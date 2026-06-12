@@ -1,0 +1,35 @@
+// ============================================================
+// daemon/Android.bp — lechao_lcview daemon（守护进程）编译配置
+// 所属模块：LcView 事件日志系统
+// 设计目的：编译生成一个 Android 用户态守护进程 lechao_lcview。
+//   此进程运行在 system 分区，负责：
+//   1) 通过 AIDL 连接 HAL 服务拉取批量日志
+//   2) 使用 SchemaParser 校验和解析二进制记录
+//   3) 使用 FileWriter 将日志写入 JSONL 文件
+//
+// 依赖说明：
+//   vendor.lechao.lcview_headers — 共享头文件 (lcview_events.h)
+//   libbinder_ndk — NDK Binder 通信框架
+//   libjsoncpp — JSON 解析引擎（解析 schema 配置文件）
+//   liblog — 输出 logcat 日志
+//   vendor.lechao.lcview-V1-ndk — AIDL NDK 后端生成的 C++ 代码
+// ============================================================
+
+cc_binary {
+    name: "lechao_lcview",
+    cflags: ["-Wall", "-Werror"],
+    header_libs: ["vendor.lechao.lcview_headers", "vendor_lechao_log_headers"],
+    init_rc: ["lechao_lcview.rc"],
+    srcs: [
+        "lechao_lcview.cpp",
+        "SchemaParser.cpp",
+        "FileWriter.cpp",
+    ],
+    shared_libs: [
+        "libbase",
+        "libbinder_ndk",
+        "libjsoncpp",
+        "liblog",
+        "vendor.lechao.lcview-V1-ndk",
+    ],
+}

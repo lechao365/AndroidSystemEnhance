@@ -1,0 +1,230 @@
+diff --git a/drivers/usb/storage/transport.c b/drivers/usb/storage/transport.c
+index 7449e379077a..6428ede59922 100644
+--- a/drivers/usb/storage/transport.c
++++ b/drivers/usb/storage/transport.c
+@@ -168,10 +168,31 @@ static int usb_stor_msg_common(struct us_data *us, int timeout)
+  
+ 	clear_bit(US_FLIDX_URB_ACTIVE, &us->dflags);
+ 
++	/*
++	 * 超时处理：URB 等待超时或被信号中断
++	 *
++	 * 为什么在此处发射 TIMEOUT notifier：
++	 *   - 这是 usb_stor_msg_common 的超时检测点，wait_for_completion 返回 <=0
++	 *     表示要么真正的超时（timeleft == 0），要么信号中断（timeleft < 0）
++	 *   - 在 kill URB 后立即记录 last_fault_type/status 并发射 notifier，
++	 *     确保 vendor_lechao_usbd 监控驱动能实时捕获超时事件
++	 *   - 不在 interpret_urb_result 中发射，因为 TIMEOUT 是一种特殊的
++	 *     "主动取消"场景，不是 URB 完成后的状态解析
++	 */
+ 	if (timeleft <= 0) {
+ 		usb_stor_dbg(us, "%s -- cancelling URB\n",
+ 			     timeleft == 0 ? "Timeout" : "Signal");
+ 		usb_kill_urb(us->current_urb);
++		us->last_fault_type = USB_STOR_XFER_ERROR;
++		us->last_fault_status = us->current_urb->status;
++		{
++			struct usb_stor_notifier_data nd = {
++				.us = us, .srb = us->srb,
++				.result = USB_STOR_XFER_ERROR,
++				.status = us->current_urb->status,
++			};
++			usb_stor_notifier_call(us, USB_STOR_NOTIFIER_TIMEOUT, &nd);
++		}
+ 	}
+ 
+ 	/* return the URB status */
+@@ -252,10 +273,28 @@ EXPORT_SYMBOL_GPL(usb_stor_clear_halt);
+  * This function prints appropriate debugging messages, clears halts on
+  * non-control endpoints, and translates the status to the corresponding
+  * USB_STOR_XFER_xxx return code.
++ *
++ * interpret_urb_result — URB 完成状态解析与精细 notifier 发射
++ *
++ * 为什么在 interpret_urb_result 中发射 STALL/DATA_CORRUPT notifier：
++ *   - STALL（-EPIPE）：URB 完成后的端点挂起状态解析，区分 control pipe
++ *     和 bulk pipe 两种场景，在所有路径上都发射 notifier
++ *   - DATA_CORRUPT（-EOVERFLOW）：设备发送了超过请求长度的数据（babble），
++ *     这是数据完整性问题的明确信号
++ *   - 这些异常由 USB core 在 URB 完成回调中设置，只能在 interpret_urb_result
++ *     中解析出具体含义后才能分类通知
+  */
+ static int interpret_urb_result(struct us_data *us, unsigned int pipe,
+-		unsigned int length, int result, unsigned int partial)
++	unsigned int length, int result, unsigned int partial)
+ {
++	struct usb_stor_notifier_data nd = {
++		.us = us, .srb = us->srb,
++		.data_len = length,
++	};
++	u8 dir = usb_pipein(pipe) ? 1 : 2;
++
++	nd.data_direction = dir;
++
+ 	usb_stor_dbg(us, "Status code %d; transferred %u/%u\n",
+ 		     result, partial, length);
+ 	switch (result) {
+@@ -278,19 +317,40 @@ static int interpret_urb_result(struct us_data *us, unsigned int pipe,
+ 		 */
+ 		if (usb_pipecontrol(pipe)) {
+ 			usb_stor_dbg(us, "-- stall on control pipe\n");
++			us->last_fault_type = USB_STOR_XFER_STALLED;
++			us->last_fault_status = result;
++			nd.result = USB_STOR_XFER_STALLED;
++			nd.status = result;
++			usb_stor_notifier_call(us, USB_STOR_NOTIFIER_STALL, &nd);
+ 			return USB_STOR_XFER_STALLED;
+ 		}
+ 
+ 		/* for other sorts of endpoint, clear the stall */
+ 		usb_stor_dbg(us, "clearing endpoint halt for pipe 0x%x\n",
+ 			     pipe);
+-		if (usb_stor_clear_halt(us, pipe) < 0)
++		if (usb_stor_clear_halt(us, pipe) < 0) {
++			us->last_fault_type = USB_STOR_XFER_STALLED;
++			us->last_fault_status = result;
++			nd.result = USB_STOR_XFER_STALLED;
++			nd.status = result;
++			usb_stor_notifier_call(us, USB_STOR_NOTIFIER_STALL, &nd);
+ 			return USB_STOR_XFER_ERROR;
++		}
++		us->last_fault_type = USB_STOR_XFER_STALLED;
++		us->last_fault_status = result;
++		nd.result = USB_STOR_XFER_STALLED;
++		nd.status = result;
++		usb_stor_notifier_call(us, USB_STOR_NOTIFIER_STALL, &nd);
+ 		return USB_STOR_XFER_STALLED;
+ 
+ 	/* babble - the device tried to send more than we wanted to read */
+ 	case -EOVERFLOW:
+ 		usb_stor_dbg(us, "-- babble\n");
++		us->last_fault_type = USB_STOR_XFER_LONG;
++		us->last_fault_status = result;
++		nd.result = USB_STOR_XFER_LONG;
++		nd.status = result;
++		usb_stor_notifier_call(us, USB_STOR_NOTIFIER_DATA_CORRUPT, &nd);
+ 		return USB_STOR_XFER_LONG;
+ 
+ 	/* the transfer was cancelled by abort, disconnect, or timeout */
+@@ -605,32 +665,83 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
+ {
+ 	int need_auto_sense;
+ 	int result;
++	ktime_t ts_start;
++	u64 transport_duration_ns = 0;
++	struct usb_stor_notifier_data notif_data = { .us = us, .srb = srb };
++
++	ts_start = ktime_get();
++
++	/*
++	 * 通知：传输开始
++	 *
++	 * 为什么在此处发射 TRANSPORT_START notifier：
++	 *   这是 usb_stor_invoke_transport 的入口，在调用 transport() 之前。
++	 *   vendor_lechao_usbd 监控驱动需要知道每次传输的开始时间来计算延迟。
++	 *   ts_start 同时用于 duration_ns 计算，与 notifier 的时间戳独立。
++	 */
++	usb_stor_notifier_call(us, USB_STOR_NOTIFIER_TRANSPORT_START, &notif_data);
+ 
+ 	/* send the command to the transport layer */
+ 	scsi_set_resid(srb, 0);
++	us->last_fault_type = 0;
++	us->last_fault_status = 0;
+ 	result = us->transport(srb, us);
+ 
++	transport_duration_ns = ktime_to_ns(ktime_sub(ktime_get(), ts_start));
++
++	notif_data.duration_ns = transport_duration_ns;
++	notif_data.data_direction = srb->sc_data_direction == DMA_FROM_DEVICE ? 1 :
++				    srb->sc_data_direction == DMA_TO_DEVICE ? 2 : 0;
++	notif_data.data_len = scsi_bufflen(srb);
++
+ 	/*
+-	 * if the command gets aborted by the higher layers, we need to
+-	 * short-circuit all other processing
++	 * 命令被上层 abort 处理
++	 *
++	 * 为什么在此处发射 TRANSPORT_END（aborted）：
++	 *   - US_FLIDX_TIMED_OUT 表示 SCSI midlayer 已超时并触发 abort
++	 *   - 即使传输被中断，也必须发射 END 来配对 START，确保监控驱动的
++	 *     transport_active 标志被正确清除
++	 *   - was_error 由监控驱动根据 last_transport_error 自行判定
+ 	 */
+ 	if (test_bit(US_FLIDX_TIMED_OUT, &us->dflags)) {
+ 		usb_stor_dbg(us, "-- command was aborted\n");
+ 		srb->result = DID_ABORT << 16;
++		notif_data.result = srb->result;
++		usb_stor_notifier_call(us, USB_STOR_NOTIFIER_TRANSPORT_END, &notif_data);
+ 		goto Handle_Errors;
+ 	}
+ 
+-	/* if there is a transport error, reset and don't auto-sense */
++	/*
++	 * 传输层错误（transport() 返回 USB_STOR_TRANSPORT_ERROR）
++	 *
++	 * 为什么在此处连续发射 TRANSPORT_ERROR + TRANSPORT_END：
++	 *   - TRANSPORT_ERROR 表示 USB 层面的传输失败（如 URB submit 失败）
++	 *   - TRANSPORT_END 是必须配对的结束通知，无论成功还是失败
++	 *   - vendor_lechao_usbd 在 ERROR 时会标记 last_transport_error=true，
++	 *     END 时检查该标志决定是否计入有效传输
++	 */
+ 	if (result == USB_STOR_TRANSPORT_ERROR) {
+ 		usb_stor_dbg(us, "-- transport indicates error, resetting\n");
+ 		srb->result = DID_ERROR << 16;
++		notif_data.result = result;
++		usb_stor_notifier_call(us, USB_STOR_NOTIFIER_TRANSPORT_ERROR, &notif_data);
++		usb_stor_notifier_call(us, USB_STOR_NOTIFIER_TRANSPORT_END, &notif_data);
+ 		goto Handle_Errors;
+ 	}
+ 
+-	/* if the transport provided its own sense data, don't auto-sense */
++	/*
++	 * transport 自带 sense 数据（如 Bulk-only transport 的 phase error）
++	 *
++	 * 为什么只发射 END 而不发射 ERROR：
++	 *   - USB_STOR_TRANSPORT_NO_SENSE 表示传输本身成功了，但设备返回了
++	 *     CHECK CONDITION 状态，sense 数据已准备好供上层读取
++	 *   -这不是 USB 层面的错误，只是 SCSI 层面的异常状态
++	 */
+ 	if (result == USB_STOR_TRANSPORT_NO_SENSE) {
+ 		srb->result = SAM_STAT_CHECK_CONDITION;
+ 		last_sector_hacks(us, srb);
++		notif_data.result = result;
++		usb_stor_notifier_call(us, USB_STOR_NOTIFIER_TRANSPORT_END, &notif_data);
+ 		return;
+ 	}
+ 
+@@ -893,6 +1004,16 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
+ 		srb->result = DID_ERROR << 16;
+ 
+ 	last_sector_hacks(us, srb);
++	/*
++	 * 通知：传输结束（成功或失败，但不是 aborted/error/no_sense）
++	 *
++	 * 为什么在此处发射 TRANSPORT_END：
++	 *   这是正常处理路径的出口点。无论是 USB_STOR_TRANSPORT_GOOD 还是
++	 *   USB_STOR_TRANSPORT_FAILED（需要 auto-sense），都在此处统一发射 END。
++	 *   duration_ns 和 data_direction/datalen 已在前面填充到 notif_data。
++	 */
++	notif_data.result = result;
++	usb_stor_notifier_call(us, USB_STOR_NOTIFIER_TRANSPORT_END, &notif_data);
+ 	return;
+ 
+ 	/*
+@@ -927,6 +1048,16 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
+ 	}
+ 	clear_bit(US_FLIDX_RESETTING, &us->dflags);
+ 	last_sector_hacks(us, srb);
++	/*
++	 * 通知：USB 设备重置
++	 *
++	 * 为什么在此处发射 RESET notifier：
++	 *   Handle_Errors 标签是所有传输异常的汇聚点（aborted / transport error /
++	 *   auto-sense failure）。此处执行 port reset 或 transport reset 恢复设备。
++	 *   vendor_lechao_usbd 需要记录每次 reset 事件用于统计设备稳定性。
++	 *   notif_data 中的 result 是原始传输返回值（非 reset 操作本身的返回值）。
++	 */
++	usb_stor_notifier_call(us, USB_STOR_NOTIFIER_RESET, &notif_data);
+ }
+ 
+ /* Stop the current URB transfer */

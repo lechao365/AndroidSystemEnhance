@@ -1,0 +1,41 @@
+diff --git a/sepolicy/service_contexts b/sepolicy/service_contexts
+index 9d6f3bf..5a79510 100644
+--- a/sepolicy/service_contexts
++++ b/sepolicy/service_contexts
+@@ -1,12 +1,29 @@
+-# Camera
++# ===== 系统内置 HAL 服务条目（rpi5 设备必需） =====
+ android.hardware.camera.provider.ICameraProvider/external/0   u:object_r:hal_camera_service:s0
+ android.hardware.camera.provider.ICameraProvider/libcamera/0  u:object_r:hal_camera_service:s0
+-
+-# DRM
+ android.hardware.drm.IDrmFactory/widevine  u:object_r:hal_drm_service:s0
+-
+-# Gatekeeper
+ android.hardware.security.sharedsecret.ISharedSecret/gatekeeper  u:object_r:hal_gatekeeper_service:s0
+-
+-# Graphics
+ mapper/minigbm_gbm_mesa  u:object_r:hal_graphics_mapper_service:s0
++
++# ===== lechao_lciod - IO 控制器系统服务（system 端） =====
++#  服务名：system.lechao.lciod.IIoService/default
++#  标签：lciod_service（定义在 lechao_lciod.te 中）
++#  用途：上层 Java/Native 应用通过此服务名查找 lciod 进行 IO 控制
++#  为什么 system 前缀：这是 system 分区的服务，注册到 system_service_manager
++#  为什么需要 service_contexts：Android 的 service_manager 使用此文件将字符串服务名
++#   映射到 SELinux 安全上下文，确保只有有权限的 domain 可以 find/add 该服务
++system.lechao.lciod.IIoService/default              u:object_r:lciod_service:s0
++
++# ===== lechao_lciod_hal - IO 控制器 HAL 服务（vendor 端） =====
++#  服务名：vendor.lechao.lciod.IIoHal/default
++#  标签：lechao_lciod_hal_service（定义在 lechao_lciod_hal.te 中）
++#  用途：lciod(system) 通过此服务名在 vendor_service_manager 中查找 HAL
++#  为什么 vendor 前缀：这是 vendor 分区的服务，注册到 vendor_service_manager
++#  跨 partition 通信：system 端 lciod 查找 vendor 端服务，必须通过 vndbinder 连接
++vendor.lechao.lciod.IIoHal/default                  u:object_r:lechao_lciod_hal_service:s0
++
++# ===== lechao_lcview_hal - 自定义显示 HAL 服务（vendor 端） =====
++#  服务名：vendor.lechao.lcview.ILcView/default
++#  标签：lechao_lcview_hal_service（定义在 lechao_lcview_hal.te 中）
++#  用途：lcview(system) 通过此服务名在 vendor_service_manager 中查找显示 HAL
++vendor.lechao.lcview.ILcView/default              u:object_r:lechao_lcview_hal_service:s0

@@ -1,0 +1,40 @@
+diff --git a/sepolicy/file_contexts b/sepolicy/file_contexts
+index 9692b33..da8e968 100644
+--- a/sepolicy/file_contexts
++++ b/sepolicy/file_contexts
+@@ -28,3 +28,35 @@
+ /dev/block/sda5       u:object_r:system_block_device:s0
+ /dev/block/sda6       u:object_r:system_block_device:s0
+ /dev/block/sda7       u:object_r:metadata_block_device:s0
++
++# ===== lechao_lciod - IO 控制器 HAL 层（vendor 分区） =====
++#  HAL 可执行文件：位于 /vendor/bin，标签 lechao_lciod_hal_exec
++#  在 lechao_lciod_hal.te 中定义：type lechao_lciod_hal_exec, exec_type, vendor_file_type, file_type;
++#  为什么 /vendor/bin：HAL 实现必须放在 vendor 分区，这是 Android Treble 架构要求
++/vendor/bin/lechao_lciod_hal                   u:object_r:lechao_lciod_hal_exec:s0
++#  HAL 对应的内核设备节点：通配符 [0-9]+ 支持多实例（usbd0、usbd1）
++#  标签 lechao_lciod_hal_device 使 lechao_lciod_hal domain 可以 open/read/write/ioctl
++/dev/vendor_lechao_usbd[0-9]+                u:object_r:lechao_lciod_hal_device:s0
++
++# ===== lechao_lciod - IO 控制器系统服务（system 分区） =====
++#   system 端守护进程 /system/bin/lechao_lciod
++#   标签 lechao_lciod_exec，对应 lechao_lciod domain
++#   注意 lciod_hal 在 vendor 分区，lciod 在 system 分区 —— 跨 partition 通信必须通过 vndbinder
++/system/bin/lechao_lciod                       u:object_r:lechao_lciod_exec:s0
++
++# ===== lechao_lcview - 自定义显示 HAL 层（vendor 分区） =====
++#  HAL 可执行文件 /vendor/bin/lechao_lcview_hal
++#  标签 lechao_lcview_hal_exec，vendor 分区文件
++/vendor/bin/lechao_lcview_hal                    u:object_r:lechao_lcview_hal_exec:s0
++#  显示设备节点 /dev/vendor_lechao_lcview（单实例，固定名称）
++#  标签 lechao_lcview_hal_device → lcview_hal 域有权控制此设备
++/dev/vendor_lechao_lcview                    u:object_r:lechao_lcview_hal_device:s0
++
++# ===== lechao_lcview - 自定义显示系统服务（system 分区） =====
++#  system 端守护进程 /system/bin/lechao_lcview
++/system/bin/lechao_lcview                    u:object_r:lechao_lcview_exec:s0
++#  lcview 的数据文件目录 /data/vendor/lechao_lcview/
++#  (/.*)? 表示递归匹配目录下的所有文件
++#  标签 lechao_lcview_data_file → lcview 域可以在此目录下创建/读写文件
++#  为什么 /data/vendor：vendor 分区的持久化数据必须放在 /data/vendor 下
++/data/vendor/lechao_lcview(/.*)?                    u:object_r:lechao_lcview_data_file:s0

@@ -1,0 +1,12 @@
+diff --git a/Kbuild b/Kbuild
+index 464b34a08f51..230a8cc9d40f 100644
+--- a/Kbuild
++++ b/Kbuild
+@@ -92,6 +92,7 @@ obj-$(CONFIG_IO_URING)	+= io_uring/
+ obj-$(CONFIG_RUST)	+= rust/
+ obj-y			+= $(ARCH_LIB)
+ obj-y			+= drivers/
++obj-y			+= vendor/
+ obj-y			+= sound/
+ obj-$(CONFIG_SAMPLES)	+= samples/
+ obj-$(CONFIG_NET)	+= net/

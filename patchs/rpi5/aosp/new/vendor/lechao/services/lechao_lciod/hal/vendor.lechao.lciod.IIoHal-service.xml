@@ -1,0 +1,21 @@
+<!--
+  ============================================================
+  vendor.lechao.lciod.IIoHal-service.xml — VINTF Manifest 声明
+  所属模块: lechao_lciod_hal
+  设计目的: 向 Android 框架声明 vendor 分区提供的 AIDL HAL 服务。
+            该文件被编译为 prebuilt_etc 并安装到
+            /vendor/etc/vintf/manifest/ 目录。
+  作用: 实现 HW Binder 服务发现机制，使 system 分区进程
+        可以通过 ServiceManager 查找到 vendor 分区的 HAL 实现。
+  兼容性: 作为 VINTF manifest 的一部分，接口变更需要
+          兼容性检查以保证 OTA 升级安全。
+  ============================================================
+-->
+<manifest version="1.0" type="device">
+    <!-- AIDL 格式的 HAL 服务声明 -->
+    <hal format="aidl">
+        <name>vendor.lechao.lciod</name>   <!-- AIDL 包名 -->
+        <version>1</version>             <!-- 接口版本号 -->
+        <fqname>IIoHal/default</fqname>  <!-- 完全限定服务名: 接口名/实例名 -->
+    </hal>
+</manifest>

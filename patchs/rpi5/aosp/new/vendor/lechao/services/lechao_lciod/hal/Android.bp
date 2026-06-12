@@ -1,0 +1,46 @@
+// ============================================================
+// hal/Android.bp — Vendor HAL 编译规则
+// 所属模块: lechao_lciod_hal (vendor 分区二进制)
+// 设计目的: 编译 Vendor HAL 进程和 VINTF manifest 配置。
+//           该进程运行在 vendor 分区，直接与内核驱动交互。
+// 依赖关系:
+//   lechao_lciod_hal (进程) ← 链接 vendor.lechao.lciod-V1-ndk
+//   vendor.lechao.lciod.IIoHal-vintf (VINTF 声明) → 注册到设备 manifest
+// ============================================================
+
+// lechao_lciod_hal: Vendor HAL 可执行文件
+// vendor: true 表示安装到 vendor 分区
+// 链接 vendor.lechao.lciod-V1-ndk 以获得 AIDL 接口的 NDK 桩代码
+cc_binary {
+    name: "lechao_lciod_hal",
+    owner: "lechao",
+    vendor: true,
+    srcs: [
+        "hal_service.cpp",   // HAL 服务主逻辑，实现 IIoHal AIDL 接口
+        "device_io.cpp",     // 设备 IO 操作封装（open/ioctl/read）
+    ],
+    shared_libs: [
+        "libbase",             // Android 基础库
+        "libbinder_ndk",       // NDK Binder 框架
+        "liblog",              // logcat 日志
+        "vendor.lechao.lciod-V1-ndk", // vendor AIDL 接口 NDK 生成代码
+    ],
+    header_libs: ["vendor_lechao_log_headers"],
+    init_rc: ["lechao_lciod_hal.rc"],  // init 启动配置
+}
+
+// vendor.lechao.lciod.IIoHal-vintf: VINTF manifest 声明文件
+// 作为 prebuilt_etc 安装到 /vendor/etc/vintf/manifest/
+// 作用: 通知 Android 框架该设备提供了 vendor.lechao.lciod 的 IIoHal 服务
+//       是 HW Binder 服务发现机制的必要组成部分
+prebuilt_etc {
+    name: "vendor.lechao.lciod.IIoHal-vintf",
+    owner: "lechao",
+    vendor: true,
+    src: "vendor.lechao.lciod.IIoHal-service.xml",
+    filename: "vendor.lechao.lciod.IIoHal-service.xml",
+    sub_dir: "vintf/manifest",   // 安装到 /vendor/etc/vintf/manifest/
+    installable: true,
+}
+
+

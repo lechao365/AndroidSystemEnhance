@@ -1,0 +1,133 @@
+{
+  // ============================================================
+  // lcview_events.json — 事件 schema 定义文件
+  // 所属模块：LcView 事件日志系统
+  // 设计目的：以声明式 JSON 描述每个事件 ID 对应的字段列表
+  //   和类型。SchemaParser 在运行时解析此文件，用于：
+  //   1) 校验从内核接收的二进制日志记录是否合法
+  //   2) 将字段名作为 JSON 输出的 key，使日志可读
+  // 为什么用 JSON 而非硬编码结构体：
+  //   硬件或协议变更时只需更新配置文件，无需重新编译 daemon。
+  //   version 字段为将来 schema 迁移预留。
+  // ============================================================
+
+  "version": 1,
+  "events": [
+    {
+      // usb_transport_start: USB 批量传输开始事件
+      // 记录一次传输的起始，与 transport_end 配对计算延迟
+      "id": 4,
+      "name": "usb_transport_start",
+      "desc": "USB bulk transport starts",
+      "fields": [
+        {"name": "device_index",    "type": "int64"},
+        {"name": "data_direction",  "type": "int64"},
+        {"name": "bytes_to_xfer",   "type": "int64"}
+      ]
+    },
+    {
+      // usb_transport_end: USB 批量传输完成事件
+      // 包含实际传输字节数和耗时，用于性能分析
+      "id": 5,
+      "name": "usb_transport_end",
+      "desc": "USB bulk transport completes",
+      "fields": [
+        {"name": "device_index",    "type": "int64"},
+        {"name": "data_direction",  "type": "int64"},
+        {"name": "bytes_xferred",   "type": "int64"},
+        {"name": "elapsed_ns",      "type": "int64"},
+        {"name": "was_error",       "type": "int64"}
+      ]
+    },
+    {
+      // usb_transport_error: USB 批量传输错误事件
+      // 记录出错时的结果码，用于故障诊断
+      "id": 6,
+      "name": "usb_transport_error",
+      "desc": "USB bulk transport error",
+      "fields": [
+        {"name": "device_index",    "type": "int64"},
+        {"name": "data_direction",  "type": "int64"},
+        {"name": "result",          "type": "int64"}
+      ]
+    },
+    {
+      // usb_reset: USB 设备复位事件
+      // 记录复位操作，用于追踪设备稳定性
+      "id": 7,
+      "name": "usb_reset",
+      "desc": "USB device reset",
+      "fields": [
+        {"name": "device_index",    "type": "int64"}
+      ]
+    },
+    {
+      // usb_probe: USB 设备探测事件
+      // 记录新设备接入时的 VID/PID 和厂商/产品名，用于识别设备
+      "id": 8,
+      "name": "usb_probe",
+      "desc": "USB device probed",
+      "fields": [
+        {"name": "device_index",    "type": "int64"},
+        {"name": "vid",             "type": "int64"},
+        {"name": "pid",             "type": "int64"},
+        {"name": "vendor",          "type": "string"},
+        {"name": "product",         "type": "string"}
+      ]
+    },
+    {
+      // usb_disconnect: USB 设备断开事件
+      // 与 probe 配对，用于统计设备生命周期
+      "id": 9,
+      "name": "usb_disconnect",
+      "desc": "USB device disconnected",
+      "fields": [
+        {"name": "device_index",    "type": "int64"}
+      ]
+    },
+    {
+      // usb_stall: USB 端点停滞事件
+      // 记录停滞持续时间和结果码
+      "id": 10,
+      "name": "usb_stall",
+      "desc": "USB endpoint stall",
+      "fields": [
+        {"name": "duration_ns",     "type": "int64"},
+        {"name": "result",          "type": "int64"}
+      ]
+    },
+    {
+      // usb_timeout: USB 传输超时事件
+      // 记录超时持续时间和结果码
+      "id": 11,
+      "name": "usb_timeout",
+      "desc": "USB transfer timeout",
+      "fields": [
+        {"name": "duration_ns",     "type": "int64"},
+        {"name": "result",          "type": "int64"}
+      ]
+    },
+    {
+      // usb_data_corrupt: USB 数据损坏事件
+      // 记录检测到数据损坏时的持续时间和结果码
+      "id": 12,
+      "name": "usb_data_corrupt",
+      "desc": "USB data corruption detected",
+      "fields": [
+        {"name": "duration_ns",     "type": "int64"},
+        {"name": "result",          "type": "int64"}
+      ]
+    },
+    {
+      // usb_rate_degraded: USB 速率降级事件
+      // 记录速率降级时的持续时间和当前速率
+      "id": 13,
+      "name": "usb_rate_degraded",
+      "desc": "USB rate degraded",
+      "fields": [
+        {"name": "duration_ns",     "type": "int64"},
+        {"name": "current_rate",    "type": "int64"}
+      ]
+    }
+  ]
+}

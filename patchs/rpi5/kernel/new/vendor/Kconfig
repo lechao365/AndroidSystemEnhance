@@ -1,0 +1,5 @@
+menu "Vendor Extensions"
+
+source "vendor/lechao/Kconfig"
+
+endmenu

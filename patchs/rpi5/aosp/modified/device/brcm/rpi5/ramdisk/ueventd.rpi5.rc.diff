@@ -1,0 +1,18 @@
+diff --git a/ramdisk/ueventd.rpi5.rc b/ramdisk/ueventd.rpi5.rc
+index e2d45fc..a7879ac 100644
+--- a/ramdisk/ueventd.rpi5.rc
++++ b/ramdisk/ueventd.rpi5.rc
+@@ -19,3 +19,13 @@
+ 
+ # USB
+ /sys/class/udc/1000480000.usb  current_speed                                 0664   system     system
++# lechao_lciod HAL —— IO 控制器的内核驱动设备节点
++#   - 权限 0660，所属 system:system，确保只有 HAL 进程可以访问
++#   - 通配符 vendor_lechao_usbd* 支持多设备实例（如 usbd0、usbd1）
++#   - 内核端注册 misc 设备时命名必须匹配此模式，否则 SELinux 上下文不生效
++/dev/vendor_lechao_usbd*                                                     0660   system     system
++# lechao_lcview HAL —— 乐超自定义显示的驱动设备节点
++#   - 权限 0660，所属 system:system，与 lciod 保持一致
++#   - 单设备实例，无通配符，对应内核中注册的固定名称
++#   - HAL 进程通过此节点进行显示数据传输和时序控制
++/dev/vendor_lechao_lcview                                                    0660   system     system

@@ -1,0 +1,34 @@
+# lechao_lcview —— 乐超自定义显示的系统服务守护进程
+#   系统级守护进程（/system/bin），管理显示控制逻辑
+#   与 lcview_hal（vendor 端）通过 vndbinder 通信，自身同时管理数据文件
+
+# 声明 lechao_lcview 为 SELinux domain
+type lechao_lcview, domain;
+# 声明 lcview 可执行文件的标签（file_contexts 匹配 /system/bin/lechao_lcview）
+type lechao_lcview_exec, exec_type, file_type;
+# 声明 lcview 数据文件的类型 —— 用于存储运行时产生的显示配置、状态等数据
+#   data_file_type 表示这是一类数据文件，确保存放在 /data/vendor/ 下
+type lechao_lcview_data_file, file_type, data_file_type;
+
+# init 启动守护进程 —— init 执行 lchao_lcview_exec → domain transition
+init_daemon_domain(lechao_lcview)
+
+# 标记为 HAL 客户端域 —— 允许它使用 HAL 客户端相关权限
+typeattribute lechao_lcview halclientdomain;
+# 允许使用 vendor binder —— 与 vendor 端的 lcview_hal 跨 partition 通信
+vndbinder_use(lechao_lcview)
+# 允许通过 Binder 调用 lcview_hal —— lcview → lcview_hal 的 RPC
+binder_call(lechao_lcview, lechao_lcview_hal)
+# 允许在 service_manager 中查找 lcview_hal 服务
+#   启动时调用 IServiceManager::getService("vendor.lechao.lcview.ILcView/default")
+allow lechao_lcview lechao_lcview_hal_service:service_manager find;
+allow lechao_lcview servicemanager:binder { call };
+
+# 允许 lcview 在 /data/vendor/lechao_lcview/ 下创建目录
+#   create_dir_perms 包含 create_dir_perms = { create setattr link unlink ioctl read write
+#     getattr add_name remove_name reparent search rmdir open } 等目录操作权限
+#   为什么：lcview 需要在 /data/vendor/ 下创建持久化工作目录用于存储配置和日志
+allow lechao_lcview lechao_lcview_data_file:dir { create_dir_perms };
+# 允许 lcview 在该目录下创建文件（如运行时生成的显示参数配置文件）
+#   create_file_perms 包含普通文件创建和读写所需的所有权限
+allow lechao_lcview lechao_lcview_data_file:file { create_file_perms };

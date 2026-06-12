@@ -1,0 +1,34 @@
+# ============================================================
+# lechao_lcview.rc — LcView 守护进程的 init 启动脚本
+# 所属模块：LcView 事件日志系统 — Daemon 层
+# 设计目的：定义 lechao_lcview daemon 的 Android init.rc 启动配置。
+#   包括：数据目录创建、服务声明、启动时机控制。
+# ============================================================
+
+# post-fs-data 阶段：创建日志数据目录
+# /data/vendor/ 下存放需要持久化的日志数据，
+# 归属 system:system 确保 daemon 有读写权限
+on post-fs-data
+    mkdir /data/vendor/lechao_lcview 0750 system system
+
+# 服务声明：lechao_lcview
+#   /system/bin/lechao_lcview — 可执行文件路径（system 分区）
+#   class main — 随 main 类服务一同启动
+#   user/group system — 以 system 身份运行，有限文件系统权限
+#   oneshot — 退出后不自动重启（主循环退出即进程终了）
+# 为什么用 oneshot 而非默认重启：
+#   daemon 主循环因 HAL 连接丢失等不可恢复错误而退出时，
+#   持续重启会造成日志风暴（logcat log 暴涨），
+#   手动恢复更合理。
+service lechao_lcview /system/bin/lechao_lcview
+    class main
+    user system
+    group system
+    oneshot
+
+# sys.boot_completed=1 触发启动：
+# 等待系统完全启动后再启动日志采集服务，
+# 确保 HAL 服务和依赖的 framework 均已就绪。
+# 这是 daemon 不依赖其他服务的轻量级启动控制方式。
+on property:sys.boot_completed=1
+    start lechao_lcview

@@ -1,0 +1,32 @@
+// ============================================================
+// daemon/Android.bp — System Daemon 编译规则
+// 所属模块: lechao_lciod (system 分区二进制)
+// 设计目的: 编译 System Daemon 进程。该进程运行在 system 分区，
+//           作为 IO 监控服务的控制面，负责:
+//           1. 注册 IIoService AIDL 接口供上层调用
+//           2. 通过 HAL 客户端连接 Vendor HAL 获取数据
+//           3. 后台线程周期性监控 IO 速率和事件
+// 依赖: system.lechao.lciod-ndk — system 侧 AIDL 桩代码
+//       vendor.lechao.lciod-V1-ndk — vendor 侧 AIDL 桩代码
+// ============================================================
+cc_binary {
+    name: "lechao_lciod",
+    owner: "lechao",
+    srcs: [
+        "service.cpp",
+        "hal_client.cpp",
+    ],
+    shared_libs: [
+        "libbase",               // Android 基础库（LOG/strings等）
+        "libbinder_ndk",         // NDK Binder 框架库
+        "liblog",                // logcat 日志输出
+        "system.lechao.lciod-ndk",  // system AIDL 接口 NDK 生成代码
+        "vendor.lechao.lciod-V1-ndk", // vendor AIDL 接口 NDK 生成代码
+    ],
+    header_libs: [
+        "vendor_lechao_log_headers",
+    ],
+    init_rc: ["lechao_lciod.rc"],  // init 启动配置文件
+}
+
+

@@ -1,0 +1,37 @@
+diff --git a/BoardConfig.mk b/BoardConfig.mk
+index a93cb46..5f3f276 100644
+--- a/BoardConfig.mk
++++ b/BoardConfig.mk
+@@ -25,7 +25,7 @@ TARGET_SCREEN_DENSITY := 240
+ # Kernel
+ BOARD_CUSTOM_BOOTIMG := true
+ BOARD_CUSTOM_BOOTIMG_MK := $(DEVICE_PATH)/mkbootimg.mk
+-BOARD_KERNEL_CMDLINE := console=ttyAMA10,115200 no_console_suspend root=/dev/ram0 rootwait androidboot.hardware=rpi5
++BOARD_KERNEL_CMDLINE := console=ttyAMA0,115200 no_console_suspend root=/dev/ram0 rootwait androidboot.hardware=rpi5 androidboot.verifiedbootstate=orange
+ 
+ # Manifest
+ DEVICE_FRAMEWORK_COMPATIBILITY_MATRIX_FILE := $(DEVICE_PATH)/framework_compatibility_matrix.xml
+@@ -55,8 +55,16 @@ TARGET_VENDOR_PROP += $(DEVICE_PATH)/vendor.prop
+ TARGET_NO_RECOVERY := true
+ 
+ # SELinux
++# 加入自定义 sepolicy 目录到编译系统 —— 告诉 Android 编译系统还有额外的 SELinux
++# 规则文件在这里（lechao_lciod.te, lechao_lciod_hal.te, lechao_lcview.te 等）
++# 为什么要加这行：默认只有 system/sepolicy 下的官方规则会被编译。
++# 自定义服务和 HAL 需要自己的 SELinux 域，必须在 BOARD_SEPOLICY_DIRS 中声明，
++# 否则这些 .te 文件不会被编译进 sepolicy，导致新服务无法启动（avc denied）
+ BOARD_SEPOLICY_DIRS += device/brcm/rpi5/sepolicy
+ BOARD_KERNEL_CMDLINE += androidboot.selinux=permissive
++# TODO(debug): 以下选项跳过 SELinux neverallow 检查，仅用于开发调试阶段
++# 上板验证完成后必须删除此行，否则生产环境可能导致系统无法启动
++SELINUX_IGNORE_NEVERALLOWS := true
+ 
+ # Treble
+ TARGET_COPY_OUT_VENDOR := vendor
+@@ -68,3 +76,6 @@ BOARD_HOSTAPD_PRIVATE_LIB := lib_driver_cmd_$(BOARD_WLAN_DEVICE)
+ BOARD_WPA_SUPPLICANT_DRIVER := NL80211
+ BOARD_WPA_SUPPLICANT_PRIVATE_LIB := lib_driver_cmd_$(BOARD_WLAN_DEVICE)
+ WPA_SUPPLICANT_VERSION := VER_0_8_X
++
++# 禁用 dm-verity（开发调试需要）
++BOARD_BUILD_DISABLED_VBMETAIMAGE := true

@@ -1,0 +1,17 @@
+// ============================================================
+// config/Android.bp — 事件 schema 配置文件编译模块
+// 所属模块：LcView 事件日志系统
+// 设计目的：将 lcview_events.json 作为预置配置文件打包到
+//   vendor 分区的 /vendor/etc/lcview_events.json 路径。
+//   SchemaParser 在运行时读取此文件来理解二进制日志格式。
+// 为什么用 prebuilt_etc 而非直接复制：
+//   Soong 的 prebuilt_etc 会自动处理 SELinux file_contexts
+//   标签、分区路径和安装依赖，比手动 cp 更可靠。
+// ============================================================
+
+prebuilt_etc {
+    name: "vendor.lechao.lcview-config",
+    vendor: true,
+    src: "lcview_events.json",
+    filename: "lcview_events.json",
+}

@@ -1,0 +1,15 @@
+diff --git a/boot/config.txt b/boot/config.txt
+index fb68a37..ff26b04 100644
+--- a/boot/config.txt
++++ b/boot/config.txt
+@@ -27,6 +27,10 @@ dtoverlay=cma,cma-320
+ # SPI
+ #dtparam=spi=on
+ 
++# UART
++enable_uart=1
++dtoverlay=uart0-pi5
++
+ # USB
+ dtoverlay=dwc2,dr_mode=peripheral
+ [cm5]

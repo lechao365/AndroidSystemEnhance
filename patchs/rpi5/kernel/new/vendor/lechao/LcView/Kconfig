@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# LcView 结构化事件日志子系统 Kconfig 配置
+#
+# 启用后编译 LcView 内核模块，提供：
+#   1. Builder API（供内核其他模块调用，记录结构化事件）
+#   2. 环形缓冲区（无锁写 + overflow eviction）
+#   3. /dev/vendor_lechao_lcview 字符设备（供用户态读取）
+#
+# 依赖：CONFIG_VENDOR_LECHAO（父菜单选项）
+
+config LCVIEW
+    bool "LcView logging trace subsystem"
+    help
+      LcView is a structured event logging system for kernel modules.
+      It provides a builder-style API for other kernel code to log
+      events, stores them in a ring buffer, and exposes the data via
+      /dev/vendor_lechao_lcview character device.
+
+      If unsure, say N.

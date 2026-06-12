@@ -1,0 +1,150 @@
+diff --git a/drivers/usb/storage/usb.h b/drivers/usb/storage/usb.h
+index fd3f32670873..02882639374f 100644
+--- a/drivers/usb/storage/usb.h
++++ b/drivers/usb/storage/usb.h
+@@ -38,6 +38,77 @@
+ struct us_data;
+ struct scsi_cmnd;
+ 
++#include <linux/notifier.h>
++
++/*
++ * ============================================================
++ * USB storage notifier interface —厂商扩展通知链接口
++ * ============================================================
++ *
++ * 【设计目的】
++ *   为 Lechao vendor USB 监控驱动提供传输事件的实时推送通道。
++ *   usb-storage 核心在关键传输节点（start/end/error/reset/stall/timeout）
++ *   发射事件，vendor 驱动通过注册 atomic_notifier_block 接收并处理。
++ *
++ * 【通知链类型】
++ *   每个 us_data 实例内嵌一个 atomic_notifier_head（us->notifier），
++ *   vendor 驱动注册到每个设备的独立链上，实现 per-device 监控。
++ *
++ * 【调用上下文】
++ *   全部为 atomic notifier chain，在自旋锁或中断上下文中调用，
++ *   notifier 回调必须不可睡眠。
++ *
++ * 【发射位置】（见 transport.c）
++ *   TRANSPORT_START：usb_stor_invoke_transport 入口（每次传输前）
++ *   TRANSPORT_END：所有正常出口点（成功/失败/no_sense/aborted）
++ *   TRANSPORT_ERROR：transport() 返回 USB_STOR_TRANSPORT_ERROR 时
++ *   RESET：Handle_Errors 错误恢复路径执行 reset 后
++ *   STALL：interpret_urb_result 解析 URB 返回 -EPIPE 时
++ *   TIMEOUT：usb_stor_msg_common wait_for_completion 超时后
++ *   DATA_CORRUPT：interpret_urb_result 解析 URB 返回 -EOVERFLOW 时
++ *   RATE_DEGRADED：vendor 驱动内部判定（不在 usb-storage 核心发射）
++ *   DEVICE_PROBE / DISCONNECT：厂商 notifier 链（见 usb.c）
++ * ============================================================
++ */
++enum usb_stor_notifier_event {
++	USB_STOR_NOTIFIER_TRANSPORT_START,   /* 传输开始：在调用 transport() 前发射 */
++	USB_STOR_NOTIFIER_TRANSPORT_END,     /* 传输结束：在所有正常出口发射（含 error/abort） */
++	USB_STOR_NOTIFIER_TRANSPORT_ERROR,   /* 传输层错误：transport() 返回 ERROR 时 */
++	USB_STOR_NOTIFIER_RESET,             /* 设备重置：Handle_Errors 路径执行 reset 后 */
++	USB_STOR_NOTIFIER_DEVICE_PROBE,      /* 设备探测：usb-storage 探测新设备时（厂商 notifier 链） */
++	USB_STOR_NOTIFIER_DEVICE_DISCONNECT, /* 设备断开：usb-storage 断开设备时（厂商 notifier 链） */
++	USB_STOR_NOTIFIER_STALL,             /* USB STALL：URB 返回 -EPIPE，端点被挂起 */
++	USB_STOR_NOTIFIER_TIMEOUT,           /* 传输超时：URB 等待超时或被信号中断 */
++	USB_STOR_NOTIFIER_DATA_CORRUPT,      /* 数据损坏：URB 返回 -EOVERFLOW（babble） */
++	USB_STOR_NOTIFIER_RATE_DEGRADED,     /* 性能降级：vendor 驱动内部判定（不在核心发射） */
++};
++
++/*
++ * struct usb_stor_notifier_data — notifier 事件载荷
++ *
++ * 【字段来源】
++ *   us：      指向 us_data，用于 notifier 回调定位设备
++ *   srb：     SCSI 命令指针，用于提取传输方向、数据长度
++ *   result：  传输层返回码（USB_STOR_XFER_xxx 或 transport result）
++ *   status：  URB 状态码（如 -EPIPE/-EOVERFLOW/-ECONNRESET）
++ *   data_direction：数据传输方向（1=读, 2=写, 0=无）
++ *   data_len：请求的数据长度（scsi_bufflen）
++ *   duration_ns：传输耗时（仅在 TRANSPORT_END 时填充）
++ *
++ * 【使用场景】
++ *   vendor_lechao_usbd_handle_event 通过 nd->srb 获取传输信息，
++ *   通过 nd->result/status 判断错误类型，通过 nd->duration_ns 计算 latency。
++ */
++struct usb_stor_notifier_data {
++	struct us_data *us;            /* usb-storage 设备实例指针 */
++	struct scsi_cmnd *srb;         /* SCSI 命令指针（可能为 NULL） */
++	int result;                    /* 传输层返回码（USB_STOR_XFER_xxx 或 transport result） */
++	int status;                    /* URB 状态码（原始 errno） */
++	u8 data_direction;             /* 数据方向：1=DMA_FROM_DEVICE(读), 2=DMA_TO_DEVICE(写), 0=无 */
++	u32 data_len;                  /* 请求传输的数据长度（字节） */
++	u64 duration_ns;               /* 传输耗时（纳秒，仅 TRANSPORT_END 填充） */
++};
++
+ /*
+  * Unusual device list definitions 
+  */
+@@ -148,6 +219,21 @@ struct us_data {
+ 	/* hacks for READ CAPACITY bug handling */
+ 	int			use_last_sector_hacks;
+ 	int			last_sector_retries;
++
++	/* notifier for vendor extensions */
++	struct atomic_notifier_head	notifier;  /* vendor 驱动注册的通知链头（如 vendor_lechao_usbd） */
++
++	/*
++	 * 内部故障跟踪字段（用于精细 notifier 事件）
++	 *
++	 * last_fault_type：最近一次 USB 传输故障的类型（USB_STOR_XFER_xxx）
++	 * last_fault_status：最近一次故障的 URB status 码
++	 * last_rate_sample_ns / last_rate_sample_bytes：预留用于速率采样（当前未使用）
++	 */
++	int			last_fault_type;    /* 最近 USB 传输故障类型 */
++	int			last_fault_status;  /* 最近故障的 URB status */
++	u64			last_rate_sample_ns;    /* 预留：速率采样时间 */
++	u64			last_rate_sample_bytes; /* 预留：速率采样字节数 */
+ };
+ 
+ /* Convert between us_data and the corresponding Scsi_Host */
+@@ -207,4 +293,45 @@ static void __exit __driver##_exit(void) \
+ } \
+ module_exit(__driver##_exit)
+ 
++/* notifier helper functions */
++
++/*
++ * usb_stor_notifier_init — 初始化 us_data 的原子通知链头
++ * @us: usb-storage 设备实例
++ *
++ * 在 usb_stor_probe1 中调用，将 us->notifier 初始化为空的原子通知链。
++ * vendor 驱动随后通过 atomic_notifier_chain_register 注册回调。
++ */
++static inline void usb_stor_notifier_init(struct us_data *us)
++{
++	ATOMIC_INIT_NOTIFIER_HEAD(&us->notifier);
++}
++
++/*
++ * usb_stor_notifier_call — 向设备的所有 notifier 回调发射事件
++ * @us:    usb-storage 设备实例
++ * @event: 事件类型（见 usb_stor_notifier_event 枚举）
++ * @data:  事件载荷（struct usb_stor_notifier_data *）
++ *
++ * 遍历 us->notifier 链上的所有 notifier_block，依次调用其 notifier_call。
++ * 返回值：最后一个回调的返回值（NOTIFY_OK 或 NOTIFY_DONE）。
++ * 调用上下文：可从任意上下文调用（atomic notifier chain）。
++ */
++static inline int usb_stor_notifier_call(struct us_data *us,
++					  unsigned long event, void *data)
++{
++	return atomic_notifier_call_chain(&us->notifier, event, data);
++}
++
++/*
++ * vendor lifecycle notifier — 厂商级生命周期通知链
++ *
++ * 与 per-device 的 us->notifier 不同，这是全局级别的通知链，
++ * 用于设备探测/断开事件（PROBE/DISCONNECT）。
++ * vendor_lechao_usbd 注册此链来为每个新设备创建监控实例。
++ * 注册/注销在 usb.c 中实现。
++ */
++int usb_stor_register_vendor_notifier(struct notifier_block *nb);
++int usb_stor_unregister_vendor_notifier(struct notifier_block *nb);
++
+ #endif

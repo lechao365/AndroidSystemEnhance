@@ -1,0 +1,42 @@
+diff --git a/arch/arm64/configs/android_rpi5_defconfig b/arch/arm64/configs/android_rpi5_defconfig
+index f5922e35506b..2233605b234c 100644
+--- a/arch/arm64/configs/android_rpi5_defconfig
++++ b/arch/arm64/configs/android_rpi5_defconfig
+@@ -5106,7 +5106,7 @@ CONFIG_USB_DWC2_DUAL_ROLE=y
+ # USB port drivers
+ #
+ CONFIG_USB_SERIAL=y
+-# CONFIG_USB_SERIAL_CONSOLE is not set
++CONFIG_USB_SERIAL_CONSOLE=y
+ # CONFIG_USB_SERIAL_GENERIC is not set
+ # CONFIG_USB_SERIAL_SIMPLE is not set
+ # CONFIG_USB_SERIAL_AIRCABLE is not set
+@@ -5118,7 +5118,7 @@ CONFIG_USB_SERIAL_CH341=y
+ CONFIG_USB_SERIAL_CP210X=y
+ # CONFIG_USB_SERIAL_CYPRESS_M8 is not set
+ # CONFIG_USB_SERIAL_EMPEG is not set
+-# CONFIG_USB_SERIAL_FTDI_SIO is not set
++CONFIG_USB_SERIAL_FTDI_SIO=y
+ # CONFIG_USB_SERIAL_VISOR is not set
+ # CONFIG_USB_SERIAL_IPAQ is not set
+ # CONFIG_USB_SERIAL_IR is not set
+@@ -5158,7 +5158,7 @@ CONFIG_USB_SERIAL_PL2303=y
+ # CONFIG_USB_SERIAL_QT2 is not set
+ # CONFIG_USB_SERIAL_UPD78F0730 is not set
+ # CONFIG_USB_SERIAL_XR is not set
+-# CONFIG_USB_SERIAL_DEBUG is not set
++CONFIG_USB_SERIAL_DEBUG=y
+ 
+ #
+ # USB Miscellaneous drivers
+@@ -7338,8 +7338,8 @@ CONFIG_CONSOLE_LOGLEVEL_DEFAULT=7
+ CONFIG_CONSOLE_LOGLEVEL_QUIET=4
+ CONFIG_MESSAGE_LOGLEVEL_DEFAULT=4
+ CONFIG_BOOT_PRINTK_DELAY=y
+-# CONFIG_DYNAMIC_DEBUG is not set
+-# CONFIG_DYNAMIC_DEBUG_CORE is not set
++CONFIG_DYNAMIC_DEBUG=y
++CONFIG_DYNAMIC_DEBUG_CORE=y
+ CONFIG_SYMBOLIC_ERRNAME=y
+ CONFIG_DEBUG_BUGVERBOSE=y
+ # end of printk and dmesg options

@@ -1,0 +1,38 @@
+# lechao_lciod_hal —— IO 控制器的 HAL 守护进程
+#   这是一个 vendor 端守护进程（位于 /vendor/bin），直接操作内核驱动节点
+#   与 lechao_lciod（system 端）通过 vndbinder 通信
+
+# 声明 lechao_lciod_hal 为 SELinux domain
+type lechao_lciod_hal, domain;
+# 声明 HAL 可执行文件的类型标签（用于 file_contexts 中匹配 /vendor/bin/lechao_lciod_hal）
+#   vendor_file_type 表示此文件属于 vendor 分区，这是跨分区通信的关键标签
+type lechao_lciod_hal_exec, exec_type, vendor_file_type, file_type;
+# 声明 HAL 操作的设备节点类型（用于 file_contexts 中匹配 /dev/vendor_lechao_usbd*）
+#   dev_type 表示这是一个设备文件
+type lechao_lciod_hal_device, dev_type, file_type;
+# 声明 HAL 注册到 service_manager 的服务类型
+type lechao_lciod_hal_service, service_manager_type;
+
+# 标记为 init 启动的守护进程域 —— init 执行 lechao_lciod_hal_exec → 切换到该 domain
+init_daemon_domain(lechao_lciod_hal)
+# 允许使用 vendor binder —— 与 system 端的 iod 跨 partition 通信
+#   为什么必须：iod（system）和 iod_hal（vendor）在不同进程空间，需跨 hidl/binder 通信
+vndbinder_use(lechao_lciod_hal)
+# 允许 HAL 与 servicemanager 进行 binder 通信（注册服务需要 call + transfer）
+binder_call(lechao_lciod_hal, servicemanager)
+
+# 允许 HAL 打开/读写/控制设备节点 /dev/vendor_lechao_usbd*
+#   chr_file = 字符设备，ioctl = 控制命令（如：配置 IO 引脚、读取数据）
+#   getattr = 获取文件属性（如 stat() 查询设备状态）
+#   为什么只给这些权限：HAL 层职责明确，只需操作设备节点，无需访问文件系统
+allow lechao_lciod_hal lechao_lciod_hal_device:chr_file { open read write ioctl getattr };
+# 允许 HAL 将自己的服务（vendor.lechao.lciod.IIoHal）注册到 service_manager
+#   这样 iod 端才能 find 到这个服务并建立通信
+allow lechao_lciod_hal lechao_lciod_hal_service:service_manager add;
+
+# 允许 HAL 搜索 /dev 目录 —— 内核注册设备节点时，HAL 需要遍历 /dev 查找设备
+#   为什么：/dev 是 device(tmpfs)，HAL 进程在启动时可能需枚举已注册的设备
+allow lechao_lciod_hal device:dir { search read open };
+
+# 允许 HAL 写入 logd —— vendor 域默认无 logd 权限，不添加则 logcat 看不到 HAL 日志
+allow lechao_lciod_hal logd:unix_dgram_socket write;

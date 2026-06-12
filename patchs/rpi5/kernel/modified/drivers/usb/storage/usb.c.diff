@@ -1,0 +1,53 @@
+diff --git a/drivers/usb/storage/usb.c b/drivers/usb/storage/usb.c
+index 7b36a3334fb3..fa16ec851daf 100644
+--- a/drivers/usb/storage/usb.c
++++ b/drivers/usb/storage/usb.c
+@@ -932,6 +932,20 @@ static unsigned int usb_stor_sg_tablesize(struct usb_interface *intf)
+ 	return SG_ALL;
+ }
+ 
++static BLOCKING_NOTIFIER_HEAD(usb_stor_vendor_nh);
++
++int usb_stor_register_vendor_notifier(struct notifier_block *nb)
++{
++	return blocking_notifier_chain_register(&usb_stor_vendor_nh, nb);
++}
++EXPORT_SYMBOL_GPL(usb_stor_register_vendor_notifier);
++
++int usb_stor_unregister_vendor_notifier(struct notifier_block *nb)
++{
++	return blocking_notifier_chain_unregister(&usb_stor_vendor_nh, nb);
++}
++EXPORT_SYMBOL_GPL(usb_stor_unregister_vendor_notifier);
++
+ /* First part of general USB mass-storage probing */
+ int usb_stor_probe1(struct us_data **pus,
+ 		struct usb_interface *intf,
+@@ -1006,6 +1020,15 @@ int usb_stor_probe2(struct us_data *us)
+ 		result = -ENXIO;
+ 		goto BadDevice;
+ 	}
++
++	/* Initialize notifier chain */
++	usb_stor_notifier_init(us);
++
++	/* Notify vendor modules about new device */
++	dev_info(dev, "usb-storage: notifying vendor modules (PROBE)\n");
++	blocking_notifier_call_chain(&usb_stor_vendor_nh,
++				      USB_STOR_NOTIFIER_DEVICE_PROBE, us);
++
+ 	usb_stor_dbg(us, "Transport: %s\n", us->transport_name);
+ 	usb_stor_dbg(us, "Protocol: %s\n", us->protocol_name);
+ 
+@@ -1084,6 +1107,11 @@ void usb_stor_disconnect(struct usb_interface *intf)
+ {
+ 	struct us_data *us = usb_get_intfdata(intf);
+ 
++	/* Notify vendor modules before device teardown */
++	dev_info(&us->pusb_intf->dev, "usb-storage: notifying vendor modules (DISCONNECT)\n");
++	blocking_notifier_call_chain(&usb_stor_vendor_nh,
++				      USB_STOR_NOTIFIER_DEVICE_DISCONNECT, us);
++
+ 	quiesce_and_remove_host(us);
+ 	release_everything(us);
+ }

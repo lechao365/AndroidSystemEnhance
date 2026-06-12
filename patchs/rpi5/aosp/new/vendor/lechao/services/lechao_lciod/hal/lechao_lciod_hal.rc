@@ -1,0 +1,21 @@
+# ============================================================
+# lechao_lciod_hal.rc — Vendor HAL init 启动配置文件
+# 所属模块: lechao_lciod_hal
+# 设计目的: 定义 IO 监控服务的 vendor 分区 HAL 进程启动参数。
+#           在 hal 类中启动，由 init 的 hal 启动阶段触发。
+# 架构角色: init → lechao_lciod_hal (/vendor/bin) → (ioctl) → 内核驱动
+# ============================================================
+
+# lechao_lciod_hal: Vendor HAL 服务
+# 路径: /vendor/bin/lechao_lciod_hal
+# 启动时机: class hal（init 在 hal 阶段触发所有 hal 类服务）
+# 用户/组: system（特权用户，可访问 /dev 设备节点）
+# 接口声明: 注册为 vendor.lechao.lciod.IIoHal/default
+#           这是 HW Binder 服务，通过 VINTF manifest 发布
+# oneshot: 一次性服务，不自动重启（由 System Daemon 的死亡通知管理生命周期）
+service lechao_lciod_hal /vendor/bin/lechao_lciod_hal
+    class hal
+    user system
+    group system
+    interface aidl vendor.lechao.lciod.IIoHal/default
+    oneshot

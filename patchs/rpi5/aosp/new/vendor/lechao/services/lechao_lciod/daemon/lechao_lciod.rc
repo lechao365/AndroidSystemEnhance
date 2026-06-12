@@ -1,0 +1,28 @@
+# ============================================================
+# lechao_lciod.rc — System Daemon init 启动配置文件
+# 所属模块: lechao_lciod daemon
+# 设计目的: 定义 IO 监控服务的 system 分区进程的启动参数。
+#           采用延时启动策略（等待 boot_completed），避免在
+#           系统启动初期与 Vendor HAL 竞争资源。
+# 架构角色: init → lechao_lciod (/system/bin) → (AIDL) → HAL
+# ============================================================
+
+# lechao_lciod: 系统 IO Daemon 服务
+# 路径: /system/bin/lechao_lciod
+# 启动条件: sys.boot_completed=1（系统启动完成后触发）
+# 用户/组: system（系统级服务，可访问 AIDL service_manager）
+# 接口声明: 注册为 system.lechao.lciod.IIoService/default
+# oneshot 表示一次性执行，init 不会在进程退出后自动重启
+service lechao_lciod /system/bin/lechao_lciod
+    class main
+    user system
+    group system
+    interface aidl system.lechao.lciod.IIoService/default
+    oneshot
+
+# 系统启动完成时启动 IO Daemon
+# 延迟启动的原因：
+#   1. Vendor HAL 可能还在启动阶段
+#   2. 内核驱动设备节点可能还未创建完成
+on property:sys.boot_completed=1
+    start lechao_lciod

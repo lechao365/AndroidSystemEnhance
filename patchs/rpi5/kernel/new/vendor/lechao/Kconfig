@@ -1,0 +1,25 @@
+#
+# Lechao Vendor 特性顶层 Kconfig 菜单
+#
+# 所有 Lechao vendor 内核子系统的配置入口挂在 "Lechao Vendor Features" 菜单下。
+# 主开关 CONFIG_VENDOR_LECHAO 控制整个 vendor 目录是否参与编译，
+# 各子模块通过 source 引入各自的 Kconfig 文件。
+#
+# 包含的子菜单：
+#   LcView/       — LcView 结构化事件日志子系统
+#   drivers/      — Lechao vendor 驱动（如 USB 功能驱动）
+#
+
+menu "Lechao Vendor Features"
+
+config VENDOR_LECHAO
+    bool "Lechao Vendor Extensions"
+    default y
+    help
+      Master switch for Lechao vendor kernel extensions.
+      Say Y to enable all Lechao vendor features.
+
+source "vendor/lechao/LcView/Kconfig"
+source "vendor/lechao/LcIod/Kconfig"
+
+endmenu

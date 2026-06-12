@@ -1,0 +1,5 @@
+cc_library_headers {
+    name: "vendor_lechao_log_headers",
+    vendor: true,
+    export_include_dirs: ["."],
+}

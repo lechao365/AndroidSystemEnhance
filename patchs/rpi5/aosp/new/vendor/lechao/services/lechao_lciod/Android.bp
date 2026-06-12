@@ -1,0 +1,48 @@
+// ============================================================
+// lechao_lciod 顶层构建文件
+// 模块: system.lechao.lciod (system分区 AIDL 接口)
+// 作者: Lechao
+// 描述: 定义 system ↔ vendor 两层 AIDL 接口的编译规则。
+//       采用双进程架构（System Daemon + Vendor HAL），通过
+//       NDK 后端生成 C++ Binder 桩代码。
+// ============================================================
+
+// System 分区 AIDL 接口 — 面向 system_server 和上层 App
+// 使用 unstable:true 表示 API 尚未冻结，可以快速迭代
+aidl_interface {
+    name: "system.lechao.lciod",
+    owner: "lechao",
+    unstable: true,    // 开发阶段，允许接口变更
+    srcs: [
+        "system/lechao/lciod/IIoService.aidl",
+        "system/lechao/lciod/IoStats.aidl",
+        "system/lechao/lciod/IoConfig.aidl",
+        "system/lechao/lciod/IoEvent.aidl",
+    ],
+    backend: {
+        ndk: {
+            enabled: true,  // 生成 NDK C++ Binder 代码，供 system 进程使用
+        },
+    },
+}
+
+// Vendor 分区 AIDL 接口 — 面向 HAL 实现
+// 使用 VINTF 稳定性保证，vendor_available 表示供 vendor 分区引用
+aidl_interface {
+    name: "vendor.lechao.lciod",
+    owner: "lechao",
+    stability: "vintf",       // VINTF 稳定性契约，HAL 接口必须
+    vendor_available: true,   // vendor 分区可链接此库
+    srcs: [
+        "vendor/lechao/lciod/IIoHal.aidl",
+        "vendor/lechao/lciod/IoStats.aidl",
+        "vendor/lechao/lciod/IoConfig.aidl",
+        "vendor/lechao/lciod/IoEvent.aidl",
+    ],
+    backend: {
+        ndk: {
+            enabled: true,  // 生成 NDK C++ Binder 代码，供 HAL 进程使用
+        },
+    },
+    frozen: false,  // 未冻结，可修改
+}

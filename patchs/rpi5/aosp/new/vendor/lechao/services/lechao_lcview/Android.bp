@@ -1,0 +1,35 @@
+// ============================================================
+// Android.bp — lechao_lcview 项目根编译配置
+// 所属模块：LcView（Log View）结构化事件日志系统
+// 设计目的：定义项目中所有子模块共用的编译依赖。
+//   包含两部分：
+//     1) cc_library_headers：头文件库，供 daemon 和 hal 子模块共享
+//     2) aidl_interface：AIDL 接口定义，供跨进程通信使用
+// ============================================================
+
+// 头文件库模块：
+//   输出 include/ 目录下的 lcview_events.h 给依赖方使用。
+//   vendor: true 表示该模块安装在 vendor 分区，非 system 分区。
+cc_library_headers {
+    name: "vendor.lechao.lcview_headers",
+    vendor: true,
+    export_include_dirs: ["include"],
+}
+
+// AIDL 接口模块：
+//   定义 ILcView HAL 接口，编译生成 NDK 后端 C++ 代码。
+//   stability: "vintf" → 声明为 VINTF 稳定接口，与系统映像版本解耦。
+//   vendor_available: true → 对 vendor 模块可见。
+//   srcs 指向 AIDL 源文件，backend.ndk.enabled 启用 NDK（非 Java）后端。
+aidl_interface {
+    name: "vendor.lechao.lcview",
+    owner: "lechao",
+    stability: "vintf",
+    vendor_available: true,
+    srcs: ["vendor/lechao/lcview/ILcView.aidl"],
+    backend: {
+        ndk: {
+            enabled: true,
+        },
+    },
+}

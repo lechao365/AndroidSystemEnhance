@@ -1,0 +1,8 @@
+diff --git a/manifest.xml b/manifest.xml
+index 1a15efd..227561d 100644
+--- a/manifest.xml
++++ b/manifest.xml
+@@ -1 +1,2 @@
+-<manifest version="1.0" type="device" target-level="202404" />
++<manifest version="1.0" type="device" target-level="202404">
++</manifest>

@@ -1,0 +1,34 @@
+# lechao_lcview_hal —— 乐超自定义显示的 HAL 守护进程
+#   vendor 端守护进程（/vendor/bin），直接操作显示设备的内核驱动节点
+#   与 system 端的 lcview 通过 vndbinder 通信
+
+# 声明 lechao_lcview_hal 为 SELinux domain
+type lechao_lcview_hal, domain;
+# 声明可执行文件标签（file_contexts 匹配 /vendor/bin/lechao_lcview_hal）
+#   vendor_file_type 表明位于 vendor 分区
+type lechao_lcview_hal_exec, exec_type, vendor_file_type, file_type;
+# 声明设备节点类型（file_contexts 匹配 /dev/vendor_lechao_lcview）
+type lechao_lcview_hal_device, dev_type, file_type;
+# 声明服务类型，用于注册到 service_manager
+type lechao_lcview_hal_service, service_manager_type;
+
+# init 启动守护进程
+init_daemon_domain(lechao_lcview_hal)
+# 允许使用 vendor binder —— 与 system 端的 lcview 跨 partition 通信
+vndbinder_use(lechao_lcview_hal)
+# 允许 HAL 与 servicemanager 进行 binder 通信（注册服务需要 call + transfer）
+binder_call(lechao_lcview_hal, servicemanager)
+
+# 允许 HAL 打开/读写/控制显示设备节点 /dev/vendor_lechao_lcview
+#   ioctl 是核心：显示控制需要大量的自定义 ioctl 命令（如：初始化、刷新、电源管理等）
+#   open/read/write/getattr 是基础设备操作
+allow lechao_lcview_hal lechao_lcview_hal_device:chr_file { open read write ioctl getattr };
+# 允许 HAL 将服务（vendor.lechao.lcview.ILcView）注册到 service_manager
+#   lcview(system端) 通过 find 此服务来建立显示控制通道
+allow lechao_lcview_hal lechao_lcview_hal_service:service_manager add;
+
+# 允许 HAL 搜索 /dev 目录 —— 打开 /dev/vendor_lechao_lcview 之前需要遍历 /dev
+allow lechao_lcview_hal device:dir { search read };
+
+# 允许 HAL 写入 logd —— vendor 域默认无 logd 权限，不添加则 logcat 看不到 HAL 日志
+allow lechao_lcview_hal logd:unix_dgram_socket write;

@@ -1,0 +1,13 @@
+diff --git a/Kconfig b/Kconfig
+index 57a142d8d8b4..f51a39c7e2f9 100644
+--- a/Kconfig
++++ b/Kconfig
+@@ -19,6 +19,8 @@ source "net/Kconfig"
+ 
+ source "drivers/Kconfig"
+ 
++source "vendor/Kconfig"
++
+ source "fs/Kconfig"
+ 
+ source "security/Kconfig"

@@ -1,0 +1,59 @@
+diff --git a/README.md b/README.md
+index 52b71fe..b5f1d4d 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1,54 @@
+ Raspberry Vanilla AOSP 15 device configuration for Raspberry Pi 5.
++
++## Serial Console Configuration
++
++### Hardware Setup
++
++Connect USB-to-serial adapter to 40-pin header:
++
++| Pin | Function | Connection |
++|-----|----------|------------|
++| 6   | GND      | GND        |
++| 8   | TXD      | USB RX     |
++| 10  | RXD      | USB TX     |
++
++### Configuration Files
++
++1. **config.txt** (`device/brcm/rpi5/boot/config.txt`)
++
++```txt
++enable_uart=1
++dtoverlay=uart0-pi5
++```
++
++2. **BoardConfig.mk** (`device/brcm/rpi5/BoardConfig.mk`)
++
++```make
++BOARD_KERNEL_CMDLINE := console=ttyAMA0,115200 no_console_suspend root=/dev/ram0 rootwait androidboot.hardware=rpi5
++```
++
++### Serial Parameters
++
++- Baud rate: 115200
++- Data bits: 8
++- Stop bits: 1
++- Parity: None
++
++### Verification
++
++After flashing the image, you should see kernel boot messages on the serial console immediately after power-on.
++
++### Troubleshooting
++
++If no serial output:
++
++1. Check USB-to-serial wiring (RX/TX swap is common)
++2. Verify serial terminal settings (115200 8N1)
++3. Ensure `config.txt` and `BoardConfig.mk` changes are compiled into boot.img
++4. Rebuild bootimage and reflash
++
++### Related UART Devices
++
++- `ttyAMA0` - 40-pin header UART (RP1 UART0, GPIO14/15)
++- `ttyAMA10` - System debug UART (not exposed on 40-pin header)
++

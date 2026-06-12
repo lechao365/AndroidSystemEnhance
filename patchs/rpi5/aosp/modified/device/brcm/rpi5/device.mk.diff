@@ -1,0 +1,56 @@
+diff --git a/device.mk b/device.mk
+index 8de7b0f..85a08e8 100644
+--- a/device.mk
++++ b/device.mk
+@@ -166,8 +166,41 @@ PRODUCT_COPY_FILES += \
+     $(DEVICE_PATH)/seccomp_policy/mediacodec.policy:$(TARGET_COPY_OUT_VENDOR)/etc/seccomp_policy/mediacodec.policy \
+     $(DEVICE_PATH)/seccomp_policy/mediaswcodec.policy:$(TARGET_COPY_OUT_VENDOR)/etc/seccomp_policy/mediaswcodec.policy
+ 
+-# Soong
++# Soong 命名空间 —— 让编译系统能找到 vendor/lechao 下的 Android.bp
++# vendor/lechao 是我们的自定义服务源码根目录（在 AOSP 源码树外），不加这一行
++# 会导致编译系统找不到 lechao_lciod、lechao_lcview 等模块的 BUILD 文件
+ PRODUCT_SOONG_NAMESPACES += $(DEVICE_PATH)
++PRODUCT_SOONG_NAMESPACES += vendor/lechao
++
++# lechao_lciod —— IO 控制器的系统服务守护进程
++#   功能：Java/Native 客户端通过 Binder 调用 lciod 服务，lciod 再通过 Binder 转发给 HAL
++#   为什么需要：用户态需要抽象统一的 IO 控制接口，由 lciod 服务统一管理
++# lechao_lciod_hal —— IO 控制器的 HAL 实现
++#   功能：直接操作内核驱动节点（/dev/vendor_lechao_usbd*），提供底层 IO 能力
++#   为什么需要 HAL 层：隔离内核细节，lciod 服务不直接接触驱动，通过 Binder 与 HAL 通信
++# vendor.lechao.lciod.IIoHal-vintf —— HAL 的 VINTF 接口定义模块
++#   功能：生成 VINTF 清单，向 Android 框架注册该 HAL 的存在
++#   为什么需要 VINTF：Android 14+ 强制要求所有 HAL 必须在 manifest 中声明
++# lechao lciod service
++PRODUCT_PACKAGES += \
++    lechao_lciod \
++    lechao_lciod_hal \
++    vendor.lechao.lciod.IIoHal-vintf
++
++# lechao_lcview —— 乐超自定义显示服务的系统守护进程
++#   功能：管理 LCView 显示设备的生命周期与数据流，通过 Binder 与 HAL 通信
++#   为什么需要：RPi5 上需要自定义的显示控制（初始化、数据传输、刷新控制）
++# lechao_lcview_hal —— LCView 的 HAL 实现
++#   功能：直接操作内核驱动节点（/dev/vendor_lechao_lcview），控制显示硬件
++#   为什么需要 HAL 层：同上，隔离内核细节，lciod 服务不直接接触驱动
++# vendor.lechao.lcview.ILcView-vintf —— LCView HAL 的 VINTF 接口定义模块
++# vendor.lechao.lcview-config —— LCView 配置文件包（包含硬件参数、分辨率和时序配置）
++# lechao lcview service
++PRODUCT_PACKAGES += \
++    lechao_lcview \
++    lechao_lcview_hal \
++    vendor.lechao.lcview.ILcView-vintf \
++    vendor.lechao.lcview-config
+ 
+ # Storage
+ $(call inherit-product, $(SRC_TARGET_DIR)/product/emulated_storage.mk)
+@@ -194,6 +227,8 @@ PRODUCT_COPY_FILES += \
+     frameworks/native/data/etc/android.hardware.usb.host.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.usb.host.xml \
+     frameworks/native/data/etc/android.software.midi.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.software.midi.xml
+ 
++# Vendor Lechao SELinux -- added after module builds
++
+ # Virtualization
+ $(call inherit-product, packages/modules/Virtualization/apex/product_packages.mk)
+ 

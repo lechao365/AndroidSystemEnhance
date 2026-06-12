@@ -1,0 +1,26 @@
+# ============================================================
+# lechao_lcview_hal.rc — LcView HAL 服务的 init 启动脚本
+# 所属模块：LcView 事件日志系统 — HAL 层
+# 设计目的：定义 lechao_lcview_hal 守护进程的 init 配置。
+#   该服务运行在 vendor 分区，以 system 身份运行，
+#   注册为 AIDL 接口服务供 daemon 进程调用。
+# ============================================================
+
+# service lechao_lcview_hal：
+#   /vendor/bin/lechao_lcview_hal — 执行路径（vendor 分区）
+#   class hal — 属于 hal 服务类别，随 hal 类启动
+#   user/group system — 以 system 身份运行
+#   interface aidl ... — 显式声明实现 vendor.lechao.lcview.ILcView
+#                        AIDL 接口，这是 Treble 架构要求。
+#                        此声明使 init 自动管理 service_manager 注册。
+#   oneshot — 退出后不重启（确保不会在 init 中产生重启循环）
+# 为什么 oneshot 而不是默认重启：
+#   如果内核驱动设备节点不存在或打开失败，HAL 进程快速退出，
+#   持续重启不会解决问题，反而造成资源浪费。
+#   日志会指示 daemon 重试连接，等驱动准备好后再手动启动更合理。
+service lechao_lcview_hal /vendor/bin/lechao_lcview_hal
+    class hal
+    user system
+    group system
+    interface aidl vendor.lechao.lcview.ILcView/default
+    oneshot
