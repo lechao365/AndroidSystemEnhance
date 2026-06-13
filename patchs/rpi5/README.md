@@ -348,4 +348,4 @@ adb shell ls -l /dev/vendor_lechao_lcview /dev/vendor_lechao_usbd*
 
 | 路径 | 说明 |
 |------|------|
-| （暂无） | 后续按需新增，直接在 `others/` 目录下创建和维护 |
+| `usb-verify/` | USB 设备验证工具（Makefile + src/ + include/），含 ioctl 兼容层、CLI/check/device 子模块，独立编译运行 |
