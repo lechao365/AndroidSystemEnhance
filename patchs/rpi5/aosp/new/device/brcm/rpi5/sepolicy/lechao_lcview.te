@@ -32,3 +32,8 @@ allow lechao_lcview lechao_lcview_data_file:dir { create_dir_perms };
 # 允许 lcview 在该目录下创建文件（如运行时生成的显示参数配置文件）
 #   create_file_perms 包含普通文件创建和读写所需的所有权限
 allow lechao_lcview lechao_lcview_data_file:file { create_file_perms };
+
+# 允许读取 /vendor/etc/lcview_events.json schema 配置文件
+# daemon 启动时加载 schema，热重载时重新读取
+allow lechao_lcview vendor_file:dir search;
+allow lechao_lcview vendor_file:file r_file_perms;

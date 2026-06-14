@@ -1,6 +1,6 @@
 config VENDOR_LECHAO_USBD
 	bool "Lechao USB Storage Rate Monitor"
-	depends on USB_STORAGE
+	depends on USB_STORAGE=y
 	select LCVIEW
 	default y
 	help

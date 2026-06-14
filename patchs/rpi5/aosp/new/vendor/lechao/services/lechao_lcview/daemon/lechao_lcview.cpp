@@ -193,7 +193,8 @@ int main(int argc, char* argv[])
                 const EventSchema* es = schema.find(hdr->event_id);
                 if (es) {
                     LC_ALOGD("parse: event_id=%u valid, writing", hdr->event_id);
-                    writer.writeRecord(*es, hdr, fields);
+                    size_t fieldsLen = recordDataLen - sizeof(struct lcview_record_hdr);
+                    writer.writeRecord(*es, hdr, fields, fieldsLen);
                 }
             } else {
                 writer.writeInvalid(recordStart, recordDataLen, errMsg);

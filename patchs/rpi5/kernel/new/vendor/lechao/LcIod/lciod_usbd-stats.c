@@ -198,7 +198,8 @@ static void lcview_trace_transport_start(struct vendor_lechao_usbd_device *rate_
     lcview_builder_add_int(b, (int64_t)device_index);
     lcview_builder_add_int(b, (int64_t)dir);
     lcview_builder_add_int(b, (int64_t)scsi_bufflen(srb));
-    lcview_builder_commit(b, &lcview_ring);
+    if (lcview_builder_commit(b, &lcview_ring))
+        lcview_builder_cancel(b);
 }
 
 /*
@@ -225,7 +226,8 @@ static void lcview_trace_transport_end(struct vendor_lechao_usbd_device *rate_de
     lcview_builder_add_int(b, (int64_t)bytes);
     lcview_builder_add_int(b, (int64_t)elapsed_ns);
     lcview_builder_add_int(b, (int64_t)was_error);
-    lcview_builder_commit(b, &lcview_ring);
+    if (lcview_builder_commit(b, &lcview_ring))
+        lcview_builder_cancel(b);
 }
 
 /*
@@ -243,7 +245,8 @@ static void lcview_trace_transport_error(struct vendor_lechao_usbd_device *rate_
     lcview_builder_add_int(b, (int64_t)device_index);
     lcview_builder_add_int(b, (int64_t)dir);
     lcview_builder_add_int(b, (int64_t)result);
-    lcview_builder_commit(b, &lcview_ring);
+    if (lcview_builder_commit(b, &lcview_ring))
+        lcview_builder_cancel(b);
 }
 
 /*
@@ -259,7 +262,8 @@ static void lcview_trace_reset(struct vendor_lechao_usbd_device *rate_dev,
     if (!b)
         return;
     lcview_builder_add_int(b, (int64_t)device_index);
-    lcview_builder_commit(b, &lcview_ring);
+    if (lcview_builder_commit(b, &lcview_ring))
+        lcview_builder_cancel(b);
 }
 
 /*
@@ -276,7 +280,8 @@ static void lcview_trace_stall(struct vendor_lechao_usbd_device *rate_dev,
         return;
     lcview_builder_add_int(b, (int64_t)device_index);
     lcview_builder_add_int(b, (int64_t)status);
-    lcview_builder_commit(b, &lcview_ring);
+    if (lcview_builder_commit(b, &lcview_ring))
+        lcview_builder_cancel(b);
 }
 
 /*
@@ -293,7 +298,8 @@ static void lcview_trace_timeout(struct vendor_lechao_usbd_device *rate_dev,
         return;
     lcview_builder_add_int(b, (int64_t)device_index);
     lcview_builder_add_int(b, (int64_t)status);
-    lcview_builder_commit(b, &lcview_ring);
+    if (lcview_builder_commit(b, &lcview_ring))
+        lcview_builder_cancel(b);
 }
 
 /*
@@ -310,7 +316,8 @@ static void lcview_trace_data_corrupt(struct vendor_lechao_usbd_device *rate_dev
         return;
     lcview_builder_add_int(b, (int64_t)device_index);
     lcview_builder_add_int(b, (int64_t)status);
-    lcview_builder_commit(b, &lcview_ring);
+    if (lcview_builder_commit(b, &lcview_ring))
+        lcview_builder_cancel(b);
 }
 
 /*
@@ -327,7 +334,8 @@ static void lcview_trace_rate_degraded(struct vendor_lechao_usbd_device *rate_de
         return;
     lcview_builder_add_int(b, (int64_t)device_index);
     lcview_builder_add_int(b, (int64_t)latency_ns);
-    lcview_builder_commit(b, &lcview_ring);
+    if (lcview_builder_commit(b, &lcview_ring))
+        lcview_builder_cancel(b);
 }
 
 /*
@@ -557,8 +565,6 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
         elapsed_ns = ktime_to_ns(ktime_sub(ktime_get(),
                                            rate_dev->transport_start_time));
         trace.was_error = rate_dev->last_transport_error ? 1 : 0;
-        rate_dev->last_transport_latency_ns = elapsed_ns;
-        rate_dev->stats.last_transport_latency_ns = elapsed_ns;
 
         if (srb && !rate_dev->last_transport_error) {
             bytes = scsi_bufflen(srb) - scsi_get_resid(srb);
@@ -599,6 +605,9 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
                 VENDOR_LECHAO_USBD_EVENT_RATE_DEGRADED,
                 0, 0, 0);
         }
+
+        rate_dev->last_transport_latency_ns = elapsed_ns;
+        rate_dev->stats.last_transport_latency_ns = elapsed_ns;
 
         rate_dev->stats.last_update = ktime_get_ns();
         rate_dev->last_transport_error = false;

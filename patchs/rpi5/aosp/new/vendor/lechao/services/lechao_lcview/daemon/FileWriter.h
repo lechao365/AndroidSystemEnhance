@@ -43,7 +43,8 @@ public:
     // 写入一条合法的事件记录到对应的 event 文件
     void writeRecord(const EventSchema& schema,
                      const struct lcview_record_hdr* hdr,
-                     const uint8_t* fields);
+                     const uint8_t* fields,
+                     size_t fieldsLen);
 
     // 写入一条非法记录到 invalid_records.log（用于诊断）
     void writeInvalid(const uint8_t* data, size_t len, const std::string& reason);
@@ -65,7 +66,8 @@ private:
     // 将二进制记录格式化为一行 JSONL 字符串
     std::string formatJsonLine(const EventSchema& schema,
                                const struct lcview_record_hdr* hdr,
-                               const uint8_t* fields);
+                               const uint8_t* fields,
+                               size_t fieldsLen);
 
     FileWriterConfig mCfg;
 

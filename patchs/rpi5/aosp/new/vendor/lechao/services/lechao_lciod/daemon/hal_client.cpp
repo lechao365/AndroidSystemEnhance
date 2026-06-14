@@ -34,6 +34,15 @@ IoHalClient::IoHalClient() : connected_(false), lastRetryMs_(0), retryCount_(0) 
     connect();
 }
 
+IoHalClient::~IoHalClient() {
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (currentCookie_) {
+        AIBinder_DeathRecipient_delete(currentCookie_->recipient);
+        delete currentCookie_;
+        currentCookie_ = nullptr;
+    }
+}
+
 void IoHalClient::connect() {
     auto hal = IIoHal::fromBinder(
         ndk::SpAIBinder(AServiceManager_checkService(kHalName)));
@@ -44,10 +53,16 @@ void IoHalClient::connect() {
 
         AIBinder_DeathRecipient *recipient = AIBinder_DeathRecipient_new(&onHalDied);
         AIBinder_DeathRecipient_setOnUnlinked(recipient, &onHalDiedUnlinked);
+
+        auto *cookie = new DeathCookie{this, recipient};
         binder_status_t linkRet = AIBinder_linkToDeath(hal_->asBinder().get(),
-            recipient, this);
+            recipient, cookie);
         if (linkRet != STATUS_OK) {
             ALOGE("hal_client: linkToDeath failed: %d", linkRet);
+            AIBinder_DeathRecipient_delete(recipient);
+            delete cookie;
+        } else {
+            currentCookie_ = cookie;
         }
         ALOGI("Connected to HAL service");
     } else {
@@ -59,15 +74,22 @@ void IoHalClient::connect() {
     }
 }
 
-void IoHalClient::onHalDiedUnlinked(void * /*cookie*/) {
+void IoHalClient::onHalDiedUnlinked(void *cookie) {
+    auto *dc = static_cast<DeathCookie *>(cookie);
+    if (!dc) return;
+    AIBinder_DeathRecipient_delete(dc->recipient);
+    delete dc;
 }
 
 void IoHalClient::onHalDied(void *cookie) {
-    auto *self = static_cast<IoHalClient *>(cookie);
+    auto *dc = static_cast<DeathCookie *>(cookie);
+    if (!dc) return;
+    auto *self = dc->self;
     std::lock_guard<std::mutex> lock(self->mtx_);
     self->hal_.reset();
     self->connected_ = false;
     self->retryCount_ = 0;
+    self->currentCookie_ = nullptr;
     ALOGW("HAL service died, will reconnect on next call");
 }
 

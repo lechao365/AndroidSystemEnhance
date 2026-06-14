@@ -15,7 +15,7 @@ CFLAGS  = -O2 -Wall -Wextra -Wno-unused-parameter
 LDFLAGS =
 
 TARGET  = usb-fault-inject
-SRCS    = main.c raw-gadget.c faults.c expect.c
+SRCS    = main.c raw-gadget.c usb-descriptors.c scsi.c bot.c faults.c expect.c
 OBJS    = $(SRCS:.c=.o)
 
 .PHONY: all clean

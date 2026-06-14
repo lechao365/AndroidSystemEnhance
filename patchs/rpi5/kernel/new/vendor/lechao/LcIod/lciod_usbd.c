@@ -81,7 +81,8 @@ static void lcview_trace_probe(int device_index, u16 vid, u16 pid,
     lcview_builder_add_int(b, (int64_t)pid);
     lcview_builder_add_str(b, vendor);
     lcview_builder_add_str(b, product);
-    lcview_builder_commit(b, &lcview_ring);
+    if (lcview_builder_commit(b, &lcview_ring))
+        lcview_builder_cancel(b);
 }
 
 /*
@@ -98,7 +99,8 @@ static void lcview_trace_disconnect(int device_index)
     if (!b)
         return;
     lcview_builder_add_int(b, (int64_t)device_index);
-    lcview_builder_commit(b, &lcview_ring);
+    if (lcview_builder_commit(b, &lcview_ring))
+        lcview_builder_cancel(b);
 }
 
 /*
@@ -496,6 +498,7 @@ struct vendor_lechao_usbd_device *vendor_lechao_usbd_device_alloc(struct us_data
     rate_dev->stats.last_event_type = VENDOR_LECHAO_USBD_EVENT_NONE;
 
     if (!us->pusb_dev) {
+        ida_free(&vendor_lechao_usbd_ida, minor);
         kfree(rate_dev);
         return ERR_PTR(-ENODEV);
     }
@@ -754,6 +757,13 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
         return 0;
 
     for (i = 0; i < udev->actconfig->desc.bNumInterfaces; i++) {
+        void *drvdata;
+        struct Scsi_Host *shost;
+        struct us_data *us;
+        struct vendor_lechao_usbd_device *pos;
+        struct vendor_lechao_usbd_device *new_dev = NULL;
+        bool found = false;
+
         intf = udev->actconfig->interface[i];
         if (!intf || !intf->dev.driver)
             continue;
@@ -761,20 +771,16 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
         if (strcmp(intf->dev.driver->name, "usb-storage") != 0)
             continue;
 
-        void *drvdata = dev_get_drvdata(&intf->dev);
-        struct Scsi_Host *shost = drvdata ? scsi_host_get(drvdata) : NULL;
+        drvdata = dev_get_drvdata(&intf->dev);
+        shost = drvdata ? scsi_host_get(drvdata) : NULL;
         if (!shost)
             continue;
 
-        struct us_data *us = host_to_us(shost);
+        us = host_to_us(shost);
         if (!us || !us->notifier.head) {
             scsi_host_put(shost);
             continue;
         }
-
-        struct vendor_lechao_usbd_device *pos;
-        struct vendor_lechao_usbd_device *new_dev = NULL;
-        bool found = false;
 
         mutex_lock(&vendor_lechao_usbd_mutex);
         list_for_each_entry(pos, &vendor_lechao_usbd_devices, list) {

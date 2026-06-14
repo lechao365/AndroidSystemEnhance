@@ -72,6 +72,8 @@ bool SchemaParser::parseJson(const std::string& jsonContent)
 {
     Json::Value root;
     Json::CharReaderBuilder builder;
+    builder.settings_["allowComments"] = false;
+    builder.settings_["strictRoot"] = false;
     std::string errors;
     std::istringstream iss(jsonContent);
 
@@ -80,12 +82,16 @@ bool SchemaParser::parseJson(const std::string& jsonContent)
         return false;
     }
 
-    mVersion = root.get("version", 0).asInt();
+    int newVersion = root.get("version", 0).asInt();
     const Json::Value& events = root["events"];
     if (!events.isArray()) {
         LOG(ERROR) << "SchemaParser: 'events' is not an array";
         return false;
     }
+
+    /* 原子提交：先全部解析到局部 map，全部成功后再 swap 到成员变量。
+     * 任意一步失败都直接返回，mSchemaMap 保持完整旧状态。 */
+    std::unordered_map<uint16_t, EventSchema> newMap;
 
     for (const auto& ev : events) {
         EventSchema schema;
@@ -113,9 +119,11 @@ bool SchemaParser::parseJson(const std::string& jsonContent)
         }
 
         LC_LOGD("SchemaParser: parsed event id=" << schema.id << " name=" << schema.name << " fields=" << schema.fields.size());
-        mSchemaMap[schema.id] = std::move(schema);
+        newMap[schema.id] = std::move(schema);
     }
 
+    mSchemaMap = std::move(newMap);
+    mVersion = newVersion;
     LOG(INFO) << "SchemaParser: loaded " << mSchemaMap.size() << " events";
     return true;
 }
@@ -162,7 +170,9 @@ bool SchemaParser::validate(const uint8_t* data, size_t len,
     }
 
     // field_count 必须与 schema 定义一致
-    if (hdr->field_count != (uint8_t)schema->fields.size()) {
+    /* hdr->field_count 是 uint8_t，自然提升为 int 比较；
+     * size() 直接比较防止 schema 字段数 > 255 时强转截断匹配 */
+    if ((size_t)hdr->field_count != schema->fields.size()) {
         errMsg = "field count mismatch: expected " +
                  std::to_string(schema->fields.size()) +
                  ", got " + std::to_string(hdr->field_count);
@@ -211,7 +221,14 @@ bool SchemaParser::validate(const uint8_t* data, size_t len,
             }
             uint16_t fieldLen;
             memcpy(&fieldLen, ptr, 2);
-            ptr += 2 + fieldLen;
+            ptr += 2;
+            if (fieldLen > (size_t)(end - ptr)) {
+                errMsg = "field " + std::to_string(i) + " data exceeds record (len="
+                         + std::to_string(fieldLen) + ", remaining="
+                         + std::to_string(end - ptr) + ")";
+                return false;
+            }
+            ptr += fieldLen;
             break;
         }
         default:

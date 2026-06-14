@@ -146,6 +146,7 @@ int read_event(int fd, struct vendor_lechao_usbd_event *event, int timeout_ms) {
     struct vendor_lechao_usbd_event tmp;
     ssize_t n;
     int count = 0;
+    int saved_errno = 0;
     while ((n = read(fd, &tmp, sizeof(tmp))) == (ssize_t)sizeof(tmp)) {
         *event = tmp;
         count++;
@@ -153,10 +154,14 @@ int read_event(int fd, struct vendor_lechao_usbd_event *event, int timeout_ms) {
         if (ret <= 0)
             break;
     }
+    if (n < 0)
+        saved_errno = errno;
+
     if (count > 1)
         LOG(WARNING) << "read_event: drained " << count << " events from kernel, "
                      << (count - 1) << " dropped";
     if (count > 0) return 0;
-    errno = EAGAIN;
+
+    errno = saved_errno ? saved_errno : EAGAIN;
     return -1;
 }

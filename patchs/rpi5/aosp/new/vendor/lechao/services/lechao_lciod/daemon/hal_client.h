@@ -12,6 +12,8 @@
 #include <memory>
 #include <mutex>
 
+struct AIBinder_DeathRecipient;
+
 namespace aidl::vendor::lechao::lciod {
 class IIoHal;
 }
@@ -22,13 +24,21 @@ class IIoHal;
 class IoHalClient {
 public:
     IoHalClient();
+    ~IoHalClient();
     std::shared_ptr<aidl::vendor::lechao::lciod::IIoHal> get();
 private:
+    /* DeathCookie 同时携带 self 和 recipient，便于 unlink 回调释放资源 */
+    struct DeathCookie {
+        IoHalClient *self;
+        AIBinder_DeathRecipient *recipient;
+    };
+
     std::mutex mtx_;
     std::shared_ptr<aidl::vendor::lechao::lciod::IIoHal> hal_;
     bool connected_;
     int64_t lastRetryMs_;
     int retryCount_;
+    DeathCookie *currentCookie_ = nullptr;
 
     void connect();
     static void onHalDied(void *cookie);

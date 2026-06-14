@@ -12,10 +12,9 @@
 # 用户/组: system（特权用户，可访问 /dev 设备节点）
 # 接口声明: 注册为 vendor.lechao.lciod.IIoHal/default
 #           这是 HW Binder 服务，通过 VINTF manifest 发布
-# oneshot: 一次性服务，不自动重启（由 System Daemon 的死亡通知管理生命周期）
+# 崩溃恢复: 不设 oneshot，init 自动重启崩溃进程，确保 HAL 可用性
 service lechao_lciod_hal /vendor/bin/lechao_lciod_hal
     class hal
     user system
     group system
     interface aidl vendor.lechao.lciod.IIoHal/default
-    oneshot

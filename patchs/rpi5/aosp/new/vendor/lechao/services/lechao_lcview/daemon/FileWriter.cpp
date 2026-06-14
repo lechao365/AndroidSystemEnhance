@@ -179,7 +179,8 @@ static void jsonEscapeString(std::ostringstream& oss, const std::string& s)
 // thread_local 可保证每个线程独立，无需额外同步。
 std::string FileWriter::formatJsonLine(const EventSchema& schema,
                                         const struct lcview_record_hdr* hdr,
-                                        const uint8_t* fields)
+                                        const uint8_t* fields,
+                                        size_t fieldsLen)
 {
     thread_local std::ostringstream oss;
     oss.str("");   // 清空内容
@@ -191,14 +192,26 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
         << ",\"f\":[";
 
     const uint8_t* ptr = fields;
+    const uint8_t* const end = fields + fieldsLen;
+
+#define LCVIEW_NEED(n) do { \
+    if ((size_t)(end - ptr) < (size_t)(n)) { \
+        ALOGE("FileWriter: formatJsonLine: out-of-bounds at field %zu (need %zu, remain %zd)", \
+              i, (size_t)(n), (ssize_t)(end - ptr)); \
+        return std::string(); \
+    } \
+} while (0)
+
     for (size_t i = 0; i < schema.fields.size(); i++) {
         if (i > 0) oss << ",";
 
+        LCVIEW_NEED(1);
         uint8_t type = *ptr;
         ptr++;
 
         switch (type) {
         case LCVIEW_TYPE_INT32: {
+            LCVIEW_NEED(4);
             int32_t val;
             memcpy(&val, ptr, 4);
             oss << val;
@@ -206,6 +219,7 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
             break;
         }
         case LCVIEW_TYPE_INT64: {
+            LCVIEW_NEED(8);
             int64_t val;
             memcpy(&val, ptr, 8);
             oss << val;
@@ -213,6 +227,7 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
             break;
         }
         case LCVIEW_TYPE_FLOAT: {
+            LCVIEW_NEED(4);
             float val;
             memcpy(&val, ptr, 4);
             oss << val;
@@ -220,18 +235,22 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
             break;
         }
         case LCVIEW_TYPE_STRING: {
+            LCVIEW_NEED(2);
             uint16_t len;
             memcpy(&len, ptr, 2);
             ptr += 2;
+            LCVIEW_NEED(len);
             std::string s(reinterpret_cast<const char*>(ptr), len);
             ptr += len;
             jsonEscapeString(oss, s);
             break;
         }
         case LCVIEW_TYPE_BINARY: {
+            LCVIEW_NEED(2);
             uint16_t len;
             memcpy(&len, ptr, 2);
             ptr += 2;
+            LCVIEW_NEED(len);
             oss << "\"";
             for (uint16_t j = 0; j < len; j++)
                 oss << std::hex << std::setfill('0')
@@ -245,6 +264,7 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
             break;
         }
     }
+#undef LCVIEW_NEED
     oss << "]}\n";
     return oss.str();
 }
@@ -253,7 +273,8 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
 // 如果文件尚未打开，自动创建；写入后立即 flush
 void FileWriter::writeRecord(const EventSchema& schema,
                               const struct lcview_record_hdr* hdr,
-                              const uint8_t* fields)
+                              const uint8_t* fields,
+                              size_t fieldsLen)
 {
     auto it = mFiles.find(schema.id);
     // 如果对应 event_id 的文件还未打开，自动 openFile
@@ -266,7 +287,12 @@ void FileWriter::writeRecord(const EventSchema& schema,
         }
     }
 
-    std::string line = formatJsonLine(schema, hdr, fields);
+    std::string line = formatJsonLine(schema, hdr, fields, fieldsLen);
+
+    if (line.empty()) {
+        ALOGE("FileWriter: writeRecord: formatJsonLine returned empty for event %u, DROPPING", schema.id);
+        return;
+    }
 
     LC_ALOGD("lechao_lcview: write %u %s", schema.id, line.c_str());
 

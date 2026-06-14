@@ -221,9 +221,11 @@ private:
                         deviceMinor = extract_minor_from_path(devices[0]);
                         if (deviceMinor < 0) deviceMinor = 0;
                     } else {
-                        LC_ALOGW("monitor: listDevices failed or empty");
+                        deviceMinor = -1;
                     }
                 }
+
+                if (deviceMinor < 0) continue;
 
                 /* 每 tick 轮询事件 */
                 VendorIoEvent vev;
