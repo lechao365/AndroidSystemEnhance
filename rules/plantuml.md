@@ -1,0 +1,77 @@
+# PlantUML 编写约束
+
+> 本文档记录实际遇到过的 PlantUML 渲染失败问题及其修复方案，防止重犯。
+
+## 规则 1：禁止空图块
+
+**问题：** `@startuml/@enduml` 内只有注释或完全为空时，PlantUML 报 "must contain at least one shape"，导致渲染失败。
+
+**错误示例：**
+
+```plantuml
+@startuml
+' 时序图
+@enduml
+```
+
+**正确做法：** 即使是模板，也必须包含至少一个图形元素（participant、start、rectangle 等）。
+
+---
+
+## 规则 2：UML 块内禁止花括号占位符
+
+**问题：** 模板占位符 `{模块名称}`、`{调用}` 等的花括号会被 PlantUML 解释为 package/object 等语法块的定界符，导致解析错误。
+
+**错误示例：**
+
+```plantuml
+@startuml
+participant "{子模块}" as M1
+Caller -> M1 : {调用}
+@enduml
+```
+
+**正确做法：** PlantUML 代码块内的占位符使用尖括号 `<>`，正文 Markdown 中仍使用 `{}`。
+
+```plantuml
+@startuml
+participant "<子模块>" as M1
+Caller -> M1 : <调用>
+@enduml
+```
+
+---
+
+## 规则 3：条件块内禁止 fork/fork again
+
+**问题：** `fork/fork again` 是并行分支语法，不能嵌套在 `if/else` 条件块内部，会导致语法错误。
+
+**错误示例：**
+
+```plantuml
+@startuml
+start
+if (cond?) then (是)
+    :A;
+else (否)
+    fork
+        :B;
+    fork again
+        :C;
+    end fork
+endif
+stop
+@enduml
+```
+
+**正确做法：** 用 `repeat/repeat while` 表达重试循环，或用 `if/else` 表达互斥分支，不要混用 fork。
+
+```plantuml
+@startuml
+start
+repeat
+  :操作;
+repeat while (失败?)
+stop
+@enduml
+```

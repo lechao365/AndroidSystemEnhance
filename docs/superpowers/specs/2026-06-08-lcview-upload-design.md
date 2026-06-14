@@ -1,6 +1,6 @@
 # LcView 上传链路设计规格
 
-## 1. 概述
+## 概述
 
 本文档描述 LcView 日志打点系统的"二期上传"能力——从设备端 JSONL 落盘到云端入库、前端可视化的完整链路。
 
@@ -14,7 +14,7 @@
 Daemon 上传线程 → HTTP POST → 云侧 Go 服务 → MySQL 入库 → Grafana 看板
 ```
 
-## 2. 关键设计决策
+## 关键设计决策
 
 | 决策项 | 选择 | 理由 |
 |--------|------|------|
@@ -28,7 +28,7 @@ Daemon 上传线程 → HTTP POST → 云侧 Go 服务 → MySQL 入库 → Graf
 | 文件切割 | 4MB (原 50MB) | 匹配上传粒度，减少单次传输大小 |
 | 上传触发 | 4MB 满文件 OR 5min 超时 | 平衡延迟与吞吐 |
 
-## 3. event_id 空间规划
+## event_id 空间规划
 
 每个业务域预留 1000 个 event_id，通过 `event_id / 1000` 自动确定业务域：
 
@@ -42,9 +42,9 @@ Daemon 上传线程 → HTTP POST → 云侧 Go 服务 → MySQL 入库 → Graf
 | 5000-5999 | 存储/文件系统 | storage | 预留 |
 | 6000+ | 自定义业务 | custom | 按需扩展 |
 
-## 4. 端侧上传线程设计
+## 端侧上传线程设计
 
-### 4.1 整体架构变化
+### 整体架构变化
 
 当前 daemon 进程改造为双线程：
 
@@ -53,7 +53,7 @@ Daemon 上传线程 → HTTP POST → 云侧 Go 服务 → MySQL 入库 → Graf
 上传线程: 扫描 logs/ → 检测可上传文件 → HTTP POST → gzip → uploaded/
 ```
 
-### 4.2 文件切割策略调整
+### 文件切割策略调整
 
 FileWriter 滚动参数调整：
 
@@ -63,7 +63,7 @@ FileWriter 滚动参数调整：
 | rotation_interval_h | 24 | 24 | 保持不变 |
 | maxTotalSizeMb | 500 | 500 | 保持不变 |
 
-### 4.3 可上传文件识别
+### 可上传文件识别
 
 通过 FileWriter 接口暴露当前活跃文件名：
 
@@ -74,7 +74,7 @@ std::string FileWriter::getCurrentLogFilename() const;
 
 上传线程扫描 `logs/` 目录时排除当前活跃文件，其余文件均为可上传文件。
 
-### 4.4 上传线程核心逻辑
+### 上传线程核心逻辑
 
 ```
 上传线程 (uploaderThread):
@@ -110,7 +110,7 @@ std::string FileWriter::getCurrentLogFilename() const;
         6. sleep 30s (扫描间隔)
 ```
 
-### 4.5 健壮性设计
+### 健壮性设计
 
 | 异常场景 | 处理策略 |
 |---------|---------|
@@ -122,7 +122,7 @@ std::string FileWriter::getCurrentLogFilename() const;
 | daemon 重启 | 扫描 `logs/` 中所有非活跃文件，重新上传 |
 | 并发安全 | 上传线程只读 `logs/` 目录列表，文件移动使用原子 rename |
 
-### 4.6 HTTP 上传请求格式
+### HTTP 上传请求格式
 
 **请求：**
 ```
@@ -169,7 +169,7 @@ Content-Disposition: form-data; name="file_name"
 }
 ```
 
-### 4.7 设备配置文件
+### 设备配置文件
 
 路径：`/data/vendor/lechao_lcview/device.conf`
 
@@ -180,7 +180,7 @@ server_url=http://192.168.1.100:8080
 
 daemon 启动时读取此文件，上传线程使用其中的 token 和 server_url。
 
-### 4.8 SELinux 权限扩展
+### SELinux 权限扩展
 
 daemon 域新增权限：
 
@@ -196,9 +196,9 @@ allow lechao_lcview self:udp_socket { recv_msg send_msg };
 allow lechao_lcview lechao_lcview_data_file:file { read open getattr };
 ```
 
-## 5. 云侧接收服务设计
+## 云侧接收服务设计
 
-### 5.1 技术栈
+### 技术栈
 
 | 组件 | 技术 | 版本 |
 |------|------|------|
@@ -207,7 +207,7 @@ allow lechao_lcview lechao_lcview_data_file:file { read open getattr };
 | 前端 | Grafana | 10.x+ |
 | 部署 | Docker Compose | v2+ |
 
-### 5.2 代码目录结构
+### 代码目录结构
 
 ```
 10-系统特性定制/patchs/cloud/lechao_lcview_server/
@@ -255,9 +255,9 @@ allow lechao_lcview lechao_lcview_data_file:file { read open getattr };
 └── go.sum
 ```
 
-### 5.3 MySQL 表设计
+### MySQL 表设计
 
-#### 5.3.1 设备表
+#### 设备表
 
 ```sql
 CREATE TABLE devices (
@@ -274,7 +274,7 @@ CREATE TABLE devices (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
-#### 5.3.2 事件 Schema 注册表
+#### 事件 Schema 注册表
 
 ```sql
 CREATE TABLE event_schemas (
@@ -295,7 +295,7 @@ CREATE TABLE event_schemas (
 `domain` 由 `event_id / 1000` 自动计算，映射关系：
 - 0 → usb, 1 → ufs, 2 → wifi, 3 → bluetooth, 4 → cpu, 5 → storage, 6+ → custom
 
-#### 5.3.3 事件数据表（按 event_id 动态创建）
+#### 事件数据表（按 event_id 动态创建）
 
 命名规则：`event_{domain}_{event_name}`
 
@@ -324,7 +324,7 @@ CREATE TABLE event_usb_transport_start (
 4. 不存在则根据 `fields` JSON 自动生成 CREATE TABLE 语句并执行
 5. 后续数据直接批量 INSERT
 
-### 5.4 API 设计
+### API 设计
 
 | 接口 | 方法 | 认证 | 说明 |
 |------|------|------|------|
@@ -347,7 +347,7 @@ CREATE TABLE event_usb_transport_start (
 | 2002 | 未知 event_id |
 | 3001 | 服务器内部错误 |
 
-### 5.5 上传接口处理流程
+### 上传接口处理流程
 
 ```
 1. Auth 中间件: X-Device-Token → 查 devices 表 → 获取 device_sn
@@ -363,7 +363,7 @@ CREATE TABLE event_usb_transport_start (
 7. 返回成功响应（接收行数、字节数）
 ```
 
-### 5.6 高并发处理
+### 高并发处理
 
 | 策略 | 实现 |
 |------|------|
@@ -374,7 +374,7 @@ CREATE TABLE event_usb_transport_start (
 | 优雅关闭 | signal.Notify + http.Server.Shutdown，等待进行中请求完成 |
 | 连接池 | database/sql 内置连接池，MaxOpenConns=50, MaxIdleConns=10 |
 
-### 5.7 Docker Compose 配置
+### Docker Compose 配置
 
 ```yaml
 version: "3.8"
@@ -438,9 +438,9 @@ volumes:
   grafana_data:
 ```
 
-## 6. Grafana 前端看板设计
+## Grafana 前端看板设计
 
-### 6.1 Dashboard 结构
+### Dashboard 结构
 
 ```
 Dashboard: LcView 总览
@@ -464,7 +464,7 @@ Dashboard: LcView 总览
 └── Tab: ... (按需扩展)
 ```
 
-### 6.2 Grafana MySQL 查询示例
+### Grafana MySQL 查询示例
 
 ```sql
 -- Transport 吞吐量趋势 (Time Series Panel)
@@ -497,7 +497,7 @@ GROUP BY d.device_sn, d.name, d.status
 ORDER BY event_count DESC;
 ```
 
-### 6.3 告警规则
+### 告警规则
 
 | 告警名称 | 条件 | 通知方式 |
 |---------|------|---------|
@@ -506,7 +506,7 @@ ORDER BY event_count DESC;
 | 传输延迟异常 | 5min 内 avg(elapsed_ns) > 阈值 | Grafana Alert → Webhook |
 | 数据入库延迟 | received_at - ts > 60s | Grafana Alert → Webhook |
 
-### 6.4 Dashboard Provisioning
+### Dashboard Provisioning
 
 Grafana 自动加载配置，无需手动配置：
 
@@ -540,7 +540,7 @@ providers:
 
 Dashboard JSON 文件纳入 Git 版本管理。
 
-## 7. 端到端数据流
+## 端到端数据流
 
 ```
 ┌───────────────────────────────────────────────────────────────────┐
@@ -581,7 +581,7 @@ Dashboard JSON 文件纳入 Git 版本管理。
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-## 8. 设备注册流程
+## 设备注册流程
 
 ```
 首次部署:
@@ -597,9 +597,9 @@ Dashboard JSON 文件纳入 Git 版本管理。
 3. daemon 启动时读取 device.conf → 上传线程使用 token 认证
 ```
 
-## 9. 编译与开发流程
+## 编译与开发流程
 
-### 9.1 端侧（daemon 改造）
+### 端侧（daemon 改造）
 
 ```bash
 cd /home/lechao/workspace/aosp
@@ -607,7 +607,7 @@ source build/envsetup.sh && lunch aosp_rpi5-bp1a-userdebug
 m lechao_lcview           # 编译 daemon（含上传线程）
 ```
 
-### 9.2 云侧（Go 服务）
+### 云侧（Go 服务）
 
 ```bash
 cd /mnt/d/Code/Github/AndroidSystemLearn/10-系统特性定制/patchs/cloud/lechao_lcview_server
@@ -616,7 +616,7 @@ docker-compose build                           # Docker 构建
 docker-compose up -d                           # 启动全部服务
 ```
 
-### 9.3 部署迁移
+### 部署迁移
 
 WSL2 → 商用云迁移步骤：
 1. 同一份代码推送到云服务器
@@ -624,7 +624,7 @@ WSL2 → 商用云迁移步骤：
 3. `docker-compose up -d`
 4. 设备端 `device.conf` 的 `server_url` 改为公网地址
 
-## 10. 实施阶段
+## 实施阶段
 
 | 阶段 | 内容 | 依赖 | 预计产出 |
 |------|------|------|---------|
@@ -633,7 +633,7 @@ WSL2 → 商用云迁移步骤：
 | Phase 3 | Grafana Dashboard 配置：数据源 + Dashboard JSON + 告警 | Phase 1 | 可视化看板 |
 | Phase 4 | 端到端联调：多设备上报 + 可视化验证 + 异常场景测试 | Phase 1-3 | 完整可运行系统 |
 
-## 11. 源码路径
+## 源码路径
 
 | 组件 | 源码路径 | 说明 |
 |------|---------|------|
