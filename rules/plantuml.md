@@ -75,3 +75,39 @@ repeat while (失败?)
 stop
 @enduml
 ```
+
+---
+
+## 规则 4：活动图颜色必须使用新语法 `<<#color>>`
+
+**问题：** 活动图（Activity Diagram）中对节点着色的旧语法 `#color:label;` 已被 PlantUML 标记为 deprecated，渲染时会报语法警告。
+
+**错误示例：**
+
+```plantuml
+@startuml
+start
+if (条件?) then (yes)
+  #pink:return -1;
+else (no)
+  #lightgreen:return 0;
+endif
+stop
+@enduml
+```
+
+**正确做法：** 颜色移到语句末尾，使用 `<<#color>>` 附着在 `;` 之后。
+
+```plantuml
+@startuml
+start
+if (条件?) then (yes)
+  :return -1;<<#pink>>
+else (no)
+  :return 0;<<#lightgreen>>
+endif
+stop
+@enduml
+```
+
+> **适用范围：** 仅活动图（`start`/`stop` 语法）中的 `:label;` 节点。时序图、组件图、类图等其他图型不受此约束。

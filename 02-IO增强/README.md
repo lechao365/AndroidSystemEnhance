@@ -1,6 +1,6 @@
 # LcIod IO 监控系统
 
-基于 notifier chain 的 USB 存储传输速率监控框架，覆盖内核态事件注入、驱动统计、用户态 HAL 代理、System 服务暴露全链路。
+基于 notifier chain 的 USB 存储传输速率监控框架，覆盖内核态事件注入、驱动统计、用户态 HAL 代理、System 服务暴露全链路。配套外围故障注入与验证工具，构成 **注入 → 检测 → 上报 → 校验** 的完整闭环。
 
 ## 文档索引
 
@@ -9,8 +9,10 @@
 | 02.01 | [内核态增强](./02.01-内核态增强-lciod-kernel.md) | 内核态 | usb-storage notifier 注入 + LcIod 驱动 |
 | 02.02 | HAL 增强 | 用户态 (vendor) | IIoHal AIDL + 设备缓存 + ioctl 封装 |
 | 02.03 | Daemon 增强 | 用户态 (system) | IIoService 代理 + 字段投影 + 监控线程 |
+| 02.04 | [故障注入工具](./02.04-故障注入工具-usb-fault-inject.md) | 外围 (Device 端) | usb-fault-inject — 12 类协议级故障注入 CLI |
+| 02.05 | [故障注入验证](./02.05-故障注入验证-usb-verify.md) | 外围 (Host 端) | usb-verify — 统计读取 + 事件等待 + 阈值断言 CLI |
 
-> **阅读建议**：先读本 README 建立全局视角，再按层级深入子文档。内核态子文档已完整，用户态架构详见源码注释。
+> **阅读建议**：先读本 README 建立全局视角，再按层级深入子文档。02.01-02.03 为监控系统主体，02.04-02.05 为外围验证工具。
 
 ## 逻辑视图
 
@@ -315,9 +317,74 @@ LcView 提供 9 个 USB 事件 ID，LcIod 在 notifier 回调中调用 `lcview_b
 | 监控对象 | 通用事件打点 | USB 存储传输速率/错误/降级 |
 | 事件推送 | HAL 批量累积 flush | 内核 per-device wait_queue 阻塞读 |
 
+## 外围验证组件（故障注入闭环）
+
+02.04-02.05 构成独立于监控主体的外围验证工具链，用于端到端校验 LcIod 监控系统的故障检测能力。
+
+### 闭环架构
+
+```plantuml
+@startuml
+skinparam packageStyle rectangle
+
+package "Pi Zero 2W (USB Device)" {
+    component "usb-fault-inject\n02.04" as INJECT {
+        component "Raw Gadget 驱动层\nraw-gadget.c (252行)" as RG
+        component "12 类故障实现\nfaults.c (264行)" as FAULTS
+        component "期望值契约表\nexpect.c (123行)" as EXPECT
+    }
+}
+
+package "Pi 5 (USB Host)" {
+    component "LcIod 内核驱动\n02.01" as LCIOD {
+        component "notifier chain\n事件捕获" as NOTIFIER
+        component "stats engine\n统计引擎" as STATS2
+    }
+    component "usb-verify\n02.05" as VERIFY {
+        component "ioctl + poll\n设备操作层" as DEV
+        component "阈值断言引擎\ncheck 层" as CHECK
+        component "文本/JSON 输出\noutput 层" as OUT
+    }
+}
+
+INJECT --> RG : ioctl /dev/raw-gadget
+RG --> NOTIFIER : USB 协议层故障\nSTALL/TIMEOUT/CORRUPT/...
+NOTIFIER --> STATS2 : 捕获 + 累计统计
+STATS2 --> VERIFY : /dev/vendor_lechao_usbdN\nioctl GET_STATS + read event
+EXPECT --> VERIFY : stdout JSON\nexpect_table 契约
+CHECK --> OUT : PASS / FAIL\n退出码 0/5
+@enduml
+```
+
+### 12 类故障映射
+
+| ID | 故障 | Device 命令 | 内核捕获事件 | 校验命令 |
+|----|------|------------|-------------|---------|
+| F1/F2 | STALL | `stall --ep in/out` | STALL + ERROR + RESET | `check stats --stall-ge 1` |
+| F3 | Timeout | `timeout --duration 5000` | TIMEOUT + ERROR + RESET | `check stats --timeout-ge 1` |
+| F4-F7 | Corrupt | `corrupt --field cbw-sig/csw-sig/csw-tag/csw-status` | CORRUPT + ERROR + RESET | `check stats --corrupt-ge 1` |
+| F8 | Short | `short --bytes 512` | CORRUPT + ERROR | `check stats --corrupt-ge 1` |
+| F9 | Abort | `abort --ep in/out` | ERROR + RESET | `check stats --error-ge 1` |
+| F10 | Hotplug | `hotplug --cycles 3` | DISCONNECT + PROBE | 设备节点观察 |
+| F11 | Disconnect | `disconnect` | DISCONNECT | 设备节点观察 |
+| F12 | Degrade | `degrade --delay 50` | RATE_DEGRADED | `check degrade --rate-drop-ge N` |
+
+### 端到端工作流
+
+```
+1. usb-verify stats reset --device /dev/vendor_lechao_usbd0   # Host 清零统计
+2. usb-fault-inject stall --ep in                              # Device 注入故障
+   → stdout: {"fault":"stall","expect":{"error_count":1,...}}
+3. usb-verify check stats --device /dev/vendor_lechao_usbd0 \  # Host 校验
+     --stall-ge 1 --error-ge 1 --reset-ge 1
+   → PASS (退出码 0) / FAIL (退出码 5)
+```
+
 ## 相关资源
 
 - **内核源码**：[`patchs/rpi5/kernel/new/vendor/lechao/LcIod/`](../patchs/rpi5/kernel/new/vendor/lechao/LcIod/) — LcIod 驱动
 - **usb-storage 修改**：[`patchs/rpi5/kernel/modified/drivers/usb/storage/`](../patchs/rpi5/kernel/modified/drivers/usb/storage/) — notifier 注入点
 - **用户态源码**：[`patchs/rpi5/aosp/new/vendor/lechao/services/lechao_lciod/`](../patchs/rpi5/aosp/new/vendor/lechao/services/lechao_lciod/) — HAL + Daemon + AIDL
 - **SELinux 策略**：[`patchs/rpi5/aosp/new/device/brcm/rpi5/sepolicy/`](../patchs/rpi5/aosp/new/device/brcm/rpi5/sepolicy/) — `lechao_lciod.te` + `lechao_lciod_hal.te`
+- **故障注入工具**：[`patchs/rpi-zero2w/others/usb-fault-inject/`](../patchs/rpi-zero2w/others/usb-fault-inject/) — Device 端 12 类故障注入
+- **故障校验工具**：[`patchs/rpi5/others/usb-verify/`](../patchs/rpi5/others/usb-verify/) — Host 端统计校验 CLI
