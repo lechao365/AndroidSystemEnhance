@@ -7,8 +7,8 @@
 ## 一键同步
 
 ```bash
-bash patchs/rpi5/sync.sh              # 同步归档
-bash patchs/rpi5/sync.sh --check-only  # 仅检查，不执行
+bash scripts/sync_code_to_patchs.sh              # 同步归档
+bash scripts/sync_code_to_patchs.sh --check-only  # 仅检查，不执行
 ```
 
 脚本自动完成扫描、归档、验证、陈旧文件检查。详细规则见下方各节。
@@ -64,7 +64,7 @@ bash patchs/rpi5/sync.sh --check-only  # 仅检查，不执行
 
 ## 归档流程说明
 
-以下为 `sync.sh` 各步骤的说明，便于理解脚本行为。
+以下为 `sync_code_to_patchs.sh` 各步骤的说明，便于理解脚本行为。
 
 1. **Step 0 — 发现非 repo 目录**：对比 repo manifest 和文件系统，自动发现不属于 repo 管理的顶层目录，递归纳入 new/ 扫描。
 2. **Step 1 — Kernel 同步**：自动计算 upstream base commit，`--diff-filter=M` 生成 modified `.diff`，`--diff-filter=A` + untracked 文件复制到 new/。

@@ -12,7 +12,7 @@
 workspace 改动 → 执行同步规则 → 更新本 README 文件映射表
 ```
 
-每次在 `~/workspace/aosp` 或 `~/workspace/rpi5-kernel-build` 中完成改动后，按 [rules/sync.md](../../rules/sync.md) 执行归档，然后更新本文件的**文件映射表**（第 5 章）。
+每次在 `~/workspace/aosp` 或 `~/workspace/rpi5-kernel-build` 中完成改动后，按 [rules/sync_code_to_patchs.md](../../rules/sync_code_to_patchs.md) 执行归档，然后更新本文件的**文件映射表**（第 5 章）。
 
 ### 包含的特性
 

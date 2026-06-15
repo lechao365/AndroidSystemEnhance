@@ -2,14 +2,14 @@
 set -uo pipefail
 
 # ============================================================================
-# sync.sh — workspace → patchs/rpi5 一键同步脚本
-# 规则详见: rules/sync.md
-# 用法:    bash patchs/rpi5/sync.sh [--check-only]
+# sync_code_to_patchs.sh — workspace → patchs/rpi5 一键同步脚本
+# 规则详见: rules/sync_code_to_patchs.md
+# 用法:    bash scripts/sync_code_to_patchs.sh [--check-only]
 # ============================================================================
 
 # --- Configuration ----------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PATCH_ROOT="$SCRIPT_DIR"
+PATCH_ROOT="$SCRIPT_DIR/../patchs/rpi5"
 KERNEL_WS="${KERNEL_WS:-$HOME/workspace/rpi5-kernel-build/common}"
 AOSP_WS="${AOSP_WS:-$HOME/workspace/aosp}"
 
@@ -74,7 +74,7 @@ for arg in "$@"; do
     case "$arg" in
         --check-only|--dry-run) CHECK_ONLY=true ;;
         -h|--help)
-            echo "Usage: bash patchs/rpi5/sync.sh [--check-only]"
+            echo "Usage: bash scripts/sync_code_to_patchs.sh [--check-only]"
             echo "  --check-only  仅扫描和验证，不执行归档"
             exit 0 ;;
         *) log_error "未知参数: $arg"; exit 1 ;;
