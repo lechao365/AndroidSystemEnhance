@@ -7,7 +7,7 @@ description: Use when workspace 源码改动需归档到 patchs/rpi5，或用户
 
 ```bash
 bash skills/sync-code-to-patchs/sync_code_to_patchs.sh --check-only  # 先检查
-bash skills/sync-code-to-patchs/sync_code_to_patchs.sh               # 执行归档
+bash skills/sync-code-to-patchs/sync_code_to_patchs.sh               # 执行归档（自动更新 manifest.yaml）
 ```
 
 ## 完整工作流

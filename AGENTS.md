@@ -1,12 +1,5 @@
 # AndroidSystemEnhance 项目约束
 
-## Skills
-
-本项目通过 OpenCode skill 提供归档与文档同步工作流，按需通过 `/skill` 命令调用：
-
-- `sync-code-to-patchs`：workspace 源码 → patchs/rpi5 归档
-- `sync-patchs-to-doc`：patchs/rpi5 → 技术文档同步
-
 ## 源码改动优先级
 
 `~/workspace/` 是编译源码树（唯一参与编译），`patchs/` 是单向归档目录，改动必须从源头开始。

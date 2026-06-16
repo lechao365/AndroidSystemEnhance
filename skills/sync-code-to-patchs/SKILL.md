@@ -41,9 +41,17 @@ bash skills/sync-code-to-patchs/sync_code_to_patchs.sh --check-only  # 仅检查
 | `SKIP` | 编译产物已跳过 | 正常（排除规则生效） |
 | `STALE` | patchs 有但 workspace 已无 | 手动清理 patchs 中的陈旧文件 |
 
-### 4. 更新文件映射表（手动）
+### 4. 同步 README.md（AI 驱动，方案先行）
 
-同步完成后，检查新增/变更条目，更新 `patchs/rpi5/README.md` 文件映射表（补充"改动要点"描述）。
+脚本已自动生成/更新 `patchs/rpi5/manifest.yaml`（结构映射的真相）。
+README.md 的文件映射表由 AI 基于维护，流程：
+
+1. 读取 manifest.yaml，与 README.md 当前文件列表对比，识别新增/删除文件
+2. 对新增文件读取对应 diff/源码，生成"改动要点"描述
+3. 输出 README 更新方案（具体改哪些行、改什么内容）
+4. 用户确认后落盘 README.md
+
+**强制约束**：方案先行，未经确认禁止直接写 README.md。
 
 ## 归档规则速查
 
@@ -60,3 +68,25 @@ bash skills/sync-code-to-patchs/sync_code_to_patchs.sh --check-only  # 仅检查
 **排除规则**：编译产物（`*.o` `*.ko` `Image` `*.dtb`）、构建缓存（`out/` `prebuilts/`）、上游未改动文件均不归档。
 
 详细规则与路径映射见脚本内注释和历史设计文档。
+
+## README.md 格式规范（AI 维护目标）
+
+README.md 包含三段，**禁止目录树**（与映射表重复）：
+
+| 章节 | 内容 | 来源 |
+|------|------|------|
+| 概述 + 包含的特性 | 高层语义描述 | AI/人工 |
+| 文件映射表 | 分组表格 | AI 从 manifest 渲染前两列 + 读取 diff 填描述 |
+| 回写命令 | 静态部署命令 | 不变 |
+
+### 文件映射表格式
+
+按 `kernel/modified`、`kernel/new`、`aosp/modified`、`aosp/new`、`others` 分组，
+每个文件一行，列：`patch 路径 | workspace 源码路径 | 改动要点`。
+patch 路径与 workspace 源码路径严格来自 manifest.yaml，AI 不得臆造。
+改动要点为空时留空，待后续补充。
+
+### 首次迁移
+
+首次按本格式重写 README.md 时，现有 README 中已有的"改动要点/说明"
+必须迁移到新表格对应行，不得丢失。
