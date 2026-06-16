@@ -3,13 +3,13 @@ set -uo pipefail
 
 # ============================================================================
 # sync_patchs_to_doc.sh — patchs/rpi5 变动报告生成器
-# 规则详见: rules/sync_patchs_to_doc.md
-# 用法:    bash scripts/sync_patchs_to_doc.sh [--check-only]
+# 规则详见: skills/sync-patchs-to-doc/SKILL.md
+# 用法:    bash skills/sync-patchs-to-doc/sync_patchs_to_doc.sh [--check-only]
 # ============================================================================
 
 # --- Configuration ----------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PATCH_DIR="patchs/rpi5"
 
 # --- Colors -----------------------------------------------------------------
@@ -32,7 +32,7 @@ for arg in "$@"; do
     case "$arg" in
         --check-only|--dry-run) CHECK_ONLY=true ;;
         -h|--help)
-            echo "Usage: bash scripts/sync_patchs_to_doc.sh [--check-only]"
+            echo "Usage: bash skills/sync-patchs-to-doc/sync_patchs_to_doc.sh [--check-only]"
             echo "  --check-only  仅输出报告，不输出 AI 操作提示"
             exit 0 ;;
         *) log_error "未知参数: $arg"; exit 1 ;;

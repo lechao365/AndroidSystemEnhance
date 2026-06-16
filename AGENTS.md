@@ -1,14 +1,11 @@
 # AndroidSystemEnhance 项目约束
 
-## Patchs 归档规则
+## Skills
 
-执行 `scripts/sync_code_to_patchs.sh` 完成一键同步，规则详见 [rules/sync_code_to_patchs.md](rules/sync_code_to_patchs.md)。
+本项目通过 OpenCode skill 提供归档与文档同步工作流，按需通过 `/skill` 命令调用：
 
-## 文档同步规则
-
-当 patchs/rpi5/ 发生变动后，执行 `scripts/sync_patchs_to_doc.sh` 生成变动报告，
-AI 根据报告内容给出技术文档的更新方案，经确认后落盘。
-规则详见 [rules/sync_patchs_to_doc.md](rules/sync_patchs_to_doc.md)。
+- `sync-code-to-patchs`：workspace 源码 → patchs/rpi5 归档
+- `sync-patchs-to-doc`：patchs/rpi5 → 技术文档同步
 
 ## 源码改动优先级
 
