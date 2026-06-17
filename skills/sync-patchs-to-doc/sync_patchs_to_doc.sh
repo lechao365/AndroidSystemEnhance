@@ -4,7 +4,7 @@ set -uo pipefail
 # ============================================================================
 # sync_patchs_to_doc.sh — patchs/rpi5 变动报告生成器
 # 规则详见: skills/sync-patchs-to-doc/SKILL.md
-# 用法:    bash skills/sync-patchs-to-doc/sync_patchs_to_doc.sh [--check-only]
+# 用法:    bash skills/sync-patchs-to-doc/sync_patchs_to_doc.sh [--check-only] [--full-diff]
 # ============================================================================
 
 # --- Configuration ----------------------------------------------------------
@@ -28,12 +28,15 @@ log_step()  { echo -e "\n${BLUE}========== $1 ==========${NC}"; }
 # 参数解析
 # ============================================================================
 CHECK_ONLY=false
+FULL_DIFF=false
 for arg in "$@"; do
     case "$arg" in
         --check-only|--dry-run) CHECK_ONLY=true ;;
+        --full-diff) FULL_DIFF=true ;;
         -h|--help)
-            echo "Usage: bash skills/sync-patchs-to-doc/sync_patchs_to_doc.sh [--check-only]"
+            echo "Usage: bash skills/sync-patchs-to-doc/sync_patchs_to_doc.sh [--check-only] [--full-diff]"
             echo "  --check-only  仅输出报告，不输出 AI 操作提示"
+            echo "  --full-diff   在报告末尾追加 git diff 正文，供 AI 直接读取（零往返）"
             exit 0 ;;
         *) log_error "未知参数: $arg"; exit 1 ;;
     esac
@@ -125,11 +128,11 @@ while IFS=$'\t' read -r status path1 path2; do
     esac
 
     # 获取行数统计
-    numstat=$(git diff HEAD --numstat -- "$display_path" 2>/dev/null | head -1)
+    numstat=$(set +o pipefail; git diff HEAD --numstat -- "$display_path" 2>/dev/null | head -1)
     added=$(echo "$numstat" | awk '{print $1}')
     deleted=$(echo "$numstat" | awk '{print $2}')
-    [ "$added" = "-" ] && added="0"
-    [ "$deleted" = "-" ] && deleted="0"
+    [ "$added" = "-" ] || [ -z "$added" ] && added="0"
+    [ "$deleted" = "-" ] || [ -z "$deleted" ] && deleted="0"
 
     # 重命名显示 old → new
     case "$base_status" in
@@ -190,12 +193,27 @@ TOTAL=$((TOTAL_A + TOTAL_M + TOTAL_D + TOTAL_R + TOTAL_OTHER))
 echo "总计: $TOTAL 个文件变动 ($([ $TOTAL_A -gt 0 ] && echo -n "$TOTAL_A 新增, ")$([ $TOTAL_M -gt 0 ] && echo -n "$TOTAL_M 修改, ")$([ $TOTAL_D -gt 0 ] && echo -n "$TOTAL_D 删除")$([ $TOTAL_R -gt 0 ] && echo -n ", $TOTAL_R 重命名")$([ $TOTAL_OTHER -gt 0 ] && echo -n ", $TOTAL_OTHER 其他"))"
 
 # ============================================================================
+# （可选）输出完整 diff 正文，供 AI 零往返读取
+# ============================================================================
+if [ "$FULL_DIFF" = true ]; then
+    log_step "完整 diff 正文（HEAD）"
+    git --no-pager diff HEAD -- "$PATCH_DIR" 2>/dev/null || \
+        log_warn "无法获取 diff 正文"
+fi
+
+# ============================================================================
 # AI 操作提示
 # ============================================================================
 if [ "$CHECK_ONLY" = false ]; then
     cat <<TIP
 
-下一步: AI 根据以上变动报告，判断影响的技术文档范围，给出更新方案。
-        经用户确认后，执行文档落盘。
+下一步（7 步闭环，详见 SKILL.md）：
+  ① 本报告已列出变动清单（+ --full-diff 可取完整 diff 正文）
+  ② 依据 rules/doc-sync-mapping.md 将变动分发到对应文档目录（01/02）
+  ③ 读 patchs/rpi5/manifest.yaml，按 source 去 ~/workspace/ 取全量源码上下文
+  ④ 用行号锚点(#L) + 符号名 + 文件名 定位受影响章节（注意形态D代码块注释盲区）
+  ⑤ 输出动作清单级方案（文档→章节→动作），用户确认后落盘
+  ⑥ 章节级增量落盘，刷新行号锚点（含盲区/区间终点/重复出现处）
+  ⑦ 一致性自检：锚点有效性 / 路径合规 / 断链 / 模板章节完整性
 TIP
 fi

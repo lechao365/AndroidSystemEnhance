@@ -2,9 +2,9 @@
 set -uo pipefail
 
 # ============================================================================
-# sync_code_to_patchs.sh — workspace → patchs/rpi5 一键同步脚本
+# sync_code_to_patchs.sh — workspace → patchs/rpi5 全量镜像同步脚本
 # 规则详见: skills/sync-code-to-patchs/SKILL.md
-# 用法:    bash skills/sync-code-to-patchs/sync_code_to_patchs.sh [--check-only]
+# 用法:    bash skills/sync-code-to-patchs/sync_code_to_patchs.sh [--check-only] [--no-prune]
 # ============================================================================
 
 # --- Configuration ----------------------------------------------------------
@@ -24,6 +24,7 @@ TOTAL_OK=0
 TOTAL_MISS=0
 TOTAL_SKIP=0
 TOTAL_STALE=0
+TOTAL_PRUNE=0
 
 # --- Colors -----------------------------------------------------------------
 RED='\033[0;31m'
@@ -38,10 +39,11 @@ log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 log_step()  { echo -e "\n${BLUE}========== $1 ==========${NC}"; }
 
-print_ok()   { echo -e "  ${GREEN}OK${NC}   $1"; TOTAL_OK=$((TOTAL_OK + 1)); }
-print_miss() { echo -e "  ${RED}MISS${NC} $1"; TOTAL_MISS=$((TOTAL_MISS + 1)); }
-print_skip() { echo -e "  ${YELLOW}SKIP${NC} $1"; TOTAL_SKIP=$((TOTAL_SKIP + 1)); }
-print_stale(){ echo -e "  ${YELLOW}STALE${NC} $1"; TOTAL_STALE=$((TOTAL_STALE + 1)); }
+print_ok()    { echo -e "  ${GREEN}OK${NC}   $1"; TOTAL_OK=$((TOTAL_OK + 1)); }
+print_miss()  { echo -e "  ${RED}MISS${NC} $1"; TOTAL_MISS=$((TOTAL_MISS + 1)); }
+print_skip()  { echo -e "  ${YELLOW}SKIP${NC} $1"; TOTAL_SKIP=$((TOTAL_SKIP + 1)); }
+print_stale() { echo -e "  ${YELLOW}STALE${NC} $1"; TOTAL_STALE=$((TOTAL_STALE + 1)); }
+print_prune() { echo -e "  ${BLUE}PRUNE${NC} $1"; TOTAL_PRUNE=$((TOTAL_PRUNE + 1)); }
 
 # 自动检测 upstream merge-base
 find_upstream_base() {
@@ -70,12 +72,15 @@ find_upstream_base() {
 # 参数解析
 # ============================================================================
 CHECK_ONLY=false
+PRUNE=true
 for arg in "$@"; do
     case "$arg" in
         --check-only|--dry-run) CHECK_ONLY=true ;;
+        --no-prune) PRUNE=false ;;
         -h|--help)
-            echo "Usage: bash skills/sync-code-to-patchs/sync_code_to_patchs.sh [--check-only]"
-            echo "  --check-only  仅扫描和验证，不执行归档"
+            echo "Usage: bash skills/sync-code-to-patchs/sync_code_to_patchs.sh [--check-only] [--no-prune]"
+            echo "  --check-only  仅扫描和验证，不执行归档（STALE 仅报告）"
+            echo "  --no-prune    仅添加/更新，不删除对齐（默认全量镜像含删除）"
             exit 0 ;;
         *) log_error "未知参数: $arg"; exit 1 ;;
     esac
@@ -189,7 +194,20 @@ if [ "$KERNEL_OK" = true ]; then
     while IFS= read -r f; do
         [ -z "$f" ] && continue
         target="$PATCH_ROOT/kernel/modified/${f}.diff"
-        if [ "$CHECK_ONLY" = false ]; then mkdir -p "$(dirname "$target")"; git diff "$BASE" -- "$f" > "$target"; fi
+        # 空差异检测（check-only 也判）：git diff --quiet 退出码 0 = 无差异 = workspace 已恢复上游原样
+        if git diff --quiet "$BASE" -- "$f" 2>/dev/null; then
+            if [ "$CHECK_ONLY" = true ]; then
+                print_prune "kernel/modified/${f}.diff (空diff，将清理)"
+            else
+                rm -f "$target"
+                print_prune "kernel/modified/${f}.diff (空diff，已恢复原样)"
+            fi
+            continue
+        fi
+        if [ "$CHECK_ONLY" = false ]; then
+            mkdir -p "$(dirname "$target")"
+            git diff "$BASE" -- "$f" > "$target"
+        fi
         [ -f "$target" ] && print_ok "kernel/modified/${f}.diff" || print_miss "kernel/modified/${f}.diff"
     done < <(git diff "$BASE" --diff-filter=M --name-only 2>/dev/null | grep -vE "$EXCLUDE_RE")
 
@@ -224,7 +242,10 @@ if [ "$AOSP_OK" = true ]; then
     for proj_dir in $AOSP_CHANGED_PROJECTS; do
         cd "$AOSP_WS/$proj_dir"
         BASE=$(find_upstream_base)
-        [ -z "$BASE" ] && BASE=$(git rev-parse HEAD 2>/dev/null)
+        if [ -z "$BASE" ]; then
+            BASE=$(git rev-parse HEAD 2>/dev/null)
+            log_warn "$proj_dir 无 upstream remote，使用 HEAD 作为 base（tracked 改动 diff 可能为空）"
+        fi
 
         all_files=$( { git diff "$BASE" --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null; } )
         real_count=$(echo "$all_files" | grep -vE "$EXCLUDE_RE" | grep -c '.' || true)
@@ -242,7 +263,20 @@ if [ "$AOSP_OK" = true ]; then
         while IFS= read -r f; do
             [ -z "$f" ] && continue
             target="$PATCH_ROOT/aosp/modified/${proj_dir}/${f}.diff"
-            if [ "$CHECK_ONLY" = false ]; then mkdir -p "$(dirname "$target")"; git diff "$BASE" -- "$f" > "$target"; fi
+            # 空差异检测（check-only 也判）：git diff --quiet 退出码 0 = 无差异 = workspace 已恢复上游原样
+            if git diff --quiet "$BASE" -- "$f" 2>/dev/null; then
+                if [ "$CHECK_ONLY" = true ]; then
+                    print_prune "aosp/modified/${proj_dir}/${f}.diff (空diff，将清理)"
+                else
+                    rm -f "$target"
+                    print_prune "aosp/modified/${proj_dir}/${f}.diff (空diff，已恢复原样)"
+                fi
+                continue
+            fi
+            if [ "$CHECK_ONLY" = false ]; then
+                mkdir -p "$(dirname "$target")"
+                git diff "$BASE" -- "$f" > "$target"
+            fi
             [ -f "$target" ] && print_ok "aosp/modified/${proj_dir}/${f}.diff" || print_miss "aosp/modified/${proj_dir}/${f}.diff"
         done < <(git diff "$BASE" --diff-filter=M --name-only 2>/dev/null | grep -vE "$EXCLUDE_RE")
 
@@ -282,11 +316,15 @@ if [ "$AOSP_OK" = true ]; then
 fi
 
 # ============================================================================
-# Step 3: 陈旧文件检查（patchs 有，workspace 无）
+# Step 3: 删除对齐（全量镜像）—— patchs 有，workspace 无则删除
 # ============================================================================
-log_step "Step 3: 陈旧文件检查"
+log_step "Step 3: 删除对齐（全量镜像）"
 
-check_stale() {
+# 删除对齐：遍历 patchs 文件，workspace 中无对应源文件则删除（或仅报告）
+# subpath: patchs 下子路径（如 kernel/modified）
+# ws:      对应 workspace 根目录
+# strip_diff: 1=modified(.diff)，需去掉 .diff 后缀再定位源文件
+sync_prune() {
     local subpath="$1" ws="$2" strip_diff="$3"
     local full_dir="$PATCH_ROOT/$subpath"
     [ ! -d "$full_dir" ] && return
@@ -295,24 +333,41 @@ check_stale() {
         [ "$strip_diff" = 1 ] && rel="${rel%.diff}"
         if [ ! -f "$ws/$rel" ]; then
             local suffix=""; [ "$strip_diff" = 1 ] && suffix=".diff"
-            print_stale "${subpath}/${rel}${suffix}"
+            local label="${subpath}/${rel}${suffix}"
+            if [ "$CHECK_ONLY" = true ]; then
+                print_stale "${label} (将删除)"
+            elif [ "$PRUNE" = true ]; then
+                rm -f "$pfile"
+                print_prune "$label"
+            else
+                print_stale "$label"
+            fi
         fi
     done < <(find "$full_dir" -type f -print0 2>/dev/null)
 }
 
 if [ "$KERNEL_OK" = true ]; then
     echo "--- Kernel ---"
-    check_stale "kernel/modified" "$KERNEL_WS" 1
-    check_stale "kernel/new" "$KERNEL_WS" 0
+    sync_prune "kernel/modified" "$KERNEL_WS" 1
+    sync_prune "kernel/new"      "$KERNEL_WS" 0
 fi
 
 if [ "$AOSP_OK" = true ]; then
     echo "--- AOSP ---"
-    check_stale "aosp/modified" "$AOSP_WS" 1
-    check_stale "aosp/new" "$AOSP_WS" 0
+    sync_prune "aosp/modified" "$AOSP_WS" 1
+    sync_prune "aosp/new"      "$AOSP_WS" 0
 fi
 
-[ "$TOTAL_STALE" -eq 0 ] && log_info "无陈旧文件"
+# 清理空目录，保持 patchs 目录树干净
+if [ "$CHECK_ONLY" = false ] && [ "$PRUNE" = true ]; then
+    find "$PATCH_ROOT/kernel/modified" "$PATCH_ROOT/kernel/new" \
+         "$PATCH_ROOT/aosp/modified" "$PATCH_ROOT/aosp/new" \
+         -type d -empty -delete 2>/dev/null
+fi
+
+if [ "$TOTAL_PRUNE" -eq 0 ] && [ "$TOTAL_STALE" -eq 0 ]; then
+    log_info "无删除对齐项"
+fi
 
 # ============================================================================
 # Step 4: 更新 manifest.yaml（patch ↔ workspace 结构映射）
@@ -384,14 +439,19 @@ log_step "同步完成"
 
 echo -e "  ${GREEN}OK${NC}:    $TOTAL_OK 个文件已同步/验证"
 echo -e "  ${RED}MISS${NC}:  $TOTAL_MISS 个文件缺失"
-[ "$TOTAL_SKIP" -gt 0 ] && echo -e "  ${YELLOW}SKIP${NC}:  $TOTAL_SKIP 项已跳过（编译产物）"
-[ "$TOTAL_STALE" -gt 0 ] && echo -e "  ${YELLOW}STALE${NC}: $TOTAL_STALE 个陈旧文件"
+[ "$TOTAL_SKIP" -gt 0 ]  && echo -e "  ${YELLOW}SKIP${NC}:  $TOTAL_SKIP 项已跳过（编译产物）"
+[ "$TOTAL_PRUNE" -gt 0 ] && echo -e "  ${BLUE}PRUNE${NC}: $TOTAL_PRUNE 个文件已删除对齐（workspace 已无）"
+[ "$TOTAL_STALE" -gt 0 ] && echo -e "  ${YELLOW}STALE${NC}: $TOTAL_STALE 个陈旧文件（未删除，见 --no-prune/--check-only）"
 
-if [ "$CHECK_ONLY" = true ]; then log_info "本次为仅检查模式，未执行实际归档操作"; fi
+if [ "$CHECK_ONLY" = true ]; then log_info "本次为仅检查模式，未执行实际归档/删除操作"; fi
 if [ "$TOTAL_MISS" -gt 0 ]; then log_warn "部分文件缺失，请去掉 --check-only 重新执行"; fi
-if [ "$TOTAL_STALE" -gt 0 ]; then log_warn "部分 patchs 文件在 workspace 中已不存在，请手动清理"; fi
 
 cat <<'TIP'
 
-下一步：manifest.yaml 已更新。README.md 由 AI 同步——读取 manifest，与当前 README 文件列表对比，对新增文件读取 diff 生成改动要点，输出更新方案供确认。
+下一步：manifest.yaml 已全量重生成（含删除对齐）。README.md 由 AI 自动同步——
+  1. 读取 manifest 与当前 README 文件映射表对比，识别新增/删除文件
+  2. 新增文件读取对应 diff 生成"改动要点"
+  3. 已删除文件（workspace 删除/恢复原样）对应行直接移除，不保留历史
+  4. 直接落盘，输出更新摘要（新增 N / 删除 M / 修改要点 K）
+判定：仅当存在 MISS 时停下不更新 README；PRUNE（删除对齐/空diff清理）属正常，继续更新。
 TIP
