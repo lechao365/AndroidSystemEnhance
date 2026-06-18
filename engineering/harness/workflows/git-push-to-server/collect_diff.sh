@@ -3,8 +3,8 @@ set -uo pipefail
 
 # ============================================================================
 # collect_diff.sh — 收集 git status + diff + 分支信息，格式化输出给 AI
-# 规则详见: skills/git-push-to-server/SKILL.md
-# 用法:    bash skills/git-push-to-server/collect_diff.sh [--stat-only]
+# 规则详见: engineering/harness/workflows/git-push-to-server/WORKFLOW.md
+# 用法:    bash engineering/harness/workflows/git-push-to-server/collect_diff.sh [--stat-only]
 # 退出码:  0=有改动（正常输出）; 1=无改动（输出 nothing to commit）
 # ============================================================================
 
@@ -37,7 +37,7 @@ for arg in "$@"; do
     case "$arg" in
         --stat-only) STAT_ONLY=true ;;
         -h|--help)
-            echo "Usage: bash skills/git-push-to-server/collect_diff.sh [--stat-only]"
+            echo "Usage: bash engineering/harness/workflows/git-push-to-server/collect_diff.sh [--stat-only]"
             echo "  --stat-only  只输出分支 + status + --stat，不输出 diff 正文"
             exit 0 ;;
         *) log_error "未知参数: $arg"; exit 1 ;;

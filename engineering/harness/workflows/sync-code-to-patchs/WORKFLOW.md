@@ -21,9 +21,9 @@ workspace 删除的文件，patchs 同步删除（默认全量镜像，含删除
 ### 2. 执行同步
 
 ```bash
-bash skills/sync-code-to-patchs/sync_code_to_patchs.sh              # 全量镜像同步（默认含删除）
-bash skills/sync-code-to-patchs/sync_code_to_patchs.sh --check-only  # 仅检查，不执行（STALE 仅报告将删除项）
-bash skills/sync-code-to-patchs/sync_code_to_patchs.sh --no-prune    # 仅添加/更新，不删除对齐
+bash engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh              # 全量镜像同步（默认含删除）
+bash engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh --check-only  # 仅检查，不执行（STALE 仅报告将删除项）
+bash engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh --no-prune    # 仅添加/更新，不删除对齐
 ```
 
 脚本自动完成：扫描 workspace → 归档到 patchs → 清理空 diff → 删除对齐（workspace 已无的 patchs 文件）→ 重生成 manifest.yaml。

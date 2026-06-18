@@ -7,7 +7,7 @@ description: patchs/rpi5 变动后生成报告，按模板规范将代码 diff �
 
 当 `patchs/rpi5/` 发生变动后，生成结构化变动报告，并**按模板规范将代码 diff 精准转换为文档更新**。
 
-**核心理念**：`templates/*.md` 是**只读契约**，设计文档（`01-*/02-*`）是**受控可变区**。AI 不得擅改模板；diff 与模板冲突时，必须用户确认后才可调整模板。
+**核心理念**：`engineering/harness/templates/*.md` 是**只读契约**，设计文档（`01-*/02-*`）是**受控可变区**。AI 不得擅改模板；diff 与模板冲突时，必须用户确认后才可调整模板。
 
 ## 触发场景
 
@@ -20,16 +20,16 @@ description: patchs/rpi5 变动后生成报告，按模板规范将代码 diff �
 ### 1. 生成变动报告
 
 ```bash
-bash skills/sync-patchs-to-doc/sync_patchs_to_doc.sh              # 生成变动报告
-bash skills/sync-patchs-to-doc/sync_patchs_to_doc.sh --full-diff  # 报告 + 完整 diff 正文（AI 零往返）
-bash skills/sync-patchs-to-doc/sync_patchs_to_doc.sh --check-only  # 仅检查，不输出提示
+bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh              # 生成变动报告
+bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh --full-diff  # 报告 + 完整 diff 正文（AI 零往返）
+bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh --check-only  # 仅检查，不输出提示
 ```
 
 脚本基于 git HEAD 对比 `patchs/rpi5/`，按目录分组（`kernel/modified`、`kernel/new`、`aosp/modified`、`aosp/new`、`others`）输出变动类型（A/M/D/R）和行数统计。加 `--full-diff` 在报告末尾追加 `git diff HEAD` 完整正文。
 
-### 2. 按映射规则定位文档（依据 rules/doc-sync-mapping.md）
+### 2. 按映射规则定位文档（依据 engineering/harness/config/doc-sync-mapping.md）
 
-**禁止凭空自主判断归属**，必须依据 [patchs→文档映射规则](../../rules/doc-sync-mapping.md)：
+**禁止凭空自主判断归属**，必须依据 [patchs→文档映射规则](../../config/doc-sync-mapping.md)：
 
 - **精确匹配**：`**/LcView/**`→`01-打点增强/`、`**/LcIod/**`→`02-IO增强/`、`others/usb-*`→`02-IO增强/` 等（首条命中即归属）
 - **通用配置类**（如 `device.mk.diff`、`*sepolicy*`、`Android.bp`）：读 diff 正文，按涉及的模块名（lciod/lcview）分发，可分发到多个文档目录
@@ -105,7 +105,7 @@ manifest.yaml 条目示例：
 |---------|------|
 | `UPDATE-锚点` | 行号锚点刷新（含形态 D 盲区、区间终点、重复出现处）|
 | `UPDATE-表格` | 表格新增/修改/删除行（值严格来自 diff/workspace）|
-| `UPDATE-图` | 重画 PlantUML（遵守 `rules/plantuml.md`）|
+| `UPDATE-图` | 重画 PlantUML（遵守 `engineering/harness/rules/plantuml.md`）|
 | `UPDATE-文本` | 修改描述段落（表述与 diff 语义对齐）|
 | `ADD-文件` | 文件矩阵/目录树补入新文件 + 行数 |
 | `REMOVE-文件` | 移除所有引用（grep 全量）|
@@ -126,7 +126,7 @@ manifest.yaml 条目示例：
 │
 ├─ 动作3 [UPDATE-图] 章节: 逻辑视图/二进制布局图 (L177)
 │  改: PlantUML rectangle 字段区追加 timestamp(8B)
-│  据: 结构体新增字段（⚠PlantUML须遵守 rules/plantuml.md）
+│  据: 结构体新增字段（⚠PlantUML须遵守 engineering/harness/rules/plantuml.md）
 │
 ├─ 动作4 [UPDATE-锚点] 章节: 关键设计与实现 (L648 代码块注释)
 │  改: // lcview_builder.c:88 → // lcview_builder.c:101
@@ -147,7 +147,7 @@ manifest.yaml 条目示例：
 - **只改动作清单覆盖的章节**，其他章节一字不动
 - 新增内容**只能加到模板定义的现有章节**（如新增字段加到"逻辑视图/字段表"）
 - 禁止：全文重写、新建非模板章节、改变章节顺序
-- PlantUML 改动后必须过 `rules/plantuml.md` 约束
+- PlantUML 改动后必须过 `engineering/harness/rules/plantuml.md` 约束
 - **行号锚点刷新机制**：对受影响文件的每个被引符号，重新 grep 源码取新行号，全量替换文档中的 `#L旧` → `#L新`（含形态 D 代码块注释、区间引用终点、重复出现处）
 
 ### 7. 自动一致性自检（落盘后强制）
@@ -170,8 +170,8 @@ manifest.yaml 条目示例：
 |------|------|
 | 方案先行 | 动作清单级方案，确认后落盘 |
 | 增量更新 | 章节级，不全量重写 |
-| 映射驱动 | 依据 `rules/doc-sync-mapping.md` 分发 |
-| 模板只读 | `templates/*.md` 不可擅改；冲突需确认（`TEMPLATE-CONFLICT`）|
+| 映射驱动 | 依据 `engineering/harness/config/doc-sync-mapping.md` 分发 |
+| 模板只读 | `engineering/harness/templates/*.md` 不可擅改；冲突需确认（`TEMPLATE-CONFLICT`）|
 | 代码引用规范 | patchs 相对路径 + `#L行号`；禁 workspace 路径；刷新含形态 D 盲区 |
 | 内容对齐 diff | 基于真实 diff/workspace，禁臆造接口/字段/行为 |
 | 重复引用全改 | 同一行号/符号多次出现时，grep 全量命中，禁止只改第一处 |

@@ -3,8 +3,8 @@ set -uo pipefail
 
 # ============================================================================
 # sync_patchs_to_doc.sh — patchs/rpi5 变动报告生成器
-# 规则详见: skills/sync-patchs-to-doc/SKILL.md
-# 用法:    bash skills/sync-patchs-to-doc/sync_patchs_to_doc.sh [--check-only] [--full-diff]
+# 规则详见: engineering/harness/workflows/sync-patchs-to-doc/WORKFLOW.md
+# 用法:    bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh [--check-only] [--full-diff]
 # ============================================================================
 
 # --- Configuration ----------------------------------------------------------
@@ -34,7 +34,7 @@ for arg in "$@"; do
         --check-only|--dry-run) CHECK_ONLY=true ;;
         --full-diff) FULL_DIFF=true ;;
         -h|--help)
-            echo "Usage: bash skills/sync-patchs-to-doc/sync_patchs_to_doc.sh [--check-only] [--full-diff]"
+            echo "Usage: bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh [--check-only] [--full-diff]"
             echo "  --check-only  仅输出报告，不输出 AI 操作提示"
             echo "  --full-diff   在报告末尾追加 git diff 正文，供 AI 直接读取（零往返）"
             exit 0 ;;
@@ -207,9 +207,9 @@ fi
 if [ "$CHECK_ONLY" = false ]; then
     cat <<TIP
 
-下一步（7 步闭环，详见 SKILL.md）：
+下一步（7 步闭环，详见 WORKFLOW.md）：
   ① 本报告已列出变动清单（+ --full-diff 可取完整 diff 正文）
-  ② 依据 rules/doc-sync-mapping.md 将变动分发到对应文档目录（01/02）
+  ② 依据 engineering/harness/config/doc-sync-mapping.md 将变动分发到对应文档目录（01/02）
   ③ 读 patchs/rpi5/manifest.yaml，按 source 去 ~/workspace/ 取全量源码上下文
   ④ 用行号锚点(#L) + 符号名 + 文件名 定位受影响章节（注意形态D代码块注释盲区）
   ⑤ 输出动作清单级方案（文档→章节→动作），用户确认后落盘

@@ -14,8 +14,8 @@ description: 收集 diff → AI 生成中文 type commit message → 单次确�
 ### 1. 收集 diff（脚本）
 
 ```bash
-bash skills/git-push-to-server/collect_diff.sh              # 完整输出（status + stat + diff）
-bash skills/git-push-to-server/collect_diff.sh --stat-only  # 仅 status + stat，跳过 diff 正文
+bash engineering/harness/workflows/git-push-to-server/collect_diff.sh              # 完整输出（status + stat + diff）
+bash engineering/harness/workflows/git-push-to-server/collect_diff.sh --stat-only  # 仅 status + stat，跳过 diff 正文
 ```
 
 脚本输出当前分支、远程、git status、改动统计、diff 正文。无改动时输出 `nothing to commit` 并退出码 1，AI 见此**停止流程**。
@@ -47,19 +47,9 @@ bash skills/git-push-to-server/collect_diff.sh --stat-only  # 仅 status + stat�
 
 #### scope 词表（目录+模块，改动行数最多目录为准）
 
-| 目录 | 模块识别规则 | scope |
-|------|------------|-------|
-| `kernel/` 下 `vendor/lechao/LcView/**` | 路径含 `LcView` | `kernel-lcview` |
-| `kernel/` 下 `vendor/lechao/LcIod/**` | 路径含 `LcIod` | `kernel-lciod` |
-| `kernel/` 其他 | 无明确模块 | `kernel-unknown` |
-| `aosp/` 下涉及 lcview/lciod | grep 文件名/路径 | `aosp-lcview` / `aosp-lciod` |
-| `aosp/` 其他 | 无明确模块 | `aosp-unknown` |
-| `docs/` | 固定 | `docs` |
-| `skills/` | 固定 | `skills` |
-| `rules/` | 固定 | `rules` |
-| `scripts/` | 固定 | `scripts` |
-| `.opencode/` | 固定 | `tooling` |
-| 未命中 | 兜底 | `misc` |
+> 完整映射表已抽出至独立配置，新增目录只改配置不动 workflow。
+
+详见 [scope 映射表](../../config/scope-mapping.md)
 
 #### 选取规则
 
@@ -109,7 +99,7 @@ body:
 用户确认后，AI 将最终 message 写入临时文件，调脚本：
 
 ```bash
-bash skills/git-push-to-server/commit_and_push.sh \
+bash engineering/harness/workflows/git-push-to-server/commit_and_push.sh \
     --message-file <临时文件> \
     [--branch <分支>] \
     [--remote origin] \

@@ -3,8 +3,8 @@ set -uo pipefail
 
 # ============================================================================
 # commit_and_push.sh — git add -A + commit -F + push，失败保留 commit
-# 规则详见: skills/git-push-to-server/SKILL.md
-# 用法:    bash skills/git-push-to-server/commit_and_push.sh \
+# 规则详见: engineering/harness/workflows/git-push-to-server/WORKFLOW.md
+# 用法:    bash engineering/harness/workflows/git-push-to-server/commit_and_push.sh \
 #              --message-file <path> [--branch <b>] [--remote origin] [--no-push]
 # ============================================================================
 
@@ -44,7 +44,7 @@ while [ $# -gt 0 ]; do
         --no-push)
             NO_PUSH=true; shift ;;
         -h|--help)
-            echo "Usage: bash skills/git-push-to-server/commit_and_push.sh --message-file <path> [--branch <b>] [--remote origin] [--no-push]"
+            echo "Usage: bash engineering/harness/workflows/git-push-to-server/commit_and_push.sh --message-file <path> [--branch <b>] [--remote origin] [--no-push]"
             echo "  --message-file <path>  message 文本文件（git commit -F 读取）"
             echo "  --branch <b>           推送分支（默认当前分支）"
             echo "  --remote <name>        远程名（默认 origin）"
