@@ -2,8 +2,8 @@
 
 ## 源码改动优先级
 
+**改动 `~/workspace/` 下任何源码前，必须先加载** [engineering/harness/rules/source-code-modify.md](engineering/harness/rules/source-code-modify.md)（含验证流程、归档纪律、禁止行为）。
 `~/workspace/` 是编译源码树（唯一参与编译），`patchs/` 是单向归档目录，改动必须从源头开始。
-详细规则详见 [engineering/harness/rules/source-code-priority.md](engineering/harness/rules/source-code-priority.md)。
 
 ## 并行策略
 

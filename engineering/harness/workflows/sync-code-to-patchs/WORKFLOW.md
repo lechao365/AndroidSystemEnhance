@@ -16,7 +16,7 @@ workspace 删除的文件，patchs 同步删除（默认全量镜像，含删除
 
 - 确认改动发生在 `~/workspace/`，而非直接改 `patchs/`
 - `patchs/` 是单向归档目录，严禁手动修改（`others/` 除外）
-- 详见 [源码改动优先级](../../rules/source-code-priority.md)
+- 详见 [源码改动优先级](../../rules/source-code-modify.md)
 
 ### 2. 执行同步
 

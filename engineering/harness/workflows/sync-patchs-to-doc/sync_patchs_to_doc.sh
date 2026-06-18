@@ -9,7 +9,12 @@ set -uo pipefail
 
 # --- Configuration ----------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# 向上查找项目根（锚点：AGENTS.md），根治相对层级 ../.. 计算错误
+REPO_ROOT="$SCRIPT_DIR"
+while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/AGENTS.md" ]; do
+    REPO_ROOT="$(dirname "$REPO_ROOT")"
+done
+[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 1; }
 PATCH_DIR="patchs/rpi5"
 
 # --- Colors -----------------------------------------------------------------
@@ -61,7 +66,11 @@ log_info "扫描: $PATCH_DIR/"
 # ============================================================================
 # --name-status 输出格式: <status>\t<old_path>\t<new_path> (仅 R/C 有三列)
 # A=新增, M=修改, D=删除, R=重命名, C=复制
-DIFF_OUTPUT=$(git diff HEAD --name-status -- "$PATCH_DIR" 2>/dev/null)
+# git diff HEAD 只看 tracked；git ls-files --others 补全 untracked 新文件（映射为 A）
+_tracked=$(git diff HEAD --name-status -- "$PATCH_DIR" 2>/dev/null)
+_untracked=$(git ls-files --others --exclude-standard -- "$PATCH_DIR" 2>/dev/null \
+    | sed 's/^/A\t/')
+DIFF_OUTPUT="${_tracked:+$_tracked$'\n'}$_untracked"
 
 if [ -z "$DIFF_OUTPUT" ]; then
     echo ""
@@ -127,12 +136,17 @@ while IFS=$'\t' read -r status path1 path2; do
         *) TOTAL_OTHER=$((TOTAL_OTHER + 1)) ;;
     esac
 
-    # 获取行数统计
+    # 获取行数统计（tracked 用 git diff numstat，untracked 用 wc）
     numstat=$(set +o pipefail; git diff HEAD --numstat -- "$display_path" 2>/dev/null | head -1)
     added=$(echo "$numstat" | awk '{print $1}')
     deleted=$(echo "$numstat" | awk '{print $2}')
     [ "$added" = "-" ] || [ -z "$added" ] && added="0"
     [ "$deleted" = "-" ] || [ -z "$deleted" ] && deleted="0"
+    # untracked 新文件 git diff 无 numstat，直接统计文件行数
+    if [ "$base_status" = "A" ] && [ -z "$numstat" ] && [ -f "$display_path" ]; then
+        added=$(wc -l < "$display_path" 2>/dev/null || echo "0")
+        deleted="0"
+    fi
 
     # 重命名显示 old → new
     case "$base_status" in
@@ -197,8 +211,21 @@ echo "总计: $TOTAL 个文件变动 ($([ $TOTAL_A -gt 0 ] && echo -n "$TOTAL_A 
 # ============================================================================
 if [ "$FULL_DIFF" = true ]; then
     log_step "完整 diff 正文（HEAD）"
+    # tracked 改动的 diff
     git --no-pager diff HEAD -- "$PATCH_DIR" 2>/dev/null || \
         log_warn "无法获取 diff 正文"
+    # untracked 新文件的完整内容（git diff HEAD 不含 untracked，需单独输出）
+    _untracked_files=$(git ls-files --others --exclude-standard -- "$PATCH_DIR" 2>/dev/null)
+    if [ -n "$_untracked_files" ]; then
+        echo ""
+        echo "--- untracked 新文件完整内容 ---"
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            echo ""
+            echo "+++ b/$f (新文件)"
+            sed 's/^/+/' "$f" 2>/dev/null || echo "(无法读取)"
+        done <<< "$_untracked_files"
+    fi
 fi
 
 # ============================================================================

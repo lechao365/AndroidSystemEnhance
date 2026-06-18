@@ -317,4 +317,4 @@ deactivate H
 - **内核源码**：[`patchs/rpi5/kernel/new/vendor/lechao/LcView/`](../patchs/rpi5/kernel/new/vendor/lechao/LcView/) — Builder API + 环形缓冲区 + 字符设备
 - **用户态源码**：[`patchs/rpi5/aosp/new/vendor/lechao/services/lechao_lcview/`](../patchs/rpi5/aosp/new/vendor/lechao/services/lechao_lcview/) — HAL + Daemon + AIDL + Schema 配置
 - **SELinux 策略**：[`patchs/rpi5/aosp/new/device/brcm/rpi5/sepolicy/`](../patchs/rpi5/aosp/new/device/brcm/rpi5/sepolicy/) — `lechao_lcview.te` + `lechao_lcview_hal.te`
-- **上传器 Spec**：[`docs/specs/2026-06-08-lcview-upload-design.md`](../docs/specs/2026-06-08-lcview-upload-design.md) — 二期独立进程 `lcview_uploader` 设计
+- **上传器 Spec**：`docs/specs/2026-06-08-lcview-upload-design.md` — 二期独立进程 `lcview_uploader` 设计（待补充）

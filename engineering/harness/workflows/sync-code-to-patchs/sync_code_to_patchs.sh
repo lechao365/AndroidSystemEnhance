@@ -9,7 +9,13 @@ set -uo pipefail
 
 # --- Configuration ----------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PATCH_ROOT="$SCRIPT_DIR/../../patchs/rpi5"
+# 向上查找项目根（锚点：AGENTS.md），根治相对层级 ../.. 计算错误
+REPO_ROOT="$SCRIPT_DIR"
+while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/AGENTS.md" ]; do
+    REPO_ROOT="$(dirname "$REPO_ROOT")"
+done
+[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 1; }
+PATCH_ROOT="$REPO_ROOT/patchs/rpi5"
 KERNEL_WS="${KERNEL_WS:-$HOME/workspace/rpi5-kernel-build/common}"
 AOSP_WS="${AOSP_WS:-$HOME/workspace/aosp}"
 

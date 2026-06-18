@@ -64,7 +64,7 @@ bash engineering/harness/workflows/git-push-to-server/collect_diff.sh --stat-onl
 新增(skills): sync-code-to-patchs 支持删除对齐
 
 - skills: 新增 sync_prune 函数实现 patchs 删除对齐
-- rules: 更新 source-code-priority.md 镜像规则说明
+- rules: 更新 source-code-modify.md 镜像规则说明
 ```
 
 ### 3. 单次确认（AI 展示，支持多轮编辑）
