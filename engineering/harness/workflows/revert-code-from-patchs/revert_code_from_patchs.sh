@@ -13,60 +13,26 @@ set -uo pipefail
 # 退出码:  0=成功; 1=扫描/apply/校验失败; 3=参数/环境错误; 4=plan为空
 # ============================================================================
 
-# --- 锚点查找 REPO_ROOT -----------------------------------------------------
+# --- 锚点 + 公共库（bootstrap 统一入口）-------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$SCRIPT_DIR"
-while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/AGENTS.md" ]; do
-    REPO_ROOT="$(dirname "$REPO_ROOT")"
-done
-[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 3; }
+# shellcheck source=../../lib/harness_bootstrap.sh
+source "$SCRIPT_DIR/../../lib/harness_bootstrap.sh"
+
 PATCH_ROOT="$REPO_ROOT/patchs/rpi5"
 KERNEL_WS="${KERNEL_WS:-$HOME/workspace/rpi5-kernel-build/common}"
 AOSP_WS="${AOSP_WS:-$HOME/workspace/aosp}"
 
-# 排除规则（与 sync_code_to_patchs.sh 保持一致）
-EXCLUDE_RE='\.o$|\.ko$|\.cmd$|\.symvers$|^Image$|\.dtb$|\.dtbo$|\.prebuilt$|\.prev$|overlays\.prebuilt|overlays\.prev|\.prebuilt/|\.prev/'
-EXCLUDE_DIR_RE='^(out|prebuilts)$'
-
-# --- 接入维测库 -------------------------------------------------------------
-# shellcheck source=../../lib/harness_observability.sh
-source "$REPO_ROOT/engineering/harness/lib/harness_observability.sh"
-
+# --- 接入维测库（模式 A：扫描为主，apply 内部显式失败处理）-------------------
 harness_init "revert_code_from_patchs"
 
-# 临时文件清理（与 lib EXIT trap 共存：lib 先注册 _h_finalize，此处追加 _cleanup）
-# _cleanup 保留 $? 不变，确保 _h_finalize 拿到正确的退出码
+# 临时文件清理：通过公共库 exit hook 注册（不再手写 trap）
 TMP_FILES=()
 _cleanup() {
-    local rc=$?
     [ ${#TMP_FILES[@]} -gt 0 ] && rm -f "${TMP_FILES[@]}" 2>/dev/null || true
-    return "$rc"
 }
-trap '_cleanup; _h_finalize' EXIT INT TERM
-
-# find_upstream_base — 复用自 sync_code_to_patchs.sh（原样，保证回退的 upstream
-# 与 sync 生成 diff 时的 upstream 是同一个 commit）
-find_upstream_base() {
-    local base="" m_ref current_branch suffix ref
-    m_ref=$(git for-each-ref refs/remotes/m/ --format='%(refname:short)' 2>/dev/null | head -1)
-    [ -n "$m_ref" ] && base=$(git merge-base HEAD "$m_ref" 2>/dev/null || true)
-    if [ -z "$base" ]; then
-        current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-        if [ "$current_branch" != "HEAD" ] && [ -n "$current_branch" ]; then
-            suffix="${current_branch#*/}"
-            while IFS= read -r ref; do
-                [[ "$ref" == */"$suffix" ]] && { base=$(git merge-base HEAD "$ref" 2>/dev/null || true); [ -n "$base" ] && break; }
-            done < <(git for-each-ref refs/remotes/ --format='%(refname:short)' 2>/dev/null)
-        fi
-    fi
-    if [ -z "$base" ]; then
-        while IFS= read -r ref; do
-            base=$(git merge-base HEAD "$ref" 2>/dev/null || true)
-            [ -n "$base" ] && break
-        done < <(git for-each-ref refs/remotes/ --format='%(refname:short)' 2>/dev/null)
-    fi
-    echo "$base"
-}
+harness_on_exit_add "_cleanup"
+trap 'exit 130' INT   # 128 + SIGINT(2)，触发 EXIT trap 走公共库收尾
+trap 'exit 143' TERM  # 128 + SIGTERM(15)
 
 # diff_normalized — 比较两个 diff 文件语义是否一致（忽略 index 行 hash）
 diff_normalized() {
@@ -77,14 +43,13 @@ diff_normalized() {
 # _is_excluded — 判断文件是否命中排除规则（编译产物 / 构建缓存）
 _is_excluded() {
     local f="$1"
-    echo "$f" | grep -qE "$EXCLUDE_RE" && return 0
+    echo "$f" | grep -qE "$HARNESS_EXCLUDE_RE" && return 0
     local bn="${f%%/*}"
-    [[ "$bn" =~ $EXCLUDE_DIR_RE ]] && return 0
+    [[ "$bn" =~ $HARNESS_EXCLUDE_DIR_RE ]] && return 0
     return 1
 }
 
 # _parse_proj — 把 plan 中的"项目"字段解析为 workspace 绝对路径
-# 返回值通过 stdout（调用者用 $() 捕获）
 _parse_proj() {
     local proj="$1"
     case "$proj" in
@@ -107,7 +72,7 @@ while [ $# -gt 0 ]; do
         -h|--help)
             cat <<'USAGE'
 Usage: bash revert_code_from_patchs.sh [--plan-file <path>] [--apply] [--check-only]
-  无参数 / --plan-file X    生成回退计划（默认 /tmp/revert-plan-<ts>.tsv）
+  无参数 / --plan-file X    生成回退计划（默认 artifacts/revert_code_from_patchs/<ts>-plan.tsv）
   --apply --plan-file X     执行回退计划（只执行标记 + 的条目）
   --check-only              仅扫描预览，不生成 plan 文件
 USAGE
@@ -128,8 +93,14 @@ step_begin "阶段 0: 前置检查"
 
 KERNEL_OK=false
 AOSP_OK=false
-[ -d "$KERNEL_WS/.git" ] && KERNEL_OK=true && log_info "Kernel workspace: $KERNEL_WS"
-[ -d "$AOSP_WS/.repo"  ] && AOSP_OK=true   && log_info "AOSP workspace:   $AOSP_WS"
+if [ -d "$KERNEL_WS/.git" ]; then
+    KERNEL_OK=true
+    log_info "Kernel workspace: $KERNEL_WS"
+fi
+if [ -d "$AOSP_WS/.repo" ]; then
+    AOSP_OK=true
+    log_info "AOSP workspace:   $AOSP_WS"
+fi
 
 if [ "$KERNEL_OK" = false ] && [ "$AOSP_OK" = false ]; then
     log_error "未找到有效的 workspace（检查 KERNEL_WS/AOSP_WS 环境变量）"
@@ -137,34 +108,7 @@ if [ "$KERNEL_OK" = false ] && [ "$AOSP_OK" = false ]; then
     harness_exit 3
 fi
 log_info "Patch root: $PATCH_ROOT"
-if [ ! -d "$PATCH_ROOT/kernel" ] && [ ! -d "$PATCH_ROOT/aosp" ]; then
-    log_error "patchs/rpi5 为空，无基线可回退"
-    step_end 1
-    harness_exit 3
-fi
-log_info "模式: $MODE"
 step_end 0
-
-# ============================================================================
-# patchs 覆盖集合构建
-# ============================================================================
-
-# coverage_kernel — 输出 patchs 覆盖的 kernel 文件列表（相对 KERNEL_WS）
-coverage_kernel() {
-    [ -d "$PATCH_ROOT/kernel/modified" ] && find "$PATCH_ROOT/kernel/modified" -name '*.diff' 2>/dev/null | \
-        sed "s|$PATCH_ROOT/kernel/modified/||;s|\.diff$||"
-    [ -d "$PATCH_ROOT/kernel/new" ] && find "$PATCH_ROOT/kernel/new" -type f 2>/dev/null | \
-        sed "s|$PATCH_ROOT/kernel/new/||"
-}
-
-# coverage_aosp_project — 输出指定 repo 项目的 patchs 覆盖文件（相对项目根）
-coverage_aosp_project() {
-    local proj="$1"
-    [ -d "$PATCH_ROOT/aosp/modified/$proj" ] && find "$PATCH_ROOT/aosp/modified/$proj" -name '*.diff' 2>/dev/null | \
-        sed "s|$PATCH_ROOT/aosp/modified/$proj/||;s|\.diff$||"
-    [ -d "$PATCH_ROOT/aosp/new/$proj" ] && find "$PATCH_ROOT/aosp/new/$proj" -type f 2>/dev/null | \
-        sed "s|$PATCH_ROOT/aosp/new/$proj/||"
-}
 
 # ============================================================================
 # 扫描函数（kernel）
@@ -179,23 +123,24 @@ scan_kernel_modified() {
     local out="$1"
     [ ! -d "$PATCH_ROOT/kernel/modified" ] && return
     cd "$KERNEL_WS" || { log_error "无法进入 $KERNEL_WS"; return 1; }
-    local BASE; BASE=$(find_upstream_base)
-    [ -z "$BASE" ] && { log_error "kernel 无法确定 upstream base"; return 1; }
+    local BASE; BASE=$(harness_find_upstream_base)
+    if [ -z "$BASE" ]; then
+        harness_report_no_upstream "kernel"
+        return 1
+    fi
 
     while IFS= read -r -d '' dfile; do
         local rel="${dfile#$PATCH_ROOT/kernel/modified/}"; rel="${rel%.diff}"
-        local tmp; tmp=$(mktemp); TMP_FILES+=("$tmp")
+        local tmp; tmp=$(harness_tmp_file "kd.diff"); TMP_FILES+=("$tmp")
         git diff "$BASE" -- "$rel" > "$tmp" 2>/dev/null
         if [ ! -s "$tmp" ]; then
-            # workspace 已恢复 upstream，但 patchs 有定制 → DIVERGED（缺失定制）
             printf '%s\t%s\t%s\t%s\t%s\t%s\n' "+" "MODIFIED-DIVERGED" "kernel" "$rel" "checkout" "workspace 已恢复 upstream，缺失 patchs 定制" >> "$out"
         elif diff_normalized "$tmp" "$dfile"; then
             G_MATCH_MODIFIED=$((G_MATCH_MODIFIED + 1))
         else
             printf '%s\t%s\t%s\t%s\t%s\t%s\n' "+" "MODIFIED-DIVERGED" "kernel" "$rel" "checkout" "workspace diff 与 patchs 不一致" >> "$out"
         fi
-        rm -f "$tmp"
-    done < <(find "$PATCH_ROOT/kernel/modified" -name '*.diff' -print0 2>/dev/null)
+    done < <(find "$PATCH_ROOT/kernel/modified" -name '*.diff' -print0 2>/dev/null || true)
 }
 
 # scan_kernel_new — 比对 patchs/new/ 文件 vs workspace 文件
@@ -213,14 +158,14 @@ scan_kernel_new() {
         else
             G_MATCH_NEW=$((G_MATCH_NEW + 1))
         fi
-    done < <(find "$PATCH_ROOT/kernel/new" -type f -print0 2>/dev/null)
+    done < <(find "$PATCH_ROOT/kernel/new" -type f -print0 2>/dev/null || true)
 }
 
 # scan_extra_kernel — workspace 改动 − patchs 覆盖集合 = EXTRA
 scan_extra_kernel() {
     local out="$1"
     cd "$KERNEL_WS" || return 1
-    local BASE; BASE=$(find_upstream_base)
+    local BASE; BASE=$(harness_find_upstream_base)
     [ -z "$BASE" ] && return
     local cov; cov=$(coverage_kernel | sort -u)
     local ws_changes; ws_changes=$( { git diff "$BASE" --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null; } | sort -u)
@@ -254,12 +199,15 @@ scan_aosp_modified() {
         [ ! -d "$PATCH_ROOT/aosp/modified/$proj" ] && continue
         [ ! -d "$AOSP_WS/$proj/.git" ] && continue
         cd "$AOSP_WS/$proj" || continue
-        local BASE; BASE=$(find_upstream_base)
-        [ -z "$BASE" ] && { log_warn "$proj 无 upstream base，跳过 modified 扫描"; continue; }
+        local BASE; BASE=$(harness_find_upstream_base)
+        if [ -z "$BASE" ]; then
+            log_warn "$proj 无 upstream base，跳过 modified 扫描"
+            continue
+        fi
 
         while IFS= read -r -d '' dfile; do
             local rel="${dfile#$PATCH_ROOT/aosp/modified/$proj/}"; rel="${rel%.diff}"
-            local tmp; tmp=$(mktemp); TMP_FILES+=("$tmp")
+            local tmp; tmp=$(harness_tmp_file "ad.diff"); TMP_FILES+=("$tmp")
             git diff "$BASE" -- "$rel" > "$tmp" 2>/dev/null
             if [ ! -s "$tmp" ]; then
                 printf '%s\t%s\t%s\t%s\t%s\t%s\n' "+" "MODIFIED-DIVERGED" "aosp:$proj" "$rel" "checkout" "workspace 已恢复 upstream，缺失 patchs 定制" >> "$out"
@@ -268,8 +216,7 @@ scan_aosp_modified() {
             else
                 printf '%s\t%s\t%s\t%s\t%s\t%s\n' "+" "MODIFIED-DIVERGED" "aosp:$proj" "$rel" "checkout" "workspace diff 与 patchs 不一致" >> "$out"
             fi
-            rm -f "$tmp"
-        done < <(find "$PATCH_ROOT/aosp/modified/$proj" -name '*.diff' -print0 2>/dev/null)
+        done < <(find "$PATCH_ROOT/aosp/modified/$proj" -name '*.diff' -print0 2>/dev/null || true)
     done < <(sort "$AOSP_WS/.repo/project.list")
 }
 
@@ -293,7 +240,7 @@ scan_aosp_new() {
             else
                 G_MATCH_NEW=$((G_MATCH_NEW + 1))
             fi
-        done < <(find "$PATCH_ROOT/aosp/new/$proj" -type f -print0 2>/dev/null)
+        done < <(find "$PATCH_ROOT/aosp/new/$proj" -type f -print0 2>/dev/null || true)
     done < <(sort "$AOSP_WS/.repo/project.list")
 
     # 非 repo 目录的 new（用 comm 求差集：全部 new − repo 项目 new）
@@ -330,7 +277,7 @@ scan_extra_aosp() {
         [ -z "$proj" ] && continue
         [ ! -d "$AOSP_WS/$proj/.git" ] && continue
         cd "$AOSP_WS/$proj" || continue
-        local BASE; BASE=$(find_upstream_base)
+        local BASE; BASE=$(harness_find_upstream_base)
         [ -z "$BASE" ] && continue
         local cov; cov=$(coverage_aosp_project "$proj" | sort -u)
         local ws_changes; ws_changes=$( { git diff "$BASE" --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null; } | sort -u)
@@ -365,7 +312,7 @@ scan_extra_aosp_non_repo() {
         rel="${d#$AOSP_WS/}"; rel="${rel%/}"
         bn=$(basename "$rel")
         [[ "$bn" =~ ^\. ]] && continue
-        [[ "$bn" =~ $EXCLUDE_DIR_RE ]] && continue
+        [[ "$bn" =~ $HARNESS_EXCLUDE_DIR_RE ]] && continue
         # 跳过 repo project（精确匹配顶层名 或 有以 rel/ 开头的项目）
         local top_proj; top_proj=$(sort "$AOSP_WS/.repo/project.list" | cut -d/ -f1 | sort -u)
         echo "$top_proj" | grep -Fxq "$bn" && continue
@@ -379,6 +326,34 @@ scan_extra_aosp_non_repo() {
             printf '%s\t%s\t%s\t%s\t%s\t%s\n' "+" "EXTRA-NEW-UNTRACKED" "aosp:$rel" "$f" "revert" "非 repo 目录未归档文件" >> "$out"
         done < <(find "$rel" -type f 2>/dev/null | sort -u)
     done
+}
+
+# ============================================================================
+# coverage 函数（patchs 覆盖集合，用于 EXTRA 判定）
+# ============================================================================
+coverage_kernel() {
+    local rel
+    while IFS= read -r -d '' pfile; do
+        rel="${pfile#$PATCH_ROOT/kernel/modified/}"; rel="${rel%.diff}"
+        echo "$rel"
+    done < <(find "$PATCH_ROOT/kernel/modified" -name '*.diff' -print0 2>/dev/null || true)
+    while IFS= read -r -d '' pfile; do
+        rel="${pfile#$PATCH_ROOT/kernel/new/}"
+        echo "$rel"
+    done < <(find "$PATCH_ROOT/kernel/new" -type f -print0 2>/dev/null || true)
+}
+
+coverage_aosp_project() {
+    local proj="$1"
+    local rel
+    while IFS= read -r -d '' pfile; do
+        rel="${pfile#$PATCH_ROOT/aosp/modified/$proj/}"; rel="${rel%.diff}"
+        echo "$rel"
+    done < <(find "$PATCH_ROOT/aosp/modified/$proj" -name '*.diff' -print0 2>/dev/null || true)
+    while IFS= read -r -d '' pfile; do
+        rel="${pfile#$PATCH_ROOT/aosp/new/$proj/}"
+        echo "$rel"
+    done < <(find "$PATCH_ROOT/aosp/new/$proj" -type f -print0 2>/dev/null || true)
 }
 
 # ============================================================================
@@ -458,8 +433,8 @@ do_checkout_patch() {
     [ ! -f "$diff_file" ] && { log_error "patchs diff 不存在: $diff_file"; return 1; }
 
     cd "$ws" || return 1
-    local BASE; BASE=$(find_upstream_base)
-    [ -z "$BASE" ] && { log_error "$proj 无法确定 upstream base"; return 1; }
+    local BASE; BASE=$(harness_find_upstream_base)
+    [ -z "$BASE" ] && { harness_report_no_upstream "$proj"; return 1; }
     # 先验证 diff 可应用，再 checkout（避免 BROKEN-DIFF 时 workspace 被半修改导致定制丢失）
     git apply --check "$diff_file" 2>/dev/null || { log_error "BROKEN-DIFF: $diff_file 无法应用到 upstream"; return 1; }
     git checkout "$BASE" -- "$rel" 2>/dev/null || { log_error "checkout 失败: $rel"; return 1; }
@@ -472,8 +447,8 @@ do_checkout_only() {
     local proj="$1" rel="$2"
     local ws; ws=$(_parse_proj "$proj")
     cd "$ws" || return 1
-    local BASE; BASE=$(find_upstream_base)
-    [ -z "$BASE" ] && { log_error "$proj 无法确定 upstream base"; return 1; }
+    local BASE; BASE=$(harness_find_upstream_base)
+    [ -z "$BASE" ] && { harness_report_no_upstream "$proj"; return 1; }
     git checkout "$BASE" -- "$rel" 2>/dev/null || { log_error "checkout 失败: $rel"; return 1; }
     return 0
 }
@@ -496,16 +471,14 @@ do_restore() {
 }
 
 # do_revert_extra — 回退 EXTRA 类条目
-# EXTRA-MODIFIED / EXTRA-NEW-TRACKED → git checkout upstream
-# EXTRA-NEW-UNTRACKED → rm
 do_revert_extra() {
     local proj="$1" rel="$2" category="$3"
     local ws; ws=$(_parse_proj "$proj")
     case "$category" in
         EXTRA-MODIFIED|EXTRA-NEW-TRACKED)
             cd "$ws" || return 1
-            local BASE; BASE=$(find_upstream_base)
-            [ -z "$BASE" ] && { log_error "$proj 无法确定 upstream base"; return 1; }
+            local BASE; BASE=$(harness_find_upstream_base)
+            [ -z "$BASE" ] && { harness_report_no_upstream "$proj"; return 1; }
             git checkout "$BASE" -- "$rel" 2>/dev/null || { log_error "checkout 失败: $rel"; return 1; }
             ;;
         EXTRA-NEW-UNTRACKED)
@@ -545,8 +518,6 @@ apply_plan() {
         IFS=$'\t' read -r category proj rel action summary <<< "$rest"
 
         # 统一错误处理：do_* 失败时由 on_err --continue 记录现场（lineno/cmd/stack/step_ctx）后 return 1
-        # （--continue：仅记录现场不退出，由 apply_plan 的 return 1 把失败传播给上层 step_end/harness_exit）
-        # 注意：不能用 `if ! do_*; then ... $?`，因 `!` 会把 $? 取反为 0，须显式捕获 rc
         local rc=0
         case "$action" in
             checkout)
@@ -583,6 +554,7 @@ apply_plan() {
 
     log_info "执行完成"
     log_info "已执行: $applied 条"
+    log_result "APPLY 结果" "applied=$applied" "plan=$plan"
     return 0
 }
 
@@ -592,12 +564,12 @@ apply_plan() {
 
 verify_after_apply() {
     local orig_plan="$1"
-    local verify_out="/tmp/revert-verify-$(date +%Y%m%d%H%M%S).tsv"
+    local verify_out; verify_out=$(harness_tmp_file "verify.tsv")
 
     log_info "落盘校验（全量重跑）"
 
     # 生成新的扫描结果（静默）
-    local new_plan; new_plan=$(mktemp); TMP_FILES+=("$new_plan")
+    local new_plan; new_plan=$(harness_tmp_file "verify-plan.tsv"); TMP_FILES+=("$new_plan")
     gen_plan_silent "$new_plan"
 
     # 构建 key 集合（proj<TAB>rel）
@@ -648,11 +620,10 @@ verify_after_apply() {
     log_info "RESIDUAL: $residual"
     log_info "NEW-DIFF: $newdiff"
     log_info "校验文件: $verify_out"
+    log_result "VERIFY 结果" "fixed=$fixed" "kept=$kept" "residual=$residual" "new_diff=$newdiff" "verify_file=$verify_out"
 
-    # artifact 归档（复制到 harness/log/<script>/artifacts/，/tmp 副本由 _cleanup 兜底）
+    # artifact 归档
     artifact_register "$verify_out" "verify.tsv"
-
-    rm -f "$new_plan"
 
     if [ "$residual" -gt 0 ] || [ "$newdiff" -gt 0 ]; then
         log_error "校验失败：有 RESIDUAL($residual) 或 NEW-DIFF($newdiff)"
@@ -668,7 +639,9 @@ verify_after_apply() {
 
 case "$MODE" in
     plan)
-        [ -z "$PLAN_FILE" ] && PLAN_FILE="/tmp/revert-plan-$(date +%Y%m%d%H%M%S).tsv"
+        if [ -z "$PLAN_FILE" ]; then
+            PLAN_FILE=$(harness_tmp_file "plan.tsv")
+        fi
         step_begin "阶段 1: 生成回退计划"
         gen_plan "$PLAN_FILE"
         _PRC=$?
@@ -678,8 +651,9 @@ case "$MODE" in
             log_info "plan 为空，无操作（exit 4）"
             harness_exit 4
         fi
-        # artifact 归档（复制到 harness/log/<script>/artifacts/，/tmp 副本由 _cleanup 兜底）
+        # artifact 归档
         artifact_register "$PLAN_FILE" "plan.tsv"
+        log_result "PLAN 生成" "plan_file=$PLAN_FILE" "entries=$(grep -c '^[-+]' "$PLAN_FILE" 2>/dev/null || echo 0)"
         ;;
     apply)
         step_begin "阶段 2: 执行回退计划"
@@ -701,7 +675,7 @@ case "$MODE" in
         artifact_register "$PLAN_FILE" "plan.tsv"
         ;;
     check-only)
-        PLAN_FILE=$(mktemp /tmp/revert-preview.XXXXXX); TMP_FILES+=("$PLAN_FILE")
+        PLAN_FILE=$(harness_tmp_file "preview-plan.tsv"); TMP_FILES+=("$PLAN_FILE")
         step_begin "阶段 1: 生成回退计划"
         gen_plan "$PLAN_FILE"
         _CRC=$?

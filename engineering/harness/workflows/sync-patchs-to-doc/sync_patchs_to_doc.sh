@@ -8,18 +8,12 @@ set -uo pipefail
 # 退出码:  0=成功(有变动); 3=参数/环境错误; 4=无变动
 # ============================================================================
 
-# --- 锚点查找 REPO_ROOT -----------------------------------------------------
+# --- 锚点 + 公共库（bootstrap 统一入口）-------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$SCRIPT_DIR"
-while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/AGENTS.md" ]; do
-    REPO_ROOT="$(dirname "$REPO_ROOT")"
-done
-[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 3; }
-PATCH_DIR="patchs/rpi5"
+# shellcheck source=../../lib/harness_bootstrap.sh
+source "$SCRIPT_DIR/../../lib/harness_bootstrap.sh"
 
-# --- 接入维测库 -------------------------------------------------------------
-# shellcheck source=../../lib/harness_observability.sh
-source "$REPO_ROOT/engineering/harness/lib/harness_observability.sh"
+PATCH_DIR="patchs/rpi5"
 
 harness_init "sync_patchs_to_doc"
 

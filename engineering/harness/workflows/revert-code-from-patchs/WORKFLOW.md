@@ -22,10 +22,12 @@ description: patchs/rpi5 为基线，把 workspace 偏离部分拉回一致（�
 ### 1. 生成回退计划（脚本）
 
 ```bash
-bash engineering/harness/workflows/revert-code-from-patchs/revert_code_from_patchs.sh              # 生成 plan 到 /tmp
+bash engineering/harness/workflows/revert-code-from-patchs/revert_code_from_patchs.sh              # 生成 plan 到 artifacts
 bash engineering/harness/workflows/revert-code-from-patchs/revert_code_from_patchs.sh --plan-file X # 指定 plan 路径
 bash engineering/harness/workflows/revert-code-from-patchs/revert_code_from_patchs.sh --check-only  # 仅预览，不生成 plan
 ```
+
+plan 默认输出路径：`engineering/harness/log/revert_code_from_patchs/artifacts/<ts>-plan.tsv`，不再写到 `/tmp/`。可用 `--plan-file <path>` 指定外部路径。
 
 脚本扫描 workspace 与 patchs 差异，输出五类分类：
 
@@ -54,7 +56,7 @@ AI 读取生成的 plan 文件（TSV），按类别分组呈现给用户：
 AI 展示选中条目汇总（各类数量 + 动作分布），等用户最终 `y` 确认后执行：
 
 ```bash
-bash .../revert_code_from_patchs.sh --apply --plan-file /tmp/revert-plan-xxx.tsv
+bash .../revert_code_from_patchs.sh --apply --plan-file <plan路径>
 ```
 
 脚本行为：
@@ -73,7 +75,7 @@ apply 完成后脚本自动重跑全量扫描，与原 plan 对比，分 4 类�
 | ❌ `RESIDUAL` | 原 `+` 执行的条目仍偏离 | **是（回退未生效）** |
 | ❓ `NEW-DIFF` | apply 后新出现的差异 | **是（需排查）** |
 
-落盘文件：`/tmp/revert-verify-<timestamp>.tsv`
+落盘文件：`engineering/harness/log/revert_code_from_patchs/artifacts/<ts>-verify.tsv`
 退出码：有 `RESIDUAL` 或 `NEW-DIFF` → 非 0（失败）；仅 `KEPT` → 0（成功）
 
 ### 5. 执行结果报告
@@ -120,7 +122,7 @@ AI 汇报各类执行数量 + 校验结果。若校验失败，列出 RESIDUAL/N
 | 场景 | 处理 |
 |------|------|
 | workspace 不存在 | 报错退出 |
-| 无法确定 upstream base | 报错退出，提示 `git remote -v` 检查 |
+| 无法确定 upstream base | 报错退出（`harness_report_no_upstream` 输出当前分支与 `git branch --set-upstream-to=` 修复建议），不再猜测任意 remote |
 | patchs 为空 | 报错退出 |
 | `.diff` 损坏（`git apply --check` 失败） | 标记 BROKEN-DIFF，该条 return 1 停止执行 |
 | apply 失败 | **立即停止**，退出码非 0 |

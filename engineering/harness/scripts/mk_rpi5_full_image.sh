@@ -32,13 +32,13 @@ set -o pipefail
 # 0. 配置区
 #==============================================================================
 
-AOSP_ROOT="/home/lechao/workspace/aosp"
-KERNEL_SRC="/home/lechao/workspace/rpi5-kernel-build/common"
-KERNEL_OUT="/home/lechao/workspace/rpi5-kernel-build/out/android_rpi5"
-KERNEL_DEST="${AOSP_ROOT}/device/brcm/rpi5-kernel"
-WINDOWS_IMG_DIR="/mnt/c/Files/RaspberryImages"
+AOSP_ROOT="${AOSP_ROOT:-$HOME/workspace/aosp}"
+KERNEL_SRC="${KERNEL_SRC:-$HOME/workspace/rpi5-kernel-build/common}"
+KERNEL_OUT="${KERNEL_OUT:-$HOME/workspace/rpi5-kernel-build/out/android_rpi5}"
+KERNEL_DEST="${KERNEL_DEST:-${AOSP_ROOT}/device/brcm/rpi5-kernel}"
+WINDOWS_IMG_DIR="${WINDOWS_IMG_DIR:-/mnt/c/Files/RaspberryImages}"
 
-CLANG_BIN="/home/lechao/workspace/rpi5-kernel-build/prebuilts/clang/host/linux-x86/clang-r522817/bin"
+CLANG_BIN="${CLANG_BIN:-$HOME/workspace/rpi5-kernel-build/prebuilts/clang/host/linux-x86/clang-r522817/bin}"
 CLANG_TRIPLE="aarch64-linux-gnu-"
 
 LUNCH_TARGET="aosp_rpi5-bp1a-userdebug"
@@ -46,16 +46,10 @@ BUILD_JOBS=${BUILD_JOBS:-$(nproc)}
 KERNEL_DEFCONFIG="android_rpi5_defconfig"
 VERSION_PREFIX="RaspberryVanillaAOSP15"
 
-# --- 锚点查找 REPO_ROOT + 接入维测库 ---------------------------------------
+# --- 锚点 + 公共库（bootstrap 统一入口）-------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$SCRIPT_DIR"
-while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/AGENTS.md" ]; do
-    REPO_ROOT="$(dirname "$REPO_ROOT")"
-done
-[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 3; }
-
-# shellcheck source=../lib/harness_observability.sh
-source "$REPO_ROOT/engineering/harness/lib/harness_observability.sh"
+# shellcheck source=../lib/harness_bootstrap.sh
+source "$SCRIPT_DIR/../lib/harness_bootstrap.sh"
 
 harness_init --with-errexit "mk_rpi5_full_image"
 
@@ -228,8 +222,10 @@ if [ "$DO_KERNEL" = true ]; then
         harness_exit 3
     fi
     KERNEL_VER=$(strings "$KERNEL_IMAGE" | grep "Linux version" | head -1)
-    echo "  [OK] Image ($(ls -lh "$KERNEL_IMAGE" | awk '{print $5}'))"
+    KERNEL_IMAGE_SIZE=$(ls -lh "$KERNEL_IMAGE" | awk '{print $5}')
+    echo "  [OK] Image ($KERNEL_IMAGE_SIZE)"
     echo "  [OK] 版本: $KERNEL_VER"
+    log_result "内核产物" "image=$KERNEL_IMAGE" "size=$KERNEL_IMAGE_SIZE" "version=$KERNEL_VER"
 
     for dtb in bcm2712-rpi-5-b.dtb bcm2712d0-rpi-5-b.dtb; do
         if [ ! -f "${KERNEL_DTS_DIR}/${dtb}" ]; then
@@ -240,18 +236,24 @@ if [ "$DO_KERNEL" = true ]; then
     echo "  [OK] dtb 已生成"
 
     if [ -d "$KERNEL_OVERLAYS_DIR" ] && ls "${KERNEL_OVERLAYS_DIR}"/*.dtbo >/dev/null 2>&1; then
-        echo "  [OK] overlays: $(ls "${KERNEL_OVERLAYS_DIR}"/*.dtbo 2>/dev/null | wc -l) 个"
+        OVERLAYS_COUNT=$(ls "${KERNEL_OVERLAYS_DIR}"/*.dtbo 2>/dev/null | wc -l)
+        echo "  [OK] overlays: $OVERLAYS_COUNT 个"
+        log_info "overlays: $OVERLAYS_COUNT 个"
     fi
 
     # 备份预编译内核 + 拷贝新内核
     log_info "同步内核产物到 AOSP（备份 + 拷贝 Image/dtb/overlays）"
     cd "$KERNEL_DEST"
     if [ ! -f "Image.prebuilt" ]; then
-        cp Image Image.prebuilt 2>/dev/null || true
-        cp bcm2712-rpi-5-b.dtb bcm2712-rpi-5-b.dtb.prebuilt 2>/dev/null || true
-        cp bcm2712d0-rpi-5-b.dtb bcm2712d0-rpi-5-b.dtb.prebuilt 2>/dev/null || true
-        cp -a overlays overlays.prebuilt 2>/dev/null || true
-        echo "  [OK] 预编译内核已备份（.prebuilt），可通过 git checkout 恢复"
+        # Image 是打包失败时唯一无法重建的关键产物，备份失败需告警；dtb/overlays 可重新编译，容忍失败
+        if ! cp Image Image.prebuilt 2>/dev/null; then
+            log_warn "Image.prebuilt 备份失败（磁盘/权限?），后续无法通过 .prebuilt 恢复"
+        else
+            cp bcm2712-rpi-5-b.dtb bcm2712-rpi-5-b.dtb.prebuilt 2>/dev/null || true
+            cp bcm2712d0-rpi-5-b.dtb bcm2712d0-rpi-5-b.dtb.prebuilt 2>/dev/null || true
+            cp -a overlays overlays.prebuilt 2>/dev/null || true
+            echo "  [OK] 预编译内核已备份（.prebuilt），可通过 git checkout 恢复"
+        fi
     fi
 
     # 拷贝新内核到 AOSP 预编译内核目录
@@ -343,7 +345,9 @@ if [ "$DO_BOOT" = true ] || [ "$DO_SYSTEM" = true ] || [ "$DO_VENDOR" = true ]; 
             log_error "缺少镜像: ${img_file}"
             harness_exit 3
         fi
-        echo "  [OK] ${img_file} ($(ls -lh "${ANDROID_PRODUCT_OUT}/${img_file}" | awk '{print $5}'))"
+        local _img_size; _img_size=$(ls -lh "${ANDROID_PRODUCT_OUT}/${img_file}" | awk '{print $5}')
+        echo "  [OK] ${img_file} ($_img_size)"
+        log_info "产物: ${img_file} size=$_img_size"
     done
 
     # 验证打包所需的全部镜像均存在
@@ -429,6 +433,7 @@ fi
 IMG_SIZE=$(ls -lh "$NEW_IMG" | awk '{print $5}')
 IMG_NAME=$(basename "$NEW_IMG")
 echo "  [OK] ${IMG_NAME} (${IMG_SIZE})"
+log_result "刷机包生成" "name=$IMG_NAME" "size=$IMG_SIZE" "path=$NEW_IMG"
 
 step_end 0
 
@@ -461,6 +466,7 @@ if ! cp "$NEW_IMG" "$WINDOWS_IMG_DIR/"; then
     harness_exit 1
 fi
 echo "  [OK] ${IMG_NAME} → ${WINDOWS_IMG_DIR}/"
+log_result "镜像拷贝" "name=$IMG_NAME" "dest=$WINDOWS_IMG_DIR/"
 
 step_end 0
 
@@ -486,11 +492,11 @@ echo ""
 
 # 记录构建报告到 artifact（替代原 build_history.txt）
 BUILD_END_TS=$(date +%s)
-BUILD_DURATION=$((BUILD_END_TS - _H_INIT_TS))
-REPORT_FILE=$(mktemp /tmp/build-report.XXXXXX.json)
+BUILD_DURATION=$((BUILD_END_TS - $(harness_started_at_epoch)))
+REPORT_FILE=$(harness_tmp_file "build-report.json")
 cat > "$REPORT_FILE" <<EOF
 {
-  "ts": "$(_h_ts_iso)",
+  "ts": "$(harness_now_iso)",
   "script": "mk_rpi5_full_image",
   "mode": ${MODE},
   "plan": "${PLAN}",

@@ -1,5 +1,5 @@
 #!/bin/bash
-set -uo pipefail
+set -eo pipefail
 
 # ============================================================================
 # sync_code_to_patchs.sh — workspace → patchs/rpi5 全量镜像同步脚本
@@ -8,22 +8,17 @@ set -uo pipefail
 # 退出码:  0=成功; 1=有MISS(需检查); 3=参数/环境错误
 # ============================================================================
 
-# --- 锚点查找 REPO_ROOT -----------------------------------------------------
+# --- 锚点 + 公共库（bootstrap 统一入口）-------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$SCRIPT_DIR"
-while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/AGENTS.md" ]; do
-    REPO_ROOT="$(dirname "$REPO_ROOT")"
-done
-[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 3; }
+# shellcheck source=../../lib/harness_bootstrap.sh
+source "$SCRIPT_DIR/../../lib/harness_bootstrap.sh"
+
 PATCH_ROOT="$REPO_ROOT/patchs/rpi5"
 KERNEL_WS="${KERNEL_WS:-$HOME/workspace/rpi5-kernel-build/common}"
 AOSP_WS="${AOSP_WS:-$HOME/workspace/aosp}"
 
-# 排除规则：grep -E 模式（构建系统约定，不会因定制变更）
-EXCLUDE_RE='\.o$|\.ko$|\.cmd$|\.symvers$|^Image$|\.dtb$|\.dtbo$|\.prebuilt$|\.prev$|overlays\.prebuilt|overlays\.prev|\.prebuilt/|\.prev/'
-
-# 排除规则：目录 basename
-EXCLUDE_DIR_RE='^(out|prebuilts)$'
+# --- 接入维测库（模式 B：高密度写操作，fail-fast）---------------------------
+harness_init --with-errexit "sync_code_to_patchs"
 
 # --- Counters ---------------------------------------------------------------
 TOTAL_OK=0
@@ -32,41 +27,12 @@ TOTAL_SKIP=0
 TOTAL_STALE=0
 TOTAL_PRUNE=0
 
-# --- 接入维测库 -------------------------------------------------------------
-# shellcheck source=../../lib/harness_observability.sh
-source "$REPO_ROOT/engineering/harness/lib/harness_observability.sh"
-
-# --- 业务输出（逐文件状态，保留彩色风格，内部走 lib 双写）-------------------
-print_ok()    { printf "  ${_H_GREEN}OK${_H_NC}   %s\n" "$1"; TOTAL_OK=$((TOTAL_OK + 1)); _h_log_file_write "INFO" "OK: $1"; }
-print_miss()  { printf "  ${_H_RED}MISS${_H_NC} %s\n" "$1"; TOTAL_MISS=$((TOTAL_MISS + 1)); _h_log_file_write "WARN" "MISS: $1"; }
-print_skip()  { printf "  ${_H_YELLOW}SKIP${_H_NC} %s\n" "$1"; TOTAL_SKIP=$((TOTAL_SKIP + 1)); _h_log_file_write "INFO" "SKIP: $1"; }
-print_stale() { printf "  ${_H_YELLOW}STALE${_H_NC} %s\n" "$1"; TOTAL_STALE=$((TOTAL_STALE + 1)); _h_log_file_write "INFO" "STALE: $1"; }
-print_prune() { printf "  ${_H_BLUE}PRUNE${_H_NC} %s\n" "$1"; TOTAL_PRUNE=$((TOTAL_PRUNE + 1)); _h_log_file_write "INFO" "PRUNE: $1"; }
-
-harness_init "sync_code_to_patchs"
-
-# 自动检测 upstream merge-base
-find_upstream_base() {
-    local base="" m_ref current_branch suffix ref
-    m_ref=$(git for-each-ref refs/remotes/m/ --format='%(refname:short)' 2>/dev/null | head -1)
-    [ -n "$m_ref" ] && base=$(git merge-base HEAD "$m_ref" 2>/dev/null || true)
-    if [ -z "$base" ]; then
-        current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-        if [ "$current_branch" != "HEAD" ] && [ -n "$current_branch" ]; then
-            suffix="${current_branch#*/}"
-            while IFS= read -r ref; do
-                [[ "$ref" == */"$suffix" ]] && { base=$(git merge-base HEAD "$ref" 2>/dev/null || true); [ -n "$base" ] && break; }
-            done < <(git for-each-ref refs/remotes/ --format='%(refname:short)' 2>/dev/null)
-        fi
-    fi
-    if [ -z "$base" ]; then
-        while IFS= read -r ref; do
-            base=$(git merge-base HEAD "$ref" 2>/dev/null || true)
-            [ -n "$base" ] && break
-        done < <(git for-each-ref refs/remotes/ --format='%(refname:short)' 2>/dev/null)
-    fi
-    echo "$base"
-}
+# --- 业务输出（薄包装：仅计数 + 终端彩色，日志走 harness_status_emit）-------
+print_ok()    { harness_status_emit "OK"    "$1" "${2:-}"; TOTAL_OK=$((TOTAL_OK + 1)); }
+print_miss()  { harness_status_emit "MISS"  "$1" "${2:-}"; TOTAL_MISS=$((TOTAL_MISS + 1)); }
+print_skip()  { harness_status_emit "SKIP"  "$1" "${2:-}"; TOTAL_SKIP=$((TOTAL_SKIP + 1)); }
+print_stale() { harness_status_emit "STALE" "$1" "${2:-}"; TOTAL_STALE=$((TOTAL_STALE + 1)); }
+print_prune() { harness_status_emit "PRUNE" "$1" "${2:-}"; TOTAL_PRUNE=$((TOTAL_PRUNE + 1)); }
 
 # ============================================================================
 # 参数解析
@@ -93,8 +59,14 @@ step_begin "前置检查"
 
 KERNEL_OK=false
 AOSP_OK=false
-[ -d "$KERNEL_WS/.git" ] && KERNEL_OK=true && log_info "Kernel workspace: $KERNEL_WS"
-[ -d "$AOSP_WS/.repo"  ] && AOSP_OK=true   && log_info "AOSP workspace:   $AOSP_WS"
+if [ -d "$KERNEL_WS/.git" ]; then
+    KERNEL_OK=true
+    log_info "Kernel workspace: $KERNEL_WS"
+fi
+if [ -d "$AOSP_WS/.repo" ]; then
+    AOSP_OK=true
+    log_info "AOSP workspace:   $AOSP_WS"
+fi
 
 if [ "$KERNEL_OK" = false ] && [ "$AOSP_OK" = false ]; then
     log_error "未找到有效的 workspace"
@@ -110,16 +82,17 @@ step_end 0
 NON_REPO_DIRS=()
 REPO_PROJECT_LIST=""
 AOSP_CHANGED_PROJECTS=""
+REPO_LIST_FILE=""
 
 if [ "$AOSP_OK" = true ]; then
     step_begin "Step 0: 扫描 workspace"
 
     # 读取 project.list（<1ms），替代 repo forall（400ms）
-    REPO_LIST_FILE=$(mktemp /tmp/sync_repolist.XXXXXX)
+    REPO_LIST_FILE=$(harness_tmp_file "repolist.txt")
     if [ -f "$AOSP_WS/.repo/project.list" ]; then
         sort "$AOSP_WS/.repo/project.list" > "$REPO_LIST_FILE"
     else
-        (cd "$AOSP_WS" && repo forall -c 'echo $REPO_PATH' 2>/dev/null | sort) > "$REPO_LIST_FILE" || on_err "${BASH_LINENO[0]}" "$BASH_COMMAND" $?
+        (cd "$AOSP_WS" && repo forall -c 'echo $REPO_PATH' 2>/dev/null | sort) > "$REPO_LIST_FILE"
     fi
 
     # 并行扫描有改动的 repo 项目（xargs -P 比 repo status 快 60%）
@@ -127,7 +100,7 @@ if [ "$AOSP_OK" = true ]; then
         [ -d "{}/.git" ] || exit 0
         cd "{}" 2>/dev/null || exit 0
         test -n "$(git diff --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null)" && echo "{}"
-    ' 2>/dev/null)
+    ' 2>/dev/null || true)
     log_info "有改动的 repo 项目: $(echo "$AOSP_CHANGED_PROJECTS" | grep -c '.' 2>/dev/null || echo 0)"
 
     # 发现非 repo 目录（用 grep -F 批量匹配，避免逐行 while read）
@@ -140,13 +113,11 @@ if [ "$AOSP_OK" = true ]; then
             rel="${d#$AOSP_WS/}"; rel="${rel%/}"
             bn=$(basename "$rel")
             [[ "$bn" =~ ^\. ]] && continue
-            [[ "$bn" =~ $EXCLUDE_DIR_RE ]] && continue
+            [[ "$bn" =~ $HARNESS_EXCLUDE_DIR_RE ]] && continue
 
             # 判断此目录是否属于某个 repo 项目：精确匹配（rel == proj）或被包含（rel 在 proj 下）
-            # grep -Fxq 精确匹配整行；grep -Fq "${rel}/" 匹配以 rel/ 开头的行
             if grep -Fxq "$rel" "$REPO_LIST_FILE" 2>/dev/null; then continue; fi
             if grep -E "^${rel}/" "$REPO_LIST_FILE" >/dev/null 2>&1; then
-                # 有以 rel/ 开头的 repo 项目 → rel 本身不是 repo 项目，但其子目录有
                 _discover_non_repo "$rel/"
                 continue
             fi
@@ -155,9 +126,7 @@ if [ "$AOSP_OK" = true ]; then
             if [ -L "$AOSP_WS/$rel" ]; then
                 resolved=$(realpath --relative-to="$AOSP_WS" "$AOSP_WS/$rel" 2>/dev/null || true)
                 if [ -n "$resolved" ]; then
-                    # 精确匹配或作为某个 repo 项目的子目录
                     if grep -Fxq "$resolved" "$REPO_LIST_FILE" 2>/dev/null; then continue; fi
-                    # 检查 resolved 的任何父目录是否是 repo 项目
                     local _parent="$resolved"
                     while [[ "$_parent" == */* ]]; do
                         _parent="${_parent%/*}"
@@ -184,12 +153,12 @@ if [ "$KERNEL_OK" = true ]; then
     step_begin "Step 1: Kernel 同步"
     cd "$KERNEL_WS"
 
-    BASE=$(find_upstream_base)
+    BASE=$(harness_find_upstream_base)
     if [ -z "$BASE" ]; then
-        log_error "无法确定 kernel upstream base commit"
+        harness_report_no_upstream "kernel"
         harness_exit 3
     fi
-    log_info "Upstream base: $(git log --oneline -1 "$BASE" 2>/dev/null | head -1 || on_err --continue "${BASH_LINENO[0]}" "$BASH_COMMAND" $?)"
+    log_info "Upstream base: $(git log --oneline -1 "$BASE" 2>/dev/null | head -1 || true)"
 
     echo "--- Modified ---"
     while IFS= read -r f; do
@@ -198,38 +167,56 @@ if [ "$KERNEL_OK" = true ]; then
         # 空差异检测（check-only 也判）：git diff --quiet 退出码 0 = 无差异 = workspace 已恢复上游原样
         if git diff --quiet "$BASE" -- "$f" 2>/dev/null; then
             if [ "$CHECK_ONLY" = true ]; then
-                print_prune "kernel/modified/${f}.diff (空diff，将清理)"
+                print_prune "kernel/modified/${f}.diff" "空diff，将清理"
             else
                 rm -f "$target"
-                print_prune "kernel/modified/${f}.diff (空diff，已恢复原样)"
+                print_prune "kernel/modified/${f}.diff" "空diff，已恢复原样"
             fi
             continue
         fi
         if [ "$CHECK_ONLY" = false ]; then
             mkdir -p "$(dirname "$target")"
-            git diff "$BASE" -- "$f" > "$target" 2>/dev/null || on_err --continue "${BASH_LINENO[0]}" "$BASH_COMMAND" $?
+            git diff "$BASE" -- "$f" > "$target" 2>/dev/null
         fi
-        [ -f "$target" ] && print_ok "kernel/modified/${f}.diff" || print_miss "kernel/modified/${f}.diff"
-    done < <(git diff "$BASE" --diff-filter=M --name-only 2>/dev/null | grep -vE "$EXCLUDE_RE")
+        if [ -f "$target" ]; then
+            print_ok "kernel/modified/${f}.diff"
+        else
+            print_miss "kernel/modified/${f}.diff"
+        fi
+    done < <(git diff "$BASE" --diff-filter=M --name-only 2>/dev/null | grep -vE "$HARNESS_EXCLUDE_RE" || true)
 
     echo "--- New (tracked) ---"
     while IFS= read -r f; do
         [ -z "$f" ] && continue
         target="$PATCH_ROOT/kernel/new/${f}"
-        if [ "$CHECK_ONLY" = false ]; then mkdir -p "$(dirname "$target")"; cp "$f" "$target"; fi
-        [ -f "$target" ] && print_ok "kernel/new/${f}" || print_miss "kernel/new/${f}"
-    done < <(git diff "$BASE" --diff-filter=ACR --name-only 2>/dev/null | grep -vE "$EXCLUDE_RE")
+        if [ "$CHECK_ONLY" = false ]; then
+            mkdir -p "$(dirname "$target")"
+            cp "$f" "$target"
+        fi
+        if [ -f "$target" ]; then
+            print_ok "kernel/new/${f}"
+        else
+            print_miss "kernel/new/${f}"
+        fi
+    done < <(git diff "$BASE" --diff-filter=ACR --name-only 2>/dev/null | grep -vE "$HARNESS_EXCLUDE_RE" || true)
 
     echo "--- New (untracked) ---"
     while IFS= read -r f; do
         [ -z "$f" ] && continue
         target="$PATCH_ROOT/kernel/new/${f}"
-        if [ "$CHECK_ONLY" = false ]; then mkdir -p "$(dirname "$target")"; cp "$f" "$target"; fi
-        [ -f "$target" ] && print_ok "kernel/new/${f}" || print_miss "kernel/new/${f}"
-    done < <(git ls-files --others --exclude-standard 2>/dev/null | grep -vE "$EXCLUDE_RE")
+        if [ "$CHECK_ONLY" = false ]; then
+            mkdir -p "$(dirname "$target")"
+            cp "$f" "$target"
+        fi
+        if [ -f "$target" ]; then
+            print_ok "kernel/new/${f}"
+        else
+            print_miss "kernel/new/${f}"
+        fi
+    done < <(git ls-files --others --exclude-standard 2>/dev/null | grep -vE "$HARNESS_EXCLUDE_RE" || true)
 
     # 编译产物汇总
-    skip_count=$( { git diff "$BASE" --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null; } | grep -cE "$EXCLUDE_RE" || true )
+    skip_count=$( { git diff "$BASE" --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null; } | grep -cE "$HARNESS_EXCLUDE_RE" || true )
     [ "$skip_count" -gt 0 ] && print_skip "kernel: ${skip_count} 个编译产物"
     step_end 0
 fi
@@ -243,18 +230,18 @@ if [ "$AOSP_OK" = true ]; then
 
     for proj_dir in $AOSP_CHANGED_PROJECTS; do
         cd "$AOSP_WS/$proj_dir"
-        BASE=$(find_upstream_base)
+        BASE=$(harness_find_upstream_base)
         if [ -z "$BASE" ]; then
-            BASE=$(git rev-parse HEAD 2>/dev/null)
-            log_warn "$proj_dir 无 upstream remote，使用 HEAD 作为 base（tracked 改动 diff 可能为空）"
+            harness_report_no_upstream "aosp:$proj_dir"
+            harness_exit 3
         fi
 
-        all_files=$( { git diff "$BASE" --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null; } )
-        real_count=$(echo "$all_files" | grep -vE "$EXCLUDE_RE" | grep -c '.' || true)
+        all_files=$( { git diff "$BASE" --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null; } || true)
+        real_count=$(echo "$all_files" | grep -vE "$HARNESS_EXCLUDE_RE" | grep -c '.' || true)
         [ -z "$real_count" ] && real_count=0
 
         if [ "$real_count" -eq 0 ]; then
-            skip_count=$(echo "$all_files" | grep -cE "$EXCLUDE_RE" || true)
+            skip_count=$(echo "$all_files" | grep -cE "$HARNESS_EXCLUDE_RE" || true)
             [ -z "$skip_count" ] && skip_count=0
             [ "$skip_count" -gt 0 ] && print_skip "${proj_dir}: ${skip_count} 个编译产物"
             cd "$AOSP_WS"; continue
@@ -268,35 +255,53 @@ if [ "$AOSP_OK" = true ]; then
             # 空差异检测（check-only 也判）：git diff --quiet 退出码 0 = 无差异 = workspace 已恢复上游原样
             if git diff --quiet "$BASE" -- "$f" 2>/dev/null; then
                 if [ "$CHECK_ONLY" = true ]; then
-                    print_prune "aosp/modified/${proj_dir}/${f}.diff (空diff，将清理)"
+                    print_prune "aosp/modified/${proj_dir}/${f}.diff" "空diff，将清理"
                 else
                     rm -f "$target"
-                    print_prune "aosp/modified/${proj_dir}/${f}.diff (空diff，已恢复原样)"
+                    print_prune "aosp/modified/${proj_dir}/${f}.diff" "空diff，已恢复原样"
                 fi
                 continue
             fi
             if [ "$CHECK_ONLY" = false ]; then
                 mkdir -p "$(dirname "$target")"
-                git diff "$BASE" -- "$f" > "$target" 2>/dev/null || on_err --continue "${BASH_LINENO[0]}" "$BASH_COMMAND" $?
+                git diff "$BASE" -- "$f" > "$target" 2>/dev/null
             fi
-            [ -f "$target" ] && print_ok "aosp/modified/${proj_dir}/${f}.diff" || print_miss "aosp/modified/${proj_dir}/${f}.diff"
-        done < <(git diff "$BASE" --diff-filter=M --name-only 2>/dev/null | grep -vE "$EXCLUDE_RE")
+            if [ -f "$target" ]; then
+                print_ok "aosp/modified/${proj_dir}/${f}.diff"
+            else
+                print_miss "aosp/modified/${proj_dir}/${f}.diff"
+            fi
+        done < <(git diff "$BASE" --diff-filter=M --name-only 2>/dev/null | grep -vE "$HARNESS_EXCLUDE_RE" || true)
 
         while IFS= read -r f; do
             [ -z "$f" ] && continue
             target="$PATCH_ROOT/aosp/new/${proj_dir}/${f}"
-            if [ "$CHECK_ONLY" = false ]; then mkdir -p "$(dirname "$target")"; cp "$f" "$target"; fi
-            [ -f "$target" ] && print_ok "aosp/new/${proj_dir}/${f}" || print_miss "aosp/new/${proj_dir}/${f}"
-        done < <(git diff "$BASE" --diff-filter=ACR --name-only 2>/dev/null | grep -vE "$EXCLUDE_RE")
+            if [ "$CHECK_ONLY" = false ]; then
+                mkdir -p "$(dirname "$target")"
+                cp "$f" "$target"
+            fi
+            if [ -f "$target" ]; then
+                print_ok "aosp/new/${proj_dir}/${f}"
+            else
+                print_miss "aosp/new/${proj_dir}/${f}"
+            fi
+        done < <(git diff "$BASE" --diff-filter=ACR --name-only 2>/dev/null | grep -vE "$HARNESS_EXCLUDE_RE" || true)
 
         while IFS= read -r f; do
             [ -z "$f" ] && continue
             target="$PATCH_ROOT/aosp/new/${proj_dir}/${f}"
-            if [ "$CHECK_ONLY" = false ]; then mkdir -p "$(dirname "$target")"; cp "$f" "$target"; fi
-            [ -f "$target" ] && print_ok "aosp/new/${proj_dir}/${f}" || print_miss "aosp/new/${proj_dir}/${f}"
-        done < <(git ls-files --others --exclude-standard 2>/dev/null | grep -vE "$EXCLUDE_RE")
+            if [ "$CHECK_ONLY" = false ]; then
+                mkdir -p "$(dirname "$target")"
+                cp "$f" "$target"
+            fi
+            if [ -f "$target" ]; then
+                print_ok "aosp/new/${proj_dir}/${f}"
+            else
+                print_miss "aosp/new/${proj_dir}/${f}"
+            fi
+        done < <(git ls-files --others --exclude-standard 2>/dev/null | grep -vE "$HARNESS_EXCLUDE_RE" || true)
 
-        skip_count=$(echo "$all_files" | grep -cE "$EXCLUDE_RE" || true)
+        skip_count=$(echo "$all_files" | grep -cE "$HARNESS_EXCLUDE_RE" || true)
         [ -z "$skip_count" ] && skip_count=0
         [ "$skip_count" -gt 0 ] && print_skip "${proj_dir}: ${skip_count} 个编译产物"
         cd "$AOSP_WS"
@@ -310,9 +315,16 @@ if [ "$AOSP_OK" = true ]; then
             [ ! -d "$nr_dir" ] && continue
             while IFS= read -r f; do
                 target="$PATCH_ROOT/aosp/new/${f}"
-                if [ "$CHECK_ONLY" = false ]; then mkdir -p "$(dirname "$target")"; cp "$AOSP_WS/$f" "$target"; fi
-                [ -f "$target" ] && print_ok "aosp/new/${f}" || print_miss "aosp/new/${f}"
-            done < <(find "$nr_dir" -type f 2>/dev/null | grep -vE "$EXCLUDE_RE")
+                if [ "$CHECK_ONLY" = false ]; then
+                    mkdir -p "$(dirname "$target")"
+                    cp "$AOSP_WS/$f" "$target"
+                fi
+                if [ -f "$target" ]; then
+                    print_ok "aosp/new/${f}"
+                else
+                    print_miss "aosp/new/${f}"
+                fi
+            done < <(find "$nr_dir" -type f 2>/dev/null | grep -vE "$HARNESS_EXCLUDE_RE" || true)
         done
     fi
     step_end 0
@@ -338,7 +350,7 @@ sync_prune() {
             local suffix=""; [ "$strip_diff" = 1 ] && suffix=".diff"
             local label="${subpath}/${rel}${suffix}"
             if [ "$CHECK_ONLY" = true ]; then
-                print_stale "${label} (将删除)"
+                print_stale "${label}" "将删除"
             elif [ "$PRUNE" = true ]; then
                 rm -f "$pfile"
                 print_prune "$label"
@@ -346,7 +358,7 @@ sync_prune() {
                 print_stale "$label"
             fi
         fi
-    done < <(find "$full_dir" -type f -print0 2>/dev/null)
+    done < <(find "$full_dir" -type f -print0 2>/dev/null || true)
 }
 
 if [ "$KERNEL_OK" = true ]; then
@@ -365,7 +377,7 @@ fi
 if [ "$CHECK_ONLY" = false ] && [ "$PRUNE" = true ]; then
     find "$PATCH_ROOT/kernel/modified" "$PATCH_ROOT/kernel/new" \
          "$PATCH_ROOT/aosp/modified" "$PATCH_ROOT/aosp/new" \
-         -type d -empty -delete 2>/dev/null
+         -type d -empty -delete 2>/dev/null || true
 fi
 
 if [ "$TOTAL_PRUNE" -eq 0 ] && [ "$TOTAL_STALE" -eq 0 ]; then
@@ -400,7 +412,7 @@ _manifest_emit() {
     done
 }
 
-MANIFEST_TMP=$(mktemp /tmp/manifest.XXXXXX)
+MANIFEST_TMP=$(harness_tmp_file "manifest.yaml")
 {
     echo "# Auto-generated by sync_code_to_patchs.sh — patch↔workspace 结构映射。"
     echo "# 禁止手动编辑。README.md（人类可读）由 AI 基于此文件维护。"
@@ -422,6 +434,16 @@ MANIFEST_TMP=$(mktemp /tmp/manifest.XXXXXX)
         fi
     fi
 } > "$MANIFEST_TMP"
+
+# manifest 内容完整性校验：非空且含合法结构头
+if [ ! -s "$MANIFEST_TMP" ]; then
+    log_error "manifest 临时文件为空，中止更新"
+    rm -f "$MANIFEST_TMP"
+    harness_exit 1
+fi
+if ! grep -qE '^(kernel|aosp|others):' "$MANIFEST_TMP" 2>/dev/null; then
+    log_warn "manifest 无任何 section（可能全部为空）"
+fi
 
 # 归档本次生成的 manifest 临时文件（供回溯）
 artifact_register "$MANIFEST_TMP" "manifest.yaml"

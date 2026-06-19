@@ -26,7 +26,11 @@ bash engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh --
 bash engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh --no-prune    # 仅添加/更新，不删除对齐
 ```
 
+脚本采用模式 B（`set -eo pipefail` + `--with-errexit`），任何写操作失败立即终止（fail-fast），保证 `patchs/rpi5` 文件树与 `manifest.yaml` 的一致性。`manifest.yaml` 更新前会校验临时文件完整性，前序步骤失败时 manifest 不更新。`manifest`、`repolist` 等中间产物自动归档到 `engineering/harness/log/sync_code_to_patchs/artifacts/`。
+
 脚本自动完成：扫描 workspace → 归档到 patchs → 清理空 diff → 删除对齐（workspace 已无的 patchs 文件）→ 重生成 manifest.yaml。
+
+**前置约束**：所有参与的 git 仓库（kernel、有改动的 AOSP repo 项目）必须配置 upstream（`@{upstream}` 或 `branch.<name>.remote/merge`），否则脚本报错退出 3。
 
 ### 3. 检查输出（必须）
 

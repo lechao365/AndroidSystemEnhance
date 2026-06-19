@@ -9,17 +9,10 @@ set -uo pipefail
 # 退出码:  0=成功; 1=通用失败; 2=push失败(commit已保留); 3=参数/环境错误; 4=无改动可提交
 # ============================================================================
 
-# --- 锚点查找 REPO_ROOT -----------------------------------------------------
+# --- 锚点 + 公共库（bootstrap 统一入口）-------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$SCRIPT_DIR"
-while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/AGENTS.md" ]; do
-    REPO_ROOT="$(dirname "$REPO_ROOT")"
-done
-[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 3; }
-
-# --- 接入维测库 -------------------------------------------------------------
-# shellcheck source=../../lib/harness_observability.sh
-source "$REPO_ROOT/engineering/harness/lib/harness_observability.sh"
+# shellcheck source=../../lib/harness_bootstrap.sh
+source "$SCRIPT_DIR/../../lib/harness_bootstrap.sh"
 
 harness_init "commit_and_push"
 
@@ -103,6 +96,7 @@ step_begin "Step 2: 提交"
 git commit -F "$MESSAGE_FILE" || on_err "${BASH_LINENO[0]}" "$BASH_COMMAND" $?
 COMMIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 log_info "提交成功: $COMMIT_HASH"
+log_result "COMMIT 结果" "commit=$COMMIT_HASH" "branch=$BRANCH" "staged=$STAGED_COUNT"
 step_end 0
 
 # ============================================================================
@@ -111,8 +105,7 @@ step_end 0
 if [ "$NO_PUSH" = true ]; then
     log_info "--no-push 模式，跳过推送"
     step_begin "完成（未推送）"
-    echo "  commit: $COMMIT_HASH"
-    echo "  分支:   $BRANCH (仅本地)"
+    log_result "PUSH 结果" "pushed=false" "commit=$COMMIT_HASH" "branch=$BRANCH"
     step_end 0
     harness_exit 0
 fi
@@ -123,10 +116,7 @@ log_warn "push 失败时 commit 已保留（本地 $COMMIT_HASH），未自动�
 git push "$REMOTE" "$BRANCH" || on_err --exit-code 2 "${BASH_LINENO[0]}" "$BASH_COMMAND" $?
 REMOTE_URL=$(git remote get-url "$REMOTE" 2>/dev/null || echo "unknown")
 log_info "推送成功: $REMOTE/$BRANCH ($REMOTE_URL)"
+log_result "PUSH 结果" "pushed=true" "commit=$COMMIT_HASH" "remote=$REMOTE" "branch=$BRANCH" "remote_url=$REMOTE_URL"
 step_end 0
 
-step_begin "完成"
-echo "  commit: $COMMIT_HASH"
-echo "  推送:   $REMOTE/$BRANCH ($REMOTE_URL)"
-step_end 0
 harness_exit 0

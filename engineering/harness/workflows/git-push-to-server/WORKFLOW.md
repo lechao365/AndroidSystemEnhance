@@ -18,7 +18,9 @@ bash engineering/harness/workflows/git-push-to-server/collect_diff.sh           
 bash engineering/harness/workflows/git-push-to-server/collect_diff.sh --stat-only  # 仅 status + stat，跳过 diff 正文
 ```
 
-脚本输出当前分支、远程、git status、改动统计、diff 正文。无改动时输出 `nothing to commit` 并退出码 1，AI 见此**停止流程**。
+脚本输出当前分支、远程、git status、改动统计、diff 正文。无改动时输出 `nothing to commit` 并退出码 4（无操作，非错误），AI 见此**停止流程**。
+
+**空仓库/全 untracked 场景**：脚本无论 HEAD 是否存在，都会收集 `git ls-files --others --exclude-standard` 作为 untracked 列表，并输出每个新文件的完整内容（或大 diff 降级时输出前 20 行）。因此新仓初始化场景下 AI 也能拿到足够上下文生成 commit message。空仓库时 stat 段会输出简化版并标注"空仓库，无 upstream base"。
 
 **大 diff 降级**（>50 文件或 >5000 行）：脚本自动改为输出 `--stat` + 每个文件前 20 行摘要，末尾提示"diff 已截断"。AI 基于摘要生成 message。
 
@@ -126,7 +128,7 @@ bash engineering/harness/workflows/git-push-to-server/commit_and_push.sh \
 
 | 场景 | 处理 |
 |------|------|
-| 无改动 | collect_diff.sh 输出 `nothing to commit` + 退出码 1，AI 停止流程 |
+| 无改动 | collect_diff.sh 输出 `nothing to commit` + 退出码 4（无操作），AI 停止流程 |
 | diff 过大（>50 文件或 >5000 行） | collect 自动降级为 --stat + 每文件前 20 行摘要 |
 | push 失败 | 保留 commit，脚本退出码 2，提示手动处理（不自动回退） |
 | AI 生成失败 | 停下提示用户手动写 message |

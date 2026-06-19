@@ -3,14 +3,26 @@
 # harness_observability.sh — harness 脚本维测公共库
 # 规则详见: engineering/harness/rules/script-observability.md
 #
-# 所有 engineering/ 下 bash 脚本 source 本库后调用：
-#   harness_init "script-name"           # 初始化（模式 A）
-#   harness_init --with-errexit "name"   # 初始化（模式 B，配合 set -e）
-#   log_info / log_warn / log_error      # 双格式日志
-#   step_begin / step_end                # 结构化 step
-#   on_err ...                           # 错误现场捕获
-#   artifact_register                    # 中间产物归档
-#   harness_exit [code]                  # 收尾退出
+# API 分层:
+#   公共 API (业务脚本可自由调用):
+#     harness_init [--with-errexit] "<script-name>"   初始化
+#     harness_exit [code]                             收尾退出
+#     log_info / log_warn / log_error                 双格式日志
+#     step_begin / step_end                           结构化 step
+#     on_err ...                                      错误现场捕获
+#     artifact_register <src> <name>                  中间产物归档
+#     log_result "<title>" "k=v" ...                  结构化结果记录
+#     harness_status_emit <status> <label> [msg]      逐文件状态输出
+#     harness_on_exit_add "<cmd>"                     注册 EXIT 回调
+#     harness_tmp_file / harness_tmp_dir <name>       临时文件/目录
+#     harness_log_file / harness_artifacts_dir        路径查询
+#     harness_now_iso / harness_started_at_epoch      时间 API
+#     harness_git_current_branch / harness_git_upstream_ref
+#     harness_find_upstream_base                      upstream 基线
+#     harness_report_no_upstream "<ctx>"              upstream 缺失报错
+#
+#   私有 API (以下划线开头，业务脚本禁止直接依赖):
+#     _h_* / _H_*                                     库内部实现
 # ============================================================================
 
 # 防止重复 source
@@ -31,6 +43,13 @@ _H_STEP_TITLES=()       # 各 step 标题
 _H_STEP_DURATIONS=()    # 各 step 耗时秒
 _H_INIT_TS=0            # harness_init epoch
 _H_ERREXIT=false        # 是否模式 B
+_H_EXIT_HOOKS=()        # EXIT 回调列表（业务脚本可注册 cleanup）
+
+# --- workspace 同步专用共享常量（sync/revert 脚本复用，保证 diff 基线一致）---
+# 排除规则：grep -E 模式（构建系统约定，不会因定制变更）
+HARNESS_EXCLUDE_RE='\.o$|\.ko$|\.cmd$|\.symvers$|^Image$|\.dtb$|\.dtbo$|\.prebuilt$|\.prev$|overlays\.prebuilt|overlays\.prev|\.prebuilt/|\.prev/'
+# 排除规则：目录 basename
+HARNESS_EXCLUDE_DIR_RE='^(out|prebuilts)$'
 
 # --- 颜色（仅 stdout 用，日志文件不含 ANSI）---------------------------------
 _H_RED='\033[0;31m'
@@ -52,11 +71,16 @@ _h_ts_iso() {
 # 用法: _h_log_file_write <level> <msg> [extra_kv...]
 _h_log_file_write() {
     local level="$1" msg="$2"; shift 2
-    local line="ts=$(_h_ts_iso) level=$level step=${_H_STEP_CURRENT}/? script=${_H_SCRIPT_NAME} msg=\"${msg}\""
+    # 转义 msg 中的双引号，避免破坏结构化键值格式
+    local esc_msg="${msg//\"/\\\"}"
+    local line="ts=$(_h_ts_iso) level=$level step=${_H_STEP_CURRENT}/? script=${_H_SCRIPT_NAME} msg=\"${esc_msg}\""
     # 追加额外键值（如 failed_cmd=/lineno=/exit=/stack=）
     local kv
     for kv in "$@"; do
-        line+=" ${kv%%=*}=\"${kv#*=}\""
+        # 转义 value 部分的双引号
+        local esc_kv_v="${kv#*=}"
+        esc_kv_v="${esc_kv_v//\"/\\\"}"
+        line+=" ${kv%%=*}=\"${esc_kv_v}\""
     done
     printf '%s\n' "$line" >> "$_H_LOG_FILE"
 }
@@ -102,7 +126,7 @@ harness_init() {
     _h_rotate_logs
 
     # 注册 trap
-    # EXIT trap：收尾（汇总、复制 latest.log、artifact 轮转）
+    # EXIT trap：收尾（执行 hooks、汇总、复制 latest.log、artifact 轮转）
     trap '_h_finalize' EXIT
     # 模式 B：ERR trap 自动触发 on_err 现场捕获（退出由 set -e 完成）
     if [ "$_H_ERREXIT" = true ]; then
@@ -139,9 +163,14 @@ _h_rotate_logs() {
     done
 }
 
-# EXIT trap 收尾
+# EXIT trap 收尾（先执行业务 hooks，再汇总、轮转）
 _h_finalize() {
     local exit_code=$?
+    # 执行业务脚本注册的 EXIT 回调（cleanup 等）
+    local hook
+    for hook in "${_H_EXIT_HOOKS[@]}"; do
+        eval "$hook" 2>/dev/null || true
+    done
     # 若处于某个 step 内未正常结束，标记 INCOMPLETE
     if [ -n "$_H_STEP_TITLE" ]; then
         _H_STEP_STATES+=("INCOMPLETE")
@@ -165,6 +194,10 @@ _h_print_summary() {
         [ "${_H_STEP_STATES[i]}" != "OK" ] && failed=$((failed + 1))
     done
     local dur=$(( $(date +%s) - _H_INIT_TS ))
+    local artifact_count=0
+    if [ -d "$_H_ARTIFACTS_DIR" ]; then
+        artifact_count=$(ls -1 "$_H_ARTIFACTS_DIR"/${_H_TS}-* 2>/dev/null | wc -l)
+    fi
     {
         echo ""
         echo "=========================================="
@@ -172,10 +205,11 @@ _h_print_summary() {
         echo " 退出码:   $exit_code"
         echo " Step:     $total 个 ($failed 个失败)"
         echo " 耗时:     ${dur}s"
+        echo " Artifacts: $artifact_count 个 ($_H_ARTIFACTS_DIR)"
         echo " 日志:     $_H_LOG_FILE"
         echo "=========================================="
     } >&1
-    _h_log_file_write "INFO" "脚本结束: exit=$exit_code duration=${dur}s steps=$total failed=$failed"
+    _h_log_file_write "INFO" "脚本结束: exit=$exit_code duration=${dur}s steps=$total failed=$failed artifacts=$artifact_count"
 }
 
 # ============================================================================
@@ -195,6 +229,25 @@ log_error() {
     _h_log_file_write "ERROR" "$*"
     # 错误走 stderr，便于 2>error.log 分流
     printf "${_H_RED}[ERROR]${_H_NC} %s\n" "$*" >&2
+}
+
+# ============================================================================
+# log_result — 结构化结果记录（成功路径关键产物落日志）
+# 用法: log_result "<title>" "k1=v1" "k2=v2" ...
+# ============================================================================
+log_result() {
+    local title="$1"; shift
+    printf "\n%s\n" "$title"
+    local kv
+    for kv in "$@"; do
+        printf "  %s\n" "$kv"
+    done
+    # 写结构化日志
+    local line="result: $title"
+    for kv in "$@"; do
+        line+=" $kv"
+    done
+    _h_log_file_write "INFO" "$line"
 }
 
 # ============================================================================
@@ -223,6 +276,28 @@ step_end() {
         printf "${_H_RED}[STEP %s]${_H_NC} FAILED (exit=%s, took %ss)\n" "$_H_STEP_CURRENT" "$rc" "$dur"
     fi
     _H_STEP_TITLE=""
+}
+
+# ============================================================================
+# harness_status_emit — 逐文件状态输出（统一终端 + 日志格式）
+# 用法: harness_status_emit <OK|MISS|SKIP|STALE|PRUNE> <label> [message]
+# ============================================================================
+harness_status_emit() {
+    local status="$1" label="$2" msg="${3:-}"
+    local color
+    case "$status" in
+        OK)        color="$_H_GREEN" ;;
+        MISS)      color="$_H_RED" ;;
+        SKIP|STALE) color="$_H_YELLOW" ;;
+        PRUNE)     color="$_H_BLUE" ;;
+        *)         color="$_H_NC" ;;
+    esac
+    printf "  ${color}%-5s${_H_NC} %s\n" "$status" "$label"
+    if [ -n "$msg" ]; then
+        _h_log_file_write "INFO" "status=$status label=\"$label\" msg=\"$msg\""
+    else
+        _h_log_file_write "INFO" "status=$status label=\"$label\""
+    fi
 }
 
 # ============================================================================
@@ -280,16 +355,56 @@ _h_on_err_trapped() {
 }
 
 # ============================================================================
+# harness_on_exit_add — 注册 EXIT 回调（在 lib 收尾前执行）
+# 用法: harness_on_exit_add "<command>"
+# ============================================================================
+harness_on_exit_add() {
+    _H_EXIT_HOOKS+=("$1")
+}
+
+# ============================================================================
+# harness_tmp_file / harness_tmp_dir — 临时文件/目录（落入 artifacts，统一轮转）
+# 用法: local f; f=$(harness_tmp_file "name")
+#       local d; d=$(harness_tmp_dir "name")
+# ============================================================================
+harness_tmp_file() {
+    local name="${1:-tmp}"
+    name="${name//[^a-zA-Z0-9_.-]/_}"
+    local f="$_H_ARTIFACTS_DIR/$_H_TS-tmp-${name}"
+    # 保证唯一性（同秒多次调用）
+    local i=0
+    while [ -e "$f" ]; do i=$((i + 1)); f="$_H_ARTIFACTS_DIR/$_H_TS-tmp-${name}-${i}"; done
+    : > "$f"
+    printf '%s' "$f"
+}
+
+harness_tmp_dir() {
+    local name="${1:-tmpdir}"
+    name="${name//[^a-zA-Z0-9_.-]/_}"
+    local d="$_H_ARTIFACTS_DIR/$_H_TS-tmpdir-${name}"
+    local i=0
+    while [ -e "$d" ]; do i=$((i + 1)); d="$_H_ARTIFACTS_DIR/$_H_TS-tmpdir-${name}-${i}"; done
+    mkdir -p "$d"
+    printf '%s' "$d"
+}
+
+# ============================================================================
 # artifact_register（中间产物归档）
 # ============================================================================
 artifact_register() {
     local src="$1" name="$2"
     local dest="$_H_ARTIFACTS_DIR/$_H_TS-$name"
     if [ -f "$src" ]; then
-        cp -f "$src" "$dest"
+        cp -f "$src" "$dest" || {
+            _h_log_file_write "ERROR" "artifact 归档失败(文件): $name src=$src"
+            return 1
+        }
         _h_log_file_write "INFO" "artifact 归档: $name -> $dest"
     elif [ -d "$src" ]; then
-        cp -rf "$src" "$dest"
+        cp -rf "$src" "$dest" || {
+            _h_log_file_write "ERROR" "artifact 归档失败(目录): $name src=$src"
+            return 1
+        }
         _h_log_file_write "INFO" "artifact 归档(目录): $name -> $dest"
     else
         _h_log_file_write "WARN" "artifact 源不存在: $src"
@@ -337,7 +452,7 @@ harness_exit() {
 }
 
 # ============================================================================
-# 工具函数
+# 路径查询
 # ============================================================================
 harness_log_file() {
     printf '%s' "$_H_LOG_FILE"
@@ -345,4 +460,69 @@ harness_log_file() {
 
 harness_artifacts_dir() {
     printf '%s' "$_H_ARTIFACTS_DIR"
+}
+
+# ============================================================================
+# 时间 API
+# ============================================================================
+harness_now_iso() {
+    _h_ts_iso
+}
+
+harness_started_at_epoch() {
+    printf '%s' "$_H_INIT_TS"
+}
+
+# ============================================================================
+# Git upstream 基线检测（显式策略，禁止猜测）
+# ============================================================================
+
+# harness_git_current_branch — 返回当前分支名（detached HEAD 返回空串）
+harness_git_current_branch() {
+    local branch
+    branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    [ "$branch" = "HEAD" ] && branch=""
+    printf '%s' "$branch"
+}
+
+# harness_git_upstream_ref — 返回当前分支的 upstream ref（如 origin/main），无则空
+harness_git_upstream_ref() {
+    local ups=""
+    # 优先用 git 的 @{upstream}
+    ups=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || echo "")
+    if [ -z "$ups" ]; then
+        # 兜底：从 branch config 读 remote + merge
+        local branch remote merge
+        branch=$(harness_git_current_branch)
+        [ -z "$branch" ] && { printf ''; return; }
+        remote=$(git config "branch.${branch}.remote" 2>/dev/null || echo "")
+        merge=$(git config "branch.${branch}.merge" 2>/dev/null || echo "")
+        if [ -n "$remote" ] && [ -n "$merge" ]; then
+            # merge 形如 refs/heads/main，取 short
+            local short="${merge#refs/heads/}"
+            short="${short#refs/heads}"
+            ups="${remote}/${short}"
+        fi
+    fi
+    printf '%s' "$ups"
+}
+
+# harness_find_upstream_base — 返回 merge-base HEAD <upstream-ref>，无 upstream 返回空
+# 注意：不做任意 remote 猜测，调用者需对空返回值做显式失败处理
+harness_find_upstream_base() {
+    local ups base
+    ups=$(harness_git_upstream_ref)
+    [ -z "$ups" ] && { printf ''; return; }
+    base=$(git merge-base HEAD "$ups" 2>/dev/null || echo "")
+    printf '%s' "$base"
+}
+
+# harness_report_no_upstream — upstream 缺失时的统一错误报告
+# 用法: harness_report_no_upstream "<上下文描述>"
+harness_report_no_upstream() {
+    local ctx="${1:-当前仓库}"
+    local branch
+    branch=$(harness_git_current_branch)
+    log_error "${ctx} 无法确定 upstream base（分支: ${branch:-detached}）"
+    log_error "请设置 upstream: git branch --set-upstream-to=origin/${branch:-<branch>}"
 }

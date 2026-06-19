@@ -8,17 +8,10 @@ set -uo pipefail
 # 退出码:  0=有改动（正常输出）; 3=参数/环境错误; 4=无改动（输出 nothing to commit）
 # ============================================================================
 
-# --- 锚点查找 REPO_ROOT -----------------------------------------------------
+# --- 锚点 + 公共库（bootstrap 统一入口）-------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$SCRIPT_DIR"
-while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/AGENTS.md" ]; do
-    REPO_ROOT="$(dirname "$REPO_ROOT")"
-done
-[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 3; }
-
-# --- 接入维测库 -------------------------------------------------------------
-# shellcheck source=../../lib/harness_observability.sh
-source "$REPO_ROOT/engineering/harness/lib/harness_observability.sh"
+# shellcheck source=../../lib/harness_bootstrap.sh
+source "$SCRIPT_DIR/../../lib/harness_bootstrap.sh"
 
 harness_init "collect_diff"
 
@@ -26,9 +19,6 @@ harness_init "collect_diff"
 # diff 过大阈值
 MAX_FILES=50
 MAX_LINES=5000
-
-# 空仓库兜底：UNTRACKED 仅在 HEAD 存在分支赋值，空仓库场景需预定义
-UNTRACKED=""
 
 # ============================================================================
 # 参数解析
@@ -40,7 +30,7 @@ for arg in "$@"; do
         -h|--help)
             echo "Usage: bash engineering/harness/workflows/git-push-to-server/collect_diff.sh [--stat-only]"
             echo "  --stat-only  只输出分支 + status + --stat，不输出 diff 正文"
-            exit 0 ;;
+            harness_exit 0 ;;
         *) log_error "未知参数: $arg"; harness_exit 3 ;;
     esac
 done
@@ -72,8 +62,11 @@ fi
 # 文件数统计
 FILE_COUNT=$(echo "$STATUS_OUTPUT" | grep -c '.' || true)
 
+# untracked 列表：无论 HEAD 是否存在都收集（空仓库也能拿到新增文件正文）
+UNTRACKED=$(git ls-files --others --exclude-standard 2>/dev/null || true)
+
 # ============================================================================
-# 输出格式化
+# 输出格式化（报告正文允许裸 echo，诊断走 log_*）
 # ============================================================================
 step_begin "收集 git push 上下文"
 echo "当前分支: $CURRENT_BRANCH"
@@ -87,16 +80,15 @@ echo ""
 
 # --- 改动统计 (--stat) ---
 echo "========== 改动统计 (--stat) =========="
-# HEAD 可能不存在（空仓库），用双保险：优先 HEAD，失败则用空树
 if [ "$HEAD_SHORT" = "none" ]; then
-    # 空仓库：所有文件都是新增，用 ls-files + status 拼 stat
+    # 空仓库：所有文件都是新增，用 status 拼简化 stat
     git status --porcelain | cut -c4- | sed 's/^/ /' || true
-    echo "(空仓库，无法生成 stat)"
+    echo "(空仓库，无 upstream base，以上为全部 untracked 文件)"
+    log_info "空仓库场景（HEAD 不存在），stat 使用简化版"
 else
     # tracked 改动 stat
     git --no-pager diff HEAD --stat 2>/dev/null || true
     # untracked 文件不在 diff HEAD 里，单独列行数
-    UNTRACKED=$(git ls-files --others --exclude-standard 2>/dev/null)
     if [ -n "$UNTRACKED" ]; then
         echo "--- untracked (新增, 未追踪) ---"
         echo "$UNTRACKED" | while IFS= read -r f; do
@@ -132,7 +124,7 @@ else
         echo "========== DIFF 内容 (已降级: $FILE_COUNT 文件 / $DIFF_LINES 行) =========="
         echo "⚠ diff 已截断（超过阈值 $MAX_FILES 文件或 $MAX_LINES 行），AI 基于 stat + 文件摘要生成 message"
         echo ""
-        # tracked 改动：每文件前 20 行
+        # tracked 改动：每文件前 20 行（仅 HEAD 存在时）
         if [ "$HEAD_SHORT" != "none" ]; then
             CHANGED_FILES=$(git --no-pager diff HEAD --name-only 2>/dev/null)
             echo "$CHANGED_FILES" | while IFS= read -r f; do
