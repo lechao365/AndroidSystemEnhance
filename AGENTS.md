@@ -14,6 +14,11 @@
 
 所有 PlantUML 图表编写前，必须参考 [engineering/harness/rules/plantuml.md](engineering/harness/rules/plantuml.md) 中的规则，防止渲染失败。
 
+## 脚本维测规则（observability）
+
+改动 `engineering/` 下任何 bash 脚本（含 workflows/、scripts/、未来 loop/ 等）前，必须先加载 [engineering/harness/rules/script-observability.md](engineering/harness/rules/script-observability.md)。
+该规则强制要求：source 公共库、接入文件日志、结构化 step、错误现场捕获、统一退出码、中间产物归档。`engineering/harness/log/` 为本地维测产物，不归档。
+
 ## 权限规则
 
 继承全局权限规则。项目额外自动放行：`~/workspace/` 目录下所有文件的增删改查。

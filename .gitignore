@@ -3,3 +3,8 @@
 .opencode/package.json
 .opencode/package-lock.json
 .opencode/bun.lock
+
+
+# harness 脚本维测日志（本地产物，不归档）
+engineering/harness/log/*
+!engineering/harness/log/.gitkeep
