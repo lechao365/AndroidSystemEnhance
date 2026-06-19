@@ -59,14 +59,29 @@ rp5-serial/
 
 ### Windows Host 前台启动
 
-```bash
-# 在 Windows Python 环境下
-cd <repo-root>/engineering/loop/connection/providers/rp5-serial
-PYTHONPATH=python python -m rp5_serial.host.server --port COM3 --baudrate 115200 --listen-port 9700
+**推荐方式**：使用一键启动脚本（双击或 CMD 运行）
+
+```bat
+REM 默认参数: COM5 / 115200 / 9700
+engineering\loop\scripts\start_rp5_serial_host.bat
+
+REM 自定义 COM 口
+engineering\loop\scripts\start_rp5_serial_host.bat COM3
+
+REM 全参数自定义
+engineering\loop\scripts\start_rp5_serial_host.bat COM3 9600 9800
+```
+
+**手动方式**（备用）：
+
+```bat
+cd <repo-root>\engineering\loop\connection\providers\rp5-serial
+set PYTHONPATH=python
+python -m rp5_serial.host.server --port COM5 --baudrate 115200 --listen-port 9700
 ```
 
 参数：
-- `--port`：物理串口名（COM3 / /dev/ttyUSB0）
+- `--port`：物理串口名（COM5 / COM3 / /dev/ttyUSB0）
 - `--baudrate`：波特率（默认 115200）
 - `--listen-host`：TCP 监听地址（默认 0.0.0.0）
 - `--listen-port`：TCP 监听端口（默认 9700）

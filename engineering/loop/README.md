@@ -8,6 +8,7 @@
 - `connection/`：连接域，定义协议、provider profile 与具体 provider 实现
 - `workflows/`：业务闭环（如启动失败调试），消费 core + connection
 - `profiles/`：设备级/场景级配置
+- `scripts/`：可直接运行的入口脚本（如 Windows `.bat` 快速启动）
 
 ## 已实现模块
 
