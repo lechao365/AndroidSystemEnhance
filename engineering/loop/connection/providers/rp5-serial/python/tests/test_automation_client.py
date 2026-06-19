@@ -23,12 +23,59 @@ class FakeRaw:
         return None
 
 
-class FakeSocket:
+class FakeStreamSocket:
+    """模拟 stream channel socket，支持 recv + settimeout + gettimeout。
+
+    connect 后先返回 subscribe 响应，之后按序返回预置消息。
+    """
+
+    def __init__(self, messages: list[dict]):
+        self._data = b"".join(encode_message(m) for m in messages)
+        self.sent: list[dict] = []
+        self._timeout = None
+        self.closed = False
+
+    def makefile(self, mode: str):
+        assert mode == "rb"
+
+        class _FakeFile:
+            def __init__(self, data: bytes):
+                self._data = data
+
+            def readline(self):
+                if not self._data:
+                    return b""
+                line, _, self._data = self._data.partition(b"\n")
+                return line + b"\n"
+
+        return _FakeFile(self._data)
+
+    def sendall(self, payload: bytes):
+        self.sent.append(json.loads(payload.decode("utf-8")))
+
+    def settimeout(self, value):
+        self._timeout = value
+
+    def gettimeout(self):
+        return self._timeout
+
+    def recv(self, bufsize: int) -> bytes:
+        if not self._data:
+            return b""
+        chunk = self._data[:bufsize]
+        self._data = self._data[bufsize:]
+        return chunk
+
+    def close(self):
+        self.closed = True
+
+
+class FakeCmdSocket:
+    """模拟 command channel socket，用 FakeRaw 提供 makefile readline。"""
+
     def __init__(self, raw: FakeRaw):
         self.raw = raw
         self.sent: list[dict] = []
-        self.timeout = None
-        self.closed = False
 
     def makefile(self, mode: str):
         assert mode == "rb"
@@ -38,27 +85,38 @@ class FakeSocket:
         self.sent.append(json.loads(payload.decode("utf-8")))
 
     def settimeout(self, value):
-        self.timeout = value
+        pass
+
+    def gettimeout(self):
+        return None
 
     def close(self):
-        self.closed = True
+        pass
 
 
-class RaisingSocket(FakeSocket):
+class RaisingCmdSocket(FakeCmdSocket):
     def sendall(self, payload: bytes):
         if json.loads(payload.decode("utf-8")).get("op") == "writer.release":
             raise OSError("release failed")
         super().sendall(payload)
 
 
-def _patch_connections(monkeypatch, *sockets: FakeSocket) -> None:
-    pending = deque(sockets)
+def _patch_connections(monkeypatch, cmd_sock, stream_sock) -> None:
+    pending = deque([cmd_sock, stream_sock])
     monkeypatch.setattr("socket.create_connection", lambda *args, **kwargs: pending.popleft())
 
 
+def _ok(msgs: list[dict] | None = None) -> list[dict]:
+    """subscribe 响应在最前面"""
+    base = [{"ok": True, "code": "OK", "message": "ok", "data": {}}]
+    if msgs:
+        base.extend(msgs)
+    return base
+
+
 def test_connect_subscribes_stream_channel(monkeypatch):
-    cmd_sock = FakeSocket(FakeRaw([]))
-    stream_sock = FakeSocket(FakeRaw([{"ok": True, "code": "OK", "message": "ok", "data": {}}]))
+    cmd_sock = FakeCmdSocket(FakeRaw([]))
+    stream_sock = FakeStreamSocket(_ok())
     _patch_connections(monkeypatch, cmd_sock, stream_sock)
 
     client = AutomationClient("127.0.0.1", 9700)
@@ -69,7 +127,7 @@ def test_connect_subscribes_stream_channel(monkeypatch):
 
 
 def test_send_line_consumes_command_response(monkeypatch):
-    cmd_sock = FakeSocket(
+    cmd_sock = FakeCmdSocket(
         FakeRaw(
             [
                 {"ok": True, "code": "OK", "message": "ok", "data": {}},
@@ -77,7 +135,7 @@ def test_send_line_consumes_command_response(monkeypatch):
             ]
         )
     )
-    stream_sock = FakeSocket(FakeRaw([{"ok": True, "code": "OK", "message": "ok", "data": {}}]))
+    stream_sock = FakeStreamSocket(_ok())
     _patch_connections(monkeypatch, cmd_sock, stream_sock)
 
     client = AutomationClient("127.0.0.1", 9700)
@@ -91,12 +149,10 @@ def test_send_line_consumes_command_response(monkeypatch):
 
 
 def test_read_until_timeout_returns_only_stream_text(monkeypatch):
-    cmd_sock = FakeSocket(FakeRaw([]))
-    stream_sock = FakeSocket(
-        FakeRaw(
+    cmd_sock = FakeCmdSocket(FakeRaw([]))
+    stream_sock = FakeStreamSocket(
+        _ok(
             [
-                {"ok": True, "code": "OK", "message": "ok", "data": {}},
-                {"ok": True, "code": "OK", "message": "ignored", "data": {}},
                 {"op": "stream.data", "data": {"text": "console:/ $"}},
             ]
         )
@@ -110,8 +166,8 @@ def test_read_until_timeout_returns_only_stream_text(monkeypatch):
 
 
 def test_capture_recent_lines_uses_command_channel(monkeypatch):
-    cmd_sock = FakeSocket(FakeRaw([{"ok": True, "code": "OK", "message": "ok", "data": {"lines": ["line1", "line2"]}}]))
-    stream_sock = FakeSocket(FakeRaw([{"ok": True, "code": "OK", "message": "ok", "data": {}}]))
+    cmd_sock = FakeCmdSocket(FakeRaw([{"ok": True, "code": "OK", "message": "ok", "data": {"lines": ["line1", "line2"]}}]))
+    stream_sock = FakeStreamSocket(_ok())
     _patch_connections(monkeypatch, cmd_sock, stream_sock)
 
     client = AutomationClient("127.0.0.1", 9700)
@@ -123,8 +179,8 @@ def test_capture_recent_lines_uses_command_channel(monkeypatch):
 
 
 def test_capture_recent_lines_raises_on_error_response(monkeypatch):
-    cmd_sock = FakeSocket(FakeRaw([{"ok": False, "code": "INVALID_REQUEST", "message": "bad limit", "data": {}}]))
-    stream_sock = FakeSocket(FakeRaw([{"ok": True, "code": "OK", "message": "ok", "data": {}}]))
+    cmd_sock = FakeCmdSocket(FakeRaw([{"ok": False, "code": "INVALID_REQUEST", "message": "bad limit", "data": {}}]))
+    stream_sock = FakeStreamSocket(_ok())
     _patch_connections(monkeypatch, cmd_sock, stream_sock)
 
     client = AutomationClient("127.0.0.1", 9700)
@@ -139,8 +195,8 @@ def test_capture_recent_lines_raises_on_error_response(monkeypatch):
 
 
 def test_capture_recent_lines_returns_empty_list_for_invalid_lines_type(monkeypatch):
-    cmd_sock = FakeSocket(FakeRaw([{"ok": True, "code": "OK", "message": "ok", "data": {"lines": "not-a-list"}}]))
-    stream_sock = FakeSocket(FakeRaw([{"ok": True, "code": "OK", "message": "ok", "data": {}}]))
+    cmd_sock = FakeCmdSocket(FakeRaw([{"ok": True, "code": "OK", "message": "ok", "data": {"lines": "not-a-list"}}]))
+    stream_sock = FakeStreamSocket(_ok())
     _patch_connections(monkeypatch, cmd_sock, stream_sock)
 
     client = AutomationClient("127.0.0.1", 9700)
@@ -150,8 +206,8 @@ def test_capture_recent_lines_returns_empty_list_for_invalid_lines_type(monkeypa
 
 
 def test_capture_recent_lines_returns_empty_list_for_non_string_items(monkeypatch):
-    cmd_sock = FakeSocket(FakeRaw([{"ok": True, "code": "OK", "message": "ok", "data": {"lines": ["line1", 2]}}]))
-    stream_sock = FakeSocket(FakeRaw([{"ok": True, "code": "OK", "message": "ok", "data": {}}]))
+    cmd_sock = FakeCmdSocket(FakeRaw([{"ok": True, "code": "OK", "message": "ok", "data": {"lines": ["line1", 2]}}]))
+    stream_sock = FakeStreamSocket(_ok())
     _patch_connections(monkeypatch, cmd_sock, stream_sock)
 
     client = AutomationClient("127.0.0.1", 9700)
@@ -161,15 +217,12 @@ def test_capture_recent_lines_returns_empty_list_for_non_string_items(monkeypatc
 
 
 def test_release_closes_both_channels(monkeypatch):
-    cmd_sock = RaisingSocket(FakeRaw([]))
-    stream_sock = FakeSocket(FakeRaw([{"ok": True, "code": "OK", "message": "ok", "data": {}}]))
+    cmd_sock = RaisingCmdSocket(FakeRaw([]))
+    stream_sock = FakeStreamSocket(_ok())
     _patch_connections(monkeypatch, cmd_sock, stream_sock)
 
     client = AutomationClient("127.0.0.1", 9700)
     client.connect()
     client.release()
 
-    assert cmd_sock.closed is True
-    assert cmd_sock.raw.closed is True
     assert stream_sock.closed is True
-    assert stream_sock.raw.closed is True

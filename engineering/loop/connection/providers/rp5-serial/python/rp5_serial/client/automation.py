@@ -48,7 +48,7 @@ class AutomationClient:
         self._cmd_sock: socket.socket | None = None
         self._cmd_raw = None  # command socket.makefile("rb") 产生的只读文件对象
         self._stream_sock: socket.socket | None = None
-        self._stream_raw = None  # stream socket.makefile("rb") 产生的只读文件对象
+        self._stream_recv_buf = b""  # stream channel recv 尚未切分的字节
 
     def connect(self) -> None:
         """建立到 Host 的 TCP 连接。
@@ -61,9 +61,9 @@ class AutomationClient:
         self._cmd_raw = self._cmd_sock.makefile("rb")
         try:
             self._stream_sock = socket.create_connection((self.host, self.port), timeout=5)
-            self._stream_raw = self._stream_sock.makefile("rb")
+            self._stream_recv_buf = b""
             self._stream_sock.sendall(encode_message({"op": "stream.subscribe", "data": {}}))
-            response = self._read_response(self._stream_raw)
+            response = self._read_stream_line()
             if response is None:
                 raise OSError("host 关闭连接")
             if response.get("code") != OK:
@@ -111,8 +111,8 @@ class AutomationClient:
     def read_until_timeout(self, timeout_sec: float) -> list[str]:
         """在 ``timeout_sec`` 秒内持续读取 Host 推送的串口输出。
 
-        采用 0.2s 轮询超时，循环直到 deadline。读到 EOF（连接关闭）时立即结束。
-        读取结束后将 socket 恢复为阻塞模式。
+        采用 ``socket.recv`` + 手动行切分，避免 ``socket.makefile`` 在
+        ``settimeout`` 后产生 ``cannot read from timed out object`` 的缺陷。
 
         Args:
             timeout_sec: 采样总时长（秒）
@@ -120,7 +120,7 @@ class AutomationClient:
         Returns:
             采集到的行列表（仅包含 ``stream.data`` 中的文本）
         """
-        if timeout_sec <= 0:
+        if timeout_sec <= 0 or self._stream_sock is None:
             return []
 
         lines: list[str] = []
@@ -129,16 +129,16 @@ class AutomationClient:
         try:
             while time.monotonic() < deadline:
                 try:
-                    payload = self._read_response(self._stream_raw)
+                    raw_payload = self._recv_json_line()
                 except socket.timeout:
                     continue
                 except OSError:
                     break
-                if payload is None:
+                if raw_payload is None:
                     break
-                if payload.get("op") != "stream.data":
+                if raw_payload.get("op") != "stream.data":
                     continue
-                text = payload.get("data", {}).get("text")
+                text = raw_payload.get("data", {}).get("text")
                 if isinstance(text, str):
                     lines.append(text)
         finally:
@@ -147,6 +147,34 @@ class AutomationClient:
             except OSError:
                 pass
         return lines
+
+    def _recv_json_line(self) -> dict | None:
+        """从 stream socket 读取一行 JSON 并解码。
+
+        内部维护 ``_stream_recv_buf`` 做字节缓冲，按 ``\\n`` 切分。
+        recv 超时抛 ``socket.timeout`` 由调用方处理。
+
+        Returns:
+            解码后的 dict；连接关闭（读到 EOF）返回 None
+        """
+        while b"\n" not in self._stream_recv_buf:
+            chunk = self._stream_sock.recv(4096)  # type: ignore[union-attr]
+            if not chunk:
+                return None
+            self._stream_recv_buf += chunk
+        line, _, self._stream_recv_buf = self._stream_recv_buf.partition(b"\n")
+        return decode_message(line)
+
+    def _read_stream_line(self) -> dict | None:
+        """阻塞读取 stream channel 上一行 JSON（用于 subscribe 响应）。"""
+        old_timeout = self._stream_sock.gettimeout() if self._stream_sock else None  # type: ignore[union-attr]
+        if self._stream_sock is not None:
+            self._stream_sock.settimeout(5.0)
+        try:
+            return self._recv_json_line()
+        finally:
+            if self._stream_sock is not None and old_timeout is not None:
+                self._stream_sock.settimeout(old_timeout)  # type: ignore[union-attr]
 
     def capture_recent_lines(self, limit: int) -> list[str]:
         """请求 Host 返回最近 N 行缓冲（stream.read_recent）。
@@ -207,15 +235,9 @@ class AutomationClient:
                 pass
 
     def _close_stream_channel(self) -> None:
-        raw = self._stream_raw
         sock = self._stream_sock
-        self._stream_raw = None
         self._stream_sock = None
-        if raw is not None:
-            try:
-                raw.close()
-            except OSError:
-                pass
+        self._stream_recv_buf = b""
         if sock is not None:
             try:
                 sock.close()

@@ -12,8 +12,9 @@ source "$SCRIPT_DIR/../../../../harness/lib/harness_bootstrap.sh"
 harness_init "loop-boot-failure-debug"
 
 PYTHON_ROOT="$SCRIPT_DIR/../python"
+CORE_ROOT="$SCRIPT_DIR/../../../core/python"
 PROVIDER_ROOT="$SCRIPT_DIR/../../../connection/providers/rp5-serial/python"
-export PYTHONPATH="$PYTHON_ROOT:$PROVIDER_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$PYTHON_ROOT:$CORE_ROOT:$PROVIDER_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 python3 -m boot_failure_debug.cli "$@"
 rc=$?

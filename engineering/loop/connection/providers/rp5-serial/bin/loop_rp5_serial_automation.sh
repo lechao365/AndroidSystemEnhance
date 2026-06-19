@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/../../../../../harness/lib/harness_bootstrap.sh"
 harness_init "loop-rp5-serial-automation"
 
 PYTHON_ROOT="$SCRIPT_DIR/../python"
-PYTHONPATH="$PYTHON_ROOT${PYTHONPATH:+:$PYTHONPATH}" python -m rp5_serial.client.automation "$@"
+PYTHONPATH="$PYTHON_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -m rp5_serial.client.automation "$@"
 rc=$?
 
 harness_exit $rc
