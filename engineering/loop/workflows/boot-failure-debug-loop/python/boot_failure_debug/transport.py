@@ -125,15 +125,31 @@ class Rp5SerialTransport(BaseTransport):
         self.client.send_line(text)
 
     def capture_window(self, timeout_sec: float, recent_limit: int) -> list[ObservedLine]:
-        """采集输出窗口。
+        """采集输出窗口：先拉 recent buffer，再等待新推送。
 
-        优先使用 read_until_timeout（持续推送），拿到的是相对时间戳。
+        live 场景下板子可能已启动完成、串口输出稀疏，仅靠 read_until_timeout
+        可能拿不到数据。因此先通过 capture_recent_lines 拉 host 环形缓冲中的
+        历史行，再等待 timeout_sec 内的新输出，合并去重。
         """
-        raw_lines = self.client.read_until_timeout(timeout_sec)
         base_t = time.monotonic()
+
+        # 1) 先拉 recent buffer（host 侧环形缓冲，最多 recent_limit 行）
+        recent_raw = self.client.capture_recent_lines(recent_limit)
+
+        # 2) 等待新推送
+        pushed_raw = self.client.read_until_timeout(timeout_sec)
+
+        # 3) 合并去重：recent 的末尾可能与 pushed 的开头重叠
+        seen: set[str] = set()
+        merged: list[str] = []
+        for text in recent_raw + pushed_raw:
+            if text not in seen:
+                seen.add(text)
+                merged.append(text)
+
         lines = [
             ObservedLine(t=base_t + i * 0.01, text=text)
-            for i, text in enumerate(raw_lines)
+            for i, text in enumerate(merged)
         ]
         if recent_limit > 0 and len(lines) > recent_limit:
             lines = lines[-recent_limit:]
@@ -142,10 +158,18 @@ class Rp5SerialTransport(BaseTransport):
     def wait_for_pattern(
         self, patterns: list[str], timeout_sec: float, recent_limit: int
     ) -> ObservedLine | None:
-        """在 timeout_sec 内持续读取输出，命中任一 pattern 即返回。"""
-        raw_lines = self.client.read_until_timeout(timeout_sec)
+        """在 recent buffer + timeout_sec 内持续读取输出，命中任一 pattern 即返回。"""
+        # 先在 recent buffer 中找
+        recent_raw = self.client.capture_recent_lines(recent_limit)
+        for text in recent_raw:
+            for pattern in patterns:
+                if pattern in text:
+                    return ObservedLine(t=0.0, text=text)
+
+        # 再等新推送
+        pushed_raw = self.client.read_until_timeout(timeout_sec)
         base_t = time.monotonic()
-        for i, text in enumerate(raw_lines):
+        for i, text in enumerate(pushed_raw):
             for pattern in patterns:
                 if pattern in text:
                     return ObservedLine(t=base_t + i * 0.01, text=text)

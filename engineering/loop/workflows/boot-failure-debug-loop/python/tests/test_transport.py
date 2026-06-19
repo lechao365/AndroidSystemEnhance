@@ -134,13 +134,40 @@ class TestRp5SerialTransport:
         client = self._make_mock_client()
         transport = Rp5SerialTransport(client)
         lines = transport.capture_window(timeout_sec=5, recent_limit=100)
+        # recent=["line1","line2"], pushed=["line1","line2"] -> 去重后 2 行
         assert len(lines) == 2
         assert all(isinstance(line, ObservedLine) for line in lines)
         assert lines[0].text == "line1"
 
-    def test_wait_for_pattern_found(self):
+    def test_capture_window_merges_recent_and_pushed(self):
+        """recent 和 pushed 不同行时应合并，相同时应去重。"""
+        client = MagicMock()
+        client.acquire_writer.return_value = True
+        client.capture_recent_lines.return_value = ["line_a", "line_b"]
+        client.read_until_timeout.return_value = ["line_b", "line_c"]
+        transport = Rp5SerialTransport(client)
+        lines = transport.capture_window(timeout_sec=5, recent_limit=100)
+        texts = [l.text for l in lines]
+        assert texts == ["line_a", "line_b", "line_c"]
+
+    def test_wait_for_pattern_found_in_pushed(self):
+        """pattern 在 pushed 中找到。"""
         client = self._make_mock_client()
+        client.capture_recent_lines.return_value = ["line1", "line2"]
         client.read_until_timeout.return_value = ["Linux version", "console:/ $"]
+        transport = Rp5SerialTransport(client)
+        matched = transport.wait_for_pattern(
+            ["console:/ $"], timeout_sec=5, recent_limit=100
+        )
+        assert matched is not None
+        assert matched.text == "console:/ $"
+
+    def test_wait_for_pattern_found_in_recent(self):
+        """pattern 在 recent buffer 中找到。"""
+        client = MagicMock()
+        client.acquire_writer.return_value = True
+        client.capture_recent_lines.return_value = ["Booting Linux", "console:/ $"]
+        client.read_until_timeout.return_value = ["line_after"]
         transport = Rp5SerialTransport(client)
         matched = transport.wait_for_pattern(
             ["console:/ $"], timeout_sec=5, recent_limit=100
@@ -150,6 +177,7 @@ class TestRp5SerialTransport:
 
     def test_wait_for_pattern_not_found(self):
         client = self._make_mock_client()
+        client.capture_recent_lines.return_value = ["line1", "line2"]
         client.read_until_timeout.return_value = ["no prompt here"]
         transport = Rp5SerialTransport(client)
         matched = transport.wait_for_pattern(
