@@ -4,14 +4,32 @@
 
 ## 当前范围
 
+- `core/`：loop 通用框架层（数据模型、transport 抽象、观察器、规则引擎框架、报告渲染）
 - `connection/`：连接域，定义协议、provider profile 与具体 provider 实现
-- `workflows/`：业务闭环（如启动失败调试），后续实现
-- `profiles/`：设备级/场景级配置，后续实现
+- `workflows/`：业务闭环（如启动失败调试），消费 core + connection
+- `profiles/`：设备级/场景级配置
 
-## 首期目标
+## 已实现模块
 
-- `connection/providers/rp5-serial/`：Windows Host 独占物理串口 + WSL2 Client 三模式接入
-- `workflows/boot-failure-debug-loop/` v1：后续计划实现
+- `core/python/loop_core/`：通用框架（9 个模块，76 个独立测试）
+- `connection/providers/rp5-serial/`：Windows Host 独占物理串口 + WSL2 Client 三模式接入 + AutomationClient 双通道 + Rp5SerialTransport
+- `workflows/boot-failure-debug-loop/` v1：启动失败诊断闭环（消费 loop_core）
+- `profiles/`：device profile + workflow profile + override 合并
+
+## 测试
+
+联合回归（三套测试目录）：
+
+```bash
+PYTHONPATH="engineering/loop/core/python:engineering/loop/connection/providers/rp5-serial/python:engineering/loop/workflows/boot-failure-debug-loop/python" \
+  python3 -m pytest \
+    engineering/loop/core/python/tests \
+    engineering/loop/connection/providers/rp5-serial/python/tests \
+    engineering/loop/workflows/boot-failure-debug-loop/python/tests \
+    -q --import-mode=importlib
+```
+
+> 注意：由于三个测试目录都叫 `tests`，必须使用 `--import-mode=importlib` 避免包名冲突。
 
 ## 与 harness 的关系
 
@@ -38,5 +56,7 @@ Windows Host 本地轻量日志由 Host 自行维护，不强制套用 harness �
 
 ## 参考
 
-- 设计规格：`docs/specs/2026-06-19-loop-engineering-design.md`
-- 实施计划：`docs/plans/2026-06-19-rp5-serial-host-client-mvp.md`
+- 总体设计：`docs/specs/2026-06-19-loop-engineering-design.md`
+- core 抽取设计：`docs/specs/2026-06-19-loop-core-extraction-design.md`
+- shell 基础链路修复：`docs/specs/2026-06-19-loop-shell-foundation-fix-design.md`
+- 实施计划：`docs/plans/2026-06-19-loop-core-extraction.md`
