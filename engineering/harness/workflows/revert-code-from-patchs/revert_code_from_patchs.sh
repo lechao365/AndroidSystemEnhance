@@ -544,39 +544,34 @@ apply_plan() {
         local category proj rel action summary
         IFS=$'\t' read -r category proj rel action summary <<< "$rest"
 
+        # 统一错误处理：do_* 失败时由 on_err --continue 记录现场（lineno/cmd/stack/step_ctx）后 return 1
+        # （--continue：仅记录现场不退出，由 apply_plan 的 return 1 把失败传播给上层 step_end/harness_exit）
+        # 注意：不能用 `if ! do_*; then ... $?`，因 `!` 会把 $? 取反为 0，须显式捕获 rc
+        local rc=0
         case "$action" in
             checkout)
                 log_info "  [CHECKOUT] $proj:$rel"
-                if do_checkout_patch "$proj" "$rel"; then
-                    applied=$((applied + 1))
-                else
-                    log_error "  [CHECKOUT] $proj:$rel 失败，停止执行"
-                    return 1
-                fi
+                do_checkout_patch "$proj" "$rel"; rc=$?
+                [ $rc -ne 0 ] && { on_err --continue "${BASH_LINENO[0]}" "do_checkout_patch $proj:$rel" $rc; return 1; }
+                applied=$((applied + 1))
                 ;;
             checkout-only)
                 log_info "  [CHECKOUT-ONLY] $proj:$rel"
-                if do_checkout_only "$proj" "$rel"; then
-                    applied=$((applied + 1))
-                else
-                    return 1
-                fi
+                do_checkout_only "$proj" "$rel"; rc=$?
+                [ $rc -ne 0 ] && { on_err --continue "${BASH_LINENO[0]}" "do_checkout_only $proj:$rel" $rc; return 1; }
+                applied=$((applied + 1))
                 ;;
             restore)
                 log_info "  [RESTORE] $proj:$rel"
-                if do_restore "$proj" "$rel"; then
-                    applied=$((applied + 1))
-                else
-                    return 1
-                fi
+                do_restore "$proj" "$rel"; rc=$?
+                [ $rc -ne 0 ] && { on_err --continue "${BASH_LINENO[0]}" "do_restore $proj:$rel" $rc; return 1; }
+                applied=$((applied + 1))
                 ;;
             revert)
                 log_info "  [REVERT] $category $proj:$rel"
-                if do_revert_extra "$proj" "$rel" "$category"; then
-                    applied=$((applied + 1))
-                else
-                    return 1
-                fi
+                do_revert_extra "$proj" "$rel" "$category"; rc=$?
+                [ $rc -ne 0 ] && { on_err --continue "${BASH_LINENO[0]}" "do_revert_extra $category $proj:$rel" $rc; return 1; }
+                applied=$((applied + 1))
                 ;;
             skip|stash-hint)
                 ;;  # 跳过
