@@ -1,66 +1,74 @@
 ---
 name: loop-engineering
-description: loop engineering 总体工作流
+description: loop engineering v2 工作流（用例驱动 + AI 修复闭环）
 ---
 
-# Loop Engineering Workflow
+# Loop Engineering v2 Workflow
 
 ## 目标
 
-由 AI 接管开发板，稳定执行「观察 → 分类 → 采样 → 诊断 → 报告」的调试闭环：
+AI 接管设备验收：执行用例 → 输出证据 → AI 分析 → 修复代码 → 重测 → 循环直到全 pass。
 
-1. **观察**：通过连接层稳定接管设备输出（串口/ADB）。
-2. **分类**：基于规则识别故障类型（无输出 / kernel panic / boot hang / 反复重启 等）。
-3. **采样**：在只读或低风险动作范围内采集证据。
-4. **诊断**：汇总证据给出分类与建议。
-5. **报告**：输出人类可读与机器可读的诊断报告。
+## 核心流程
 
-## 当前阶段
-
-- `core/`：**已实现**（通用框架层，221 个自动化测试覆盖）
-- `connection/providers/rp5-serial/`：已实现（Windows Host + WSL2 Client + AutomationClient 双通道）
-- `workflows/boot-failure-debug-loop/`：已实现 v1（消费 loop_core，状态机闭环）
-- `profiles/`：已实现（device profile + workflow profile + override 合并）
+```
+1. AI 读代码/spec + template → 生成 YAML 用例
+2. le run 执行用例 → EvidenceBundle JSON
+3. 全 pass → 功能 OK
+4. 有 fail → AI 读 EvidenceBundle 分析根因
+5. AI 修改 workspace 代码
+6. 编译部署（binary 自动 / 镜像确认）
+7. goto 2，直到全 pass 或 N=5 回退人工
+```
 
 ## 分层职责
 
-- **core/**：loop 通用抽象，不绑定具体 provider。提供数据模型、transport 抽象、fixture 回放、观察器、cycle 切分、规则引擎框架、动作批量执行器、报告渲染。
-- **connection/**：连接域，承载协议契约、provider profile、具体 provider 实现。provider 自包含 transport 适配层。
-- **workflows/**：业务闭环流程，消费 core 通用框架 + connection provider。只保留业务特有的规则定义、状态机、动作编排、配置。
-- **profiles/**：设备级/场景级配置。
+| 层 | 职责 |
+|----|------|
+| opencode (AI) | 生成用例 / 分析证据 / 修复代码 |
+| loop_core | 用例加载 / 断言求值 / 执行 / 证据输出 |
+| cases/*.yaml | 场景定义（声明式，零 Python） |
+| connection | 传输层（串口/ADB） |
 
 ## core 模块清单
 
 | 模块 | 职责 |
 |------|------|
-| `models.py` | ObservedLine(cycle_id) / RuleMatch / ActionRecord / LoopAttempt |
-| `transport.py` | BaseTransport 抽象 + FixtureTransport 回放 |
-| `config.py` | DeviceProfile / BaseWorkflowConfig / merge_profiles |
-| `observer.py` | capture_snapshot(参数化) / detect_prompt |
-| `cycles.py` | assign_cycles / count_cycles |
-| `rules.py` | Rule Protocol / evaluate_rules / classify(priority) |
-| `actions.py` | execute_actions(批量执行器，execute_fn 注入) |
-| `report.py` | write_report_bundle / render_summary(advice_map) |
+| `models.py` | ObservedLine / TestCaseResult / CollectorResult / EvidenceBundle |
+| `assertion_engine.py` | 确定性断言（contains/regex/equals/prompt_visible/not_contains/exit_code_zero） |
+| `case_loader.py` | YAML 加载 + include + requires 拓扑排序 |
+| `executor.py` | 用例执行 + collector 触发（去重） |
+| `collector.py` | 深度证据采集 |
+| `runner.py` | 通用 LoopRunner（场景无关） |
+| `evidence.py` | EvidenceBundle JSON 输出 |
+| `report.py` | evidence.py 薄封装 |
+| `cli.py` | 统一 CLI（le run / gen-cases / deploy） |
+| `config.py` | DeviceProfile / merge_profiles |
+| `transport.py` | BaseTransport + FixtureTransport |
+| `observer.py` | capture_snapshot（prompt 探测） |
+| `cycles.py` | cycle 切分工具（可选） |
 
-## 扩展新 workflow 的步骤
+## 扩展新场景
 
-1. 在 `workflows/` 下创建新 workflow 目录
-2. 继承 `loop_core.config.BaseWorkflowConfig` 添加专属阈值
-3. 实现规则类（实现 `loop_core.rules.Rule` 协议）
-4. 编写状态机 runner（消费 loop_core observer/cycles/rules/report）
-5. 编写动作规划与执行（注入 execute_fn）
-6. 选择 provider transport（如 `rp5_serial.transport.Rp5SerialTransport`）
+1. 参照 `templates/case-template.md`
+2. 在 `cases/system/` 下创建 `<scenario>.yaml`
+3. `le.sh run --suite <path> ...`
+
+无需写任何 Python 代码。
+
+## 断言类型
+
+| type | 用途 |
+|------|------|
+| `contains` | 输出包含文本 |
+| `regex` | 输出匹配正则 |
+| `equals` | 输出完全等于 |
+| `prompt_visible` | shell prompt 可见 |
+| `not_contains` | 输出不包含文本 |
+| `exit_code_zero` | 退出码为 0 |
 
 ## 遗留点
 
-以下能力当前未抽到 core，待第二个 workflow 出现时评估：
-
-1. **状态机框架（C/D 方案）**：当前 runner 状态机留在各业务层。当多个 workflow 共享相同状态流转模式时，评估是否将 `PREPARE → ATTACH → OBSERVE → CLASSIFY → COLLECT_EVIDENCE → REASSESS → EXIT` 抽为 `BaseWorkflowRunner`。
-2. **规则引擎升级（B2/B3）**：当前为 B1 弱约束（Rule Protocol）。若多个 workflow 出现共性规则模式（如 MarkerRule / SilenceRule / CycleRule），可升级为声明式规则类型族。
-3. **L1 采样执行器（A3）**：当前 L1 采样逻辑在 runner 私有方法中。若第二个 workflow 也需要类似采样，可上提到 core。
-4. **quiet_for_sec live 计算**：live transport 下 ObservedLine.t 使用 monotonic 基准，导致 observer 的 quiet_for_sec 计算恒为 0.0，影响 kernel_boot_hang 分类准确性。需将 live transport 的时间戳改为相对偏移。
-5. **transport 合同扩展**：当前 wait_for_pattern 在 live 模式下轮询 recent buffer 可能产生较高 TCP 请求频率（~10 req/s），后续可优化为单次请求。
-
-## 与 harness 的关系
-
-loop bash 入口复用 harness observability，但不依赖 harness 业务 workflow。详见 `engineering/loop/README.md`。
+1. **gen-cases / deploy 未实现**：第二步实现 AI 用例生成和 binary/image 部署
+2. **loop_ctrl 未实现**：第三步实现循环控制（N=5 / 回归检测 / 升级人工）
+3. **参数化用例**：case_loader 预留 parameters 字段，第一步未实现展开

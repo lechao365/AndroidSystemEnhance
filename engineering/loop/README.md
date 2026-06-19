@@ -1,63 +1,94 @@
 # Loop Engineering
 
-`engineering/loop/` 只承载 loop engineering 本身，不重构 `engineering/harness/`。
+AI 驱动的设备验收闭环：用例驱动 + EvidenceBundle + opencode AI 分析修复。
 
-## 当前范围
+## 架构
 
-- `core/`：loop 通用框架层（数据模型、transport 抽象、观察器、规则引擎框架、报告渲染）
-- `connection/`：连接域，定义协议、provider profile 与具体 provider 实现
-- `workflows/`：业务闭环（如启动失败调试），消费 core + connection
-- `profiles/`：设备级/场景级配置
-- `scripts/`：可直接运行的入口脚本（如 Windows `.bat` 快速启动）
+```
+opencode (AI Driver)
+    ↓ le run
+LE 框架 (loop_core)
+    ├── case_loader       YAML 用例加载（include/requires）
+    ├── assertion_engine  确定性断言（6 种类型）
+    ├── executor          用例执行 + collector 触发
+    ├── runner            通用 LoopRunner（场景无关）
+    └── evidence          EvidenceBundle JSON 输出
+    ↓ transport
+connection (rp5-serial provider)
+```
 
-## 已实现模块
+## 目录结构
 
-- `core/python/loop_core/`：通用框架（9 个模块，76 个独立测试）
-- `connection/providers/rp5-serial/`：Windows Host 独占物理串口 + WSL2 Client 三模式接入 + AutomationClient 双通道 + Rp5SerialTransport
-- `workflows/boot-failure-debug-loop/` v1：启动失败诊断闭环（消费 loop_core）
-- `profiles/`：device profile + workflow profile + override 合并
+```
+engineering/loop/
+├── bin/le.sh                    统一 CLI 入口
+├── core/python/loop_core/       LE 框架（通用层）
+├── cases/                       声明式用例（YAML）
+│   ├── common/                    公共原子用例
+│   ├── modules/                   模块级用例（第二步）
+│   └── system/                    系统级用例
+├── templates/                   AI 生成约束模板
+│   └── case-template.md
+├── connection/                  连接层（provider）
+│   ├── profiles/devices/rp5/
+│   └── providers/rp5-serial/
+└── scripts/                     辅助脚本
+    └── start_rp5_serial_host.bat
+```
+
+## 快速开始
+
+### fixture 模式（离线回放）
+
+```bash
+bash engineering/loop/bin/le.sh run \
+  --suite engineering/loop/cases/system/boot-success.yaml \
+  --fixture <jsonl路径> \
+  --device-profile engineering/loop/connection/profiles/devices/rp5/default.json \
+  --case-dirs engineering/loop/cases/common,engineering/loop/cases/system \
+  --artifacts-dir <输出目录>
+```
+
+### live 模式
+
+```bash
+# 先启动 Windows Host（COM5）
+# 然后在 WSL2 执行：
+bash engineering/loop/bin/le.sh run \
+  --suite engineering/loop/cases/system/boot-success.yaml \
+  --host 127.0.0.1 --port 9700 \
+  --device-profile engineering/loop/connection/profiles/devices/rp5/default.json \
+  --case-dirs engineering/loop/cases/common,engineering/loop/cases/system \
+  --artifacts-dir <输出目录>
+```
+
+## 添加新场景
+
+只需写 1 个 YAML 用例文件，零 Python 代码：
+
+```bash
+# 1. 参照模板编写用例
+# 参考 engineering/loop/templates/case-template.md
+
+# 2. 创建用例文件
+# engineering/loop/cases/system/<your-scenario>.yaml
+
+# 3. 执行
+bash engineering/loop/bin/le.sh run --suite <path> ...
+```
 
 ## 测试
 
-联合回归（三套测试目录）：
-
 ```bash
-PYTHONPATH="engineering/loop/core/python:engineering/loop/connection/providers/rp5-serial/python:engineering/loop/workflows/boot-failure-debug-loop/python" \
+PYTHONPATH="engineering/loop/core/python:engineering/loop/connection/providers/rp5-serial/python" \
   python3 -m pytest \
-    engineering/loop/core/python/tests \
-    engineering/loop/connection/providers/rp5-serial/python/tests \
-    engineering/loop/workflows/boot-failure-debug-loop/python/tests \
-    -q --import-mode=importlib
+  engineering/loop/core/python/tests/ \
+  engineering/loop/connection/providers/rp5-serial/python/tests/ \
+  -v --import-mode=importlib
 ```
 
-> 注意：由于三个测试目录都叫 `tests`，必须使用 `--import-mode=importlib` 避免包名冲突。
+## 设计文档
 
-## 与 harness 的关系
-
-loop 与 harness 保持解耦，仅在 bash 入口层复用 harness 的 observability 基础设施：
-
-- `engineering/harness/lib/harness_bootstrap.sh`
-- `engineering/harness/lib/harness_observability.sh`
-- `engineering/harness/rules/script-observability.md`
-
-loop **不依赖** harness 的业务 workflow 逻辑，也不把 patchs/workspace 的业务规则耦合进 loop 核心。
-
-## 日志落点
-
-loop 的 bash 入口脚本日志统一落到 harness 的日志目录，采用前缀命名以避免与现有 harness 脚本混淆：
-
-- 落点：`engineering/harness/log/<script-name>/`
-- script-name 前缀：
-  - `loop-rp5-serial-monitor`
-  - `loop-rp5-serial-interactive`
-  - `loop-rp5-serial-automation`
-  - `loop-boot-failure-debug`
-
-Windows Host 本地轻量日志由 Host 自行维护，不强制套用 harness 完整维测框架，落点不强制在 `engineering/harness/log/`。
-
-## 参考
-
-- 总体设计：`docs/specs/2026-06-19-loop-engineering-design.md`
-- core 抽取设计：`docs/specs/2026-06-19-loop-core-extraction-design.md`
-- shell 基础链路修复：`docs/specs/2026-06-19-loop-shell-foundation-fix-design.md`
-- 实施计划：`docs/plans/2026-06-19-loop-core-extraction.md`
+- `docs/specs/2026-06-19-loop-engineering-v2-design.md`（v2 架构，权威来源）
+- `docs/specs/2026-06-19-loop-core-extraction-design.md`（core 抽取）
+- `docs/specs/2026-06-19-loop-engineering-design.md`（v1 原始设计，历史归档）
