@@ -187,22 +187,6 @@ cases:
         load_suite(path, [str(tmp_path)])
 
 
-def test_requires_nonexistent_warns_but_loads(tmp_path):
-    """requires 引用不存在的用例时，加载成功（执行时该用例会 skip）。"""
-    path = _write(tmp_path, "t.yaml", """
-suite: t
-version: 1
-cases:
-  - id: a
-    command: ""
-    assert: {type: prompt_visible}
-    severity: critical
-    requires: [nonexistent]
-""")
-    suite = load_suite(path, [str(tmp_path)])
-    assert len(suite.cases) == 1  # 加载成功，执行时处理
-
-
 def test_default_severity_is_critical(tmp_path):
     """severity 未指定时默认 critical。"""
     path = _write(tmp_path, "t.yaml", """
@@ -215,3 +199,174 @@ cases:
 """)
     suite = load_suite(path, [str(tmp_path)])
     assert suite.cases[0].severity == "critical"
+
+
+def test_requires_nonexistent_raises_at_load_time(tmp_path):
+    """requires 引用不存在的用例时，加载阶段即抛 ValueError（fail-fast）。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: a
+    command: ""
+    assert: {type: prompt_visible}
+    severity: critical
+    requires: [missing_case]
+""")
+    with pytest.raises(ValueError, match="missing required case"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_unknown_collector_reference_raises_at_load_time(tmp_path):
+    """on_fail.collectors 引用未定义 collector 时，加载阶段即抛 ValueError。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: a
+    command: "true"
+    assert: {type: contains, value: "ok"}
+    on_fail:
+      collectors: [missing_collector]
+""")
+    with pytest.raises(ValueError, match="unknown collector"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_invalid_severity_raises_at_load_time(tmp_path):
+    """severity 取值非法时，加载阶段即抛 ValueError。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: a
+    command: ""
+    assert: {type: prompt_visible}
+    severity: fatal
+""")
+    with pytest.raises(ValueError, match="invalid severity"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_include_duplicate_case_id_raises(tmp_path):
+    """include 与主 suite 出现重复 case id 时，加载阶段即抛 ValueError。"""
+    _write(tmp_path, "common.yaml", """
+suite: common
+version: 1
+cases:
+  - id: shared
+    command: ""
+    assert: {type: prompt_visible}
+""")
+    path = _write(tmp_path, "system.yaml", """
+suite: system
+version: 1
+include: [common]
+cases:
+  - id: shared
+    command: ""
+    assert: {type: prompt_visible}
+""")
+    with pytest.raises(ValueError, match="duplicate case id"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_suite_defaults_parsed(tmp_path):
+    """suite 级 defaults 字段正确解析到 CaseSuite.defaults。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+defaults:
+  capture_timeout: 12.5
+  recent_limit: 200
+cases:
+  - id: a
+    command: ""
+    assert: {type: prompt_visible}
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    assert suite.defaults.capture_timeout == 12.5
+    assert suite.defaults.recent_limit == 200
+
+
+def test_suite_defaults_absent(tmp_path):
+    """未提供 defaults 时，CaseSuite.defaults 保持默认值。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: a
+    command: ""
+    assert: {type: prompt_visible}
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    assert suite.defaults.capture_timeout is None
+    assert suite.defaults.recent_limit is None
+
+
+def test_case_missing_id_raises(tmp_path):
+    """case 缺少 id 时报错。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - command: "echo hi"
+    assert: {type: contains, value: "hi"}
+""")
+    with pytest.raises(ValueError, match="missing required keys"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_case_missing_assert_raises(tmp_path):
+    """case 缺少 assert 时报错。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: a
+    command: "echo hi"
+""")
+    with pytest.raises(ValueError, match="missing required keys"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_unknown_assertion_type_raises(tmp_path):
+    """未知断言类型报错。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: a
+    command: "echo hi"
+    assert: {type: bogus_check, value: "hi"}
+""")
+    with pytest.raises(ValueError, match="unknown assertion type"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_contains_missing_value_raises(tmp_path):
+    """contains 断言缺少 value 报错。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: a
+    command: "echo hi"
+    assert: {type: contains}
+""")
+    with pytest.raises(ValueError, match="requires value"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_regex_missing_pattern_raises(tmp_path):
+    """regex 断言缺少 pattern 报错。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: a
+    command: "echo hi"
+    assert: {type: regex}
+""")
+    with pytest.raises(ValueError, match="requires pattern"):
+        load_suite(path, [str(tmp_path)])

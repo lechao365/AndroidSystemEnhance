@@ -40,6 +40,19 @@ class TestCase:
 
 
 @dataclass
+class SuiteDefaults:
+    """suite 级默认配置（可选）。
+
+    Attributes:
+        capture_timeout: 输出捕获超时（秒），None 表示未设置
+        recent_limit: 最近输出保留行数，None 表示未设置
+    """
+
+    capture_timeout: float | None = None
+    recent_limit: int | None = None
+
+
+@dataclass
 class CaseSuite:
     """用例集。
 
@@ -48,12 +61,16 @@ class CaseSuite:
         version: suite 版本
         cases: 用例列表（拓扑序）
         collectors: collector 名称 -> {commands, hints}
+        defaults: suite 级默认配置（可选，向后兼容默认空）
+        warnings: 加载过程中的非致命提示信息列表
     """
 
     name: str
     version: int
     cases: list[TestCase]
     collectors: dict[str, dict]
+    defaults: SuiteDefaults = field(default_factory=SuiteDefaults)
+    warnings: list[str] = field(default_factory=list)
 
 
 def load_suite(suite_path: str, case_dirs: list[str]) -> CaseSuite:
@@ -68,7 +85,8 @@ def load_suite(suite_path: str, case_dirs: list[str]) -> CaseSuite:
 
     Raises:
         FileNotFoundError: suite 或 include 文件不存在
-        ValueError: requires 存在环
+        ValueError: 静态校验失败（requires 引用缺失 / collector 未知 /
+            severity 非法 / 重复 case id / requires 存在环 / 断言规格非法）
     """
     raw = _load_yaml(suite_path)
     suite_name = raw["suite"]
@@ -82,30 +100,44 @@ def load_suite(suite_path: str, case_dirs: list[str]) -> CaseSuite:
         inc_path = _find_suite(inc_name, case_dirs)
         inc_raw = _load_yaml(inc_path)
         for case_def in inc_raw.get("cases", []):
+            _validate_case_definition(case_def)
             all_cases.append(_parse_case(case_def, inc_raw["suite"]))
         all_collectors.update(inc_raw.get("collectors", {}))
 
     # 处理主 suite 的 cases
     for case_def in raw.get("cases", []):
+        _validate_case_definition(case_def)
         all_cases.append(_parse_case(case_def, suite_name))
 
     # 合并主 suite 的 collectors（覆盖同名 include）
     all_collectors.update(raw.get("collectors", {}))
 
-    # 去重（include 和主 suite 可能有同 id 用例，主 suite 优先）
-    seen: dict[str, TestCase] = {}
+    # 重复 case id 检测（include + 主 suite 合并后唯一）
+    seen_ids: set[str] = set()
     for case in all_cases:
-        seen[case.id] = case
-    unique_cases = list(seen.values())
+        if case.id in seen_ids:
+            raise ValueError(f"duplicate case id: {case.id}")
+        seen_ids.add(case.id)
+
+    # 断言规格校验
+    for case in all_cases:
+        _validate_assertion_shape(case.assert_spec)
+
+    # requires / collector 引用校验
+    _validate_case_links(all_cases, all_collectors)
 
     # 拓扑排序 + 环检测
-    ordered = _topological_sort(unique_cases)
+    ordered = _topological_sort(all_cases)
+
+    # 解析 suite 级 defaults
+    defaults = _parse_defaults(raw.get("defaults", {}))
 
     return CaseSuite(
         name=suite_name,
         version=suite_version,
         cases=ordered,
         collectors=all_collectors,
+        defaults=defaults,
     )
 
 
@@ -135,6 +167,69 @@ def _parse_case(defn: dict, suite: str) -> TestCase:
     )
 
 
+# 允许的 severity 取值
+_VALID_SEVERITIES = {"critical", "warn"}
+# 允许的 assertion type 取值
+_VALID_ASSERT_TYPES = {
+    "contains",
+    "regex",
+    "equals",
+    "prompt_visible",
+    "not_contains",
+    "exit_code_zero",
+}
+
+
+def _validate_case_definition(defn: dict) -> None:
+    """静态校验单条用例定义：必需键、severity 合法性。"""
+    required_keys = {"id", "assert"}
+    missing = required_keys - set(defn)
+    if missing:
+        raise ValueError(f"case missing required keys: {sorted(missing)}")
+    severity = defn.get("severity", "critical")
+    if severity not in _VALID_SEVERITIES:
+        raise ValueError(f"invalid severity: {severity}")
+
+
+def _validate_case_links(cases: list[TestCase], collectors: dict[str, dict]) -> None:
+    """校验 requires 与 on_fail.collectors 引用是否都指向已定义目标。"""
+    case_ids = {c.id for c in cases}
+    for case in cases:
+        for dep_id in case.requires:
+            if dep_id not in case_ids:
+                raise ValueError(
+                    f"missing required case '{dep_id}' referenced by '{case.id}'"
+                )
+        for collector_name in case.on_fail.get("collectors", []):
+            if collector_name not in collectors:
+                raise ValueError(
+                    f"unknown collector '{collector_name}' referenced by '{case.id}'"
+                )
+
+
+def _validate_assertion_shape(assert_spec: dict) -> None:
+    """校验断言规格结构：type 合法、必填参数齐备。"""
+    atype = assert_spec.get("type")
+    if atype in {"contains", "equals", "not_contains"} and "value" not in assert_spec:
+        raise ValueError(f"assert type '{atype}' requires value")
+    if atype == "regex" and "pattern" not in assert_spec:
+        raise ValueError("assert type 'regex' requires pattern")
+    if atype not in _VALID_ASSERT_TYPES:
+        raise ValueError(f"unknown assertion type: {atype}")
+
+
+def _parse_defaults(raw: dict) -> SuiteDefaults:
+    """解析 suite 级 defaults 字段为 SuiteDefaults，缺省字段保持 None。"""
+    if not raw:
+        return SuiteDefaults()
+    capture_timeout = raw.get("capture_timeout")
+    recent_limit = raw.get("recent_limit")
+    return SuiteDefaults(
+        capture_timeout=float(capture_timeout) if capture_timeout is not None else None,
+        recent_limit=int(recent_limit) if recent_limit is not None else None,
+    )
+
+
 def _topological_sort(cases: list[TestCase]) -> list[TestCase]:
     """拓扑排序：被依赖的用例排在前面。检测环。"""
     case_map = {c.id: c for c in cases}
@@ -143,7 +238,7 @@ def _topological_sort(cases: list[TestCase]) -> list[TestCase]:
 
     def visit(case_id: str, path: list[str]):
         if case_id not in case_map:
-            return  # 引用不存在的用例，加载阶段忽略（执行阶段处理）
+            return  # defensive: requires 已在 _validate_case_links 校验，正常路径不可达
         state = visited.get(case_id)
         if state == 1:
             return
