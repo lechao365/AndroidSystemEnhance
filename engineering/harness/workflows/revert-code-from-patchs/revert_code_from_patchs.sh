@@ -10,16 +10,16 @@ set -uo pipefail
 #   bash .../revert_code_from_patchs.sh [--plan-file <path>]         # 生成回退计划
 #   bash .../revert_code_from_patchs.sh --apply --plan-file <path>   # 执行回退计划
 #   bash .../revert_code_from_patchs.sh --check-only                  # 仅扫描预览
+# 退出码:  0=成功; 1=扫描/apply/校验失败; 3=参数/环境错误; 4=plan为空
 # ============================================================================
 
-# --- Configuration ----------------------------------------------------------
+# --- 锚点查找 REPO_ROOT -----------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# 向上查找项目根（锚点：AGENTS.md）
 REPO_ROOT="$SCRIPT_DIR"
 while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/AGENTS.md" ]; do
     REPO_ROOT="$(dirname "$REPO_ROOT")"
 done
-[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 1; }
+[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 3; }
 PATCH_ROOT="$REPO_ROOT/patchs/rpi5"
 KERNEL_WS="${KERNEL_WS:-$HOME/workspace/rpi5-kernel-build/common}"
 AOSP_WS="${AOSP_WS:-$HOME/workspace/aosp}"
@@ -28,19 +28,21 @@ AOSP_WS="${AOSP_WS:-$HOME/workspace/aosp}"
 EXCLUDE_RE='\.o$|\.ko$|\.cmd$|\.symvers$|^Image$|\.dtb$|\.dtbo$|\.prebuilt$|\.prev$|overlays\.prebuilt|overlays\.prev|\.prebuilt/|\.prev/'
 EXCLUDE_DIR_RE='^(out|prebuilts)$'
 
-# --- Colors -----------------------------------------------------------------
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+# --- 接入维测库 -------------------------------------------------------------
+# shellcheck source=../../lib/harness_observability.sh
+source "$REPO_ROOT/engineering/harness/lib/harness_observability.sh"
 
-# --- Helpers ----------------------------------------------------------------
-log_info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
-log_step()  { echo -e "\n${BLUE}========== $1 ==========${NC}"; }
+harness_init "revert_code_from_patchs"
 
-# 临时文件清理（trap 兜底，防止中断时 /tmp 残留）
+# 临时文件清理（与 lib EXIT trap 共存：lib 先注册 _h_finalize，此处追加 _cleanup）
+# _cleanup 保留 $? 不变，确保 _h_finalize 拿到正确的退出码
 TMP_FILES=()
-_cleanup() { [ ${#TMP_FILES[@]} -gt 0 ] && rm -f "${TMP_FILES[@]}" 2>/dev/null || true; }
-trap _cleanup EXIT INT TERM
+_cleanup() {
+    local rc=$?
+    [ ${#TMP_FILES[@]} -gt 0 ] && rm -f "${TMP_FILES[@]}" 2>/dev/null || true
+    return "$rc"
+}
+trap '_cleanup; _h_finalize' EXIT INT TERM
 
 # find_upstream_base — 复用自 sync_code_to_patchs.sh（原样，保证回退的 upstream
 # 与 sync 生成 diff 时的 upstream 是同一个 commit）
@@ -100,7 +102,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --apply)         MODE="apply"; shift ;;
         --check-only)    MODE="check-only"; shift ;;
-        --plan-file)     [ $# -lt 2 ] && { log_error "--plan-file 需要一个路径参数"; exit 1; }; PLAN_FILE="$2"; shift 2 ;;
+        --plan-file)     [ $# -lt 2 ] && { log_error "--plan-file 需要一个路径参数"; harness_exit 3; }; PLAN_FILE="$2"; shift 2 ;;
         --plan-file=*)   PLAN_FILE="${1#*=}"; shift ;;
         -h|--help)
             cat <<'USAGE'
@@ -109,20 +111,20 @@ Usage: bash revert_code_from_patchs.sh [--plan-file <path>] [--apply] [--check-o
   --apply --plan-file X     执行回退计划（只执行标记 + 的条目）
   --check-only              仅扫描预览，不生成 plan 文件
 USAGE
-            exit 0 ;;
-        *) log_error "未知参数: $1"; exit 1 ;;
+            harness_exit 0 ;;
+        *) log_error "未知参数: $1"; harness_exit 3 ;;
     esac
 done
 
 if [ "$MODE" = "apply" ] && [ -z "$PLAN_FILE" ]; then
     log_error "--apply 模式必须配合 --plan-file <path>"
-    exit 1
+    harness_exit 3
 fi
 
 # ============================================================================
 # 前置检查
 # ============================================================================
-log_step "前置检查"
+step_begin "阶段 0: 前置检查"
 
 KERNEL_OK=false
 AOSP_OK=false
@@ -131,14 +133,17 @@ AOSP_OK=false
 
 if [ "$KERNEL_OK" = false ] && [ "$AOSP_OK" = false ]; then
     log_error "未找到有效的 workspace（检查 KERNEL_WS/AOSP_WS 环境变量）"
-    exit 1
+    step_end 1
+    harness_exit 3
 fi
 log_info "Patch root: $PATCH_ROOT"
 if [ ! -d "$PATCH_ROOT/kernel" ] && [ ! -d "$PATCH_ROOT/aosp" ]; then
     log_error "patchs/rpi5 为空，无基线可回退"
-    exit 1
+    step_end 1
+    harness_exit 3
 fi
 log_info "模式: $MODE"
+step_end 0
 
 # ============================================================================
 # patchs 覆盖集合构建
@@ -395,14 +400,14 @@ gen_plan() {
         echo ""
     } > "$out"
 
-    log_step "扫描 kernel"
+    log_info "扫描 kernel"
     if [ "$KERNEL_OK" = true ]; then
         scan_kernel_modified "$out"
         scan_kernel_new "$out"
         scan_extra_kernel "$out"
     fi
 
-    log_step "扫描 aosp"
+    log_info "扫描 aosp"
     if [ "$AOSP_OK" = true ]; then
         scan_aosp_modified "$out"
         scan_aosp_new "$out"
@@ -410,7 +415,7 @@ gen_plan() {
     fi
 
     local total; total=$(grep -c '^[-+]' "$out" 2>/dev/null || true); total=${total:-0}
-    log_step "扫描完成"
+    log_info "扫描完成"
     log_info "MODIFIED-MATCH: $G_MATCH_MODIFIED 个文件已是 patchs 状态（不列入 plan）"
     log_info "NEW-MATCH: $G_MATCH_NEW 个文件已是 patchs 状态（不列入 plan）"
     log_info "需确认条目: $total 个（详见 plan 文件）"
@@ -524,7 +529,7 @@ apply_plan() {
         return 0
     fi
 
-    log_step "执行回退计划 ($selected 条)"
+    log_info "执行回退计划 ($selected 条)"
     log_info "Plan 文件: $plan"
     log_warn "如 workspace 有 staged 改动（git index），checkout 可能受影响；建议先 git stash"
 
@@ -581,7 +586,7 @@ apply_plan() {
         esac
     done < "$plan"
 
-    log_step "执行完成"
+    log_info "执行完成"
     log_info "已执行: $applied 条"
     return 0
 }
@@ -594,7 +599,7 @@ verify_after_apply() {
     local orig_plan="$1"
     local verify_out="/tmp/revert-verify-$(date +%Y%m%d%H%M%S).tsv"
 
-    log_step "落盘校验（全量重跑）"
+    log_info "落盘校验（全量重跑）"
 
     # 生成新的扫描结果（静默）
     local new_plan; new_plan=$(mktemp); TMP_FILES+=("$new_plan")
@@ -649,6 +654,9 @@ verify_after_apply() {
     log_info "NEW-DIFF: $newdiff"
     log_info "校验文件: $verify_out"
 
+    # artifact 归档（复制到 harness/log/<script>/artifacts/，/tmp 副本由 _cleanup 兜底）
+    artifact_register "$verify_out" "verify.tsv"
+
     rm -f "$new_plan"
 
     if [ "$residual" -gt 0 ] || [ "$newdiff" -gt 0 ]; then
@@ -666,23 +674,49 @@ verify_after_apply() {
 case "$MODE" in
     plan)
         [ -z "$PLAN_FILE" ] && PLAN_FILE="/tmp/revert-plan-$(date +%Y%m%d%H%M%S).tsv"
+        step_begin "阶段 1: 生成回退计划"
         gen_plan "$PLAN_FILE"
+        _PRC=$?
+        step_end $_PRC
+        # plan 为空 → exit 4（无操作）
+        if [ ! -s "$PLAN_FILE" ] || ! grep -q '^[-+]' "$PLAN_FILE" 2>/dev/null; then
+            log_info "plan 为空，无操作（exit 4）"
+            harness_exit 4
+        fi
+        # artifact 归档（复制到 harness/log/<script>/artifacts/，/tmp 副本由 _cleanup 兜底）
+        artifact_register "$PLAN_FILE" "plan.tsv"
         ;;
     apply)
+        step_begin "阶段 2: 执行回退计划"
         if apply_plan "$PLAN_FILE"; then
-            verify_after_apply "$PLAN_FILE"
-            exit $?
+            step_end 0
         else
+            step_end 1
             log_error "apply 失败，跳过校验"
-            exit 1
+            harness_exit 1
         fi
+
+        step_begin "阶段 3: 落盘校验"
+        verify_after_apply "$PLAN_FILE"
+        _VRC=$?
+        step_end $_VRC
+        # verify 校验失败 → exit 1
+        [ $_VRC -ne 0 ] && harness_exit 1
+        # artifact 归档（apply 模式下 plan 文件由调用者提供，也归档一份）
+        artifact_register "$PLAN_FILE" "plan.tsv"
         ;;
     check-only)
         PLAN_FILE=$(mktemp /tmp/revert-preview.XXXXXX); TMP_FILES+=("$PLAN_FILE")
+        step_begin "阶段 1: 生成回退计划"
         gen_plan "$PLAN_FILE"
+        _CRC=$?
+        step_end $_CRC
+        # check-only 不做 plan 空判断（预览模式，即使为空也输出）
+        artifact_register "$PLAN_FILE" "plan.tsv"
         echo ""
-        log_step "差异预览"
+        log_info "差异预览"
         cat "$PLAN_FILE"
-        rm -f "$PLAN_FILE"
         ;;
 esac
+
+harness_exit 0
