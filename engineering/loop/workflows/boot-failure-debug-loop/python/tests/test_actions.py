@@ -17,8 +17,8 @@ from boot_failure_debug.actions import (
     L1_COMMANDS,
     L2_SAFE_ACTIONS,
 )
-from boot_failure_debug.models import ActionRecord, RuleMatch
-from boot_failure_debug.transport import FixtureTransport
+from loop_core.models import ActionRecord, RuleMatch
+from loop_core.transport import FixtureTransport
 
 
 # ============================================================================
@@ -42,6 +42,37 @@ class TestPlanActions:
         assert len(actions) >= len(L1_COMMANDS)
         assert all(a.level == "L1" for a in actions[:len(L1_COMMANDS)])
         assert [a.command for a in actions[:len(L1_COMMANDS)]] == L1_COMMANDS
+
+    def test_shell_prompt_available_honors_custom_l1_commands(self):
+        matches = [
+            RuleMatch(
+                rule_id="shell_prompt_available",
+                matched=True,
+                confidence=0.9,
+                severity="low",
+                evidence=["console:/ $"],
+                phase="CLASSIFY_FAILURE",
+                suggested_actions=["collect_read_only"],
+            )
+        ]
+        actions = plan_actions(matches, l1_commands=["uname -a", "id"])
+        assert [a.command for a in actions] == ["uname -a", "id"]
+        assert all(a.level == "L1" for a in actions)
+
+    def test_shell_prompt_available_honors_empty_l1_commands(self):
+        matches = [
+            RuleMatch(
+                rule_id="shell_prompt_available",
+                matched=True,
+                confidence=0.9,
+                severity="low",
+                evidence=["console:/ $"],
+                phase="CLASSIFY_FAILURE",
+                suggested_actions=["collect_read_only"],
+            )
+        ]
+        actions = plan_actions(matches, l1_commands=[])
+        assert actions == []
 
     def test_shell_prompt_available_adds_result_planned(self):
         matches = [

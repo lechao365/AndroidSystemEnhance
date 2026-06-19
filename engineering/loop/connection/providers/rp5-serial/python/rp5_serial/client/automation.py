@@ -45,8 +45,10 @@ class AutomationClient:
         self.host = host
         self.port = port
         self.owner_id = owner_id or f"auto-{os.getpid()}"
-        self._sock: socket.socket | None = None
-        self._raw = None  # socket.makefile("rb") 产生的只读文件对象
+        self._cmd_sock: socket.socket | None = None
+        self._cmd_raw = None  # command socket.makefile("rb") 产生的只读文件对象
+        self._stream_sock: socket.socket | None = None
+        self._stream_raw = None  # stream socket.makefile("rb") 产生的只读文件对象
 
     def connect(self) -> None:
         """建立到 Host 的 TCP 连接。
@@ -54,8 +56,21 @@ class AutomationClient:
         Raises:
             OSError: 连接失败（Host 不可达 / 拒绝连接等）
         """
-        self._sock = socket.create_connection((self.host, self.port), timeout=5)
-        self._raw = self._sock.makefile("rb")
+        self.release()
+        self._cmd_sock = socket.create_connection((self.host, self.port), timeout=5)
+        self._cmd_raw = self._cmd_sock.makefile("rb")
+        try:
+            self._stream_sock = socket.create_connection((self.host, self.port), timeout=5)
+            self._stream_raw = self._stream_sock.makefile("rb")
+            self._stream_sock.sendall(encode_message({"op": "stream.subscribe", "data": {}}))
+            response = self._read_response(self._stream_raw)
+            if response is None:
+                raise OSError("host 关闭连接")
+            if response.get("code") != OK:
+                raise OSError(response.get("message") or "stream.subscribe failed")
+        except Exception:
+            self.release()
+            raise
 
     def acquire_writer(self) -> bool:
         """申请 writer（owner_type=workflow）。
@@ -70,8 +85,8 @@ class AutomationClient:
             "op": "writer.acquire",
             "data": {"owner_type": "workflow", "owner_id": self.owner_id},
         }
-        self._sock.sendall(encode_message(request))
-        response = self._read_response()
+        self._cmd_sock.sendall(encode_message(request))
+        response = self._read_response(self._cmd_raw)
         if response is None:
             raise OSError("host 关闭连接")
         return response.get("code") == OK
@@ -86,41 +101,49 @@ class AutomationClient:
             OSError: 连接异常
         """
         request = {"op": "input.send_line", "data": {"text": text}}
-        self._sock.sendall(encode_message(request))
+        self._cmd_sock.sendall(encode_message(request))
+        response = self._read_response(self._cmd_raw)
+        if response is None:
+            raise OSError("host 关闭连接")
+        if response.get("code") != OK:
+            raise OSError(response.get("message") or "input.send_line failed")
 
     def read_until_timeout(self, timeout_sec: float) -> list[str]:
         """在 ``timeout_sec`` 秒内持续读取 Host 推送的串口输出。
 
-        采用 0.5s 轮询超时，循环直到 deadline。读到 EOF（连接关闭）时立即结束。
+        采用 0.2s 轮询超时，循环直到 deadline。读到 EOF（连接关闭）时立即结束。
         读取结束后将 socket 恢复为阻塞模式。
 
         Args:
             timeout_sec: 采样总时长（秒）
 
         Returns:
-            采集到的行列表（已去除行尾换行符）
+            采集到的行列表（仅包含 ``stream.data`` 中的文本）
         """
         if timeout_sec <= 0:
             return []
 
         lines: list[str] = []
         deadline = time.monotonic() + timeout_sec
-        self._sock.settimeout(0.5)
+        self._stream_sock.settimeout(0.2)
         try:
             while time.monotonic() < deadline:
                 try:
-                    chunk = self._raw.readline()
+                    payload = self._read_response(self._stream_raw)
                 except socket.timeout:
                     continue
                 except OSError:
                     break
-                if not chunk:
-                    # EOF：连接被对端关闭
+                if payload is None:
                     break
-                lines.append(chunk.decode("utf-8", errors="replace").rstrip("\n\r"))
+                if payload.get("op") != "stream.data":
+                    continue
+                text = payload.get("data", {}).get("text")
+                if isinstance(text, str):
+                    lines.append(text)
         finally:
             try:
-                self._sock.settimeout(None)
+                self._stream_sock.settimeout(None)
             except OSError:
                 pass
         return lines
@@ -132,17 +155,24 @@ class AutomationClient:
             limit: 期望抓取的行数
 
         Returns:
-            Host 返回的行列表；响应异常或缺失时返回空列表
+            Host 返回的 ``list[str]``；当响应结构异常（如 ``data.lines`` 不是 ``list[str]``）时返回空列表
 
         Raises:
-            OSError: 连接异常或被对端关闭
+            OSError: 连接异常、被对端关闭或 host 返回失败响应
         """
         request = {"op": "stream.read_recent", "data": {"limit": limit}}
-        self._sock.sendall(encode_message(request))
-        response = self._read_response()
+        self._cmd_sock.sendall(encode_message(request))
+        response = self._read_response(self._cmd_raw)
         if response is None:
             raise OSError("host 关闭连接")
-        return response.get("data", {}).get("lines", []) or []
+        if response.get("code") != OK:
+            raise OSError(response.get("message") or "stream.read_recent failed")
+        lines = response.get("data", {}).get("lines", [])
+        if not isinstance(lines, list):
+            return []
+        if not all(isinstance(line, str) for line in lines):
+            return []
+        return lines
 
     def release(self) -> None:
         """释放 writer 并关闭连接。
@@ -150,32 +180,54 @@ class AutomationClient:
         尽力发送 ``writer.release``，忽略所有 OSError；保证 socket 被关闭、
         内部状态被重置，可安全重复调用。
         """
-        sock = self._sock
-        if sock is None:
-            return
-        try:
-            request = {"op": "writer.release", "data": {}}
-            sock.sendall(encode_message(request))
-        except OSError:
-            pass
-        if self._raw is not None:
+        cmd_sock = self._cmd_sock
+        if cmd_sock is not None:
             try:
-                self._raw.close()
+                request = {"op": "writer.release", "data": {}}
+                cmd_sock.sendall(encode_message(request))
             except OSError:
                 pass
-            self._raw = None
-        try:
-            sock.close()
-        except OSError:
-            pass
-        self._sock = None
+        self._close_stream_channel()
+        self._close_command_channel()
 
-    def _read_response(self) -> dict | None:
-        """从 socket 读取一行并解码为响应 dict。
+    def _close_command_channel(self) -> None:
+        raw = self._cmd_raw
+        sock = self._cmd_sock
+        self._cmd_raw = None
+        self._cmd_sock = None
+        if raw is not None:
+            try:
+                raw.close()
+            except OSError:
+                pass
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _close_stream_channel(self) -> None:
+        raw = self._stream_raw
+        sock = self._stream_sock
+        self._stream_raw = None
+        self._stream_sock = None
+        if raw is not None:
+            try:
+                raw.close()
+            except OSError:
+                pass
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _read_response(self, raw) -> dict | None:
+        """从指定 stream 读取一行并解码为响应 dict。
 
         对端关闭连接（读到空）时返回 None。
         """
-        line = self._raw.readline()
+        line = raw.readline()
         if not line:
             return None
         return decode_message(line)

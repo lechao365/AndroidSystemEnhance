@@ -14,17 +14,17 @@ from pathlib import Path
 
 import pytest
 
-from boot_failure_debug.boot_cycles import assign_boot_cycles
+from loop_core.cycles import assign_cycles
 from boot_failure_debug.config import load_profiles
-from boot_failure_debug.models import ObservedLine
-from boot_failure_debug.observer import ObservationSnapshot
+from loop_core.models import ObservedLine
+from loop_core.observer import ObservationSnapshot
 from boot_failure_debug.rules import (
     classify,
     evaluate_rules,
     RULE_PRIORITY,
 )
-from boot_failure_debug.transport import FixtureTransport
-from boot_failure_debug.observer import capture_snapshot
+from loop_core.transport import FixtureTransport
+from loop_core.observer import capture_snapshot
 
 REPO = Path(__file__).resolve().parents[6]
 DEVICE_PROFILE = REPO / "engineering/loop/connection/profiles/devices/rp5/default.json"
@@ -39,7 +39,14 @@ def _cfg():
 def _snapshot_from_fixture(name: str, timeout: float = 20) -> ObservationSnapshot:
     cfg = _cfg()
     transport = FixtureTransport.from_jsonl(str(FIXTURES / f"{name}.jsonl"))
-    return capture_snapshot(transport, cfg, timeout_sec=timeout)
+    return capture_snapshot(
+        transport,
+        timeout_sec=timeout,
+        prompt_markers=cfg.prompt_markers,
+        recent_limit=cfg.recent_lines_limit,
+        quiet_window_sec=cfg.quiet_window_sec,
+        cycle_markers=cfg.reboot_markers,
+    )
 
 
 # ============================================================================

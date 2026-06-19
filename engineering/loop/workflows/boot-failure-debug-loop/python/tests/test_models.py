@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from boot_failure_debug.config import load_profiles, WorkflowConfig
-from boot_failure_debug.models import (
+from boot_failure_debug.config import BootFailureConfig, load_profiles
+from loop_core.models import (
     ActionRecord,
     LoopAttempt,
     ObservedLine,
@@ -29,7 +29,7 @@ WORKFLOW_PROFILE = REPO / "engineering/loop/profiles/boot-failure-debug/default.
 
 def test_load_profiles_returns_workflow_config():
     cfg = load_profiles(str(DEVICE_PROFILE), str(WORKFLOW_PROFILE))
-    assert isinstance(cfg, WorkflowConfig)
+    assert isinstance(cfg, BootFailureConfig)
 
 
 def test_load_profiles_merges_device_fields():
@@ -73,7 +73,7 @@ def test_load_profiles_override_does_not_touch_device_fields():
 
 def test_observed_line_defaults_boot_cycle_zero():
     line = ObservedLine(t=1.0, text="hello")
-    assert line.boot_cycle_id == 0
+    assert line.cycle_id == 0
 
 
 def test_rule_match_to_dict_roundtrip():
@@ -91,6 +91,22 @@ def test_rule_match_to_dict_roundtrip():
     assert d["matched"] is True
     assert d["confidence"] == 0.95
     assert d["evidence"] == ["Kernel panic - not syncing"]
+
+
+def test_action_record_serializes_output_lines_and_metadata():
+    ar = ActionRecord(
+        action_id="a-serialized",
+        level="L1",
+        command="dmesg",
+        reason="prompt available",
+        result="OK",
+        output_lines=["[ 1.0 ] init"],
+        metadata={"captured_line_count": 1, "pattern_matched": True},
+    )
+    d = ar.to_dict()
+    assert d["output_lines"] == ["[ 1.0 ] init"]
+    assert d["metadata"]["captured_line_count"] == 1
+    assert d["metadata"]["pattern_matched"] is True
 
 
 def test_action_record_to_dict():

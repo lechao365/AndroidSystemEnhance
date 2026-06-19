@@ -1,18 +1,19 @@
 """transport 层合同测试。
 
 FixtureTransport：基于 JSONL transcript 的离线回放 transport，供 AI 自验证。
-Rp5SerialTransport：包装 AutomationClient 的 live transport（通过 mock 验证合同）。
 
-两者必须实现相同接口：
+Rp5SerialTransport 的测试已迁移到 provider 侧：
+    engineering/loop/connection/providers/rp5-serial/python/tests/test_transport.py
+
+FixtureTransport 必须实现接口：
     acquire_writer / release / send_line / capture_window / wait_for_pattern
 """
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
-from boot_failure_debug.models import ObservedLine
-from boot_failure_debug.transport import BaseTransport, FixtureTransport, Rp5SerialTransport
+from loop_core.models import ObservedLine
+from loop_core.transport import BaseTransport, FixtureTransport
 
 REPO = Path(__file__).resolve().parents[6]
 FIXTURES = REPO / "engineering/loop/workflows/boot-failure-debug-loop/python/tests/fixtures"
@@ -93,94 +94,3 @@ class TestFixtureTransport:
         )
         assert matched is not None
         assert "console:/ $" in matched.text
-
-
-# ============================================================================
-# Rp5SerialTransport（通过 mock AutomationClient 验证合同）
-# ============================================================================
-
-class TestRp5SerialTransport:
-    def _make_mock_client(self):
-        client = MagicMock()
-        client.acquire_writer.return_value = True
-        client.capture_recent_lines.return_value = ["line1", "line2"]
-        client.read_until_timeout.return_value = ["line1", "line2"]
-        return client
-
-    def test_inherits_base_transport(self):
-        transport = Rp5SerialTransport(self._make_mock_client())
-        assert isinstance(transport, BaseTransport)
-
-    def test_acquire_writer_delegates_to_client(self):
-        client = self._make_mock_client()
-        transport = Rp5SerialTransport(client)
-        assert transport.acquire_writer() is True
-        client.acquire_writer.assert_called_once()
-
-    def test_release_delegates_to_client(self):
-        client = self._make_mock_client()
-        transport = Rp5SerialTransport(client)
-        transport.release()
-        client.release.assert_called_once()
-
-    def test_send_line_delegates_to_client(self):
-        client = self._make_mock_client()
-        transport = Rp5SerialTransport(client)
-        transport.acquire_writer()
-        transport.send_line("uname -a")
-        client.send_line.assert_called_once_with("uname -a")
-
-    def test_capture_window_returns_observed_lines(self):
-        client = self._make_mock_client()
-        transport = Rp5SerialTransport(client)
-        lines = transport.capture_window(timeout_sec=5, recent_limit=100)
-        # recent=["line1","line2"], pushed=["line1","line2"] -> 去重后 2 行
-        assert len(lines) == 2
-        assert all(isinstance(line, ObservedLine) for line in lines)
-        assert lines[0].text == "line1"
-
-    def test_capture_window_merges_recent_and_pushed(self):
-        """recent 和 pushed 不同行时应合并，相同时应去重。"""
-        client = MagicMock()
-        client.acquire_writer.return_value = True
-        client.capture_recent_lines.return_value = ["line_a", "line_b"]
-        client.read_until_timeout.return_value = ["line_b", "line_c"]
-        transport = Rp5SerialTransport(client)
-        lines = transport.capture_window(timeout_sec=5, recent_limit=100)
-        texts = [l.text for l in lines]
-        assert texts == ["line_a", "line_b", "line_c"]
-
-    def test_wait_for_pattern_found_in_pushed(self):
-        """pattern 在 pushed 中找到。"""
-        client = self._make_mock_client()
-        client.capture_recent_lines.return_value = ["line1", "line2"]
-        client.read_until_timeout.return_value = ["Linux version", "console:/ $"]
-        transport = Rp5SerialTransport(client)
-        matched = transport.wait_for_pattern(
-            ["console:/ $"], timeout_sec=5, recent_limit=100
-        )
-        assert matched is not None
-        assert matched.text == "console:/ $"
-
-    def test_wait_for_pattern_found_in_recent(self):
-        """pattern 在 recent buffer 中找到。"""
-        client = MagicMock()
-        client.acquire_writer.return_value = True
-        client.capture_recent_lines.return_value = ["Booting Linux", "console:/ $"]
-        client.read_until_timeout.return_value = ["line_after"]
-        transport = Rp5SerialTransport(client)
-        matched = transport.wait_for_pattern(
-            ["console:/ $"], timeout_sec=5, recent_limit=100
-        )
-        assert matched is not None
-        assert matched.text == "console:/ $"
-
-    def test_wait_for_pattern_not_found(self):
-        client = self._make_mock_client()
-        client.capture_recent_lines.return_value = ["line1", "line2"]
-        client.read_until_timeout.return_value = ["no prompt here"]
-        transport = Rp5SerialTransport(client)
-        matched = transport.wait_for_pattern(
-            ["console:/ $"], timeout_sec=5, recent_limit=100
-        )
-        assert matched is None

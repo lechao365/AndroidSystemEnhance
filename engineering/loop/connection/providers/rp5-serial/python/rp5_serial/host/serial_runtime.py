@@ -105,12 +105,25 @@ class RuntimeState:
                 payload += b"\n"
             self._serial.write(payload)  # type: ignore[union-attr]
 
+    def _pending_text(self) -> str | None:
+        """返回尚未换行的接收文本快照；空文本返回 None。"""
+        if not self._rx_buf:
+            return None
+        text = self._rx_buf.decode("utf-8", errors="replace").rstrip("\r")
+        return text or None
+
     def recent_lines(self, limit: int) -> list[str]:
-        """返回最近 N 行缓冲（不足时全量返回）。"""
+        """返回最近 N 行缓冲；若存在半行，也作为最后一条观察结果返回。"""
         with self._lock:
             if limit <= 0:
                 return []
-            return list(self._line_buffer[-limit:])
+            lines = list(self._line_buffer[-limit:])
+            pending = self._pending_text()
+            if pending:
+                lines.append(pending)
+            if len(lines) > limit:
+                lines = lines[-limit:]
+            return lines
 
     def inc_subscriber(self) -> int:
         with self._lock:

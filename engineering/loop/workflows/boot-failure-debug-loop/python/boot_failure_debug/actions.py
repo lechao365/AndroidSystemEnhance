@@ -1,28 +1,18 @@
-"""L1/L2 动作规划与执行。
+"""boot-failure L1/L2 动作规划与执行。
 
-V1 动作边界（对齐设计规格 §10.5）：
+V1 动作边界：
 - L1（只读采样）：dmesg / getprop / mount / ps
 - L2（低风险探测）：send_enter / wait_prompt / capture_recent_context / extend_observe_window
 
-V1 明确不做：
-- L3（恢复动作）：修改系统文件、持久化配置写入
-- L4（高风险动作）：破坏性修复
-
-动作规划逻辑：
-- shell_prompt_available -> 执行全部 L1 命令
-- login_prompt_not_reached / boot_hang -> 仅用 L2 安全动作
-- kernel_panic / reboot_loop -> capture_recent_context + 报告，不执行 L1
+业务特有逻辑：
+- plan_actions: 规则 -> 动作清单映射
+- execute_action: 具体动作分派
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from loop_core.models import ActionRecord, RuleMatch
 
-from boot_failure_debug.models import ActionRecord, RuleMatch
-
-if TYPE_CHECKING:
-    from boot_failure_debug.transport import BaseTransport
-
-# L1 只读采样命令（按 workflow profile l1_commands 执行）
+# L1 只读采样命令（默认值，可被 cfg.l1_commands 覆盖）
 L1_COMMANDS: list[str] = ["dmesg", "getprop", "mount", "ps"]
 
 # L2 低风险探测动作
@@ -38,18 +28,21 @@ L2_SAFE_ACTIONS: list[str] = [
 # 动作规划
 # ============================================================================
 
-def plan_actions(matches: list[RuleMatch]) -> list[ActionRecord]:
+def plan_actions(
+    matches: list[RuleMatch], l1_commands: list[str] | None = None
+) -> list[ActionRecord]:
     """根据规则匹配结果规划动作清单。
 
     Args:
         matches: 规则匹配结果列表
+        l1_commands: 可选 L1 命令列表；None 回退默认常量，空列表尊重为空
 
     Returns:
-        :class:`ActionRecord` 列表（result=PLANNED）
+        ActionRecord 列表（result=PLANNED）
     """
     matched_ids = {m.rule_id for m in matches if getattr(m, "matched", False)}
+    configured_l1_commands = L1_COMMANDS if l1_commands is None else l1_commands
 
-    # 无匹配 -> 不规划动作
     if not matched_ids:
         return []
 
@@ -57,7 +50,7 @@ def plan_actions(matches: list[RuleMatch]) -> list[ActionRecord]:
 
     # shell_prompt_available -> 执行全部 L1 命令
     if "shell_prompt_available" in matched_ids:
-        for i, cmd in enumerate(L1_COMMANDS):
+        for i, cmd in enumerate(configured_l1_commands):
             actions.append(
                 ActionRecord(
                     action_id=f"a-{i + 1}",
@@ -105,18 +98,18 @@ def plan_actions(matches: list[RuleMatch]) -> list[ActionRecord]:
 # ============================================================================
 
 def execute_action(
-    action: ActionRecord, transport: "BaseTransport"
+    action: ActionRecord,
+    transport,
+    l1_commands: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> ActionRecord:
     """执行单个动作并更新 result。
 
-    Args:
-        action: 待执行的动作（result=PLANNED）
-        transport: transport 实例
-
-    Returns:
-        更新后的 :class:`ActionRecord`（result=OK/SKIP/FAIL）
+    wait_prompt / extend_observe_window / capture_recent_context 在 runner 层处理。
+    send_enter -> 发送空字符串。
+    L1 命令 -> send_line(command)。
     """
-    # wait_prompt / extend_observe_window / capture_recent_context 在 runner 层处理
+    configured_l1_commands = set(L1_COMMANDS if l1_commands is None else l1_commands)
+
     if action.command in ("wait_prompt", "extend_observe_window", "capture_recent_context"):
         return ActionRecord(
             action_id=action.action_id,
@@ -124,9 +117,11 @@ def execute_action(
             command=action.command,
             reason=action.reason,
             result="SKIP",
+            evidence_ref=action.evidence_ref,
+            output_lines=list(action.output_lines),
+            metadata=dict(action.metadata),
         )
 
-    # send_enter -> 发送空字符串
     if action.command == "send_enter":
         transport.send_line("")
         return ActionRecord(
@@ -135,10 +130,11 @@ def execute_action(
             command=action.command,
             reason=action.reason,
             result="OK",
+            evidence_ref=action.evidence_ref,
+            metadata={"sent_inputs": [""]},
         )
 
-    # L1 命令 -> send_line(command)
-    if action.command in L1_COMMANDS:
+    if action.command in configured_l1_commands:
         transport.send_line(action.command)
         return ActionRecord(
             action_id=action.action_id,
@@ -146,28 +142,26 @@ def execute_action(
             command=action.command,
             reason=action.reason,
             result="OK",
+            evidence_ref=action.evidence_ref,
+            metadata={"sent_inputs": [action.command]},
         )
 
-    # 未知的 L2 动作 -> SKIP
     return ActionRecord(
         action_id=action.action_id,
         level=action.level,
         command=action.command,
         reason=action.reason,
         result="SKIP",
+        evidence_ref=action.evidence_ref,
+        output_lines=list(action.output_lines),
+        metadata=dict(action.metadata),
     )
 
 
 def execute_actions(
-    actions: list[ActionRecord], transport: "BaseTransport"
+    actions: list[ActionRecord],
+    transport,
+    l1_commands: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> list[ActionRecord]:
-    """执行动作列表并返回更新后的结果。
-
-    Args:
-        actions: 动作列表（result=PLANNED）
-        transport: transport 实例
-
-    Returns:
-        更新后的动作列表
-    """
-    return [execute_action(a, transport) for a in actions]
+    """执行动作列表并返回更新后的结果。"""
+    return [execute_action(a, transport, l1_commands=l1_commands) for a in actions]

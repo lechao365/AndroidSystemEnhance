@@ -8,14 +8,16 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import json
+import subprocess
+import sys
 import tempfile
 
 import pytest
 
-from boot_failure_debug.models import LoopAttempt, RuleMatch, ActionRecord
-from boot_failure_debug.report import render_summary, write_report_bundle
+from loop_core.models import LoopAttempt, RuleMatch, ActionRecord
+from loop_core.report import render_summary, write_report_bundle
 from boot_failure_debug.runner import BootFailureRunner
-from boot_failure_debug.transport import FixtureTransport
+from loop_core.transport import FixtureTransport
 from boot_failure_debug.config import load_profiles
 
 REPO = Path(__file__).resolve().parents[6]
@@ -74,6 +76,7 @@ class TestRenderSummary:
             boot_cycle_count=3,
             matched_rules=[],
             actions=[],
+            extra_summary_lines=["boot_cycle: 3"],
         )
         summary = render_summary(attempt)
         assert "boot_cycle: 3" in summary
@@ -137,6 +140,54 @@ class TestRenderSummary:
         summary = render_summary(attempt)
         assert "dmesg" in summary
 
+    def test_contains_l1_output_preview(self):
+        attempt = LoopAttempt(
+            attempt_id="att-report",
+            device_id="rp5",
+            outcome="EXIT_SUCCESS",
+            final_classification="shell_prompt_available",
+            boot_cycle_count=1,
+            matched_rules=[],
+            actions=[
+                ActionRecord(
+                    action_id="a-1",
+                    level="L1",
+                    command="dmesg",
+                    reason="prompt available",
+                    result="OK",
+                    output_lines=["[ 1.0 ] init started", "[ 2.0 ] servicemanager ready"],
+                    metadata={"captured_line_count": 2},
+                )
+            ],
+        )
+        summary = render_summary(attempt)
+        assert "L1采样" in summary
+        assert "dmesg" in summary
+        assert "init started" in summary
+
+    def test_omits_l1_output_preview_when_no_output_lines(self):
+        attempt = LoopAttempt(
+            attempt_id="att-report-empty",
+            device_id="rp5",
+            outcome="EXIT_SUCCESS",
+            final_classification="shell_prompt_available",
+            boot_cycle_count=1,
+            matched_rules=[],
+            actions=[
+                ActionRecord(
+                    action_id="a-1",
+                    level="L1",
+                    command="dmesg",
+                    reason="prompt available",
+                    result="OK",
+                    output_lines=[],
+                    metadata={"captured_line_count": 0},
+                )
+            ],
+        )
+        summary = render_summary(attempt)
+        assert "L1采样" not in summary
+
 
 # ============================================================================
 # write_report_bundle
@@ -195,6 +246,29 @@ class TestWriteReportBundle:
 # ============================================================================
 
 class TestCLI:
+    def test_joint_collection_allows_importing_workflow_test_modules(self):
+        script = """
+import importlib
+import sys
+sys.path = [
+    'engineering/loop/connection/providers/rp5-serial/python',
+    'engineering/loop/workflows/boot-failure-debug-loop/python',
+] + sys.path
+sys.modules.pop('tests', None)
+module = importlib.import_module('tests.test_report')
+print(module.__file__)
+""".strip()
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0
+        assert proc.stdout.strip().endswith(
+            "engineering/loop/workflows/boot-failure-debug-loop/python/tests/test_report.py"
+        )
+
     def test_cli_fixture_mode_generates_artifacts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             from boot_failure_debug.cli import main
