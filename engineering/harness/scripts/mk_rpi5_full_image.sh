@@ -424,7 +424,7 @@ log_info "验证生成的刷机包"
 NEW_IMG=$(ls -t "${ANDROID_PRODUCT_OUT}/${VERSION_PREFIX}"-*-rpi5.img 2>/dev/null | head -1 || true)
 if [ -z "$NEW_IMG" ]; then
     log_error "刷机包未生成"
-    harness_exit 3
+    harness_exit 1
 fi
 IMG_SIZE=$(ls -lh "$NEW_IMG" | awk '{print $5}')
 IMG_NAME=$(basename "$NEW_IMG")
@@ -495,6 +495,7 @@ cat > "$REPORT_FILE" <<EOF
   "mode": ${MODE},
   "plan": "${PLAN}",
   "exit_code": 0,
+  "_note": "此报告仅在成功路径生成，exit_code 必为 0；失败路径由 harness_observability 的日志记录",
   "duration_sec": ${BUILD_DURATION},
   "env": {
     "BUILD_JOBS": ${BUILD_JOBS},
