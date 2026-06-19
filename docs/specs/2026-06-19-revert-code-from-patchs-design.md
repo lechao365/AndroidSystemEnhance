@@ -179,6 +179,14 @@ bash engineering/harness/workflows/revert-code-from-patchs/revert_code_from_patc
 3. AI **直接编辑 plan 文件**的 `+`/`-` 标记
 4. 用户最终确认 → AI 调阶段 2（`--apply`）执行
 5. 执行后 AI 报告结果（各类执行数量、失败列表）
+6. **落盘校验（强制，全量）**：apply 完成后，脚本用与阶段 1 相同的扫描逻辑重跑一遍，生成校验 plan，与原 plan 对比，分 4 类输出：
+   - ✅ `FIXED`：原 plan 中 `+` 执行的条目，现已是 MATCH（回退生效）
+   - ⚠ `KEPT`：原 plan 中 `-` skip 的条目，仍偏离（用户主动保留，**不算失败**）
+   - ❌ `RESIDUAL`：原 plan 中 `+` 执行的条目，apply 后仍偏离（**回退未生效，真正失败**）
+   - ❓ `NEW-DIFF`：apply 后新出现的差异（理论上不应有，需排查）
+
+   落盘文件：`/tmp/revert-verify-<timestamp>.tsv`
+   退出码：有 `RESIDUAL` 或 `NEW-DIFF` → 非 0（失败）；仅 `KEPT` → 0（成功）
 
 ---
 
@@ -200,6 +208,8 @@ bash engineering/harness/workflows/revert-code-from-patchs/revert_code_from_patc
 | plan 文件不存在 | apply 阶段 `--plan-file` 指向不存在文件 | 报错退出 |
 | `--apply` 但未指定 `--plan-file` | 参数缺失 | 报错退出（apply 必须有明确 plan） |
 | workspace 有 staged 改动 | apply 前 `git diff --cached --quiet` 非 0 | **仅警告不阻断**，提示"有 staged 改动，checkout 可能影响 index" |
+| apply 后仍有 RESIDUAL（执行过但未生效） | 落盘校验阶段对比发现原 plan `+` 条目仍偏离 | 列出残留条目，提示可能原因（staged 改动覆盖、diff 与 upstream base 不匹配），退出码非 0 |
+| apply 后出现 NEW-DIFF（新差异） | 落盘校验发现原 plan 外的新偏离 | 列出新差异，提示可能原因（apply 副作用），退出码非 0 |
 
 ### 幂等性保障
 
@@ -377,3 +387,4 @@ description: patchs/rpi5 为基线，把 workspace 偏离部分拉回一致（�
 5. 幂等性：同一 plan 重复 apply 不报错
 6. `--check-only` 能快速预览差异
 7. 命令入口 `/revert-code-from-patchs` 可用，AI 能主持逐条确认流程
+8. apply 成功后自动全量重跑落盘校验，生成 `/tmp/revert-verify-*.tsv`，按 `FIXED`/`KEPT`/`RESIDUAL`/`NEW-DIFF` 四类输出；有 `RESIDUAL` 或 `NEW-DIFF` 则退出码非 0
