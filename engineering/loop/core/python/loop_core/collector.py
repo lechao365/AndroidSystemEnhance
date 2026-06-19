@@ -20,7 +20,8 @@ class Collector:
         self.transport = transport
 
     def run(self, name: str, spec: dict, capture_timeout: float = 5.0,
-            recent_limit: int = 400) -> CollectorResult:
+            recent_limit: int = 400,
+            prompt_markers: list[str] | None = None) -> CollectorResult:
         """执行一个 collector 的全部命令。
 
         Args:
@@ -28,6 +29,8 @@ class Collector:
             spec: collector 规格 {commands: [...], hints: "..."}
             capture_timeout: 每条命令的采集超时
             recent_limit: 每条命令的行数上限
+            prompt_markers: prompt 标记列表；传给 transport 用于在 fixture
+                回放下按命令/prompt 自然分段，避免首条命令消费全部 fixture 行
 
         Returns:
             CollectorResult
@@ -38,13 +41,14 @@ class Collector:
 
         for cmd in commands:
             start = time.monotonic()
+            boundary = self.transport.mark_output_boundary()
             self.transport.send_line(cmd)
-            lines = self.transport.capture_window(
-                timeout_sec=capture_timeout, recent_limit=recent_limit
+            capture = self.transport.capture_since(
+                boundary, capture_timeout, recent_limit, prompt_markers
             )
             outputs.append({
                 "command": cmd,
-                "lines": [line.text for line in lines],
+                "lines": [line.text for line in capture.lines],
                 "duration_sec": round(time.monotonic() - start, 3),
             })
 

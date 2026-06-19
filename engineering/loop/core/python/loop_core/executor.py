@@ -75,6 +75,7 @@ class CaseExecutor:
                         suite.collectors[cname],
                         capture_timeout=capture_timeout,
                         recent_limit=recent_limit,
+                        prompt_markers=prompt_markers,
                     )
 
         # 统计
@@ -135,31 +136,23 @@ class CaseExecutor:
                     tags=case.tags,
                 )
 
-        # 执行用例
+        # 执行用例：先标记输出边界，确保只采集本命令之后的输出
         start = time.monotonic()
-        output_lines: list[str] = []
-        prompt_visible = False
-
         if case.command:
-            # 有命令：send + capture
+            boundary = self.transport.mark_output_boundary()
             self.transport.send_line(case.command)
-            captured = self.transport.capture_window(
-                timeout_sec=capture_timeout, recent_limit=recent_limit
+            capture = self.transport.capture_since(
+                boundary, capture_timeout, recent_limit, prompt_markers
             )
-            output_lines = [line.text for line in captured]
         else:
-            # 无命令：仅探测 prompt（capture 当前缓冲）
-            captured = self.transport.capture_window(
-                timeout_sec=capture_timeout, recent_limit=recent_limit
+            # 无命令：仅探测当前缓冲之后的输出
+            boundary = self.transport.mark_output_boundary()
+            capture = self.transport.capture_since(
+                boundary, capture_timeout, recent_limit, prompt_markers
             )
-            output_lines = [line.text for line in captured]
 
-        # 检测 prompt
-        for line in output_lines:
-            if any(marker in line for marker in prompt_markers):
-                prompt_visible = True
-                break
-
+        output_lines = [line.text for line in capture.lines]
+        prompt_visible = capture.prompt_visible
         output_text = "\n".join(output_lines)
         duration = round(time.monotonic() - start, 3)
 
@@ -167,6 +160,7 @@ class CaseExecutor:
         ctx = AssertionContext(
             output=output_text,
             prompt_visible=prompt_visible,
+            exit_code=capture.exit_code,
         )
         result = self.engine.evaluate(case.assert_spec, ctx)
 

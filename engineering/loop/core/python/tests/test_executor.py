@@ -200,6 +200,37 @@ cases:
     assert bundle.summary["overall"] == "PASS"
 
 
+def test_fixture_transport_capture_isolated_per_command(tmp_path):
+    """每条命令只看到自己发送后的输出，不会被前一条命令的历史污染。"""
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: first
+    command: "cmd1"
+    assert: {type: contains, value: "first_only"}
+  - id: second
+    command: "cmd2"
+    assert: {type: contains, value: "second_only"}
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+    transport = FixtureTransport([
+        {"t": 0.1, "text": "first_only"},
+        {"t": 0.2, "text": "console:/ $"},
+        {"t": 0.3, "text": "second_only"},
+        {"t": 0.4, "text": "console:/ $"},
+    ])
+    transport.acquire_writer()
+    bundle = CaseExecutor(transport, AssertionEngine()).execute_suite(
+        suite, device_id="rp5", prompt_markers=["console:/ $"]
+    )
+    assert bundle.cases[0].status == "pass"
+    assert bundle.cases[1].status == "pass"
+    # 第二条 case 不应该看到 first_only
+    assert "first_only" not in bundle.cases[1].output
+
+
 def _write(tmp_path: Path, name: str, content: str) -> str:
     p = tmp_path / name
     p.write_text(content)
