@@ -50,7 +50,7 @@ while [ $# -gt 0 ]; do
             echo "  --branch <b>           推送分支（默认当前分支）"
             echo "  --remote <name>        远程名（默认 origin）"
             echo "  --no-push              只 commit 不 push"
-            exit 0 ;;
+            harness_exit 0 ;;
         *) log_error "未知参数: $1"; harness_exit 3 ;;
     esac
 done
