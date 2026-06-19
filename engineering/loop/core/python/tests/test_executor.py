@@ -1,0 +1,206 @@
+"""CaseExecutor 测试：用例执行、依赖短路、collector 去重。"""
+import pytest
+from pathlib import Path
+
+from loop_core.assertion_engine import AssertionEngine
+from loop_core.case_loader import load_suite
+from loop_core.executor import CaseExecutor
+from loop_core.models import EvidenceBundle
+from loop_core.transport import FixtureTransport
+
+
+def _make_transport(rows: list[dict]) -> FixtureTransport:
+    return FixtureTransport(rows)
+
+
+def test_all_pass(tmp_path):
+    """全部用例 pass。"""
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: shell_ok
+    command: ""
+    assert: {type: prompt_visible}
+    severity: critical
+"""
+    suite = load_suite(str(Path(_write(tmp_path, "t.yaml", suite_yaml))), [str(tmp_path)])
+    # fixture 中包含 prompt 行
+    transport = _make_transport([{"t": 1.0, "text": "console:/ $"}])
+    transport.acquire_writer()
+
+    executor = CaseExecutor(transport, AssertionEngine())
+    bundle = executor.execute_suite(suite, device_id="rp5", prompt_markers=["console:/ $"])
+
+    assert bundle.summary["total"] == 1
+    assert bundle.summary["passed"] == 1
+    assert bundle.summary["failed"] == 0
+    assert bundle.summary["overall"] == "PASS"
+    assert bundle.cases[0].status == "pass"
+
+
+def test_fail_triggers_collector(tmp_path):
+    """用例 fail 时触发 collector。"""
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: zygote_check
+    command: "getprop init.svc.zygote"
+    assert: {type: contains, value: "running"}
+    severity: critical
+    on_fail:
+      collectors: [debug]
+collectors:
+  debug:
+    commands: ["dmesg"]
+    hints: "check dmesg"
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+    # fixture 输出 "stopped"（不含 "running"）
+    transport = _make_transport([
+        {"t": 0.5, "text": "stopped"},
+        {"t": 1.0, "text": "dmesg output line"},
+    ])
+    transport.acquire_writer()
+
+    executor = CaseExecutor(transport, AssertionEngine())
+    bundle = executor.execute_suite(suite, device_id="rp5", prompt_markers=[])
+
+    assert bundle.summary["failed"] == 1
+    assert bundle.cases[0].status == "fail"
+    assert "debug" in bundle.cases[0].triggered_collectors
+    assert "debug" in bundle.evidence
+    assert len(bundle.evidence["debug"].outputs) == 1
+
+
+def test_dependency_skip(tmp_path):
+    """前置用例 fail 时，依赖用例 skip。"""
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: shell_ok
+    command: ""
+    assert: {type: prompt_visible}
+    severity: critical
+  - id: zygote_ok
+    command: "getprop init.svc.zygote"
+    assert: {type: contains, value: "running"}
+    severity: critical
+    requires: [shell_ok]
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+    # fixture 无 prompt 行 -> shell_ok fail -> zygote_ok skip
+    transport = _make_transport([{"t": 0.5, "text": "no prompt here"}])
+    transport.acquire_writer()
+
+    executor = CaseExecutor(transport, AssertionEngine())
+    bundle = executor.execute_suite(suite, device_id="rp5", prompt_markers=["console:/ $"])
+
+    assert bundle.cases[0].status == "fail"  # shell_ok
+    assert bundle.cases[1].status == "skipped"  # zygote_ok
+    assert "shell_ok" in bundle.cases[1].skip_reason
+    assert bundle.summary["skipped"] == 1
+
+
+def test_dependency_skip_propagates(tmp_path):
+    """skip 传播：a fail → b skip → c skip。"""
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: a
+    command: ""
+    assert: {type: prompt_visible}
+    severity: critical
+  - id: b
+    command: ""
+    assert: {type: prompt_visible}
+    severity: critical
+    requires: [a]
+  - id: c
+    command: ""
+    assert: {type: prompt_visible}
+    severity: critical
+    requires: [b]
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+    transport = _make_transport([{"t": 0.5, "text": "no prompt"}])
+    transport.acquire_writer()
+
+    executor = CaseExecutor(transport, AssertionEngine())
+    bundle = executor.execute_suite(suite, device_id="rp5", prompt_markers=["console:/ $"])
+
+    assert bundle.cases[0].status == "fail"
+    assert bundle.cases[1].status == "skipped"
+    assert bundle.cases[2].status == "skipped"
+
+
+def test_collector_deduplication(tmp_path):
+    """同 suite 内同 collector 只执行一次。"""
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: check_a
+    command: "true"
+    assert: {type: contains, value: "no_match"}
+    severity: critical
+    on_fail: {collectors: [shared]}
+  - id: check_b
+    command: "true"
+    assert: {type: contains, value: "no_match"}
+    severity: critical
+    on_fail: {collectors: [shared]}
+collectors:
+  shared:
+    commands: ["dmesg"]
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+    transport = _make_transport([
+        {"t": 0.5, "text": "output_a"},
+        {"t": 0.6, "text": "output_b"},
+        {"t": 1.0, "text": "dmesg_line"},
+    ])
+    transport.acquire_writer()
+
+    executor = CaseExecutor(transport, AssertionEngine())
+    bundle = executor.execute_suite(suite, device_id="rp5", prompt_markers=[])
+
+    assert "shared" in bundle.evidence
+    assert len(bundle.evidence["shared"].outputs) == 1  # 只执行一次
+
+
+def test_warn_severity_does_not_fail_suite(tmp_path):
+    """severity=warn 的用例 fail 不影响 overall（记录但不阻断）。"""
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: warn_case
+    command: "true"
+    assert: {type: contains, value: "no_match"}
+    severity: warn
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+    transport = _make_transport([{"t": 0.5, "text": "some output"}])
+    transport.acquire_writer()
+
+    executor = CaseExecutor(transport, AssertionEngine())
+    bundle = executor.execute_suite(suite, device_id="rp5", prompt_markers=[])
+
+    # warn 用例 fail 计入 failed 计数，但 overall 仍可为 PASS（无 critical fail）
+    assert bundle.cases[0].status == "fail"
+    assert bundle.summary["overall"] == "PASS"
+
+
+def _write(tmp_path: Path, name: str, content: str) -> str:
+    p = tmp_path / name
+    p.write_text(content)
+    return str(p)
