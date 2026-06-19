@@ -5,29 +5,23 @@ set -uo pipefail
 # sync_patchs_to_doc.sh — patchs/rpi5 变动报告生成器
 # 规则详见: engineering/harness/workflows/sync-patchs-to-doc/WORKFLOW.md
 # 用法:    bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh [--check-only] [--full-diff]
+# 退出码:  0=成功(有变动); 3=参数/环境错误; 4=无变动
 # ============================================================================
 
-# --- Configuration ----------------------------------------------------------
+# --- 锚点查找 REPO_ROOT -----------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# 向上查找项目根（锚点：AGENTS.md），根治相对层级 ../.. 计算错误
 REPO_ROOT="$SCRIPT_DIR"
 while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/AGENTS.md" ]; do
     REPO_ROOT="$(dirname "$REPO_ROOT")"
 done
-[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 1; }
+[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 3; }
 PATCH_DIR="patchs/rpi5"
 
-# --- Colors -----------------------------------------------------------------
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# --- 接入维测库 -------------------------------------------------------------
+# shellcheck source=../../lib/harness_observability.sh
+source "$REPO_ROOT/engineering/harness/lib/harness_observability.sh"
 
-log_info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
-log_step()  { echo -e "\n${BLUE}========== $1 ==========${NC}"; }
+harness_init "sync_patchs_to_doc"
 
 # ============================================================================
 # 参数解析
@@ -42,19 +36,19 @@ for arg in "$@"; do
             echo "Usage: bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh [--check-only] [--full-diff]"
             echo "  --check-only  仅输出报告，不输出 AI 操作提示"
             echo "  --full-diff   在报告末尾追加 git diff 正文，供 AI 直接读取（零往返）"
-            exit 0 ;;
-        *) log_error "未知参数: $arg"; exit 1 ;;
+            harness_exit 0 ;;
+        *) log_error "未知参数: $arg"; harness_exit 3 ;;
     esac
 done
 
 # ============================================================================
 # 前置检查
 # ============================================================================
-cd "$REPO_ROOT" || { log_error "无法进入仓库根目录: $REPO_ROOT"; exit 1; }
+cd "$REPO_ROOT" || { log_error "无法进入仓库根目录: $REPO_ROOT"; harness_exit 3; }
 
 if [ ! -d "$PATCH_DIR" ]; then
     log_error "patchs 目录不存在: $PATCH_DIR"
-    exit 1
+    harness_exit 3
 fi
 
 HEAD_SHORT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -75,13 +69,13 @@ DIFF_OUTPUT="${_tracked:+$_tracked$'\n'}$_untracked"
 if [ -z "$DIFF_OUTPUT" ]; then
     echo ""
     log_info "无变动"
-    exit 0
+    harness_exit 4
 fi
 
 # ============================================================================
 # 按目录分组输出
 # ============================================================================
-log_step "Patchs → Doc 变动报告"
+step_begin "Patchs → Doc 变动报告"
 
 # 统计
 TOTAL_A=0
@@ -210,7 +204,8 @@ echo "总计: $TOTAL 个文件变动 ($([ $TOTAL_A -gt 0 ] && echo -n "$TOTAL_A 
 # （可选）输出完整 diff 正文，供 AI 零往返读取
 # ============================================================================
 if [ "$FULL_DIFF" = true ]; then
-    log_step "完整 diff 正文（HEAD）"
+    echo ""
+    echo "========== 完整 diff 正文（HEAD） =========="
     # tracked 改动的 diff
     git --no-pager diff HEAD -- "$PATCH_DIR" 2>/dev/null || \
         log_warn "无法获取 diff 正文"
@@ -244,3 +239,6 @@ if [ "$CHECK_ONLY" = false ]; then
   ⑦ 一致性自检：锚点有效性 / 路径合规 / 断链 / 模板章节完整性
 TIP
 fi
+
+step_end 0
+harness_exit 0
