@@ -65,7 +65,7 @@ STATUS_OUTPUT=$(git status --porcelain 2>/dev/null)
 
 if [ -z "$STATUS_OUTPUT" ]; then
     echo "nothing to commit, working tree clean"
-    _h_log_file_write "INFO" "无改动，退出码 4"
+    log_info "无改动，退出码 4"
     harness_exit 4
 fi
 
