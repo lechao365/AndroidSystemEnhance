@@ -46,6 +46,19 @@ BUILD_JOBS=${BUILD_JOBS:-$(nproc)}
 KERNEL_DEFCONFIG="android_rpi5_defconfig"
 VERSION_PREFIX="RaspberryVanillaAOSP15"
 
+# --- 锚点查找 REPO_ROOT + 接入维测库 ---------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$SCRIPT_DIR"
+while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/AGENTS.md" ]; do
+    REPO_ROOT="$(dirname "$REPO_ROOT")"
+done
+[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 3; }
+
+# shellcheck source=../lib/harness_observability.sh
+source "$REPO_ROOT/engineering/harness/lib/harness_observability.sh"
+
+harness_init --with-errexit "mk_rpi5_full_image"
+
 #==============================================================================
 # 1. 参数解析与帮助
 #==============================================================================
@@ -89,20 +102,19 @@ while [[ $# -gt 0 ]]; do
         -mode)
             MODE="$2"
             if [[ ! "$MODE" =~ ^[0-4]$ ]]; then
-                echo "[ERROR] -mode 参数必须是 0~4"
-                exit 1
+                log_error "-mode 参数必须是 0~4"
+                harness_exit 3
             fi
             shift 2
             ;;
         -h|--help)
             print_help
-            exit 0
+            harness_exit 0
             ;;
         *)
-            echo "[ERROR] 未知参数: $1"
-            echo "用法: $0 [-mode N] [-h]"
-            echo "使用 -h 查看详细帮助"
-            exit 1
+            log_error "未知参数: $1"
+            log_error "用法: $0 [-mode N] [-h]，使用 -h 查看详细帮助"
+            harness_exit 3
             ;;
     esac
 done
@@ -142,44 +154,29 @@ case $MODE in
     3) PLAN="vendorimage + 打包" ;;
     4) PLAN="systemimage + 打包" ;;
 esac
-TOTAL_STEPS=4
 
-CUR_STEP=0
-# 进度输出函数：打印 [当前步/总步数] 分割线标题
-step() {
-    CUR_STEP=$((CUR_STEP + 1))
-    echo ""
-    echo "######################################################################"
-    echo "# [${CUR_STEP}/${TOTAL_STEPS}] $1"
-    echo "######################################################################"
-}
-
-echo "=========================================="
-echo " 树莓派5 AOSP 一键编译打包"
-echo " 模式:     ${MODE} — ${PLAN}"
-echo " 总步数:   ${TOTAL_STEPS}"
-echo " 并行:     ${BUILD_JOBS} 核心"
-echo "=========================================="
-echo ""
+log_info "树莓派5 AOSP 一键编译打包"
+log_info "模式: ${MODE} — ${PLAN}"
+log_info "并行: ${BUILD_JOBS} 核心"
 
 #==============================================================================
 # 2. 编译内核（mode 1 或 mode 2）
 #==============================================================================
 
 if [ "$DO_KERNEL" = true ]; then
-    step "编译内核（AOSP Clang + LLD）"
+    step_begin "编译内核（AOSP Clang + LLD）"
 
     if [ ! -d "$KERNEL_SRC" ]; then
-        echo "[ERROR] 内核源码目录不存在: $KERNEL_SRC"
-        exit 1
+        log_error "内核源码目录不存在: $KERNEL_SRC"
+        harness_exit 3
     fi
     if [ ! -d "$CLANG_BIN" ]; then
-        echo "[ERROR] Clang 工具链目录不存在: $CLANG_BIN"
-        exit 1
+        log_error "Clang 工具链目录不存在: $CLANG_BIN"
+        harness_exit 3
     fi
 
-    echo "[STEP] 内核源码: $KERNEL_SRC"
-    echo "[STEP] 编译输出: $KERNEL_OUT"
+    log_info "内核源码: $KERNEL_SRC"
+    log_info "编译输出: $KERNEL_OUT"
 
     export ARCH=arm64
     export PATH="${CLANG_BIN}:${PATH}"
@@ -205,33 +202,30 @@ if [ "$DO_KERNEL" = true ]; then
     cd "$KERNEL_SRC"
 
     # 应用 defconfig（首次或配置变更时执行，增量编译时 .config 已存在则快速通过）
-    echo ""
-    echo "[STEP] 应用内核配置: ${KERNEL_DEFCONFIG}"
+    log_info "应用内核配置: ${KERNEL_DEFCONFIG}"
     if ! ${KERNEL_MAKE_CMD} ${KERNEL_DEFCONFIG}; then
-        echo "[ERROR] defconfig 配置失败"
-        exit 1
+        log_error "defconfig 配置失败"
+        harness_exit 1
     fi
 
     # 编译内核 Image + 设备树 dtb + overlays
     # Image：树莓派5 非压缩内核镜像
     # dtbs： 包含 bcm2712*.dtb（主设备树）和 overlays/*.dtbo（设备树覆盖）
-    echo ""
-    echo "[STEP] 编译内核 Image + dtbs（预计 5-20 分钟）"
+    log_info "编译内核 Image + dtbs（预计 5-20 分钟）"
     if ! ${KERNEL_MAKE_CMD} Image dtbs -j${BUILD_JOBS}; then
-        echo "[ERROR] 内核编译失败"
-        exit 1
+        log_error "内核编译失败"
+        harness_exit 1
     fi
 
     # 验证产物
-    echo ""
-    echo "[STEP] 验证内核编译产物"
+    log_info "验证内核编译产物"
     KERNEL_IMAGE="${KERNEL_OUT}/arch/arm64/boot/Image"
     KERNEL_DTS_DIR="${KERNEL_OUT}/arch/arm64/boot/dts/broadcom"
     KERNEL_OVERLAYS_DIR="${KERNEL_DTS_DIR}/overlays"
 
     if [ ! -f "$KERNEL_IMAGE" ]; then
-        echo "[ERROR] 内核镜像未生成: $KERNEL_IMAGE"
-        exit 1
+        log_error "内核镜像未生成: $KERNEL_IMAGE"
+        harness_exit 3
     fi
     KERNEL_VER=$(strings "$KERNEL_IMAGE" | grep "Linux version" | head -1)
     echo "  [OK] Image ($(ls -lh "$KERNEL_IMAGE" | awk '{print $5}'))"
@@ -239,8 +233,8 @@ if [ "$DO_KERNEL" = true ]; then
 
     for dtb in bcm2712-rpi-5-b.dtb bcm2712d0-rpi-5-b.dtb; do
         if [ ! -f "${KERNEL_DTS_DIR}/${dtb}" ]; then
-            echo "[ERROR] 设备树未生成: ${dtb}"
-            exit 1
+            log_error "设备树未生成: ${dtb}"
+            harness_exit 3
         fi
     done
     echo "  [OK] dtb 已生成"
@@ -250,8 +244,7 @@ if [ "$DO_KERNEL" = true ]; then
     fi
 
     # 备份预编译内核 + 拷贝新内核
-    echo ""
-    echo "[STEP] 同步内核产物到 AOSP（备份 + 拷贝 Image/dtb/overlays）"
+    log_info "同步内核产物到 AOSP（备份 + 拷贝 Image/dtb/overlays）"
     cd "$KERNEL_DEST"
     if [ ! -f "Image.prebuilt" ]; then
         cp Image Image.prebuilt 2>/dev/null || true
@@ -270,18 +263,21 @@ if [ "$DO_KERNEL" = true ]; then
     fi
     echo "  [OK] Image / dtb / overlays 已同步到 device/brcm/rpi5-kernel/"
 
+    step_end 0
 else
-    step "跳过内核编译（使用已有内核）"
+    step_begin "跳过内核编译（使用已有内核）"
 
     # 确认预编译内核目录中有 Image（后续 make bootimage 依赖它）
     # mode 3/4 不编译 bootimage，但打包时需要已有 boot.img
     if [ "$DO_BOOT" = false ] && [ ! -f "${KERNEL_DEST}/Image" ]; then
-        echo "[ERROR] 缺少预编译内核: ${KERNEL_DEST}/Image"
-        echo "        请先运行 mode 1（全量编译）获取内核"
-        exit 1
+        log_error "缺少预编译内核: ${KERNEL_DEST}/Image"
+        log_error "请先运行 mode 1（全量编译）获取内核"
+        harness_exit 3
     fi
     KERNEL_VER=$(strings "${KERNEL_DEST}/Image" | grep "Linux version" | head -1)
-    echo "[INFO] 使用已有内核: $KERNEL_VER"
+    log_info "使用已有内核: $KERNEL_VER"
+
+    step_end 0
 fi
 
 #==============================================================================
@@ -306,39 +302,34 @@ if [ "$DO_BOOT" = true ] || [ "$DO_SYSTEM" = true ] || [ "$DO_VENDOR" = true ]; 
     fi
     TARGET_DESC="${TARGET_DESC# + }"  # 去掉开头的 " + "
 
-    step "编译 AOSP 镜像（${TARGET_DESC}）"
+    step_begin "编译 AOSP 镜像（${TARGET_DESC}）"
 
     # 初始化构建环境
     cd "$AOSP_ROOT"
     if [ ! -f "build/envsetup.sh" ]; then
-        echo "[ERROR] AOSP 构建脚本不存在: $AOSP_ROOT/build/envsetup.sh"
-        exit 1
+        log_error "AOSP 构建脚本不存在: $AOSP_ROOT/build/envsetup.sh"
+        harness_exit 3
     fi
 
-    echo "[STEP] source build/envsetup.sh && lunch ${LUNCH_TARGET}"
+    log_info "source build/envsetup.sh && lunch ${LUNCH_TARGET}"
     source build/envsetup.sh
     lunch "$LUNCH_TARGET"
 
     if [ -z "${ANDROID_PRODUCT_OUT}" ]; then
-        echo "[ERROR] ANDROID_PRODUCT_OUT 未设置，lunch 可能失败"
-        exit 1
+        log_error "ANDROID_PRODUCT_OUT 未设置，lunch 可能失败"
+        harness_exit 3
     fi
-    echo "[INFO] 产物目录: ${ANDROID_PRODUCT_OUT}"
+    log_info "产物目录: ${ANDROID_PRODUCT_OUT}"
 
-    echo ""
-    echo "[STEP] make ${MAKE_TARGETS} -j${BUILD_JOBS}"
+    log_info "make ${MAKE_TARGETS} -j${BUILD_JOBS}"
 
     if ! make ${MAKE_TARGETS} -j${BUILD_JOBS}; then
-        echo "[ERROR] AOSP 编译失败"
-        echo "        排查建议："
-        echo "        1. 磁盘空间: df -h"
-        echo "        2. 内存/swap: free -h && swapon --show"
-        echo "        3. 减少并行: BUILD_JOBS=4 $0 -mode ${MODE}"
-        exit 1
+        log_error "AOSP 编译失败"
+        log_error "排查建议：1.磁盘空间 df -h  2.内存/swap free -h  3.减少并行 BUILD_JOBS=4 $0 -mode ${MODE}"
+        harness_exit 1
     fi
 
-    echo ""
-    echo "[STEP] 验证编译产物"
+    log_info "验证编译产物"
     # 验证本次编译的镜像
     for img in ${MAKE_TARGETS}; do
         img_file="${img}image"
@@ -349,15 +340,14 @@ if [ "$DO_BOOT" = true ] || [ "$DO_SYSTEM" = true ] || [ "$DO_VENDOR" = true ]; 
             vendorimage)  img_file="vendor.img" ;;
         esac
         if [ ! -f "${ANDROID_PRODUCT_OUT}/${img_file}" ]; then
-            echo "[ERROR] 缺少镜像: ${img_file}"
-            exit 1
+            log_error "缺少镜像: ${img_file}"
+            harness_exit 3
         fi
         echo "  [OK] ${img_file} ($(ls -lh "${ANDROID_PRODUCT_OUT}/${img_file}" | awk '{print $5}'))"
     done
 
     # 验证打包所需的全部镜像均存在
-    echo ""
-    echo "[STEP] 验证打包所需镜像完整性"
+    log_info "验证打包所需镜像完整性"
     MISSING_IMGS=""
     for img in boot.img system.img vendor.img; do
         if [ ! -f "${ANDROID_PRODUCT_OUT}/${img}" ]; then
@@ -365,14 +355,16 @@ if [ "$DO_BOOT" = true ] || [ "$DO_SYSTEM" = true ] || [ "$DO_VENDOR" = true ]; 
         fi
     done
     if [ -n "$MISSING_IMGS" ]; then
-        echo "[ERROR] 打包所需镜像缺失:${MISSING_IMGS}"
-        echo "        请先运行 mode 1（全量编译）生成缺失镜像"
-        exit 1
+        log_error "打包所需镜像缺失:${MISSING_IMGS}"
+        log_error "请先运行 mode 1（全量编译）生成缺失镜像"
+        harness_exit 3
     fi
     echo "  [OK] boot.img / system.img / vendor.img 均已就绪"
 
+    step_end 0
+
 else
-    step "确认镜像就绪（跳过编译，仅验证 .img 文件存在）"
+    step_begin "确认镜像就绪（跳过编译，仅验证 .img 文件存在）"
 
     # mode 0 也需要 lunch 以设置 rpi5-mkimg.sh 依赖的环境变量
     cd "$AOSP_ROOT"
@@ -382,97 +374,95 @@ else
     # 确认三个 .img 都存在
     for img in boot.img system.img vendor.img; do
         if [ ! -f "${ANDROID_PRODUCT_OUT}/${img}" ]; then
-            echo "[ERROR] 缺少镜像: ${img}"
-            echo "        请先运行 mode 1（全量编译）生成镜像"
-            exit 1
+            log_error "缺少镜像: ${img}"
+            log_error "请先运行 mode 1（全量编译）生成镜像"
+            harness_exit 3
         fi
         echo "  [OK] ${img} 已就绪"
     done
-    echo "[INFO] 使用已有镜像（跳过编译）"
-fi
+    log_info "使用已有镜像（跳过编译）"
 
-echo ""
+    step_end 0
+fi
 
 #==============================================================================
 # 4. 打包完整刷机镜像（rpi5-mkimg.sh）
 #==============================================================================
 
-step "生成可刷写 .img 镜像（rpi5-mkimg.sh）"
+step_begin "生成可刷写 .img 镜像（rpi5-mkimg.sh）"
 
 cd "$AOSP_ROOT"
 
 if [ ! -f "./rpi5-mkimg.sh" ]; then
-    echo "[ERROR] rpi5-mkimg.sh 不存在: $AOSP_ROOT/rpi5-mkimg.sh"
-    exit 1
+    log_error "rpi5-mkimg.sh 不存在: $AOSP_ROOT/rpi5-mkimg.sh"
+    harness_exit 3
 fi
 
 # 删除旧的刷机包（rpi5-mkimg.sh 遇到同名文件会报错退出）
-echo "[STEP] 清理旧的 ${VERSION_PREFIX}-*-rpi5.img"
+log_info "清理旧的 ${VERSION_PREFIX}-*-rpi5.img"
 OLD_IMGS=$(ls "${ANDROID_PRODUCT_OUT}/${VERSION_PREFIX}"-*-rpi5.img 2>/dev/null || true)
 if [ -n "$OLD_IMGS" ]; then
     echo "$OLD_IMGS" | while read -r old_img; do
-        echo "  删除: $(basename "$old_img")"
+        log_info "删除: $(basename "$old_img")"
         rm -f "$old_img"
     done
 else
-    echo "  [INFO] 无旧镜像需要清理"
+    log_info "无旧镜像需要清理"
 fi
 
 # 运行 rpi5-mkimg.sh（需要 sudo 进行分区/格式化/losetup）
 # 注意：sudo 默认会清空环境变量，必须显式传递 TARGET_PRODUCT 和 ANDROID_PRODUCT_OUT
-echo ""
-echo "[STEP] 运行 rpi5-mkimg.sh（需要 sudo 权限）"
+log_info "运行 rpi5-mkimg.sh（需要 sudo 权限）"
 if ! sudo TARGET_PRODUCT="${TARGET_PRODUCT}" ANDROID_PRODUCT_OUT="${ANDROID_PRODUCT_OUT}" ./rpi5-mkimg.sh; then
-    echo "[ERROR] rpi5-mkimg.sh 执行失败"
-    echo "        常见原因："
-    echo "        1. sudo 权限不足"
-    echo "        2. 磁盘不足（df -h 确认至少 20GB）"
-    echo "        3. loop 设备不可用（sudo modprobe loop）"
-    exit 1
+    log_error "rpi5-mkimg.sh 执行失败"
+    log_error "常见原因：1.sudo 权限不足  2.磁盘不足（df -h 确认至少 20GB）  3.loop 设备不可用（sudo modprobe loop）"
+    harness_exit 1
 fi
 
 # 验证生成的新镜像
-echo ""
-echo "[STEP] 验证生成的刷机包"
-NEW_IMG=$(ls -t "${ANDROID_PRODUCT_OUT}/${VERSION_PREFIX}"-*-rpi5.img 2>/dev/null | head -1)
+log_info "验证生成的刷机包"
+NEW_IMG=$(ls -t "${ANDROID_PRODUCT_OUT}/${VERSION_PREFIX}"-*-rpi5.img 2>/dev/null | head -1 || true)
 if [ -z "$NEW_IMG" ]; then
-    echo "[ERROR] 刷机包未生成"
-    exit 1
+    log_error "刷机包未生成"
+    harness_exit 3
 fi
 IMG_SIZE=$(ls -lh "$NEW_IMG" | awk '{print $5}')
 IMG_NAME=$(basename "$NEW_IMG")
 echo "  [OK] ${IMG_NAME} (${IMG_SIZE})"
 
+step_end 0
+
 #==============================================================================
 # 5. 拷贝到 Windows 目录
 #==============================================================================
 
-step "拷贝刷机包到 ${WINDOWS_IMG_DIR}"
+step_begin "拷贝刷机包到 ${WINDOWS_IMG_DIR}"
 
 if [ ! -d "$WINDOWS_IMG_DIR" ]; then
     mkdir -p "$WINDOWS_IMG_DIR"
 fi
 
 # 保留最近 2 个版本，删除更旧的
-OLD_COUNT=$(ls "${WINDOWS_IMG_DIR}/${VERSION_PREFIX}"-*-rpi5.img 2>/dev/null | wc -l)
+OLD_COUNT=$(ls "${WINDOWS_IMG_DIR}/${VERSION_PREFIX}"-*-rpi5.img 2>/dev/null | wc -l || true)
 if [ "$OLD_COUNT" -gt 0 ]; then
     KEEP=2
     ls -t "${WINDOWS_IMG_DIR}/${VERSION_PREFIX}"-*-rpi5.img 2>/dev/null \
         | tail -n +$((KEEP+1)) \
         | while read -r old; do
-            echo "  删除旧镜像: $(basename "$old")"
+            log_info "删除旧镜像: $(basename "$old")"
             rm -f "$old"
         done
     DELETED=$((OLD_COUNT > KEEP ? OLD_COUNT - KEEP : 0))
-    echo "  [INFO] 保留最近 ${KEEP} 个，清理 ${DELETED} 个旧镜像"
+    log_info "保留最近 ${KEEP} 个，清理 ${DELETED} 个旧镜像"
 fi
 
-cp "$NEW_IMG" "$WINDOWS_IMG_DIR/"
-if [ $? -ne 0 ]; then
-    echo "[ERROR] 镜像拷贝失败，检查 /mnt/c/ 是否已挂载"
-    exit 1
+if ! cp "$NEW_IMG" "$WINDOWS_IMG_DIR/"; then
+    log_error "镜像拷贝失败，检查 /mnt/c/ 是否已挂载"
+    harness_exit 1
 fi
 echo "  [OK] ${IMG_NAME} → ${WINDOWS_IMG_DIR}/"
+
+step_end 0
 
 #==============================================================================
 # 6. 完成
@@ -494,7 +484,33 @@ echo "  1. Windows 打开 C:\\Files\\RaspberryImages\\"
 echo "  2. 用 Raspberry Pi Imager 或 balenaEtcher 写入 SD 卡"
 echo ""
 
-# 记录构建历史
+# 记录构建报告到 artifact（替代原 build_history.txt）
+BUILD_END_TS=$(date +%s)
+BUILD_DURATION=$((BUILD_END_TS - _H_INIT_TS))
+REPORT_FILE=$(mktemp /tmp/build-report.XXXXXX.json)
+cat > "$REPORT_FILE" <<EOF
 {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') | mode=${MODE} | ${IMG_NAME} | ${KERNEL_VER}"
-} >> "${AOSP_ROOT}/out/build_history.txt" 2>/dev/null || true
+  "ts": "$(_h_ts_iso)",
+  "script": "mk_rpi5_full_image",
+  "mode": ${MODE},
+  "plan": "${PLAN}",
+  "exit_code": 0,
+  "duration_sec": ${BUILD_DURATION},
+  "env": {
+    "BUILD_JOBS": ${BUILD_JOBS},
+    "AOSP_ROOT": "${AOSP_ROOT}",
+    "KERNEL_SRC": "${KERNEL_SRC}",
+    "LUNCH_TARGET": "${LUNCH_TARGET}"
+  },
+  "artifacts": {
+    "image": "${IMG_NAME:-unknown}",
+    "image_size": "${IMG_SIZE:-unknown}",
+    "kernel_version": "${KERNEL_VER:-unknown}",
+    "windows_dest": "${WINDOWS_IMG_DIR}"
+  }
+}
+EOF
+artifact_register "$REPORT_FILE" "build-report.json"
+rm -f "$REPORT_FILE"
+
+harness_exit 0
