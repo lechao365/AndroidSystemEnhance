@@ -345,7 +345,7 @@ if [ "$DO_BOOT" = true ] || [ "$DO_SYSTEM" = true ] || [ "$DO_VENDOR" = true ]; 
             log_error "缺少镜像: ${img_file}"
             harness_exit 3
         fi
-        local _img_size; _img_size=$(ls -lh "${ANDROID_PRODUCT_OUT}/${img_file}" | awk '{print $5}')
+        _img_size=$(ls -lh "${ANDROID_PRODUCT_OUT}/${img_file}" | awk '{print $5}')
         echo "  [OK] ${img_file} ($_img_size)"
         log_info "产物: ${img_file} size=$_img_size"
     done

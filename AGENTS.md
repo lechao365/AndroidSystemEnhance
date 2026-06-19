@@ -27,3 +27,8 @@
 
 所有设计规格和实施计划保存到 `docs/specs/` 和 `docs/plans/`，禁止使用 `docs/superpowers/`。
 详细规则详见 [engineering/harness/rules/doc-paths.md](engineering/harness/rules/doc-paths.md)。
+
+## 文档索引一致性
+
+改动 `engineering/harness/` 下任何文件（脚本、规则、配置、文档、lib）后，必须检查相关 README.md 是否需要同步更新（新增/删除/重命名文件时尤其关键）。
+详细检查清单见 [engineering/harness/README.md](engineering/harness/README.md) 的「README 同步」章节。

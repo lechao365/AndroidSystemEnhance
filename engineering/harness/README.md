@@ -58,3 +58,8 @@ harness_init "<script-name>"
 - **config/** 是 rules/workflows 的数据源，新增目录或模块只改配置不动脚本。
 - **templates/** 为只读契约，改模板需用户确认（见 `sync-patchs-to-doc` 的 `TEMPLATE-CONFLICT`）。
 - **lib/** 是 scripts/workflows 的公共依赖，改动需同步影响范围内的脚本。
+- **README 同步**：改动本目录下文件后，按以下清单检查 README 是否需更新：
+  - 新增/删除/重命名 `lib/*.sh`、`scripts/*.sh`、`workflows/*/`、`rules/*.md`、`config/*.md`、`templates/*` → 更新对应子目录 README.md 的文件清单
+  - 公共 API 变动（`lib/*.sh` 新增/删除函数对外暴露）→ 额外更新本 README 的「lib 公共能力速查」章节
+  - 新增/删除 `rules/*.md` → 同步更新 `rules/README.md` 文件说明表 + 本 README 快速导航表
+  - 仅修改文件内容（文件名/结构不变）→ 无需更新 README
