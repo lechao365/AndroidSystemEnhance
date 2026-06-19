@@ -5,34 +5,30 @@ set -uo pipefail
 # collect_diff.sh — 收集 git status + diff + 分支信息，格式化输出给 AI
 # 规则详见: engineering/harness/workflows/git-push-to-server/WORKFLOW.md
 # 用法:    bash engineering/harness/workflows/git-push-to-server/collect_diff.sh [--stat-only]
-# 退出码:  0=有改动（正常输出）; 1=无改动（输出 nothing to commit）
+# 退出码:  0=有改动（正常输出）; 3=参数/环境错误; 4=无改动（输出 nothing to commit）
 # ============================================================================
 
-# --- Configuration ----------------------------------------------------------
+# --- 锚点查找 REPO_ROOT -----------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# 向上查找项目根（锚点：AGENTS.md），根治相对层级 ../.. 计算错误
 REPO_ROOT="$SCRIPT_DIR"
 while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/AGENTS.md" ]; do
     REPO_ROOT="$(dirname "$REPO_ROOT")"
 done
-[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 1; }
+[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 3; }
 
+# --- 接入维测库 -------------------------------------------------------------
+# shellcheck source=../../lib/harness_observability.sh
+source "$REPO_ROOT/engineering/harness/lib/harness_observability.sh"
+
+harness_init "collect_diff"
+
+# --- Configuration ----------------------------------------------------------
 # diff 过大阈值
 MAX_FILES=50
 MAX_LINES=5000
 
 # 空仓库兜底：UNTRACKED 仅在 HEAD 存在分支赋值，空仓库场景需预定义
 UNTRACKED=""
-
-# --- Colors -----------------------------------------------------------------
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-log_info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
-log_step()  { echo -e "\n${BLUE}========== $1 ==========${NC}"; }
 
 # ============================================================================
 # 参数解析
@@ -45,14 +41,14 @@ for arg in "$@"; do
             echo "Usage: bash engineering/harness/workflows/git-push-to-server/collect_diff.sh [--stat-only]"
             echo "  --stat-only  只输出分支 + status + --stat，不输出 diff 正文"
             exit 0 ;;
-        *) log_error "未知参数: $arg"; exit 1 ;;
+        *) log_error "未知参数: $arg"; harness_exit 3 ;;
     esac
 done
 
 # ============================================================================
 # 前置检查
 # ============================================================================
-cd "$REPO_ROOT" || { log_error "无法进入仓库根目录: $REPO_ROOT"; exit 1; }
+cd "$REPO_ROOT" || { log_error "无法进入仓库根目录: $REPO_ROOT"; harness_exit 3; }
 
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 REMOTE_NAME=$(git config --get branch."${CURRENT_BRANCH}".remote 2>/dev/null || echo "origin")
@@ -69,7 +65,8 @@ STATUS_OUTPUT=$(git status --porcelain 2>/dev/null)
 
 if [ -z "$STATUS_OUTPUT" ]; then
     echo "nothing to commit, working tree clean"
-    exit 1
+    _h_log_file_write "INFO" "无改动，退出码 4"
+    harness_exit 4
 fi
 
 # 文件数统计
@@ -78,7 +75,7 @@ FILE_COUNT=$(echo "$STATUS_OUTPUT" | grep -c '.' || true)
 # ============================================================================
 # 输出格式化
 # ============================================================================
-log_step "GIT PUSH CONTEXT"
+step_begin "收集 git push 上下文"
 echo "当前分支: $CURRENT_BRANCH"
 echo "远程:     $REMOTE_NAME ($REMOTE_URL)"
 echo ""
@@ -173,3 +170,5 @@ else
     fi
 fi
 echo "======================================"
+step_end 0
+harness_exit 0
