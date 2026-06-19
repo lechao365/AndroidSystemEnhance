@@ -5,16 +5,16 @@ set -uo pipefail
 # sync_code_to_patchs.sh — workspace → patchs/rpi5 全量镜像同步脚本
 # 规则详见: engineering/harness/workflows/sync-code-to-patchs/WORKFLOW.md
 # 用法:    bash engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh [--check-only] [--no-prune]
+# 退出码:  0=成功; 1=有MISS(需检查); 3=参数/环境错误
 # ============================================================================
 
-# --- Configuration ----------------------------------------------------------
+# --- 锚点查找 REPO_ROOT -----------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# 向上查找项目根（锚点：AGENTS.md），根治相对层级 ../.. 计算错误
 REPO_ROOT="$SCRIPT_DIR"
 while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/AGENTS.md" ]; do
     REPO_ROOT="$(dirname "$REPO_ROOT")"
 done
-[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 1; }
+[ -f "$REPO_ROOT/AGENTS.md" ] || { echo "ERROR: 未找到项目根（AGENTS.md 锚点缺失）" >&2; exit 3; }
 PATCH_ROOT="$REPO_ROOT/patchs/rpi5"
 KERNEL_WS="${KERNEL_WS:-$HOME/workspace/rpi5-kernel-build/common}"
 AOSP_WS="${AOSP_WS:-$HOME/workspace/aosp}"
@@ -32,24 +32,18 @@ TOTAL_SKIP=0
 TOTAL_STALE=0
 TOTAL_PRUNE=0
 
-# --- Colors -----------------------------------------------------------------
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# --- 接入维测库 -------------------------------------------------------------
+# shellcheck source=../../lib/harness_observability.sh
+source "$REPO_ROOT/engineering/harness/lib/harness_observability.sh"
 
-# --- Helpers ----------------------------------------------------------------
-log_info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
-log_step()  { echo -e "\n${BLUE}========== $1 ==========${NC}"; }
+# --- 业务输出（逐文件状态，保留彩色风格，内部走 lib 双写）-------------------
+print_ok()    { printf "  ${_H_GREEN}OK${_H_NC}   %s\n" "$1"; TOTAL_OK=$((TOTAL_OK + 1)); _h_log_file_write "INFO" "OK: $1"; }
+print_miss()  { printf "  ${_H_RED}MISS${_H_NC} %s\n" "$1"; TOTAL_MISS=$((TOTAL_MISS + 1)); _h_log_file_write "WARN" "MISS: $1"; }
+print_skip()  { printf "  ${_H_YELLOW}SKIP${_H_NC} %s\n" "$1"; TOTAL_SKIP=$((TOTAL_SKIP + 1)); _h_log_file_write "INFO" "SKIP: $1"; }
+print_stale() { printf "  ${_H_YELLOW}STALE${_H_NC} %s\n" "$1"; TOTAL_STALE=$((TOTAL_STALE + 1)); _h_log_file_write "INFO" "STALE: $1"; }
+print_prune() { printf "  ${_H_BLUE}PRUNE${_H_NC} %s\n" "$1"; TOTAL_PRUNE=$((TOTAL_PRUNE + 1)); _h_log_file_write "INFO" "PRUNE: $1"; }
 
-print_ok()    { echo -e "  ${GREEN}OK${NC}   $1"; TOTAL_OK=$((TOTAL_OK + 1)); }
-print_miss()  { echo -e "  ${RED}MISS${NC} $1"; TOTAL_MISS=$((TOTAL_MISS + 1)); }
-print_skip()  { echo -e "  ${YELLOW}SKIP${NC} $1"; TOTAL_SKIP=$((TOTAL_SKIP + 1)); }
-print_stale() { echo -e "  ${YELLOW}STALE${NC} $1"; TOTAL_STALE=$((TOTAL_STALE + 1)); }
-print_prune() { echo -e "  ${BLUE}PRUNE${NC} $1"; TOTAL_PRUNE=$((TOTAL_PRUNE + 1)); }
+harness_init "sync_code_to_patchs"
 
 # 自动检测 upstream merge-base
 find_upstream_base() {
@@ -87,15 +81,15 @@ for arg in "$@"; do
             echo "Usage: bash engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh [--check-only] [--no-prune]"
             echo "  --check-only  仅扫描和验证，不执行归档（STALE 仅报告）"
             echo "  --no-prune    仅添加/更新，不删除对齐（默认全量镜像含删除）"
-            exit 0 ;;
-        *) log_error "未知参数: $arg"; exit 1 ;;
+            harness_exit 0 ;;
+        *) log_error "未知参数: $arg"; harness_exit 3 ;;
     esac
 done
 
 # ============================================================================
 # 前置检查
 # ============================================================================
-log_step "前置检查"
+step_begin "前置检查"
 
 KERNEL_OK=false
 AOSP_OK=false
@@ -104,10 +98,11 @@ AOSP_OK=false
 
 if [ "$KERNEL_OK" = false ] && [ "$AOSP_OK" = false ]; then
     log_error "未找到有效的 workspace"
-    exit 1
+    harness_exit 3
 fi
 log_info "模式:       $([ "$CHECK_ONLY" = true ] && echo '仅检查' || echo '同步归档')"
 log_info "Patch root: $PATCH_ROOT"
+step_end 0
 
 # ============================================================================
 # Step 0: 发现非 repo 目录 + 获取改动项目列表
@@ -117,11 +112,10 @@ REPO_PROJECT_LIST=""
 AOSP_CHANGED_PROJECTS=""
 
 if [ "$AOSP_OK" = true ]; then
-    log_step "Step 0: 扫描 workspace"
+    step_begin "Step 0: 扫描 workspace"
 
     # 读取 project.list（<1ms），替代 repo forall（400ms）
     REPO_LIST_FILE=$(mktemp /tmp/sync_repolist.XXXXXX)
-    trap 'rm -f "$REPO_LIST_FILE"' EXIT
     if [ -f "$AOSP_WS/.repo/project.list" ]; then
         sort "$AOSP_WS/.repo/project.list" > "$REPO_LIST_FILE"
     else
@@ -180,19 +174,20 @@ if [ "$AOSP_OK" = true ]; then
         done
     }
     _discover_non_repo ""
+    step_end 0
 fi
 
 # ============================================================================
 # Step 1: Kernel 同步
 # ============================================================================
 if [ "$KERNEL_OK" = true ]; then
-    log_step "Step 1: Kernel 同步"
+    step_begin "Step 1: Kernel 同步"
     cd "$KERNEL_WS"
 
     BASE=$(find_upstream_base)
     if [ -z "$BASE" ]; then
         log_error "无法确定 kernel upstream base commit"
-        exit 1
+        harness_exit 1
     fi
     log_info "Upstream base: $(git log --oneline -1 "$BASE" | head -1)"
 
@@ -236,13 +231,14 @@ if [ "$KERNEL_OK" = true ]; then
     # 编译产物汇总
     skip_count=$( { git diff "$BASE" --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null; } | grep -cE "$EXCLUDE_RE" || true )
     [ "$skip_count" -gt 0 ] && print_skip "kernel: ${skip_count} 个编译产物"
+    step_end 0
 fi
 
 # ============================================================================
 # Step 2: AOSP 同步
 # ============================================================================
 if [ "$AOSP_OK" = true ]; then
-    log_step "Step 2: AOSP 同步"
+    step_begin "Step 2: AOSP 同步"
     cd "$AOSP_WS"
 
     for proj_dir in $AOSP_CHANGED_PROJECTS; do
@@ -319,12 +315,13 @@ if [ "$AOSP_OK" = true ]; then
             done < <(find "$nr_dir" -type f 2>/dev/null | grep -vE "$EXCLUDE_RE")
         done
     fi
+    step_end 0
 fi
 
 # ============================================================================
 # Step 3: 删除对齐（全量镜像）—— patchs 有，workspace 无则删除
 # ============================================================================
-log_step "Step 3: 删除对齐（全量镜像）"
+step_begin "Step 3: 删除对齐（全量镜像）"
 
 # 删除对齐：遍历 patchs 文件，workspace 中无对应源文件则删除（或仅报告）
 # subpath: patchs 下子路径（如 kernel/modified）
@@ -374,11 +371,12 @@ fi
 if [ "$TOTAL_PRUNE" -eq 0 ] && [ "$TOTAL_STALE" -eq 0 ]; then
     log_info "无删除对齐项"
 fi
+step_end 0
 
 # ============================================================================
 # Step 4: 更新 manifest.yaml（patch ↔ workspace 结构映射）
 # ============================================================================
-log_step "Step 4: 更新 manifest.yaml"
+step_begin "Step 4: 更新 manifest.yaml"
 
 MANIFEST="$PATCH_ROOT/manifest.yaml"
 
@@ -425,6 +423,9 @@ MANIFEST_TMP=$(mktemp /tmp/manifest.XXXXXX)
     fi
 } > "$MANIFEST_TMP"
 
+# 归档本次生成的 manifest 临时文件（供回溯）
+artifact_register "$MANIFEST_TMP" "manifest.yaml"
+
 if [ ! -f "$MANIFEST" ] || ! diff -q "$MANIFEST" "$MANIFEST_TMP" >/dev/null 2>&1; then
     if [ "$CHECK_ONLY" = false ]; then
         mv "$MANIFEST_TMP" "$MANIFEST"
@@ -437,20 +438,23 @@ else
     rm -f "$MANIFEST_TMP"
     log_info "manifest.yaml 无变化"
 fi
+step_end 0
 
 # ============================================================================
-# 总结
+# 归档 repo 项目列表（供回溯）
 # ============================================================================
-log_step "同步完成"
+if [ -n "${REPO_LIST_FILE:-}" ] && [ -f "$REPO_LIST_FILE" ]; then
+    artifact_register "$REPO_LIST_FILE" "repolist.txt"
+    rm -f "$REPO_LIST_FILE"
+fi
 
-echo -e "  ${GREEN}OK${NC}:    $TOTAL_OK 个文件已同步/验证"
-echo -e "  ${RED}MISS${NC}:  $TOTAL_MISS 个文件缺失"
-[ "$TOTAL_SKIP" -gt 0 ]  && echo -e "  ${YELLOW}SKIP${NC}:  $TOTAL_SKIP 项已跳过（编译产物）"
-[ "$TOTAL_PRUNE" -gt 0 ] && echo -e "  ${BLUE}PRUNE${NC}: $TOTAL_PRUNE 个文件已删除对齐（workspace 已无）"
-[ "$TOTAL_STALE" -gt 0 ] && echo -e "  ${YELLOW}STALE${NC}: $TOTAL_STALE 个陈旧文件（未删除，见 --no-prune/--check-only）"
-
-if [ "$CHECK_ONLY" = true ]; then log_info "本次为仅检查模式，未执行实际归档/删除操作"; fi
-if [ "$TOTAL_MISS" -gt 0 ]; then log_warn "部分文件缺失，请去掉 --check-only 重新执行"; fi
+# ============================================================================
+# 汇总
+# ============================================================================
+step_begin "汇总"
+echo "OK: $TOTAL_OK  MISS: $TOTAL_MISS  SKIP: $TOTAL_SKIP  STALE: $TOTAL_STALE  PRUNE: $TOTAL_PRUNE"
+[ "$CHECK_ONLY" = true ] && log_info "本次为仅检查模式，未执行实际归档/删除操作"
+step_end 0
 
 cat <<'TIP'
 
@@ -461,3 +465,11 @@ cat <<'TIP'
   4. 直接落盘，输出更新摘要（新增 N / 删除 M / 修改要点 K）
 判定：仅当存在 MISS 时停下不更新 README；PRUNE（删除对齐/空diff清理）属正常，继续更新。
 TIP
+
+if [ "$TOTAL_MISS" -gt 0 ]; then
+    log_warn "同步完成，有 $TOTAL_MISS 个 MISS（退出码 1）"
+    harness_exit 1
+else
+    log_info "同步完成，无 MISS"
+    harness_exit 0
+fi
