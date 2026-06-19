@@ -1,102 +1,77 @@
-"""loop_core/models.py 单元测试。"""
-from loop_core.models import ActionRecord, LoopAttempt, ObservedLine, RuleMatch
-
-
-def test_observed_line_defaults_cycle_id_zero():
-    line = ObservedLine(t=1.0, text="hello")
-    assert line.cycle_id == 0
-
-
-def test_observed_line_uses_cycle_id_not_boot_cycle_id():
-    """确认字段名是 cycle_id，不是 boot_cycle_id。"""
-    line = ObservedLine(t=1.0, text="hello", cycle_id=3)
-    assert line.cycle_id == 3
-    assert not hasattr(line, "boot_cycle_id")
+"""loop_core v2 数据模型测试。"""
+from loop_core.models import (
+    ObservedLine,
+    TestCaseResult,
+    CollectorResult,
+    EvidenceBundle,
+)
 
 
 def test_observed_line_to_dict():
-    line = ObservedLine(t=1.0, text="hello", cycle_id=2)
-    d = line.to_dict()
-    assert d == {"t": 1.0, "text": "hello", "cycle_id": 2}
+    line = ObservedLine(t=1.5, text="hello", cycle_id=2)
+    assert line.to_dict() == {"t": 1.5, "text": "hello", "cycle_id": 2}
 
 
-def test_rule_match_to_dict_roundtrip():
-    rm = RuleMatch(
-        rule_id="kernel_panic_detected",
-        matched=True,
-        confidence=0.95,
-        severity="high",
-        evidence=["Kernel panic - not syncing"],
-        phase="CLASSIFY_FAILURE",
-        suggested_actions=["capture_recent_context"],
+def test_test_case_result_defaults():
+    r = TestCaseResult(id="zygote_running", suite="boot-success", status="pass")
+    assert r.command == ""
+    assert r.output == ""
+    assert r.output_preview == ""
+    assert r.assertion == {}
+    assert r.duration_sec == 0.0
+    assert r.failure_reason == ""
+    assert r.skip_reason == ""
+    assert r.triggered_collectors == []
+    assert r.tags == []
+
+
+def test_test_case_result_to_dict():
+    r = TestCaseResult(
+        id="zygote_running",
+        suite="boot-success",
+        status="fail",
+        command="getprop init.svc.zygote",
+        output="stopped\n",
+        assertion={"type": "contains", "value": "running"},
+        duration_sec=1.2,
+        failure_reason="expected 'running', got 'stopped'",
+        triggered_collectors=["crash_dump"],
     )
-    d = rm.to_dict()
-    assert d["rule_id"] == "kernel_panic_detected"
-    assert d["matched"] is True
-    assert d["confidence"] == 0.95
-    assert d["evidence"] == ["Kernel panic - not syncing"]
+    d = r.to_dict()
+    assert d["id"] == "zygote_running"
+    assert d["status"] == "fail"
+    assert d["triggered_collectors"] == ["crash_dump"]
 
 
-def test_action_record_serializes_output_lines_and_metadata():
-    record = ActionRecord(
-        action_id="a-1",
-        level="L1",
-        command="dmesg",
-        reason="prompt available",
-        result="OK",
-        output_lines=["[ 1.0 ] init"],
-        metadata={"captured_line_count": 1, "pattern_matched": True},
+def test_collector_result_to_dict():
+    cr = CollectorResult(
+        name="crash_dump",
+        commands=["logcat -b crash -d", "ls -la /data/tombstones/"],
+        outputs=[
+            {"command": "logcat -b crash -d", "lines": ["crash line 1"]},
+        ],
+        hints="关注 abort message",
     )
-    d = record.to_dict()
-    assert d["output_lines"] == ["[ 1.0 ] init"]
-    assert d["metadata"]["captured_line_count"] == 1
+    d = cr.to_dict()
+    assert d["name"] == "crash_dump"
+    assert len(d["commands"]) == 2
+    assert d["hints"] == "关注 abort message"
 
 
-def test_action_record_defaults_empty_output_lines_and_metadata():
-    record = ActionRecord(
-        action_id="a-1",
-        level="L1",
-        command="dmesg",
-        reason="prompt available",
-        result="OK",
-    )
-    assert record.output_lines == []
-    assert record.metadata == {}
-
-
-def test_loop_attempt_has_extra_summary_lines():
-    attempt = LoopAttempt(
-        attempt_id="att-1",
+def test_evidence_bundle_to_dict():
+    bundle = EvidenceBundle(
+        bundle_id="eb-test-001",
         device_id="rp5",
-        outcome="EXIT_FAILURE",
-        final_classification="no_output_after_attach",
-        boot_cycle_count=0,
+        suite="boot-success",
+        timestamp="2026-06-19T22:36:06+08:00",
+        summary={"total": 2, "passed": 1, "failed": 1, "skipped": 0, "overall": "FAIL"},
+        cases=[
+            TestCaseResult(id="shell_reachable", suite="boot-success", status="pass"),
+            TestCaseResult(id="zygote_running", suite="boot-success", status="fail"),
+        ],
+        evidence={},
     )
-    assert attempt.extra_summary_lines == []
-
-
-def test_loop_attempt_extra_summary_lines_serialized():
-    attempt = LoopAttempt(
-        attempt_id="att-1",
-        device_id="rp5",
-        outcome="EXIT_SUCCESS",
-        final_classification="shell_prompt_available",
-        boot_cycle_count=1,
-        extra_summary_lines=["boot_cycle: 1", "device_model: rpi5"],
-    )
-    d = attempt.to_dict()
-    assert d["extra_summary_lines"] == ["boot_cycle: 1", "device_model: rpi5"]
-
-
-def test_loop_attempt_empty_lists_default():
-    attempt = LoopAttempt(
-        attempt_id="att-2",
-        device_id="rp5",
-        outcome="EXIT_FAILURE",
-        final_classification="no_output_after_attach",
-        boot_cycle_count=0,
-    )
-    assert attempt.matched_rules == []
-    assert attempt.actions == []
-    assert attempt.artifacts_dir == ""
-    assert attempt.extra_summary_lines == []
+    d = bundle.to_dict()
+    assert d["bundle_id"] == "eb-test-001"
+    assert d["summary"]["overall"] == "FAIL"
+    assert len(d["cases"]) == 2
