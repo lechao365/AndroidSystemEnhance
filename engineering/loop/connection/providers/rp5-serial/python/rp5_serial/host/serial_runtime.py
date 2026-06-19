@@ -1,0 +1,206 @@
+import threading
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
+from rp5_serial.shared.models import Session, StatusResponse, WriterLease
+
+# 可选依赖：pyserial 缺失时降级，不阻断 host 启动
+try:
+    import serial  # type: ignore
+    HAS_SERIAL = True
+except ImportError:  # pragma: no cover - 环境相关
+    serial = None  # type: ignore
+    HAS_SERIAL = False
+
+TZ = timezone(timedelta(hours=8))
+
+# 最近输出缓冲上限
+MAX_LINE_BUFFER = 500
+
+
+def now_iso() -> str:
+    return datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+@dataclass
+class RuntimeState:
+    device_id: str
+    active_session: Session | None = None
+    active_writer: WriterLease | None = None
+    subscriber_count: int = 0
+    # 串口配置
+    serial_port: str | None = None
+    baudrate: int = 115200
+    # pyserial Serial 实例（类型为 Any，避免硬依赖）
+    _serial: object | None = None
+    # 最近输出缓冲（保留最近 MAX_LINE_BUFFER 行）
+    _line_buffer: list[str] = field(default_factory=list)
+    # 接收半行缓冲（尚未遇到 \n 的字节）
+    _rx_buf: bytes = b""
+    # 并发锁：保护 session/writer/buffer 的读写一致性
+    _lock: threading.RLock = field(default_factory=threading.RLock)
+
+    def open_session(self, mode: str, owner_id: str) -> Session:
+        with self._lock:
+            session = Session(
+                session_id=f"s-{uuid4().hex[:8]}",
+                device_id=self.device_id,
+                mode=mode,
+                writer_owner=None,
+                started_at=now_iso(),
+                ended_at=None,
+                state="ACTIVE",
+            )
+            self.active_session = session
+            return session
+
+    def close_session(self) -> None:
+        """结束当前 session，同时释放 writer。"""
+        with self._lock:
+            if self.active_session is None:
+                return
+            self.active_writer = None
+            self.active_session.ended_at = now_iso()
+            self.active_session.state = "ENDED"
+            self.active_session = None
+
+    def acquire_writer(self, owner_type: str, owner_id: str) -> WriterLease | None:
+        with self._lock:
+            if self.active_writer is not None:
+                return None
+            if self.active_session is None:
+                self.open_session(mode="interactive", owner_id=owner_id)
+            lease = WriterLease(
+                lease_id=f"l-{uuid4().hex[:8]}",
+                session_id=self.active_session.session_id,
+                owner_type=owner_type,
+                owner_id=owner_id,
+                acquired_at=now_iso(),
+                expires_at=now_iso(),
+                state="HELD",
+            )
+            self.active_writer = lease
+            self.active_session.writer_owner = owner_id
+            return lease
+
+    def release_writer(self) -> None:
+        with self._lock:
+            self.active_writer = None
+            if self.active_session:
+                self.active_session.writer_owner = None
+
+    def send_line(self, text: str) -> None:
+        """向串口写入一行（自动追加 \\n）。
+
+        必须持有 writer lease，否则拒绝写入。
+        """
+        with self._lock:
+            if self.active_writer is None:
+                raise RuntimeError("no active writer lease; acquire_writer first")
+            if self._serial is None:
+                raise RuntimeError("serial port not open")
+            payload = text.encode("utf-8")
+            if not payload.endswith(b"\n"):
+                payload += b"\n"
+            self._serial.write(payload)  # type: ignore[union-attr]
+
+    def recent_lines(self, limit: int) -> list[str]:
+        """返回最近 N 行缓冲（不足时全量返回）。"""
+        with self._lock:
+            if limit <= 0:
+                return []
+            return list(self._line_buffer[-limit:])
+
+    def inc_subscriber(self) -> int:
+        with self._lock:
+            self.subscriber_count += 1
+            return self.subscriber_count
+
+    def dec_subscriber(self) -> int:
+        with self._lock:
+            self.subscriber_count = max(0, self.subscriber_count - 1)
+            return self.subscriber_count
+
+    # ------------------------------------------------------------------
+    # 串口 I/O
+    # ------------------------------------------------------------------
+
+    def open_serial(self) -> bool:
+        """打开串口。成功返回 True；无驱动或失败返回 False。"""
+        if not HAS_SERIAL:
+            return False
+        if self._serial is not None:
+            return True
+        try:
+            self._serial = serial.Serial(  # type: ignore[union-attr]
+                self.serial_port,
+                baudrate=self.baudrate,
+                timeout=0,  # 非阻塞读取
+            )
+            return True
+        except Exception:
+            self._serial = None
+            return False
+
+    def close_serial(self) -> None:
+        """关闭串口连接。"""
+        if self._serial is None:
+            return
+        try:
+            self._serial.close()  # type: ignore[union-attr]
+        except Exception:
+            pass
+        finally:
+            self._serial = None
+
+    def read_lines(self) -> list[str]:
+        """非阻塞读取串口当前可用字节，按 \\n 切分。
+
+        返回本次新增的完整行列表；半行暂存到 _rx_buf，下次拼接。
+        最近输出缓冲保留最近 MAX_LINE_BUFFER 行。
+        """
+        with self._lock:
+            if self._serial is None:
+                return []
+            try:
+                waiting = getattr(self._serial, "in_waiting", 0) or 0
+                chunk = self._serial.read(waiting) if waiting else b""  # type: ignore[union-attr]
+            except Exception:
+                return []
+            if not chunk:
+                return []
+            data = self._rx_buf + chunk
+            parts = data.split(b"\n")
+            # 最后一段尚未遇到换行，保留到下次
+            self._rx_buf = parts[-1]
+            new_lines: list[str] = []
+            for raw in parts[:-1]:
+                text = raw.decode("utf-8", errors="replace").rstrip("\r")
+                self._line_buffer.append(text)
+                new_lines.append(text)
+            # 裁剪缓冲到上限
+            if len(self._line_buffer) > MAX_LINE_BUFFER:
+                del self._line_buffer[: len(self._line_buffer) - MAX_LINE_BUFFER]
+            return new_lines
+
+    # ------------------------------------------------------------------
+    # 状态
+    # ------------------------------------------------------------------
+
+    def _serial_state(self) -> str:
+        if self._serial is not None and getattr(self._serial, "is_open", False):
+            return "CONNECTED"
+        if not HAS_SERIAL:
+            return "NO_DRIVER"
+        return "DISCONNECTED"
+
+    def status(self) -> StatusResponse:
+        with self._lock:
+            return StatusResponse(
+                host_state="READY",
+                serial_state=self._serial_state(),
+                active_session=self.active_session.to_dict() if self.active_session else None,
+                active_writer=self.active_writer.to_dict() if self.active_writer else None,
+                subscriber_count=self.subscriber_count,
+            )

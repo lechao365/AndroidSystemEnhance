@@ -8,3 +8,9 @@
 # harness 脚本维测日志（本地产物，不归档）
 engineering/harness/log/*
 !engineering/harness/log/.gitkeep
+
+# loop engineering 本地产物（编译缓存、Host 日志、pytest 缓存）
+__pycache__/
+*.pyc
+engineering/loop/**/.host-log/
+.pytest_cache/
