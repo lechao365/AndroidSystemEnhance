@@ -1,0 +1,14 @@
+# 公共 shell 可达性用例。被其他 suite include 复用。
+suite: shell
+version: 1
+
+cases:
+  - id: shell_reachable
+    description: "shell prompt 可见，设备串口可达"
+    command: ""
+    assert:
+      type: prompt_visible
+    severity: critical
+    on_fail:
+      collectors: []
+    tags: [shell, reachable]

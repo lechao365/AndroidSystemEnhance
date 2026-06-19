@@ -1,0 +1,60 @@
+# 系统级 boot 成功验收用例。
+# include shell suite 的 shell_reachable 用例。
+suite: boot-success
+version: 1
+
+include:
+  - shell
+
+cases:
+  - id: boot_completed
+    description: "sys.boot_completed 属性为 1"
+    command: "getprop sys.boot_completed"
+    assert:
+      type: contains
+      value: "1"
+    severity: critical
+    requires: [shell_reachable]
+    on_fail:
+      collectors: [boot_log, init_log]
+    tags: [boot, system]
+
+  - id: zygote_running
+    description: "zygote 服务处于 running 状态"
+    command: "getprop init.svc.zygote"
+    assert:
+      type: contains
+      value: "running"
+    severity: critical
+    requires: [shell_reachable]
+    on_fail:
+      collectors: [crash_dump, init_log]
+    tags: [boot, android_core]
+
+  - id: surfaceflinger_running
+    description: "surfaceflinger 服务处于 running 状态"
+    command: "getprop init.svc.surfaceflinger"
+    assert:
+      type: contains
+      value: "running"
+    severity: critical
+    requires: [shell_reachable]
+    on_fail:
+      collectors: [crash_dump, init_log]
+    tags: [boot, android_core]
+
+collectors:
+  crash_dump:
+    commands:
+      - "logcat -b crash -d"
+      - "ls -la /data/tombstones/"
+    hints: "关注 abort message / signal / fault addr / backtrace"
+  init_log:
+    commands:
+      - "getprop init.svc.*"
+      - "logcat -b system -d"
+    hints: "关注 service 重启频率 / 退出信号 / last_reason"
+  boot_log:
+    commands:
+      - "dmesg"
+    hints: "关注 boot 时序 / init 阶段卡点 / kernel 错误"
