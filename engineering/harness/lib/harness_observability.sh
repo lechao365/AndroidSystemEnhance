@@ -314,7 +314,7 @@ _h_rotate_artifacts() {
         [ "$found" = false ] && ts_list+=("$ts")
     done < <(ls -1 "$_H_ARTIFACTS_DIR" 2>/dev/null)
 
-    # ts_list 按降序，保留前 2 个（本轮 + 1 轮历史），删除其余
+    # ts_list 按降序，保留前 3 个（本轮 + 2 轮历史），删除其余
     # 注意：本轮 ts 就是 $_H_TS
     # 排序（降序）
     local -a sorted=()
@@ -322,7 +322,7 @@ _h_rotate_artifacts() {
     local i=0 t
     for t in "${sorted[@]}"; do
         i=$((i + 1))
-        if [ $i -gt 2 ]; then
+        if [ $i -gt 3 ]; then
             rm -f "$_H_ARTIFACTS_DIR"/${t}-* 2>/dev/null
         fi
     done
