@@ -1,0 +1,9 @@
+{"t": 0.0, "text": "Booting Linux on physical CPU 0x0"}
+{"t": 0.5, "text": "Linux version 6.1.0-android14-loom (gcc version 13) #1 SMP PREEMPT"}
+{"t": 2.0, "text": "init: starting service 'zygote'"}
+{"t": 5.0, "text": "reboot: Restarting system"}
+{"t": 6.0, "text": "Booting Linux on physical CPU 0x0"}
+{"t": 6.5, "text": "Linux version 6.1.0-android14-loom (gcc version 13) #1 SMP PREEMPT"}
+{"t": 8.0, "text": "init: starting service 'zygote'"}
+{"t": 11.0, "text": "reboot: Restarting system"}
+{"t": 12.0, "text": "Booting Linux on physical CPU 0x0"}
