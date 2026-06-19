@@ -2,9 +2,6 @@
   "device_id": "rp5",
   "transport": "serial",
   "prompt_markers": ["console:/ $", "console:/ #", "localhost:/ #", "# ", "$ "],
-  "boot_markers": ["Booting Linux", "Linux version", "U-Boot", "starting kernel"],
   "reboot_markers": ["reboot: Restarting system", "U-Boot"],
-  "panic_markers": ["Kernel panic", "Unable to handle kernel", "Call trace:"],
-  "hang_markers": ["Freeing unused kernel memory", "init: starting service"],
   "line_ending": "\n"
 }

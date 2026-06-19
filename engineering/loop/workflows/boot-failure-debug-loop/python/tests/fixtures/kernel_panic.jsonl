@@ -1,8 +1,0 @@
-{"t": 0.0, "text": "Booting Linux on physical CPU 0x0"}
-{"t": 0.5, "text": "Linux version 6.1.0-android14-loom (gcc version 13) #1 SMP PREEMPT"}
-{"t": 2.0, "text": "Unable to handle kernel NULL pointer dereference at 0x00000000"}
-{"t": 2.5, "text": "Call trace:"}
-{"t": 2.6, "text": "  do_init_module+0x20/0x40"}
-{"t": 2.7, "text": "  kernel_init+0x10/0x20"}
-{"t": 3.0, "text": "Kernel panic - not syncing: Fatal exception in interrupt"}
-{"t": 3.1, "text": "---[ end Kernel panic - not syncing: Fatal exception in interrupt ]---"}

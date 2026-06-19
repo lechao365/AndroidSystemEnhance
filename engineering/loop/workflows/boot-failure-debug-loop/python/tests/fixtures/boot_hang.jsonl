@@ -1,5 +1,0 @@
-{"t": 0.0, "text": "Booting Linux on physical CPU 0x0"}
-{"t": 0.5, "text": "Linux version 6.1.0-android14-loom (gcc version 13) #1 SMP PREEMPT"}
-{"t": 1.5, "text": "Freeing unused kernel memory: 1024K"}
-{"t": 2.0, "text": "Run /init as init process"}
-{"t": 3.0, "text": "init: starting service 'surfaceflinger'"}
