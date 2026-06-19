@@ -1,0 +1,5 @@
+# opencode 工具链依赖（从 .opencode/.gitignore 迁移）
+.opencode/node_modules/
+.opencode/package.json
+.opencode/package-lock.json
+.opencode/bun.lock
