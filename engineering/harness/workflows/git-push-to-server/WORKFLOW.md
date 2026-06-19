@@ -71,7 +71,21 @@ bash engineering/harness/workflows/git-push-to-server/collect_diff.sh --stat-onl
 
 ### 3. 单次确认（AI 展示，支持多轮编辑）
 
-展示格式（**只展示 type/scope/subject/body + 分支，不重复完整 message**）：
+#### 强制约束（不可跳过）
+
+无论用户在何时、以何种措辞表达"提交"或"推送"意图（如"同意提交""可以提交""提交吧"），AI 都**必须**：
+
+1. 先完成 collect diff（第 1 步）
+2. 生成 commit message（第 2 步）
+3. 展示完整 message 预览（本步）
+4. **等待用户对该 message 的显式确认**（`y` / `n` / 修改意见）
+
+**禁止**将用户在 collect 之前的任何"同意"视为对后续 message 的确认。
+**禁止**跳过第 3 步直接调用 `commit_and_push.sh`。
+
+#### 展示格式
+
+（**只展示 type/scope/subject/body + 分支，不重复完整 message**）：
 
 ```
 ────────── 提交预览 ──────────
