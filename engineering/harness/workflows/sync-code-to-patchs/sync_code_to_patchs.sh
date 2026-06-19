@@ -119,7 +119,7 @@ if [ "$AOSP_OK" = true ]; then
     if [ -f "$AOSP_WS/.repo/project.list" ]; then
         sort "$AOSP_WS/.repo/project.list" > "$REPO_LIST_FILE"
     else
-        (cd "$AOSP_WS" && repo forall -c 'echo $REPO_PATH' 2>/dev/null | sort) > "$REPO_LIST_FILE"
+        (cd "$AOSP_WS" && repo forall -c 'echo $REPO_PATH' 2>/dev/null | sort) > "$REPO_LIST_FILE" || on_err "${BASH_LINENO[0]}" "$BASH_COMMAND" $?
     fi
 
     # 并行扫描有改动的 repo 项目（xargs -P 比 repo status 快 60%）
@@ -187,9 +187,9 @@ if [ "$KERNEL_OK" = true ]; then
     BASE=$(find_upstream_base)
     if [ -z "$BASE" ]; then
         log_error "无法确定 kernel upstream base commit"
-        harness_exit 1
+        harness_exit 3
     fi
-    log_info "Upstream base: $(git log --oneline -1 "$BASE" | head -1)"
+    log_info "Upstream base: $(git log --oneline -1 "$BASE" 2>/dev/null | head -1 || on_err --continue "${BASH_LINENO[0]}" "$BASH_COMMAND" $?)"
 
     echo "--- Modified ---"
     while IFS= read -r f; do
@@ -207,7 +207,7 @@ if [ "$KERNEL_OK" = true ]; then
         fi
         if [ "$CHECK_ONLY" = false ]; then
             mkdir -p "$(dirname "$target")"
-            git diff "$BASE" -- "$f" > "$target"
+            git diff "$BASE" -- "$f" > "$target" 2>/dev/null || on_err --continue "${BASH_LINENO[0]}" "$BASH_COMMAND" $?
         fi
         [ -f "$target" ] && print_ok "kernel/modified/${f}.diff" || print_miss "kernel/modified/${f}.diff"
     done < <(git diff "$BASE" --diff-filter=M --name-only 2>/dev/null | grep -vE "$EXCLUDE_RE")
@@ -277,7 +277,7 @@ if [ "$AOSP_OK" = true ]; then
             fi
             if [ "$CHECK_ONLY" = false ]; then
                 mkdir -p "$(dirname "$target")"
-                git diff "$BASE" -- "$f" > "$target"
+                git diff "$BASE" -- "$f" > "$target" 2>/dev/null || on_err --continue "${BASH_LINENO[0]}" "$BASH_COMMAND" $?
             fi
             [ -f "$target" ] && print_ok "aosp/modified/${proj_dir}/${f}.diff" || print_miss "aosp/modified/${proj_dir}/${f}.diff"
         done < <(git diff "$BASE" --diff-filter=M --name-only 2>/dev/null | grep -vE "$EXCLUDE_RE")
