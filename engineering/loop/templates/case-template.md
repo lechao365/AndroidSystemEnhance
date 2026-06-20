@@ -69,16 +69,33 @@ collectors:        # 可选：collector 定义
 - suite 名：snake_case，与文件名一致（如 `lcview` 对应 `lcview.yaml`）
 - case id：snake_case，suite 内唯一，语义清晰（如 `zygote_running`）
 - collector 名：语义化（`crash_dump` / `init_log` / `network_log`）
+  - 公共诊断 collector 统一沉淀在 `cases/common/shell.yaml`（`common.shell`
+    命名空间），业务 suite include 后用短名引用，不要本地重定义同名 collector
 
 ## 5. collector 选择指南
 
-| fail 类型 | 推荐 collector | 典型命令 |
-|-----------|--------------|---------|
-| 进程崩溃/abort | `crash_dump` | logcat -b crash -d, ls /data/tombstones/ |
-| 服务未启动/异常退出 | `init_log` | getprop init.svc.*, logcat -b system -d |
-| 网络问题 | `network_log` | ip addr, logcat -b system -d, ping |
-| boot 卡死/时序问题 | `boot_log` | dmesg, getprop ro.boottime.* |
-| SELinux/权限问题 | `security_log` | getenforce, dmesg | grep avc |
+> **首选公共 collector**：`common.shell` 已内置 `boot_log` / `init_log` /
+> `crash_dump`，业务 suite 通过 `include: [common/shell]` 即可获得，失败时
+> 直接用短名引用即可，**不要重复定义**。仅在场景专属诊断（特定 HAL 日志、
+> 模块私有路径等）时才在本地 `collectors:` 块中新增 collector。
+
+### 何时用公共 collector
+
+| 场景 | 用法 |
+|------|------|
+| 复用 boot/init/crash 诊断 | `include: [common/shell]`，`on_fail.collectors: [boot_log]` 等 |
+| 全新的场景专属诊断 | 本地 `collectors:` 定义短名（仍走短名 → FQN 解析） |
+| 同时需要公共与本地 | include + 本地定义；引用都写短名即可 |
+
+### 常见 fail 类型对照
+
+| fail 类型 | 推荐 collector | 典型命令 | 公共/本地 |
+|-----------|--------------|---------|----------|
+| 进程崩溃/abort | `crash_dump` | logcat -b crash -d, ls /data/tombstones/ | 公共 |
+| 服务未启动/异常退出 | `init_log` | getprop init.svc.*, logcat -b system -d | 公共 |
+| boot 卡死/时序问题 | `boot_log` | dmesg, getprop ro.boottime.* | 公共 |
+| 网络问题 | `network_log` | ip addr, logcat -b system -d, ping | 本地 |
+| SELinux/权限问题 | `security_log` | getenforce, dmesg | grep avc | 本地 |
 
 ## 6. 好用例 vs 坏用例
 

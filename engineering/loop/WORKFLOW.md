@@ -30,6 +30,30 @@ AI 接管设备验收：执行用例 → 输出证据 → AI 分析 → 修复�
 | cases/*.yaml | 场景定义（声明式，零 Python） |
 | connection | 传输层（串口/ADB） |
 
+## 规则复用模型
+
+### FQN 命名
+
+- case FQN = `<suite>.<id>`（如 `system.boot.zygote_running`）。
+- collector FQN = `<suite>.<name>`（如 `common.shell.crash_dump`）。
+- `requires` / `on_fail.collectors` 可写短名：loader 按本地命名空间 → 显式 FQN →
+  全局唯一短名 三段式解析（见 `case_loader._resolve_case_links`）。
+
+### 公共 suite 与诊断 collector 库
+
+`cases/common/shell.yaml`（`common.shell`）提供：
+- 原子用例 `shell_reachable`（作为系统用例的 `requires` 前置）。
+- 公共诊断 collector：`boot_log` / `init_log` / `crash_dump`。
+
+业务 suite 通过 `include: [common/shell]` 自动注入上述用例和 collector，
+失败时直接用短名引用即可，无需重复定义。新场景应优先复用公共 collector，
+仅在场景专属诊断（如 HAL / sensor 特定日志）时定义本地 collector。
+
+### include 解析
+
+- `include` 路径由 `--case-dirs` 解析；loader 在每个 case_dir 下找 `<name>.yaml`。
+- 因此 `include: [common/shell]` 要求 `--case-dirs` 包含 `cases/` 根目录。
+
 ## core 模块清单
 
 | 模块 | 职责 |
