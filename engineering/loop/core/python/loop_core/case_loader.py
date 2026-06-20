@@ -148,7 +148,10 @@ def load_suite(suite_path: str, case_dirs: list[str]) -> CaseSuite:
     _resolve_case_links(all_cases, all_collectors)
 
     # 拓扑排序 + 环检测
-    ordered = _topological_sort(all_cases)
+    # 传入主 suite 名，让主 suite 的无依赖 case 排在 include 的 case 前面。
+    # 例如 boot-success.yaml 的 trigger_reboot 排在 common/shell 的 shell_reachable 前面，
+    # 确保 boot 场景先重启再检查，不遗漏启动早期日志。
+    ordered = _topological_sort(all_cases, main_suite=suite_name)
 
     # 解析 suite 级 defaults
     defaults = _parse_defaults(raw.get("defaults", {}))
@@ -378,15 +381,20 @@ def _parse_defaults(raw: dict) -> SuiteDefaults:
     )
 
 
-def _topological_sort(cases: list[TestCase]) -> list[TestCase]:
-    """拓扑排序：被依赖的用例排在前面。检测环。"""
+def _topological_sort(cases: list[TestCase], main_suite: str = "") -> list[TestCase]:
+    """拓扑排序：被依赖的用例排在前面。检测环。
+
+    main_suite 不改变拓扑语义（requires 仍然优先），但当多个 case 之间无依赖
+    关系时，主 suite 的 case 排在 include 的 case 前面。这样主 suite 可以
+    把关键前置操作（如 trigger_reboot）放在 include 的检查用例之前。
+    """
     case_map = {c.fqn: c for c in cases}
     visited: dict[str, int] = {}  # 0=visiting, 1=done
     result: list[TestCase] = []
 
     def visit(fqn: str, path: list[str]):
         if fqn not in case_map:
-            return  # defensive: requires 已在 _resolve_case_links 校验，正常路径不可达
+            return  # defensive: requires 已在 _resolve_case_links 校验
         state = visited.get(fqn)
         if state == 1:
             return
@@ -399,7 +407,12 @@ def _topological_sort(cases: list[TestCase]) -> list[TestCase]:
         visited[fqn] = 1
         result.append(case_map[fqn])
 
-    for case in cases:
+    # 主 suite 的 case 先于 include 的 case 做拓扑遍历，
+    # 确保无依赖的主 suite case（如 trigger_reboot）排在 include case（如 shell_reachable）前面
+    main_cases = [c for c in cases if c.suite == main_suite]
+    other_cases = [c for c in cases if c.suite != main_suite]
+
+    for case in main_cases + other_cases:
         visit(case.fqn, [])
 
     return result

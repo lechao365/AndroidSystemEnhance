@@ -1,6 +1,12 @@
 # 系统级 boot 成功验收用例。
 # include common.shell 获取 shell_reachable 用例 + 公共诊断 collector
 # （boot_log / init_log / crash_dump / kmsg）。
+# 执行顺序（由 case_loader 拓扑排序保证）：
+#   1. trigger_reboot（action: reboot，主 suite case，排在 include case 之前）
+#   2. shell_reachable（include 自 common/shell）
+#   3. boot_completed / zygote_running / surfaceflinger_running
+# trigger_reboot 先执行确保抓到完整启动日志；下游 case 通过 requires: [shell_reachable]
+# 确保 shell 可达后再检查服务状态。
 # trigger_reboot 自带 on_fail.collectors（serial_recent / init_log / crash_dump / kmsg），
 #   覆盖早期失败证据：其失败会导致下游 case SKIP，故必须自行采集 serial/kernel 上下文。
 # FQN 命名空间：system.boot
@@ -26,7 +32,7 @@ cases:
       type: contains
       value: "1"
     severity: critical
-    requires: [trigger_reboot]
+    requires: [trigger_reboot, shell_reachable]
     on_fail:
       collectors: [boot_log, init_log, kmsg]
     tags: [boot, system]
@@ -38,7 +44,7 @@ cases:
       type: contains
       value: "running"
     severity: critical
-    requires: [trigger_reboot]
+    requires: [trigger_reboot, shell_reachable]
     on_fail:
       collectors: [serial_recent, crash_dump, init_log, kmsg]
     tags: [boot, android_core]
@@ -50,7 +56,7 @@ cases:
       type: contains
       value: "running"
     severity: critical
-    requires: [trigger_reboot]
+    requires: [trigger_reboot, shell_reachable]
     on_fail:
       collectors: [crash_dump, init_log, kmsg]
     tags: [boot, android_core]

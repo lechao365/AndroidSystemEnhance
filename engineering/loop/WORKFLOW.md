@@ -121,6 +121,7 @@ shell 不可达时，AI/人工应优先分析 `serial_context`；shell 可达时
 7. 不强行给唯一根因；允许并列多个候选修复方向
 8. 只有当证据足以落到 `~/workspace/` 可操作范围时，才输出候选补丁草案；否则只出诊断报告
 9. AI 不自动修改 `boot-success.yaml`
+10. 诊断阶段可通过串口直接采集的设备信息（如 `/dev/dri/`、`/sys/class/drm/`、`getprop`、`dumpsys` 等），无需向用户逐条确认，直接执行
 
 reboot 诊断闭环的数据流：
 - `/le run --suite boot-success.yaml --host <ip> --port 9700 ...`

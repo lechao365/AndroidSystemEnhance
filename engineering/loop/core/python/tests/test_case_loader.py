@@ -798,7 +798,11 @@ def test_common_shell_yaml_has_kmsg_collector():
 
 
 def test_boot_success_yaml_has_trigger_reboot_first():
-    """boot-success.yaml 首条 case 是 trigger_reboot，后续 case requires 它。"""
+    """boot-success.yaml 首条 case 是 trigger_reboot，排在 shell_reachable 之前。
+
+    主 suite 的无依赖 case 必须排在 include 的 case 前面，
+    确保 boot 场景先重启再检查，不遗漏启动早期日志。
+    """
     from pathlib import Path
     from loop_core.case_loader import load_suite
 
@@ -811,13 +815,23 @@ def test_boot_success_yaml_has_trigger_reboot_first():
     boot_yaml = cases_dir / "system" / "boot-success.yaml"
 
     suite = load_suite(str(boot_yaml), [str(cases_dir)])
-    reboot_cases = [c for c in suite.cases if c.action == "reboot"]
-    assert len(reboot_cases) == 1
-    assert reboot_cases[0].id == "trigger_reboot"
 
-    reboot_fqn = reboot_cases[0].fqn
-    dependents = [c for c in suite.cases if reboot_fqn in c.requires]
-    assert len(dependents) >= 1, "no case requires trigger_reboot"
+    # trigger_reboot 必须存在且是第一条 case
+    assert suite.cases[0].id == "trigger_reboot"
+    assert suite.cases[0].action == "reboot"
+
+    # shell_reachable（来自 include common/shell）必须排在 trigger_reboot 之后
+    case_ids = [c.id for c in suite.cases]
+    assert "shell_reachable" in case_ids
+    assert case_ids.index("trigger_reboot") < case_ids.index("shell_reachable")
+
+    # 下游 case 依赖 trigger_reboot 和 shell_reachable
+    reboot_fqn = "system.boot.trigger_reboot"
+    shell_fqn = "common.shell.shell_reachable"
+    for case_id in ("boot_completed", "zygote_running", "surfaceflinger_running"):
+        case = next(c for c in suite.cases if c.id == case_id)
+        assert reboot_fqn in case.requires, f"{case_id} missing requires: {reboot_fqn}"
+        assert shell_fqn in case.requires, f"{case_id} missing requires: {shell_fqn}"
 
 
 def test_boot_success_trigger_reboot_has_early_failure_collectors():
