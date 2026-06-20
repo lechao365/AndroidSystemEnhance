@@ -19,7 +19,7 @@ lib/
 
 ## 路径配置
 
-所有路径的单一事实源: [`config/paths.conf`](../config/paths.conf)
+所有路径的单一事实源: [`config/harness-paths.conf`](../config/harness-paths.conf)
 路径管理规则: [`rules/path-management.md`](../rules/path-management.md) (PATH-001)
 
 ## 使用约定

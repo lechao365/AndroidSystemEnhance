@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../lib/shell/harness_path_util.sh
-source "$SCRIPT_DIR/../../lib/shell/harness_path_util.sh"
+source "$SCRIPT_DIR/../lib/shell/harness_path_util.sh"
 REPO_ROOT="$(harness_repo_root)"
 FIXTURE="$SCRIPT_DIR/fixtures/observability/basic/run_fixture.sh"
 LOG_ROOT="$(harness_path LOG_DIR)"
@@ -117,13 +117,18 @@ test_harness_init_reuses_preexported_repo_root() {
 #!/bin/bash
 set -euo pipefail
 REPO_ROOT="${1}"
-source "$REPO_ROOT/engineering/harness/lib/shell/harness_observability.sh"
+source "$REPO_ROOT/engineering/harness/lib/shell/harness_bootstrap.sh"
 harness_init "root-reuse-check"
 harness_exit 0
 HEREDOC
 
-    mkdir -p "$sandbox/engineering/harness/lib/shell"
-    cp "$REPO_ROOT/engineering/harness/lib/shell/harness_observability.sh" "$sandbox/engineering/harness/lib/shell/harness_observability.sh"
+    mkdir -p "$sandbox/engineering/harness/lib/shell" "$sandbox/engineering/harness/config"
+    cp "$REPO_ROOT/engineering/harness/lib/shell/harness_bootstrap.sh" \
+       "$REPO_ROOT/engineering/harness/lib/shell/harness_observability.sh" \
+       "$REPO_ROOT/engineering/harness/lib/shell/harness_path_util.sh" \
+       "$sandbox/engineering/harness/lib/shell/"
+    cp "$REPO_ROOT/engineering/harness/config/harness-paths.conf" \
+       "$sandbox/engineering/harness/config/harness-paths.conf"
 
     bash "$external_script" "$sandbox" >/dev/null
 

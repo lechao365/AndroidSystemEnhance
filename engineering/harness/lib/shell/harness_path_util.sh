@@ -5,12 +5,12 @@
 #
 # 职责:
 #   1. 从 BASH_SOURCE / __file__ 向上查找 REPO_ROOT（AGENTS.md 锚点）
-#   2. 加载 config/paths.conf（单一事实源）
+#   2. 加载 config/harness-paths.conf（单一事实源）
 #   3. 提供路径查询公共 API（harness_path / harness_env_path / harness_pythonpath）
 #
 # 公共 API:
 #   harness_repo_root              输出 REPO_ROOT 绝对路径
-#   harness_path <KEY>             输出 paths.conf 中 KEY 对应的绝对路径
+#   harness_path <KEY>             输出 harness-paths.conf 中 KEY 对应的绝对路径
 #   harness_env_path <KEY>         输出环境可覆盖路径（先查 ENV，再查 config 默认值）
 #   harness_pythonpath             输出拼好的 PYTHONPATH 字符串（绝对路径，冒号分隔）
 #
@@ -50,16 +50,16 @@ _h_path_find_root() {
 _H_PATH_REPO_ROOT=$(_h_path_find_root "${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}")
 
 # ----------------------------------------------------------------------------
-# 内部：加载 config/paths.conf
+# 内部：加载 config/harness-paths.conf
 # ----------------------------------------------------------------------------
 # 解析 KEY="value" 格式到关联数组（bash 4+）
 declare -gA _H_PATH_CONF 2>/dev/null || declare -A _H_PATH_CONF
-_H_PATH_CONF_FILE="$_H_PATH_REPO_ROOT/engineering/harness/config/paths.conf"
+_H_PATH_CONF_FILE="$_H_PATH_REPO_ROOT/engineering/harness/config/harness-paths.conf"
 
 _h_path_load_conf() {
     local conf_file="$1"
     [ -f "$conf_file" ] || {
-        echo "ERROR: paths.conf 不存在: $conf_file" >&2
+        echo "ERROR: harness-paths.conf 不存在: $conf_file" >&2
         exit 3
     }
     local line key val
@@ -85,7 +85,7 @@ harness_repo_root() {
     printf '%s' "$_H_PATH_REPO_ROOT"
 }
 
-# harness_path <KEY> — 输出 paths.conf 中 KEY 对应的绝对路径
+# harness_path <KEY> — 输出 harness-paths.conf 中 KEY 对应的绝对路径
 # 相对路径基于 REPO_ROOT 解析；已是绝对路径则原样返回
 harness_path() {
     local key="$1"
@@ -104,7 +104,7 @@ harness_path() {
 }
 
 # harness_env_path <KEY> — 输出环境可覆盖路径
-# KEY 为 paths.conf 中的 ENV_* 键（如 ENV_KERNEL_WS）
+# KEY 为 harness-paths.conf 中的 ENV_* 键（如 ENV_KERNEL_WS）
 # 逻辑: 取 ENV_* 的值（已含 ${ENV_VAR:-default}），eval 展开
 harness_env_path() {
     local key="$1"

@@ -1,13 +1,14 @@
 @echo off
 REM ============================================================================
-REM harness_path_util.bat -- Windows 批处理统一路径工具
-REM 规则详见: engineering/harness/rules/path-management.md (PATH-001)
+REM harness_path_util.bat -- Windows batch unified path utility
+REM Rule: engineering/harness/rules/path-management.md (PATH-001)
 REM
-REM 设计说明:
-REM   bat 无函数返回值/跨脚本函数复用，采用「加载即设置变量」模式。
-REM   call 本文件后，所有 HARNESS_PATH_<KEY> 变量在调用者作用域可用。
+REM Design:
+REM   bat has no function return value, uses "load-and-set-variables" pattern.
+REM   After calling this file, all HARNESS_PATH_* variables are available
+REM   in the caller scope.
 REM
-REM 用法（被其他 bat 脚本 call）:
+REM Usage (called by other bat scripts):
 REM   set "SCRIPT_DIR=%~dp0"
 REM   set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 REM   call "%SCRIPT_DIR%\..\..\lib\bat\harness_path_util.bat"
@@ -15,15 +16,15 @@ REM   echo %REPO_ROOT%
 REM   echo %HARNESS_PATH_HOST_LOG_DIR%
 REM   echo %HARNESS_PATH_PYTHONPATH%
 REM
-REM 变量约定:
-REM   REPO_ROOT                 -- 仓库根绝对路径
-REM   HARNESS_PATH_<KEY>        -- paths.conf 中 KEY 对应的绝对路径（反斜杠）
-REM   HARNESS_PATH_PYTHONPATH   -- 拼好的 PYTHONPATH（分号分隔，Windows 风格）
+REM Variables:
+REM   REPO_ROOT                 -- repo root absolute path
+REM   HARNESS_PATH_KEY          -- absolute path for KEY in harness-paths.conf
+REM   HARNESS_PATH_PYTHONPATH   -- assembled PYTHONPATH, semicolon-separated
 REM ============================================================================
 
 setlocal enabledelayedexpansion
 
-REM --- 定位 REPO_ROOT（从本文件位置向上找 AGENTS.md）---
+REM --- Locate REPO_ROOT by searching upwards for AGENTS.md anchor ---
 set "_H_PATH_DIR=%~dp0"
 set "_H_PATH_DIR=!_H_PATH_DIR:~0,-1!"
 set "_H_PATH_ROOT=!_H_PATH_DIR!"
@@ -31,25 +32,25 @@ set "_H_PATH_ROOT=!_H_PATH_DIR!"
 if exist "!_H_PATH_ROOT!\AGENTS.md" goto :_h_path_find_root_done
 for %%i in ("!_H_PATH_ROOT!\..") do set "_H_PATH_ROOT=%%~fi"
 if "!_H_PATH_ROOT!"=="%~d0\" (
-    echo ERROR: harness_path_util.bat 未找到项目根（AGENTS.md 锚点缺失）>&2
+    echo ERROR: harness_path_util.bat cannot find repo root, AGENTS.md anchor missing>&2
     exit /b 3
 )
 goto :_h_path_find_root_loop
 :_h_path_find_root_done
 
-REM --- 加载 config/paths.conf ---
-set "_H_PATH_CONF_FILE=!_H_PATH_ROOT!\engineering\harness\config\paths.conf"
+REM --- Load config/harness-paths.conf ---
+set "_H_PATH_CONF_FILE=!_H_PATH_ROOT!\engineering\harness\config\harness-paths.conf"
 if not exist "!_H_PATH_CONF_FILE!" (
-    echo ERROR: paths.conf 不存在: !_H_PATH_CONF_FILE!>&2
+    echo ERROR: harness-paths.conf not found: !_H_PATH_CONF_FILE!>&2
     exit /b 3
 )
 
-REM --- 解析 KEY="value" 并设置 HARNESS_PATH_<KEY>（绝对路径，反斜杠）---
+REM --- Parse KEY="value" lines and set HARNESS_PATH_KEY variables ---
 for /f "usebackq eol=# tokens=1,* delims==" %%a in ("!_H_PATH_CONF_FILE!") do (
     call :_h_path_set_var "%%a" "%%b"
 )
 
-REM --- 构造 HARNESS_PATH_PYTHONPATH（分号分隔）---
+REM --- Build HARNESS_PATH_PYTHONPATH, semicolon-separated ---
 set "_H_PP_RAW=!HARNESS_PATH_PYTHON_PATH_ROOTS!"
 set "HARNESS_PATH_PYTHONPATH="
 :_h_py_loop
@@ -68,48 +69,49 @@ if "!HARNESS_PATH_PYTHONPATH!"=="" (
 if not "!_H_PP_RAW!"=="" goto :_h_py_loop
 :_h_py_done
 
-REM --- 导出变量到调用者作用域 ---
+REM --- Export REPO_ROOT to caller scope, then reload all vars globally ---
 endlocal & (
     set "REPO_ROOT=%_H_PATH_ROOT%"
     set "_HARNESS_PATH_UTIL_LOADED=1"
-    REM HARNESS_PATH_* 变量通过 for 循环在 setlocal 内设置，需逐个导出
 )
-REM 重新设置（endlocal 会清除 delayed expansion 变量，改用直接设置）
-REM 注: 上面的 endlocal & 只能导出固定变量名，动态变量需用另一种方式
 
-REM 重新执行变量设置（不带 setlocal，直接进入调用者作用域）
-set "REPO_ROOT=%_H_PATH_ROOT%" 2>nul
+REM --- Reload phase: re-parse config in caller scope, no setlocal ---
 goto :_h_path_reload
 
-REM --- 内部：设置单个 HARNESS_PATH_<KEY> 变量 ---
+REM --- Internal: set single HARNESS_PATH_KEY variable, local scope ---
 :_h_path_set_var
 set "_h_sv_key=%~1"
 set "_h_sv_val=%~2"
-REM 去除 key 首尾空格
+REM Trim leading spaces from key
 for /f "tokens=* delims= " %%k in ("!_h_sv_key!") do set "_h_sv_key=%%k"
 if "!_h_sv_key!"=="" goto :eof
-REM 去除 value 两端引号
+REM Strip all quotes from value
 set "_h_sv_val=!_h_sv_val:"=!"
-REM 相对路径拼接 REPO_ROOT（以 / 或 \ 开头为绝对路径）
-set "_h_sv_first=!_h_sv_val:~0,1!"
-if not "!_h_sv_first!"=="\" if not "!_h_sv_first!"=="/" (
-    set "_h_sv_val=!_H_PATH_ROOT!\!_h_sv_val!"
+REM Prepend REPO_ROOT if relative path, except for PYTHON_PATH_ROOTS
+if /i not "!_h_sv_key!"=="PYTHON_PATH_ROOTS" (
+    set "_h_sv_first=!_h_sv_val:~0,1!"
+    if not "!_h_sv_first!"=="\" if not "!_h_sv_first!"=="/" (
+        set "_h_sv_val=!_H_PATH_ROOT!\!_h_sv_val!"
+    )
 )
-REM 正斜杠转反斜杠
+REM Convert forward slashes to backslashes
 set "_h_sv_val=!_h_sv_val:/=\!"
 set "HARNESS_PATH_!_h_sv_key!=!_h_sv_val!"
 goto :eof
 
 REM ============================================================================
-REM 重新加载阶段（endlocal 后，直接在调用者作用域设置变量）
+REM Reload phase: after endlocal, set variables directly in caller scope
 REM ============================================================================
 :_h_path_reload
-REM 重新解析 paths.conf（此时无 setlocal，变量直接持久化）
-set "_H_PATH_CONF_FILE=%REPO_ROOT%\engineering\harness\config\paths.conf"
+set "_H_PATH_CONF_FILE=%REPO_ROOT%\engineering\harness\config\harness-paths.conf"
+if not exist "%_H_PATH_CONF_FILE%" (
+    echo ERROR: _h_path_reload: harness-paths.conf not found: %_H_PATH_CONF_FILE%>&2
+    exit /b 3
+)
 for /f "usebackq eol=# tokens=1,* delims==" %%a in ("%_H_PATH_CONF_FILE%") do (
     call :_h_path_set_var_global "%%a" "%%b"
 )
-REM 重新构造 PYTHONPATH
+REM Rebuild PYTHONPATH
 set "_H_PP_RAW=%HARNESS_PATH_PYTHON_PATH_ROOTS%"
 set "HARNESS_PATH_PYTHONPATH="
 :_h_py_loop2
@@ -127,6 +129,7 @@ if "%HARNESS_PATH_PYTHONPATH%"=="" (
 )
 if not "%_H_PP_RAW%"=="" goto :_h_py_loop2
 :_h_py_done2
+REM Cleanup temp variables
 set "_H_PATH_DIR="
 set "_H_PATH_ROOT="
 set "_H_PATH_CONF_FILE="
@@ -138,16 +141,19 @@ set "_h_pp_root="
 set "_h_pp_abs="
 goto :eof
 
-REM --- 内部：全局作用域设置变量 ---
+REM --- Internal: set single HARNESS_PATH_KEY variable, global scope ---
 :_h_path_set_var_global
 set "_h_key=%~1"
 set "_h_val=%~2"
 for /f "tokens=* delims= " %%k in ("%_h_key%") do set "_h_key=%%k"
 if "%_h_key%"=="" goto :eof
 set "_h_val=%_h_val:"=%"
-set "_h_first=%_h_val:~0,1%"
-if not "%_h_first%"=="\" if not "%_h_first%"=="/" (
-    set "_h_val=%REPO_ROOT%\%_h_val%"
+REM Prepend REPO_ROOT if relative path, except for PYTHON_PATH_ROOTS
+if /i not "%_h_key%"=="PYTHON_PATH_ROOTS" (
+    set "_h_first=%_h_val:~0,1%"
+    if not "%_h_first%"=="\" if not "%_h_first%"=="/" (
+        set "_h_val=%REPO_ROOT%\%_h_val%"
+    )
 )
 set "_h_val=%_h_val:/=\%"
 set "HARNESS_PATH_%_h_key%=%_h_val%"

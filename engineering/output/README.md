@@ -8,7 +8,7 @@ rp5-serial Windows Host 进程的运行产物，包括：
 - 串口 transcript 文件（rp5-serial-transcript.log）
 - Host 进程日志（rp5_serial_host.log）
 
-由 Windows 端 `start_rp5_serial_host.bat` 触发写入。
+由 Windows 端 `engineering/harness/scripts/start_rp5_serial_host.bat` 触发写入。
 
 ## log/
 

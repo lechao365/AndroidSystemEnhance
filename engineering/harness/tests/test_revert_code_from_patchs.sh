@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../lib/shell/harness_path_util.sh
-source "$SCRIPT_DIR/../../lib/shell/harness_path_util.sh"
+source "$SCRIPT_DIR/../lib/shell/harness_path_util.sh"
 REPO_ROOT="$(harness_repo_root)"
 FIXTURE_ROOT="$SCRIPT_DIR/fixtures/revert-code-from-patchs"
 
@@ -54,13 +54,17 @@ copy_runtime_scaffold() {
     local sandbox="$1"
     mkdir -p \
         "$sandbox/engineering/harness/workflows/revert-code-from-patchs" \
-        "$sandbox/engineering/harness/lib/shell"
+        "$sandbox/engineering/harness/lib/shell" \
+        "$sandbox/engineering/harness/config"
     cp "$REPO_ROOT/AGENTS.md" "$sandbox/AGENTS.md"
     cp "$REPO_ROOT/engineering/harness/workflows/revert-code-from-patchs/revert_code_from_patchs.sh" \
        "$sandbox/engineering/harness/workflows/revert-code-from-patchs/revert_code_from_patchs.sh"
     cp "$REPO_ROOT/engineering/harness/lib/shell/harness_bootstrap.sh" \
        "$REPO_ROOT/engineering/harness/lib/shell/harness_observability.sh" \
+       "$REPO_ROOT/engineering/harness/lib/shell/harness_path_util.sh" \
        "$sandbox/engineering/harness/lib/shell/"
+    cp "$REPO_ROOT/engineering/harness/config/harness-paths.conf" \
+       "$sandbox/engineering/harness/config/harness-paths.conf"
 }
 
 copy_fixture() {

@@ -4,12 +4,12 @@
 
 职责:
     1. 从 __file__ 向上查找 REPO_ROOT（AGENTS.md 锚点，与 shell 端一致）
-    2. 加载 config/paths.conf（单一事实源）
+    2. 加载 config/harness-paths.conf（单一事实源）
     3. 提供路径查询 API
 
 公共 API:
     repo_root() -> Path              返回 REPO_ROOT 绝对路径
-    path(key) -> Path                返回 paths.conf 中 KEY 对应的绝对路径
+    path(key) -> Path                返回 harness-paths.conf 中 KEY 对应的绝对路径
     env_path(key) -> str             返回环境可覆盖路径
     pythonpath() -> list[str]        返回 Python 包根绝对路径列表
     ensure_dir(key) -> Path          path() + mkdir(parents=True, exist_ok=True)
@@ -43,15 +43,15 @@ def _find_repo_root() -> Path:
 
 
 def _load_conf() -> dict[str, str]:
-    """解析 paths.conf，返回 key->value 字典。"""
+    """解析 harness-paths.conf，返回 key->value 字典。"""
     global _CONF_CACHE
     if _CONF_CACHE is not None:
         return _CONF_CACHE
 
     root = _find_repo_root()
-    conf_file = root / "engineering" / "harness" / "config" / "paths.conf"
+    conf_file = root / "engineering" / "harness" / "config" / "harness-paths.conf"
     if not conf_file.is_file():
-        raise FileNotFoundError(f"paths.conf 不存在: {conf_file}")
+        raise FileNotFoundError(f"harness-paths.conf 不存在: {conf_file}")
 
     conf: dict[str, str] = {}
     pattern = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)="(.*)"\s*$')
@@ -77,7 +77,7 @@ def _expand_env(val: str) -> str:
 
 
 def path(key: str) -> Path:
-    """返回 paths.conf 中 KEY 对应的绝对路径。
+    """返回 harness-paths.conf 中 KEY 对应的绝对路径。
 
     相对路径基于 REPO_ROOT 解析；已是绝对路径则原样返回。
     字符串中的 $HOME 等环境变量会被展开。
@@ -93,7 +93,7 @@ def path(key: str) -> Path:
 
 
 def env_path(key: str) -> str:
-    """返回环境可覆盖路径（KEY 为 paths.conf 中的 ENV_* 键）。
+    """返回环境可覆盖路径（KEY 为 harness-paths.conf 中的 ENV_* 键）。
 
     ENV_* 值中的 ${ENV_VAR:-default} 会被展开。
     """

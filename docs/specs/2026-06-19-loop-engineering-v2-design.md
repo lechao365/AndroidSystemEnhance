@@ -138,8 +138,6 @@
 engineering/loop/
 ├── README.md                          # 重新生成
 ├── WORKFLOW.md                        # 重写
-├── bin/
-│   └── le.sh                          # 新增：统一 CLI 入口（替代 loop_boot_failure_debug.sh）
 ├── core/python/loop_core/             # 重构
 │   ├── models.py                      # 重写（删 LoopAttempt/RuleMatch/ActionRecord，加 v2 模型）
 │   ├── assertion_engine.py            # 新增
@@ -167,10 +165,10 @@ engineering/loop/
 ├── connection/                        # 保留不动
 │   ├── profiles/devices/rp5/
 │   └── providers/rp5-serial/
-├── scripts/                           # 保留不动
-│   └── start_rp5_serial_host.bat
 └── ❌ workflows/                      # 整个目录移除（boot-failure-debug-loop/）
 ```
+
+> 注：`scripts/` 目录已移除，`le.sh` 和 `start_rp5_serial_host.bat` 迁移至 `engineering/harness/scripts/`。
 
 ### 5.3 用例层（声明式 YAML）
 
@@ -760,7 +758,7 @@ le.sh deploy image \
 ### 8.4 入口脚本
 
 ```bash
-# engineering/loop/scripts/le.sh — 统一 LE CLI 入口
+# engineering/harness/scripts/le.sh — 统一 LE CLI 入口
 #!/bin/bash
 # 调用 python3 -m loop_core.cli "$@"
 ```
@@ -853,7 +851,7 @@ le.sh deploy image \
 - workflows/：**整个目录删除**（fixtures 迁移到 core/tests/）
 - 用例新增：`cases/common/shell.yaml` + `cases/system/boot-success.yaml`
 - 模板新增：`templates/case-template.md`
-- 入口新增：`bin/le.sh`
+- 入口新增：`harness/scripts/le.sh`（从 `bin/le.sh` 调整）
 - profile 简化：device profile + workflow profile 删除 v1 字段
 - 文档：**README.md / WORKFLOW.md 重新生成**
 - 测试：全量重写（core 侧）
@@ -1015,8 +1013,8 @@ engineering/loop/workflows/   # ❌ 整个目录移除
 
 **用例/模板/入口新增：**
 ```
+engineering/harness/scripts/le.sh       # 新增（CLI 入口，最终迁至 harness）
 engineering/loop/
-├── bin/le.sh                           # 新增
 ├── cases/common/shell.yaml             # 新增
 ├── cases/system/boot-success.yaml      # 新增
 └── templates/case-template.md          # 新增

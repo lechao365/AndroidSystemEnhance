@@ -63,13 +63,13 @@ rp5-serial/
 
 ```bat
 REM 默认参数: COM5 / 115200 / 9700
-engineering\loop\scripts\start_rp5_serial_host.bat
+engineering\harness\scripts\start_rp5_serial_host.bat
 
 REM 自定义 COM 口
-engineering\loop\scripts\start_rp5_serial_host.bat COM3
+engineering\harness\scripts\start_rp5_serial_host.bat COM3
 
 REM 全参数自定义
-engineering\loop\scripts\start_rp5_serial_host.bat COM3 9600 9800
+engineering\harness\scripts\start_rp5_serial_host.bat COM3 9600 9800
 ```
 
 **手动方式**（备用）：

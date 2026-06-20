@@ -2,7 +2,7 @@
 
 > **规则 ID**：`PATH-001`
 > - `engineering/` 下所有脚本（shell / python / bat）禁止硬编码工程内路径，必须通过统一路径工具获取。
-> - 路径配置的单一事实源为 `engineering/harness/config/paths.conf`，三方工具（shell / python / bat）均从此文件加载。
+> - 路径配置的单一事实源为 `engineering/harness/config/harness-paths.conf`，三方工具（shell / python / bat）均从此文件加载。
 
 ## 1. 适用范围
 
@@ -12,7 +12,7 @@
 ## 2. 强制要求（MUST）
 
 1. **MUST** 通过统一路径工具获取工程内路径，禁止硬编码 `engineering/output/...`、`patchs/...`、`engineering/harness/...` 等字面值。
-2. **MUST** 新增路径时，先在 `config/paths.conf` 中定义 KEY，再通过工具 API 引用。
+2. **MUST** 新增路径时，先在 `config/harness-paths.conf` 中定义 KEY，再通过工具 API 引用。
 3. **MUST** 环境可覆盖路径（如 workspace 路径）使用 `ENV_*` 前缀的 KEY，保留 `${ENV_VAR:-default}` 覆盖语义。
 4. **MUST** 三方工具的选择：
    - shell 脚本：source `lib/shell/harness_path_util.sh`（或通过 bootstrap 间接 source）
@@ -57,7 +57,7 @@ REM   %HARNESS_PATH_HOST_LOG_DIR%
 REM   %HARNESS_PATH_PYTHONPATH%
 ```
 
-## 5. 配置文件格式（`config/paths.conf`）
+## 5. 配置文件格式（`config/harness-paths.conf`）
 
 ```bash
 # 相对路径（基于 REPO_ROOT 解析）
@@ -73,7 +73,7 @@ PYTHON_PATH_ROOTS="engineering/loop/core/python:engineering/loop/connection/prov
 
 ## 6. 目录调整流程
 
-当工程目录结构变更时，**仅修改 `config/paths.conf`**，无需改动脚本：
+当工程目录结构变更时，**仅修改 `config/harness-paths.conf`**，无需改动脚本：
 1. 在 paths.conf 中更新对应 KEY 的值
 2. 运行 `validate_harness_scripts.sh` 验证
 3. 冒烟测试受影响的脚本

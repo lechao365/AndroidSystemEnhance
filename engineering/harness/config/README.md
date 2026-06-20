@@ -21,7 +21,7 @@ workflow 依赖的映射配置表——把"目录特征 → scope / 文档归属
 
 | 文件 | 作用 | 校验方式 |
 |------|------|---------|
-| [paths.conf](./paths.conf) | 统一路径配置（shell / python / bat 三方共用的单一事实源），定义工程内所有路径 KEY | 规则 [rules/path-management.md](../rules/path-management.md) (PATH-001) |
+| [harness-paths.conf](./harness-paths.conf) | 统一路径配置（shell / python / bat 三方共用的单一事实源），定义工程内所有路径 KEY | 规则 [rules/path-management.md](../rules/path-management.md) (PATH-001) |
 
 ### YAML 字段速查
 

@@ -21,7 +21,6 @@ connection (rp5-serial provider)
 
 ```
 engineering/loop/
-├── scripts/le.sh                 统一 CLI 入口
 ├── core/python/loop_core/       LE 框架（通用层）
 ├── cases/                       声明式用例（YAML）
 │   ├── common/                    公共 suite（含 shell + 诊断 collector 库）
@@ -29,11 +28,12 @@ engineering/loop/
 │   └── system/                    系统级用例
 ├── templates/                   AI 生成约束模板
 │   └── case-template.md
-├── connection/                  连接层（provider）
-│   ├── profiles/devices/rp5/
-│   └── providers/rp5-serial/
-└── scripts/                     辅助脚本
-    └── start_rp5_serial_host.bat
+└── connection/                  连接层（provider）
+    ├── profiles/devices/rp5/
+    └── providers/rp5-serial/
+
+> CLI 入口脚本已移至 `engineering/harness/scripts/le.sh`  
+> Windows Host 启动脚本已移至 `engineering/harness/scripts/start_rp5_serial_host.bat`
 ```
 
 ### 公共 suite 与诊断 collector 库
@@ -76,7 +76,7 @@ cases:
 ### fixture 模式（离线回放）
 
 ```bash
-bash engineering/loop/scripts/le.sh run \
+bash engineering/harness/scripts/le.sh run \
   --suite engineering/loop/cases/system/boot-success.yaml \
   --fixture <jsonl路径> \
   --device-profile engineering/loop/connection/profiles/devices/rp5/default.json \
@@ -89,7 +89,7 @@ bash engineering/loop/scripts/le.sh run \
 ```bash
 # 先启动 Windows Host（COM5）
 # 然后在 WSL2 执行：
-bash engineering/loop/scripts/le.sh run \
+bash engineering/harness/scripts/le.sh run \
   --suite engineering/loop/cases/system/boot-success.yaml \
   --host 127.0.0.1 --port 9700 \
   --device-profile engineering/loop/connection/profiles/devices/rp5/default.json \
@@ -109,7 +109,7 @@ bash engineering/loop/scripts/le.sh run \
 # engineering/loop/cases/system/<your-scenario>.yaml
 
 # 3. 执行（case-dirs 指向 cases 根目录，保证 include: [common/shell] 可解析）
-bash engineering/loop/scripts/le.sh run --suite <path> \
+bash engineering/harness/scripts/le.sh run --suite <path> \
   --case-dirs engineering/loop/cases ...
 ```
 

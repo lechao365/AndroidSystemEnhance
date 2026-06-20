@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../lib/shell/harness_path_util.sh
-source "$SCRIPT_DIR/../../lib/shell/harness_path_util.sh"
+source "$SCRIPT_DIR/../lib/shell/harness_path_util.sh"
 REPO_ROOT="$(harness_repo_root)"
 SYNC_SCRIPT="$REPO_ROOT/engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh"
 FIXTURE_ROOT="$REPO_ROOT/engineering/harness/tests/fixtures/sync-code-to-patchs"
