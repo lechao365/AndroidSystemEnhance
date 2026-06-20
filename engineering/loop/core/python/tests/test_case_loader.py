@@ -819,3 +819,27 @@ def test_boot_success_yaml_has_trigger_reboot_first():
     dependents = [c for c in suite.cases if reboot_fqn in c.requires]
     assert len(dependents) >= 1, "no case requires trigger_reboot"
 
+
+def test_boot_success_trigger_reboot_has_early_failure_collectors():
+    """trigger_reboot 失败时也会主动采集早期 boot 诊断证据。"""
+    from pathlib import Path
+    from loop_core.case_loader import load_suite
+
+    repo_root = Path(__file__).resolve()
+    while repo_root.name != "engineering":
+        repo_root = repo_root.parent
+        if repo_root == repo_root.parent:
+            raise RuntimeError("engineering/ root not found")
+    cases_dir = repo_root / "loop" / "cases"
+    boot_yaml = cases_dir / "system" / "boot-success.yaml"
+
+    suite = load_suite(str(boot_yaml), [str(cases_dir)])
+    trigger_reboot = next(case for case in suite.cases if case.id == "trigger_reboot")
+
+    assert trigger_reboot.on_fail["collectors"] == [
+        "common.shell.serial_recent",
+        "common.shell.init_log",
+        "common.shell.crash_dump",
+        "common.shell.kmsg",
+    ]
+

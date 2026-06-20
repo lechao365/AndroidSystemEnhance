@@ -1,6 +1,8 @@
 # 系统级 boot 成功验收用例。
 # include common.shell 获取 shell_reachable 用例 + 公共诊断 collector
 # （boot_log / init_log / crash_dump / kmsg）。
+# trigger_reboot 自带 on_fail.collectors（serial_recent / init_log / crash_dump / kmsg），
+#   覆盖早期失败证据：其失败会导致下游 case SKIP，故必须自行采集 serial/kernel 上下文。
 # FQN 命名空间：system.boot
 suite: system.boot
 version: 1
@@ -14,6 +16,8 @@ cases:
     description: "触发设备重启并等待启动完成"
     severity: critical
     assert: {}
+    on_fail:
+      collectors: [serial_recent, init_log, crash_dump, kmsg]
 
   - id: boot_completed
     description: "sys.boot_completed 属性为 1"
