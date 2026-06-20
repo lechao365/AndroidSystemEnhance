@@ -297,3 +297,88 @@ def test_transport_reboot_cycles_zero_without_markers():
     ctx = transport.describe_runtime_context()
 
     assert ctx["reboot_cycles"] == 0
+
+
+class FakeClient:
+    """模拟 AutomationClient，按预设序列返回 read_until_timeout 结果。"""
+
+    def __init__(self, read_sequences: list[list[str]]) -> None:
+        self._sequences = read_sequences
+        self._seq_idx = 0
+        self.sent_lines: list[str] = []
+        self._writer_held = False
+
+    def acquire_writer(self) -> bool:
+        self._writer_held = True
+        return True
+
+    def release(self) -> None:
+        self._writer_held = False
+
+    def send_line(self, text: str) -> None:
+        self.sent_lines.append(text)
+        if text == "reboot":
+            raise OSError("simulated reboot disconnect")
+
+    def read_until_timeout(self, timeout_sec: float) -> list[str]:
+        if self._seq_idx < len(self._sequences):
+            result = self._sequences[self._seq_idx]
+            self._seq_idx += 1
+            return result
+        return []
+
+
+def test_rp5_transport_reboot_and_wait_pass():
+    """L1→L2→L3 全程通过的 happy path。"""
+    from rp5_serial.transport import Rp5SerialTransport
+
+    fake = FakeClient([
+        [],
+        ["Booting Linux on physical CPU 0x0", "Linux version 6.6"],
+        ["init: ... started service 'zygote' has pid 636"],
+        ["1"],
+    ])
+    transport = Rp5SerialTransport(fake)
+    result = transport.reboot_and_wait(
+        boot_markers=["Booting Linux on physical CPU", "init: ... started service 'zygote' has pid"],
+        panic_markers=["Kernel panic"],
+        prompt_markers=["console:/ $"],
+    )
+    assert result.status == "pass"
+    assert result.stage_reached == "l3_verified"
+    assert "reboot" in fake.sent_lines
+    assert "getprop sys.boot_completed" in fake.sent_lines
+
+
+def test_rp5_transport_reboot_and_wait_panic():
+    """L1 前命中 panic marker 立即 fail。"""
+    from rp5_serial.transport import Rp5SerialTransport
+
+    fake = FakeClient([
+        [],
+        ["Booting Linux on physical CPU"],
+        ["Kernel panic - not syncing"],
+    ])
+    transport = Rp5SerialTransport(fake)
+    result = transport.reboot_and_wait(
+        boot_markers=["Booting Linux on physical CPU", "init: ... started service 'zygote' has pid"],
+        panic_markers=["Kernel panic"],
+    )
+    assert result.status == "fail"
+    assert "panic_detected" in result.failure_reason
+
+
+def test_rp5_transport_reboot_and_wait_l1_timeout():
+    """L1 marker 一直不出现 → fail(timeout, none)。"""
+    from rp5_serial.transport import Rp5SerialTransport
+
+    fake = FakeClient([[], [], []])
+    transport = Rp5SerialTransport(fake)
+    result = transport.reboot_and_wait(
+        boot_markers=["Booting Linux on physical CPU", "init: ... started service 'zygote' has pid"],
+        panic_markers=["Kernel panic"],
+        l1_timeout=0.1,
+    )
+    assert result.status == "fail"
+    assert "timeout" in result.failure_reason
+    assert result.stage_reached == "none"

@@ -37,6 +37,8 @@ class CaseExecutor:
         prompt_markers: list[str] | None = None,
         capture_timeout: float = 5.0,
         recent_limit: int = 400,
+        boot_markers: list[str] | None = None,
+        panic_markers: list[str] | None = None,
     ) -> EvidenceBundle:
         """执行完整用例集。
 
@@ -46,6 +48,8 @@ class CaseExecutor:
             prompt_markers: prompt 标记列表（用于 prompt_visible 断言）
             capture_timeout: 用例命令的采集超时
             recent_limit: 采集行数上限
+            boot_markers: reboot 检测的两级 boot 标记（action case 使用）
+            panic_markers: kernel panic 标记列表（action case 使用）
 
         Returns:
             EvidenceBundle
@@ -57,7 +61,8 @@ class CaseExecutor:
 
         for case in suite.cases:
             result = self._execute_case(
-                case, results, prompt_markers, capture_timeout, recent_limit
+                case, results, prompt_markers, capture_timeout, recent_limit,
+                boot_markers=boot_markers, panic_markers=panic_markers,
             )
             results[case.fqn] = result
             # 收集需要执行的 collector（critical fail 才触发）
@@ -132,6 +137,8 @@ class CaseExecutor:
         prompt_markers: list[str],
         capture_timeout: float,
         recent_limit: int,
+        boot_markers: list[str] | None = None,
+        panic_markers: list[str] | None = None,
     ) -> TestCaseResult:
         """执行单个用例（含依赖检查）。"""
         # 检查依赖
@@ -155,6 +162,53 @@ class CaseExecutor:
                     skip_reason=f"dependency '{dep_id}' {dep_status}",
                     tags=case.tags,
                 )
+
+        # action case 分支（如 action: reboot）
+        if case.action == "reboot":
+            reboot_fn = getattr(self.transport, "reboot_and_wait", None)
+            if reboot_fn is None or not callable(reboot_fn):
+                return TestCaseResult(
+                    id=case.id,
+                    suite=case.suite,
+                    status="error",
+                    command=case.command,
+                    failure_reason="transport does not support reboot_and_wait",
+                    error_type="unsupported_action",
+                    tags=case.tags,
+                )
+            start = time.monotonic()
+            try:
+                reboot_result = reboot_fn(
+                    boot_markers=boot_markers or [],
+                    panic_markers=panic_markers or [],
+                    prompt_markers=prompt_markers,
+                )
+            except Exception as exc:
+                return TestCaseResult(
+                    id=case.id,
+                    suite=case.suite,
+                    status="error",
+                    command=case.command,
+                    failure_reason=str(exc),
+                    error_type=type(exc).__name__,
+                    tags=case.tags,
+                )
+            duration = round(time.monotonic() - start, 3)
+            output_text = "\n".join(reboot_result.transcript_lines)
+            preview = " | ".join(reboot_result.transcript_lines[:5]) if reboot_result.transcript_lines else ""
+            return TestCaseResult(
+                id=case.id,
+                suite=case.suite,
+                status="pass" if reboot_result.status == "pass" else "fail",
+                command=case.command,
+                output=output_text,
+                output_preview=preview,
+                assertion={"type": "action", "action": case.action},
+                duration_sec=duration,
+                failure_reason=reboot_result.failure_reason,
+                triggered_collectors=case.on_fail.get("collectors", []) if reboot_result.status != "pass" else [],
+                tags=case.tags,
+            )
 
         # 执行用例：先标记输出边界，确保只采集本命令之后的输出
         # 仅包裹命令执行与断言求值；依赖检查（skip 逻辑）已在上游完成，不进入 try

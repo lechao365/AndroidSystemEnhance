@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timedelta
 
-from loop_core.models import ObservedLine
+from loop_core.models import ObservedLine, RebootResult
 from loop_core.transport import BaseTransport, CommandCapture
 
 
@@ -327,3 +327,148 @@ class Rp5SerialTransport(BaseTransport):
         markers = prompt_markers or []
         prompt_visible = self._detect_prompt_visible(lines, markers)
         return CommandCapture(lines=lines, prompt_visible=prompt_visible)
+
+    # ------------------------------------------------------------------
+    # reboot API（live 模式）
+    # ------------------------------------------------------------------
+
+    def reboot_and_wait(
+        self,
+        boot_markers: list[str],
+        panic_markers: list[str],
+        boot_complete_timeout: float = 180.0,
+        l1_timeout: float = 30.0,
+        l2_timeout: float = 90.0,
+        l3_timeout: float = 60.0,
+        prompt_markers: list[str] | None = None,
+    ) -> RebootResult:
+        """发 reboot 并等待设备回来（live 模式）。
+
+        三级渐进判定：
+        L1: 等 boot_markers[0]（boot 开始）
+        L2: 等 boot_markers[1]（init 阶段，zygote 起来）
+        L3: 发 getprop sys.boot_completed，等响应含 "1"
+
+        任一阶段命中 panic_markers 立即 fail。任一阶段超时即 fail，
+        保留已采集 transcript 作为证据。
+        """
+        del prompt_markers  # live L3 用 getprop 响应值判定，不需 prompt
+        boot_start = time.monotonic()
+        all_lines: list[str] = []
+        stage = "none"
+
+        l1_marker = boot_markers[0] if len(boot_markers) > 0 else ""
+        l2_marker = boot_markers[1] if len(boot_markers) > 1 else ""
+
+        del boot_complete_timeout  # 由 l1+l2+l3 之和兜底
+
+        # 发 reboot（容忍 OSError——reboot 系统调用可能瞬间断流）
+        try:
+            self.client.send_line("reboot")
+        except OSError:
+            pass
+
+        def _check_panic(lines: list[str]) -> str | None:
+            for line in lines:
+                for p in panic_markers:
+                    if p in line:
+                        return line
+            return None
+
+        # L1 等待：boot_markers[0]
+        l1_deadline = time.monotonic() + l1_timeout
+        l1_hit = False
+        while time.monotonic() < l1_deadline:
+            chunk = self.client.read_until_timeout(2.0)
+            if chunk:
+                all_lines.extend(chunk)
+                panic_line = _check_panic(chunk)
+                if panic_line:
+                    return RebootResult(
+                        status="fail",
+                        transcript_lines=all_lines,
+                        failure_reason=f"panic_detected: {panic_line}",
+                        stage_reached=stage,
+                        boot_duration_sec=round(time.monotonic() - boot_start, 3),
+                    )
+                if l1_marker and any(l1_marker in line for line in chunk):
+                    l1_hit = True
+                    stage = "l1_boot_start"
+                    break
+        if not l1_hit:
+            return RebootResult(
+                status="fail",
+                transcript_lines=all_lines,
+                failure_reason="timeout",
+                stage_reached="none",
+                boot_duration_sec=round(time.monotonic() - boot_start, 3),
+            )
+
+        # L2 等待：boot_markers[1]
+        l2_deadline = time.monotonic() + l2_timeout
+        l2_hit = False
+        while time.monotonic() < l2_deadline:
+            chunk = self.client.read_until_timeout(2.0)
+            if chunk:
+                all_lines.extend(chunk)
+                panic_line = _check_panic(chunk)
+                if panic_line:
+                    return RebootResult(
+                        status="fail",
+                        transcript_lines=all_lines,
+                        failure_reason=f"panic_detected: {panic_line}",
+                        stage_reached=stage,
+                        boot_duration_sec=round(time.monotonic() - boot_start, 3),
+                    )
+                if l2_marker and any(l2_marker in line for line in chunk):
+                    l2_hit = True
+                    stage = "l2_init_ready"
+                    break
+        if not l2_hit:
+            return RebootResult(
+                status="fail",
+                transcript_lines=all_lines,
+                failure_reason="timeout",
+                stage_reached=stage,
+                boot_duration_sec=round(time.monotonic() - boot_start, 3),
+            )
+
+        # L3 验证：发 getprop sys.boot_completed，读 stream 找含 "1" 的响应
+        try:
+            self.client.send_line("getprop sys.boot_completed")
+        except OSError:
+            pass
+
+        l3_deadline = time.monotonic() + l3_timeout
+        while time.monotonic() < l3_deadline:
+            chunk = self.client.read_until_timeout(2.0)
+            if chunk:
+                all_lines.extend(chunk)
+                panic_line = _check_panic(chunk)
+                if panic_line:
+                    return RebootResult(
+                        status="fail",
+                        transcript_lines=all_lines,
+                        failure_reason=f"panic_detected: {panic_line}",
+                        stage_reached=stage,
+                        boot_duration_sec=round(time.monotonic() - boot_start, 3),
+                    )
+                if any(
+                    line.strip() == "1" or line.strip().endswith("1")
+                    for line in chunk
+                ):
+                    return RebootResult(
+                        status="pass",
+                        transcript_lines=all_lines,
+                        failure_reason="",
+                        stage_reached="l3_verified",
+                        boot_duration_sec=round(time.monotonic() - boot_start, 3),
+                    )
+
+        return RebootResult(
+            status="fail",
+            transcript_lines=all_lines,
+            failure_reason="timeout",
+            stage_reached=stage,
+            boot_duration_sec=round(time.monotonic() - boot_start, 3),
+        )

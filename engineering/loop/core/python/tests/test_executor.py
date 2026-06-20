@@ -412,3 +412,74 @@ collectors:
     assert bundle.cases[0].status == "fail"
     assert "t.serial_recent" in bundle.evidence
     assert bundle.evidence["t.serial_recent"].artifact_paths == ["/tmp/serial.log"]
+
+
+class FakeTransportWithReboot:
+    """模拟 transport，记录 reboot_and_wait 调用。"""
+
+    def __init__(self) -> None:
+        self.reboot_called = False
+        self.reboot_args: dict = {}
+
+    def acquire_writer(self) -> bool:
+        return True
+
+    def release(self) -> None:
+        pass
+
+    def mark_output_boundary(self) -> int:
+        return 0
+
+    def send_line(self, text: str) -> None:
+        pass
+
+    def capture_since(self, boundary, timeout_sec, recent_limit, prompt_markers=None):
+        from loop_core.transport import CommandCapture
+        from loop_core.models import ObservedLine
+        return CommandCapture(lines=[ObservedLine(t=0, text="1")], prompt_visible=True)
+
+    def reboot_and_wait(self, **kwargs):
+        from loop_core.models import RebootResult
+        self.reboot_called = True
+        self.reboot_args = kwargs
+        return RebootResult(
+            status="pass",
+            transcript_lines=["Booting Linux", "init: zygote", "1"],
+            failure_reason="",
+            stage_reached="l3_verified",
+            boot_duration_sec=42.0,
+        )
+
+
+def test_executor_action_case_calls_reboot_and_wait():
+    """action: reboot 的 case 触发 transport.reboot_and_wait，结果转 TestCaseResult。"""
+    from loop_core.case_loader import TestCase
+    from loop_core.assertion_engine import AssertionEngine
+    from loop_core.executor import CaseExecutor
+
+    fake = FakeTransportWithReboot()
+    executor = CaseExecutor(fake, AssertionEngine())
+
+    case = TestCase(
+        id="trigger_reboot",
+        suite="system.boot",
+        command="",
+        action="reboot",
+        assert_spec={},
+        severity="critical",
+    )
+    result = executor._execute_case(
+        case,
+        results={},
+        prompt_markers=["console:/ $"],
+        capture_timeout=5.0,
+        recent_limit=400,
+        boot_markers=["Booting Linux", "init: zygote"],
+        panic_markers=["Kernel panic"],
+    )
+
+    assert fake.reboot_called is True
+    assert result.status == "pass"
+    assert result.id == "trigger_reboot"
+    assert "Booting Linux" in result.output
+    assert result.assertion == {"type": "action", "action": "reboot"}
