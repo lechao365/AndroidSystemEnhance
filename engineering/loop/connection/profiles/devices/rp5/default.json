@@ -2,6 +2,15 @@
   "device_id": "rp5",
   "transport": "serial",
   "prompt_markers": ["console:/ $", "console:/ #", "localhost:/ #", "# ", "$ "],
-  "reboot_markers": ["reboot: Restarting system", "U-Boot"],
+  "boot_markers": [
+    "Booting Linux on physical CPU",
+    "init: ... started service 'zygote' has pid"
+  ],
+  "reboot_markers": [
+    "reboot: Restarting system",
+    "U-Boot",
+    "Booting Linux on physical CPU"
+  ],
+  "panic_markers": ["Kernel panic", "BUG:", "Internal error"],
   "line_ending": "\n"
 }
