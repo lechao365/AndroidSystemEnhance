@@ -483,3 +483,37 @@ def test_executor_action_case_calls_reboot_and_wait():
     assert result.id == "trigger_reboot"
     assert "Booting Linux" in result.output
     assert result.assertion == {"type": "action", "action": "reboot"}
+
+
+def test_executor_action_case_fail_includes_stage_in_reason():
+    """action case fail 时，failure_reason 带 stage_reached 信息。"""
+    from loop_core.case_loader import TestCase
+    from loop_core.assertion_engine import AssertionEngine
+    from loop_core.executor import CaseExecutor
+
+    class FakeTransportTimeout(FakeTransportWithReboot):
+        def reboot_and_wait(self, **kwargs):
+            from loop_core.models import RebootResult
+            self.reboot_called = True
+            self.reboot_args = kwargs
+            return RebootResult(
+                status="fail",
+                transcript_lines=["Booting Linux"],
+                failure_reason="timeout",
+                stage_reached="l1_boot_start",
+                boot_duration_sec=30.0,
+            )
+
+    fake = FakeTransportTimeout()
+    executor = CaseExecutor(fake, AssertionEngine())
+    case = TestCase(
+        id="trigger_reboot", suite="system.boot", command="",
+        action="reboot", assert_spec={}, severity="critical",
+    )
+    result = executor._execute_case(
+        case, results={}, prompt_markers=[], capture_timeout=5.0, recent_limit=400,
+        boot_markers=["Booting Linux"], panic_markers=[],
+    )
+    assert result.status == "fail"
+    assert "timeout" in result.failure_reason
+    assert "l1_boot_start" in result.failure_reason

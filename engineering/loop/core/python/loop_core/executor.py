@@ -196,6 +196,10 @@ class CaseExecutor:
             duration = round(time.monotonic() - start, 3)
             output_text = "\n".join(reboot_result.transcript_lines)
             preview = " | ".join(reboot_result.transcript_lines[:5]) if reboot_result.transcript_lines else ""
+            stage = reboot_result.stage_reached
+            reason = reboot_result.failure_reason
+            if stage and stage != "none":
+                reason = f"{reason} (stage: {stage})" if reason else f"stage: {stage}"
             return TestCaseResult(
                 id=case.id,
                 suite=case.suite,
@@ -205,7 +209,7 @@ class CaseExecutor:
                 output_preview=preview,
                 assertion={"type": "action", "action": case.action},
                 duration_sec=duration,
-                failure_reason=reboot_result.failure_reason,
+                failure_reason=reason,
                 triggered_collectors=case.on_fail.get("collectors", []) if reboot_result.status != "pass" else [],
                 tags=case.tags,
             )
