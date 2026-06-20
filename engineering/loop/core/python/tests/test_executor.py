@@ -288,7 +288,7 @@ cases:
 
 
 def test_collector_error_does_not_crash_suite(tmp_path):
-    """collector 执行异常时，suite 不崩溃，记录 warning。"""
+    """collector 执行异常时，suite 不崩溃；collector 自身降级为 degraded。"""
     suite_yaml = """
 suite: t
 version: 1
@@ -319,9 +319,12 @@ collectors:
     )
     # Case itself still fails (expected), but collector error doesn't crash
     assert bundle.cases[0].status == "fail"
-    # Collector error recorded as warning
-    assert "warnings" in bundle.summary
-    assert any("broken_collector" in w for w in bundle.summary["warnings"])
+    # Collector 内部捕获 OSError，单命令失败 → status=error
+    assert "broken_collector" in bundle.evidence
+    cr = bundle.evidence["broken_collector"]
+    assert cr.status == "error"
+    assert cr.partial is False
+    assert "collector connection lost" in cr.error
 
 
 def _write(tmp_path: Path, name: str, content: str) -> str:

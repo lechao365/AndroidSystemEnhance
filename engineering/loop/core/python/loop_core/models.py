@@ -71,14 +71,22 @@ class CollectorResult:
     Attributes:
         name: collector 名称
         commands: 执行的命令列表
-        outputs: 每条命令的输出 [{command, lines, duration_sec}]
+        outputs: 每条命令的输出 [{command, lines, duration_sec, error?}]
         hints: 给 AI 的分析提示
+        status: ok | degraded | error；任一命令抛 OSError 即降级为 degraded
+        partial: True 表示部分命令失败（仍有部分 evidence 可用）
+        error: status != ok 时的错误信息（取首个错误）
+        artifact_paths: collector 产出的工件路径（预留）
     """
 
     name: str
     commands: list[str]
     outputs: list[dict]
     hints: str = ""
+    status: str = "ok"
+    partial: bool = False
+    error: str = ""
+    artifact_paths: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)

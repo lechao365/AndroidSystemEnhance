@@ -37,24 +37,57 @@ class Collector:
         """
         commands = spec.get("commands", [])
         hints = spec.get("hints", "")
+        prompt_markers = prompt_markers or []
         outputs: list[dict] = []
+        error_msg = ""
 
         for cmd in commands:
-            start = time.monotonic()
             boundary = self.transport.mark_output_boundary()
-            self.transport.send_line(cmd)
-            capture = self.transport.capture_since(
-                boundary, capture_timeout, recent_limit, prompt_markers
-            )
-            outputs.append({
-                "command": cmd,
-                "lines": [line.text for line in capture.lines],
-                "duration_sec": round(time.monotonic() - start, 3),
-            })
+            start = time.monotonic()
+            try:
+                self.transport.send_line(cmd)
+                capture = self.transport.capture_since(
+                    boundary, capture_timeout, recent_limit, prompt_markers
+                )
+                # 剥离 shell prompt 行：prompt 是 shell 提示符，不属于命令输出
+                lines = [
+                    line.text for line in capture.lines
+                    if not any(m in line.text for m in prompt_markers)
+                ]
+                outputs.append({
+                    "command": cmd,
+                    "lines": lines,
+                    "duration_sec": round(time.monotonic() - start, 3),
+                })
+            except OSError as exc:
+                outputs.append({
+                    "command": cmd,
+                    "lines": [],
+                    "duration_sec": round(time.monotonic() - start, 3),
+                    "error": str(exc),
+                })
+                if not error_msg:
+                    error_msg = str(exc)
+
+        # 循环后统一判定最终状态：全成功=ok，部分失败=degraded，全失败=error
+        failed_count = sum(1 for out in outputs if "error" in out)
+        succeeded_count = len(outputs) - failed_count
+        if failed_count == 0:
+            status = "ok"
+            partial = False
+        elif succeeded_count > 0:
+            status = "degraded"
+            partial = True
+        else:
+            status = "error"
+            partial = False
 
         return CollectorResult(
             name=name,
             commands=commands,
             outputs=outputs,
             hints=hints,
+            status=status,
+            partial=partial,
+            error=error_msg,
         )
