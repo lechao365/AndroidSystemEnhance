@@ -86,6 +86,23 @@ class TestFixtureTransport:
         assert matched is not None
         assert "console:/ $" in matched.text
 
+    def test_capture_since_recent_limit_keeps_tail(self):
+        """capture_since 的 recent_limit 应保留末尾 N 行，与 live transport 一致。
+
+        场景：fixture 有 6 行（无 prompt），boundary 从 0 开始，
+        recent_limit=3 应返回最后 3 行（tail），而非前 3 行（head）。
+        head 语义会丢弃命令末尾输出，live/fixture 行为必须一致。
+        """
+        rows = [{"t": float(i), "text": f"line{i}"} for i in range(6)]
+        transport = FixtureTransport(rows)
+        capture = transport.capture_since(
+            transport.mark_output_boundary(),
+            timeout_sec=999,
+            recent_limit=3,
+        )
+        texts = [line.text for line in capture.lines]
+        assert texts == ["line3", "line4", "line5"]
+
     def test_from_jsonl_loads_rows(self, tmp_path):
         fixture = tmp_path / "test.jsonl"
         fixture.write_text(

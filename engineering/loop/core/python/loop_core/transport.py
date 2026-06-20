@@ -202,7 +202,7 @@ class FixtureTransport(BaseTransport):
             boundary: int 类型的行索引（由 mark_output_boundary 返回）
             timeout_sec: 仅为与 live transport API 对齐而保留；fixture 回放
                 不真实等待，本实现忽略该参数
-            recent_limit: 行数上限；0 表示不限
+            recent_limit: 行数上限（保留末尾 N 行）；0 表示不限
             prompt_markers: prompt 标记列表；提供时用于在首个 prompt 处截断
         """
         prompt_markers = prompt_markers or []
@@ -224,7 +224,7 @@ class FixtureTransport(BaseTransport):
 
         lines = [ObservedLine(t=r["t"], text=r["text"]) for r in selected]
         if recent_limit > 0 and len(lines) > recent_limit:
-            lines = lines[:recent_limit]
+            lines = lines[-recent_limit:]
 
         prompt_visible = any(
             any(marker in line.text for marker in prompt_markers)
