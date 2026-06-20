@@ -105,6 +105,26 @@ shell 不可达时，AI/人工应优先分析 `serial_context`；shell 可达时
 
 ## 遗留点
 
-1. **gen-cases / deploy 未实现**：第二步实现 AI 用例生成和 binary/image 部署
-2. **loop_ctrl 未实现**：第三步实现循环控制（N=5 / 回归检测 / 升级人工）
-3. **参数化用例**：case_loader 预留 parameters 字段，第一步未实现展开
+1. **gen-cases 未实现**：第二步实现 AI 用例生成（reboot 诊断闭环属范围 A，已实现）
+2. **deploy 未实现**：第二步实现 binary/image 部署（范围 A 不含 deploy）
+3. **loop_ctrl 未实现**：第三步实现循环控制（N=5 / 回归检测 / 升级人工）
+4. **参数化用例**：case_loader 预留 parameters 字段，第一步未实现展开
+
+## AI 诊断报告约束（范围 A reboot 诊断闭环）
+
+当 AI（opencode）通过 `/le` 触发 reboot 诊断闭环并收到 EvidenceBundle 后，**必须**按
+`engineering/harness/templates/diagnosis-report-template.md` 产出诊断报告：
+
+1. 报告路径：`engineering/output/runs/<run-id>/diagnosis-report.md`（与 EvidenceBundle 同目录）
+2. 报告含 6 节：结论 / 证据链 / 根因分析 / 修复建议 / 建议新增 case / 循环终止建议
+3. 修复建议必须具体到 workspace 文件路径和函数名
+4. YAML 建议（第 5 节）不自动应用，只给人 review（G2 决策）
+5. AI 不自动修改 boot-success.yaml
+
+reboot 诊断闭环的数据流：
+- `/le run --suite boot-success.yaml --host <ip> --port 9700 ...`
+- executor 遇到 `action: reboot` case → 调 transport.reboot_and_wait
+- reboot_and_wait 三级渐进判定（L1 boot 开始 / L2 init 阶段 / L3 boot_completed 验证）
+- 后续 case（requires: [trigger_reboot]）在设备回来后正常执行
+- on_fail 触发 collectors（含新增 kmsg）
+- EvidenceBundle 落盘 → AI 读后按模板产出诊断报告
