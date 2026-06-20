@@ -134,3 +134,52 @@ cases:
     bundle = json.loads((artifacts / "evidence_bundle.json").read_text())
     assert bundle["summary"]["overall"] == "FAIL"
     assert "boom-from-transport" in bundle["summary"]["error"]
+
+
+def test_cli_passes_boot_panic_markers_to_runner(tmp_path, monkeypatch):
+    """CLI 从 DeviceProfile 提取 boot_markers/panic_markers 传给 LoopRunner。"""
+    from loop_core import cli
+
+    captured = {}
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run(self):
+            from loop_core.models import EvidenceBundle
+            return EvidenceBundle(
+                bundle_id="eb-test", device_id="rp5", suite="test",
+                timestamp="2026-01-01T00:00:00+0800",
+                summary={"total": 0, "passed": 0, "failed": 0, "skipped": 0, "overall": "PASS"},
+                cases=[], evidence={},
+            )
+
+        def build_failure_bundle(self, reason):
+            from loop_core.models import EvidenceBundle
+            return EvidenceBundle(
+                bundle_id="eb-fail", device_id="rp5", suite="test",
+                timestamp="2026-01-01T00:00:00+0800",
+                summary={"total": 0, "passed": 0, "failed": 0, "skipped": 0, "overall": "FAIL", "error": reason},
+                cases=[], evidence={},
+            )
+
+    profile_file = tmp_path / "profile.json"
+    profile_file.write_text('{"device_id":"rp5","boot_markers":["Booting Linux"],"panic_markers":["Kernel panic"]}', encoding="utf-8")
+
+    monkeypatch.setattr(cli, "LoopRunner", FakeRunner)
+
+    (tmp_path / "dummy.yaml").write_text("suite: test\nversion: 1\ncases: []\n", encoding="utf-8")
+    (tmp_path / "dummy.jsonl").write_text('{"t":0,"text":"x"}\n', encoding="utf-8")
+
+    argv = [
+        "run",
+        "--suite", str(tmp_path / "dummy.yaml"),
+        "--fixture", str(tmp_path / "dummy.jsonl"),
+        "--device-profile", str(profile_file),
+        "--artifacts-dir", str(tmp_path / "out"),
+    ]
+    cli.main(argv)
+
+    assert captured.get("boot_markers") == ["Booting Linux"]
+    assert captured.get("panic_markers") == ["Kernel panic"]

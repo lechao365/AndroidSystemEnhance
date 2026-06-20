@@ -147,6 +147,8 @@ def _cmd_run(args) -> int:
         suite=suite,
         capture_timeout=capture_timeout,
         recent_limit=recent_limit,
+        boot_markers=profile.boot_markers,
+        panic_markers=profile.panic_markers,
     )
     if hasattr(transport, "set_cycle_markers"):
         transport.set_cycle_markers(profile.reboot_markers)

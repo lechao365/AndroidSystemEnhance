@@ -173,3 +173,46 @@ cases:
 
     assert bundle.serial_context["transcript_path"] == "/tmp/serial.log"
     assert bundle.serial_context["reboot_cycles"] == 2
+
+
+def test_runner_passes_boot_markers_to_executor(monkeypatch):
+    """LoopRunner.run() 把 boot_markers/panic_markers 透传给 executor.execute_suite。"""
+    from loop_core.case_loader import CaseSuite
+
+    captured = {}
+
+    class FakeExecutor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def execute_suite(self, suite, **kwargs):
+            captured.update(kwargs)
+            from loop_core.models import EvidenceBundle
+            return EvidenceBundle(
+                bundle_id="eb-test",
+                device_id="rp5",
+                suite=suite.name,
+                timestamp="2026-01-01T00:00:00+0800",
+                summary={"total": 0, "passed": 0, "failed": 0, "skipped": 0, "overall": "PASS"},
+                cases=[],
+                evidence={},
+            )
+
+    class FakeTransport:
+        def acquire_writer(self): return True
+        def release(self): pass
+
+    suite = CaseSuite(name="test", version=1, cases=[], collectors={})
+    runner = LoopRunner(
+        device_id="rp5",
+        prompt_markers=["console:/ $"],
+        transport=FakeTransport(),
+        suite=suite,
+        boot_markers=["Booting Linux"],
+        panic_markers=["Kernel panic"],
+    )
+    runner.executor = FakeExecutor()
+    runner.run()
+
+    assert captured.get("boot_markers") == ["Booting Linux"]
+    assert captured.get("panic_markers") == ["Kernel panic"]

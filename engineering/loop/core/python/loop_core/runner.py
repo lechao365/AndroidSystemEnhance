@@ -39,6 +39,8 @@ class LoopRunner:
         capture_timeout: float = 5.0,
         recent_limit: int = 400,
         device_profile: dict | None = None,
+        boot_markers: list[str] | None = None,
+        panic_markers: list[str] | None = None,
     ) -> None:
         self.device_id = device_id
         self.prompt_markers = prompt_markers
@@ -47,6 +49,8 @@ class LoopRunner:
         self.capture_timeout = capture_timeout
         self.recent_limit = recent_limit
         self.device_profile = device_profile or {}
+        self.boot_markers = boot_markers or []
+        self.panic_markers = panic_markers or []
         self.executor = CaseExecutor(transport, AssertionEngine())
 
     def run(self) -> EvidenceBundle:
@@ -65,6 +69,8 @@ class LoopRunner:
                 prompt_markers=self.prompt_markers,
                 capture_timeout=self.capture_timeout,
                 recent_limit=self.recent_limit,
+                boot_markers=self.boot_markers,
+                panic_markers=self.panic_markers,
             )
             self._enrich_bundle(bundle)
             return bundle
