@@ -106,22 +106,16 @@ harness_init() {
     if [ -n "${REPO_ROOT:-}" ] && [ -f "$REPO_ROOT/AGENTS.md" ]; then
         REPO_ROOT="$(cd "$REPO_ROOT" && pwd)"
     else
-        # 锚点查找 REPO_ROOT（从 BASH_SOURCE 向上找 AGENTS.md）
-        local bsrc="${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}"
-        local dir
-        dir="$(cd "$(dirname "$bsrc")" && pwd)"
-        REPO_ROOT="$dir"
-        while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/AGENTS.md" ]; do
-            REPO_ROOT="$(dirname "$REPO_ROOT")"
-        done
+        # REPO_ROOT 缺失时委托 path_util 定位（AGENTS.md 锚点）
+        REPO_ROOT=$(harness_repo_root 2>/dev/null) || {
+            echo "ERROR: harness_init 未找到项目根（AGENTS.md 锚点缺失）" >&2
+            exit 3
+        }
     fi
-    if [ ! -f "$REPO_ROOT/AGENTS.md" ]; then
-        echo "ERROR: harness_init 未找到项目根（AGENTS.md 锚点缺失）" >&2
-        exit 3
-    fi
+    export REPO_ROOT
 
-    # 日志目录
-    _H_LOG_DIR="$REPO_ROOT/engineering/output/log/$_H_SCRIPT_NAME"
+    # 日志目录（通过 path_util 获取 LOG_DIR，统一事实源）
+    _H_LOG_DIR="$(harness_path LOG_DIR)/$_H_SCRIPT_NAME"
     _H_ARTIFACTS_DIR="$_H_LOG_DIR/artifacts"
     _H_LOG_FILE="$_H_LOG_DIR/$_H_SCRIPT_NAME-$_H_TS.log"
     mkdir -p "$_H_LOG_DIR" "$_H_ARTIFACTS_DIR"

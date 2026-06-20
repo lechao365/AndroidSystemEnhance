@@ -33,17 +33,16 @@ REM %~dp0 展开为脚本所在目录 (含末尾反斜杠), 去掉反斜杠得�
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 
-REM 从 scripts/ 上溯 3 级到 repo 根: scripts/ -> loop/ -> engineering/ -> repo root
-for %%i in ("%SCRIPT_DIR%\..\..\..") do set "REPO_ROOT=%%~fi"
-
-REM provider python 根目录: engineering/loop/connection/providers/rp5-serial/python
-set "PROVIDER_PYTHON=%SCRIPT_DIR%\..\connection\providers\rp5-serial\python"
-
-REM 日志目录: engineering/output/host-log
-set "LOG_DIR=%REPO_ROOT%\engineering\output\host-log"
+REM 定位路径工具并加载统一路径配置
+set "HARNESS_PATH_UTIL=%SCRIPT_DIR%\..\..\harness\lib\bat\harness_path_util.bat"
+call "%HARNESS_PATH_UTIL%"
+REM 加载后可用: %REPO_ROOT% %HARNESS_PATH_HOST_LOG_DIR% %HARNESS_PATH_PYTHONPATH%
+set "LOG_DIR=%HARNESS_PATH_HOST_LOG_DIR%"
+set "PROVIDER_PYTHON=%HARNESS_PATH_PYTHONPATH%"
 
 REM --- 设置 PYTHONPATH -------------------------------------------------------
-set "PYTHONPATH=%PROVIDER_PYTHON%"
+set "PYTHON_LIB_DIR=%HARNESS_PATH_PYTHON_LIB_DIR%"
+set "PYTHONPATH=%HARNESS_PATH_PYTHONPATH%;%PYTHON_LIB_DIR%"
 
 REM --- 启动 Host -------------------------------------------------------------
 echo.

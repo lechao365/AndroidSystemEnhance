@@ -10,10 +10,10 @@ set -uo pipefail
 
 # --- 锚点 + 公共库（bootstrap 统一入口）-------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../../lib/harness_bootstrap.sh
-source "$SCRIPT_DIR/../../lib/harness_bootstrap.sh"
+# shellcheck source=../../lib/shell/harness_bootstrap.sh
+source "$SCRIPT_DIR/../../lib/shell/harness_bootstrap.sh"
 
-PATCH_DIR="patchs/rpi5"
+PATCH_DIR="$(harness_path PATCHS_DIR)"
 
 harness_init "sync_patchs_to_doc"
 

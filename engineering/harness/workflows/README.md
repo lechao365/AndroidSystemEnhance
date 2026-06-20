@@ -14,7 +14,7 @@
 ## 结构约定
 
 每个工作流子目录包含：
-- **脚本**（`*.sh`）：承担机械工作（diff 收集、git 操作、文件拷贝、归档）。统一通过 `lib/harness_bootstrap.sh` 接入维测库，遵循 `rules/script-observability.md`。
+- **脚本**（`*.sh`）：承担机械工作（diff 收集、git 操作、文件拷贝、归档）。统一通过 `lib/shell/harness_bootstrap.sh` 接入维测库，遵循 `rules/script-observability.md`。
 - **`WORKFLOW.md`**：流程契约，定义步骤、AI 与脚本的分工、参数、边界处理、异常处理
 - **`README.md`**：极简入口（一句话定位 + 指向 WORKFLOW.md），不重复流程内容
 

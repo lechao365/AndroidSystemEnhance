@@ -6,6 +6,11 @@ from uuid import uuid4
 
 from rp5_serial.shared.models import Session, StatusResponse, WriterLease
 
+try:
+    from harness_path_util import ensure_dir
+except ImportError:
+    ensure_dir = None  # type: ignore
+
 # 可选依赖：pyserial 缺失时降级，不阻断 host 启动
 try:
     import serial  # type: ignore
@@ -50,7 +55,13 @@ class RuntimeState:
     transcript_path: str = field(init=False, default="")
 
     def __post_init__(self) -> None:
-        base = Path(self.transcript_dir or "output/host-log")
+        if self.transcript_dir:
+            base = Path(self.transcript_dir)
+        elif ensure_dir is not None:
+            base = ensure_dir("HOST_LOG_DIR")
+        else:
+            # fallback: 相对路径（兼容未配置 PYTHONPATH 的场景）
+            base = Path("engineering/output/host-log")
         base.mkdir(parents=True, exist_ok=True)
         self.transcript_path = str(base / TRANSCRIPT_FILENAME)
 

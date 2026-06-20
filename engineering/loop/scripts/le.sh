@@ -6,14 +6,12 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../../harness/lib/harness_bootstrap.sh
-source "$SCRIPT_DIR/../../harness/lib/harness_bootstrap.sh"
+# shellcheck source=../../harness/lib/shell/harness_bootstrap.sh
+source "$SCRIPT_DIR/../../harness/lib/shell/harness_bootstrap.sh"
 
 harness_init "le"
 
-CORE_ROOT="$SCRIPT_DIR/../core/python"
-PROVIDER_ROOT="$SCRIPT_DIR/../connection/providers/rp5-serial/python"
-export PYTHONPATH="$CORE_ROOT:$PROVIDER_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$(harness_pythonpath)${PYTHONPATH:+:$PYTHONPATH}"
 
 python3 -m loop_core.cli "$@"
 rc=$?

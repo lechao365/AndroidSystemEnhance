@@ -2,8 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../../../../lib/harness_bootstrap.sh
-source "$SCRIPT_DIR/../../../../lib/harness_bootstrap.sh"
+# shellcheck source=../../../../lib/shell/harness_bootstrap.sh
+source "$SCRIPT_DIR/../../../../lib/shell/harness_bootstrap.sh"
 
 SCRIPT_NAME="${1:-test-harness-observability-basic}"
 

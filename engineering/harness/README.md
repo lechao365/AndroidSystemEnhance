@@ -17,6 +17,7 @@
 | 画 PlantUML 图 | [rules/plantuml.md](./rules/plantuml.md) |
 | 多任务并行处理 | [rules/parallel-strategy.md](./rules/parallel-strategy.md) |
 | 改 harness 下的 bash 脚本 | [rules/script-observability.md](./rules/script-observability.md) |
+| 获取工程路径 / 改路径配置 | [rules/path-management.md](./rules/path-management.md) |
 | 查 config 机器层 / 映射层说明 | [config/README.md](./config/README.md) |
 | 查 commit scope 映射 | [config/scope-mapping.md](./config/scope-mapping.md) |
 | 查 patchs→文档分发规则 | [config/doc-sync-mapping.md](./config/doc-sync-mapping.md) |
@@ -34,7 +35,7 @@
 | 目录 | 作用 |
 |------|------|
 | [config/](./config/) | 控制配置与映射层；包含任务准入矩阵、scope 映射、文档分发映射，供 README / rules / workflows 协同消费 |
-| [lib/](./lib/) | bash 公共库：`harness_bootstrap.sh`（统一入口）+ `harness_observability.sh`（日志/step/artifact/tmp/status/upstream） |
+| [lib/](./lib/) | bash/python/bat 公共库：路径工具（harness_path_util）+ bootstrap + observability |
 | [rules/](./rules/) | 全局约束规则，AI 与人都必须遵守的硬性约定 |
 | [scripts/](./scripts/) | 独立脚本与静态校验入口；后续 validator 默认从本目录进入 |
 | [templates/](./templates/) | 技术文档模板（只读契约），设计文档必须遵循 |
@@ -42,16 +43,17 @@
 
 ## lib 公共能力速查
 
-所有 `engineering/` 下 bash 脚本通过 `lib/harness_bootstrap.sh` 统一入口加载：
+所有 `engineering/` 下 bash 脚本通过 `lib/shell/harness_bootstrap.sh` 统一入口加载：
 
 ```bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../../lib/harness_bootstrap.sh"   # 自动定位 REPO_ROOT + source observability
+source "$SCRIPT_DIR/../../lib/shell/harness_bootstrap.sh"   # 自动定位 REPO_ROOT + source observability
 harness_init "<script-name>"
 ```
 
 提供的关键能力（详见 [rules/script-observability.md](./rules/script-observability.md)）：
 
+- **路径解析**：`harness_path <KEY>` / `harness_env_path` / `harness_pythonpath`（shell）；`path(key)` / `ensure_dir(key)`（python）
 - **日志/步骤**：`log_info/warn/error`、`log_result`、`step_begin/end`
 - **状态输出**：`harness_status_emit <OK|MISS|SKIP|STALE|PRUNE> <label>`
 - **临时产物**：`harness_tmp_file` / `harness_tmp_dir`（自动落入 artifacts，参与轮转）

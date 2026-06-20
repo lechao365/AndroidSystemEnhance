@@ -1,7 +1,7 @@
 # 脚本维测规则（observability）
 
 > **规则 ID**：`OBS-001` / `OBS-002`
-> - `OBS-001`：`engineering/` 下所有 bash 脚本必须通过 `lib/harness_bootstrap.sh` 统一入口接入，调用 `harness_init` 完成锚点与 observability 初始化，禁止业务脚本重复实现 `REPO_ROOT` 查找或私自定义日志/step/退出函数。
+> - `OBS-001`：`engineering/` 下所有 bash 脚本必须通过 `lib/shell/harness_bootstrap.sh` 统一入口接入，调用 `harness_init` 完成锚点与 observability 初始化，禁止业务脚本重复实现 `REPO_ROOT` 查找或私自定义日志/step/退出函数。
 > - `OBS-002`：必须使用统一退出码（0/1/2/3/4），通过 `harness_exit` 退出，禁止业务逻辑裸 `exit`；临时产物必须通过 `harness_tmp_file/harness_tmp_dir` 或 `artifact_register` 落入 `artifacts/`，禁止裸写 `/tmp/`。
 
 ## 1. 适用范围与加载时机
@@ -13,7 +13,7 @@
 
 所有 harness 脚本**必须**：
 
-1. **MUST** 通过 `lib/harness_bootstrap.sh` 统一入口加载（锚点 + source observability），禁止业务脚本重复实现 `REPO_ROOT` 查找。
+1. **MUST** 通过 `lib/shell/harness_bootstrap.sh` 统一入口加载（锚点 + source observability），禁止业务脚本重复实现 `REPO_ROOT` 查找。
 2. **MUST** 调用 `harness_init "<script-name>"`（模式 A）或 `harness_init --with-errexit "<script-name>"`（模式 B），在所有业务逻辑前。
 3. **MUST** 使用 `log_info/log_warn/log_error` 输出诊断信息，禁止裸 `echo`（除第 4 节例外清单）。
 4. **MUST** 用 `step_begin/step_end` 包裹每个独立阶段。
@@ -100,8 +100,8 @@ harness_exit 0
 ```bash
 # 业务脚本头部模板（仅两行）
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../../lib/harness_bootstrap.sh
-source "$SCRIPT_DIR/../../lib/harness_bootstrap.sh"
+# shellcheck source=../../lib/shell/harness_bootstrap.sh
+source "$SCRIPT_DIR/../../lib/shell/harness_bootstrap.sh"
 ```
 
 source 后即可使用：`REPO_ROOT`、`harness_init`、`log_*`、`step_*` 等全部公共 API。

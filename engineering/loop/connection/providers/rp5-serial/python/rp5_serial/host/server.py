@@ -21,6 +21,15 @@ from rp5_serial.host.handler import ClientHandler, StreamBroker
 from rp5_serial.host.logging_utils import build_logger
 from rp5_serial.host.serial_runtime import RuntimeState
 
+# 统一路径工具（从 engineering/harness/lib/python 加载）
+try:
+    from harness_path_util import ensure_dir
+except ImportError:
+    # PYTHONPATH 未包含 lib/python 时的友好报错
+    raise ImportError(
+        "缺少 harness_path_util，请将 engineering/harness/lib/python 加入 PYTHONPATH"
+    )
+
 # 串口读循环空闲时的休眠间隔（秒）
 _SERIAL_READ_INTERVAL = 0.01
 
@@ -44,8 +53,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--log-dir",
-        default="output/host-log",
-        help="Host 轻量日志目录 (默认: output/host-log)",
+        default=str(ensure_dir("HOST_LOG_DIR")),
+        help="Host 轻量日志目录",
     )
     return parser.parse_args()
 

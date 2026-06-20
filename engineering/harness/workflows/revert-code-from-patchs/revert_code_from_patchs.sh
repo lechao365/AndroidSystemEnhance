@@ -15,12 +15,12 @@ set -uo pipefail
 
 # --- 锚点 + 公共库（bootstrap 统一入口）-------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../../lib/harness_bootstrap.sh
-source "$SCRIPT_DIR/../../lib/harness_bootstrap.sh"
+# shellcheck source=../../lib/shell/harness_bootstrap.sh
+source "$SCRIPT_DIR/../../lib/shell/harness_bootstrap.sh"
 
-PATCH_ROOT="$REPO_ROOT/patchs/rpi5"
-KERNEL_WS="${KERNEL_WS:-$HOME/workspace/rpi5-kernel-build/common}"
-AOSP_WS="${AOSP_WS:-$HOME/workspace/aosp}"
+PATCH_ROOT="$(harness_path PATCHS_DIR)"
+KERNEL_WS="${KERNEL_WS:-$(harness_env_path ENV_KERNEL_WS)}"
+AOSP_WS="${AOSP_WS:-$(harness_env_path ENV_AOSP_WS)}"
 
 # --- 接入维测库（模式 A：扫描为主，apply 内部显式失败处理）-------------------
 harness_init "revert_code_from_patchs"

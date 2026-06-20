@@ -16,12 +16,12 @@ set -uo pipefail
 # ============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../lib/harness_bootstrap.sh
-source "$SCRIPT_DIR/../lib/harness_bootstrap.sh"
+# shellcheck source=../lib/shell/harness_bootstrap.sh
+source "$SCRIPT_DIR/../lib/shell/harness_bootstrap.sh"
 
 harness_init "validate_harness_config"
 
-HARNESS_DIR="$REPO_ROOT/engineering/harness"
+HARNESS_DIR="$(harness_path HARNESS_DIR)"
 CONFIG_DIR="$HARNESS_DIR/config"
 
 WARN_COUNT=0

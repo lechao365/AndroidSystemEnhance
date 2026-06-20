@@ -15,12 +15,12 @@ set -uo pipefail
 # ============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../lib/harness_bootstrap.sh
-source "$SCRIPT_DIR/../lib/harness_bootstrap.sh"
+# shellcheck source=../lib/shell/harness_bootstrap.sh
+source "$SCRIPT_DIR/../lib/shell/harness_bootstrap.sh"
 
 harness_init "validate_harness_docs"
 
-HARNESS_DIR="$REPO_ROOT/engineering/harness"
+HARNESS_DIR="$(harness_path HARNESS_DIR)"
 
 # 累计告警计数
 WARN_COUNT=0
@@ -84,7 +84,10 @@ scan_readme_links() {
 README_FILES=()
 while IFS= read -r f; do
     README_FILES+=("$f")
-done < <(find "$HARNESS_DIR" -name 'README.md' -type f 2>/dev/null)
+done < <(find "$HARNESS_DIR" -name 'README.md' -type f \
+    -not -path '*/__pycache__/*' \
+    -not -path '*/.pytest_cache/*' \
+    2>/dev/null)
 
 if [ "${#README_FILES[@]}" -eq 0 ]; then
     log_warn "未发现任何 README.md，跳过链接扫描"

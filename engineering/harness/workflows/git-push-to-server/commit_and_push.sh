@@ -11,8 +11,8 @@ set -uo pipefail
 
 # --- 锚点 + 公共库（bootstrap 统一入口）-------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../../lib/harness_bootstrap.sh
-source "$SCRIPT_DIR/../../lib/harness_bootstrap.sh"
+# shellcheck source=../../lib/shell/harness_bootstrap.sh
+source "$SCRIPT_DIR/../../lib/shell/harness_bootstrap.sh"
 
 harness_init "commit_and_push"
 

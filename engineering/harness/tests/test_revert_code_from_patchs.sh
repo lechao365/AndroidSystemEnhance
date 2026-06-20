@@ -2,7 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# shellcheck source=../../lib/shell/harness_path_util.sh
+source "$SCRIPT_DIR/../../lib/shell/harness_path_util.sh"
+REPO_ROOT="$(harness_repo_root)"
 FIXTURE_ROOT="$SCRIPT_DIR/fixtures/revert-code-from-patchs"
 
 fail() {
@@ -45,20 +47,20 @@ assert_no_plan_entries() {
 }
 
 new_sandbox() {
-    mktemp -d "/tmp/opencode/test-revert-code-from-patchs.XXXXXX"
+    mktemp -d "$(harness_path TEST_SANDBOX_DIR)/test-revert-code-from-patchs.XXXXXX"
 }
 
 copy_runtime_scaffold() {
     local sandbox="$1"
     mkdir -p \
         "$sandbox/engineering/harness/workflows/revert-code-from-patchs" \
-        "$sandbox/engineering/harness/lib"
+        "$sandbox/engineering/harness/lib/shell"
     cp "$REPO_ROOT/AGENTS.md" "$sandbox/AGENTS.md"
     cp "$REPO_ROOT/engineering/harness/workflows/revert-code-from-patchs/revert_code_from_patchs.sh" \
        "$sandbox/engineering/harness/workflows/revert-code-from-patchs/revert_code_from_patchs.sh"
-    cp "$REPO_ROOT/engineering/harness/lib/harness_bootstrap.sh" \
-       "$REPO_ROOT/engineering/harness/lib/harness_observability.sh" \
-       "$sandbox/engineering/harness/lib/"
+    cp "$REPO_ROOT/engineering/harness/lib/shell/harness_bootstrap.sh" \
+       "$REPO_ROOT/engineering/harness/lib/shell/harness_observability.sh" \
+       "$sandbox/engineering/harness/lib/shell/"
 }
 
 copy_fixture() {

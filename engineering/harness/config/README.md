@@ -35,6 +35,7 @@ workflow 依赖的映射配置表——把"目录特征 → scope / 文档归属
 
 | 文件 | 作用 | 校验 schema |
 |------|------|-------------|
+| [paths.conf](./paths.conf) | 统一路径配置（shell / python / bat 三方共用的单一事实源），定义工程内所有路径 KEY | 规则 [rules/path-management.md](../rules/path-management.md) (PATH-001) |
 | [scope-mapping.yaml](./scope-mapping.yaml) | scope 判定规则的机器可读版（`version` + `rules[]`，每条含 `match`/`scope`/`priority`） | [schema/scope-mapping.schema.json](./schema/scope-mapping.schema.json) |
 | [doc-sync-mapping.yaml](./doc-sync-mapping.yaml) | patchs→文档分发规则的机器可读版（`version` + `routes[]`，每条含 `match`/`docs[]`/`mode`/`priority`） | [schema/doc-sync-mapping.schema.json](./schema/doc-sync-mapping.schema.json) |
 

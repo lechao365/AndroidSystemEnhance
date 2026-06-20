@@ -15,6 +15,9 @@ engineering/output/host-log/*
 engineering/output/runs/*
 !engineering/output/runs/.gitkeep
 
+# 根级 output 防御（工程产物统一在 engineering/output/）
+/output/
+
 # Python 缓存（本地产物）
 __pycache__/
 *.pyc

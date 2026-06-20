@@ -16,12 +16,12 @@ set -uo pipefail
 # ============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../lib/harness_bootstrap.sh
-source "$SCRIPT_DIR/../lib/harness_bootstrap.sh"
+# shellcheck source=../lib/shell/harness_bootstrap.sh
+source "$SCRIPT_DIR/../lib/shell/harness_bootstrap.sh"
 
 harness_init "validate_harness_scripts"
 
-HARNESS_DIR="$REPO_ROOT/engineering/harness"
+HARNESS_DIR="$(harness_path HARNESS_DIR)"
 
 WARN_COUNT=0
 SCAN_COUNT=0
@@ -94,6 +94,7 @@ while IFS= read -r f; do
 done < <(find "$HARNESS_DIR" -name '*.sh' -type f \
     -not -path '*/log/*' \
     -not -path '*/tests/*' \
+    -not -path '*/lib/*' \
     2>/dev/null | sort)
 
 log_info "待校验脚本 ${#TARGETS[@]} 个"

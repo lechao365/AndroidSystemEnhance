@@ -28,28 +28,28 @@
 set -e
 set -o pipefail
 
+# --- 锚点 + 公共库（bootstrap 统一入口）-------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../lib/shell/harness_bootstrap.sh
+source "$SCRIPT_DIR/../lib/shell/harness_bootstrap.sh"
+
 #==============================================================================
 # 0. 配置区
 #==============================================================================
 
-AOSP_ROOT="${AOSP_ROOT:-$HOME/workspace/aosp}"
-KERNEL_SRC="${KERNEL_SRC:-$HOME/workspace/rpi5-kernel-build/common}"
-KERNEL_OUT="${KERNEL_OUT:-$HOME/workspace/rpi5-kernel-build/out/android_rpi5}"
+AOSP_ROOT="${AOSP_ROOT:-$(harness_env_path ENV_AOSP_WS)}"
+KERNEL_SRC="${KERNEL_SRC:-$(harness_env_path ENV_KERNEL_WS)}"
+KERNEL_OUT="${KERNEL_OUT:-$(harness_env_path ENV_KERNEL_OUT)}"
 KERNEL_DEST="${KERNEL_DEST:-${AOSP_ROOT}/device/brcm/rpi5-kernel}"
-WINDOWS_IMG_DIR="${WINDOWS_IMG_DIR:-/mnt/c/Files/RaspberryImages}"
+WINDOWS_IMG_DIR="${WINDOWS_IMG_DIR:-$(harness_env_path ENV_WINDOWS_IMG_DIR)}"
 
-CLANG_BIN="${CLANG_BIN:-$HOME/workspace/rpi5-kernel-build/prebuilts/clang/host/linux-x86/clang-r522817/bin}"
+CLANG_BIN="${CLANG_BIN:-$(harness_env_path ENV_CLANG_BIN)}"
 CLANG_TRIPLE="aarch64-linux-gnu-"
 
 LUNCH_TARGET="aosp_rpi5-bp1a-userdebug"
 BUILD_JOBS=${BUILD_JOBS:-$(nproc)}
 KERNEL_DEFCONFIG="android_rpi5_defconfig"
 VERSION_PREFIX="RaspberryVanillaAOSP15"
-
-# --- 锚点 + 公共库（bootstrap 统一入口）-------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../lib/harness_bootstrap.sh
-source "$SCRIPT_DIR/../lib/harness_bootstrap.sh"
 
 harness_init --with-errexit "mk_rpi5_full_image"
 

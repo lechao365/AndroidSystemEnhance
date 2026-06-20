@@ -32,3 +32,9 @@
 
 改动 `engineering/harness/` 下任何文件（脚本、规则、配置、文档、lib）后，必须检查相关 README.md 是否需要同步更新（新增/删除/重命名文件时尤其关键）。
 详细检查清单见 [engineering/harness/README.md](engineering/harness/README.md) 的「README 同步」章节。
+
+## 路径管理
+
+`engineering/` 下所有脚本（shell / python / bat）禁止硬编码工程内路径，统一通过 `engineering/harness/config/paths.conf`（单一事实源）+ 三方路径工具获取。
+改动任何脚本的路径引用前，必须先加载 [engineering/harness/rules/path-management.md](engineering/harness/rules/path-management.md)（PATH-001）。
+目录调整时仅修改 `paths.conf`，无需改动脚本。
