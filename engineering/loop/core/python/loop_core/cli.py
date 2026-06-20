@@ -52,6 +52,18 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument(
         "--artifacts-dir", required=True, help="artifacts 输出目录"
     )
+    run_parser.add_argument(
+        "--capture-timeout",
+        type=float,
+        default=None,
+        help="输出采集超时（秒），缺省按 CLI > suite.defaults > profile 默认 兜底",
+    )
+    run_parser.add_argument(
+        "--recent-limit",
+        type=int,
+        default=None,
+        help="采集行数上限，缺省按 CLI > suite.defaults > profile 默认 兜底",
+    )
 
     # gen-cases 占位
     sub.add_parser("gen-cases", help="AI 辅助用例生成（第二步实现）")
@@ -113,15 +125,34 @@ def _cmd_run(args) -> int:
         transport = Rp5SerialTransport(client)
 
     # 执行
+    # 参数优先级：CLI 显式 > suite.defaults > profile 默认 > 硬编码兜底
+    if args.capture_timeout is not None:
+        capture_timeout = args.capture_timeout
+    elif suite.defaults.capture_timeout is not None:
+        capture_timeout = suite.defaults.capture_timeout
+    else:
+        capture_timeout = profile.default_capture_timeout
+
+    if args.recent_limit is not None:
+        recent_limit = args.recent_limit
+    elif suite.defaults.recent_limit is not None:
+        recent_limit = suite.defaults.recent_limit
+    else:
+        recent_limit = profile.default_recent_limit
+
     runner = LoopRunner(
         device_id=profile.device_id,
         prompt_markers=profile.prompt_markers,
         transport=transport,
         suite=suite,
-        capture_timeout=5.0,
-        recent_limit=400,
+        capture_timeout=capture_timeout,
+        recent_limit=recent_limit,
     )
-    bundle = runner.run()
+    try:
+        bundle = runner.run()
+    except Exception as exc:
+        # 顶层兜底：任何运行时异常都产出 failure bundle，保证 AI 拿到结构化证据
+        bundle = runner.build_failure_bundle(f"runtime error: {exc}")
 
     # 输出
     paths = write_evidence_bundle(bundle, args.artifacts_dir)

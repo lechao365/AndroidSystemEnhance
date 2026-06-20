@@ -104,7 +104,9 @@ class EvidenceBundle:
         summary: 汇总 {total, passed, failed, skipped, overall}
         cases: 全部用例结果
         evidence: collector 名称 -> CollectorResult
-        device_profile: 设备配置摘要
+        device_profile: 设备配置摘要（如 device_id、prompt_markers）
+        execution_config: 本次执行配置摘要（如 capture_timeout、recent_limit、provider_type）
+        warnings: 执行过程中产生的非致命告警信息列表
     """
 
     bundle_id: str
@@ -115,6 +117,8 @@ class EvidenceBundle:
     cases: list[TestCaseResult]
     evidence: dict[str, CollectorResult]
     device_profile: dict = field(default_factory=dict)
+    execution_config: dict = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)

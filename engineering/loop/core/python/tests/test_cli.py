@@ -1,0 +1,136 @@
+"""CLI 测试：参数透传、异常兜底、非 PASS 退出码。"""
+import json
+
+from loop_core.cli import main
+
+
+def test_cli_fixture_mode_passes(tmp_path):
+    """fixture 模式正常执行返回 0。"""
+    suite_path = tmp_path / "t.yaml"
+    suite_path.write_text("""
+suite: t
+version: 1
+cases:
+  - id: shell_ok
+    command: ""
+    assert: {type: prompt_visible}
+""")
+    fixture_path = tmp_path / "f.jsonl"
+    fixture_path.write_text('{"t": 1.0, "text": "console:/ $"}\n')
+    profile_path = tmp_path / "p.json"
+    profile_path.write_text(json.dumps({"device_id": "rp5", "prompt_markers": ["console:/ $"]}))
+
+    artifacts = tmp_path / "out"
+    rc = main([
+        "run",
+        "--suite", str(suite_path),
+        "--fixture", str(fixture_path),
+        "--device-profile", str(profile_path),
+        "--case-dirs", str(tmp_path),
+        "--artifacts-dir", str(artifacts),
+    ])
+    assert rc == 0
+    assert (artifacts / "evidence_bundle.json").exists()
+
+
+def test_cli_returns_nonzero_on_fail(tmp_path):
+    """suite fail 时返回非零。"""
+    suite_path = tmp_path / "t.yaml"
+    suite_path.write_text("""
+suite: t
+version: 1
+cases:
+  - id: must_fail
+    command: "true"
+    assert: {type: contains, value: "impossible_match"}
+    severity: critical
+""")
+    fixture_path = tmp_path / "f.jsonl"
+    fixture_path.write_text('{"t": 0.5, "text": "some output"}\n{"t": 0.6, "text": "console:/ $"}\n')
+    profile_path = tmp_path / "p.json"
+    profile_path.write_text(json.dumps({"device_id": "rp5"}))
+
+    artifacts = tmp_path / "out"
+    rc = main([
+        "run",
+        "--suite", str(suite_path),
+        "--fixture", str(fixture_path),
+        "--device-profile", str(profile_path),
+        "--case-dirs", str(tmp_path),
+        "--artifacts-dir", str(artifacts),
+    ])
+    assert rc == 1
+
+
+def test_cli_bundle_contains_execution_config(tmp_path):
+    """生成的 bundle 包含 execution_config。"""
+    suite_path = tmp_path / "t.yaml"
+    suite_path.write_text("""
+suite: t
+version: 1
+cases:
+  - id: c1
+    command: ""
+    assert: {type: prompt_visible}
+""")
+    fixture_path = tmp_path / "f.jsonl"
+    fixture_path.write_text('{"t": 1.0, "text": "console:/ $"}\n')
+    profile_path = tmp_path / "p.json"
+    profile_path.write_text(json.dumps({"device_id": "rp5", "prompt_markers": ["console:/ $"]}))
+
+    artifacts = tmp_path / "out"
+    main([
+        "run", "--suite", str(suite_path),
+        "--fixture", str(fixture_path),
+        "--device-profile", str(profile_path),
+        "--case-dirs", str(tmp_path),
+        "--artifacts-dir", str(artifacts),
+        "--capture-timeout", "3.0",
+    ])
+    bundle = json.loads((artifacts / "evidence_bundle.json").read_text())
+    assert bundle["execution_config"]["capture_timeout"] == 3.0
+    assert "provider_type" in bundle["execution_config"]
+
+
+def test_cli_produces_bundle_on_runtime_exception(tmp_path, monkeypatch):
+    """runner.run() 抛异常时，CLI 顶层兜底仍写出 failure bundle。"""
+    import loop_core.cli as cli_mod
+
+    suite_path = tmp_path / "t.yaml"
+    suite_path.write_text("""
+suite: t
+version: 1
+cases:
+  - id: c1
+    command: ""
+    assert: {type: prompt_visible}
+""")
+    fixture_path = tmp_path / "f.jsonl"
+    fixture_path.write_text('{"t": 1.0, "text": "console:/ $"}\n')
+    profile_path = tmp_path / "p.json"
+    profile_path.write_text(json.dumps({"device_id": "rp5", "prompt_markers": ["console:/ $"]}))
+
+    artifacts = tmp_path / "out"
+
+    original_run = cli_mod.LoopRunner.run
+
+    def boom(self):
+        raise RuntimeError("boom-from-transport")
+
+    monkeypatch.setattr(cli_mod.LoopRunner, "run", boom)
+    try:
+        rc = main([
+            "run", "--suite", str(suite_path),
+            "--fixture", str(fixture_path),
+            "--device-profile", str(profile_path),
+            "--case-dirs", str(tmp_path),
+            "--artifacts-dir", str(artifacts),
+        ])
+    finally:
+        monkeypatch.setattr(cli_mod.LoopRunner, "run", original_run)
+
+    # 兜底产出的 bundle overall=FAIL → 退出码非零
+    assert rc == 1
+    bundle = json.loads((artifacts / "evidence_bundle.json").read_text())
+    assert bundle["summary"]["overall"] == "FAIL"
+    assert "boom-from-transport" in bundle["summary"]["error"]

@@ -43,7 +43,7 @@ AI 接管设备验收：执行用例 → 输出证据 → AI 分析 → 修复�
 | `evidence.py` | EvidenceBundle JSON 输出 |
 | `report.py` | evidence.py 薄封装 |
 | `cli.py` | 统一 CLI（le run / gen-cases / deploy） |
-| `config.py` | DeviceProfile / merge_profiles |
+| `config.py` | DeviceProfile（设备语义 + 默认执行参数） |
 | `transport.py` | BaseTransport + FixtureTransport |
 | `observer.py` | capture_snapshot（prompt 探测） |
 | `cycles.py` | cycle 切分工具（可选） |

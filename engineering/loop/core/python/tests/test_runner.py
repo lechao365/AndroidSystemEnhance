@@ -84,3 +84,61 @@ cases:
     bundle = runner.run()
 
     assert bundle.cases[0].status == "pass"
+
+
+def test_runner_bundle_contains_execution_context(tmp_path):
+    """bundle 包含 execution_config 和 device_profile。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: c1
+    command: ""
+    assert: {type: prompt_visible}
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    transport = FixtureTransport([{"t": 1.0, "text": "console:/ $"}])
+    runner = LoopRunner(
+        device_id="rp5",
+        prompt_markers=["console:/ $"],
+        transport=transport,
+        suite=suite,
+        capture_timeout=7.0,
+        recent_limit=200,
+    )
+    bundle = runner.run()
+    assert bundle.execution_config["capture_timeout"] == 7.0
+    assert bundle.execution_config["recent_limit"] == 200
+    assert "FixtureTransport" in bundle.execution_config["provider_type"]
+    assert bundle.device_profile["device_id"] == "rp5"
+
+
+def test_runner_build_failure_bundle_is_public_and_carries_context(tmp_path):
+    """build_failure_bundle 公开可用，并填充 device_profile / execution_config。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: c1
+    command: ""
+    assert: {type: prompt_visible}
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    transport = FixtureTransport([])
+
+    runner = LoopRunner(
+        device_id="rp5",
+        prompt_markers=["console:/ $"],
+        transport=transport,
+        suite=suite,
+        capture_timeout=3.0,
+        recent_limit=50,
+    )
+    bundle = runner.build_failure_bundle("simulated runtime error")
+
+    assert bundle.summary["overall"] == "FAIL"
+    assert "simulated runtime error" in bundle.summary["error"]
+    assert bundle.device_profile["device_id"] == "rp5"
+    assert bundle.execution_config["capture_timeout"] == 3.0
+    assert bundle.execution_config["recent_limit"] == 50
+    assert "FixtureTransport" in bundle.execution_config["provider_type"]
