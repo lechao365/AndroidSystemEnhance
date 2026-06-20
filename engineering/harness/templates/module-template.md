@@ -20,9 +20,9 @@
 
 - 工作目录：`~/workspace/{workspace}/`
 - 模块源码：`{模块相对路径}/`
-- 完整源码归档：[`../../patchs/rpi5/{layer}/new/{模块相对路径}/`](./../../patchs/rpi5/{layer}/new/{模块相对路径}/)
+- 完整源码归档：`patchs/rpi5/{layer}/new/{模块相对路径}/`
 
-> **关联文档：** {上下游组件} 设计见 [{关联文档}](./XX.XX-XXX.md)。系统级架构分析见 [README.md](./README.md)。
+> **关联文档：** `{上下游组件}` 设计见 `XX.XX-XXX.md`；系统级架构分析见同目录 `README.md`。
 
 ## 用例视图
 
@@ -46,6 +46,7 @@ M1 --> Up : 返回
 
 note over Down, M2 : ... <阶段说明> ...
 Down -> M2 : <操作>
+@enduml
 ```
 
 ### 异常路径

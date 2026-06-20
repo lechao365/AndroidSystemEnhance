@@ -2217,7 +2217,7 @@ Refs: docs/specs/2026-06-19-loop-engineering-v2-design.md"
 - Create: `engineering/loop/cases/common/shell.yaml`
 - Create: `engineering/loop/cases/system/boot-success.yaml`
 - Create: `engineering/loop/templates/case-template.md`
-- Create: `engineering/loop/bin/le.sh`
+- Create: `engineering/loop/scripts/le.sh`
 
 - [ ] **Step 1: 创建 cases/common/shell.yaml**
 
@@ -2452,13 +2452,13 @@ harness_exit "$rc"
 - [ ] **Step 5: 设置 le.sh 可执行权限**
 
 ```bash
-chmod +x engineering/loop/bin/le.sh
+chmod +x engineering/loop/scripts/le.sh
 ```
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add engineering/loop/cases/common/shell.yaml engineering/loop/cases/system/boot-success.yaml engineering/loop/templates/case-template.md engineering/loop/bin/le.sh
+git add engineering/loop/cases/common/shell.yaml engineering/loop/cases/system/boot-success.yaml engineering/loop/templates/case-template.md engineering/loop/scripts/le.sh
 git commit -m "新增(loop): v2 用例/模板/入口脚本
 
 cases: common/shell.yaml + system/boot-success.yaml（首个系统级场景）
@@ -2497,7 +2497,7 @@ EOF
 
 ```bash
 mkdir -p /tmp/opencode/le-e2e-test
-bash engineering/loop/bin/le.sh run \
+bash engineering/loop/scripts/le.sh run \
   --suite engineering/loop/cases/system/boot-success.yaml \
   --fixture engineering/loop/core/python/tests/fixtures/boot_success.jsonl \
   --device-profile engineering/loop/connection/profiles/devices/rp5/default.json \
@@ -2667,7 +2667,7 @@ rmdir engineering/loop/profiles/ 2>/dev/null || true
 - [ ] **Step 3: 验证 device profile 能被 CLI 正确加载**
 
 ```bash
-bash engineering/loop/bin/le.sh run \
+bash engineering/loop/scripts/le.sh run \
   --suite engineering/loop/cases/system/boot-success.yaml \
   --fixture engineering/loop/core/python/tests/fixtures/boot_success.jsonl \
   --device-profile engineering/loop/connection/profiles/devices/rp5/default.json \
@@ -2740,7 +2740,7 @@ engineering/loop/
 ### fixture 模式（离线回放）
 
 ```bash
-bash engineering/loop/bin/le.sh run \
+bash engineering/loop/scripts/le.sh run \
   --suite engineering/loop/cases/system/boot-success.yaml \
   --fixture <jsonl路径> \
   --device-profile engineering/loop/connection/profiles/devices/rp5/default.json \
@@ -2753,7 +2753,7 @@ bash engineering/loop/bin/le.sh run \
 ```bash
 # 先启动 Windows Host（COM5）
 # 然后在 WSL2 执行：
-bash engineering/loop/bin/le.sh run \
+bash engineering/loop/scripts/le.sh run \
   --suite engineering/loop/cases/system/boot-success.yaml \
   --host 127.0.0.1 --port 9700 \
   --device-profile engineering/loop/connection/profiles/devices/rp5/default.json \
@@ -2773,7 +2773,7 @@ cp engineering/loop/templates/case-template.md <参考>
 # engineering/loop/cases/system/<your-scenario>.yaml
 
 # 3. 执行
-bash engineering/loop/bin/le.sh run --suite <path> ...
+bash engineering/loop/scripts/le.sh run --suite <path> ...
 ```
 
 ## 测试

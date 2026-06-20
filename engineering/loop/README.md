@@ -21,7 +21,7 @@ connection (rp5-serial provider)
 
 ```
 engineering/loop/
-├── bin/le.sh                    统一 CLI 入口
+├── scripts/le.sh                 统一 CLI 入口
 ├── core/python/loop_core/       LE 框架（通用层）
 ├── cases/                       声明式用例（YAML）
 │   ├── common/                    公共 suite（含 shell + 诊断 collector 库）
@@ -76,7 +76,7 @@ cases:
 ### fixture 模式（离线回放）
 
 ```bash
-bash engineering/loop/bin/le.sh run \
+bash engineering/loop/scripts/le.sh run \
   --suite engineering/loop/cases/system/boot-success.yaml \
   --fixture <jsonl路径> \
   --device-profile engineering/loop/connection/profiles/devices/rp5/default.json \
@@ -89,7 +89,7 @@ bash engineering/loop/bin/le.sh run \
 ```bash
 # 先启动 Windows Host（COM5）
 # 然后在 WSL2 执行：
-bash engineering/loop/bin/le.sh run \
+bash engineering/loop/scripts/le.sh run \
   --suite engineering/loop/cases/system/boot-success.yaml \
   --host 127.0.0.1 --port 9700 \
   --device-profile engineering/loop/connection/profiles/devices/rp5/default.json \
@@ -109,7 +109,7 @@ bash engineering/loop/bin/le.sh run \
 # engineering/loop/cases/system/<your-scenario>.yaml
 
 # 3. 执行（case-dirs 指向 cases 根目录，保证 include: [common/shell] 可解析）
-bash engineering/loop/bin/le.sh run --suite <path> \
+bash engineering/loop/scripts/le.sh run --suite <path> \
   --case-dirs engineering/loop/cases ...
 ```
 
@@ -138,7 +138,7 @@ PYTHONPATH="engineering/loop/core/python:engineering/loop/connection/providers/r
 
 ## 串口 transcript
 
-rp5-serial host 持续将串口正文写入 `transcript_path`（默认 `.host-log/rp5-serial-transcript.log`），
+rp5-serial host 持续将串口正文写入 `transcript_path`（默认 `output/host-log/rp5-serial-transcript.log`），
 每行带 ISO 时间戳。`serial_recent` collector 通过 `mode: serial_context` 直接消费 host 上下文，
 无需 shell 可达即可获取串口根证据（transcript 路径 + 最近片段 + restart 周期）。
 

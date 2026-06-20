@@ -760,7 +760,7 @@ le.sh deploy image \
 ### 8.4 入口脚本
 
 ```bash
-# engineering/loop/bin/le.sh — 统一 LE CLI 入口
+# engineering/loop/scripts/le.sh — 统一 LE CLI 入口
 #!/bin/bash
 # 调用 python3 -m loop_core.cli "$@"
 ```

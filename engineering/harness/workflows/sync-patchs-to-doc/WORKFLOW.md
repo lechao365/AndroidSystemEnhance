@@ -9,11 +9,61 @@ description: patchs/rpi5 变动后生成报告，按模板规范将代码 diff �
 
 **核心理念**：`engineering/harness/templates/*.md` 是**只读契约**，设计文档（`01-*/02-*`）是**受控可变区**。AI 不得擅改模板；diff 与模板冲突时，必须用户确认后才可调整模板。
 
-## 触发场景
+## Trigger（触发条件）
 
 - 用户执行完归档（sync-code-to-patchs）后
 - 用户提到"更新文档""文档同步""patchs 变了"
 - `patchs/rpi5/` 相对 git HEAD 有未同步到文档的变动
+
+## Preconditions（前置条件）
+
+- `patchs/rpi5/manifest.yaml` 存在（首次未归档时停下提示用户先执行 `/sync-code-to-patchs`）
+- `engineering/harness/config/doc-sync-mapping.md` 可读（patchs→文档映射规则）
+- 目标设计文档（`01-*/02-*`）与模板（`engineering/harness/templates/*.md`）存在
+
+## Inputs（输入）
+
+| 参数 | 说明 |
+|------|------|
+| 无参数 | 生成变动报告（分组 + 变动类型 A/M/D/R + 行数统计） |
+| `--full-diff` | 报告 + 完整 diff 正文（AI 零往返） |
+| `--check-only` | 仅检查，不输出提示 |
+
+脚本基于 git HEAD 对比 `patchs/rpi5/`，按目录分组（`kernel/modified`、`kernel/new`、`aosp/modified`、`aosp/new`、`others`）输出变动类型（A/M/D/R）和行数统计。加 `--full-diff` 在报告末尾追加 `git diff HEAD` 完整正文。
+
+## Human confirmation gates（人工确认门）
+
+**方案确认门（强制）**：Step6 落盘前必须展示 Step5 的"动作清单级方案"并获得用户确认。
+
+- 默认只更新文档不动模板
+- 若方案含 `TEMPLATE-CONFLICT`（diff 引入内容无法归入任何模板章节/违反模板约束），**必须用户确认**才能改模板
+- 禁止跳过方案展示直接落盘；禁止全文重写/新建非模板章节
+
+## Outputs / artifacts（输出/产物）
+
+- 变动报告（脚本 stdout + 日志/artifacts，`OBS-001`/`OBS-002`）
+- 章节级增量文档更新（仅动作清单覆盖的章节，机械执行已确认动作）
+- 落盘后自动一致性自检报告：模板章节完整性 / 代码路径合规 / 行号锚点有效性 / 交叉引用可达 / 形态 D 盲区
+- 日志/artifacts 按 `OBS-001`/`OBS-002` 落盘
+
+## Failure / recovery（失败/恢复）
+
+| 场景 | 处理 |
+|------|------|
+| manifest 缺失（首次未归档） | 停下提示用户先执行 `/sync-code-to-patchs` |
+| diff 引入内容无模板章节承载 | 标记 `TEMPLATE-CONFLICT`，等用户确认后才动模板 |
+| 行号锚点失效 | 一致性自检标记，刷新含形态 D 盲区、区间终点、重复出现处 |
+| 代码路径违规（workspace 绝对路径） | 一致性自检标记，应改为 patchs 相对路径 |
+| 交叉引用断链 | 一致性自检标记 |
+
+## Related policy IDs（关联规则 ID）
+
+- `SRC-002`：patchs 是受控归档（本 workflow 读取 patchs 作为文档同步来源）
+- `DOC-001`：文档分层（spec/plan 与长期技术文档分层，本 workflow 维护长期技术文档）
+- `DOC-002`：PlantUML 改动必须过 plantuml.md 约束
+- `OBS-001` / `OBS-002`：脚本维测
+
+---
 
 ## 工作流（7 步闭环）
 
@@ -24,8 +74,6 @@ bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh     
 bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh --full-diff  # 报告 + 完整 diff 正文（AI 零往返）
 bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh --check-only  # 仅检查，不输出提示
 ```
-
-脚本基于 git HEAD 对比 `patchs/rpi5/`，按目录分组（`kernel/modified`、`kernel/new`、`aosp/modified`、`aosp/new`、`others`）输出变动类型（A/M/D/R）和行数统计。加 `--full-diff` 在报告末尾追加 `git diff HEAD` 完整正文。
 
 ### 2. 按映射规则定位文档（依据 engineering/harness/config/doc-sync-mapping.md）
 
@@ -105,7 +153,7 @@ manifest.yaml 条目示例：
 |---------|------|
 | `UPDATE-锚点` | 行号锚点刷新（含形态 D 盲区、区间终点、重复出现处）|
 | `UPDATE-表格` | 表格新增/修改/删除行（值严格来自 diff/workspace）|
-| `UPDATE-图` | 重画 PlantUML（遵守 `engineering/harness/rules/plantuml.md`）|
+| `UPDATE-图` | 重画 PlantUML（遵守 `engineering/harness/rules/plantuml.md`，即 `DOC-002`）|
 | `UPDATE-文本` | 修改描述段落（表述与 diff 语义对齐）|
 | `ADD-文件` | 文件矩阵/目录树补入新文件 + 行数 |
 | `REMOVE-文件` | 移除所有引用（grep 全量）|
@@ -147,7 +195,7 @@ manifest.yaml 条目示例：
 - **只改动作清单覆盖的章节**，其他章节一字不动
 - 新增内容**只能加到模板定义的现有章节**（如新增字段加到"逻辑视图/字段表"）
 - 禁止：全文重写、新建非模板章节、改变章节顺序
-- PlantUML 改动后必须过 `engineering/harness/rules/plantuml.md` 约束
+- PlantUML 改动后必须过 `engineering/harness/rules/plantuml.md` 约束（`DOC-002`）
 - **行号锚点刷新机制**：对受影响文件的每个被引符号，重新 grep 源码取新行号，全量替换文档中的 `#L旧` → `#L新`（含形态 D 代码块注释、区间引用终点、重复出现处）
 
 ### 7. 自动一致性自检（落盘后强制）

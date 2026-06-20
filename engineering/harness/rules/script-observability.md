@@ -1,5 +1,9 @@
 # 脚本维测规则（observability）
 
+> **规则 ID**：`OBS-001` / `OBS-002`
+> - `OBS-001`：`engineering/` 下所有 bash 脚本必须通过 `lib/harness_bootstrap.sh` 统一入口接入，调用 `harness_init` 完成锚点与 observability 初始化，禁止业务脚本重复实现 `REPO_ROOT` 查找或私自定义日志/step/退出函数。
+> - `OBS-002`：必须使用统一退出码（0/1/2/3/4），通过 `harness_exit` 退出，禁止业务逻辑裸 `exit`；临时产物必须通过 `harness_tmp_file/harness_tmp_dir` 或 `artifact_register` 落入 `artifacts/`，禁止裸写 `/tmp/`。
+
 ## 1. 适用范围与加载时机
 
 - **适用对象**：`engineering/` 下所有 bash 脚本（harness/workflows/、harness/scripts/、未来 loop/ 等）。
@@ -176,7 +180,7 @@ status=OK label="kernel/new/foo.c"
 ### 目录布局
 
 ```
-engineering/harness/log/
+engineering/output/log/
 ├── .gitkeep
 ├── <script-name>/
 │   ├── <script-name>-YYYYMMDD-HHMMSS.log   # 最多保留 2 份历史
@@ -203,34 +207,34 @@ engineering/harness/log/
 
 ```bash
 # 最新一次运行
-cat engineering/harness/log/<script-name>/latest.log
+cat engineering/output/log/<script-name>/latest.log
 
 # 按时间翻历史
-ls -lt engineering/harness/log/<script-name>/
+ls -lt engineering/output/log/<script-name>/
 ```
 
 ### 快速定位错误
 
 ```bash
 # grep 错误行
-grep "level=ERROR" engineering/harness/log/<script-name>/latest.log
+grep "level=ERROR" engineering/output/log/<script-name>/latest.log
 
 # 看调用栈（错误行的 stack= 字段）
-grep "stack=" engineering/harness/log/<script-name>/latest.log
+grep "stack=" engineering/output/log/<script-name>/latest.log
 
 # 查成功路径关键产物
-grep "^result:" engineering/harness/log/<script-name>/latest.log
+grep "^result:" engineering/output/log/<script-name>/latest.log
 ```
 
 ### 对比两次运行
 
 ```bash
-diff engineering/harness/log/<script-name>/<script-name>-20260619-150000.log \
-     engineering/harness/log/<script-name>/<script-name>-20260619-160000.log
+diff engineering/output/log/<script-name>/<script-name>-20260619-150000.log \
+     engineering/output/log/<script-name>/<script-name>-20260619-160000.log
 ```
 
 ### 查看中间产物
 
 ```bash
-ls engineering/harness/log/<script-name>/artifacts/
+ls engineering/output/log/<script-name>/artifacts/
 ```

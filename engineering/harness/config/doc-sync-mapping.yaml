@@ -1,0 +1,79 @@
+version: 1
+
+# patchs → 技术文档分发规则（机器层）
+# 解释层：doc-sync-mapping.md（人类可读）
+# 匹配语义：按 priority 降序遍历，首条命中即归属（等价 md 的"自上而下首条命中即归属"）
+# mode 字段：
+#   fixed       = 固定分发，docs 即目标目录
+#   ai-diff     = 需 AI 读 diff 正文后从 docs 候选集合中选定（可多份）
+#   ai-pending  = 兜底，AI 读 diff 后判断，无法判断标注"归属待定"
+routes:
+  # —— 固定映射（精确命中即分发）——
+  - match: "**/LcView/**"
+    docs: ["docs/01-打点增强"]
+    mode: fixed
+    priority: 100
+  - match: "**/lcview*"
+    docs: ["docs/01-打点增强"]
+    mode: fixed
+    priority: 95
+  - match: "**/LcIod/**"
+    docs: ["docs/02-IO增强"]
+    mode: fixed
+    priority: 90
+  - match: "**/lciod*"
+    docs: ["docs/02-IO增强"]
+    mode: fixed
+    priority: 85
+  - match: "others/usb-verify/**"
+    docs: ["docs/02-IO增强"]
+    mode: fixed
+    priority: 80
+  - match: "others/usb-fault-inject/**"
+    docs: ["docs/02-IO增强"]
+    mode: fixed
+    priority: 79
+  - match: "kernel/modified/drivers/usb/**"
+    docs: ["docs/02-IO增强"]
+    mode: fixed
+    priority: 78
+
+  # —— 通用配置类（AI 读 diff 分发，docs 为候选集合）——
+  - match: "aosp/modified/device/brcm/rpi5/device.mk.diff"
+    docs: ["docs/01-打点增强", "docs/02-IO增强"]
+    mode: ai-diff
+    priority: 50
+  - match: "aosp/modified/device/brcm/rpi5/manifest.xml.diff"
+    docs: ["docs/01-打点增强", "docs/02-IO增强"]
+    mode: ai-diff
+    priority: 50
+  - match: "aosp/modified/device/brcm/rpi5/*sepolicy*"
+    docs: ["docs/01-打点增强", "docs/02-IO增强"]
+    mode: ai-diff
+    priority: 50
+  - match: "aosp/modified/device/brcm/rpi5/BoardConfig.mk.diff"
+    docs: ["docs/01-打点增强", "docs/02-IO增强"]
+    mode: ai-diff
+    priority: 50
+  - match: "**/Android.bp"
+    docs: ["docs/01-打点增强", "docs/02-IO增强"]
+    mode: ai-diff
+    priority: 40
+  - match: "**/Makefile"
+    docs: ["docs/01-打点增强", "docs/02-IO增强"]
+    mode: ai-diff
+    priority: 40
+  - match: "**/Kconfig"
+    docs: ["docs/01-打点增强", "docs/02-IO增强"]
+    mode: ai-diff
+    priority: 40
+  - match: "**/Kbuild"
+    docs: ["docs/01-打点增强", "docs/02-IO增强"]
+    mode: ai-diff
+    priority: 40
+
+  # —— 兜底 ——
+  - match: "**"
+    docs: []
+    mode: ai-pending
+    priority: 0

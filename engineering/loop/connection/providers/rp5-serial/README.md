@@ -22,7 +22,7 @@
   - 不负责故障判定 / panic 识别 / 规则引擎，只做串口托管 + 数据转发 + session/lease 管理
 - **WSL2 Client**：
   - bash 入口复用 harness observability（`harness_bootstrap.sh` / `harness_observability.sh`）
-  - 日志落点：`engineering/harness/log/loop-rp5-serial-*/`
+  - 日志落点：`engineering/output/log/loop-rp5-serial-*/`
   - 不直接打开物理串口，通过逻辑会话访问 Host
 
 ## 目录结构

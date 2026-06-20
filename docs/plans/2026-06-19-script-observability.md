@@ -18,7 +18,7 @@
 |---|---|---|
 | 新增 | `engineering/harness/lib/harness_observability.sh` | 公共维测库（所有 API） |
 | 新增 | `engineering/harness/rules/script-observability.md` | 维测规则（强约束） |
-| 新增 | `engineering/harness/log/.gitkeep` | 日志目录占位 |
+| 新增 | `engineering/output/log/.gitkeep` | 日志目录占位 |
 | 修改 | `.gitignore` | 忽略日志目录（保留 .gitkeep） |
 | 修改 | `AGENTS.md` | 增加维测规则引用 |
 | 修改 | `engineering/harness/workflows/git-push-to-server/collect_diff.sh` | 接入 lib |
@@ -66,9 +66,9 @@ mkdir -p engineering/harness/lib
 _HARNESS_OBSERVABILITY_SOURCED=1
 
 # --- 全局状态（harness_init 后填充）-----------------------------------------
-_H_LOG_DIR=""           # harness/log/<script>
+_H_LOG_DIR=""           # engineering/output/log/<script>
 _H_LOG_FILE=""          # 本次日志文件全路径
-_H_ARTIFACTS_DIR=""     # harness/log/<script>/artifacts
+_H_ARTIFACTS_DIR=""     # engineering/output/log/<script>/artifacts
 _H_SCRIPT_NAME=""       # 脚本名
 _H_TS=""                # 本次运行 timestamp（YYYYMMDD-HHMMSS）
 _H_STEP_CURRENT=0       # 当前 step 编号
@@ -141,7 +141,7 @@ harness_init() {
     fi
 
     # 日志目录
-    _H_LOG_DIR="$REPO_ROOT/engineering/harness/log/$_H_SCRIPT_NAME"
+    _H_LOG_DIR="$REPO_ROOT/engineering/output/log/$_H_SCRIPT_NAME"
     _H_ARTIFACTS_DIR="$_H_LOG_DIR/artifacts"
     _H_LOG_FILE="$_H_LOG_DIR/$_H_SCRIPT_NAME-$_H_TS.log"
     mkdir -p "$_H_LOG_DIR" "$_H_ARTIFACTS_DIR"
@@ -553,7 +553,7 @@ ts=2026-06-19T15:31:00+0800 level=ERROR step=2/? script=sync_code_to_patchs msg=
 ### 目录布局
 
 ```
-engineering/harness/log/
+engineering/output/log/
 ├── .gitkeep
 ├── <script-name>/
 │   ├── <script-name>-YYYYMMDD-HHMMSS.log   # 最多保留 2 份历史
@@ -574,33 +574,33 @@ engineering/harness/log/
 
 ```bash
 # 最新一次运行
-cat engineering/harness/log/<script-name>/latest.log
+cat engineering/output/log/<script-name>/latest.log
 
 # 按时间翻历史
-ls -lt engineering/harness/log/<script-name>/
+ls -lt engineering/output/log/<script-name>/
 ```
 
 ### 快速定位错误
 
 ```bash
 # grep 错误行
-grep "level=ERROR" engineering/harness/log/<script-name>/latest.log
+grep "level=ERROR" engineering/output/log/<script-name>/latest.log
 
 # 看调用栈（错误行的 stack= 字段）
-grep "stack=" engineering/harness/log/<script-name>/latest.log
+grep "stack=" engineering/output/log/<script-name>/latest.log
 ```
 
 ### 对比两次运行
 
 ```bash
-diff engineering/harness/log/<script-name>/<script-name>-20260619-150000.log \
-     engineering/harness/log/<script-name>/<script-name>-20260619-160000.log
+diff engineering/output/log/<script-name>/<script-name>-20260619-150000.log \
+     engineering/output/log/<script-name>/<script-name>-20260619-160000.log
 ```
 
 ### 查看中间产物
 
 ```bash
-ls engineering/harness/log/<script-name>/artifacts/
+ls engineering/output/log/<script-name>/artifacts/
 ```
 ```
 
@@ -618,7 +618,7 @@ git commit -m "新增(rules): script-observability 脚本维测规则"
 **Files:**
 - Modify: `.gitignore`
 - Modify: `AGENTS.md`
-- Create: `engineering/harness/log/.gitkeep`
+- Create: `engineering/output/log/.gitkeep`
 
 - [ ] **Step 1: 更新 .gitignore**
 
@@ -627,15 +627,15 @@ git commit -m "新增(rules): script-observability 脚本维测规则"
 ```
 
 # harness 脚本维测日志（本地产物，不归档）
-engineering/harness/log/
-!engineering/harness/log/.gitkeep
+engineering/output/log/
+!engineering/output/log/.gitkeep
 ```
 
 - [ ] **Step 2: 创建 log 目录占位**
 
 ```bash
-mkdir -p engineering/harness/log
-touch engineering/harness/log/.gitkeep
+mkdir -p engineering/output/log
+touch engineering/output/log/.gitkeep
 ```
 
 `.gitkeep` 内容为空文件。
@@ -648,18 +648,18 @@ touch engineering/harness/log/.gitkeep
 ## 脚本维测规则（observability）
 
 改动 `engineering/` 下任何 bash 脚本（含 workflows/、scripts/、未来 loop/ 等）前，必须先加载 [engineering/harness/rules/script-observability.md](engineering/harness/rules/script-observability.md)。
-该规则强制要求：source 公共库、接入文件日志、结构化 step、错误现场捕获、统一退出码、中间产物归档。`engineering/harness/log/` 为本地维测产物，不归档。
+该规则强制要求：source 公共库、接入文件日志、结构化 step、错误现场捕获、统一退出码、中间产物归档。`engineering/output/log/` 为本地维测产物，不归档。
 ```
 
 - [ ] **Step 4: 验证 gitignore 生效**
 
 Run: `git status`
-Expected: `engineering/harness/log/.gitkeep` 显示为 untracked，且 `.gitignore` 显示为 modified；log 目录下其他内容（若有）不被追踪。
+Expected: `engineering/output/log/.gitkeep` 显示为 untracked，且 `.gitignore` 显示为 modified；log 目录下其他内容（若有）不被追踪。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add .gitignore AGENTS.md engineering/harness/log/.gitkeep
+git add .gitignore AGENTS.md engineering/output/log/.gitkeep
 git commit -m "配置(observability): 忽略日志目录 + AGENTS.md 引用维测规则"
 ```
 
@@ -767,8 +767,8 @@ Expected: 无输出
 ```bash
 bash engineering/harness/workflows/git-push-to-server/collect_diff.sh --stat-only
 echo "exit=$?"
-ls engineering/harness/log/collect_diff/
-cat engineering/harness/log/collect_diff/latest.log
+ls engineering/output/log/collect_diff/
+cat engineering/output/log/collect_diff/latest.log
 ```
 
 Expected:
@@ -928,7 +928,7 @@ Expected: 无输出
 echo "test message" > /tmp/test-msg.txt
 bash engineering/harness/workflows/git-push-to-server/commit_and_push.sh --message-file /tmp/test-msg.txt --no-push
 echo "exit=$?"
-cat engineering/harness/log/commit_and_push/latest.log
+cat engineering/output/log/commit_and_push/latest.log
 ```
 
 （注：此步会产生真实 commit，验证后用 `git reset --soft HEAD~1` 回退。若仓库当前无改动，会 exit 4。）
@@ -1038,7 +1038,7 @@ Expected: 无输出
 ```bash
 bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh --check-only
 echo "exit=$?"
-cat engineering/harness/log/sync_patchs_to_doc/latest.log
+cat engineering/output/log/sync_patchs_to_doc/latest.log
 ```
 
 Expected:
@@ -1200,8 +1200,8 @@ Expected: 无输出
 ```bash
 bash engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh --check-only
 echo "exit=$?"
-ls engineering/harness/log/sync_code_to_patchs/artifacts/
-cat engineering/harness/log/sync_code_to_patchs/latest.log | grep "level="
+ls engineering/output/log/sync_code_to_patchs/artifacts/
+cat engineering/output/log/sync_code_to_patchs/latest.log | grep "level="
 ```
 
 Expected:
@@ -1362,8 +1362,8 @@ Expected: 无输出
 ```bash
 bash engineering/harness/workflows/revert-code-from-patchs/revert_code_from_patchs.sh --check-only
 echo "exit=$?"
-ls engineering/harness/log/revert_code_from_patchs/artifacts/
-cat engineering/harness/log/revert_code_from_patchs/latest.log | grep "level="
+ls engineering/output/log/revert_code_from_patchs/artifacts/
+cat engineering/output/log/revert_code_from_patchs/latest.log | grep "level="
 ```
 
 Expected:
@@ -1544,8 +1544,8 @@ Expected: 无输出
 ```bash
 bash engineering/harness/scripts/mk_rpi5_full_image.sh -mode 0
 echo "exit=$?"
-ls engineering/harness/log/mk_rpi5_full_image/artifacts/
-cat engineering/harness/log/mk_rpi5_full_image/artifacts/*-build-report.json
+ls engineering/output/log/mk_rpi5_full_image/artifacts/
+cat engineering/output/log/mk_rpi5_full_image/artifacts/*-build-report.json
 ```
 
 Expected:
@@ -1591,7 +1591,7 @@ Expected: 全部 OK。
 - [ ] **Step 2: 日志目录结构确认**
 
 ```bash
-ls -R engineering/harness/log/
+ls -R engineering/output/log/
 ```
 
 Expected: 6 个脚本子目录 + .gitkeep，每个子目录含日志文件 + latest.log（+ artifacts/ 含对应产物）。
@@ -1603,7 +1603,7 @@ Expected: 6 个脚本子目录 + .gitkeep，每个子目录含日志文件 + lat
 for i in 1 2 3 4; do
     bash engineering/harness/workflows/git-push-to-server/collect_diff.sh --stat-only >/dev/null 2>&1
 done
-ls -1 engineering/harness/log/collect_diff/*.log | wc -l
+ls -1 engineering/output/log/collect_diff/*.log | wc -l
 ```
 
 Expected: 3（保留 2 份历史 + latest.log 不计入 *.log 通配，或 latest.log 计入则为 4——需确认 latest.log 是否匹配 `*.log`。按文件名 `latest.log` 匹配 `*.log`，所以应是 4 个：2 历史 + 1 本次 + latest.log。若要 latest.log 不计入，轮转逻辑应排除它。）
@@ -1616,7 +1616,7 @@ Expected: 3（保留 2 份历史 + latest.log 不计入 *.log 通配，或 lates
 git status
 ```
 
-Expected: `engineering/harness/log/` 下内容全部被 gitignore（除 .gitkeep），working tree clean。
+Expected: `engineering/output/log/` 下内容全部被 gitignore（除 .gitkeep），working tree clean。
 
 - [ ] **Step 5: 最终提交（若有未提交改动）**
 

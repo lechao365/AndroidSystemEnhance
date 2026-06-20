@@ -30,9 +30,9 @@
 _HARNESS_OBSERVABILITY_SOURCED=1
 
 # --- 全局状态（harness_init 后填充）-----------------------------------------
-_H_LOG_DIR=""           # harness/log/<script>
+_H_LOG_DIR=""           # output/log/<script>
 _H_LOG_FILE=""          # 本次日志文件全路径
-_H_ARTIFACTS_DIR=""     # harness/log/<script>/artifacts
+_H_ARTIFACTS_DIR=""     # output/log/<script>/artifacts
 _H_SCRIPT_NAME=""       # 脚本名
 _H_TS=""                # 本次运行 timestamp（YYYYMMDD-HHMMSS）
 _H_STEP_CURRENT=0       # 当前 step 编号
@@ -103,21 +103,25 @@ harness_init() {
     _H_INIT_TS=$(date +%s)
     _H_TS=$(date '+%Y%m%d-%H%M%S')
 
-    # 锚点查找 REPO_ROOT（从 BASH_SOURCE 向上找 AGENTS.md）
-    local bsrc="${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}"
-    local dir
-    dir="$(cd "$(dirname "$bsrc")" && pwd)"
-    REPO_ROOT="$dir"
-    while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/AGENTS.md" ]; do
-        REPO_ROOT="$(dirname "$REPO_ROOT")"
-    done
+    if [ -n "${REPO_ROOT:-}" ] && [ -f "$REPO_ROOT/AGENTS.md" ]; then
+        REPO_ROOT="$(cd "$REPO_ROOT" && pwd)"
+    else
+        # 锚点查找 REPO_ROOT（从 BASH_SOURCE 向上找 AGENTS.md）
+        local bsrc="${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}"
+        local dir
+        dir="$(cd "$(dirname "$bsrc")" && pwd)"
+        REPO_ROOT="$dir"
+        while [ "$REPO_ROOT" != "/" ] && [ ! -f "$REPO_ROOT/AGENTS.md" ]; do
+            REPO_ROOT="$(dirname "$REPO_ROOT")"
+        done
+    fi
     if [ ! -f "$REPO_ROOT/AGENTS.md" ]; then
         echo "ERROR: harness_init 未找到项目根（AGENTS.md 锚点缺失）" >&2
         exit 3
     fi
 
     # 日志目录
-    _H_LOG_DIR="$REPO_ROOT/engineering/harness/log/$_H_SCRIPT_NAME"
+    _H_LOG_DIR="$REPO_ROOT/engineering/output/log/$_H_SCRIPT_NAME"
     _H_ARTIFACTS_DIR="$_H_LOG_DIR/artifacts"
     _H_LOG_FILE="$_H_LOG_DIR/$_H_SCRIPT_NAME-$_H_TS.log"
     mkdir -p "$_H_LOG_DIR" "$_H_ARTIFACTS_DIR"
@@ -145,7 +149,7 @@ _h_rotate_logs() {
     while IFS= read -r f; do
         [ -z "$f" ] && continue
         old_logs+=("$f")
-    done < <(ls -t "$_H_LOG_DIR"/${_H_SCRIPT_NAME}-*.log 2>/dev/null)
+    done < <(ls -t "$_H_LOG_DIR"/${_H_SCRIPT_NAME}-*.log 2>/dev/null || true)
 
     # 保留最新 2 份，删除其余
     local i=0
@@ -158,7 +162,7 @@ _h_rotate_logs() {
             fts="${fts#${_H_SCRIPT_NAME}-}"
             fts="${fts%.log}"
             rm -f "$f"
-            rm -f "$_H_ARTIFACTS_DIR"/${fts}-* 2>/dev/null
+            rm -rf "$_H_ARTIFACTS_DIR"/${fts}-* 2>/dev/null || true
         fi
     done
 }
@@ -196,7 +200,7 @@ _h_print_summary() {
     local dur=$(( $(date +%s) - _H_INIT_TS ))
     local artifact_count=0
     if [ -d "$_H_ARTIFACTS_DIR" ]; then
-        artifact_count=$(ls -1 "$_H_ARTIFACTS_DIR"/${_H_TS}-* 2>/dev/null | wc -l)
+        artifact_count=$(ls -1 "$_H_ARTIFACTS_DIR"/${_H_TS}-* 2>/dev/null | wc -l) || artifact_count=0
     fi
     {
         echo ""
@@ -242,12 +246,11 @@ log_result() {
     for kv in "$@"; do
         printf "  %s\n" "$kv"
     done
-    # 写结构化日志
     local line="result: $title"
     for kv in "$@"; do
         line+=" $kv"
     done
-    _h_log_file_write "INFO" "$line"
+    printf '%s\n' "$line" >> "$_H_LOG_FILE"
 }
 
 # ============================================================================
@@ -293,11 +296,12 @@ harness_status_emit() {
         *)         color="$_H_NC" ;;
     esac
     printf "  ${color}%-5s${_H_NC} %s\n" "$status" "$label"
+    # 日志文件中写入裸 status= 行（便于 grep 结构化状态，见 rules 第 9 节）
+    local status_line="status=$status label=\"$label\""
     if [ -n "$msg" ]; then
-        _h_log_file_write "INFO" "status=$status label=\"$label\" msg=\"$msg\""
-    else
-        _h_log_file_write "INFO" "status=$status label=\"$label\""
+        status_line+=" msg=\"$msg\""
     fi
+    printf '%s\n' "$status_line" >> "$_H_LOG_FILE"
 }
 
 # ============================================================================
@@ -427,7 +431,7 @@ _h_rotate_artifacts() {
         local found=false t
         for t in "${ts_list[@]}"; do [ "$t" = "$ts" ] && { found=true; break; }; done
         [ "$found" = false ] && ts_list+=("$ts")
-    done < <(ls -1 "$_H_ARTIFACTS_DIR" 2>/dev/null)
+    done < <(ls -1 "$_H_ARTIFACTS_DIR" 2>/dev/null || true)
 
     # ts_list 按降序，保留前 3 个（本轮 + 2 轮历史），删除其余
     # 注意：本轮 ts 就是 $_H_TS
@@ -438,7 +442,7 @@ _h_rotate_artifacts() {
     for t in "${sorted[@]}"; do
         i=$((i + 1))
         if [ $i -gt 3 ]; then
-            rm -f "$_H_ARTIFACTS_DIR"/${t}-* 2>/dev/null
+            rm -rf "$_H_ARTIFACTS_DIR"/${t}-* 2>/dev/null || true
         fi
     done
 }

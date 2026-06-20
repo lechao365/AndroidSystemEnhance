@@ -495,7 +495,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    logger = build_logger("rp5_serial_host", "./.host-log")
+    logger = build_logger("rp5_serial_host", "output/host-log")
     logger.info("host starting config=%s", args.config)
     return 0
 
@@ -997,7 +997,7 @@ Expected: 无输出，退出 0。
 - [ ] **Step 3: 检查日志命名空间**
 
 检查点：
-- loop bash 入口日志落到 `engineering/harness/log/loop-rp5-serial-*`
+- loop bash 入口日志落到 `engineering/output/log/loop-rp5-serial-*`
 - Host 本地日志不强行塞进 harness log
 
 - [ ] **Step 4: 审核 README 一致性**

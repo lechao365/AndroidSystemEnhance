@@ -27,6 +27,10 @@ TOTAL_SKIP=0
 TOTAL_STALE=0
 TOTAL_PRUNE=0
 
+# Deletion tracking（workspace 中被删除的文件，供 manifest deletions: 记录）
+KERNEL_DELETIONS=()
+AOSP_DELETIONS=()
+
 # --- 业务输出（薄包装：仅计数 + 终端彩色，日志走 harness_status_emit）-------
 print_ok()    { harness_status_emit "OK"    "$1" "${2:-}"; TOTAL_OK=$((TOTAL_OK + 1)); }
 print_miss()  { harness_status_emit "MISS"  "$1" "${2:-}"; TOTAL_MISS=$((TOTAL_MISS + 1)); }
@@ -160,6 +164,12 @@ if [ "$KERNEL_OK" = true ]; then
     fi
     log_info "Upstream base: $(git log --oneline -1 "$BASE" 2>/dev/null | head -1 || true)"
 
+    # Tracked deletion detection（git diff --diff-filter=D 列出已删除文件）
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        KERNEL_DELETIONS+=("$f")
+    done < <(git diff "$BASE" --diff-filter=D --name-only 2>/dev/null | grep -vE "$HARNESS_EXCLUDE_RE" || true)
+
     echo "--- Modified ---"
     while IFS= read -r f; do
         [ -z "$f" ] && continue
@@ -248,6 +258,12 @@ if [ "$AOSP_OK" = true ]; then
         fi
 
         echo "--- $proj_dir ---"
+
+        # Tracked deletion detection
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            AOSP_DELETIONS+=("${proj_dir}/${f}")
+        done < <(git diff "$BASE" --diff-filter=D --name-only 2>/dev/null | grep -vE "$HARNESS_EXCLUDE_RE" || true)
 
         while IFS= read -r f; do
             [ -z "$f" ] && continue
@@ -420,6 +436,23 @@ MANIFEST_TMP=$(harness_tmp_file "manifest.yaml")
 
     _manifest_emit "kernel" "rpi5-kernel-build/common"
     _manifest_emit "aosp"   "aosp"
+
+    # deletions 段（workspace 中被 git 删除的文件，对应 patchs 中已 prune 的旧 patch）
+    if [ ${#KERNEL_DELETIONS[@]} -gt 0 ] || [ ${#AOSP_DELETIONS[@]} -gt 0 ]; then
+        echo "deletions:"
+        if [ ${#KERNEL_DELETIONS[@]} -gt 0 ]; then
+            echo "  kernel:"
+            for f in "${KERNEL_DELETIONS[@]}"; do
+                echo "    - source: rpi5-kernel-build/common/${f}"
+            done
+        fi
+        if [ ${#AOSP_DELETIONS[@]} -gt 0 ]; then
+            echo "  aosp:"
+            for f in "${AOSP_DELETIONS[@]}"; do
+                echo "    - source: aosp/${f}"
+            done
+        fi
+    fi
 
     # others（无 workspace 映射）
     if [ -d "$PATCH_ROOT/others" ]; then

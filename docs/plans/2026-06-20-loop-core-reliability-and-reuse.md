@@ -1160,7 +1160,7 @@ Expected:
 
 Run:
 ```bash
-bash engineering/loop/bin/le.sh run \
+bash engineering/loop/scripts/le.sh run \
   --suite engineering/loop/cases/system/boot-success.yaml \
   --fixture engineering/loop/core/python/tests/fixtures/boot_success.jsonl \
   --device-profile engineering/loop/connection/profiles/devices/rp5/default.json \

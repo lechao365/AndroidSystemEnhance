@@ -1,5 +1,8 @@
 # 文档归档路径（覆盖 Superpowers Skill 默认）
 
+> **规则 ID**：`DOC-001`
+> - `DOC-001`：过程型文档（spec/plan）与长期技术文档分层；spec 与 plan 必须落到 `docs/specs/`、`docs/plans/`，禁止使用 superpowers 默认的 `docs/superpowers/` 路径。
+
 > **指令优先级**：本规则优先级高于 superpowers skill 内的硬编码路径，所有 skill 必须遵守。
 
 ## 路径映射

@@ -75,7 +75,7 @@ Host 启动后职责：
 - Host 前台运行，不含服务托管
 - 不实现 `expect.wait`，由 client 侧自行轮询输出缓冲
 - 不含 ADB
-- transcript 持续落盘（`.host-log/rp5-serial-transcript.log`），status 接口返回 `transcript_path`
+- transcript 持续落盘（`output/host-log/rp5-serial-transcript.log`），status 接口返回 `transcript_path`
 
 ## bash 入口与日志
 
@@ -83,4 +83,4 @@ WSL2 bash 入口统一复用 harness observability：
 
 - 入口命名：`loop_rp5_serial_status.sh` / `loop_rp5_serial_monitor.sh` / `loop_rp5_serial_interactive.sh` / `loop_rp5_serial_automation.sh`
 - 日志 script-name：`loop-rp5-serial-status` / `loop-rp5-serial-monitor` / `loop-rp5-serial-interactive` / `loop-rp5-serial-automation`
-- 落点：`engineering/harness/log/loop-rp5-serial-*/`
+- 落点：`engineering/output/log/loop-rp5-serial-*/`

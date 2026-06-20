@@ -5,16 +5,17 @@
 .opencode/bun.lock
 
 
-# harness 脚本维测日志（本地产物，不归档）
-engineering/harness/log/*
-!engineering/harness/log/.gitkeep
+# 工程产物目录（本地产物，不归档）
+engineering/output/log/*
+!engineering/output/log/.gitkeep
 
-# loop engineering 本地产物（编译缓存、Host 日志、pytest 缓存）
+engineering/output/host-log/*
+!engineering/output/host-log/.gitkeep
+
+engineering/output/runs/*
+!engineering/output/runs/.gitkeep
+
+# Python 缓存（本地产物）
 __pycache__/
 *.pyc
-engineering/loop/**/.host-log/
 .pytest_cache/
-
-# loop engineering 运行产物（本地产物，不归档）
-engineering/loop/runs/*
-!engineering/loop/runs/.gitkeep

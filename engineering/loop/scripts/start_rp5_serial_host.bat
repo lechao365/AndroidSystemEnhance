@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 REM ===========================================================================
 REM start_rp5_serial_host.bat -- rp5-serial Windows Host 快速启动
 REM
@@ -32,8 +33,14 @@ REM %~dp0 展开为脚本所在目录 (含末尾反斜杠), 去掉反斜杠得�
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 
+REM 从 scripts/ 上溯 3 级到 repo 根: scripts/ -> loop/ -> engineering/ -> repo root
+for %%i in ("%SCRIPT_DIR%\..\..\..") do set "REPO_ROOT=%%~fi"
+
 REM provider python 根目录: engineering/loop/connection/providers/rp5-serial/python
 set "PROVIDER_PYTHON=%SCRIPT_DIR%\..\connection\providers\rp5-serial\python"
+
+REM 日志目录: engineering/output/host-log
+set "LOG_DIR=%REPO_ROOT%\engineering\output\host-log"
 
 REM --- 设置 PYTHONPATH -------------------------------------------------------
 set "PYTHONPATH=%PROVIDER_PYTHON%"
@@ -45,12 +52,13 @@ echo   ========================
 echo   COM Port  : %COM_PORT%
 echo   Baudrate  : %BAUDRATE%
 echo   Listen    : 0.0.0.0:%LISTEN_PORT%
+echo   Log Dir   : %LOG_DIR%
 echo   PYTHONPATH: %PYTHONPATH%
 echo   ========================
 echo   Press Ctrl-C to stop
 echo.
 
-python -m rp5_serial.host.server --port %COM_PORT% --baudrate %BAUDRATE% --listen-port %LISTEN_PORT%
+python -m rp5_serial.host.server --port %COM_PORT% --baudrate %BAUDRATE% --listen-port %LISTEN_PORT% --log-dir "%LOG_DIR%"
 
 REM 退出码透传
 exit /b %ERRORLEVEL%

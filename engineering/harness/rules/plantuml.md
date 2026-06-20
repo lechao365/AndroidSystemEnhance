@@ -1,5 +1,8 @@
 # PlantUML 编写约束
 
+> **规则 ID**：`DOC-002`
+> - `DOC-002`：编写任何 PlantUML 图表前，必须遵守本文件的渲染失败经验清单（禁止空图块、UML 块内禁止花括号占位符、必须显式闭合、条件块内禁止 fork、活动图颜色使用新语法）。
+
 > 本文档记录实际遇到过的 PlantUML 渲染失败问题及其修复方案，防止重犯。
 
 ## 规则 1：禁止空图块
@@ -20,7 +23,7 @@
 
 ## 规则 2：UML 块内禁止花括号占位符
 
-**问题：** 模板占位符 `{模块名称}`、`{调用}` 等的花括号会被 PlantUML 解释为 package/object 等语法块的定界符，导致解析错误。
+**问题：** 模板占位符 `{模块名称}`、`{调用}` 或 `{{模块标题}}` 会被 PlantUML 解释为 package/object 等语法块的定界符，导致解析错误。
 
 **错误示例：**
 
@@ -31,7 +34,7 @@ Caller -> M1 : {调用}
 @enduml
 ```
 
-**正确做法：** PlantUML 代码块内的占位符使用尖括号 `<>`，正文 Markdown 中仍使用 `{}`。
+**正确做法：** PlantUML 代码块内的占位符统一使用尖括号 `<>`，正文 Markdown 中仍可使用 `{}` 或 `{{}}`。
 
 ```plantuml
 @startuml
@@ -40,9 +43,34 @@ Caller -> M1 : <调用>
 @enduml
 ```
 
+> **适用范围：** 仅 `plantuml` fenced code block 内禁止 `{}` / `{{}}` 占位符；普通 Markdown 正文、表格、代码示例不受此限制。
+
 ---
 
-## 规则 3：条件块内禁止 fork/fork again
+## 规则 3：PlantUML 代码块必须显式闭合
+
+**问题：** 模板或示例遗漏 `@enduml` 时，渲染器会把后续内容吞入同一图块，造成语法错误或整页渲染失败。
+
+**错误示例：**
+
+```plantuml
+@startuml
+participant "A" as A
+A -> A : <调用>
+```
+
+**正确做法：** 每个 `@startuml` 必须在同一 fenced code block 内对应一个 `@enduml`，不得跨块闭合。
+
+```plantuml
+@startuml
+participant "A" as A
+A -> A : <调用>
+@enduml
+```
+
+---
+
+## 规则 4：条件块内禁止 fork/fork again
 
 **问题：** `fork/fork again` 是并行分支语法，不能嵌套在 `if/else` 条件块内部，会导致语法错误。
 
@@ -78,7 +106,7 @@ stop
 
 ---
 
-## 规则 4：活动图颜色必须使用新语法 `<<#color>>`
+## 规则 5：活动图颜色必须使用新语法 `<<#color>>`
 
 **问题：** 活动图（Activity Diagram）中对节点着色的旧语法 `#color:label;` 已被 PlantUML 标记为 deprecated，渲染时会报语法警告。
 

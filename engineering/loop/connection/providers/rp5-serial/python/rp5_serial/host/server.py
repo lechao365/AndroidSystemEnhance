@@ -44,8 +44,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--log-dir",
-        default="./.host-log",
-        help="Host 轻量日志目录 (默认: ./.host-log)",
+        default="output/host-log",
+        help="Host 轻量日志目录 (默认: output/host-log)",
     )
     return parser.parse_args()
 
@@ -138,6 +138,8 @@ def main() -> int:
         else:
             logger.warning("serial open failed port=%s", args.port)
     logger.info("runtime ready status=%s", state.status().to_dict())
+    # 显式打印串口状态，便于启动后快速确认
+    print(f"[Serial] port={args.port or '(none)'} state={state.status().serial_state}")
 
     broker = StreamBroker()
     stop_event = threading.Event()

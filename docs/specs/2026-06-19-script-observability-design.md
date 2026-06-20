@@ -59,10 +59,10 @@
 |---|---|---|
 | 新增 | `engineering/harness/lib/harness_observability.sh` | 公共维测库，所有脚本 source 它 |
 | 新增 | `engineering/harness/rules/script-observability.md` | 维测规则（强约束） |
-| 新增 | `engineering/harness/log/<script-name>/` | 每脚本独立日志目录（运行时按需创建） |
-| 新增 | `engineering/harness/log/<script-name>/artifacts/` | 中间产物目录 |
-| 新增 | `engineering/harness/log/.gitkeep` | 占位文件 |
-| 修改 | `.gitignore` | 追加 `engineering/harness/log/` 忽略（保留 `.gitkeep`） |
+| 新增 | `engineering/output/log/<script-name>/` | 每脚本独立日志目录（运行时按需创建） |
+| 新增 | `engineering/output/log/<script-name>/artifacts/` | 中间产物目录 |
+| 新增 | `engineering/output/log/.gitkeep` | 占位文件 |
+| 修改 | `.gitignore` | 追加 `engineering/output/log/` 忽略（保留 `.gitkeep`） |
 | 修改 | `AGENTS.md` | 增加维测规则引用段落 |
 | 修改 | 6 个现有脚本 | 接入维测库，统一日志/step/on_err/退出码/artifact |
 
@@ -78,7 +78,7 @@
 脚本启动
   └─ source harness_observability.sh（锚点查找 REPO_ROOT）
        └─ harness_init "script-name"
-            ├─ 创建 harness/log/<script-name>/（不存在则建）
+            ├─ 创建 engineering/output/log/<script-name>/（不存在则建）
             ├─ 创建本次日志文件 <script-name>-<ts>.log
             ├─ 清理历史日志：保留最新 2 份 + 本次 = 3 份
             ├─ 创建/更新 artifacts/ 目录
@@ -87,7 +87,7 @@
        ├─ log_info/log_warn/log_error → stdout（彩色精简） + 日志文件（结构化键值）
        ├─ step_begin/step_end → 自动编号 + 耗时 + step 内错误关联
        ├─ cmd || on_err ... → 错误现场捕获
-       └─ 中间产物 → artifact_register → harness/log/<script>/artifacts/<ts>-<name>
+       └─ 中间产物 → artifact_register → engineering/output/log/<script>/artifacts/<ts>-<name>
   └─ harness_exit [code]
        ├─ 打印运行汇总（总 step 数、失败数、耗时、日志路径）
        ├─ flush 日志
@@ -197,14 +197,14 @@ harness_init --with-errexit "mk_rpi5_full_image"
 ```bash
 artifact_register "<source-path>" "<artifact-name>"
 ```
-- 把中间产物复制到 `harness/log/<script>/artifacts/<ts>-<artifact-name>`。
+- 把中间产物复制到 `engineering/output/log/<script>/artifacts/<ts>-<artifact-name>`。
 - 在日志里记录路径。
 - 随轮转清理（保留最新 2 轮 + 本轮 = 3 轮）。
 
 示例：
 ```bash
 artifact_register "/tmp/revert-plan-xxx.tsv" "plan.tsv"
-# → harness/log/revert_code_from_patchs/artifacts/20260619-153012-plan.tsv
+# → engineering/output/log/revert_code_from_patchs/artifacts/20260619-153012-plan.tsv
 ```
 
 #### 工具函数
@@ -271,7 +271,7 @@ ts=2026-06-19T15:31:00+0800 level=ERROR step=2/? script=sync_code_to_patchs msg=
 ### 5.1 目录布局（按脚本扁平）
 
 ```
-engineering/harness/log/
+engineering/output/log/
 ├── .gitkeep                                    # 占位
 ├── collect_diff/
 │   ├── collect_diff-20260619-153012.log        # 历史日志（最多保留 2 份）
@@ -370,7 +370,7 @@ engineering/harness/log/
 8. **目录结构与轮转**（引用第 5 节）
 
 9. **维测使用指南**（面向事后回溯）
-   - 如何查找日志：`harness/log/<script>/latest.log` 或按时间翻历史。
+   - 如何查找日志：`engineering/output/log/<script>/latest.log` 或按时间翻历史。
    - 如何快速定位错误：`grep "level=ERROR" latest.log`。
    - 如何看调用栈：错误行的 `stack=` 字段。
    - 如何对比两次运行：按 timestamp 文件名 diff。
@@ -385,7 +385,7 @@ engineering/harness/log/
 改动 `engineering/` 下任何 bash 脚本（含 workflows/scripts/、未来 loop/ 等）前，
 必须先加载 `engineering/harness/rules/script-observability.md`。
 该规则强制要求：source 公共库、接入文件日志、结构化 step、错误现场捕获、
-统一退出码、中间产物归档。`harness/log/` 为本地维测产物，不归档。
+统一退出码、中间产物归档。`engineering/output/log/` 为本地维测产物，不归档。
 ```
 
 ---
@@ -440,8 +440,8 @@ harness_exit 0
 
 | 项 | 现状 | 改造后 |
 |---|---|---|
-| 构建历史 | 追加到 `${AOSP_ROOT}/out/build_history.txt`（workspace，非本仓库） | 每次 `harness_exit` 前生成独立 artifact：`harness/log/mk_rpi5_full_image/artifacts/<ts>-build-report.json`，随轮转 3 份 |
-| 运行日志 | 无 | `harness/log/mk_rpi5_full_image/<ts>.log` + `latest.log` |
+| 构建历史 | 追加到 `${AOSP_ROOT}/out/build_history.txt`（workspace，非本仓库） | 每次 `harness_exit` 前生成独立 artifact：`engineering/output/log/mk_rpi5_full_image/artifacts/<ts>-build-report.json`，随轮转 3 份 |
+| 运行日志 | 无 | `engineering/output/log/mk_rpi5_full_image/<ts>.log` + `latest.log` |
 | 刷机包 .img | `${ANDROID_PRODUCT_OUT}/` → `${WINDOWS_IMG_DIR}` | **不变**（业务产物） |
 | .prebuilt 备份 | `device/brcm/rpi5-kernel/` | **不变**（业务数据） |
 
@@ -486,9 +486,9 @@ harness_exit 0
 - **Agent A**（基础设施）：
   - 创建 `engineering/harness/lib/harness_observability.sh`
   - 创建 `engineering/harness/rules/script-observability.md`
-  - 更新 `.gitignore`（追加 `engineering/harness/log/` 忽略，保留 `.gitkeep`）
+  - 更新 `.gitignore`（追加 `engineering/output/log/` 忽略，保留 `.gitkeep`）
   - 更新 `AGENTS.md`（追加维测规则引用段落）
-  - 创建 `engineering/harness/log/.gitkeep`
+  - 创建 `engineering/output/log/.gitkeep`
 - **Agent B**（git-push 流程，2 个简单脚本）：
   - 改造 `collect_diff.sh`（退出码 1→3/4，保留 diff 报告裸 echo 例外）
   - 改造 `commit_and_push.sh`（退出码调整，push 失败维持 2）
@@ -508,7 +508,7 @@ harness_exit 0
 1. `bash -n <script>` 语法检查。
 2. `shellcheck <script>`（若可用）。
 3. 运行 `--check-only` / `--dry-run`（revert / sync_code / sync_patchs_to_doc），确认：
-   - 日志文件正确生成在 `harness/log/<script>/`。
+   - 日志文件正确生成在 `engineering/output/log/<script>/`。
    - `latest.log` 正确更新。
    - 结构化键值格式正确。
    - artifact 正确归档（revert / sync_code / mk_rpi5）。
@@ -531,11 +531,11 @@ harness_exit 0
 `.gitignore` 追加：
 ```
 # harness 脚本维测日志（本地产物，不归档）
-engineering/harness/log/
-!engineering/harness/log/.gitkeep
+engineering/output/log/
+!engineering/output/log/.gitkeep
 ```
 
-（采用精确忽略 G1：只忽略 `engineering/harness/log/`，保留 `.gitkeep`。）
+（采用精确忽略 G1：只忽略 `engineering/output/log/`，保留 `.gitkeep`。）
 
 ---
 

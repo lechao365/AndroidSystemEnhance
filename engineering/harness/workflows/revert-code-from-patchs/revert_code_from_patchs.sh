@@ -60,6 +60,23 @@ _parse_proj() {
     esac
 }
 
+# _resolve_workspace_target — 基于 proj/rel 解析 workspace 文件绝对路径
+_resolve_workspace_target() {
+    local proj="$1" rel="$2"
+    local ws; ws=$(_parse_proj "$proj")
+    [ -z "$ws" ] && { printf ''; return; }
+
+    if [[ "$proj" == aosp:* ]]; then
+        local scope="${proj#aosp:}"
+        if [[ "$rel" == "$scope"/* ]]; then
+            printf '%s/%s' "$AOSP_WS" "$rel"
+            return
+        fi
+    fi
+
+    printf '%s/%s' "$ws" "$rel"
+}
+
 # --- 参数解析 ---------------------------------------------------------------
 MODE="plan"
 PLAN_FILE=""
@@ -166,7 +183,10 @@ scan_extra_kernel() {
     local out="$1"
     cd "$KERNEL_WS" || return 1
     local BASE; BASE=$(harness_find_upstream_base)
-    [ -z "$BASE" ] && return
+    if [ -z "$BASE" ]; then
+        harness_report_no_upstream "kernel"
+        return 1
+    fi
     local cov; cov=$(coverage_kernel | sort -u)
     local ws_changes; ws_changes=$( { git diff "$BASE" --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null; } | sort -u)
     local extra; extra=$(comm -23 <(echo "$ws_changes") <(echo "$cov") | grep -v '^$')
@@ -201,8 +221,8 @@ scan_aosp_modified() {
         cd "$AOSP_WS/$proj" || continue
         local BASE; BASE=$(harness_find_upstream_base)
         if [ -z "$BASE" ]; then
-            log_warn "$proj 无 upstream base，跳过 modified 扫描"
-            continue
+            harness_report_no_upstream "aosp:$proj"
+            return 1
         fi
 
         while IFS= read -r -d '' dfile; do
@@ -361,11 +381,14 @@ coverage_aosp_project() {
 # ============================================================================
 
 # gen_plan — 生成完整 plan（含 log 输出，用于阶段 1）
+# 返回: 0=成功; 1=扫描阶段失败（upstream 缺失等，不输出 plan）
 gen_plan() {
     local out="$1"
     G_MATCH_MODIFIED=0
     G_MATCH_NEW=0
 
+    # 先写入临时文件，扫描全部成功后才落盘到 out（避免部分 plan 泄漏）
+    local tmp; tmp=$(harness_tmp_file "gen-plan.tsv"); TMP_FILES+=("$tmp")
     {
         echo "# REVERT-PLAN generated at $(date +%FT%T)"
         echo "# 格式: <标记>\t<类别>\t<项目>\t<相对路径>\t<动作>\t<差异摘要>"
@@ -373,21 +396,30 @@ gen_plan() {
         echo "# 类别: MODIFIED-DIVERGED | NEW-MISMATCH | EXTRA-MODIFIED | EXTRA-NEW-TRACKED | EXTRA-NEW-UNTRACKED"
         echo "# 动作: checkout | checkout-only | restore | revert | skip | stash-hint"
         echo ""
-    } > "$out"
+    } > "$tmp"
 
+    local scan_rc=0
     log_info "扫描 kernel"
     if [ "$KERNEL_OK" = true ]; then
-        scan_kernel_modified "$out"
-        scan_kernel_new "$out"
-        scan_extra_kernel "$out"
+        scan_kernel_modified "$tmp" || scan_rc=1
+        scan_kernel_new "$tmp" || scan_rc=1
+        scan_extra_kernel "$tmp" || scan_rc=1
     fi
 
     log_info "扫描 aosp"
     if [ "$AOSP_OK" = true ]; then
-        scan_aosp_modified "$out"
-        scan_aosp_new "$out"
-        scan_extra_aosp "$out"
+        scan_aosp_modified "$tmp" || scan_rc=1
+        scan_aosp_new "$tmp" || scan_rc=1
+        scan_extra_aosp "$tmp" || scan_rc=1
     fi
+
+    # 扫描阶段任一失败（如 upstream 缺失）→ 不输出 plan，返回 1
+    if [ "$scan_rc" -ne 0 ]; then
+        log_error "扫描阶段失败，不输出 plan"
+        return 1
+    fi
+
+    cp -f "$tmp" "$out"
 
     local total; total=$(grep -c '^[-+]' "$out" 2>/dev/null || true); total=${total:-0}
     log_info "扫描完成"
@@ -395,6 +427,7 @@ gen_plan() {
     log_info "NEW-MATCH: $G_MATCH_NEW 个文件已是 patchs 状态（不列入 plan）"
     log_info "需确认条目: $total 个（详见 plan 文件）"
     log_info "Plan 文件: $out"
+    return 0
 }
 
 # gen_plan_silent — 生成 plan（无 log，用于 verify 阶段内部调用）
@@ -482,7 +515,9 @@ do_revert_extra() {
             git checkout "$BASE" -- "$rel" 2>/dev/null || { log_error "checkout 失败: $rel"; return 1; }
             ;;
         EXTRA-NEW-UNTRACKED)
-            rm -f "$ws/$rel" || { log_error "rm 失败: $ws/$rel"; return 1; }
+            local target; target=$(_resolve_workspace_target "$proj" "$rel")
+            [ -z "$target" ] && { log_error "无法解析路径: $proj/$rel"; return 1; }
+            rm -f "$target" || { log_error "rm 失败: $target"; return 1; }
             ;;
         *)
             log_error "未知 EXTRA 类别: $category"; return 1
@@ -646,6 +681,8 @@ case "$MODE" in
         gen_plan "$PLAN_FILE"
         _PRC=$?
         step_end $_PRC
+        # 扫描阶段失败（upstream 缺失等环境错误）→ exit 3
+        [ $_PRC -ne 0 ] && { log_error "plan 生成失败"; harness_exit 3; }
         # plan 为空 → exit 4（无操作）
         if [ ! -s "$PLAN_FILE" ] || ! grep -q '^[-+]' "$PLAN_FILE" 2>/dev/null; then
             log_info "plan 为空，无操作（exit 4）"

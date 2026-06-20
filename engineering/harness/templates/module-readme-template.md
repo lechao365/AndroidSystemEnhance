@@ -22,9 +22,9 @@
 skinparam packageStyle rectangle
 skinparam componentStyle rectangle
 
-package "{{包名}}" {
-    component "{{组件名}}" as Alias {
-        component "{{子组件}}" as SubAlias
+package "<包名>" {
+    component "<组件名>" as Alias {
+        component "<子组件>" as SubAlias
     }
 }
 
@@ -53,12 +53,12 @@ package "{{包名}}" {
 @startuml
 skinparam maxMessageSize 120
 
-participant "{{参与者A}}" as A
-participant "{{参与者B}}" as B
-participant "{{参与者C}}" as C
+participant "<参与者A>" as A
+participant "<参与者B>" as B
+participant "<参与者C>" as C
 
-A -> B : {{消息/调用}}
-B -> C : {{消息/调用}}
+A -> B : <消息/调用>
+B -> C : <消息/调用>
 
 ' TODO: 补充完整时序流程
 @enduml
@@ -81,8 +81,8 @@ B -> C : {{消息/调用}}
 
 ```plantuml
 @startuml
-package "{{构建线名称}}" {
-    rectangle "{{源码路径}}\n---\n{{文件列表}}" as SRC
+package "<构建线名称>" {
+    rectangle "<源码路径>\n---\n<文件列表>" as SRC
 }
 
 ' TODO: 补充其他构建线
@@ -106,13 +106,15 @@ package "{{构建线名称}}" {
 @startuml
 skinparam nodeStyle rectangle
 
-node "{{节点名}}" {
-    component "{{组件名}}" as Comp
+node "<节点名>" {
+    component "<组件名>" as Comp
 }
+
+component "<对端组件>" as OtherComp
 
 ' TODO: 补充其他节点和组件
 
-Comp --> OtherComp : {{通信方式}}
+Comp --> OtherComp : <通信方式>
 @enduml
 ```
 
@@ -141,13 +143,13 @@ Comp --> OtherComp : {{通信方式}}
 ```plantuml
 @startuml
 participant "init" as I
-participant "{{进程A}}" as A
-participant "{{进程B}}" as B
+participant "<进程A>" as A
+participant "<进程B>" as B
 
-== {{阶段名}} ==
-I -> A : {{触发条件}}
+== <阶段名> ==
+I -> A : <触发条件>
 activate A
-A -> A : {{初始化动作}}
+A -> A : <初始化动作>
 
 ' TODO: 补充完整启动流程
 @enduml

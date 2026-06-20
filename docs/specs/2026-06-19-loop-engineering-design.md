@@ -222,7 +222,7 @@ loop 中的 **bash 入口脚本** 允许依赖：
 继续落到：
 
 ```text
-engineering/harness/log/<script-name>/
+engineering/output/log/<script-name>/
 ```
 
 为避免与现有 harness 脚本混淆，loop 脚本统一采用前缀命名：

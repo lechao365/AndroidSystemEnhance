@@ -30,7 +30,7 @@ def now_iso() -> str:
 @dataclass
 class RuntimeState:
     device_id: str
-    # transcript 落盘目录（None 时降级到 .host-log）
+    # transcript 落盘目录（None 时降级到 output/host-log）
     transcript_dir: str | None = None
     active_session: Session | None = None
     active_writer: WriterLease | None = None
@@ -50,7 +50,7 @@ class RuntimeState:
     transcript_path: str = field(init=False, default="")
 
     def __post_init__(self) -> None:
-        base = Path(self.transcript_dir or ".host-log")
+        base = Path(self.transcript_dir or "output/host-log")
         base.mkdir(parents=True, exist_ok=True)
         self.transcript_path = str(base / TRANSCRIPT_FILENAME)
 

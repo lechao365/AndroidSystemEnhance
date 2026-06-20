@@ -10,7 +10,72 @@ description: workspace 源码改动归档到 patchs/rpi5，并自动更新 READM
 **核心语义**：`patchs/rpi5/` 是 workspace 定制改动的**精确镜像**。
 workspace 删除的文件，patchs 同步删除（默认全量镜像，含删除对齐），确保可一键精确切回 aosp/kernel。
 
-## 工作流
+## Trigger（触发条件）
+
+- 用户请求"归档"/"同步 patchs"/"sync-code-to-patchs"
+- workspace 存在已验证（`SRC-001` 验证流程）但尚未归档的定制改动
+
+## Preconditions（前置条件）
+
+- 改动发生在 `~/workspace/`（`SRC-001`），而非直接改 `patchs/`
+- 已完成"验证通过"全流程（编译→打包→上板，见 `SRC-001`/source-code-modify.md）
+- `patchs/`（除 `others/`）未被手动改动（`SRC-002`）
+- 所有参与的 git 仓库（kernel、有改动的 AOSP repo 项目）已配置 upstream（`@{upstream}` 或 `branch.<name>.remote/merge`），否则脚本报错退出 3
+
+## Inputs（输入）
+
+| 参数 | 说明 |
+|------|------|
+| 无参数 | 全量镜像同步（默认含删除对齐） |
+| `--check-only` | 仅检查，不执行（`STALE` 仅报告将删除项） |
+| `--no-prune` | 仅添加/更新，不删除对齐 |
+
+脚本采用模式 B（`set -eo pipefail` + `--with-errexit`，见 `OBS-001`），任何写操作失败立即终止（fail-fast），保证 `patchs/rpi5` 文件树与 `manifest.yaml` 的一致性。`manifest.yaml` 更新前会校验临时文件完整性，前序步骤失败时 manifest 不更新。`manifest`、`repolist` 等中间产物自动归档到 `engineering/output/log/sync_code_to_patchs/artifacts/`（`OBS-002`）。
+
+脚本自动完成：扫描 workspace → 归档到 patchs → 清理空 diff → 删除对齐（workspace 已无的 patchs 文件）→ 重生成 manifest.yaml。
+
+## Human confirmation gates（人工确认门）
+
+- 归档动作（写入 `patchs/`）由脚本直接执行，**无需用户确认**（`SRC-002` 已约束前置纪律，归档本身是机械镜像）
+- **README.md 文件映射表更新**：归档成功后由 AI 直接落盘，**无需用户确认**
+- 唯一停止条件：脚本输出含 `MISS`（workspace 改动未归档）或 `--check-only` 模式，此时停下报告等待用户处理
+
+## Outputs / artifacts（输出/产物）
+
+- `patchs/rpi5/` 镜像更新（modified→`.diff`、new→完整复制、删除对齐）
+- `patchs/rpi5/manifest.yaml` 重生成（patch↔workspace 映射真相）
+- `patchs/rpi5/README.md` 文件映射表更新（仅文件映射表章节）
+- 脚本逐文件状态输出（`OK`/`MISS`/`SKIP`/`PRUNE`/`STALE`）+ 日志/artifacts（`OBS-001`/`OBS-002`）
+
+脚本输出五种状态：
+
+| 标记 | 含义 | 处理 |
+|------|------|------|
+| `OK` | 已同步/验证 | 正常 |
+| `MISS` | workspace 有改动但 patchs 缺失 | 去掉 `--check-only` 重新执行 |
+| `SKIP` | 编译产物已跳过 | 正常（排除规则生效） |
+| `PRUNE` | patchs 文件在 workspace 已不存在 / modified 已恢复原样 | 已自动删除对齐（全量镜像），正常 |
+| `STALE` | （仅 `--no-prune` 时出现）陈旧文件未删除 | 按需去掉 `--no-prune` 重新执行以删除对齐 |
+
+## Failure / recovery（失败/恢复）
+
+| 场景 | 处理 |
+|------|------|
+| upstream 未配置 | 脚本退出码 3（参数/环境错误），按提示配置 `git branch --set-upstream-to=` |
+| 写操作失败 | 模式 B fail-fast，立即终止；`manifest.yaml` 前序失败时不更新 |
+| 输出含 `MISS` | 停下报告，不更新 README，等待用户去掉 `--check-only` 重跑 |
+| 调试 workflow 脚本 bug 时运行真实业务命令 | 用 `--check-only` 验证脚本逻辑，业务命令等流程到位再执行（见 source-code-modify.md 归档纪律） |
+
+## Related policy IDs（关联规则 ID）
+
+- `SRC-001`：workspace 是唯一编译真相源，归档前必须验证通过
+- `SRC-002`：patchs 单向受控归档（本 workflow 是 `SRC-002` 的唯一受控入口）
+- `SRC-003`：`patchs/others/` 不在本 workflow 范围（独立维护）
+- `OBS-001` / `OBS-002`：脚本维测（模式 B、统一退出码、产物归档）
+
+---
+
+## 工作流（参考实现细节）
 
 ### 1. 前置检查（必须）
 
@@ -26,23 +91,9 @@ bash engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh --
 bash engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh --no-prune    # 仅添加/更新，不删除对齐
 ```
 
-脚本采用模式 B（`set -eo pipefail` + `--with-errexit`），任何写操作失败立即终止（fail-fast），保证 `patchs/rpi5` 文件树与 `manifest.yaml` 的一致性。`manifest.yaml` 更新前会校验临时文件完整性，前序步骤失败时 manifest 不更新。`manifest`、`repolist` 等中间产物自动归档到 `engineering/harness/log/sync_code_to_patchs/artifacts/`。
-
-脚本自动完成：扫描 workspace → 归档到 patchs → 清理空 diff → 删除对齐（workspace 已无的 patchs 文件）→ 重生成 manifest.yaml。
-
-**前置约束**：所有参与的 git 仓库（kernel、有改动的 AOSP repo 项目）必须配置 upstream（`@{upstream}` 或 `branch.<name>.remote/merge`），否则脚本报错退出 3。
-
 ### 3. 检查输出（必须）
 
-脚本输出五种状态：
-
-| 标记 | 含义 | 处理 |
-|------|------|------|
-| `OK` | 已同步/验证 | 正常 |
-| `MISS` | workspace 有改动但 patchs 缺失 | 去掉 `--check-only` 重新执行 |
-| `SKIP` | 编译产物已跳过 | 正常（排除规则生效） |
-| `PRUNE` | patchs 文件在 workspace 已不存在 / modified 已恢复原样 | 已自动删除对齐（全量镜像），正常 |
-| `STALE` | （仅 `--no-prune` 时出现）陈旧文件未删除 | 按需去掉 `--no-prune` 重新执行以删除对齐 |
+（状态标记表见上方 Outputs / artifacts）
 
 ### 4. 同步 README.md（一键自动，直接落盘）
 
@@ -81,7 +132,7 @@ README.md 的文件映射表由 AI 基于 manifest 维护，**一键自动更新
 | `kernel/new/` | 全部新增文件 | 完整复制 |
 | `aosp/modified/` | 对上游已有文件的改动 | `.diff` 文件 |
 | `aosp/new/` | 全部新增文件 | 完整复制 |
-| `others/` | 独立程序 | 直接在 others/ 维护 |
+| `others/` | 独立程序 | 直接在 others/ 维护（`SRC-003`） |
 
 **modified vs new 判定**：文件在 upstream base 中已存在且被修改 → modified；不存在（新增）→ new。
 
