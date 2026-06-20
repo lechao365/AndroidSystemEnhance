@@ -8,6 +8,8 @@
       "/tmp": "allow",
       "/var/tmp/**": "allow",
       "/var/tmp": "allow",
+      "/home/lechao/**": "allow",
+      "/home/lechao": "allow",
       "~/workspace/**": "allow",
       "~/workspace": "allow"
     }
