@@ -70,9 +70,10 @@ collectors:
 
     assert bundle.summary["failed"] == 1
     assert bundle.cases[0].status == "fail"
-    assert "debug" in bundle.cases[0].triggered_collectors
-    assert "debug" in bundle.evidence
-    assert len(bundle.evidence["debug"].outputs) == 1
+    # FQN: suite=t → collector FQN 为 t.debug
+    assert "t.debug" in bundle.cases[0].triggered_collectors
+    assert "t.debug" in bundle.evidence
+    assert len(bundle.evidence["t.debug"].outputs) == 1
 
 
 def test_dependency_skip(tmp_path):
@@ -104,6 +105,38 @@ cases:
     assert bundle.cases[1].status == "skipped"  # zygote_ok
     assert "shell_ok" in bundle.cases[1].skip_reason
     assert bundle.summary["skipped"] == 1
+
+
+def test_dependency_pass_executes_dependent(tmp_path):
+    """前置用例 pass 时，依赖用例正常执行（不被错误 skip）。"""
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: shell_ok
+    command: ""
+    assert: {type: prompt_visible}
+    severity: critical
+  - id: boot_check
+    command: "getprop sys.boot_completed"
+    assert: {type: contains, value: "1"}
+    severity: critical
+    requires: [shell_ok]
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+    transport = _make_transport([
+        {"t": 0.5, "text": "console:/ $"},
+        {"t": 0.6, "text": "1"},
+        {"t": 0.7, "text": "console:/ $"},
+    ])
+    transport.acquire_writer()
+    bundle = CaseExecutor(transport, AssertionEngine()).execute_suite(
+        suite, device_id="rp5", prompt_markers=["console:/ $"]
+    )
+    assert bundle.cases[0].status == "pass"  # shell_ok
+    assert bundle.cases[1].status == "pass"  # boot_check executed and passed
+    assert bundle.summary["overall"] == "PASS"
 
 
 def test_dependency_skip_propagates(tmp_path):
@@ -172,8 +205,8 @@ collectors:
     executor = CaseExecutor(transport, AssertionEngine())
     bundle = executor.execute_suite(suite, device_id="rp5", prompt_markers=[])
 
-    assert "shared" in bundle.evidence
-    assert len(bundle.evidence["shared"].outputs) == 1  # 只执行一次
+    assert "t.shared" in bundle.evidence
+    assert len(bundle.evidence["t.shared"].outputs) == 1  # 只执行一次
 
 
 def test_warn_severity_does_not_fail_suite(tmp_path):
@@ -320,8 +353,8 @@ collectors:
     # Case itself still fails (expected), but collector error doesn't crash
     assert bundle.cases[0].status == "fail"
     # Collector 内部捕获 OSError，单命令失败 → status=error
-    assert "broken_collector" in bundle.evidence
-    cr = bundle.evidence["broken_collector"]
+    assert "t.broken_collector" in bundle.evidence
+    cr = bundle.evidence["t.broken_collector"]
     assert cr.status == "error"
     assert cr.partial is False
     assert "collector connection lost" in cr.error

@@ -59,7 +59,7 @@ class CaseExecutor:
             result = self._execute_case(
                 case, results, prompt_markers, capture_timeout, recent_limit
             )
-            results[case.id] = result
+            results[case.fqn] = result
             # 收集需要执行的 collector（critical fail 才触发）
             if result.status == "fail" and case.severity == "critical":
                 for cname in case.on_fail.get("collectors", []):

@@ -1,10 +1,11 @@
 # 系统级 boot 成功验收用例。
 # include shell suite 的 shell_reachable 用例。
-suite: boot-success
+# FQN 命名空间：system.boot
+suite: system.boot
 version: 1
 
 include:
-  - shell
+  - common/shell
 
 cases:
   - id: boot_completed
@@ -14,7 +15,7 @@ cases:
       type: contains
       value: "1"
     severity: critical
-    requires: [shell_reachable]
+    requires: [shell_reachable]  # short name，loader 解析为 common.shell.shell_reachable
     on_fail:
       collectors: [boot_log, init_log]
     tags: [boot, system]

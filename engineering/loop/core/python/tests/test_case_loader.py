@@ -36,7 +36,7 @@ cases:
 
 
 def test_load_with_collectors(tmp_path):
-    """加载含 collector 定义的 suite。"""
+    """加载含 collector 定义的 suite；collector 以 FQN 存储，on_fail 引用解析为 FQN。"""
     path = _write(tmp_path, "test.yaml", """
 suite: test-suite
 version: 1
@@ -53,9 +53,13 @@ collectors:
     hints: "check kernel/android logs"
 """)
     suite = load_suite(path, [str(tmp_path)])
-    assert "debug_log" in suite.collectors
-    assert suite.collectors["debug_log"]["commands"] == ["dmesg", "logcat -d"]
-    assert suite.collectors["debug_log"]["hints"] == "check kernel/android logs"
+    # collector 以 FQN 存储
+    assert "test-suite.debug_log" in suite.collectors
+    assert suite.collectors["test-suite.debug_log"]["commands"] == ["dmesg", "logcat -d"]
+    assert suite.collectors["test-suite.debug_log"]["hints"] == "check kernel/android logs"
+    # on_fail.collectors 解析为 FQN
+    case_a = suite.cases[0]
+    assert "test-suite.debug_log" in case_a.on_fail.get("collectors", [])
 
 
 def test_include_merges_cases(tmp_path):
@@ -87,7 +91,7 @@ cases:
 
 
 def test_include_merges_collectors(tmp_path):
-    """include 合并 collector 定义。"""
+    """include 合并 collector 定义；include 的 collector 保留其来源 suite 的 FQN。"""
     _write(tmp_path, "common.yaml", """
 suite: common
 version: 1
@@ -114,14 +118,14 @@ cases:
     severity: critical
 """)
     suite = load_suite(path, [str(tmp_path)])
-    assert "base_log" in suite.collectors
-    assert "crash_log" in suite.collectors
+    assert "common.base_log" in suite.collectors
+    assert "sys.crash_log" in suite.collectors
 
 
 def test_requires_field_parsed(tmp_path):
-    """requires 字段正确解析。"""
+    """requires 字段正确解析；同 suite 内 short name 解析为 FQN。"""
     path = _write(tmp_path, "t.yaml", """
-suite: t
+suite: my.suite
 version: 1
 cases:
   - id: a
@@ -136,7 +140,7 @@ cases:
 """)
     suite = load_suite(path, [str(tmp_path)])
     case_b = [c for c in suite.cases if c.id == "b"][0]
-    assert case_b.requires == ["a"]
+    assert case_b.requires == ["my.suite.a"]
 
 
 def test_topological_order(tmp_path):
@@ -249,7 +253,7 @@ cases:
 
 
 def test_include_duplicate_case_id_raises(tmp_path):
-    """include 与主 suite 出现重复 case id 时，加载阶段即抛 ValueError。"""
+    """同 FQN 的 case（include 与主 suite 同名 suite + 同 id）加载阶段即抛 ValueError。"""
     _write(tmp_path, "common.yaml", """
 suite: common
 version: 1
@@ -259,7 +263,7 @@ cases:
     assert: {type: prompt_visible}
 """)
     path = _write(tmp_path, "system.yaml", """
-suite: system
+suite: common
 version: 1
 include: [common]
 cases:
@@ -267,6 +271,7 @@ cases:
     command: ""
     assert: {type: prompt_visible}
 """)
+    # 两个 suite 均为 common，case id 均为 shared → FQN 均为 common.shared → 冲突
     with pytest.raises(ValueError, match="duplicate case id"):
         load_suite(path, [str(tmp_path)])
 
@@ -370,3 +375,172 @@ cases:
 """)
     with pytest.raises(ValueError, match="requires pattern"):
         load_suite(path, [str(tmp_path)])
+
+
+# ---------- FQN 命名模型 ----------
+
+
+def test_fqn_assigned_to_cases(tmp_path):
+    """case 获得基于 suite name 的 FQN。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: my.suite
+version: 1
+cases:
+  - id: case_a
+    command: ""
+    assert: {type: prompt_visible}
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    assert suite.cases[0].fqn == "my.suite.case_a"
+
+
+def test_short_requires_resolves_to_fqn(tmp_path):
+    """同 suite 内 short name requires 解析为 FQN。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: my.suite
+version: 1
+cases:
+  - id: a
+    command: ""
+    assert: {type: prompt_visible}
+  - id: b
+    command: ""
+    assert: {type: prompt_visible}
+    requires: [a]
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    case_b = [c for c in suite.cases if c.id == "b"][0]
+    assert case_b.requires == ["my.suite.a"]
+
+
+def test_cross_suite_requires_uses_fqn(tmp_path):
+    """跨 suite requires 必须解析为已存在的 FQN。"""
+    _write(tmp_path, "base.yaml", """
+suite: common.base
+version: 1
+cases:
+  - id: setup
+    command: ""
+    assert: {type: prompt_visible}
+""")
+    path = _write(tmp_path, "sys.yaml", """
+suite: system.main
+version: 1
+include: [base]
+cases:
+  - id: check
+    command: ""
+    assert: {type: prompt_visible}
+    requires: [common.base.setup]
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    case_check = [c for c in suite.cases if c.id == "check"][0]
+    assert "common.base.setup" in case_check.requires
+
+
+def test_cross_suite_short_name_fails(tmp_path):
+    """跨 suite 引用既非本地、也非已知 FQN/唯一短名 时报 missing required case。"""
+    _write(tmp_path, "base.yaml", """
+suite: common.base
+version: 1
+cases:
+  - id: setup
+    command: ""
+    assert: {type: prompt_visible}
+""")
+    path = _write(tmp_path, "sys.yaml", """
+suite: system.main
+version: 1
+include: [base]
+cases:
+  - id: check
+    command: ""
+    assert: {type: prompt_visible}
+    requires: [totally_missing]
+""")
+    # "totally_missing" 既不在本地，也不是任何已加载 FQN 的短名
+    with pytest.raises(ValueError, match="missing required case"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_ambiguous_short_name_requires_raises(tmp_path):
+    """短名在多个 suite 命名空间存在且非本地时，按 ambiguous 报错。"""
+    _write(tmp_path, "a.yaml", """
+suite: mod.a
+version: 1
+cases:
+  - id: dup
+    command: ""
+    assert: {type: prompt_visible}
+""")
+    _write(tmp_path, "b.yaml", """
+suite: mod.b
+version: 1
+cases:
+  - id: dup
+    command: ""
+    assert: {type: prompt_visible}
+""")
+    path = _write(tmp_path, "main.yaml", """
+suite: mod.main
+version: 1
+include: [a, b]
+cases:
+  - id: m
+    command: ""
+    assert: {type: prompt_visible}
+    requires: [dup]
+""")
+    # "dup" 在 mod.a 和 mod.b 各出现一次 → 模糊
+    with pytest.raises(ValueError, match="ambiguous required case"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_collector_fqn_resolution(tmp_path):
+    """collector 也获得 FQN，on_fail 引用解析为 FQN。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: my.suite
+version: 1
+cases:
+  - id: a
+    command: "true"
+    assert: {type: contains, value: "ok"}
+    on_fail:
+      collectors: [debug]
+collectors:
+  debug:
+    commands: ["dmesg"]
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    case_a = suite.cases[0]
+    assert "my.suite.debug" in case_a.on_fail.get("collectors", [])
+    assert "my.suite.debug" in suite.collectors
+
+
+def test_cross_suite_collector_reference_uses_fqn(tmp_path):
+    """跨 suite 引用 collector 必须用 FQN。"""
+    _write(tmp_path, "base.yaml", """
+suite: common.base
+version: 1
+collectors:
+  shared_log:
+    commands: ["dmesg"]
+cases:
+  - id: c1
+    command: ""
+    assert: {type: prompt_visible}
+""")
+    path = _write(tmp_path, "sys.yaml", """
+suite: system.main
+version: 1
+include: [base]
+cases:
+  - id: c2
+    command: "true"
+    assert: {type: contains, value: "ok"}
+    on_fail:
+      collectors: [common.base.shared_log]
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    case_c2 = [c for c in suite.cases if c.id == "c2"][0]
+    assert "common.base.shared_log" in case_c2.on_fail.get("collectors", [])

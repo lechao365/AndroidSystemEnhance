@@ -1,5 +1,6 @@
 # 公共 shell 可达性用例。被其他 suite include 复用。
-suite: shell
+# FQN：common.shell.shell_reachable
+suite: common.shell
 version: 1
 
 cases:
@@ -9,6 +10,4 @@ cases:
     assert:
       type: prompt_visible
     severity: critical
-    on_fail:
-      collectors: []
     tags: [shell, reachable]

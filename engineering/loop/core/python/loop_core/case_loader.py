@@ -19,11 +19,12 @@ class TestCase:
     Attributes:
         id: 用例标识（suite 内唯一）
         suite: 所属 suite 名
+        fqn: 全限定名 `<suite>.<id>`，作为内部唯一引用键（向后兼容默认空）
         command: 执行的命令（空字符串表示仅探测 prompt）
         assert_spec: 断言规格 dict {type, value/pattern}
         severity: critical（fail 阻断）/ warn（仅记录）
-        requires: 前置依赖用例 id 列表
-        on_fail: 失败时动作 {collectors: [...]}
+        requires: 前置依赖用例 FQN 列表
+        on_fail: 失败时动作 {collectors: [FQN,...]}
         tags: 用例标签
         description: 用例描述
     """
@@ -37,6 +38,7 @@ class TestCase:
     on_fail: dict = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
     description: str = ""
+    fqn: str = ""
 
 
 @dataclass
@@ -60,7 +62,7 @@ class CaseSuite:
         name: suite 名称
         version: suite 版本
         cases: 用例列表（拓扑序）
-        collectors: collector 名称 -> {commands, hints}
+        collectors: collector FQN -> {commands, hints}
         defaults: suite 级默认配置（可选，向后兼容默认空）
         warnings: 加载过程中的非致命提示信息列表
     """
@@ -76,6 +78,12 @@ class CaseSuite:
 def load_suite(suite_path: str, case_dirs: list[str]) -> CaseSuite:
     """加载 YAML 用例集，解析 include/requires。
 
+    FQN 规则：
+    - case FQN = `<suite>.<id>`；dedup / requires / collectors 引用均以 FQN 为准。
+    - 同 suite 内的 short name requires / collector 引用按所属 suite 命名空间解析为 FQN。
+    - 跨 suite 引用优先用 FQN；也支持全局唯一的短名（即末段 id 在所有已加载
+      case / collector 中唯一），多匹配时按 ambiguous 报错。
+
     Args:
         suite_path: 主 suite YAML 文件路径
         case_dirs: include 搜索目录列表
@@ -86,45 +94,53 @@ def load_suite(suite_path: str, case_dirs: list[str]) -> CaseSuite:
     Raises:
         FileNotFoundError: suite 或 include 文件不存在
         ValueError: 静态校验失败（requires 引用缺失 / collector 未知 /
-            severity 非法 / 重复 case id / requires 存在环 / 断言规格非法）
+            severity 非法 / 重复 FQN / requires 存在环 / 断言规格非法）
     """
     raw = _load_yaml(suite_path)
     suite_name = raw["suite"]
     suite_version = raw.get("version", 1)
 
     all_cases: list[TestCase] = []
+    # collectors 以 FQN 为键；include 的 collector 保留其来源 suite 的命名空间
     all_collectors: dict[str, dict] = {}
 
     # 处理 include
     for inc_name in raw.get("include", []):
         inc_path = _find_suite(inc_name, case_dirs)
         inc_raw = _load_yaml(inc_path)
+        inc_suite = inc_raw["suite"]
         for case_def in inc_raw.get("cases", []):
             _validate_case_definition(case_def)
-            all_cases.append(_parse_case(case_def, inc_raw["suite"]))
-        all_collectors.update(inc_raw.get("collectors", {}))
+            all_cases.append(_parse_case(case_def, inc_suite))
+        for cname, cspec in inc_raw.get("collectors", {}).items():
+            all_collectors[f"{inc_suite}.{cname}"] = cspec
 
     # 处理主 suite 的 cases
     for case_def in raw.get("cases", []):
         _validate_case_definition(case_def)
         all_cases.append(_parse_case(case_def, suite_name))
 
-    # 合并主 suite 的 collectors（覆盖同名 include）
-    all_collectors.update(raw.get("collectors", {}))
+    # 合并主 suite 的 collectors（覆盖同名 include，主 suite 命名空间）
+    for cname, cspec in raw.get("collectors", {}).items():
+        all_collectors[f"{suite_name}.{cname}"] = cspec
 
-    # 重复 case id 检测（include + 主 suite 合并后唯一）
-    seen_ids: set[str] = set()
+    # 计算 FQN
     for case in all_cases:
-        if case.id in seen_ids:
-            raise ValueError(f"duplicate case id: {case.id}")
-        seen_ids.add(case.id)
+        case.fqn = f"{case.suite}.{case.id}"
+
+    # 重复 FQN 检测（include + 主 suite 合并后唯一）
+    seen_fqns: set[str] = set()
+    for case in all_cases:
+        if case.fqn in seen_fqns:
+            raise ValueError(f"duplicate case id: {case.fqn}")
+        seen_fqns.add(case.fqn)
 
     # 断言规格校验
     for case in all_cases:
         _validate_assertion_shape(case.assert_spec)
 
-    # requires / collector 引用校验
-    _validate_case_links(all_cases, all_collectors)
+    # 解析 requires / collector 引用为 FQN
+    _resolve_case_links(all_cases, all_collectors)
 
     # 拓扑排序 + 环检测
     ordered = _topological_sort(all_cases)
@@ -154,15 +170,16 @@ def _find_suite(name: str, case_dirs: list[str]) -> str:
 
 
 def _parse_case(defn: dict, suite: str) -> TestCase:
+    """从 YAML 节点构建 TestCase。fqn 在 load_suite 中统一填充。"""
     return TestCase(
         id=defn["id"],
         suite=suite,
         command=defn.get("command", ""),
         assert_spec=defn.get("assert", {}),
         severity=defn.get("severity", "critical"),
-        requires=defn.get("requires", []),
-        on_fail=defn.get("on_fail", {}),
-        tags=defn.get("tags", []),
+        requires=list(defn.get("requires", [])),
+        on_fail=dict(defn.get("on_fail", {})),
+        tags=list(defn.get("tags", [])),
         description=defn.get("description", ""),
     )
 
@@ -191,20 +208,65 @@ def _validate_case_definition(defn: dict) -> None:
         raise ValueError(f"invalid severity: {severity}")
 
 
-def _validate_case_links(cases: list[TestCase], collectors: dict[str, dict]) -> None:
-    """校验 requires 与 on_fail.collectors 引用是否都指向已定义目标。"""
-    case_ids = {c.id for c in cases}
+def _resolve_case_links(
+    cases: list[TestCase], collectors: dict[str, dict]
+) -> None:
+    """将 requires / on_fail.collectors 引用解析为 FQN 并就地写回。
+
+    requires 解析顺序：
+    1. 本地命名空间：`<case.suite>.<dep_id>` 命中即用。
+    2. 精确 FQN：`dep_id` 本身即为已加载 FQN（显式跨 suite 引用）。
+    3. 全局短名唯一匹配：`dep_id` 作为末段在所有 FQN 中唯一匹配
+       （支持 include 后的跨 suite 短名引用，如 requires:[shell_reachable]）。
+       多个匹配则报 ambiguous；无匹配报 missing。
+    on_fail.collectors 同理。
+
+    Args:
+        cases: 全部用例（fqn 字段已填充）
+        collectors: 以 FQN 为键的 collector 字典
+    """
+    fqn_set = {c.fqn for c in cases}
+    # 末段短名 -> FQN 列表（用于全局唯一匹配回退）
+    by_suffix: dict[str, list[str]] = {}
+    for fqn in fqn_set:
+        by_suffix.setdefault(fqn.rsplit(".", 1)[-1], []).append(fqn)
+    collector_by_suffix: dict[str, list[str]] = {}
+    for fqn in collectors:
+        collector_by_suffix.setdefault(fqn.rsplit(".", 1)[-1], []).append(fqn)
+
+    def _resolve(ref: str, namespace: str, local_map: set, suffix_map: dict,
+                 kind: str, owner_fqn: str) -> str:
+        local_fqn = f"{namespace}.{ref}"
+        if local_fqn in local_map:
+            return local_fqn
+        if ref in local_map:
+            return ref
+        candidates = suffix_map.get(ref, [])
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            raise ValueError(
+                f"ambiguous {kind} '{ref}' referenced by '{owner_fqn}': {candidates}"
+            )
+        if kind == "required case":
+            raise ValueError(
+                f"missing required case '{ref}' referenced by '{owner_fqn}'"
+            )
+        raise ValueError(
+            f"unknown collector '{ref}' referenced by '{owner_fqn}'"
+        )
+
     for case in cases:
-        for dep_id in case.requires:
-            if dep_id not in case_ids:
-                raise ValueError(
-                    f"missing required case '{dep_id}' referenced by '{case.id}'"
-                )
-        for collector_name in case.on_fail.get("collectors", []):
-            if collector_name not in collectors:
-                raise ValueError(
-                    f"unknown collector '{collector_name}' referenced by '{case.id}'"
-                )
+        case.requires = [
+            _resolve(dep, case.suite, fqn_set, by_suffix, "required case", case.fqn)
+            for dep in case.requires
+        ]
+        if "collectors" in case.on_fail:
+            case.on_fail["collectors"] = [
+                _resolve(cname, case.suite, set(collectors), collector_by_suffix,
+                         "collector", case.fqn)
+                for cname in case.on_fail["collectors"]
+            ]
 
 
 def _validate_assertion_shape(assert_spec: dict) -> None:
@@ -232,26 +294,26 @@ def _parse_defaults(raw: dict) -> SuiteDefaults:
 
 def _topological_sort(cases: list[TestCase]) -> list[TestCase]:
     """拓扑排序：被依赖的用例排在前面。检测环。"""
-    case_map = {c.id: c for c in cases}
+    case_map = {c.fqn: c for c in cases}
     visited: dict[str, int] = {}  # 0=visiting, 1=done
     result: list[TestCase] = []
 
-    def visit(case_id: str, path: list[str]):
-        if case_id not in case_map:
-            return  # defensive: requires 已在 _validate_case_links 校验，正常路径不可达
-        state = visited.get(case_id)
+    def visit(fqn: str, path: list[str]):
+        if fqn not in case_map:
+            return  # defensive: requires 已在 _resolve_case_links 校验，正常路径不可达
+        state = visited.get(fqn)
         if state == 1:
             return
         if state == 0:
-            cycle_path = " -> ".join(path + [case_id])
+            cycle_path = " -> ".join(path + [fqn])
             raise ValueError(f"cycle detected in requires: {cycle_path}")
-        visited[case_id] = 0
-        for dep in case_map[case_id].requires:
-            visit(dep, path + [case_id])
-        visited[case_id] = 1
-        result.append(case_map[case_id])
+        visited[fqn] = 0
+        for dep in case_map[fqn].requires:
+            visit(dep, path + [fqn])
+        visited[fqn] = 1
+        result.append(case_map[fqn])
 
     for case in cases:
-        visit(case.id, [])
+        visit(case.fqn, [])
 
     return result
