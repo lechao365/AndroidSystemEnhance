@@ -26,7 +26,9 @@ harness 自身的文档 / 脚本 / 配置一致性静态校验入口，无副作
 
 ## le.sh
 
-**位置**：`engineering/harness/scripts/le.sh`
+**位置**：[`le.sh`](./le.sh)
+
+可通过 opencode slash command `/le` 触发（AI 主导闭环编排），或直接 bash 调用。
 
 Loop Engineering v2 的 CLI 入口，底层调用 `loop_core.cli`。
 
@@ -58,7 +60,7 @@ bash engineering/harness/scripts/le.sh run \
 
 ## start_rp5_serial_host.bat
 
-**位置**：`engineering/harness/scripts/start_rp5_serial_host.bat`
+**位置**：[`start_rp5_serial_host.bat`](./start_rp5_serial_host.bat)
 
 Windows 前台启动 rp5-serial Host，独占物理串口，监听 TCP 供 WSL2 Client 连接。
 

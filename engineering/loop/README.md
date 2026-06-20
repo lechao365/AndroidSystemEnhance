@@ -32,7 +32,7 @@ engineering/loop/
     ├── profiles/devices/rp5/
     └── providers/rp5-serial/
 
-> CLI 入口脚本已移至 `engineering/harness/scripts/le.sh`  
+> CLI 入口脚本已移至 `engineering/harness/scripts/le.sh`（亦可通过 opencode slash command `/le` 触发）  
 > Windows Host 启动脚本已移至 `engineering/harness/scripts/start_rp5_serial_host.bat`
 ```
 
