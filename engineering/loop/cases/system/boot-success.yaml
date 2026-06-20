@@ -30,7 +30,7 @@ cases:
     severity: critical
     requires: [shell_reachable]
     on_fail:
-      collectors: [crash_dump, init_log]
+      collectors: [serial_recent, crash_dump, init_log]
     tags: [boot, android_core]
 
   - id: surfaceflinger_running

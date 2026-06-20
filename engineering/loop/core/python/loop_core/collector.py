@@ -38,6 +38,31 @@ class Collector:
         commands = spec.get("commands", [])
         hints = spec.get("hints", "")
         prompt_markers = prompt_markers or []
+
+        mode = spec.get("mode", "commands")
+        if mode == "serial_context":
+            describe = getattr(self.transport, "describe_runtime_context", None)
+            context = describe() if callable(describe) else {}
+            outputs = [{
+                "command": "serial_context",
+                "lines": context.get("serial_snippet", []),
+                "duration_sec": 0.0,
+                "metadata": {
+                    "reboot_cycles": context.get("reboot_cycles", 0),
+                    "recent_line_count": context.get("recent_line_count", 0),
+                },
+            }]
+            transc_path = context.get("transcript_path", "")
+            return CollectorResult(
+                name=name,
+                commands=[],
+                outputs=outputs,
+                hints=hints,
+                status="ok",
+                partial=False,
+                artifact_paths=[transc_path] if transc_path else [],
+            )
+
         outputs: list[dict] = []
         error_msg = ""
 

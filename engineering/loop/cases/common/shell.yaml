@@ -15,10 +15,16 @@ cases:
       type: prompt_visible
     severity: critical
     tags: [shell, reachable]
+    on_fail:
+      collectors: [serial_recent]
 
 # 公共诊断 collector 库：所有 include common.shell 的 suite 自动获得。
 # 业务 suite 失败时按短名引用即可，loader 解析为 common.shell.<name>。
 collectors:
+  serial_recent:
+    commands: []
+    mode: serial_context
+    hints: "关注 reboot marker、zygote 重启前后串口片段"
   boot_log:
     commands:
       - "dmesg"

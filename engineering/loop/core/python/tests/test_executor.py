@@ -364,3 +364,51 @@ def _write(tmp_path: Path, name: str, content: str) -> str:
     p = tmp_path / name
     p.write_text(content)
     return str(p)
+
+
+def test_shell_reachable_fail_triggers_serial_collector(tmp_path):
+    """shell_reachable fail 时触发 serial_recent collector（mode=serial_context）"""
+    from pathlib import Path as P
+
+    suite_yaml = tmp_path / "suite.yaml"
+    suite_yaml.write_text("""
+suite: t
+version: 1
+cases:
+  - id: shell_reachable
+    command: ""
+    assert: {type: prompt_visible}
+    severity: critical
+    on_fail:
+      collectors: [serial_recent]
+collectors:
+  serial_recent:
+    commands: []
+    mode: serial_context
+    hints: "capture serial transcript"
+""", encoding="utf-8")
+
+    suite = load_suite(str(suite_yaml), [str(tmp_path)])
+
+    class ContextTransport(FixtureTransport):
+        def describe_runtime_context(self):
+            return {
+                "transcript_path": "/tmp/serial.log",
+                "serial_snippet": ["line1"],
+                "reboot_cycles": 1,
+            }
+
+    transport = ContextTransport([])
+    transport.acquire_writer()
+    executor = CaseExecutor(transport, AssertionEngine())
+    bundle = executor.execute_suite(
+        suite,
+        device_id="test",
+        prompt_markers=["console:/ $"],
+        capture_timeout=1.0,
+        recent_limit=20,
+    )
+
+    assert bundle.cases[0].status == "fail"
+    assert "t.serial_recent" in bundle.evidence
+    assert bundle.evidence["t.serial_recent"].artifact_paths == ["/tmp/serial.log"]

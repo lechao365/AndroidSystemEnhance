@@ -96,3 +96,29 @@ def test_collector_status_ok_when_all_succeed():
     assert result.status == "ok"
     assert result.partial is False
     assert result.error == ""
+
+
+def test_collector_serial_context_mode_returns_artifact_paths():
+    """mode=serial_context 消费 transport.describe_runtime_context()"""
+    class ContextTransport(FixtureTransport):
+        def describe_runtime_context(self):
+            return {
+                "transcript_path": "/tmp/serial.log",
+                "serial_snippet": ["boot line", "reboot: Restarting system"],
+                "reboot_cycles": 2,
+                "recent_line_count": 500,
+            }
+
+    transport = ContextTransport([])
+    transport.acquire_writer()
+    result = Collector(transport).run(
+        "serial_recent",
+        {"commands": [], "mode": "serial_context", "hints": "capture serial transcript context"},
+        capture_timeout=5.0,
+        recent_limit=100,
+    )
+
+    assert result.status == "ok"
+    assert result.artifact_paths == ["/tmp/serial.log"]
+    assert len(result.outputs) == 1
+    assert result.outputs[0]["lines"] == ["boot line", "reboot: Restarting system"]
