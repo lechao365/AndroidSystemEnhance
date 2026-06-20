@@ -120,3 +120,71 @@ class TestBaseTransport:
     def test_cannot_instantiate_abstract(self):
         with pytest.raises(TypeError):
             BaseTransport()
+
+
+def test_base_transport_has_reboot_and_wait_abstract():
+    """BaseTransport 声明 reboot_and_wait 抽象方法，子类必须实现。"""
+    import inspect
+    from loop_core.transport import BaseTransport
+
+    assert hasattr(BaseTransport, "reboot_and_wait")
+    sig = inspect.signature(BaseTransport.reboot_and_wait)
+    param_names = list(sig.parameters.keys())
+    assert "boot_markers" in param_names
+    assert "panic_markers" in param_names
+
+
+def test_fixture_transport_reboot_and_wait_pass_with_reboot_marker():
+    """fixture 含 boot marker 时，reboot_and_wait 返回 pass。"""
+    from loop_core.transport import FixtureTransport
+
+    rows = [
+        {"t": 0.0, "text": "reboot: Restarting system"},
+        {"t": 1.0, "text": "Booting Linux on physical CPU 0x0"},
+        {"t": 2.0, "text": "Linux version 6.6.116"},
+        {"t": 18.0, "text": "init: ... started service 'zygote' has pid 636"},
+        {"t": 19.0, "text": "1"},
+    ]
+    transport = FixtureTransport(rows)
+    result = transport.reboot_and_wait(
+        boot_markers=["Booting Linux on physical CPU", "init: ... started service 'zygote' has pid"],
+        panic_markers=["Kernel panic"],
+        prompt_markers=["console:/ $"],
+    )
+    assert result.status == "pass"
+    assert result.stage_reached == "l3_verified"
+
+
+def test_fixture_transport_reboot_and_wait_fail_no_reboot_marker():
+    """fixture 不含任何 boot marker 时，返回 fail。"""
+    from loop_core.transport import FixtureTransport
+
+    rows = [
+        {"t": 0.0, "text": "unrelated line"},
+        {"t": 1.0, "text": "another line"},
+    ]
+    transport = FixtureTransport(rows)
+    result = transport.reboot_and_wait(
+        boot_markers=["Booting Linux on physical CPU", "init: ... started service 'zygote' has pid"],
+        panic_markers=["Kernel panic"],
+    )
+    assert result.status == "fail"
+    assert "fixture_no_reboot" in result.failure_reason or result.stage_reached == "none"
+
+
+def test_fixture_transport_reboot_and_wait_detects_panic():
+    """fixture 含 panic marker 时立即返回 fail。"""
+    from loop_core.transport import FixtureTransport
+
+    rows = [
+        {"t": 0.0, "text": "reboot: Restarting system"},
+        {"t": 1.0, "text": "Booting Linux on physical CPU"},
+        {"t": 2.0, "text": "Kernel panic - not syncing"},
+    ]
+    transport = FixtureTransport(rows)
+    result = transport.reboot_and_wait(
+        boot_markers=["Booting Linux on physical CPU", "init: ... started service 'zygote' has pid"],
+        panic_markers=["Kernel panic"],
+    )
+    assert result.status == "fail"
+    assert "panic_detected" in result.failure_reason

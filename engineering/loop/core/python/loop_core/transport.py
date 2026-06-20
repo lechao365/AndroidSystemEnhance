@@ -21,7 +21,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from loop_core.models import ObservedLine
+from loop_core.models import ObservedLine, RebootResult
 
 
 @dataclass
@@ -107,6 +107,41 @@ class BaseTransport(ABC):
         """
         raise NotImplementedError(
             "capture_since not implemented; provider needs new API migration"
+        )
+
+    # ------------------------------------------------------------------
+    # reboot API（跨重启）
+    # ------------------------------------------------------------------
+
+    def reboot_and_wait(
+        self,
+        boot_markers: list[str],
+        panic_markers: list[str],
+        boot_complete_timeout: float = 180.0,
+        l1_timeout: float = 30.0,
+        l2_timeout: float = 90.0,
+        l3_timeout: float = 60.0,
+        prompt_markers: list[str] | None = None,
+    ) -> RebootResult:
+        """发 reboot 并等待设备回来。
+
+        子类必须实现。live 实现走 stream + marker 检测；
+        fixture 实现走 fixture 数据消费。
+
+        Args:
+            boot_markers: [L1_early, L2_init_ready] 两级 boot 标记
+            panic_markers: kernel panic 标记（命中即 fail）
+            boot_complete_timeout: 总超时（兜底，默认 180s）
+            l1_timeout: 等 boot_markers[0] 的上限
+            l2_timeout: 等 boot_markers[1] 的上限
+            l3_timeout: 等 getprop sys.boot_completed 返回 1 的上限
+            prompt_markers: prompt 标记列表（L3 getprop 响应判定用）
+
+        Returns:
+            RebootResult
+        """
+        raise NotImplementedError(
+            "reboot_and_wait not implemented; provider needs reboot support"
         )
 
 
@@ -231,3 +266,87 @@ class FixtureTransport(BaseTransport):
             for line in lines
         )
         return CommandCapture(lines=lines, prompt_visible=prompt_visible)
+
+    # ------------------------------------------------------------------
+    # reboot API（fixture 兼容实现）
+    # ------------------------------------------------------------------
+
+    def reboot_and_wait(
+        self,
+        boot_markers: list[str],
+        panic_markers: list[str],
+        boot_complete_timeout: float = 180.0,
+        l1_timeout: float = 30.0,
+        l2_timeout: float = 90.0,
+        l3_timeout: float = 60.0,
+        prompt_markers: list[str] | None = None,
+    ) -> RebootResult:
+        """fixture 模式：在 fixture 数据里检测 boot marker。
+
+        fixture 回放不真实发 reboot，而是扫描 fixture 行：
+        - 命中 panic_markers → 立即返回 fail(panic_detected)
+        - 命中 boot_markers[0] → L1 达到
+        - 命中 boot_markers[1] → L2 达到
+        - L2 后模拟发 getprop，扫剩余行找 "1" → L3 达成 pass
+        - 无任何 boot marker → fail(fixture_no_reboot)
+
+        timeout 参数在 fixture 模式下忽略（不真实等待）。
+        """
+        del boot_complete_timeout, l1_timeout, l2_timeout, l3_timeout
+
+        all_lines = [r["text"] for r in self._rows]
+        l1_marker = boot_markers[0] if len(boot_markers) > 0 else ""
+        l2_marker = boot_markers[1] if len(boot_markers) > 1 else ""
+
+        stage = "none"
+        l2_end_idx = len(all_lines)
+
+        for idx, line in enumerate(all_lines):
+            for p in panic_markers:
+                if p in line:
+                    return RebootResult(
+                        status="fail",
+                        transcript_lines=all_lines,
+                        failure_reason=f"panic_detected: {line}",
+                        stage_reached=stage,
+                        boot_duration_sec=0.0,
+                    )
+            if stage == "none" and l1_marker and l1_marker in line:
+                stage = "l1_boot_start"
+                continue
+            if stage == "l1_boot_start" and l2_marker and l2_marker in line:
+                stage = "l2_init_ready"
+                l2_end_idx = idx
+                continue
+
+        if stage == "none":
+            return RebootResult(
+                status="fail",
+                transcript_lines=all_lines,
+                failure_reason="fixture_no_reboot: no boot marker found in fixture",
+                stage_reached="none",
+                boot_duration_sec=0.0,
+            )
+
+        remaining = all_lines[l2_end_idx + 1:]
+        markers = prompt_markers or []
+        boot_completed_hit = any(
+            line.strip() == "1" or any(m in line for m in markers)
+            for line in remaining
+        )
+        if stage == "l2_init_ready" and boot_completed_hit:
+            return RebootResult(
+                status="pass",
+                transcript_lines=all_lines,
+                failure_reason="",
+                stage_reached="l3_verified",
+                boot_duration_sec=0.0,
+            )
+
+        return RebootResult(
+            status="fail",
+            transcript_lines=all_lines,
+            failure_reason=f"timeout at stage {stage}: boot_completed not found in fixture",
+            stage_reached=stage,
+            boot_duration_sec=0.0,
+        )

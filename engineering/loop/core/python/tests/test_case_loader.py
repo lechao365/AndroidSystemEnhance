@@ -774,3 +774,48 @@ def test_load_suite_action_case_no_assert_value_still_validates():
 
     _validate_assertion_shape({})
 
+
+# ---------- Task 13/14：kmsg collector + trigger_reboot ----------
+
+
+def test_common_shell_yaml_has_kmsg_collector():
+    """common/shell.yaml 包含 kmsg collector 定义。"""
+    from pathlib import Path
+    from loop_core.case_loader import load_suite
+
+    repo_root = Path(__file__).resolve()
+    while repo_root.name != "engineering":
+        repo_root = repo_root.parent
+        if repo_root == repo_root.parent:
+            break
+    cases_dir = repo_root / "loop" / "cases"
+    shell_yaml = cases_dir / "common" / "shell.yaml"
+
+    suite = load_suite(str(shell_yaml), [str(cases_dir)])
+    assert "common.shell.kmsg" in suite.collectors
+    kmsg_spec = suite.collectors["common.shell.kmsg"]
+    assert "cat /proc/last_kmsg" in kmsg_spec["commands"][0]
+
+
+def test_boot_success_yaml_has_trigger_reboot_first():
+    """boot-success.yaml 首条 case 是 trigger_reboot，后续 case requires 它。"""
+    from pathlib import Path
+    from loop_core.case_loader import load_suite
+
+    repo_root = Path(__file__).resolve()
+    while repo_root.name != "engineering":
+        repo_root = repo_root.parent
+        if repo_root == repo_root.parent:
+            break
+    cases_dir = repo_root / "loop" / "cases"
+    boot_yaml = cases_dir / "system" / "boot-success.yaml"
+
+    suite = load_suite(str(boot_yaml), [str(cases_dir)])
+    reboot_cases = [c for c in suite.cases if c.action == "reboot"]
+    assert len(reboot_cases) == 1
+    assert reboot_cases[0].id == "trigger_reboot"
+
+    reboot_fqn = reboot_cases[0].fqn
+    dependents = [c for c in suite.cases if reboot_fqn in c.requires]
+    assert len(dependents) >= 1, "no case requires trigger_reboot"
+

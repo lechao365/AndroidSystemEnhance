@@ -1,6 +1,6 @@
 # 系统级 boot 成功验收用例。
 # include common.shell 获取 shell_reachable 用例 + 公共诊断 collector
-# （boot_log / init_log / crash_dump）。
+# （boot_log / init_log / crash_dump / kmsg）。
 # FQN 命名空间：system.boot
 suite: system.boot
 version: 1
@@ -9,6 +9,12 @@ include:
   - common/shell
 
 cases:
+  - id: trigger_reboot
+    action: reboot
+    description: "触发设备重启并等待启动完成"
+    severity: critical
+    assert: {}
+
   - id: boot_completed
     description: "sys.boot_completed 属性为 1"
     command: "getprop sys.boot_completed"
@@ -16,9 +22,9 @@ cases:
       type: contains
       value: "1"
     severity: critical
-    requires: [shell_reachable]  # short name，loader 解析为 common.shell.shell_reachable
+    requires: [trigger_reboot]
     on_fail:
-      collectors: [boot_log, init_log]  # 解析为 common.shell.boot_log / init_log
+      collectors: [boot_log, init_log, kmsg]
     tags: [boot, system]
 
   - id: zygote_running
@@ -28,9 +34,9 @@ cases:
       type: contains
       value: "running"
     severity: critical
-    requires: [shell_reachable]
+    requires: [trigger_reboot]
     on_fail:
-      collectors: [serial_recent, crash_dump, init_log]
+      collectors: [serial_recent, crash_dump, init_log, kmsg]
     tags: [boot, android_core]
 
   - id: surfaceflinger_running
@@ -40,7 +46,7 @@ cases:
       type: contains
       value: "running"
     severity: critical
-    requires: [shell_reachable]
+    requires: [trigger_reboot]
     on_fail:
-      collectors: [crash_dump, init_log]
+      collectors: [crash_dump, init_log, kmsg]
     tags: [boot, android_core]

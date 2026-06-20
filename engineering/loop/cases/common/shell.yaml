@@ -2,7 +2,7 @@
 # 被其他 suite include 复用：
 #   include:
 #     - common/shell
-# 即可获得 shell_reachable 用例与 boot_log / init_log / crash_dump 三个诊断 collector。
+# 即可获得 shell_reachable 用例与 boot_log / init_log / crash_dump / kmsg 四个诊断 collector。
 # FQN：common.shell.shell_reachable / common.shell.boot_log / ...
 suite: common.shell
 version: 1
@@ -39,3 +39,7 @@ collectors:
       - "logcat -b crash -d"
       - "ls -la /data/tombstones/"
     hints: "关注 abort message / signal / fault addr / backtrace"
+  kmsg:
+    commands:
+      - "cat /proc/last_kmsg 2>/dev/null || dmesg | head -200"
+    hints: "上一次启动的内核日志（诊断 reboot 原因关键，last_kmsg 优先，回退 dmesg）"
