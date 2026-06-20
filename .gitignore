@@ -14,3 +14,7 @@ __pycache__/
 *.pyc
 engineering/loop/**/.host-log/
 .pytest_cache/
+
+# loop engineering 运行产物（本地产物，不归档）
+engineering/loop/runs/*
+!engineering/loop/runs/.gitkeep
