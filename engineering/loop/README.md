@@ -142,9 +142,16 @@ rp5-serial host 持续将串口正文写入 `transcript_path`（默认 `output/h
 每行带 ISO 时间戳。`serial_recent` collector 通过 `mode: serial_context` 直接消费 host 上下文，
 无需 shell 可达即可获取串口根证据（transcript 路径 + 最近片段 + restart 周期）。
 
+## `/le` 失败后诊断
+
+当 `/le` 驱动 `le run` 得到 FAIL 时，opencode 会读取本次 run 的 `summary.txt`、`evidence_bundle.json`、`serial_context` 与关联 collector 产物，先可选询问一次调查线索（如 suspect 模块、最近改动范围、首次坏版本），再在与本次 `evidence_bundle.json` 同目录下生成 `diagnosis-report.md`。
+
+诊断报告只输出"确定事实 / 现象归类 / 当前不确定点 / 候选修复方向"，不强行给唯一根因。只有当证据足以指向 `~/workspace/` 的可操作范围时，才会给出候选补丁草案。
+
 ## 设计文档
 
 - `docs/specs/2026-06-19-loop-engineering-v2-design.md`（v2 架构，权威来源）
 - `docs/specs/2026-06-20-loop-zygote-restart-serial-observability-design.md`（串口观测补强设计）
+- `docs/specs/2026-06-20-le-zygote-diagnosis-and-patch-draft-design.md`（/le 第 4-5 步诊断与补丁草案）
 - `docs/specs/2026-06-19-loop-core-extraction-design.md`（core 抽取）
 - `docs/specs/2026-06-19-loop-engineering-design.md`（v1 原始设计，历史归档）

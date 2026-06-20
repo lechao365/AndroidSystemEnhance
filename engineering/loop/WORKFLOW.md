@@ -11,15 +11,13 @@ AI 接管设备验收：执行用例 → 输出证据 → AI 分析 → 修复�
 
 ## 核心流程
 
-```
 1. AI 读代码/spec + template → 生成 YAML 用例
 2. le run 执行用例 → EvidenceBundle JSON
 3. 全 pass → 功能 OK
-4. 有 fail → AI 读 EvidenceBundle 分析根因
-5. AI 修改 workspace 代码
+4. 有 fail → AI 读 EvidenceBundle 分析证据并收敛候选修复方向
+5. AI 生成候选补丁草案（人工确认后再实施）
 6. 编译部署（binary 自动 / 镜像确认）
 7. goto 2，直到全 pass 或 N=5 回退人工
-```
 
 ## 分层职责
 
@@ -110,16 +108,19 @@ shell 不可达时，AI/人工应优先分析 `serial_context`；shell 可达时
 3. **loop_ctrl 未实现**：第三步实现循环控制（N=5 / 回归检测 / 升级人工）
 4. **参数化用例**：case_loader 预留 parameters 字段，第一步未实现展开
 
-## AI 诊断报告约束（范围 A reboot 诊断闭环）
+## AI 诊断报告约束（`/le` 第 4-5 步首版）
 
-当 AI（opencode）通过 `/le` 触发 reboot 诊断闭环并收到 EvidenceBundle 后，**必须**按
-`engineering/harness/templates/diagnosis-report-template.md` 产出诊断报告：
+当 AI（opencode）通过 `/le` 触发诊断闭环并收到 EvidenceBundle 后，必须遵守以下规则：
 
-1. 报告路径：`engineering/output/runs/<run-id>/diagnosis-report.md`（与 EvidenceBundle 同目录）
-2. 报告含 6 节：结论 / 证据链 / 根因分析 / 修复建议 / 建议新增 case / 循环终止建议
-3. 修复建议必须具体到 workspace 文件路径和函数名
-4. YAML 建议（第 5 节）不自动应用，只给人 review（G2 决策）
-5. AI 不自动修改 boot-success.yaml
+1. 任何 FAIL 都进入诊断阶段
+2. 诊断阶段只读取本次 run 的 `summary.txt`、`evidence_bundle.json`、bundle 引用的 artifacts，以及 `serial_context`
+3. 诊断前可选询问一次调查线索（最近改动模块、suspect 范围、首次坏版本等）
+4. 调查线索（用户提供，未验证）必须标记为"用户提供，未验证"，不得覆盖客观证据
+5. 报告文件固定写到与本次 `evidence_bundle.json` 同目录的 `diagnosis-report.md`
+6. 报告必须包含 7 节：结论 / 证据链 / 现象归类与不确定性 / 调查线索 / 候选修复方向 / 建议新增调整 case / 循环终止建议
+7. 不强行给唯一根因；允许并列多个候选修复方向
+8. 只有当证据足以落到 `~/workspace/` 可操作范围时，才输出候选补丁草案；否则只出诊断报告
+9. AI 不自动修改 `boot-success.yaml`
 
 reboot 诊断闭环的数据流：
 - `/le run --suite boot-success.yaml --host <ip> --port 9700 ...`
