@@ -517,6 +517,119 @@ collectors:
     assert "my.suite.debug" in suite.collectors
 
 
+# ---------- 参数化原子用例 ----------
+
+
+def test_parameterized_case_expands(tmp_path):
+    """参数化用例展开为多条。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: common.service
+version: 1
+parameters:
+  services: [zygote, surfaceflinger]
+cases:
+  - id: service_running
+    foreach: services
+    command: "getprop init.svc.${item}"
+    assert: {type: contains, value: "running"}
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    ids = [c.id for c in suite.cases]
+    assert "service_running_zygote" in ids
+    assert "service_running_surfaceflinger" in ids
+    assert len(suite.cases) == 2
+
+
+def test_parameterized_substitutes_item_in_command(tmp_path):
+    """${item} 在 command 中正确替换。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+parameters:
+  names: [alpha, beta]
+cases:
+  - id: check
+    foreach: names
+    command: "getprop ${item}"
+    assert: {type: contains, value: "ok"}
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    commands = [c.command for c in suite.cases]
+    assert "getprop alpha" in commands
+    assert "getprop beta" in commands
+
+
+def test_parameterized_substitutes_in_description_and_assert(tmp_path):
+    """${item} 在 description 和 assert.value 中替换。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+parameters:
+  names: [alpha]
+cases:
+  - id: check
+    foreach: names
+    description: "check ${item}"
+    command: "echo ${item}"
+    assert: {type: contains, value: "${item}_ok"}
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    case = suite.cases[0]
+    assert case.description == "check alpha"
+    assert case.assert_spec["value"] == "alpha_ok"
+
+
+def test_parameterized_foreach_unknown_param_raises(tmp_path):
+    """foreach 引用不存在的 parameter 时报错。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+parameters:
+  names: [alpha]
+cases:
+  - id: check
+    foreach: nonexistent
+    command: "echo hi"
+    assert: {type: contains, value: "hi"}
+""")
+    with pytest.raises(ValueError, match="unknown parameter"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_parameterized_non_list_param_raises(tmp_path):
+    """parameter 值非 list 时报错。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+parameters:
+  names: alpha
+cases:
+  - id: check
+    foreach: names
+    command: "echo hi"
+    assert: {type: contains, value: "hi"}
+""")
+    with pytest.raises(ValueError, match="must be a list"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_non_foreach_case_not_affected(tmp_path):
+    """无 foreach 的用例不受参数化影响。"""
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+parameters:
+  names: [alpha, beta]
+cases:
+  - id: plain_case
+    command: "echo hello"
+    assert: {type: contains, value: "hello"}
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    assert len(suite.cases) == 1
+    assert suite.cases[0].id == "plain_case"
+
+
 def test_cross_suite_collector_reference_uses_fqn(tmp_path):
     """跨 suite 引用 collector 必须用 FQN。"""
     _write(tmp_path, "base.yaml", """

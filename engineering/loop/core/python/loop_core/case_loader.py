@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -115,8 +116,10 @@ def load_suite(suite_path: str, case_dirs: list[str]) -> CaseSuite:
         for cname, cspec in inc_raw.get("collectors", {}).items():
             all_collectors[f"{inc_suite}.{cname}"] = cspec
 
-    # 处理主 suite 的 cases
-    for case_def in raw.get("cases", []):
+    # 处理主 suite 的 cases（先展开参数化用例）
+    parameters = raw.get("parameters", {})
+    raw_cases = _expand_parameterized_cases(raw.get("cases", []), parameters)
+    for case_def in raw_cases:
         _validate_case_definition(case_def)
         all_cases.append(_parse_case(case_def, suite_name))
 
@@ -182,6 +185,69 @@ def _parse_case(defn: dict, suite: str) -> TestCase:
         tags=list(defn.get("tags", [])),
         description=defn.get("description", ""),
     )
+
+
+def _expand_parameterized_cases(raw_cases: list[dict], parameters: dict) -> list[dict]:
+    """展开参数化用例。
+
+    遍历原始 case 列表，对声明了 `foreach` 的用例按 `parameters[foreach]`
+    列表逐项克隆并替换 `${item}` 占位符；无 `foreach` 的用例原样透传。
+
+    规则：
+    1. `foreach` 引用 `parameters` 中已定义的键，否则报错。
+    2. 对应的 parameter 值必须是 list，否则报错。
+    3. 对每个 item 克隆 case，id 设为 `{原id}_{item}`，并在 command /
+       description / assert.value / assert.pattern 中替换 `${item}`。
+    4. 替换发生在原始 dict 上，后续 _parse_case 拿到的就是已展开数据，
+       保持展开逻辑与解析逻辑解耦。
+
+    Args:
+        raw_cases: 从 YAML 解析出的原始 case dict 列表
+        parameters: suite 级 parameters 字段
+
+    Returns:
+        展开后的 case dict 列表
+
+    Raises:
+        ValueError: foreach 引用未知 parameter 或 parameter 非 list
+    """
+    expanded: list[dict] = []
+    for case_def in raw_cases:
+        foreach = case_def.get("foreach")
+        if not foreach:
+            expanded.append(case_def)
+            continue
+        if foreach not in parameters:
+            raise ValueError(
+                f"unknown parameter '{foreach}' in case '{case_def.get('id')}'"
+            )
+        values = parameters[foreach]
+        if not isinstance(values, list):
+            raise ValueError(
+                f"parameter '{foreach}' must be a list (case '{case_def.get('id')}')"
+            )
+        for item in values:
+            cloned = copy.deepcopy(case_def)
+            item_str = str(item)
+            cloned["id"] = f"{case_def['id']}_{item_str}"
+            # 在 command / description / assert.value / assert.pattern 中替换 ${item}
+            cloned["command"] = cloned.get("command", "").replace("${item}", item_str)
+            if cloned.get("description") is not None:
+                cloned["description"] = cloned["description"].replace(
+                    "${item}", item_str
+                )
+            assert_spec = cloned.get("assert", {})
+            if isinstance(assert_spec, dict):
+                if assert_spec.get("value") is not None:
+                    assert_spec["value"] = str(assert_spec["value"]).replace(
+                        "${item}", item_str
+                    )
+                if assert_spec.get("pattern") is not None:
+                    assert_spec["pattern"] = str(assert_spec["pattern"]).replace(
+                        "${item}", item_str
+                    )
+            expanded.append(cloned)
+    return expanded
 
 
 # 允许的 severity 取值

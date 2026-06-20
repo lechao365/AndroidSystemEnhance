@@ -111,3 +111,43 @@ collectors:        # 可选：collector 定义
 - [ ] suite/version 字段存在
 - [ ] coverage 覆盖所有关键功能点
 - [ ] 用例 description 标注来源（code/spec）
+
+## 8. 参数化原子用例
+
+当多个用例结构相同、仅参数不同时，使用参数化展开避免复制 YAML。
+
+### 基本用法
+
+```yaml
+parameters:
+  services: [zygote, surfaceflinger, netd]
+
+cases:
+  - id: service_running
+    foreach: services
+    command: "getprop init.svc.${item}"
+    assert: {type: contains, value: "running"}
+```
+
+展开后生成 3 条用例：`service_running_zygote`、`service_running_surfaceflinger`、`service_running_netd`。
+
+### 规则
+
+- `foreach` 引用 `parameters` 中定义的列表
+- `${item}` 在 `command` / `description` / `assert.value` / `assert.pattern` 中替换
+- 无 `foreach` 的用例不受影响
+- 展开后 FQN 重复会在加载阶段报错
+
+### 参数取值
+
+`parameters` 的值必须是 list，列表项可以是简单字符串：
+
+```yaml
+parameters:
+  critical_props:
+    - key: sys.boot_completed
+      value: "1"
+```
+
+注意：当列表项为复杂结构（dict 等）时，`{原id}_{item}` 中的 `item` 会取其
+字符串形式（可能不直观），推荐仅用简单字符串/数字作为 foreach 列表项。
