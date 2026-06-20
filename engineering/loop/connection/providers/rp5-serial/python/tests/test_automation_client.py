@@ -226,3 +226,40 @@ def test_release_closes_both_channels(monkeypatch):
     client.release()
 
     assert stream_sock.closed is True
+
+
+def test_capture_recent_entries_returns_structured_rows(monkeypatch):
+    cmd_sock = FakeCmdSocket(FakeRaw([
+        {"ok": True, "code": "OK", "message": "ok", "data": {
+            "lines": ["line1"],
+            "entries": [{"text": "line1", "ts": "2026-06-20T12:00:00+0800", "pending": False}],
+        }}
+    ]))
+    stream_sock = FakeStreamSocket(_ok())
+    _patch_connections(monkeypatch, cmd_sock, stream_sock)
+
+    client = AutomationClient("127.0.0.1", 9700)
+    client.connect()
+
+    entries = client.capture_recent_entries(1)
+    assert entries[0]["text"] == "line1"
+    assert entries[0]["ts"] == "2026-06-20T12:00:00+0800"
+
+
+def test_fetch_status_returns_status_dict(monkeypatch):
+    cmd_sock = FakeCmdSocket(FakeRaw([
+        {"ok": True, "code": "OK", "message": "ok", "data": {
+            "transcript_path": "/tmp/rp5-serial-transcript.log",
+            "recent_line_count": 42,
+            "host_state": "READY",
+        }}
+    ]))
+    stream_sock = FakeStreamSocket(_ok())
+    _patch_connections(monkeypatch, cmd_sock, stream_sock)
+
+    client = AutomationClient("127.0.0.1", 9700)
+    client.connect()
+
+    status = client.fetch_status()
+    assert status["data"]["transcript_path"] == "/tmp/rp5-serial-transcript.log"
+    assert status["data"]["recent_line_count"] == 42

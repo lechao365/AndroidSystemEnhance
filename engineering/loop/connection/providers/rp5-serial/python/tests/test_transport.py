@@ -213,3 +213,47 @@ class TestRp5SerialTransportBoundaryApi:
         )
         texts = [line.text for line in capture.lines]
         assert texts == ["l4", "l5"]
+
+
+def test_transport_describe_runtime_context():
+    """transport 从 client.fetch_status/capture_recent_entries 构建运行时上下文"""
+    client = MagicMock()
+    client.capture_recent_entries.return_value = [
+        {"text": "Booting Linux", "ts": "2026-06-20T12:00:00+0800", "pending": False},
+        {"text": "console:/ $", "ts": "2026-06-20T12:00:02+0800", "pending": False},
+    ]
+    client.read_until_timeout.return_value = []
+    client.fetch_status.return_value = {
+        "data": {
+            "transcript_path": "/tmp/rp5-serial-transcript.log",
+            "recent_line_count": 2,
+            "recent_buffer_limit": 2000,
+        }
+    }
+    transport = Rp5SerialTransport(client)
+
+    ctx = transport.describe_runtime_context()
+
+    assert ctx["transcript_path"] == "/tmp/rp5-serial-transcript.log"
+    assert ctx["recent_line_count"] == 2
+    assert ctx["recent_buffer_limit"] == 2000
+    assert len(ctx["serial_snippet"]) == 2
+    assert ctx["serial_snippet"][0] == "Booting Linux"
+
+
+def test_transport_capture_since_uses_host_timestamps():
+    """capture_since 基于 host ISO 时间戳计算相对时间"""
+    client = MagicMock()
+    client.capture_recent_entries.return_value = [
+        {"text": "Booting Linux", "ts": "2026-06-20T12:00:00+0800", "pending": False},
+        {"text": "console:/ $", "ts": "2026-06-20T12:00:02+0800", "pending": False},
+    ]
+    client.read_until_timeout.return_value = []
+    transport = Rp5SerialTransport(client)
+
+    capture = transport.capture_since(transport.mark_output_boundary(), 5, 50, ["console:/ $"])
+
+    assert capture.lines[0].text == "Booting Linux"
+    assert capture.lines[0].t == 0.0
+    assert abs(capture.lines[1].t - 2.0) < 0.01
+    assert capture.warnings == []

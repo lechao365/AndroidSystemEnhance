@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta
 
 from loop_core.models import ObservedLine
 from loop_core.transport import BaseTransport, CommandCapture
@@ -30,6 +31,8 @@ class Rp5SerialTransport(BaseTransport):
         # 传给 capture_since；当前 live 实现依赖 host 环形缓冲 + stream 推送
         # 的自然时序隔离，generation 本身不参与采集逻辑。
         self._capture_generation = 0
+        # reboot cycle 边界标记（Task 5 计算 reboot_cycles 用），本 Task 仅占位。
+        self._cycle_markers: list[str] = []
 
     # ------------------------------------------------------------------
     # writer / send
@@ -166,6 +169,113 @@ class Rp5SerialTransport(BaseTransport):
         self._capture_generation += 1
         return self._capture_generation
 
+    # ------------------------------------------------------------------
+    # host 时间戳采集辅助
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_iso_ts(ts_str: str) -> float:
+        """解析 host 侧 ISO8601 时间戳（含时区偏移）为 epoch 秒。"""
+        return datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S%z").timestamp()
+
+    def _build_lines_from_entries(
+        self, entries: list[dict]
+    ) -> list[ObservedLine]:
+        """基于 host 结构化条目构建 0-based 相对时间戳的 ObservedLine 列表。
+
+        以首条目的时间戳为基准，后续条目相对其求差，保留 host 真实时序，
+        供 observer 计算 quiet window。
+        """
+        if not entries:
+            return []
+        base = self._parse_iso_ts(entries[0]["ts"])
+        lines: list[ObservedLine] = []
+        for entry in entries:
+            current = self._parse_iso_ts(entry["ts"])
+            lines.append(
+                ObservedLine(t=round(current - base, 3), text=entry["text"])
+            )
+        return lines
+
+    def _safe_capture_entries(self, recent_limit: int) -> list[dict] | None:
+        """尝试获取 host 结构化条目，校验通过返回 list，否则返回 None。
+
+        返回 None 表示 host/client 不支持结构化条目（如旧 client、Mock 未配置
+        或缺少合法 ts/text 字段），调用方据此降级到旧的伪时间戳采集管线。
+        """
+        try:
+            entries = self.client.capture_recent_entries(recent_limit)
+        except (OSError, AttributeError):
+            return None
+        if not isinstance(entries, list):
+            return None
+        for entry in entries:
+            if not isinstance(entry, dict):
+                return None
+            if not isinstance(entry.get("ts"), str) or not isinstance(
+                entry.get("text"), str
+            ):
+                return None
+        return entries
+
+    def _append_pushed_entries(
+        self, entries: list[dict], pushed_raw: list[str]
+    ) -> list[dict]:
+        """将 stream 推送行（无 host 时间戳）追加到结构化条目尾部。
+
+        推送行本身不带 host ISO 时间戳，这里以"最后一条条目时间戳 + 递增
+        毫秒偏移"合成时间戳，保持相对时序单调；条目为空时退化到固定基准。
+        """
+        if not pushed_raw:
+            return entries
+        result = list(entries)
+        if result:
+            base_dt = datetime.strptime(
+                result[-1]["ts"], "%Y-%m-%dT%H:%M:%S%z"
+            )
+            offset_start = 1
+        else:
+            base_dt = datetime.strptime(
+                "2026-01-01T00:00:00+0800", "%Y-%m-%dT%H:%M:%S%z"
+            )
+            offset_start = 0
+        for index, text in enumerate(pushed_raw, offset_start):
+            new_dt = base_dt + timedelta(milliseconds=index * 100)
+            result.append(
+                {
+                    "text": text,
+                    "ts": new_dt.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "pending": False,
+                }
+            )
+        return result
+
+    def describe_runtime_context(self) -> dict:
+        """汇总 host 运行时上下文（供 AI 分析 / 调试快照使用）。
+
+        组合 ``session.status`` 与最近串口条目，输出 transcript 路径、缓冲
+        统计与末尾串口片段；fetch_status 失败时返回带 warnings 的降级上下文。
+
+        Returns:
+            含 transcript_path / recent_line_count / recent_buffer_limit /
+            serial_snippet / reboot_cycles 的 dict
+        """
+        try:
+            status = self.client.fetch_status()
+        except OSError:
+            return {"warnings": ["fetch_status failed"]}
+        data = status.get("data", {}) if isinstance(status, dict) else {}
+
+        entries = self._safe_capture_entries(200) or []
+        snippet = [entry["text"] for entry in entries[-40:]]
+        return {
+            "transcript_path": data.get("transcript_path", ""),
+            "recent_line_count": data.get("recent_line_count", 0),
+            "recent_buffer_limit": data.get("recent_buffer_limit", 0),
+            "serial_snippet": snippet,
+            "reboot_cycles": 0,
+        }
+
     def capture_since(
         self,
         boundary: object,
@@ -175,8 +285,10 @@ class Rp5SerialTransport(BaseTransport):
     ) -> CommandCapture:
         """采集 ``boundary`` 之后的输出。
 
-        复用 capture_window 的合并管线（recent + pushed，仅裁剪边界重叠），
-        额外计算 prompt 可见性并封装为 CommandCapture。
+        优先走 host 时间戳管线：当 ``capture_recent_entries`` 返回合法结构化
+        条目时，基于 host ISO 时间戳构建相对时间戳；否则降级到旧的伪时间戳
+        合并管线（``capture_recent_lines`` + ``read_until_timeout``，仅裁剪边界
+        重叠），保证未升级 host / 旧调用方行为不变。
 
         Args:
             boundary: mark_output_boundary 返回的不透明游标（live 实现未使用，
@@ -185,15 +297,22 @@ class Rp5SerialTransport(BaseTransport):
             recent_limit: 行数上限（0 表示不限），取末尾 N 行
             prompt_markers: prompt 标记列表，用于判断 prompt 可见性
         """
-        del boundary  # live 实现靠时序隔离，未消费游标本身
-
-        recent_raw = self.client.capture_recent_lines(recent_limit)
-        pushed_raw = self.client.read_until_timeout(timeout_sec)
-        merged = self._merge_boundary_overlap(recent_raw, pushed_raw)
-        lines = [
-            ObservedLine(t=i * 0.01, text=text) for i, text in enumerate(merged)
-        ]
-        lines = self._apply_recent_limit(lines, recent_limit)
+        entries = self._safe_capture_entries(recent_limit)
+        if entries is not None:
+            pushed_raw = self.client.read_until_timeout(timeout_sec)
+            entries = self._append_pushed_entries(entries, pushed_raw)
+            lines = self._build_lines_from_entries(entries)
+            lines = self._apply_recent_limit(lines, recent_limit)
+        else:
+            del boundary  # live 实现靠时序隔离，未消费游标本身
+            recent_raw = self.client.capture_recent_lines(recent_limit)
+            pushed_raw = self.client.read_until_timeout(timeout_sec)
+            merged = self._merge_boundary_overlap(recent_raw, pushed_raw)
+            lines = [
+                ObservedLine(t=i * 0.01, text=text)
+                for i, text in enumerate(merged)
+            ]
+            lines = self._apply_recent_limit(lines, recent_limit)
 
         markers = prompt_markers or []
         prompt_visible = self._detect_prompt_visible(lines, markers)

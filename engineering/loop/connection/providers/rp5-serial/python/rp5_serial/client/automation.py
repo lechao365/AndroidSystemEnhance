@@ -202,6 +202,56 @@ class AutomationClient:
             return []
         return lines
 
+    def capture_recent_entries(self, limit: int) -> list[dict]:
+        """请求 Host 返回最近 N 条结构化缓冲条目（stream.read_recent）。
+
+        与 ``capture_recent_lines`` 复用同一 host 接口，但消费 ``data.entries``
+        中的结构化条目（含 host 侧 ISO 时间戳 ``ts`` 与 ``pending`` 标记）。
+
+        Args:
+            limit: 期望抓取的条目数
+
+        Returns:
+            形如 ``{"text": str, "ts": str, "pending": bool}`` 的 dict 列表；
+            响应结构异常（``data.entries`` 非 list、元素缺少合法 ``text``）时
+            过滤掉非法项，必要时返回空列表
+
+        Raises:
+            OSError: 连接异常、被对端关闭或 host 返回失败响应
+        """
+        request = {"op": "stream.read_recent", "data": {"limit": limit}}
+        self._cmd_sock.sendall(encode_message(request))
+        response = self._read_response(self._cmd_raw)
+        if response is None:
+            raise OSError("host 关闭连接")
+        if response.get("code") != OK:
+            raise OSError(response.get("message") or "stream.read_recent failed")
+        entries = response.get("data", {}).get("entries", [])
+        if not isinstance(entries, list):
+            return []
+        return [
+            entry
+            for entry in entries
+            if isinstance(entry, dict) and isinstance(entry.get("text"), str)
+        ]
+
+    def fetch_status(self) -> dict:
+        """请求 Host 当前会话状态（session.status）。
+
+        Returns:
+            host 返回的完整响应 dict（含 ``data.transcript_path`` /
+            ``data.recent_line_count`` / ``data.recent_buffer_limit`` 等字段）
+
+        Raises:
+            OSError: 连接异常或被对端关闭
+        """
+        request = {"op": "session.status", "data": {}}
+        self._cmd_sock.sendall(encode_message(request))
+        response = self._read_response(self._cmd_raw)
+        if response is None:
+            raise OSError("host 关闭连接")
+        return response
+
     def release(self) -> None:
         """释放 writer 并关闭连接。
 
