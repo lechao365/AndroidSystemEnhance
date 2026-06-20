@@ -21,8 +21,9 @@ class TestCase:
         id: 用例标识（suite 内唯一）
         suite: 所属 suite 名
         fqn: 全限定名 `<suite>.<id>`，作为内部唯一引用键（向后兼容默认空）
-        command: 执行的命令（空字符串表示仅探测 prompt）
-        assert_spec: 断言规格 dict {type, value/pattern}
+        command: 执行的命令（空字符串表示仅探测 prompt；与 action 互斥）
+        action: 触发动作类型（如 'reboot'）；与 command 互斥，默认空字符串表示命令模式
+        assert_spec: 断言规格 dict {type, value/pattern}；action case 为空 dict
         severity: critical（fail 阻断）/ warn（仅记录）
         requires: 前置依赖用例 FQN 列表
         on_fail: 失败时动作 {collectors: [FQN,...]}
@@ -33,7 +34,8 @@ class TestCase:
     id: str
     suite: str
     command: str
-    assert_spec: dict
+    action: str = ""
+    assert_spec: dict = field(default_factory=dict)
     severity: str = "critical"
     requires: list[str] = field(default_factory=list)
     on_fail: dict = field(default_factory=dict)
@@ -178,6 +180,7 @@ def _parse_case(defn: dict, suite: str) -> TestCase:
         id=defn["id"],
         suite=suite,
         command=defn.get("command", ""),
+        action=defn.get("action", ""),
         assert_spec=defn.get("assert", {}),
         severity=defn.get("severity", "critical"),
         requires=list(defn.get("requires", [])),
@@ -261,10 +264,12 @@ _VALID_ASSERT_TYPES = {
     "not_contains",
     "exit_code_zero",
 }
+# 允许的 action 取值（与 command 互斥）
+_VALID_ACTIONS = {"reboot"}
 
 
 def _validate_case_definition(defn: dict) -> None:
-    """静态校验单条用例定义：必需键、severity 合法性。"""
+    """静态校验单条用例定义：必需键、severity 合法性、action/command 互斥。"""
     required_keys = {"id", "assert"}
     missing = required_keys - set(defn)
     if missing:
@@ -272,6 +277,16 @@ def _validate_case_definition(defn: dict) -> None:
     severity = defn.get("severity", "critical")
     if severity not in _VALID_SEVERITIES:
         raise ValueError(f"invalid severity: {severity}")
+    action = defn.get("action", "")
+    command = defn.get("command", "")
+    if action and command:
+        raise ValueError(
+            f"action and command are mutually exclusive in case '{defn.get('id')}'"
+        )
+    if action and action not in _VALID_ACTIONS:
+        raise ValueError(
+            f"unknown action: {action} (allowed: {sorted(_VALID_ACTIONS)})"
+        )
 
 
 def _resolve_case_links(
@@ -336,7 +351,12 @@ def _resolve_case_links(
 
 
 def _validate_assertion_shape(assert_spec: dict) -> None:
-    """校验断言规格结构：type 合法、必填参数齐备。"""
+    """校验断言规格结构：type 合法、必填参数齐备。
+
+    action case（如 action: reboot）的 assert 为空 dict，跳过校验。
+    """
+    if not assert_spec:
+        return  # action case 无断言
     atype = assert_spec.get("type")
     if atype in {"contains", "equals", "not_contains"} and "value" not in assert_spec:
         raise ValueError(f"assert type '{atype}' requires value")

@@ -75,3 +75,36 @@ def test_evidence_bundle_to_dict():
     assert d["bundle_id"] == "eb-test-001"
     assert d["summary"]["overall"] == "FAIL"
     assert len(d["cases"]) == 2
+
+
+def test_reboot_result_pass():
+    """RebootResult 成功场景。"""
+    from loop_core.models import RebootResult
+
+    result = RebootResult(
+        status="pass",
+        transcript_lines=["Booting Linux", "init: zygote"],
+        failure_reason="",
+        stage_reached="l3_verified",
+        boot_duration_sec=42.5,
+    )
+    assert result.status == "pass"
+    assert result.stage_reached == "l3_verified"
+    assert result.boot_duration_sec == 42.5
+    d = result.to_dict()
+    assert d["status"] == "pass"
+
+
+def test_reboot_result_fail_timeout():
+    """RebootResult 超时失败场景。"""
+    from loop_core.models import RebootResult
+
+    result = RebootResult(
+        status="fail",
+        transcript_lines=["Booting Linux"],
+        failure_reason="timeout",
+        stage_reached="l2_init_ready",
+        boot_duration_sec=90.0,
+    )
+    assert result.status == "fail"
+    assert result.failure_reason == "timeout"

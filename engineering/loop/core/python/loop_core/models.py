@@ -123,3 +123,25 @@ class EvidenceBundle:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass
+class RebootResult:
+    """reboot_and_wait 的返回值。
+
+    Attributes:
+        status: "pass"（设备成功回来）/ "fail"（超时或 panic）
+        transcript_lines: 整个 reboot 过程采集的串口行（从 reboot 命令到判定设备回来）
+        failure_reason: 失败原因（"" / "timeout" / "panic_detected: <line>" / "writer_busy" / "fixture_no_reboot"）
+        stage_reached: 达到的阶段：l1_boot_start / l2_init_ready / l3_verified / none
+        boot_duration_sec: 从 reboot 命令到 L3 验证通过的耗时（失败时为到失败点的耗时）
+    """
+
+    status: str
+    transcript_lines: list[str] = field(default_factory=list)
+    failure_reason: str = ""
+    stage_reached: str = "none"
+    boot_duration_sec: float = 0.0
+
+    def to_dict(self) -> dict:
+        return asdict(self)

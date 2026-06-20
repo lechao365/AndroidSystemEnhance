@@ -8,6 +8,7 @@
 |------|------|---------|
 | [module-readme-template.md](./module-readme-template.md) | 模块级 README 模板，4+1 视图（用例 / 逻辑 / 过程 / 开发 / 部署）组织，用于特性的顶层 README（如 `01-打点增强/README.md`） | 特性目录的入口文档 |
 | [module-template.md](./module-template.md) | 模块详细设计文档模板，覆盖用例 / 逻辑 / 过程 / 开发 / 部署 / 关键设计 / 接口参考等完整章节 | 特性下的单个子模块文档（如 `01.01-内核态增强.md`） |
+| [diagnosis-report-template.md](./diagnosis-report-template.md) | Loop boot 诊断报告模板，约束 AI 收到 EvidenceBundle 后产出的 markdown 报告格式（结论 / 证据链 / 根因 / 修复建议 / 建议新增 case / 循环终止建议） | Loop boot 诊断报告产出 |
 
 ## 约束
 

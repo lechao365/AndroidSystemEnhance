@@ -17,7 +17,9 @@ cases:             # 必填：用例列表
   - id: <用例ID，snake_case，全局唯一>
     description: "<用例描述，一句话说清楚验证什么>"
     command: "<执行的 shell 命令，空字符串表示仅探测 prompt>"
-    assert:        # 必填：断言规格
+    # 或
+    action: <reboot>  # 可选：动作型用例（与 command 互斥）。当前支持 reboot：触发设备重启并等待启动完成
+    assert:        # 必填：断言规格（action case 可为空 {}）
       type: <断言类型>
       value: <断言值>  # contains/equals/not_contains 需要
       pattern: <正则>  # regex 需要
@@ -168,3 +170,37 @@ parameters:
 
 注意：当列表项为复杂结构（dict 等）时，`{原id}_{item}` 中的 `item` 会取其
 字符串形式（可能不直观），推荐仅用简单字符串/数字作为 foreach 列表项。
+
+## 9. action 动作型用例
+
+当用例需要触发设备状态变迁（如重启）而非执行命令时，用 `action` 字段替代 `command`。
+
+### 支持的 action 值
+
+| action | 行为 | 适用场景 |
+|--------|------|---------|
+| `reboot` | 触发设备重启并等待启动完成（三级渐进判定：L1 boot 开始 → L2 init 阶段 → L3 boot_completed 验证） | boot 诊断、启动问题复现 |
+
+### 示例
+
+```yaml
+cases:
+  - id: trigger_reboot
+    action: reboot
+    description: "触发设备重启并等待启动完成"
+    severity: critical
+    assert: {}
+
+  - id: boot_ok
+    command: "getprop sys.boot_completed"
+    assert: {type: contains, value: "1"}
+    requires: [trigger_reboot]   # 拓扑保证：reboot 完成后才跑
+```
+
+### 规则
+
+1. `action` 与 `command` **互斥**，二选一
+2. `action: reboot` 的 case **不需要 assert value**（assert 可为空 `{}`）
+3. 后续 case 靠 `requires: [trigger_reboot]` 拓扑保证在 reboot 完成后执行
+4. reboot_and_wait 的判定 marker 来自 DeviceProfile（`boot_markers` / `panic_markers`）
+5. action case 的 TestCaseResult.assertion 字段为 `{"type": "action", "action": "reboot"}`

@@ -657,3 +657,120 @@ cases:
     suite = load_suite(path, [str(tmp_path)])
     case_c2 = [c for c in suite.cases if c.id == "c2"][0]
     assert "common.base.shared_log" in case_c2.on_fail.get("collectors", [])
+
+
+# ---------- action 字段（Task 3/4/5） ----------
+
+
+def test_test_case_has_action_field():
+    """TestCase dataclass 含 action 字段，默认空字符串。"""
+    from loop_core.case_loader import TestCase
+
+    case = TestCase(id="x", suite="s", command="", assert_spec={})
+    assert case.action == ""
+
+
+def test_test_case_action_can_be_set():
+    """TestCase.action 可被显式设置为 'reboot'。"""
+    from loop_core.case_loader import TestCase
+
+    case = TestCase(id="x", suite="s", command="", assert_spec={}, action="reboot")
+    assert case.action == "reboot"
+
+
+def test_parse_case_extracts_action():
+    """_parse_case 从 YAML 节点提取 action 字段。"""
+    from loop_core.case_loader import _parse_case
+
+    defn = {"id": "trigger_reboot", "action": "reboot", "assert": {}}
+    case = _parse_case(defn, "system.boot")
+    assert case.action == "reboot"
+    assert case.command == ""
+
+
+def test_parse_case_action_defaults_empty():
+    """无 action 字段时默认空字符串（命令模式）。"""
+    from loop_core.case_loader import _parse_case
+
+    defn = {"id": "x", "command": "ls", "assert": {"type": "contains", "value": "x"}}
+    case = _parse_case(defn, "s")
+    assert case.action == ""
+
+
+def test_validate_case_rejects_action_and_command_both_present():
+    """action 与 command 互斥：两者都有则报错。"""
+    from loop_core.case_loader import _validate_case_definition
+
+    with pytest.raises(ValueError, match="action and command are mutually exclusive"):
+        _validate_case_definition({
+            "id": "x",
+            "action": "reboot",
+            "command": "ls",
+            "assert": {"type": "contains", "value": "y"},
+        })
+
+
+def test_validate_case_rejects_unknown_action():
+    """action 只允许已知值（当前只有 reboot）。"""
+    from loop_core.case_loader import _validate_case_definition
+
+    with pytest.raises(ValueError, match="unknown action"):
+        _validate_case_definition({
+            "id": "x",
+            "action": "sleep",
+            "assert": {"type": "contains", "value": "y"},
+        })
+
+
+def test_validate_case_action_reboot_does_not_require_assert_value():
+    """action: reboot 的 case 不需要 assert value。"""
+    from loop_core.case_loader import _validate_case_definition
+
+    _validate_case_definition({"id": "x", "action": "reboot", "assert": {}})
+
+
+def test_validate_case_still_accepts_command_only():
+    """纯命令模式（无 action）仍被接受（向后兼容）。"""
+    from loop_core.case_loader import _validate_case_definition
+
+    _validate_case_definition({
+        "id": "x",
+        "command": "ls",
+        "assert": {"type": "contains", "value": "y"},
+    })
+
+
+def test_load_suite_accepts_action_case_with_empty_assert(tmp_path):
+    """action: reboot 的 case，assert 为空 dict 也能正常加载。"""
+    from loop_core.case_loader import load_suite
+
+    suite_file = tmp_path / "boot-test.yaml"
+    suite_file.write_text(
+        """
+suite: system.boot_test
+version: 1
+cases:
+  - id: trigger_reboot
+    action: reboot
+    description: "触发重启"
+    assert: {}
+  - id: boot_ok
+    command: "getprop sys.boot_completed"
+    assert: {type: contains, value: "1"}
+    requires: [trigger_reboot]
+""",
+        encoding="utf-8",
+    )
+    suite = load_suite(str(suite_file), [str(tmp_path)])
+    assert suite.cases[0].id == "trigger_reboot"
+    assert suite.cases[0].action == "reboot"
+    assert suite.cases[1].id == "boot_ok"
+    assert suite.cases[1].requires == ["system.boot_test.trigger_reboot"]
+
+
+def test_load_suite_action_case_no_assert_value_still_validates():
+    """action case 的 assert 不含 type，_validate_assertion_shape 应跳过。"""
+    from loop_core.case_loader import _validate_assertion_shape
+
+    _validate_assertion_shape({})
+
