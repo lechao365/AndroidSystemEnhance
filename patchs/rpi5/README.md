@@ -68,15 +68,24 @@ rpi5/
 │   │       ├── boot/config.txt.diff
 │   │       ├── device.mk.diff
 │   │       ├── manifest.xml.diff
+│   │       ├── mkbootimg.mk.diff
+│   │       ├── overlay/SettingsProviderRpiOverlay/res/values/defaults.xml.diff
+│   │       ├── ramdisk/init.rpi5.rc.diff
 │   │       ├── ramdisk/ueventd.rpi5.rc.diff
 │   │       ├── sepolicy/file_contexts.diff
-│   │       └── sepolicy/service_contexts.diff
+│   │       ├── sepolicy/service_contexts.diff
+│   │       └── vendor.prop.diff
 │   └── new/                       # 全部新增文件（完整文件）
-│       ├── device/brcm/rpi5/sepolicy/
-│       │   ├── lechao_lciod.te
-│       │   ├── lechao_lciod_hal.te
-│       │   ├── lechao_lcview.te
-│       │   └── lechao_lcview_hal.te
+│       ├── device/brcm/rpi5/
+│       │   ├── boot/wifi.conf
+│       │   ├── ramdisk/init.rpi5.wifi.rc
+│       │   ├── scripts/
+│       │   └── sepolicy/
+│       │       ├── lechao_lciod.te
+│       │       ├── lechao_lciod_hal.te
+│       │       ├── lechao_lcview.te
+│       │       ├── lechao_lcview_hal.te
+│       │       └── rpi5_wifi_connect.te
 │       └── vendor/lechao/
 │           ├── Android.bp
 │           └── services/
@@ -180,24 +189,33 @@ adb shell ls -l /dev/vendor_lechao_lcview /dev/vendor_lechao_usbd*
 
 | .diff 文件 | 目标源码路径 | 改动要点 |
 |-----------|-------------|---------|
-| `device/brcm/rpi5/BoardConfig.mk.diff` | `device/brcm/rpi5/BoardConfig.mk` | UART ttyAMA0、SELinux 配置、禁用 dm-verity |
+| `device/brcm/rpi5/BoardConfig.mk.diff` | `device/brcm/rpi5/BoardConfig.mk` | UART ttyAMA0、SELinux 配置、禁用 dm-verity、androidboot.verifiedbootstate=orange |
 | `device/brcm/rpi5/README.md.diff` | `device/brcm/rpi5/README.md` | 新增串口配置文档 |
 | `device/brcm/rpi5/aosp_rpi5.mk.diff` | `device/brcm/rpi5/aosp_rpi5.mk` | 跳过 VINTF kernel 校验 |
-| `device/brcm/rpi5/boot/config.txt.diff` | `device/brcm/rpi5/boot/config.txt` | 启用 UART + uart0-pi5 overlay |
+| `device/brcm/rpi5/boot/config.txt.diff` | `device/brcm/rpi5/boot/config.txt` | hdmi_force_hotplug=1、vc4-kms-v3d-pi5（RPi5 专用 overlay，修复无显示器时 surfaceflinger EGLConfig 崩溃）、UART overlay |
 | `device/brcm/rpi5/device.mk.diff` | `device/brcm/rpi5/device.mk` | Soong 命名空间 + lciod/lcview 产品包 |
 | `device/brcm/rpi5/manifest.xml.diff` | `device/brcm/rpi5/manifest.xml` | 格式调整 |
+| `device/brcm/rpi5/mkbootimg.mk.diff` | `device/brcm/rpi5/mkbootimg.mk` | 修复 boot 分区 Make 依赖缺失：config.txt/Image/dtb/overlays 加入 rpiboot 依赖，避免增量编译时 boot 改动不生效 |
+| `device/brcm/rpi5/overlay/SettingsProviderRpiOverlay/res/values/defaults.xml.diff` | `.../SettingsProviderRpiOverlay/res/values/defaults.xml` | 默认设置覆盖 |
+| `device/brcm/rpi5/ramdisk/init.rpi5.rc.diff` | `device/brcm/rpi5/ramdisk/init.rpi5.rc` | init 启动脚本调整 |
 | `device/brcm/rpi5/ramdisk/ueventd.rpi5.rc.diff` | `.../ramdisk/ueventd.rpi5.rc` | lciod/lcview 设备节点权限 |
 | `device/brcm/rpi5/sepolicy/file_contexts.diff` | `.../sepolicy/file_contexts` | lciod/lcview SELinux 文件上下文 |
 | `device/brcm/rpi5/sepolicy/service_contexts.diff` | `.../sepolicy/service_contexts` | lciod/lcview 服务上下文 |
+| `device/brcm/rpi5/vendor.prop.diff` | `device/brcm/rpi5/vendor.prop` | vendor 属性追加 |
 
 ### aosp/new/
 
 | 路径 | 说明 |
 |------|------|
+| `device/brcm/rpi5/boot/wifi.conf` | WiFi 自动连接配置文件（SSID/PSK/key_mgmt） |
+| `device/brcm/rpi5/ramdisk/init.rpi5.wifi.rc` | WiFi 连接服务 init.rc |
+| `device/brcm/rpi5/scripts/Android.bp` | rpi5-wifi-connect 脚本构建规则 |
+| `device/brcm/rpi5/scripts/rpi5-wifi-connect.sh` | 开机自动连接 WiFi 脚本（读 wifi.conf → wpa_cli 连接 → 静态 IP 维持） |
 | `device/brcm/rpi5/sepolicy/lechao_lciod.te` | lciod 系统服务 SELinux 策略 |
 | `device/brcm/rpi5/sepolicy/lechao_lciod_hal.te` | lciod HAL SELinux 策略 |
 | `device/brcm/rpi5/sepolicy/lechao_lcview.te` | lcview 系统服务 SELinux 策略 |
 | `device/brcm/rpi5/sepolicy/lechao_lcview_hal.te` | lcview HAL SELinux 策略 |
+| `device/brcm/rpi5/sepolicy/rpi5_wifi_connect.te` | WiFi 连接脚本 SELinux 策略 |
 | `vendor/lechao/Android.bp` | Soong 命名空间声明 |
 | `vendor/lechao/services/include/` | 共享头文件（lechao_log.h） |
 | `vendor/lechao/services/lechao_lciod/` | IO 监控 HAL + System Service |

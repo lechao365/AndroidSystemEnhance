@@ -1,8 +1,28 @@
 diff --git a/boot/config.txt b/boot/config.txt
-index fb68a37..ff26b04 100644
+index fb68a37..c4315ba 100644
 --- a/boot/config.txt
 +++ b/boot/config.txt
-@@ -27,6 +27,10 @@ dtoverlay=cma,cma-320
+@@ -9,13 +9,18 @@ camera_auto_detect=1
+ 
+ # Display
+ disable_overscan=1
++# 强制 HDMI 热插拔检测为已连接，无显示器时 DRM/EGL 仍可初始化
++# 避免 SurfaceFlinger 因 "Failed to open any DRM device" 崩溃导致 bootloop
++hdmi_force_hotplug=1
+ 
+ # Display panel
+ #dtoverlay=vc4-kms-dsi-7inch
+ #dtoverlay=vc4-kms-dsi-ili9881-7inch
+ 
+ # Graphics acceleration
+-dtoverlay=vc4-kms-v3d
++# RPi5 必须使用 vc4-kms-v3d-pi5（非通用 vc4-kms-v3d），否则 DRM 驱动不绑定
++# 无 /dev/dri/card0 → mesa EGL 无后端 → surfaceflinger "no suitable EGLConfig found" SIGABRT
++dtoverlay=vc4-kms-v3d-pi5
+ dtoverlay=cma,cma-320
+ 
+ # I2C
+@@ -27,6 +32,10 @@ dtoverlay=cma,cma-320
  # SPI
  #dtparam=spi=on
  

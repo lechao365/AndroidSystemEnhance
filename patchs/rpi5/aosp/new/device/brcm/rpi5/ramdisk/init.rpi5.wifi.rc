@@ -1,0 +1,21 @@
+# rpi5 WiFi 自动连接服务（oneshot 模式，执行完毕即退出）
+# 等 sys.boot_completed 后触发，脚本读取 wifi.conf 连接 WiFi 并设置静态 IP。
+#
+# 用 oneshot 而非 daemon：
+#   - 脚本内部已有 while true 循环（connect → monitor → reconnect）
+#   - 但 wifi.conf 不存在 / ssid=default 时脚本 exit 0 正常退出
+#   - 不加 oneshot 会导致 init 每 5 秒重启已退出的服务，形成噪声循环
+#
+# 触发流程：
+#   sys.boot_completed=1 → start rpi5_wifi_connect（仅一次）
+#   脚本挂载 boot 分区 → 等待 WifiService → connect-network → daemon 循环
+
+service rpi5_wifi_connect /system/bin/rpi5_wifi_connect
+    class late_start
+    user root
+    group root
+    disabled
+    oneshot
+
+on property:sys.boot_completed=1
+    start rpi5_wifi_connect

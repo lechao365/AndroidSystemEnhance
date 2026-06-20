@@ -1,0 +1,15 @@
+# rpi5_wifi_connect —— 开机自动连接 WiFi 的 shell 脚本
+# 当前 androidboot.selinux=permissive，本文件不会阻塞运行；
+# 切换到 enforcing 时需要此域放行：读 /boot/wifi.conf、exec shell/system、log、cmd wifi。
+type rpi5_wifi_connect, domain;
+type rpi5_wifi_connect_exec, file_type, exec_type;
+
+# 由 init 通过 seclabel u:r:shell:s0 启动（见 init.rpi5.wifi.rc），
+# 实际运行在 shell 域，故无需 init_daemon_domain；此处仅声明类型供后续扩展。
+# 若改为独立域（seclabel u:r:rpi5_wifi_connect:s0），启用以下规则：
+# init_daemon_domain(rpi5_wifi_connect)
+# allow rpi5_wifi_connect shell_exec:file rx_file_perms;
+# allow rpi5_wifi_connect system_file:file rx_file_perms;
+# allow rpi5_wifi_connect boot_block_device:blk_file r_file_perms;
+# allow rpi5_wifi_connect vfat:dir search;
+# allow rpi5_wifi_connect vfat:file r_file_perms;

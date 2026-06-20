@@ -1,0 +1,20 @@
+diff --git a/ramdisk/init.rpi5.rc b/ramdisk/init.rpi5.rc
+index b1d0bb8..3abcf85 100644
+--- a/ramdisk/init.rpi5.rc
++++ b/ramdisk/init.rpi5.rc
+@@ -1,4 +1,5 @@
+ import /vendor/etc/init/hw/init.rpi5.usb.rc
++import /vendor/etc/init/hw/init.rpi5.wifi.rc
+ 
+ on init
+     symlink /sdcard /storage/sdcard0
+@@ -8,3 +9,9 @@ on fs
+ 
+ on late-fs
+     mount_all /vendor/etc/fstab.rpi5 --late
++
++# 默认开启网络 ADB（端口 5555，配合 ro.adb.secure=0 免授权）
++# 触发 packages/modules/adb/daemon/main.cpp 中的 TCP 监听逻辑
++on boot
++    setprop persist.adb.tcp.port 5555
++    setprop service.adb.tcp.port 5555

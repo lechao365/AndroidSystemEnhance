@@ -1,8 +1,16 @@
 diff --git a/device.mk b/device.mk
-index 8de7b0f..85a08e8 100644
+index 8de7b0f..6c75424 100644
 --- a/device.mk
 +++ b/device.mk
-@@ -166,8 +166,41 @@ PRODUCT_COPY_FILES += \
+@@ -159,6 +159,7 @@ PRODUCT_COPY_FILES += \
+     $(DEVICE_PATH)/ramdisk/fstab.rpi5:$(TARGET_COPY_OUT_VENDOR)/etc/fstab.rpi5 \
+     $(DEVICE_PATH)/ramdisk/init.rpi5.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/hw/init.rpi5.rc \
+     $(DEVICE_PATH)/ramdisk/init.rpi5.usb.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/hw/init.rpi5.usb.rc \
++    $(DEVICE_PATH)/ramdisk/init.rpi5.wifi.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/hw/init.rpi5.wifi.rc \
+     $(DEVICE_PATH)/ramdisk/ueventd.rpi5.rc:$(TARGET_COPY_OUT_VENDOR)/etc/ueventd.rc
+ 
+ # Seccomp
+@@ -166,8 +167,46 @@ PRODUCT_COPY_FILES += \
      $(DEVICE_PATH)/seccomp_policy/mediacodec.policy:$(TARGET_COPY_OUT_VENDOR)/etc/seccomp_policy/mediacodec.policy \
      $(DEVICE_PATH)/seccomp_policy/mediaswcodec.policy:$(TARGET_COPY_OUT_VENDOR)/etc/seccomp_policy/mediaswcodec.policy
  
@@ -42,10 +50,15 @@ index 8de7b0f..85a08e8 100644
 +    lechao_lcview_hal \
 +    vendor.lechao.lcview.ILcView-vintf \
 +    vendor.lechao.lcview-config
++
++# rpi5 WiFi 自动连接脚本
++# 读取 /boot/wifi.conf（用户在 SD 卡 boot 分区创建），开机自动连接指定路由器
++PRODUCT_PACKAGES += \
++    rpi5_wifi_connect
  
  # Storage
  $(call inherit-product, $(SRC_TARGET_DIR)/product/emulated_storage.mk)
-@@ -194,6 +227,8 @@ PRODUCT_COPY_FILES += \
+@@ -194,6 +233,8 @@ PRODUCT_COPY_FILES += \
      frameworks/native/data/etc/android.hardware.usb.host.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.usb.host.xml \
      frameworks/native/data/etc/android.software.midi.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.software.midi.xml
  

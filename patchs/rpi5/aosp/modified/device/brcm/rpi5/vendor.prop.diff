@@ -1,0 +1,13 @@
+diff --git a/vendor.prop b/vendor.prop
+index 97a2abd..3eabecc 100644
+--- a/vendor.prop
++++ b/vendor.prop
+@@ -69,3 +69,8 @@ ro.boot.hypervisor.vm.supported=1
+ # Wifi
+ ro.boot.wificountrycode=00
+ wifi.interface=wlan0
++
++# ADB
++# 开发调试：免授权网络 ADB（配合 init.rpi5.rc 的 persist.adb.tcp.port=5555）
++# 安全提示：同网段任意主机可 adb connect 后 adb root，仅限可信局域网开发环境
++ro.adb.secure=0

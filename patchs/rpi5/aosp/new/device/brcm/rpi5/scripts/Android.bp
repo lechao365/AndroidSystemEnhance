@@ -1,0 +1,10 @@
+// Copyright (C) 2024
+//
+// SPDX-License-Identifier: Apache-2.0
+
+// 开机自动连接 WiFi 的 shell 脚本
+// 读取 /boot/wifi.conf（INI 格式），调用 cmd wifi connect-network 连接指定路由器
+sh_binary {
+    name: "rpi5_wifi_connect",
+    src: "rpi5-wifi-connect.sh",
+}

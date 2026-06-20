@@ -1,0 +1,14 @@
+diff --git a/overlay/SettingsProviderRpiOverlay/res/values/defaults.xml b/overlay/SettingsProviderRpiOverlay/res/values/defaults.xml
+index de50395..f3b1b53 100644
+--- a/overlay/SettingsProviderRpiOverlay/res/values/defaults.xml
++++ b/overlay/SettingsProviderRpiOverlay/res/values/defaults.xml
+@@ -27,6 +27,9 @@
+     <!-- Disable bluetooth by default -->
+     <bool name="def_bluetooth_on">false</bool>
+ 
++    <!-- Enable WiFi by default (配合 rpi5_wifi_connect 自动连接 /boot/wifi.conf) -->
++    <bool name="def_wifi_on">true</bool>
++
+     <!-- Disable location by default -->
+     <integer name="def_location_mode">0</integer>
+ 
