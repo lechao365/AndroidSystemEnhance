@@ -23,3 +23,14 @@ LE（Loop Engineering）框架运行产物：
 - 按时间戳命名的运行目录：`<ts>-<scenario>/`
 - 结构化报告：`baseline/report.json`
 - 人工摘要：`baseline/summary.txt`
+
+### 自动清理
+
+`le.sh` 每次运行结束时自动调用 [`le_runs_cleanup.sh`](../harness/scripts/le_runs_cleanup.sh) 收敛产物规模：
+
+- **保留份数**：默认 20，由环境变量 `LE_RUNS_KEEP` 覆盖，或 CLI 参数 `--keep N` 指定
+- **判定依据**：run 子目录 **mtime 降序**，超过份数的最旧目录被删除
+- **保护范围**：仅清理子目录（run-id），散文件（如 `probe-reboot.log`）原样保留
+- **手动触发**：`bash engineering/harness/scripts/le_runs_cleanup.sh --keep 20 --dry-run`
+
+退出码：`0`=已清理；`3`=参数错误；`4`=无操作（含 `--dry-run`）。

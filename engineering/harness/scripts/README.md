@@ -58,6 +58,34 @@ bash engineering/harness/scripts/le.sh run \
 
 ---
 
+## le_runs_cleanup.sh
+
+**位置**：[`le_runs_cleanup.sh`](./le_runs_cleanup.sh)
+
+LE 框架 runs/ 产物自动清理脚本，由 `le.sh` 在每次运行结束时自动调用，也可手动触发。
+
+**规则**：
+- 仅清理 `runs/` 下**子目录**（run-id 目录），散文件（如 `probe-reboot.log`）保留不动
+- 按目录 mtime 降序，保留最新 N 份（默认 20），删除其余
+- 保留份数：`--keep N` > 环境变量 `LE_RUNS_KEEP` > 默认 20
+
+**用法**：
+
+```bash
+# 默认（保留 20 份，环境变量 LE_RUNS_KEEP 可覆盖）
+bash engineering/harness/scripts/le_runs_cleanup.sh
+
+# 指定保留份数
+bash engineering/harness/scripts/le_runs_cleanup.sh --keep 10
+
+# 试运行，仅打印不删除
+bash engineering/harness/scripts/le_runs_cleanup.sh --keep 20 --dry-run
+```
+
+**退出码**：`0`=已清理；`1`=部分删除失败；`3`=参数错误；`4`=无操作（含 `--dry-run`、未超份数、目录不存在）。
+
+---
+
 ## start_rp5_serial_host.bat
 
 **位置**：[`start_rp5_serial_host.bat`](./start_rp5_serial_host.bat)

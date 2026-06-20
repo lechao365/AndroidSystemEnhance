@@ -16,4 +16,9 @@ export PYTHONPATH="$(harness_pythonpath)${PYTHONPATH:+:$PYTHONPATH}"
 python3 -m loop_core.cli "$@"
 rc=$?
 
+# 收尾清理 runs/ 下过期 run-id 子目录（失败不中断主流程）
+# 保留份数由环境变量 LE_RUNS_KEEP 控制，默认 20
+bash "$SCRIPT_DIR/le_runs_cleanup.sh" --keep "${LE_RUNS_KEEP:-20}" \
+    || log_warn "runs 清理失败（不影响本次运行结果，退出码 $rc 已保留）"
+
 harness_exit "$rc"
