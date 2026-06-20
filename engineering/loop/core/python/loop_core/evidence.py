@@ -85,4 +85,18 @@ def render_evidence_summary(bundle: EvidenceBundle) -> str:
             if cr.hints:
                 lines.append(f"        hints: {cr.hints}")
 
+    if bundle.serial_context:
+        lines.append("")
+        lines.append("=== 串口上下文 ===")
+        tp = bundle.serial_context.get("transcript_path", "")
+        if tp:
+            lines.append(f"transcript: {tp}")
+        rc = bundle.serial_context.get("reboot_cycles", 0)
+        lines.append(f"reboot cycles: {rc}")
+        snippet = bundle.serial_context.get("serial_snippet", [])
+        if snippet:
+            lines.append("serial snippet:")
+            for item in snippet[:20]:
+                lines.append(f"  {item}")
+
     return "\n".join(lines)

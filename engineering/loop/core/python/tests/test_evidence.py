@@ -90,3 +90,25 @@ def test_long_output_truncated_in_json(tmp_path):
     data = json.loads(Path(paths["evidence_json"]).read_text())
     assert len(data["cases"][0]["output"]) == 5000  # output 保留完整
     assert len(data["cases"][0]["output_preview"]) == 200
+
+
+def test_summary_renders_transcript_and_reboot_cycles(tmp_path):
+    bundle = EvidenceBundle(
+        bundle_id="eb-1",
+        device_id="rp5",
+        suite="boot-success",
+        timestamp="2026-06-20T12:00:00+08:00",
+        summary={"total": 1, "passed": 0, "failed": 1, "skipped": 0, "overall": "FAIL"},
+        cases=[],
+        evidence={},
+        serial_context={
+            "transcript_path": "/tmp/serial.log",
+            "reboot_cycles": 3,
+            "serial_snippet": ["line1", "line2"],
+        },
+    )
+    paths = write_evidence_bundle(bundle, str(tmp_path))
+    text = Path(paths["summary_txt"]).read_text(encoding="utf-8")
+    assert "/tmp/serial.log" in text
+    assert "reboot cycles: 3" in text
+    assert "line1" in text

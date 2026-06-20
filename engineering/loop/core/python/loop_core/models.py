@@ -119,6 +119,7 @@ class EvidenceBundle:
     device_profile: dict = field(default_factory=dict)
     execution_config: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    serial_context: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)

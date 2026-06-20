@@ -113,3 +113,6 @@ class LoopRunner:
             "recent_limit": self.recent_limit,
             "provider_type": type(self.transport).__name__,
         }
+        describe = getattr(self.transport, "describe_runtime_context", None)
+        if callable(describe):
+            bundle.serial_context = describe() or {}

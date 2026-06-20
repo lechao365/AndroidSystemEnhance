@@ -142,3 +142,34 @@ cases:
     assert bundle.execution_config["capture_timeout"] == 3.0
     assert bundle.execution_config["recent_limit"] == 50
     assert "FixtureTransport" in bundle.execution_config["provider_type"]
+
+
+def test_runner_bundle_contains_serial_runtime_context(tmp_path):
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: c1
+    command: ""
+    assert: {type: prompt_visible}
+""")
+    suite = load_suite(path, [str(tmp_path)])
+
+    class TransportWithContext(FixtureTransport):
+        def describe_runtime_context(self):
+            return {
+                "transcript_path": "/tmp/serial.log",
+                "serial_snippet": ["line1", "line2"],
+                "reboot_cycles": 2,
+            }
+
+    runner = LoopRunner(
+        device_id="rp5",
+        prompt_markers=["console:/ $"],
+        transport=TransportWithContext([{"t": 1.0, "text": "console:/ $"}]),
+        suite=suite,
+    )
+    bundle = runner.run()
+
+    assert bundle.serial_context["transcript_path"] == "/tmp/serial.log"
+    assert bundle.serial_context["reboot_cycles"] == 2
