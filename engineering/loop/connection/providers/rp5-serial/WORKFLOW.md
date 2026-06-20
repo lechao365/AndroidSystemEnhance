@@ -38,7 +38,8 @@ Host 启动后职责：
 1. 独占打开 COM 口
 2. 维护 session 状态与 writer lease
 3. 对外提供本地 TCP 协议端点（JSON Lines）
-4. 记录轻量运行日志（启停 / 串口状态 / reconnect / attach / lease 变化）
+4. 持续落盘串口 transcript（`transcript_path`，每行带 ISO 时间戳）
+5. 记录轻量运行日志（启停 / 串口状态 / reconnect / attach / lease 变化）
 
 ## WSL2 Client 三模式
 
@@ -73,7 +74,8 @@ Host 启动后职责：
 - 单 writer，无排队，无 TTL 回收
 - Host 前台运行，不含服务托管
 - 不实现 `expect.wait`，由 client 侧自行轮询输出缓冲
-- 不含 boot-failure workflow 与 ADB
+- 不含 ADB
+- transcript 持续落盘（`.host-log/rp5-serial-transcript.log`），status 接口返回 `transcript_path`
 
 ## bash 入口与日志
 

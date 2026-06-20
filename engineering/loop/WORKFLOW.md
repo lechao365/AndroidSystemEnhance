@@ -43,7 +43,10 @@ AI 接管设备验收：执行用例 → 输出证据 → AI 分析 → 修复�
 
 `cases/common/shell.yaml`（`common.shell`）提供：
 - 原子用例 `shell_reachable`（作为系统用例的 `requires` 前置）。
-- 公共诊断 collector：`boot_log` / `init_log` / `crash_dump`。
+- 公共诊断 collector：`boot_log` / `init_log` / `crash_dump` / `serial_recent`。
+- `serial_recent` 为串口上下文 collector（`mode: serial_context`），无需 shell 可达
+  即可获取 host transcript 路径、最近串口片段与重启周期，是 zygote 反复重启等场景的
+  串口第一现场证据入口。
 
 业务 suite 通过 `include: [common/shell]` 自动注入上述用例和 collector，
 失败时直接用短名引用即可，无需重复定义。新场景应优先复用公共 collector，
@@ -62,7 +65,7 @@ AI 接管设备验收：执行用例 → 输出证据 → AI 分析 → 修复�
 | `assertion_engine.py` | 确定性断言（contains/regex/equals/prompt_visible/not_contains/exit_code_zero） |
 | `case_loader.py` | YAML 加载 + include + requires 拓扑排序 |
 | `executor.py` | 用例执行 + collector 触发（去重） |
-| `collector.py` | 深度证据采集 |
+| `collector.py` | 深度证据采集（含 `serial_context` 模式，消费 transport runtime context） |
 | `runner.py` | 通用 LoopRunner（场景无关） |
 | `evidence.py` | EvidenceBundle JSON 输出 |
 | `report.py` | evidence.py 薄封装 |
@@ -90,6 +93,15 @@ AI 接管设备验收：执行用例 → 输出证据 → AI 分析 → 修复�
 | `prompt_visible` | shell prompt 可见 |
 | `not_contains` | 输出不包含文本 |
 | `exit_code_zero` | 退出码为 0 |
+
+## EvidenceBundle 串口上下文
+
+EvidenceBundle `serial_context` 字段提供串口第一现场证据：
+- `transcript_path`：host 持续落盘的串口 transcript 文件
+- `serial_snippet`：最近一段串口片段
+- `reboot_cycles`：基于 reboot marker 估算的最近重启周期数
+
+shell 不可达时，AI/人工应优先分析 `serial_context`；shell 可达时再结合 `init_log` / `crash_dump` 等 collector 证据。
 
 ## 遗留点
 

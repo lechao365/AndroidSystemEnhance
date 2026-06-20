@@ -46,6 +46,7 @@ engineering/loop/
 | boot 诊断 collector | `common.shell.boot_log` | dmesg |
 | init 诊断 collector | `common.shell.init_log` | getprop init.svc.* / logcat -b system |
 | 崩溃诊断 collector | `common.shell.crash_dump` | logcat -b crash / tombstones |
+| 串口上下文 collector | `common.shell.serial_recent` | transcript path + serial snippet（mode: serial_context） |
 
 业务 suite 通过 `include` 即可获得上述全部资产：
 
@@ -122,8 +123,28 @@ PYTHONPATH="engineering/loop/core/python:engineering/loop/connection/providers/r
   -v --import-mode=importlib
 ```
 
+## EvidenceBundle 串口上下文
+
+`evidence_bundle.json` 包含 `serial_context` 字段，承载串口第一现场证据：
+
+| 字段 | 说明 |
+|------|------|
+| `transcript_path` | host 持续落盘的串口 transcript 文件路径 |
+| `serial_snippet` | 最近 N 行（≤40）串口关键片段 |
+| `reboot_cycles` | 基于 `reboot_markers` 估算的最近重启周期数 |
+| `recent_line_count` | host 当前环形缓冲中的行数 |
+
+`summary.txt` 同步渲染上述内容，方便人工快速浏览。
+
+## 串口 transcript
+
+rp5-serial host 持续将串口正文写入 `transcript_path`（默认 `.host-log/rp5-serial-transcript.log`），
+每行带 ISO 时间戳。`serial_recent` collector 通过 `mode: serial_context` 直接消费 host 上下文，
+无需 shell 可达即可获取串口根证据（transcript 路径 + 最近片段 + restart 周期）。
+
 ## 设计文档
 
 - `docs/specs/2026-06-19-loop-engineering-v2-design.md`（v2 架构，权威来源）
+- `docs/specs/2026-06-20-loop-zygote-restart-serial-observability-design.md`（串口观测补强设计）
 - `docs/specs/2026-06-19-loop-core-extraction-design.md`（core 抽取）
 - `docs/specs/2026-06-19-loop-engineering-design.md`（v1 原始设计，历史归档）
