@@ -1,68 +1,83 @@
 version: 1
 
 # scope 判定规则（机器层）
-# 解释层：scope-mapping.md（人类可读）
-# 匹配语义：按 priority 降序遍历，首条命中即归属（等价 md 的"自上而下首条命中即归属"）
+# scope 判定规则 — 按 priority 降序，首条命中即归属
 # 新增目录/模块时只需追加 rule，无需修改 workflow 脚本。
 rules:
   # —— kernel 模块（精确）——
   - match: "kernel/**/vendor/lechao/LcView/**"
     scope: kernel-lcview
     priority: 100
+    description: "LcView 打点框架（内核态驱动）"
   - match: "kernel/**/vendor/lechao/LcIod/**"
     scope: kernel-lciod
     priority: 99
+    description: "LcIod IO 监控驱动（内核态驱动）"
 
   # —— kernel 兜底 ——
   - match: "kernel/**"
     scope: kernel-unknown
     priority: 50
+    description: "kernel 其他模块，无明确模块归属"
 
   # —— aosp 模块（md 原文为 grep 文件名/路径，此处用 glob 近似）——
   - match: "aosp/**/LcView/**"
     scope: aosp-lcview
     priority: 90
+    description: "AOSP 层 LcView HAL/Service/Daemon"
   - match: "aosp/**/lcview*"
     scope: aosp-lcview
     priority: 90
+    description: "AOSP 层 LcView HAL/Service/Daemon"
   - match: "aosp/**/LcIod/**"
     scope: aosp-lciod
     priority: 89
+    description: "AOSP 层 LcIod HAL/Service/Daemon"
   - match: "aosp/**/lciod*"
     scope: aosp-lciod
     priority: 89
+    description: "AOSP 层 LcIod HAL/Service/Daemon"
 
   # —— aosp 兜底 ——
   - match: "aosp/**"
     scope: aosp-unknown
     priority: 40
+    description: "AOSP 其他模块，无明确模块归属"
 
   # —— engineering/harness 固定路径（互斥，priority 占位）——
   - match: "engineering/harness/workflows/**"
     scope: workflows
     priority: 70
+    description: "harness 工作流脚本"
   - match: "engineering/harness/rules/**"
     scope: rules
     priority: 70
+    description: "harness 规则文档"
   - match: "engineering/harness/config/**"
     scope: config
     priority: 70
+    description: "harness 配置映射"
   - match: "engineering/harness/scripts/**"
     scope: scripts
     priority: 70
+    description: "harness 辅助脚本"
   - match: "engineering/harness/templates/**"
     scope: templates
     priority: 70
+    description: "harness 模板"
 
   # —— 顶层固定目录 ——
   - match: "docs/**"
     scope: docs
     priority: 60
+    description: "技术文档"
   - match: ".opencode/**"
     scope: tooling
     priority: 60
+    description: "开发工具配置"
 
   # —— 全局兜底 ——
   - match: "**"
     scope: misc
     priority: 0
+    description: "未命中任何分类的兜底"

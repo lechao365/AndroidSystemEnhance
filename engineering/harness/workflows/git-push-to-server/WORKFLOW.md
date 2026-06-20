@@ -139,7 +139,7 @@ bash engineering/harness/workflows/git-push-to-server/collect_diff.sh --stat-onl
 
 > 完整映射表已抽出至独立配置，新增目录只改配置不动 workflow。
 
-详见 [scope 映射表](../../config/scope-mapping.md)
+详见 [scope 映射表](../../config/scope-mapping.yaml)
 
 #### 选取规则
 

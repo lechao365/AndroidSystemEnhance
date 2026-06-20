@@ -18,7 +18,7 @@ description: 仅以 promoted baseline 为真相源，把 workspace 偏离部分�
 
 ## Preconditions（前置条件）
 
-1. **真相源资格**：本 workflow 使用的 patchs 基线必须是 **promoted baseline**（已完成晋升，证据完整）。未证据化 baseline 不得作为恢复真相源（`SRC-004`）。证据字段以 `engineering/harness/config/baseline-evidence-template.md` 为模板，状态登记维护在 `engineering/harness/config/baseline-status.md`。若 patchs 资产未完成晋升，本 workflow **拒绝执行**，提示用户先走 sync-code-to-patchs + 晋升流程。
+1. **真相源资格**：本 workflow 使用的 patchs 基线必须是 **promoted baseline**（已完成晋升，证据完整）。未证据化 baseline 不得作为恢复真相源（`SRC-004`）。证据字段以 `engineering/harness/config/baseline-evidence-template.yaml` 为模板，状态登记维护在 `engineering/harness/config/baseline-status.yaml`。若 patchs 资产未完成晋升，本 workflow **拒绝执行**，提示用户先走 sync-code-to-patchs + 晋升流程。
 2. 操作对象仅限 `~/workspace/`（kernel + aosp），**不动 `patchs/`**
 3. 执行前建议 `git stash`/commit 保存当前坏状态现场（脚本不自动备份，便于事后定位根因）
 4. **不自动 `git add`/`git commit`**：执行后 working tree 处于回退后状态，由用户决定是否提交（便于 `git diff` 复查）

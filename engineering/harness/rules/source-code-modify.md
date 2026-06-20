@@ -4,7 +4,7 @@
 > - `SRC-001`：`~/workspace/` 是唯一参与编译的源码真相源，所有定制改动必须先改 workspace。
 > - `SRC-002`：`patchs/`（除 `others/`）是 workspace 的单向受控归档目录，仅允许通过 `sync-code-to-patchs` 同步，严禁手动修改。
 > - `SRC-003`：`patchs/others/` 不依赖 workspace，允许独立维护。
-> - `SRC-004`：未完成证据化晋升（promoted baseline）的 patchs 资产**不得**宣称为 revert workflow 的恢复真相源；证据字段须按 `engineering/harness/config/baseline-evidence-template.md` 填写并在 `baseline-status.md` 登记。
+> - `SRC-004`：未完成证据化晋升（promoted baseline）的 patchs 资产**不得**宣称为 revert workflow 的恢复真相源；证据字段须按 `engineering/harness/config/baseline-evidence-template.yaml` 填写并在 `baseline-status.yaml` 登记。
 
 ## 核心原则
 
@@ -24,7 +24,7 @@
 > 4. **operator**：执行人/批准人 → `approved_by`
 > 5. **timestamp**：验证完成时间 → `approved_at`
 >
-> 编译通过 ≠ 验证通过。未上板验证前禁止归档。证据须按 `engineering/harness/config/baseline-evidence-template.md` 填写，并在 `engineering/harness/config/baseline-status.md` 登记，方可晋升为 promoted baseline。
+> 编译通过 ≠ 验证通过。未上板验证前禁止归档。证据须按 `engineering/harness/config/baseline-evidence-template.yaml` 填写，并在 `engineering/harness/config/baseline-status.yaml` 登记，方可晋升为 promoted baseline。
 
 ## 禁止行为
 

@@ -14,7 +14,7 @@ harness 自身的文档 / 脚本 / 配置一致性静态校验入口，无副作
   - 调用：`bash engineering/harness/scripts/validate_harness_docs.sh`
 - [`validate_harness_scripts.sh`](./validate_harness_scripts.sh) — bash 脚本合规校验：`workflows/*/*.sh` 与 `scripts/*.sh` 是否 source `harness_bootstrap.sh`、是否调用 `harness_init`、是否出现裸 `exit` / 裸 `/tmp/` / 直接依赖 `_H_*`/`_h_*` 私有符号（公共库自身豁免）。
   - 调用：`bash engineering/harness/scripts/validate_harness_scripts.sh`
-- [`validate_harness_config.sh`](./validate_harness_config.sh) — 配置层校验：`scope-mapping.yaml` / `doc-sync-mapping.yaml` 存在且可被 python3 解析、`schema/*.json` 可被 `json.load()` 加载、`priority` 为整数、`match` 非空、`routes[].docs` 项以 `docs/` 开头。依赖 `python3`（含 `yaml` 模块）。
+- [`validate_harness_config.sh`](./validate_harness_config.sh) — 配置层校验：`scope-mapping.yaml` / `doc-sync-mapping.yaml` 存在且可被 python3 解析、`version` 合法性、`priority` 为整数、`match` 非空、`scope` 命名规范、`mode` 值域、`routes[].docs` 项以 `docs/` 开头。依赖 `python3`（含 `yaml` 模块）。
   - 调用：`bash engineering/harness/scripts/validate_harness_config.sh`
 
 ## 约定

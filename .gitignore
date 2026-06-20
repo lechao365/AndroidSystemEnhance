@@ -6,14 +6,8 @@
 
 
 # 工程产物目录（本地产物，不归档）
-engineering/output/log/*
-!engineering/output/log/.gitkeep
-
-engineering/output/host-log/*
-!engineering/output/host-log/.gitkeep
-
-engineering/output/runs/*
-!engineering/output/runs/.gitkeep
+engineering/output/*
+!engineering/output/README.md
 
 # 根级 output 防御（工程产物统一在 engineering/output/）
 /output/

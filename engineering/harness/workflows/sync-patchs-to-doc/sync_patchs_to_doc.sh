@@ -225,7 +225,7 @@ if [ "$CHECK_ONLY" = false ]; then
 
 下一步（7 步闭环，详见 WORKFLOW.md）：
   ① 本报告已列出变动清单（+ --full-diff 可取完整 diff 正文）
-  ② 依据 engineering/harness/config/doc-sync-mapping.md 将变动分发到对应文档目录（01/02）
+   ② 依据 engineering/harness/config/doc-sync-mapping.yaml 将变动分发到对应文档目录（01/02）
   ③ 读 patchs/rpi5/manifest.yaml，按 source 去 ~/workspace/ 取全量源码上下文
   ④ 用行号锚点(#L) + 符号名 + 文件名 定位受影响章节（注意形态D代码块注释盲区）
   ⑤ 输出动作清单级方案（文档→章节→动作），用户确认后落盘

@@ -18,7 +18,7 @@ description: patchs/rpi5 变动后生成报告，按模板规范将代码 diff �
 ## Preconditions（前置条件）
 
 - `patchs/rpi5/manifest.yaml` 存在（首次未归档时停下提示用户先执行 `/sync-code-to-patchs`）
-- `engineering/harness/config/doc-sync-mapping.md` 可读（patchs→文档映射规则）
+- `engineering/harness/config/doc-sync-mapping.yaml` 可读（patchs→文档映射规则）
 - 目标设计文档（`01-*/02-*`）与模板（`engineering/harness/templates/*.md`）存在
 
 ## Inputs（输入）
@@ -75,9 +75,9 @@ bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh --fu
 bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh --check-only  # 仅检查，不输出提示
 ```
 
-### 2. 按映射规则定位文档（依据 engineering/harness/config/doc-sync-mapping.md）
+### 2. 按映射规则定位文档（依据 engineering/harness/config/doc-sync-mapping.yaml）
 
-**禁止凭空自主判断归属**，必须依据 [patchs→文档映射规则](../../config/doc-sync-mapping.md)：
+**禁止凭空自主判断归属**，必须依据 [patchs→文档映射规则](../../config/doc-sync-mapping.yaml)：
 
 - **精确匹配**：`**/LcView/**`→`01-打点增强/`、`**/LcIod/**`→`02-IO增强/`、`others/usb-*`→`02-IO增强/` 等（首条命中即归属）
 - **通用配置类**（如 `device.mk.diff`、`*sepolicy*`、`Android.bp`）：读 diff 正文，按涉及的模块名（lciod/lcview）分发，可分发到多个文档目录
@@ -218,7 +218,7 @@ manifest.yaml 条目示例：
 |------|------|
 | 方案先行 | 动作清单级方案，确认后落盘 |
 | 增量更新 | 章节级，不全量重写 |
-| 映射驱动 | 依据 `engineering/harness/config/doc-sync-mapping.md` 分发 |
+| 映射驱动 | 依据 `engineering/harness/config/doc-sync-mapping.yaml` 分发 |
 | 模板只读 | `engineering/harness/templates/*.md` 不可擅改；冲突需确认（`TEMPLATE-CONFLICT`）|
 | 代码引用规范 | patchs 相对路径 + `#L行号`；禁 workspace 路径；刷新含形态 D 盲区 |
 | 内容对齐 diff | 基于真实 diff/workspace，禁臆造接口/字段/行为 |

@@ -6,7 +6,7 @@
 
 | 我要做的事 | 先读哪里 |
 |-----------|---------|
-| 先判断任务能不能直接做 | [config/task-admission-matrix.md](./config/task-admission-matrix.md) |
+| 先判断任务能不能直接做 | [config/README.md](./config/README.md#任务准入矩阵) |
 | 理解 harness 总体边界与真相源 | [CONTROL-CHARTER.md](./CONTROL-CHARTER.md) |
 | 改 `~/workspace/` 源码 | [rules/source-code-modify.md](./rules/source-code-modify.md) |
 | 提交并推送 | [workflows/git-push-to-server/](./workflows/git-push-to-server/) |
@@ -19,14 +19,14 @@
 | 改 harness 下的 bash 脚本 | [rules/script-observability.md](./rules/script-observability.md) |
 | 获取工程路径 / 改路径配置 | [rules/path-management.md](./rules/path-management.md) |
 | 查 config 机器层 / 映射层说明 | [config/README.md](./config/README.md) |
-| 查 commit scope 映射 | [config/scope-mapping.md](./config/scope-mapping.md) |
-| 查 patchs→文档分发规则 | [config/doc-sync-mapping.md](./config/doc-sync-mapping.md) |
+| 查 commit scope 映射 | [config/scope-mapping.yaml](./config/scope-mapping.yaml) |
+| 查 patchs→文档分发规则 | [config/doc-sync-mapping.yaml](./config/doc-sync-mapping.yaml) |
 | 做 harness 静态校验 | `engineering/harness/scripts/validate_harness_*.sh`（validator 落地后启用） |
 
 ## 控制入口
 
 - **控制总纲**：[CONTROL-CHARTER.md](./CONTROL-CHARTER.md) —— 定义目标边界、对象模型、真相源矩阵、Human / AI / Script 职责边界与规则优先级。
-- **任务准入矩阵**：[config/task-admission-matrix.md](./config/task-admission-matrix.md) —— 进入任务前先判断是否允许直接修改、必须先读哪些规则、是否需要 workflow / plan / 用户确认 / evidence。
+- **任务准入矩阵**：[config/README.md#任务准入矩阵](./config/README.md#任务准入矩阵) —— 进入任务前先判断是否允许直接修改、必须先读哪些规则、是否需要 workflow / plan / 用户确认 / evidence。
 - **规则索引**：[rules/README.md](./rules/README.md) —— 规则 ID、触发时机、适用范围。
 - **工作流索引**：[workflows/README.md](./workflows/README.md) —— 需要 workflow contract 的任务从这里进入。
 
@@ -72,7 +72,7 @@ harness_init "<script-name>"
 - **templates/** 为只读契约，改模板需用户确认（见 `sync-patchs-to-doc` 的 `TEMPLATE-CONFLICT`）。
 - **lib/** 是 scripts/workflows 的公共依赖，改动需同步影响范围内的脚本。
 - **README 同步**：改动本目录下文件后，按以下清单检查 README 是否需更新：
-  - 新增/删除/重命名 `lib/*.sh`、`scripts/*.sh`、`workflows/*/`、`rules/*.md`、`config/*.md`、`templates/*` → 更新对应子目录 README.md 的文件清单
+  - 新增/删除/重命名 `lib/*.sh`、`scripts/*.sh`、`workflows/*/`、`rules/*.md`、`config/*.yaml`、`config/*.json`、`templates/*` → 更新对应子目录 README.md 的文件清单
   - 公共 API 变动（`lib/*.sh` 新增/删除函数对外暴露）→ 额外更新本 README 的「lib 公共能力速查」章节
   - 新增/删除 `rules/*.md` → 同步更新 `rules/README.md` 文件说明表 + 本 README 快速导航表
   - 仅修改文件内容（文件名/结构不变）→ 无需更新 README

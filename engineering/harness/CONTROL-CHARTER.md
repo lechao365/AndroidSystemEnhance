@@ -63,7 +63,7 @@ archive -> candidate baseline -> promoted baseline
 1. **archive ≠ 验证通过**。archive 仅表示归档动作完成，不代表可恢复。
 2. **candidate baseline ≠ promoted baseline**。candidate 表示验证进行中，未获最终批准。
 3. **只有 promoted baseline 可作为 revert workflow 的真相源**。revert 前必须核对证据登记项。
-4. 证据字段以 `engineering/harness/config/baseline-evidence-template.md` 为模板，状态登记维护在 `engineering/harness/config/baseline-status.md`。
+4. 证据字段以 `engineering/harness/config/baseline-evidence-template.yaml` 为模板，状态登记维护在 `engineering/harness/config/baseline-status.yaml`。
 
 ---
 
