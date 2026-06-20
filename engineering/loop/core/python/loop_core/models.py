@@ -43,6 +43,7 @@ class TestCaseResult:
         skip_reason: skipped 时的原因
         triggered_collectors: fail 时触发的 collector 名称列表
         tags: 用例标签
+        error_type: error 状态时的错误类别（如 transport_error、异常类名）
     """
 
     id: str
@@ -57,6 +58,7 @@ class TestCaseResult:
     skip_reason: str = ""
     triggered_collectors: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    error_type: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)

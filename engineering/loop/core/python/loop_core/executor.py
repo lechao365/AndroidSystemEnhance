@@ -12,7 +12,7 @@ from uuid import uuid4
 from loop_core.assertion_engine import AssertionContext, AssertionEngine
 from loop_core.case_loader import CaseSuite, TestCase
 from loop_core.collector import Collector
-from loop_core.models import EvidenceBundle, TestCaseResult
+from loop_core.models import CollectorResult, EvidenceBundle, TestCaseResult
 
 
 class CaseExecutor:
@@ -53,6 +53,7 @@ class CaseExecutor:
         prompt_markers = prompt_markers or []
         results: dict[str, TestCaseResult] = {}
         triggered_collectors: set[str] = set()
+        warnings: list[str] = []
 
         for case in suite.cases:
             result = self._execute_case(
@@ -70,37 +71,56 @@ class CaseExecutor:
             collector_runner = Collector(self.transport)
             for cname in triggered_collectors:
                 if cname in suite.collectors:
-                    evidence[cname] = collector_runner.run(
-                        cname,
-                        suite.collectors[cname],
-                        capture_timeout=capture_timeout,
-                        recent_limit=recent_limit,
-                        prompt_markers=prompt_markers,
-                    )
+                    try:
+                        evidence[cname] = collector_runner.run(
+                            cname,
+                            suite.collectors[cname],
+                            capture_timeout=capture_timeout,
+                            recent_limit=recent_limit,
+                            prompt_markers=prompt_markers,
+                        )
+                    except OSError as exc:
+                        # collector 执行失败：降级为空证据并记录告警，不阻断 suite
+                        warnings.append(f"collector '{cname}' failed: {exc}")
+                        spec = suite.collectors[cname]
+                        evidence[cname] = CollectorResult(
+                            name=cname,
+                            commands=spec.get("commands", []),
+                            outputs=[],
+                            hints=spec.get("hints", ""),
+                        )
 
         # 统计
         case_list = list(results.values())
         passed = sum(1 for r in case_list if r.status == "pass")
         failed = sum(1 for r in case_list if r.status == "fail")
         skipped = sum(1 for r in case_list if r.status == "skipped")
-        critical_failed = sum(
-            1 for r, c in zip(case_list, suite.cases)
-            if r.status == "fail" and c.severity == "critical"
+        errors = sum(1 for r in case_list if r.status == "error")
+        # overall 收紧：critical 用例 fail/skipped/error 均判定为 FAIL
+        critical_incomplete = sum(
+            1
+            for result, case in zip(case_list, suite.cases)
+            if case.severity == "critical" and result.status in {"fail", "skipped", "error"}
         ) if case_list else 0
-        overall = "PASS" if critical_failed == 0 else "FAIL"
+        overall = "PASS" if critical_incomplete == 0 else "FAIL"
+
+        summary: dict = {
+            "total": len(case_list),
+            "passed": passed,
+            "failed": failed,
+            "skipped": skipped,
+            "errors": errors,
+            "overall": overall,
+        }
+        if warnings:
+            summary["warnings"] = warnings
 
         return EvidenceBundle(
             bundle_id=f"eb-{uuid4().hex[:8]}",
             device_id=device_id,
             suite=suite.name,
             timestamp=datetime.now().astimezone().isoformat(timespec="seconds"),
-            summary={
-                "total": len(case_list),
-                "passed": passed,
-                "failed": failed,
-                "skipped": skipped,
-                "overall": overall,
-            },
+            summary=summary,
             cases=case_list,
             evidence=evidence,
         )
@@ -137,32 +157,56 @@ class CaseExecutor:
                 )
 
         # 执行用例：先标记输出边界，确保只采集本命令之后的输出
-        start = time.monotonic()
-        if case.command:
-            boundary = self.transport.mark_output_boundary()
-            self.transport.send_line(case.command)
-            capture = self.transport.capture_since(
-                boundary, capture_timeout, recent_limit, prompt_markers
-            )
-        else:
-            # 无命令：仅探测当前缓冲之后的输出
-            boundary = self.transport.mark_output_boundary()
-            capture = self.transport.capture_since(
-                boundary, capture_timeout, recent_limit, prompt_markers
-            )
+        # 仅包裹命令执行与断言求值；依赖检查（skip 逻辑）已在上游完成，不进入 try
+        try:
+            start = time.monotonic()
+            if case.command:
+                boundary = self.transport.mark_output_boundary()
+                self.transport.send_line(case.command)
+                capture = self.transport.capture_since(
+                    boundary, capture_timeout, recent_limit, prompt_markers
+                )
+            else:
+                # 无命令：仅探测当前缓冲之后的输出
+                boundary = self.transport.mark_output_boundary()
+                capture = self.transport.capture_since(
+                    boundary, capture_timeout, recent_limit, prompt_markers
+                )
 
-        output_lines = [line.text for line in capture.lines]
-        prompt_visible = capture.prompt_visible
-        output_text = "\n".join(output_lines)
-        duration = round(time.monotonic() - start, 3)
+            output_lines = [line.text for line in capture.lines]
+            prompt_visible = capture.prompt_visible
+            output_text = "\n".join(output_lines)
+            duration = round(time.monotonic() - start, 3)
 
-        # 求值断言
-        ctx = AssertionContext(
-            output=output_text,
-            prompt_visible=prompt_visible,
-            exit_code=capture.exit_code,
-        )
-        result = self.engine.evaluate(case.assert_spec, ctx)
+            # 求值断言
+            ctx = AssertionContext(
+                output=output_text,
+                prompt_visible=prompt_visible,
+                exit_code=capture.exit_code,
+            )
+            result = self.engine.evaluate(case.assert_spec, ctx)
+        except OSError as exc:
+            # 传输层异常：标记为 error，避免 suite 崩溃
+            return TestCaseResult(
+                id=case.id,
+                suite=case.suite,
+                status="error",
+                command=case.command,
+                failure_reason=str(exc),
+                error_type="transport_error",
+                tags=case.tags,
+            )
+        except Exception as exc:
+            # 其他运行时异常：记录异常类名，标记为 error
+            return TestCaseResult(
+                id=case.id,
+                suite=case.suite,
+                status="error",
+                command=case.command,
+                failure_reason=str(exc),
+                error_type=type(exc).__name__,
+                tags=case.tags,
+            )
 
         # 构建 output_preview（前 5 行）
         preview = " | ".join(output_lines[:5]) if output_lines else ""

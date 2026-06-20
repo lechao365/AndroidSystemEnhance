@@ -231,6 +231,99 @@ cases:
     assert "first_only" not in bundle.cases[1].output
 
 
+def test_transport_send_error_becomes_case_error(tmp_path):
+    """transport send_line 异常时，case 标记为 error，不崩溃。"""
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: c1
+    command: "boom"
+    assert: {type: contains, value: "ok"}
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+
+    class BrokenTransport(FixtureTransport):
+        def send_line(self, text: str) -> None:
+            raise OSError("send failed")
+
+    transport = BrokenTransport([])
+    transport.acquire_writer()
+    bundle = CaseExecutor(transport, AssertionEngine()).execute_suite(suite, device_id="rp5")
+    assert bundle.cases[0].status == "error"
+    assert bundle.cases[0].error_type == "transport_error"
+    assert "send failed" in bundle.cases[0].failure_reason
+    assert bundle.summary["overall"] == "FAIL"
+
+
+def test_critical_skipped_case_makes_suite_non_pass(tmp_path):
+    """critical case 被 skip 时，overall 不能为 PASS。"""
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: shell_ok
+    command: ""
+    assert: {type: prompt_visible}
+    severity: critical
+  - id: dependent
+    command: "echo hi"
+    assert: {type: contains, value: "hi"}
+    severity: critical
+    requires: [shell_ok]
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+    # fixture 无 prompt → shell_ok fail → dependent skip
+    transport = _make_transport([{"t": 0.5, "text": "no prompt"}])
+    transport.acquire_writer()
+    bundle = CaseExecutor(transport, AssertionEngine()).execute_suite(
+        suite, device_id="rp5", prompt_markers=["console:/ $"]
+    )
+    assert bundle.cases[0].status == "fail"
+    assert bundle.cases[1].status == "skipped"
+    # KEY: critical case skipped → overall not PASS
+    assert bundle.summary["overall"] != "PASS"
+
+
+def test_collector_error_does_not_crash_suite(tmp_path):
+    """collector 执行异常时，suite 不崩溃，记录 warning。"""
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: failing_case
+    command: "true"
+    assert: {type: contains, value: "no_match"}
+    severity: critical
+    on_fail:
+      collectors: [broken_collector]
+collectors:
+  broken_collector:
+    commands: ["dmesg"]
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+
+    class CollectorBrokenTransport(FixtureTransport):
+        def send_line(self, text: str) -> None:
+            if text == "dmesg":
+                raise OSError("collector connection lost")
+            super().send_line(text)
+
+    transport = CollectorBrokenTransport([{"t": 0.5, "text": "some output"}])
+    transport.acquire_writer()
+    bundle = CaseExecutor(transport, AssertionEngine()).execute_suite(
+        suite, device_id="rp5", prompt_markers=[]
+    )
+    # Case itself still fails (expected), but collector error doesn't crash
+    assert bundle.cases[0].status == "fail"
+    # Collector error recorded as warning
+    assert "warnings" in bundle.summary
+    assert any("broken_collector" in w for w in bundle.summary["warnings"])
+
+
 def _write(tmp_path: Path, name: str, content: str) -> str:
     p = tmp_path / name
     p.write_text(content)
