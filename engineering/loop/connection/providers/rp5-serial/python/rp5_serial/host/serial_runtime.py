@@ -1,6 +1,7 @@
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from rp5_serial.shared.models import Session, StatusResponse, WriterLease
@@ -16,7 +17,10 @@ except ImportError:  # pragma: no cover - 环境相关
 TZ = timezone(timedelta(hours=8))
 
 # 最近输出缓冲上限
-MAX_LINE_BUFFER = 500
+MAX_LINE_BUFFER = 2000
+
+# transcript 文件名
+TRANSCRIPT_FILENAME = "rp5-serial-transcript.log"
 
 
 def now_iso() -> str:
@@ -26,6 +30,8 @@ def now_iso() -> str:
 @dataclass
 class RuntimeState:
     device_id: str
+    # transcript 落盘目录（None 时降级到 .host-log）
+    transcript_dir: str | None = None
     active_session: Session | None = None
     active_writer: WriterLease | None = None
     subscriber_count: int = 0
@@ -34,12 +40,19 @@ class RuntimeState:
     baudrate: int = 115200
     # pyserial Serial 实例（类型为 Any，避免硬依赖）
     _serial: object | None = None
-    # 最近输出缓冲（保留最近 MAX_LINE_BUFFER 行）
-    _line_buffer: list[str] = field(default_factory=list)
+    # 最近输出缓冲（保留最近 MAX_LINE_BUFFER 条结构化条目）
+    _line_buffer: list[dict] = field(default_factory=list)
     # 接收半行缓冲（尚未遇到 \n 的字节）
     _rx_buf: bytes = b""
     # 并发锁：保护 session/writer/buffer 的读写一致性
     _lock: threading.RLock = field(default_factory=threading.RLock)
+    # transcript 文件绝对路径（__post_init__ 初始化，不作为构造参数）
+    transcript_path: str = field(init=False, default="")
+
+    def __post_init__(self) -> None:
+        base = Path(self.transcript_dir or ".host-log")
+        base.mkdir(parents=True, exist_ok=True)
+        self.transcript_path = str(base / TRANSCRIPT_FILENAME)
 
     def open_session(self, mode: str, owner_id: str) -> Session:
         with self._lock:
@@ -112,18 +125,48 @@ class RuntimeState:
         text = self._rx_buf.decode("utf-8", errors="replace").rstrip("\r")
         return text or None
 
-    def recent_lines(self, limit: int) -> list[str]:
-        """返回最近 N 行缓冲；若存在半行，也作为最后一条观察结果返回。"""
+    def _append_entry(self, text: str, pending: bool = False) -> dict:
+        """构造一条结构化条目；非 pending 时写入 ring buffer 与 transcript 文件。
+
+        调用方应已持有 ``_lock``（如 ``read_lines`` 内部）。
+        """
+        entry = {"text": text, "ts": now_iso(), "pending": pending}
+        if not pending:
+            self._line_buffer.append(entry)
+            if len(self._line_buffer) > MAX_LINE_BUFFER:
+                del self._line_buffer[: len(self._line_buffer) - MAX_LINE_BUFFER]
+            try:
+                with Path(self.transcript_path).open("a", encoding="utf-8") as fp:
+                    fp.write(f"{entry['ts']} {text}\n")
+            except OSError:
+                # transcript 落盘失败不阻断串口读取
+                pass
+        return entry
+
+    def recent_entries(self, limit: int) -> list[dict]:
+        """返回最近 N 条结构化条目；若存在半行，作为 pending 条目追加在末尾。
+
+        兼容历史上 ``_line_buffer`` 内为纯字符串的情况。
+        """
         with self._lock:
             if limit <= 0:
                 return []
-            lines = list(self._line_buffer[-limit:])
+            entries: list[dict] = []
+            for item in self._line_buffer[-limit:]:
+                if isinstance(item, dict):
+                    entries.append(item)
+                else:
+                    entries.append({"text": item, "ts": now_iso(), "pending": False})
             pending = self._pending_text()
             if pending:
-                lines.append(pending)
-            if len(lines) > limit:
-                lines = lines[-limit:]
-            return lines
+                entries.append({"text": pending, "ts": now_iso(), "pending": True})
+            if len(entries) > limit:
+                entries = entries[-limit:]
+            return entries
+
+    def recent_lines(self, limit: int) -> list[str]:
+        """返回最近 N 行文本（从结构化条目提取 text）。"""
+        return [entry["text"] for entry in self.recent_entries(limit)]
 
     def inc_subscriber(self) -> int:
         with self._lock:
@@ -190,11 +233,8 @@ class RuntimeState:
             new_lines: list[str] = []
             for raw in parts[:-1]:
                 text = raw.decode("utf-8", errors="replace").rstrip("\r")
-                self._line_buffer.append(text)
+                self._append_entry(text)
                 new_lines.append(text)
-            # 裁剪缓冲到上限
-            if len(self._line_buffer) > MAX_LINE_BUFFER:
-                del self._line_buffer[: len(self._line_buffer) - MAX_LINE_BUFFER]
             return new_lines
 
     # ------------------------------------------------------------------
@@ -216,4 +256,7 @@ class RuntimeState:
                 active_session=self.active_session.to_dict() if self.active_session else None,
                 active_writer=self.active_writer.to_dict() if self.active_writer else None,
                 subscriber_count=self.subscriber_count,
+                transcript_path=self.transcript_path,
+                recent_buffer_limit=MAX_LINE_BUFFER,
+                recent_line_count=len(self._line_buffer),
             )

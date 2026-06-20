@@ -51,6 +51,10 @@ class StatusResponse:
     active_session: Optional[dict]
     active_writer: Optional[dict]
     subscriber_count: int
+    # transcript 持续落盘元数据
+    transcript_path: Optional[str] = None
+    recent_buffer_limit: int = 0
+    recent_line_count: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)

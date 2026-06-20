@@ -233,8 +233,8 @@ class ClientHandler:
             limit = int(data.get("limit", 100))
         except (TypeError, ValueError):
             limit = 100
-        lines = self._state.recent_lines(limit)
-        self._send(make_ok({"lines": lines}))
+        entries = self._state.recent_entries(limit)
+        self._send(make_ok({"lines": [entry["text"] for entry in entries], "entries": entries}))
 
     # 操作分发表
     _OP_TABLE = {
