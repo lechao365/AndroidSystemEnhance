@@ -28,6 +28,7 @@ class DeviceProfile:
         line_ending: 行结束符
         default_capture_timeout: 默认输出采集超时（秒）
         default_recent_limit: 默认采集行数上限
+        serial_snippet_limit: describe_runtime_context 串口片段行数上限
     """
 
     device_id: str = ""
@@ -40,3 +41,4 @@ class DeviceProfile:
     line_ending: str = "\n"
     default_capture_timeout: float = 5.0
     default_recent_limit: int = 400
+    serial_snippet_limit: int = 40

@@ -257,3 +257,43 @@ def test_transport_capture_since_uses_host_timestamps():
     assert capture.lines[0].t == 0.0
     assert abs(capture.lines[1].t - 2.0) < 0.01
     assert capture.warnings == []
+
+
+def test_transport_set_cycle_markers_and_count_cycles():
+    """transport.set_cycle_markers 后 describe_runtime_context 输出 reboot_cycles"""
+    client = MagicMock()
+    client.capture_recent_entries.return_value = [
+        {"text": "Booting Linux", "ts": "2026-06-20T12:00:00+0800", "pending": False},
+        {"text": "reboot: Restarting system", "ts": "2026-06-20T12:00:03+0800", "pending": False},
+        {"text": "Booting Linux", "ts": "2026-06-20T12:00:05+0800", "pending": False},
+    ]
+    client.read_until_timeout.return_value = []
+    client.fetch_status.return_value = {
+        "data": {
+            "transcript_path": "/tmp/serial.log",
+            "recent_line_count": 3,
+            "recent_buffer_limit": 2000,
+        }
+    }
+    transport = Rp5SerialTransport(client)
+    transport.set_cycle_markers(["reboot: Restarting system", "U-Boot"])
+
+    ctx = transport.describe_runtime_context()
+
+    assert ctx["reboot_cycles"] == 2
+    assert ctx["serial_snippet"][1] == "reboot: Restarting system"
+
+
+def test_transport_reboot_cycles_zero_without_markers():
+    """无 cycle_markers 时 reboot_cycles 为 0"""
+    client = MagicMock()
+    client.capture_recent_entries.return_value = [
+        {"text": "Booting Linux", "ts": "2026-06-20T12:00:00+0800", "pending": False},
+    ]
+    client.read_until_timeout.return_value = []
+    client.fetch_status.return_value = {"data": {}}
+    transport = Rp5SerialTransport(client)
+
+    ctx = transport.describe_runtime_context()
+
+    assert ctx["reboot_cycles"] == 0

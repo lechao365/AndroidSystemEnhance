@@ -250,6 +250,10 @@ class Rp5SerialTransport(BaseTransport):
             )
         return result
 
+    def set_cycle_markers(self, markers: list[str]) -> None:
+        """设置 reboot cycle 边界标记，供 describe_runtime_context 统计 reboot_cycles。"""
+        self._cycle_markers = list(markers)
+
     def describe_runtime_context(self) -> dict:
         """汇总 host 运行时上下文（供 AI 分析 / 调试快照使用）。
 
@@ -268,12 +272,18 @@ class Rp5SerialTransport(BaseTransport):
 
         entries = self._safe_capture_entries(200) or []
         snippet = [entry["text"] for entry in entries[-40:]]
+        reboot_cycles = 0
+        if self._cycle_markers and snippet:
+            reboot_cycles = 1
+            for line in snippet:
+                if any(marker in line for marker in self._cycle_markers):
+                    reboot_cycles += 1
         return {
             "transcript_path": data.get("transcript_path", ""),
             "recent_line_count": data.get("recent_line_count", 0),
             "recent_buffer_limit": data.get("recent_buffer_limit", 0),
             "serial_snippet": snippet,
-            "reboot_cycles": 0,
+            "reboot_cycles": reboot_cycles,
         }
 
     def capture_since(

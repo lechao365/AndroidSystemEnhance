@@ -148,6 +148,8 @@ def _cmd_run(args) -> int:
         capture_timeout=capture_timeout,
         recent_limit=recent_limit,
     )
+    if hasattr(transport, "set_cycle_markers"):
+        transport.set_cycle_markers(profile.reboot_markers)
     try:
         bundle = runner.run()
     except Exception as exc:
