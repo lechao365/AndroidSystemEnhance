@@ -107,7 +107,7 @@ engineering/ 下 README 可能膨胀到 200+ 行。为避免 AI 全量解析，�
 | **控制总纲** | 仅 harness/README | 原 CONTROL-CHARTER.md 融入 | 目标边界 / 对象模型 / 真相源矩阵 / 职责边界 / 优先级链 |
 | **边界与依赖** | engineering/README、harness/README、loop/connection/README | engineering/README 现有 | 单向依赖、能力归属判定 |
 | **公共 API 速查** | harness/lib/README、harness/README | harness/README 现有 | 函数清单 + 用法 + 公私边界 |
-| **运行流程** | rp5-serial/README（原 WORKFLOW 融入）、loop/README | rp5-serial/WORKFLOW.md | 拓扑 / 启动方式 / 使用方式 |
+| **运行流程** | rp5-serial/README、loop/README | rp5-serial/README（原 WORKFLOW 融入） | 拓扑 / 启动方式 / 使用方式 |
 | **字段速查** | harness/config/README | config/README 现有 | YAML 字段说明 |
 | **何时更新** | 有子目录且子目录易变动的目录 | config/README 现有 | 触发条件 + 操作清单 |
 | **README 同步约定** | harness/README、engineering/README | harness/README 现有 | 文件变更 → README 更新清单 |

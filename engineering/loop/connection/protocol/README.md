@@ -17,4 +17,4 @@
 
 | 文档 | 说明 |
 |------|------|
-| [rp5_serial_protocol.md](./rp5_serial_protocol.md) | rp5-serial host/client 协议定义 |
+| [rp5-serial-protocol.md](./rp5-serial-protocol.md) | rp5-serial host/client 协议定义 |
