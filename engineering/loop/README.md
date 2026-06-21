@@ -32,11 +32,11 @@ engineering/loop/
 └── connection/                  连接层（provider）
     ├── profiles/devices/rp5/
     └── providers/rp5-serial/
+```
 
 > CLI 入口脚本已移至 `engineering/loop/scripts/le.sh`（亦可通过 opencode slash command `/le` 触发）  
 > Windows Host 启动脚本已移至 `engineering/loop/scripts/start_rp5_serial_host.bat`
 > loop 专属 workflow 位于 `engineering/loop/workflows/`，当前包含 `lcview-adb-run/` 多阶段验证样板
-```
 
 ### 公共 suite 与诊断 collector 库
 
