@@ -1,6 +1,6 @@
 # Baseline 证据模板
 # 本模板定义 patch 资产晋升为 promoted baseline 时必须落盘的最小证据集。
-# 状态登记见 baseline-status.yaml，状态语义见 CONTROL-CHARTER.md § 2.3
+# 状态登记见 baseline-status.yaml，状态语义见 ../README.md#控制总纲（状态模型与证据要求）
 #
 # 晋升规则:
 #   1. candidate baseline → promoted baseline 需全部字段填齐且非空

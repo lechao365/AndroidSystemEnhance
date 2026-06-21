@@ -1,6 +1,6 @@
 # Baseline 状态登记表
 # 登记 patch 资产在晋升链 archive → candidate baseline → promoted baseline 上的当前状态。
-# 状态语义见 CONTROL-CHARTER.md § 2.3，证据字段定义见 baseline-evidence-template.yaml
+# 状态语义见 ../README.md#控制总纲（状态模型与证据要求），证据字段定义见 baseline-evidence-template.yaml
 # status 取值: archive → candidate → promoted（不可回退）
 # 仅 promoted 行的 approved_by / approved_at 必填
 

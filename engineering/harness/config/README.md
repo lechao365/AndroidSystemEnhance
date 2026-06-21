@@ -14,7 +14,7 @@ workflow 依赖的映射配置表——把"目录特征 → scope / 文档归属
 |------|------|---------|
 | [scope-mapping.yaml](./scope-mapping.yaml) | Git commit 的 scope 判定规则：按改动行数最多目录映射到 scope 词（如 `kernel-lcview`） | `workflows/git-push-to-server/` |
 | [doc-sync-mapping.yaml](./doc-sync-mapping.yaml) | patchs → 技术文档的精准分发规则：按路径 glob 匹配分发到 `01-*` / `02-*` 文档目录 | `workflows/sync-patchs-to-doc/` |
-| [baseline-status.yaml](./baseline-status.yaml) | baseline 状态登记表：记录每次同步归档的归档/候选/晋升状态 | `CONTROL-CHARTER.md`、`source-code-modify.md` |
+| [baseline-status.yaml](./baseline-status.yaml) | baseline 状态登记表：记录每次同步归档的归档/候选/晋升状态 | `../README.md#控制总纲`、`source-code-modify.md` |
 | [baseline-evidence-template.yaml](./baseline-evidence-template.yaml) | baseline 证据模板：归档晋升为 promoted baseline 前必须填写的证据字段 | `source-code-modify.md`、`revert-code-from-patchs/` |
 
 ### 其他配置
@@ -52,9 +52,9 @@ workflow 依赖的映射配置表——把"目录特征 → scope / 文档归属
 | patchs → 技术文档同步 | 否 | `rules/doc-paths.md`、`rules/plantuml.md` | `workflows/sync-patchs-to-doc/` | 是 | 是 | 是 |
 | commit / push | 否 | workflow 契约 + commit scope 配置 | `workflows/git-push-to-server/` | 否 | 是 | 是 |
 | harness bash 脚本改造 | 是 | `rules/script-observability.md` | 视脚本而定 | 否 | 否 | 是 |
-| harness 规则文档改造 | 是 | `CONTROL-CHARTER.md` + 对应 `rules/*.md` | 无 | 视范围而定 | 视风险而定 | 建议保留 |
+| harness 规则文档改造 | 是 | `../README.md#控制总纲` + 对应 `rules/*.md` | 无 | 视范围而定 | 视风险而定 | 建议保留 |
 | harness 模板改造 | 是 | `rules/plantuml.md` + `templates/README.md` | 无 | 建议先出方案 | 是 | 建议保留 |
-| harness 配置映射改造 | 是 | `CONTROL-CHARTER.md` + `config/README.md` | 无 | 视范围而定 | 视风险而定 | 建议保留 |
+| harness 配置映射改造 | 是 | `../README.md#控制总纲` + `config/README.md` | 无 | 视范围而定 | 视风险而定 | 建议保留 |
 | validator / 测试夹具改造 | 是 | `rules/script-observability.md`（脚本类）+ 本矩阵 | 无 | 否 | 否 | 是 |
 
 使用规则：
