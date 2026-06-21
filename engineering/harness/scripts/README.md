@@ -1,31 +1,57 @@
 # Scripts
 
-独立一次性脚本——属于 harness 公共工程工具，而不是 loop engineering 专属入口。
+> **AI 读取指引**：本 README 采用三层结构。先读「大纲」判断需要哪些章节，
+> 再按需精读对应章节，避免全量解析。带 🔖 的章节为高频引用，优先阅读。
 
-## 文件说明
-- [`mk_rpi5_full_image.sh`](./mk_rpi5_full_image.sh) — 树莓派 5 AOSP 一键编译打包脚本。
-- [`validate_harness_docs.sh`](./validate_harness_docs.sh) — 文档/契约层静态校验。
-- [`validate_harness_scripts.sh`](./validate_harness_scripts.sh) — bash 合规校验。
-- [`validate_harness_config.sh`](./validate_harness_config.sh) — 配置层校验。
+## 定位
+
+- **是什么**：harness 公共工程工具脚本集——编译打包、静态校验（文档 / 脚本 / 配置三类 validator）
+- **职责边界**：做 harness 级独立脚本与校验器；不做 loop 专属入口（loop 入口在 `../../loop/scripts/`）
+- **上下游依赖**：被 `AGENTS.md`、各 workflow、开发者手动调用；validator 依赖 `config/*.yaml`、`lib/`
+
+## 大纲
+
+| 章节 | 内容摘要 | 何时读取 |
+|------|---------|---------|
+| [定位](#定位) | 本目录做什么、不做什么 | 首次进入 |
+| [大纲](#大纲) | 本 README 章节索引 | 判断需要读哪些段 |
+| [目录说明](#目录说明) | 脚本清单与已迁出文件 | 了解结构时 |
+| [使用方式](#使用方式) | validator 调用示例与退出码语义 | 实际校验时 |
+| [Windows .bat 脚本注意事项](#windows-bat-脚本注意事项) | .bat 换行符 / 编码 / 验证规则（**SSOT**） | 修改 .bat 文件时 🔖 |
+| [关联资源](#关联资源) | 设计文档、规则、workflow、配置链接 | 深入理解时 |
+
+## 目录说明
+
+| 脚本 | 作用 | 调用方式 |
+|------|------|---------|
+| [`mk_rpi5_full_image.sh`](./mk_rpi5_full_image.sh) | RPi5 AOSP 一键编译打包脚本（`-mode` 选构建范围） | `bash engineering/harness/scripts/mk_rpi5_full_image.sh` |
+| [`validate_harness_docs.sh`](./validate_harness_docs.sh) | 文档 / 契约层静态校验（README 链接、文件清单、PlantUML 闭合、WORKFLOW front matter） | `bash engineering/harness/scripts/validate_harness_docs.sh` |
+| [`validate_harness_scripts.sh`](./validate_harness_scripts.sh) | bash 脚本合规校验（bootstrap source、`harness_init`、裸 `exit` / `/tmp/` / 私有符号） | `bash engineering/harness/scripts/validate_harness_scripts.sh` |
+| [`validate_harness_config.sh`](./validate_harness_config.sh) | 配置层校验（YAML 可解析性、字段合法性、命名规范） | `bash engineering/harness/scripts/validate_harness_config.sh` |
+
+**已迁出到 `../../loop/scripts/`**：`le.sh`、`le_runs_cleanup.sh`、`rp5_serial_helper.py`、`start_rp5_serial_host.bat` → 见 `../../loop/scripts/README.md`。
+
+## 使用方式
 
 ### 静态校验器（validator）
 
-harness 自身的文档 / 脚本 / 配置一致性静态校验入口，无副作用、只读扫描，退出码 `0`=全绿、`1`=有告警、`3`=环境错误。
+harness 自身的文档 / 脚本 / 配置一致性静态校验入口，无副作用、只读扫描。
 
-- [`validate_harness_docs.sh`](./validate_harness_docs.sh) — 文档/契约层校验：README 导航链接存在性、各子目录 README 文件清单与实际目录一致性、`templates/*.md` 中 PlantUML `@startuml`/`@enduml` 配对闭合与花括号占位符、`workflows/*/WORKFLOW.md` front matter（含 `name`/`description`）。
-  - 调用：`bash engineering/harness/scripts/validate_harness_docs.sh`
-- [`validate_harness_scripts.sh`](./validate_harness_scripts.sh) — bash 脚本合规校验：`workflows/*/*.sh` 与 `scripts/*.sh` 是否 source `harness_bootstrap.sh`、是否调用 `harness_init`、是否出现裸 `exit` / 裸 `/tmp/` / 直接依赖 `_H_*`/`_h_*` 私有符号（公共库自身豁免）。
-  - 调用：`bash engineering/harness/scripts/validate_harness_scripts.sh`
-- [`validate_harness_config.sh`](./validate_harness_config.sh) — 配置层校验：`scope-mapping.yaml` / `doc-sync-mapping.yaml` 存在且可被 python3 解析、`version` 合法性、`priority` 为整数、`match` 非空、`scope` 命名规范、`mode` 值域、`routes[].docs` 项以 `docs/` 开头。依赖 `python3`（含 `yaml` 模块）。
-  - 调用：`bash engineering/harness/scripts/validate_harness_config.sh`
+| 校验器 | 校验项 | 退出码语义 |
+|--------|--------|-----------|
+| `validate_harness_docs.sh` | README 导航链接存在性；各子目录 README 文件清单与实际目录一致性；`templates/*.md` 中 PlantUML `@startuml`/`@enduml` 配对闭合与花括号占位符；`workflows/*/WORKFLOW.md` front matter（含 `name`/`description`） | `0`=全绿 / `1`=有告警 / `3`=环境错误 |
+| `validate_harness_scripts.sh` | `workflows/*/*.sh` 与 `scripts/*.sh` 是否 source `harness_bootstrap.sh`；是否调用 `harness_init`；是否出现裸 `exit` / 裸 `/tmp/` / 直接依赖 `_H_*`/`_h_*` 私有符号（公共库自身豁免） | 同上 |
+| `validate_harness_config.sh` | `scope-mapping.yaml` / `doc-sync-mapping.yaml` 存在且可被 python3 解析；`version` 合法性；`priority` 为整数；`match` 非空；`scope` 命名规范；`mode` 值域；`routes[].docs` 项以 `docs/` 开头。依赖 `python3`（含 `yaml` 模块） | 同上 |
 
-## 已迁出到 `engineering/loop/scripts/`
-- `le.sh`
-- `le_runs_cleanup.sh`
-- `rp5_serial_helper.py`
-- `start_rp5_serial_host.bat`
+```bash
+bash engineering/harness/scripts/validate_harness_docs.sh
+bash engineering/harness/scripts/validate_harness_scripts.sh
+bash engineering/harness/scripts/validate_harness_config.sh
+```
 
 ## Windows .bat 脚本注意事项
+
+> **本节是 .bat 注意事项的单一事实源；`../../loop/scripts/README.md` 以链接形式引用本节。**
 
 本项目中的 `.bat` 文件（`start_rp5_serial_host.bat`、`harness_path_util.bat` 等）有严格的格式要求，违反会导致乱码、解析失败或模块找不到。
 
@@ -78,3 +104,12 @@ file engineering/loop/scripts/start_rp5_serial_host.bat
 python3 -c "print(sum(1 for b in open('engineering/loop/scripts/start_rp5_serial_host.bat','rb').read() if b>127))"
 python3 -c "d=open('engineering/loop/scripts/start_rp5_serial_host.bat','rb').read();print(d.count(b'\n')-d.count(b'\r\n'))"
 ```
+
+## 关联资源
+
+| 类型 | 路径 | 说明 |
+|------|------|------|
+| 关联规则 | `../rules/script-observability.md`（SCRIPT-001） | 改 harness 下 bash 脚本时加载 |
+| 关联配置 | `../config/harness-paths.conf` | 编译路径 KEY：`ENV_KERNEL_WS` / `ENV_AOSP_WS` / `ENV_KERNEL_OUT` / `ENV_CLANG_BIN` / `ENV_WINDOWS_IMG_DIR` |
+| 关联 workflow | `../workflows/` | validator 被 workflow 自检环节调用 |
+| 参考文档 | `../reference/build-reference.md` | RPI5 编译命令参考 |
