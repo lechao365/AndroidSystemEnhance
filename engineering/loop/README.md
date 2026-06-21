@@ -24,6 +24,7 @@ engineering/loop/
 ├── core/python/loop_core/       LE 框架（通用层）
 ├── cases/                       声明式用例（YAML）
 │   ├── common/                    公共 suite（含 shell + 诊断 collector 库）
+│   ├── features/                  基于业务特性的验收场景（如 lcview）
 │   ├── modules/                   模块级用例（第二步）
 │   └── system/                    系统级用例
 ├── templates/                   AI 生成约束模板
@@ -202,6 +203,27 @@ rp5-serial host 持续将串口正文写入 `transcript_path`（默认 `output/h
 当 `/le` 驱动 `le run` 得到 FAIL 时，opencode 会读取本次 run 的 `summary.txt`、`evidence_bundle.json`、`serial_context` 与关联 collector 产物，先可选询问一次调查线索（如 suspect 模块、最近改动范围、首次坏版本），再在与本次 `evidence_bundle.json` 同目录下生成 `diagnosis-report.md`。
 
 诊断报告只输出"确定事实 / 现象归类 / 当前不确定点 / 候选修复方向"，不强行给唯一根因。只有当证据足以指向 `~/workspace/` 的可操作范围时，才会给出候选补丁草案。
+
+## `system.adb_shell` 场景
+
+`engineering/loop/cases/system/adb-shell-success.yaml` 是 `transport=adb` 的最小 smoke suite：
+
+1. `adb shell` 可达
+2. `sys.boot_completed=1`
+3. `init.svc.adbd=running`
+4. `id` 命令可执行
+
+建议在实现任何 feature adb suite 前先单独跑通本场景。
+
+## `features.lcview` 场景
+
+`engineering/loop/cases/features/lcview/common.yaml` 提供：
+
+- adb shell reachability
+- `sys.boot_completed`
+- HAL / daemon service state
+- schema / data dir readiness
+- pull logs / invalid log / runtime context final collectors
 
 ## 设计文档
 

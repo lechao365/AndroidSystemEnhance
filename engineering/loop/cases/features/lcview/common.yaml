@@ -1,0 +1,109 @@
+suite: features.lcview.common
+version: 1
+include:
+  - common/shell
+defaults:
+  capture_timeout: 15.0
+  recent_limit: 400
+final_collectors:
+  - lcview_pull_logs
+  - lcview_invalid_log
+  - lcview_service_state
+  - lcview_runtime_context
+cases:
+  - id: adb_shell_reachable
+    command: "echo lcview_adb_ok"
+    assert: {type: contains, value: "lcview_adb_ok"}
+    severity: critical
+
+  - id: boot_completed
+    command: "getprop sys.boot_completed"
+    assert: {type: contains, value: "1"}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lcview_logcat, lcview_kmsg, serial_recent]
+
+  - id: lcview_hal_service_state
+    command: "getprop init.svc.lechao_lcview_hal"
+    assert: {type: regex, pattern: "running|stopped"}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lcview_logcat, lcview_service_state, serial_recent]
+
+  - id: lcview_daemon_service_state
+    command: "getprop init.svc.lechao_lcview"
+    assert: {type: regex, pattern: "running|stopped"}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lcview_logcat, lcview_service_state, serial_recent]
+
+  - id: lcview_schema_present
+    command: "test -f /vendor/etc/lcview_events.json && echo present"
+    assert: {type: contains, value: "present"}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lcview_files, lcview_logcat, serial_recent]
+
+  - id: lcview_data_dir_ready
+    command: "test -d /data/vendor/lechao_lcview/logs && echo ready"
+    assert: {type: contains, value: "ready"}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lcview_files, lcview_service_state, serial_recent]
+
+collectors:
+  lcview_logcat:
+    mode: adb_logcat
+    buffers: [main, system, crash]
+    filters: ["lechao_lcview", "lechao_lcview_hal"]
+    failure_code: LCVIEW_PIPELINE_FAIL
+    hints: "检查 lcview daemon / hal logcat 中的 connect/open/schema/filewriter 错误"
+
+  lcview_kmsg:
+    commands:
+      - "dmesg | grep -i lcview"
+    failure_code: LCVIEW_PIPELINE_FAIL
+    hints: "检查内核侧 lcview / lciod 相关日志"
+
+  lcview_service_state:
+    commands:
+      - "getprop init.svc.lechao_lcview"
+      - "getprop init.svc.lechao_lcview_hal"
+      - "ps -A | grep -E 'lechao_lcview|lcview'"
+    failure_code: LCVIEW_PREREQ_FAIL
+    hints: "检查 daemon / hal 服务状态与进程存在性"
+
+  lcview_files:
+    commands:
+      - "ls -l /vendor/etc/lcview_events.json"
+      - "ls -l /data/vendor/lechao_lcview"
+      - "ls -lt /data/vendor/lechao_lcview/logs"
+    failure_code: LCVIEW_PREREQ_FAIL
+    hints: "检查 schema / data dir / logs 目录状态"
+
+  lcview_pull_logs:
+    mode: adb_pull
+    remote_paths:
+      - "/data/vendor/lechao_lcview/logs"
+    required: true
+    failure_code: LCVIEW_EVIDENCE_FAIL
+    hints: "拉取 jsonl 目录，验证结构化日志是否回收到 host"
+
+  lcview_invalid_log:
+    mode: adb_pull
+    remote_paths:
+      - "/data/vendor/lechao_lcview/invalid_records.log"
+    required: false
+    failure_code: LCVIEW_EVIDENCE_FAIL
+    hints: "采集 invalid_records.log，辅助判断 schema / decode 问题"
+
+  lcview_runtime_context:
+    mode: runtime_context
+    required: true
+    failure_code: ADB_EXEC_FAIL
+    hints: "记录 adb endpoint / recent commands / reconnect / logcat snapshot"

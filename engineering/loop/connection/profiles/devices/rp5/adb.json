@@ -1,0 +1,10 @@
+{
+  "device_id": "rp5",
+  "transport": "adb",
+  "prompt_markers": [],
+  "boot_markers": ["sys.boot_completed=1"],
+  "panic_markers": ["Kernel panic", "adbd not running"],
+  "line_ending": "\n",
+  "default_capture_timeout": 10.0,
+  "default_recent_limit": 400
+}
