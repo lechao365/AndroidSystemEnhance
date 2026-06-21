@@ -1,0 +1,157 @@
+suite: system.network_adbd
+version: 1
+
+defaults:
+  capture_timeout: 20
+  recent_limit: 400
+
+include:
+  - common/shell
+
+cases:
+  - id: trigger_reboot
+    action: reboot
+    description: "触发设备重启并等待启动完成"
+    severity: critical
+    assert: {}
+    on_fail:
+      collectors: [serial_recent, init_log, crash_dump, kmsg]
+
+  - id: boot_completed
+    description: "sys.boot_completed 属性为 1"
+    command: "getprop sys.boot_completed"
+    assert:
+      type: contains
+      value: "1"
+    severity: critical
+    requires: [trigger_reboot, shell_reachable]
+    on_fail:
+      collectors: [boot_log, init_log, kmsg]
+
+  - id: wifi_service_executed
+    description: "rpi5_wifi_connect 服务已进入有效执行态"
+    command: "for i in $(seq 1 20); do s=$(getprop init.svc.rpi5_wifi_connect); case \"$s\" in running|stopped) echo WIFI_SERVICE_OK:$s; exit 0 ;; esac; sleep 1; done; echo WIFI_SERVICE_BAD:$(getprop init.svc.rpi5_wifi_connect)"
+    assert:
+      type: contains
+      value: "WIFI_SERVICE_OK:"
+    severity: critical
+    requires: [boot_completed]
+    on_fail:
+      collectors: [serial_recent, init_log, wifi_script_log, kmsg]
+
+  - id: wifi_conf_present
+    description: "/data/boot/wifi.conf 存在"
+    command: "if [ -f /data/boot/wifi.conf ]; then echo PRESENT; else echo MISSING; fi"
+    assert:
+      type: equals
+      value: "PRESENT"
+    severity: critical
+    requires: [wifi_service_executed]
+    on_fail:
+      collectors: [serial_recent, wifi_state, wifi_script_log]
+
+  - id: wifi_conf_not_default
+    description: "wifi.conf 已配置真实 ssid/psk"
+    command: "ssid=$(grep -iE '^[[:space:]]*ssid[[:space:]]*=' /data/boot/wifi.conf | head -1 | cut -d= -f2 | tr -d '[:space:]'); psk=$(grep -iE '^[[:space:]]*psk[[:space:]]*=' /data/boot/wifi.conf | head -1 | cut -d= -f2 | tr -d '[:space:]'); if [ -n \"$ssid\" ] && [ -n \"$psk\" ] && [ \"$ssid\" != default ] && [ \"$psk\" != default ]; then echo CONFIG_OK; else echo DEFAULT_VALUE; fi"
+    assert:
+      type: equals
+      value: "CONFIG_OK"
+    severity: critical
+    requires: [wifi_conf_present]
+    on_fail:
+      collectors: [wifi_state, wifi_script_log]
+
+  - id: wifi_connected_ssid
+    description: "设备已连上目标 SSID"
+    command: "for i in $(seq 1 30); do cmd wifi status 2>/dev/null | grep -F 'SSID: HUAWEI-BE7P' >/dev/null && { echo SSID_OK; exit 0; }; sleep 2; done; cmd wifi status 2>/dev/null || true"
+    assert:
+      type: contains
+      value: "SSID_OK"
+    severity: critical
+    requires: [wifi_conf_not_default]
+    on_fail:
+      collectors: [serial_recent, wifi_state, wifi_script_log, kmsg]
+
+  - id: wlan_ip_ready
+    description: "wlan0 已获得静态 IP 192.168.1.55"
+    command: "for i in $(seq 1 20); do ip addr show wlan0 2>/dev/null | grep -F '192.168.1.55/' >/dev/null && { echo IP_READY; exit 0; }; sleep 2; done; ip addr show wlan0 2>/dev/null || true"
+    assert:
+      type: contains
+      value: "IP_READY"
+    severity: critical
+    requires: [wifi_connected_ssid]
+    on_fail:
+      collectors: [serial_recent, wifi_state, wifi_script_log, adbd_tcp_state]
+
+  - id: adb_tcp_port_persist_ready
+    description: "persist.adb.tcp.port 为 5555"
+    command: "getprop persist.adb.tcp.port"
+    assert:
+      type: contains
+      value: "5555"
+    severity: critical
+    requires: [wlan_ip_ready]
+    on_fail:
+      collectors: [init_log, adbd_tcp_state]
+
+  - id: adb_tcp_port_service_ready
+    description: "service.adb.tcp.port 为 5555"
+    command: "getprop service.adb.tcp.port"
+    assert:
+      type: contains
+      value: "5555"
+    severity: critical
+    requires: [adb_tcp_port_persist_ready]
+    on_fail:
+      collectors: [init_log, adbd_tcp_state]
+
+  - id: adbd_running
+    description: "adbd 服务处于 running 状态"
+    command: "for i in $(seq 1 20); do [ \"$(getprop init.svc.adbd)\" = running ] && { echo ADBD_OK; exit 0; }; sleep 1; done; echo ADBD_BAD:$(getprop init.svc.adbd)"
+    assert:
+      type: contains
+      value: "ADBD_OK"
+    severity: critical
+    requires: [adb_tcp_port_service_ready]
+    on_fail:
+      collectors: [serial_recent, init_log, adbd_tcp_state, kmsg]
+
+  - id: host_adb_connect_success
+    run_on: host
+    description: "host 侧 adb connect 192.168.1.55:5555 成功"
+    command: "adb connect 192.168.1.55:5555"
+    assert:
+      type: regex
+      pattern: "(connected to|already connected to)"
+    severity: critical
+    requires: [adbd_running]
+    on_fail:
+      collectors: [host_adb_state, wifi_state, wifi_script_log, adbd_tcp_state, serial_recent]
+
+collectors:
+  wifi_state:
+    commands:
+      - "getprop init.svc.rpi5_wifi_connect"
+      - "cmd wifi status"
+      - "ip addr show wlan0"
+      - "ip route"
+    hints: "关注 WiFi 服务状态、SSID、wlan0 地址与默认路由"
+
+  wifi_script_log:
+    commands:
+      - "logcat -d | grep rpi5_wifi"
+    hints: "关注 rpi5_wifi 脚本日志中的挂载、配置、连接、静态 IP 设置与重试信息"
+
+  adbd_tcp_state:
+    commands:
+      - "getprop persist.adb.tcp.port"
+      - "getprop service.adb.tcp.port"
+      - "getprop init.svc.adbd"
+    hints: "关注 adbd TCP 属性是否正确以及 adbd 服务是否 running"
+
+  host_adb_state:
+    run_on: host
+    commands:
+      - "adb devices"
+      - "adb connect 192.168.1.55:5555"
+    hints: "关注 host 侧 adb server 视角下的设备状态与 connect 错误信息"

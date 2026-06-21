@@ -998,3 +998,22 @@ collectors:
     with pytest.raises(ValueError, match="host collector requires at least one command"):
         load_suite(path, [str(tmp_path)])
 
+
+def test_network_adbd_suite_loads_with_host_case_and_local_collectors():
+    suite = load_suite(
+        "engineering/loop/cases/system/network-adbd-success.yaml",
+        ["engineering/loop/cases"],
+    )
+    ids = [case.id for case in suite.cases]
+    assert ids[0] == "trigger_reboot"
+    assert "shell_reachable" in ids
+    assert ids[-1] == "host_adb_connect_success"
+
+    host_case = next(case for case in suite.cases if case.id == "host_adb_connect_success")
+    assert host_case.run_on == "host"
+
+    assert "system.network_adbd.wifi_state" in suite.collectors
+    assert "system.network_adbd.wifi_script_log" in suite.collectors
+    assert "system.network_adbd.adbd_tcp_state" in suite.collectors
+    assert suite.collectors["system.network_adbd.host_adb_state"]["run_on"] == "host"
+
