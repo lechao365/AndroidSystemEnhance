@@ -609,3 +609,71 @@ cases:
     )
     assert bundle.cases[0].status == "error"
     assert bundle.cases[0].error_type in {"host_error", "HostCommandError"}
+
+
+def test_required_final_collector_failure_makes_suite_fail(tmp_path):
+    suite_yaml = """
+suite: t
+version: 1
+final_collectors: [pull_logs]
+cases:
+  - id: ok
+    command: ""
+    assert: {type: prompt_visible}
+collectors:
+  pull_logs:
+    mode: adb_pull
+    required: true
+    remote_paths: ["/data/vendor/lechao_lcview/logs"]
+    failure_code: LCVIEW_EVIDENCE_FAIL
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+
+    class TransportWithContext(FixtureTransport):
+        def pull_artifact(self, remote_path, local_dir, timeout_sec):
+            raise OSError("pull failed")
+
+    transport = TransportWithContext([{"t": 0.1, "text": "console:/ $"}])
+    transport.acquire_writer()
+    bundle = CaseExecutor(transport, AssertionEngine()).execute_suite(
+        suite, device_id="rp5", prompt_markers=["console:/ $"]
+    )
+    assert bundle.summary["overall"] == "FAIL"
+    assert bundle.summary["failure_code"] == "LCVIEW_EVIDENCE_FAIL"
+
+
+def test_final_collector_runs_on_pass(tmp_path):
+    suite_yaml = """
+suite: t
+version: 1
+final_collectors: [pull_logs]
+cases:
+  - id: ok
+    command: ""
+    assert: {type: prompt_visible}
+collectors:
+  pull_logs:
+    mode: adb_pull
+    remote_paths: ["/data/x"]
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+
+    class PullTransport(FixtureTransport):
+        def __init__(self, rows):
+            super().__init__(rows)
+            self.pulled = False
+
+        def pull_artifact(self, remote_path, local_dir, timeout_sec):
+            self.pulled = True
+            return []
+
+    transport = PullTransport([{"t": 0.1, "text": "console:/ $"}])
+    transport.acquire_writer()
+    bundle = CaseExecutor(transport, AssertionEngine()).execute_suite(
+        suite, device_id="rp5", prompt_markers=["console:/ $"]
+    )
+    assert bundle.summary["overall"] == "PASS"
+    assert transport.pulled is True
+    assert "t.pull_logs" in bundle.evidence

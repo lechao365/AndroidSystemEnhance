@@ -41,6 +41,7 @@ class CaseExecutor:
         recent_limit: int = 400,
         boot_markers: list[str] | None = None,
         panic_markers: list[str] | None = None,
+        artifacts_dir: str = "",
     ) -> EvidenceBundle:
         """执行完整用例集。
 
@@ -52,6 +53,7 @@ class CaseExecutor:
             recent_limit: 采集行数上限
             boot_markers: reboot 检测的两级 boot 标记（action case 使用）
             panic_markers: kernel panic 标记列表（action case 使用）
+            artifacts_dir: collector artifact 落盘目录（adb_pull 使用）
 
         Returns:
             EvidenceBundle
@@ -72,11 +74,17 @@ class CaseExecutor:
                 for cname in case.on_fail.get("collectors", []):
                     triggered_collectors.add(cname)
 
-        # 执行 collector（去重）
+        # 执行 collector（去重）：triggered ∪ final，保持顺序去重
         evidence: dict[str, CollectorResult] = {}
-        if triggered_collectors:
+        ordered_collectors: list[str] = []
+        seen: set[str] = set()
+        for cname in list(triggered_collectors) + list(suite.final_collectors):
+            if cname not in seen:
+                ordered_collectors.append(cname)
+                seen.add(cname)
+        if ordered_collectors:
             collector_runner = Collector(self.transport)
-            for cname in triggered_collectors:
+            for cname in ordered_collectors:
                 if cname in suite.collectors:
                     try:
                         evidence[cname] = collector_runner.run(
@@ -85,6 +93,7 @@ class CaseExecutor:
                             capture_timeout=capture_timeout,
                             recent_limit=recent_limit,
                             prompt_markers=prompt_markers,
+                            artifacts_dir=artifacts_dir or None,
                         )
                     except OSError as exc:
                         # collector 执行失败：降级为空证据并记录告警，不阻断 suite
@@ -95,6 +104,8 @@ class CaseExecutor:
                             commands=spec.get("commands", []),
                             outputs=[],
                             hints=spec.get("hints", ""),
+                            required=bool(spec.get("required", False)),
+                            failure_code=spec.get("failure_code", ""),
                         )
 
         # 统计
@@ -121,6 +132,16 @@ class CaseExecutor:
         }
         if warnings:
             summary["warnings"] = warnings
+
+        # required collector 失败 → overall FAIL 并记录 failure_code
+        required_failures = [
+            cr for cr in evidence.values()
+            if cr.required and cr.status != "ok"
+        ]
+        if required_failures:
+            overall = "FAIL"
+            summary["overall"] = "FAIL"
+            summary["failure_code"] = required_failures[0].failure_code or "EVIDENCE_FAIL"
 
         return EvidenceBundle(
             bundle_id=f"eb-{uuid4().hex[:8]}",

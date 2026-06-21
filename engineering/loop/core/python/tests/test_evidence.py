@@ -112,3 +112,42 @@ def test_summary_renders_transcript_and_reboot_cycles(tmp_path):
     assert "/tmp/serial.log" in text
     assert "reboot cycles: 3" in text
     assert "line1" in text
+
+
+def test_summary_renders_runtime_context(tmp_path):
+    bundle = EvidenceBundle(
+        bundle_id="eb-1",
+        device_id="rp5",
+        suite="t",
+        timestamp="2026-06-21T00:00:00+08:00",
+        summary={"total": 0, "passed": 0, "failed": 0, "skipped": 0, "overall": "PASS"},
+        cases=[],
+        evidence={},
+        runtime_context={"adb_endpoint": "192.168.1.55:5555"},
+    )
+    paths = write_evidence_bundle(bundle, str(tmp_path))
+    text = Path(paths["summary_txt"]).read_text(encoding="utf-8")
+    assert "Runtime Context" in text
+    assert "192.168.1.55:5555" in text
+
+
+def test_summary_renders_collector_artifact_paths(tmp_path):
+    bundle = EvidenceBundle(
+        bundle_id="eb-1",
+        device_id="rp5",
+        suite="t",
+        timestamp="2026-06-21T00:00:00+08:00",
+        summary={"total": 0, "passed": 0, "failed": 0, "skipped": 0, "overall": "PASS"},
+        cases=[],
+        evidence={
+            "pull": CollectorResult(
+                name="pull",
+                commands=[],
+                outputs=[],
+                artifact_paths=["/tmp/a.jsonl", "/tmp/b.jsonl"],
+            )
+        },
+    )
+    paths = write_evidence_bundle(bundle, str(tmp_path))
+    text = Path(paths["summary_txt"]).read_text(encoding="utf-8")
+    assert "a.jsonl" in text

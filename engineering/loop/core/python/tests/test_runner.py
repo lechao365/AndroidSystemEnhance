@@ -216,3 +216,41 @@ def test_runner_passes_boot_markers_to_executor(monkeypatch):
 
     assert captured.get("boot_markers") == ["Booting Linux"]
     assert captured.get("panic_markers") == ["Kernel panic"]
+
+
+def test_runner_passes_artifacts_dir_to_executor(tmp_path, monkeypatch):
+    from loop_core.case_loader import CaseSuite
+    captured = {}
+
+    class FakeExecutor:
+        def __init__(self, *a, **kw):
+            pass
+
+        def execute_suite(self, suite, **kwargs):
+            captured.update(kwargs)
+            from loop_core.models import EvidenceBundle
+            return EvidenceBundle(
+                bundle_id="eb-test",
+                device_id="rp5",
+                suite=suite.name,
+                timestamp="2026-06-21T00:00:00+08:00",
+                summary={"total": 0, "passed": 0, "failed": 0, "skipped": 0, "overall": "PASS"},
+                cases=[],
+                evidence={},
+            )
+
+    class FakeTransport:
+        def acquire_writer(self): return True
+        def release(self): pass
+
+    suite = CaseSuite(name="test", version=1, cases=[], collectors={})
+    runner = LoopRunner(
+        device_id="rp5",
+        prompt_markers=[],
+        transport=FakeTransport(),
+        suite=suite,
+        artifacts_dir="/tmp/le-test",
+    )
+    runner.executor = FakeExecutor()
+    runner.run()
+    assert captured.get("artifacts_dir") == "/tmp/le-test"

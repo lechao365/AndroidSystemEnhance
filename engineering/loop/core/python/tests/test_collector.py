@@ -182,3 +182,46 @@ def test_host_collector_all_failures_become_error():
     assert result.status == "error"
     assert result.partial is False
     assert all("error" in out for out in result.outputs)
+
+
+def test_adb_pull_collector_returns_artifact_paths(tmp_path):
+    class PullTransport(FixtureTransport):
+        def pull_artifact(self, remote_path, local_dir, timeout_sec):
+            target = tmp_path / "logs"
+            target.mkdir(exist_ok=True)
+            f = target / "sample.jsonl"
+            f.write_text('{"id":1}\n', encoding="utf-8")
+            return [str(f)]
+
+    transport = PullTransport([])
+    transport.acquire_writer()
+    result = Collector(transport).run(
+        "pull_logs",
+        {"mode": "adb_pull", "remote_paths": ["/data/vendor/lechao_lcview/logs"], "required": True},
+        capture_timeout=5.0,
+        recent_limit=50,
+        artifacts_dir=str(tmp_path),
+    )
+    assert result.status == "ok"
+    assert result.artifact_paths
+    assert result.required is True
+
+
+def test_runtime_context_collector_returns_describe_output():
+    class CtxTransport(FixtureTransport):
+        def describe_runtime_context(self, artifacts_dir=None):
+            return {"adb_endpoint": "192.168.1.55:5555", "adb_recent_commands": ["getprop"]}
+
+    transport = CtxTransport([])
+    transport.acquire_writer()
+    result = Collector(transport).run(
+        "rt_ctx",
+        {"mode": "runtime_context", "required": True, "failure_code": "ADB_EXEC_FAIL"},
+        capture_timeout=5.0,
+        recent_limit=50,
+        artifacts_dir="/tmp",
+    )
+    assert result.status == "ok"
+    assert result.required is True
+    assert result.failure_code == "ADB_EXEC_FAIL"
+    assert any("adb_endpoint" in line for line in result.outputs[0]["lines"])

@@ -69,6 +69,7 @@ class CaseSuite:
         collectors: collector FQN -> {commands, hints}
         defaults: suite 级默认配置（可选，向后兼容默认空）
         warnings: 加载过程中的非致命提示信息列表
+        final_collectors: 无论 pass/fail 都会执行的 collector FQN 列表
     """
 
     name: str
@@ -77,6 +78,7 @@ class CaseSuite:
     collectors: dict[str, dict]
     defaults: SuiteDefaults = field(default_factory=SuiteDefaults)
     warnings: list[str] = field(default_factory=list)
+    final_collectors: list[str] = field(default_factory=list)
 
 
 def load_suite(suite_path: str, case_dirs: list[str]) -> CaseSuite:
@@ -160,12 +162,18 @@ def load_suite(suite_path: str, case_dirs: list[str]) -> CaseSuite:
     # 解析 suite 级 defaults
     defaults = _parse_defaults(raw.get("defaults", {}))
 
+    # 解析 final_collectors（短名 -> FQN）
+    final_collectors = _resolve_collector_refs(
+        raw.get("final_collectors", []), suite_name, all_collectors
+    )
+
     return CaseSuite(
         name=suite_name,
         version=suite_version,
         cases=ordered,
         collectors=all_collectors,
         defaults=defaults,
+        final_collectors=final_collectors,
     )
 
 
@@ -316,7 +324,7 @@ def _validate_case_definition(defn: dict) -> None:
 
 
 def _validate_collectors(collectors: dict[str, dict]) -> None:
-    """静态校验 collector 定义：run_on 取值、mode 与 run_on 兼容性、host 命令非空。"""
+    """静态校验 collector 定义：run_on 取值、mode 与 run_on 兼容性、host 命令非空、adb_pull 必填项。"""
     for cname, cspec in collectors.items():
         run_on = cspec.get("run_on", "device")
         if run_on not in _VALID_RUN_ON:
@@ -326,11 +334,43 @@ def _validate_collectors(collectors: dict[str, dict]) -> None:
             raise ValueError(
                 f"serial_context collector requires run_on=device (collector '{cname}')"
             )
+        if mode == "adb_pull" and not cspec.get("remote_paths"):
+            raise ValueError("adb_pull collector requires remote_paths")
         commands = cspec.get("commands", [])
         if run_on == "host" and not commands:
             raise ValueError(
                 f"host collector requires at least one command (collector '{cname}')"
             )
+
+
+def _resolve_collector_refs(
+    refs: list[str], suite_name: str, all_collectors: dict[str, dict]
+) -> list[str]:
+    """将 collector 引用解析为 FQN。
+
+    解析顺序：
+    1. 本地命名空间 `<suite>.<ref>` 命中即用。
+    2. ref 本身已是已加载 FQN。
+    3. 未命中报 ValueError。
+
+    Args:
+        refs: 原始引用列表（短名或 FQN）
+        suite_name: 主 suite 名（用于短名命名空间解析）
+        all_collectors: 以 FQN 为键的 collector 字典
+
+    Returns:
+        解析后的 FQN 列表（顺序保持）
+    """
+    resolved: list[str] = []
+    for ref in refs:
+        fqn_attempt = ref if "." in ref else f"{suite_name}.{ref}"
+        if fqn_attempt in all_collectors:
+            resolved.append(fqn_attempt)
+        elif ref in all_collectors:
+            resolved.append(ref)
+        else:
+            raise ValueError(f"unknown collector reference: {ref}")
+    return resolved
 
 
 def _resolve_case_links(

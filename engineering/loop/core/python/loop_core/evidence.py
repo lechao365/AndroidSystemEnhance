@@ -84,6 +84,8 @@ def render_evidence_summary(bundle: EvidenceBundle) -> str:
             lines.append(f"  [{name}] ({len(cr.commands)} commands)")
             if cr.hints:
                 lines.append(f"        hints: {cr.hints}")
+            if cr.artifact_paths:
+                lines.append(f"        artifacts: {', '.join(cr.artifact_paths[:5])}")
 
     if bundle.serial_context:
         lines.append("")
@@ -98,5 +100,11 @@ def render_evidence_summary(bundle: EvidenceBundle) -> str:
             lines.append("serial snippet:")
             for item in snippet[:20]:
                 lines.append(f"  {item}")
+
+    if bundle.runtime_context and bundle.runtime_context != bundle.serial_context:
+        lines.append("")
+        lines.append("=== Runtime Context ===")
+        for key, value in bundle.runtime_context.items():
+            lines.append(f"{key}: {value}")
 
     return "\n".join(lines)

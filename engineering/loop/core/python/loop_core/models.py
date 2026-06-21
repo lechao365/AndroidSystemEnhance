@@ -76,7 +76,9 @@ class CollectorResult:
         status: ok | degraded | error；任一命令抛 OSError 即降级为 degraded
         partial: True 表示部分命令失败（仍有部分 evidence 可用）
         error: status != ok 时的错误信息（取首个错误）
-        artifact_paths: collector 产出的工件路径（预留）
+        artifact_paths: collector 产出的工件路径
+        required: True 表示该 collector 失败要让整个 suite FAIL
+        failure_code: required collector 失败时写入 summary.failure_code 的错误码
     """
 
     name: str
@@ -87,6 +89,8 @@ class CollectorResult:
     partial: bool = False
     error: str = ""
     artifact_paths: list[str] = field(default_factory=list)
+    required: bool = False
+    failure_code: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -107,6 +111,8 @@ class EvidenceBundle:
         device_profile: 设备配置摘要（如 device_id、prompt_markers）
         execution_config: 本次执行配置摘要（如 capture_timeout、recent_limit、provider_type）
         warnings: 执行过程中产生的非致命告警信息列表
+        serial_context: 串口/transport 上下文摘要（来自 describe_runtime_context）
+        runtime_context: 运行时上下文（adb endpoint / serial 通用），与 serial_context 同源
     """
 
     bundle_id: str
@@ -120,6 +126,7 @@ class EvidenceBundle:
     execution_config: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     serial_context: dict = field(default_factory=dict)
+    runtime_context: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)

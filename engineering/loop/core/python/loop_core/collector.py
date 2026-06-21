@@ -22,7 +22,8 @@ class Collector:
 
     def run(self, name: str, spec: dict, capture_timeout: float = 5.0,
             recent_limit: int = 400,
-            prompt_markers: list[str] | None = None) -> CollectorResult:
+            prompt_markers: list[str] | None = None,
+            artifacts_dir: str | None = None) -> CollectorResult:
         """执行一个 collector 的全部命令。
 
         Args:
@@ -31,7 +32,8 @@ class Collector:
             capture_timeout: 每条命令的采集超时
             recent_limit: 每条命令的行数上限
             prompt_markers: prompt 标记列表；传给 transport 用于在 fixture
-                回放下按命令/prompt 自然分段，避免首条命令消费全部 fixture 行
+                回放模式下按命令/prompt 自然分段，避免首条命令消费全部 fixture 行
+            artifacts_dir: artifact 落盘目录（adb_pull mode 使用）
 
         Returns:
             CollectorResult
@@ -41,6 +43,59 @@ class Collector:
         prompt_markers = prompt_markers or []
 
         mode = spec.get("mode", "commands")
+        if mode == "adb_pull":
+            artifact_paths: list[str] = []
+            outputs: list[dict] = []
+            for remote_path in spec.get("remote_paths", []):
+                start = time.monotonic()
+                try:
+                    pulled = self.transport.pull_artifact(
+                        remote_path, artifacts_dir or ".", capture_timeout
+                    )
+                    artifact_paths.extend(pulled)
+                    outputs.append({
+                        "command": f"pull {remote_path}",
+                        "lines": pulled,
+                        "duration_sec": round(time.monotonic() - start, 3),
+                    })
+                except (OSError, RuntimeError) as exc:
+                    outputs.append({
+                        "command": f"pull {remote_path}",
+                        "lines": [],
+                        "duration_sec": round(time.monotonic() - start, 3),
+                        "error": str(exc),
+                    })
+            failed = sum(1 for o in outputs if "error" in o)
+            return CollectorResult(
+                name=name,
+                commands=[],
+                outputs=outputs,
+                hints=hints,
+                status="ok" if failed == 0 else "error",
+                partial=False,
+                artifact_paths=artifact_paths,
+                required=bool(spec.get("required", False)),
+                failure_code=spec.get("failure_code", ""),
+                error="" if failed == 0 else "pull failed",
+            )
+        if mode == "runtime_context":
+            describe = getattr(self.transport, "describe_runtime_context", None)
+            context = describe(artifacts_dir) if callable(describe) else {}
+            outputs = [{
+                "command": "runtime_context",
+                "lines": [f"{k}: {v}" for k, v in context.items()],
+                "duration_sec": 0.0,
+            }]
+            return CollectorResult(
+                name=name,
+                commands=[],
+                outputs=outputs,
+                hints=hints,
+                status="ok",
+                partial=False,
+                required=bool(spec.get("required", False)),
+                failure_code=spec.get("failure_code", ""),
+            )
         if mode == "serial_context":
             describe = getattr(self.transport, "describe_runtime_context", None)
             context = describe() if callable(describe) else {}

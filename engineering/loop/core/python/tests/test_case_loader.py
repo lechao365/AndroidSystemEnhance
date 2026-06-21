@@ -1017,3 +1017,38 @@ def test_network_adbd_suite_loads_with_host_case_and_local_collectors():
     assert "system.network_adbd.adbd_tcp_state" in suite.collectors
     assert suite.collectors["system.network_adbd.host_adb_state"]["run_on"] == "host"
 
+
+def test_suite_final_collectors_are_preserved(tmp_path):
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+final_collectors: [pull_logs]
+cases:
+  - id: ok
+    command: "echo ok"
+    assert: {type: contains, value: "ok"}
+collectors:
+  pull_logs:
+    mode: adb_pull
+    remote_paths: ["/data/vendor/lechao_lcview/logs"]
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    assert "t.pull_logs" in suite.final_collectors
+
+
+def test_required_adb_pull_collector_without_remote_paths_is_rejected(tmp_path):
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: ok
+    command: "echo ok"
+    assert: {type: contains, value: "ok"}
+collectors:
+  bad_pull:
+    mode: adb_pull
+    required: true
+""")
+    with pytest.raises(ValueError, match="adb_pull collector requires remote_paths"):
+        load_suite(path, [str(tmp_path)])
+
