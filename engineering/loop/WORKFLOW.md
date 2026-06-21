@@ -84,6 +84,8 @@ connection (rp5-serial provider)
 | `collector.py` | 深度证据采集（含 `serial_context` 模式，消费 transport runtime context） |
 | `runner.py` | 通用 LoopRunner（场景无关） |
 | `evidence.py` | EvidenceBundle JSON 输出 |
+| `host_exec.py` | host 执行平面（`run_on: host` 的命令执行） |
+| `provider_loader.py` | provider 动态加载（按 transport 选择 provider） |
 | `report.py` | evidence.py 薄封装 |
 | `cli.py` | 统一 CLI（le run / gen-cases / deploy） |
 | `config.py` | DeviceProfile（设备语义 + 默认执行参数） |

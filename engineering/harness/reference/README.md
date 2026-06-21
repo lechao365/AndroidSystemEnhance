@@ -34,6 +34,5 @@
 
 | 类型 | 路径 | 说明 |
 |------|------|------|
-| 关联配置 | `../config/harness-paths.conf` | 编译路径定义（KERNEL_SRC / KERNEL_OUT 等） |
-| 关联脚本 | `../scripts/mk_rpi5_full_image.sh` | build-reference 的命令源提取 |
+| 关联配置 | `../config/harness-paths.conf` | 编译路径定义（`ENV_KERNEL_WS` / `ENV_AOSP_WS` / `ENV_KERNEL_OUT` / `ENV_CLANG_BIN` / `ENV_WINDOWS_IMG_DIR` 等） |
 | 关联规则 | `../rules/path-management.md`（PATH-001） | 编译环境路径加载规则 |

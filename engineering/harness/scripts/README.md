@@ -101,8 +101,7 @@ file engineering/loop/scripts/start_rp5_serial_host.bat
 
 每次修改 `.bat` 文件后，执行以下校验：
 ```bash
-python3 -c "print(sum(1 for b in open('engineering/loop/scripts/start_rp5_serial_host.bat','rb').read() if b>127))"
-python3 -c "d=open('engineering/loop/scripts/start_rp5_serial_host.bat','rb').read();print(d.count(b'\n')-d.count(b'\r\n'))"
+for f in engineering/loop/scripts/*.bat engineering/harness/lib/bat/*.bat; do python3 -c "import sys; d=open(sys.argv[1],'rb').read(); print(sys.argv[1], 'non_ascii=', sum(1 for b in d if b>127), 'lf_only=', d.count(b'\n')-d.count(b'\r\n'))" "$f"; done
 ```
 
 ## 关联资源
@@ -112,4 +111,4 @@ python3 -c "d=open('engineering/loop/scripts/start_rp5_serial_host.bat','rb').re
 | 关联规则 | `../rules/script-observability.md`（SCRIPT-001） | 改 harness 下 bash 脚本时加载 |
 | 关联配置 | `../config/harness-paths.conf` | 编译路径 KEY：`ENV_KERNEL_WS` / `ENV_AOSP_WS` / `ENV_KERNEL_OUT` / `ENV_CLANG_BIN` / `ENV_WINDOWS_IMG_DIR` |
 | 关联 workflow | `../workflows/` | validator 被 workflow 自检环节调用 |
-| 参考文档 | `../reference/build-reference.md` | RPI5 编译命令参考 |
+

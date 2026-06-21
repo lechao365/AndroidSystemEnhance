@@ -36,7 +36,7 @@
 
 `le.sh` 每次运行结束自动调 [`le_runs_cleanup.sh`](../loop/scripts/le_runs_cleanup.sh)，保留最新 N 份（默认 20，`LE_RUNS_KEEP` 或 `--keep N` 覆盖），仅清子目录，散文件保留。
 
-手动：`bash engineering/loop/scripts/le_runs_cleanup.sh --keep 20 --dry-run`。退出码：`0`=已清理；`1`=部分删除失败；`3`=参数错误；`4`=无操作（含 `--dry-run`、未超份数、目录不存在）。
+手动：`bash engineering/loop/scripts/le_runs_cleanup.sh --keep 20 --dry-run`。退出码：`0`=已清理或目录不存在（视为无操作成功）；`1`=部分删除失败；`3`=参数错误；`4`=无操作（含 `--dry-run`、未超份数）。
 
 ## 关联资源
 
