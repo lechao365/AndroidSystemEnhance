@@ -16,7 +16,7 @@ REM
 REM Stop: Ctrl-C
 REM
 REM WARNING: This file MUST use CRLF line endings (Windows), otherwise
-REM          CMD parsing will fail. See engineering/harness/scripts/README.md.
+REM          CMD parsing will fail. See engineering/loop/scripts/README.md.
 REM ===========================================================================
 setlocal enableextensions
 
@@ -36,7 +36,7 @@ set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 
 REM Load harness path utility
-set "HARNESS_PATH_UTIL=%SCRIPT_DIR%\..\lib\bat\harness_path_util.bat"
+set "HARNESS_PATH_UTIL=%SCRIPT_DIR%\..\..\harness\lib\bat\harness_path_util.bat"
 call "%HARNESS_PATH_UTIL%"
 if errorlevel 1 (
     echo ERROR: harness_path_util.bat load failed, exit code=%ERRORLEVEL%>&2

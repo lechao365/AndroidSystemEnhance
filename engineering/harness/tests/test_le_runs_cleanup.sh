@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../lib/shell/harness_path_util.sh"
 REPO_ROOT="$(harness_repo_root)"
 
-CLEANUP_SCRIPT="$REPO_ROOT/engineering/harness/scripts/le_runs_cleanup.sh"
+CLEANUP_SCRIPT="$REPO_ROOT/engineering/loop/scripts/le_runs_cleanup.sh"
 TEST_SANDBOX="$(harness_path TEST_SANDBOX_DIR)/le-runs-cleanup-tests"
 rm -rf "$TEST_SANDBOX"
 mkdir -p "$TEST_SANDBOX"
@@ -37,6 +37,7 @@ setup_sandbox() {
     local sandbox="$1"
     mkdir -p "$sandbox/engineering/harness/lib/shell"
     mkdir -p "$sandbox/engineering/harness/config"
+    mkdir -p "$sandbox/engineering/loop/scripts"
     mkdir -p "$sandbox/engineering/output/runs"
     touch "$sandbox/AGENTS.md"
 
@@ -47,11 +48,7 @@ setup_sandbox() {
        "$sandbox/engineering/harness/lib/shell/"
     cp "$REPO_ROOT/engineering/harness/config/harness-paths.conf" \
        "$sandbox/engineering/harness/config/"
-    cp "$CLEANUP_SCRIPT" "$sandbox/engineering/harness/scripts/" 2>/dev/null || {
-        # scripts 目录可能不存在，先建
-        mkdir -p "$sandbox/engineering/harness/scripts"
-        cp "$CLEANUP_SCRIPT" "$sandbox/engineering/harness/scripts/"
-    }
+    cp "$CLEANUP_SCRIPT" "$sandbox/engineering/loop/scripts/le_runs_cleanup.sh"
 
     printf '%s\n' "$sandbox"
 }
@@ -82,7 +79,7 @@ run_cleanup() {
     local sandbox="$1"
     shift
     # 在沙箱中执行：脚本自带的 bootstrap 会用沙箱的 AGENTS.md 定位 REPO_ROOT
-    env -i PATH="$PATH" HOME="$HOME" bash "$sandbox/engineering/harness/scripts/le_runs_cleanup.sh" "$@"
+    env -i PATH="$PATH" HOME="$HOME" bash "$sandbox/engineering/loop/scripts/le_runs_cleanup.sh" "$@"
 }
 
 # 统计 runs 目录下的子目录数

@@ -7,7 +7,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../harness/lib/shell/harness_bootstrap.sh
-source "$SCRIPT_DIR/../lib/shell/harness_bootstrap.sh"
+source "$SCRIPT_DIR/../../harness/lib/shell/harness_bootstrap.sh"
 
 harness_init "le"
 

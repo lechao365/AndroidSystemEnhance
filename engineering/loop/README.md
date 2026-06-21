@@ -33,8 +33,8 @@ engineering/loop/
     ├── profiles/devices/rp5/
     └── providers/rp5-serial/
 
-> CLI 入口脚本已移至 `engineering/harness/scripts/le.sh`（亦可通过 opencode slash command `/le` 触发）  
-> Windows Host 启动脚本已移至 `engineering/harness/scripts/start_rp5_serial_host.bat`
+> CLI 入口脚本已移至 `engineering/loop/scripts/le.sh`（亦可通过 opencode slash command `/le` 触发）  
+> Windows Host 启动脚本已移至 `engineering/loop/scripts/start_rp5_serial_host.bat`
 ```
 
 ### 公共 suite 与诊断 collector 库
@@ -77,7 +77,7 @@ cases:
 ### fixture 模式（离线回放）
 
 ```bash
-bash engineering/harness/scripts/le.sh run \
+bash engineering/loop/scripts/le.sh run \
   --suite engineering/loop/cases/system/boot-success.yaml \
   --fixture <jsonl路径> \
   --device-profile engineering/loop/connection/profiles/devices/rp5/default.json \
@@ -90,7 +90,7 @@ bash engineering/harness/scripts/le.sh run \
 ```bash
 # 先启动 Windows Host（COM5）
 # 然后在 WSL2 执行：
-bash engineering/harness/scripts/le.sh run \
+bash engineering/loop/scripts/le.sh run \
   --suite engineering/loop/cases/system/boot-success.yaml \
   --host 127.0.0.1 --port 9700 \
   --device-profile engineering/loop/connection/profiles/devices/rp5/default.json \
@@ -110,7 +110,7 @@ bash engineering/harness/scripts/le.sh run \
 # engineering/loop/cases/system/<your-scenario>.yaml
 
 # 3. 执行（case-dirs 指向 cases 根目录，保证 include: [common/shell] 可解析）
-bash engineering/harness/scripts/le.sh run --suite <path> \
+bash engineering/loop/scripts/le.sh run --suite <path> \
   --case-dirs engineering/loop/cases ...
 ```
 

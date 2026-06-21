@@ -119,7 +119,7 @@ cases:
   - id: host_adb_connect_success
     run_on: host
     description: "host 通过 serial 获取设备 wlan0 IP，并 adb connect 成功"
-    command: "DEV_IP=$(PYTHONPATH=engineering/loop/connection/providers/rp5-serial/python python3 engineering/harness/scripts/rp5_serial_helper.py device-ip --host 127.0.0.1 --port 9700); [ -z \"$DEV_IP\" ] && { echo NO_IP_FOUND; exit 1; }; echo \"DEV_IP=$DEV_IP\"; adb disconnect $DEV_IP:5555 >/dev/null 2>&1; adb connect $DEV_IP:5555"
+    command: "DEV_IP=$(PYTHONPATH=engineering/loop/connection/providers/rp5-serial/python python3 engineering/loop/scripts/rp5_serial_helper.py device-ip --host 127.0.0.1 --port 9700); [ -z \"$DEV_IP\" ] && { echo NO_IP_FOUND; exit 1; }; echo \"DEV_IP=$DEV_IP\"; adb disconnect $DEV_IP:5555 >/dev/null 2>&1; adb connect $DEV_IP:5555"
     assert:
       type: regex
       pattern: "(connected to|already connected to)"
