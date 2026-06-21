@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 
+from loop_core.host_exec import HostCommandError, run_host_command
 from loop_core.models import CollectorResult
 
 
@@ -61,6 +62,49 @@ class Collector:
                 status="ok",
                 partial=False,
                 artifact_paths=[transc_path] if transc_path else [],
+            )
+
+        run_on = spec.get("run_on", "device")
+        if run_on == "host":
+            outputs: list[dict] = []
+            error_msg = ""
+            for cmd in commands:
+                start = time.monotonic()
+                try:
+                    result = run_host_command(cmd, capture_timeout)
+                    outputs.append({
+                        "command": cmd,
+                        "lines": result.output.splitlines(),
+                        "duration_sec": round(time.monotonic() - start, 3),
+                    })
+                except HostCommandError as exc:
+                    outputs.append({
+                        "command": cmd,
+                        "lines": [],
+                        "duration_sec": round(time.monotonic() - start, 3),
+                        "error": str(exc),
+                    })
+                    if not error_msg:
+                        error_msg = str(exc)
+            failed_count = sum(1 for out in outputs if "error" in out)
+            succeeded_count = len(outputs) - failed_count
+            if failed_count == 0:
+                status = "ok"
+                partial = False
+            elif succeeded_count > 0:
+                status = "degraded"
+                partial = True
+            else:
+                status = "error"
+                partial = False
+            return CollectorResult(
+                name=name,
+                commands=commands,
+                outputs=outputs,
+                hints=hints,
+                status=status,
+                partial=partial,
+                error=error_msg,
             )
 
         outputs: list[dict] = []

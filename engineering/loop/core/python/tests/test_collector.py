@@ -122,3 +122,63 @@ def test_collector_serial_context_mode_returns_artifact_paths():
     assert result.artifact_paths == ["/tmp/serial.log"]
     assert len(result.outputs) == 1
     assert result.outputs[0]["lines"] == ["boot line", "reboot: Restarting system"]
+
+
+def test_host_collector_runs_commands_locally():
+    transport = FixtureTransport([])
+    transport.acquire_writer()
+    result = Collector(transport).run(
+        "host_debug",
+        {
+            "run_on": "host",
+            "commands": ["python3 -c 'print(\"host dbg\")'"],
+            "hints": "host side",
+        },
+        capture_timeout=5.0,
+        recent_limit=100,
+    )
+    assert result.status == "ok"
+    assert result.outputs[0]["lines"] == ["host dbg"]
+
+
+def test_host_collector_partial_failure_becomes_degraded():
+    transport = FixtureTransport([])
+    transport.acquire_writer()
+    result = Collector(transport).run(
+        "host_mix",
+        {
+            "run_on": "host",
+            "commands": [
+                "python3 -c 'print(\"ok\")'",
+                "python3 -c 'import time; time.sleep(2)'",
+            ],
+            "hints": "host side",
+        },
+        capture_timeout=0.2,
+        recent_limit=100,
+    )
+    assert result.status == "degraded"
+    assert result.partial is True
+    assert result.outputs[0]["lines"] == ["ok"]
+    assert "error" in result.outputs[1]
+
+
+def test_host_collector_all_failures_become_error():
+    transport = FixtureTransport([])
+    transport.acquire_writer()
+    result = Collector(transport).run(
+        "host_bad",
+        {
+            "run_on": "host",
+            "commands": [
+                "python3 -c 'import time; time.sleep(2)'",
+                "python3 -c 'import time; time.sleep(2)'",
+            ],
+            "hints": "host side",
+        },
+        capture_timeout=0.2,
+        recent_limit=100,
+    )
+    assert result.status == "error"
+    assert result.partial is False
+    assert all("error" in out for out in result.outputs)
