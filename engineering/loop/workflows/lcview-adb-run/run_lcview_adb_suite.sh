@@ -5,8 +5,8 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../../lib/shell/harness_bootstrap.sh
-source "$SCRIPT_DIR/../../lib/shell/harness_bootstrap.sh"
+# shellcheck source=../../../harness/lib/shell/harness_bootstrap.sh
+source "$SCRIPT_DIR/../../../harness/lib/shell/harness_bootstrap.sh"
 
 harness_init "lcview-adb-run"
 
@@ -19,6 +19,7 @@ ADB_PROFILE="$(harness_path ENGINEERING_DIR)/loop/connection/profiles/devices/rp
 CASE_DIR="$(harness_path ENGINEERING_DIR)/loop/cases"
 BOOTSTRAP_SUITE="$(harness_path ENGINEERING_DIR)/loop/cases/system/network-adbd-success.yaml"
 FEATURE_SUITE="$(harness_path ENGINEERING_DIR)/loop/cases/features/lcview/end_to_end.yaml"
+LOOP_SCRIPTS_DIR="$(harness_path LOOP_SCRIPTS_DIR)"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -38,7 +39,7 @@ FALLBACK_OUT="$ARTIFACTS_DIR/fallback"
 mkdir -p "$BOOTSTRAP_OUT" "$FEATURE_OUT" "$FALLBACK_OUT"
 
 step_begin "bootstrap" "run serial network-adbd bootstrap"
-bash "$(harness_path HARNESS_DIR)/scripts/le.sh" run \
+bash "$LOOP_SCRIPTS_DIR/le.sh" run \
   --suite "$BOOTSTRAP_SUITE" \
   --host "$SERIAL_HOST" \
   --port "$SERIAL_PORT" \
@@ -56,7 +57,7 @@ fi
 
 if [[ -z "$ADB_ENDPOINT" ]]; then
   step_begin "discover-adb-endpoint" "discover adb endpoint from serial helper"
-  DISCOVERED_IP="$(python3 "$(harness_path HARNESS_DIR)/scripts/rp5_serial_helper.py" device-ip --host "$SERIAL_HOST" --port "$SERIAL_PORT" 2>/dev/null || true)"
+  DISCOVERED_IP="$(python3 "$LOOP_SCRIPTS_DIR/rp5_serial_helper.py" device-ip --host "$SERIAL_HOST" --port "$SERIAL_PORT" 2>/dev/null || true)"
   if [[ -z "$DISCOVERED_IP" || "$DISCOVERED_IP" == "NO_IP_FOUND" ]]; then
     log_error "ADB_CONNECT_FAIL: cannot discover device IP"
     harness_status_emit FAIL "discover-adb-endpoint"
@@ -69,7 +70,7 @@ fi
 log_info "adb endpoint: $ADB_ENDPOINT"
 
 step_begin "feature" "run lcview adb feature suite"
-bash "$(harness_path HARNESS_DIR)/scripts/le.sh" run \
+bash "$LOOP_SCRIPTS_DIR/le.sh" run \
   --suite "$FEATURE_SUITE" \
   --device-profile "$ADB_PROFILE" \
   --case-dirs "$CASE_DIR" \
@@ -81,7 +82,7 @@ step_end "feature" "$feature_rc"
 if [[ $feature_rc -ne 0 ]]; then
   log_warn "feature run failed (rc=$feature_rc), collecting serial fallback evidence"
   step_begin "fallback" "collect serial fallback context"
-  bash "$(harness_path HARNESS_DIR)/scripts/le.sh" run \
+  bash "$LOOP_SCRIPTS_DIR/le.sh" run \
     --suite "$(harness_path ENGINEERING_DIR)/loop/cases/system/boot-success.yaml" \
     --host "$SERIAL_HOST" \
     --port "$SERIAL_PORT" \

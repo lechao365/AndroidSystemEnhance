@@ -13,7 +13,7 @@
 | 归档源码到 patchs | [workflows/sync-code-to-patchs/](./workflows/sync-code-to-patchs/) |
 | workspace 坏了要回退 | [workflows/revert-code-from-patchs/](./workflows/revert-code-from-patchs/) |
 | patchs 变了更新技术文档 | [workflows/sync-patchs-to-doc/](./workflows/sync-patchs-to-doc/) |
-| 跑 lcview 的 serial→adb 双阶段验收 | [workflows/lcview-adb-run/](./workflows/lcview-adb-run/) |
+| 跑 lcview 的 serial→adb 双阶段验收 | [../loop/workflows/lcview-adb-run/](../loop/workflows/lcview-adb-run/) |
 | 写 / 改技术文档 | [templates/](./templates/) + [rules/doc-paths.md](./rules/doc-paths.md) |
 | 画 PlantUML 图 | [rules/plantuml.md](./rules/plantuml.md) |
 | 多任务并行处理 | [rules/parallel-strategy.md](./rules/parallel-strategy.md) |

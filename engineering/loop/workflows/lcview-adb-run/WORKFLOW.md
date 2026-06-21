@@ -2,7 +2,7 @@
 
 ## 目标
 
-提供单入口 workflow：
+提供 loop 专属单入口 workflow：
 1. 用 serial profile 跑 `system/network-adbd-success.yaml`（bootstrap）
 2. 提取 adb endpoint（从 serial helper 或参数直传）
 3. 用 adb profile 跑 `features/lcview/end_to_end.yaml`（feature run）
@@ -29,6 +29,10 @@
 | `LCVIEW_TRIGGER_FAIL` | trigger 动作执行失败 |
 | `LCVIEW_PIPELINE_FAIL` | jsonl 未生成或内容为空 |
 | `LCVIEW_EVIDENCE_FAIL` | 关键 evidence pull 失败 |
+
+## 归属规则
+
+该 workflow 属于 loop engineering 专属 phase plan，不得放回 `engineering/harness/workflows/`。
 
 ## 脚本入口
 
