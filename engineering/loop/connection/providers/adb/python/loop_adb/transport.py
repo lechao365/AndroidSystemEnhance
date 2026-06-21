@@ -53,6 +53,8 @@ class AdbTransport(BaseTransport):
         self._reconnect_count = 0
         self._last_wait_for_device_result = "not_run"
         self.client.connect(timeout_sec=self.connect_timeout_sec)
+        if self.root_mode in ("auto", "adb_root"):
+            self.client.root(timeout_sec=self.connect_timeout_sec)
 
     # ------------------------------------------------------------------
     # writer / send
@@ -94,9 +96,15 @@ class AdbTransport(BaseTransport):
     ) -> CommandCapture:
         """执行缓存的 shell 命令并返回采集结果。"""
         del boundary, recent_limit, prompt_markers
-        self._remember_command(self._pending_command)
+        command = self._pending_command.strip()
+        self._pending_command = ""
+        if not command:
+            return CommandCapture(
+                lines=[], prompt_visible=False, exit_code=0
+            )
+        self._remember_command(command)
         result = self.client.shell(
-            self._pending_command,
+            command,
             timeout_sec=timeout_sec or self.command_timeout_sec,
             as_root=self.root_mode == "su0",
         )
@@ -104,7 +112,6 @@ class AdbTransport(BaseTransport):
             ObservedLine(t=float(index), text=line)
             for index, line in enumerate(result.output_lines, start=1)
         ]
-        self._pending_command = ""
         return CommandCapture(
             lines=lines, prompt_visible=False, exit_code=result.command_exit_code
         )

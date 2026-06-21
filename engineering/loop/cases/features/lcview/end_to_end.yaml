@@ -1,10 +1,9 @@
 suite: features.lcview.end_to_end
 version: 1
 include:
-  - common/shell
   - features/lcview/common
 defaults:
-  capture_timeout: 20.0
+  capture_timeout: 60.0
   recent_limit: 500
 cases:
   - id: lcview_cleanup_old_logs
@@ -22,7 +21,7 @@ cases:
     requires: [lcview_cleanup_old_logs]
 
   - id: lcview_restart_hal
-    command: "setprop ctl.restart lechao_lcview_hal && echo hal_restarted"
+    command: "setprop ctl.restart lechao_lcview_hal && sleep 3 && echo hal_restarted"
     assert: {type: contains, value: "hal_restarted"}
     severity: critical
     requires: [lcview_cleanup_old_logs]
@@ -30,7 +29,7 @@ cases:
       collectors: [lcview_logcat, lcview_service_state, serial_recent]
 
   - id: lcview_restart_daemon
-    command: "setprop ctl.restart lechao_lcview && echo daemon_restarted"
+    command: "setprop ctl.restart lechao_lcview && sleep 3 && echo daemon_restarted"
     assert: {type: contains, value: "daemon_restarted"}
     severity: critical
     requires: [lcview_restart_hal]
@@ -38,7 +37,7 @@ cases:
       collectors: [lcview_logcat, lcview_service_state, serial_recent]
 
   - id: lcview_trigger_usb_read_window
-    command: "TARGET=$(ls /storage | head -n 1); FILE=$(find /storage/$TARGET -type f | head -n 1); dd if=$FILE of=/dev/null bs=1M count=8 && echo trigger_done"
+    command: 'USB=$(mount | grep -o "/mnt/media_rw/[^ ]*" | head -n 1); FILE="$USB/test_100m"; test -f "$FILE" && dd if="$FILE" of=/dev/null bs=1M count=8 && echo trigger_done'
     assert: {type: contains, value: "trigger_done"}
     severity: critical
     requires: [lcview_restart_daemon]
@@ -46,7 +45,7 @@ cases:
       collectors: [lcview_logcat, lcview_kmsg, lcview_service_state, serial_recent]
 
   - id: lcview_jsonl_generated
-    command: "ls /data/vendor/lechao_lcview/logs/*.jsonl"
+    command: "sleep 35; ls /data/vendor/lechao_lcview/logs/*.jsonl"
     assert: {type: regex, pattern: ".*\\.jsonl"}
     severity: critical
     requires: [lcview_trigger_usb_read_window]

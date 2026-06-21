@@ -155,6 +155,7 @@ def _cmd_run(args) -> int:
         recent_limit=recent_limit,
         boot_markers=profile.boot_markers,
         panic_markers=profile.panic_markers,
+        artifacts_dir=args.artifacts_dir,
     )
     if hasattr(transport, "set_cycle_markers"):
         transport.set_cycle_markers(profile.reboot_markers)

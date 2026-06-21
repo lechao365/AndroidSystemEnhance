@@ -109,6 +109,8 @@ def load_suite(suite_path: str, case_dirs: list[str]) -> CaseSuite:
     all_cases: list[TestCase] = []
     # collectors 以 FQN 为键；include 的 collector 保留其来源 suite 的命名空间
     all_collectors: dict[str, dict] = {}
+    # include 带来的 final_collectors（FQN，去重后合并到主 suite）
+    extra_final_collectors: list[str] = []
 
     # 处理 include
     for inc_name in raw.get("include", []):
@@ -120,6 +122,9 @@ def load_suite(suite_path: str, case_dirs: list[str]) -> CaseSuite:
             all_cases.append(_parse_case(case_def, inc_suite))
         for cname, cspec in inc_raw.get("collectors", {}).items():
             all_collectors[f"{inc_suite}.{cname}"] = cspec
+        for fc in inc_raw.get("final_collectors", []):
+            fqn = fc if "." in fc else f"{inc_suite}.{fc}"
+            extra_final_collectors.append(fqn)
 
     # 处理主 suite 的 cases（先展开参数化用例）
     parameters = raw.get("parameters", {})
@@ -150,6 +155,11 @@ def load_suite(suite_path: str, case_dirs: list[str]) -> CaseSuite:
     # collector 静态校验（在引用解析之前，确保 collector 自身合法）
     _validate_collectors(all_collectors)
 
+    # 校验 include 引入的 final_collectors 引用有效性
+    for fc in extra_final_collectors:
+        if fc not in all_collectors:
+            raise ValueError(f"unknown final_collector from include: {fc}")
+
     # 解析 requires / collector 引用为 FQN
     _resolve_case_links(all_cases, all_collectors)
 
@@ -166,6 +176,12 @@ def load_suite(suite_path: str, case_dirs: list[str]) -> CaseSuite:
     final_collectors = _resolve_collector_refs(
         raw.get("final_collectors", []), suite_name, all_collectors
     )
+    # 合并 include 带来的 final_collectors（去重，主 suite 优先）
+    seen_fc: set[str] = set(final_collectors)
+    for fc in extra_final_collectors:
+        if fc not in seen_fc:
+            seen_fc.add(fc)
+            final_collectors.append(fc)
 
     return CaseSuite(
         name=suite_name,

@@ -1,7 +1,5 @@
 suite: features.lcview.common
 version: 1
-include:
-  - common/shell
 defaults:
   capture_timeout: 15.0
   recent_limit: 400
@@ -57,6 +55,9 @@ cases:
       collectors: [lcview_files, lcview_service_state, serial_recent]
 
 collectors:
+  serial_recent:
+    mode: runtime_context
+    hints: "adb 运行上下文（endpoint / recent commands / logcat snapshot）"
   lcview_logcat:
     mode: adb_logcat
     buffers: [main, system, crash]
