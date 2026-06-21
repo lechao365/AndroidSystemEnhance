@@ -23,10 +23,13 @@ AI 接管设备验收：执行用例 → 输出证据 → AI 分析 → 修复�
 
 | 层 | 职责 |
 |----|------|
-| opencode (AI) | 生成用例 / 分析证据 / 修复代码 |
-| loop_core | 用例加载 / 断言求值 / 执行 / 证据输出 |
-| cases/*.yaml | 场景定义（声明式，零 Python） |
-| connection | 传输层（串口/ADB） |
+| opencode (AI) | 生成用例 / 分析证据 / 收敛候选修复方向 |
+| `engineering/loop/controller/` | loop session / terminate-retry-regression policy / workflow 调度 |
+| `engineering/loop/workflows/` | loop 专属 phase plan / bootstrap / verify / fallback / rerun |
+| `loop_core` | 单次 attempt：用例加载 / 断言 / 执行 / 证据输出 |
+| `cases/*.yaml` | 场景定义（声明式，零 Python） |
+| `connection` | 传输层（串口 / ADB） |
+| `engineering/harness/` | 公共规则、路径管理、脚本 bootstrap、日志与 observability 基础设施 |
 
 ## 规则复用模型
 
@@ -107,6 +110,8 @@ shell 不可达时，AI/人工应优先分析 `serial_context`；shell 可达时
 2. **deploy 未实现**：第二步实现 binary/image 部署（范围 A 不含 deploy）
 3. **loop_ctrl 未实现**：第三步实现循环控制（N=5 / 回归检测 / 升级人工）
 4. **参数化用例**：case_loader 预留 parameters 字段，第一步未实现展开
+
+> `loop_ctrl` 后续落点为 `engineering/loop/controller/`，不进入 `engineering/harness/`。
 
 ## AI 诊断报告约束（`/le` 第 4-5 步首版）
 

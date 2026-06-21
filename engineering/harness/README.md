@@ -1,6 +1,7 @@
 # Engineering Harness
 
 本项目工程控制面与执行保障面：通过控制总纲、准入矩阵、规则、工作流、模板、配置与日志证据，约束 AI、人工与脚本在源码 / 归档 / 文档 / 提交各环节的行为边界。
+`engineering/harness/` 只承载公共 harness engineering 能力，不承载 loop-specific case / workflow / controller / session / LE CLI。
 
 ## 快速导航（按意图查找）
 
@@ -41,6 +42,12 @@
 | [scripts/](./scripts/) | 独立脚本与静态校验入口；后续 validator 默认从本目录进入 |
 | [templates/](./templates/) | 技术文档模板（只读契约），设计文档必须遵循 |
 | [workflows/](./workflows/) | 多步闭环工作流，每个子目录 = 一个完整流程（脚本 + WORKFLOW.md） |
+
+## 与 `engineering/loop/` 的边界
+
+- `engineering/harness/`：公共规则、公共 workflow、公共脚本基础设施
+- `engineering/loop/`：loop engineering 专属 case / connection / core / scripts / workflows / controller / contracts
+- 依赖方向固定为 `loop -> harness`，禁止 `harness -> loop`
 
 ## lib 公共能力速查
 
