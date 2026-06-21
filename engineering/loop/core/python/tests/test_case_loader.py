@@ -857,3 +857,144 @@ def test_boot_success_trigger_reboot_has_early_failure_collectors():
         "common.shell.kmsg",
     ]
 
+
+# ---------- Task 15: run_on 字段（host/device） ----------
+
+
+def test_case_run_on_defaults_to_device(tmp_path):
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: hostless
+    command: "echo ok"
+    assert: {type: contains, value: "ok"}
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    assert suite.cases[0].run_on == "device"
+
+
+def test_case_run_on_host_is_parsed(tmp_path):
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: host_case
+    run_on: host
+    command: "python3 -c 'print(\\"ok\\")'"
+    assert: {type: contains, value: "ok"}
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    assert suite.cases[0].run_on == "host"
+
+
+def test_invalid_case_run_on_raises(tmp_path):
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: bad
+    run_on: cloud
+    command: "echo ok"
+    assert: {type: contains, value: "ok"}
+""")
+    with pytest.raises(ValueError, match="invalid run_on"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_host_reboot_action_is_rejected(tmp_path):
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: bad_reboot
+    run_on: host
+    action: reboot
+    assert: {}
+""")
+    with pytest.raises(ValueError, match="reboot action requires run_on=device"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_prompt_visible_host_case_is_rejected(tmp_path):
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: bad_prompt
+    run_on: host
+    command: "python3 -c 'print(\\"ok\\")'"
+    assert: {type: prompt_visible}
+""")
+    with pytest.raises(ValueError, match="prompt_visible requires run_on=device"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_empty_host_command_is_rejected(tmp_path):
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: bad_empty
+    run_on: host
+    command: ""
+    assert: {type: contains, value: "ok"}
+""")
+    with pytest.raises(ValueError, match="host case requires non-empty command"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_host_collector_is_preserved(tmp_path):
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: a
+    command: "echo fail"
+    assert: {type: contains, value: "ok"}
+    on_fail:
+      collectors: [host_debug]
+collectors:
+  host_debug:
+    run_on: host
+    commands: ["python3 -c 'print(\\"dbg\\")'"]
+    hints: "host side"
+""")
+    suite = load_suite(path, [str(tmp_path)])
+    assert suite.collectors["t.host_debug"]["run_on"] == "host"
+
+
+def test_host_serial_context_collector_is_rejected(tmp_path):
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: a
+    command: "echo fail"
+    assert: {type: contains, value: "ok"}
+collectors:
+  bad_ctx:
+    run_on: host
+    mode: serial_context
+    commands: []
+""")
+    with pytest.raises(ValueError, match="serial_context collector requires run_on=device"):
+        load_suite(path, [str(tmp_path)])
+
+
+def test_host_collector_requires_commands(tmp_path):
+    path = _write(tmp_path, "t.yaml", """
+suite: t
+version: 1
+cases:
+  - id: a
+    command: "echo fail"
+    assert: {type: contains, value: "ok"}
+collectors:
+  bad_host:
+    run_on: host
+    commands: []
+""")
+    with pytest.raises(ValueError, match="host collector requires at least one command"):
+        load_suite(path, [str(tmp_path)])
+

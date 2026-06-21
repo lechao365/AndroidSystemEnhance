@@ -41,6 +41,7 @@ class TestCase:
     on_fail: dict = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
     description: str = ""
+    run_on: str = "device"
     fqn: str = ""
 
 
@@ -144,6 +145,9 @@ def load_suite(suite_path: str, case_dirs: list[str]) -> CaseSuite:
     for case in all_cases:
         _validate_assertion_shape(case.assert_spec)
 
+    # collector 静态校验（在引用解析之前，确保 collector 自身合法）
+    _validate_collectors(all_collectors)
+
     # 解析 requires / collector 引用为 FQN
     _resolve_case_links(all_cases, all_collectors)
 
@@ -190,6 +194,7 @@ def _parse_case(defn: dict, suite: str) -> TestCase:
         on_fail=dict(defn.get("on_fail", {})),
         tags=list(defn.get("tags", [])),
         description=defn.get("description", ""),
+        run_on=defn.get("run_on", "device"),
     )
 
 
@@ -269,6 +274,8 @@ _VALID_ASSERT_TYPES = {
 }
 # 允许的 action 取值（与 command 互斥）
 _VALID_ACTIONS = {"reboot"}
+# 允许的 run_on 取值
+_VALID_RUN_ON = {"device", "host"}
 
 
 def _validate_case_definition(defn: dict) -> None:
@@ -290,6 +297,40 @@ def _validate_case_definition(defn: dict) -> None:
         raise ValueError(
             f"unknown action: {action} (allowed: {sorted(_VALID_ACTIONS)})"
         )
+    run_on = defn.get("run_on", "device")
+    if run_on not in _VALID_RUN_ON:
+        raise ValueError(f"invalid run_on: {run_on}")
+    if action == "reboot" and run_on != "device":
+        raise ValueError(
+            f"reboot action requires run_on=device (case '{defn.get('id')}')"
+        )
+    assert_type = defn.get("assert", {}).get("type")
+    if assert_type == "prompt_visible" and run_on != "device":
+        raise ValueError(
+            f"prompt_visible requires run_on=device (case '{defn.get('id')}')"
+        )
+    if run_on == "host" and not command:
+        raise ValueError(
+            f"host case requires non-empty command (case '{defn.get('id')}')"
+        )
+
+
+def _validate_collectors(collectors: dict[str, dict]) -> None:
+    """静态校验 collector 定义：run_on 取值、mode 与 run_on 兼容性、host 命令非空。"""
+    for cname, cspec in collectors.items():
+        run_on = cspec.get("run_on", "device")
+        if run_on not in _VALID_RUN_ON:
+            raise ValueError(f"invalid run_on: {run_on}")
+        mode = cspec.get("mode", "")
+        if mode == "serial_context" and run_on != "device":
+            raise ValueError(
+                f"serial_context collector requires run_on=device (collector '{cname}')"
+            )
+        commands = cspec.get("commands", [])
+        if run_on == "host" and not commands:
+            raise ValueError(
+                f"host collector requires at least one command (collector '{cname}')"
+            )
 
 
 def _resolve_case_links(
