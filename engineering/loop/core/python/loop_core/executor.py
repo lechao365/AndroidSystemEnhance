@@ -12,7 +12,9 @@ from uuid import uuid4
 from loop_core.assertion_engine import AssertionContext, AssertionEngine
 from loop_core.case_loader import CaseSuite, TestCase
 from loop_core.collector import Collector
-from loop_core.models import CollectorResult, EvidenceBundle, TestCaseResult
+from loop_core.host_exec import HostCommandError, run_host_command
+from loop_core.models import CollectorResult, EvidenceBundle, ObservedLine, TestCaseResult
+from loop_core.transport import CommandCapture
 
 
 class CaseExecutor:
@@ -218,7 +220,9 @@ class CaseExecutor:
         # 仅包裹命令执行与断言求值；依赖检查（skip 逻辑）已在上游完成，不进入 try
         try:
             start = time.monotonic()
-            if case.command:
+            if getattr(case, "run_on", "device") == "host":
+                capture = self._capture_host_command(case.command, capture_timeout)
+            elif case.command:
                 boundary = self.transport.mark_output_boundary()
                 self.transport.send_line(case.command)
                 capture = self.transport.capture_since(
@@ -243,6 +247,16 @@ class CaseExecutor:
                 exit_code=capture.exit_code,
             )
             result = self.engine.evaluate(case.assert_spec, ctx)
+        except HostCommandError as exc:
+            return TestCaseResult(
+                id=case.id,
+                suite=case.suite,
+                status="error",
+                command=case.command,
+                failure_reason=str(exc),
+                error_type="host_error",
+                tags=case.tags,
+            )
         except OSError as exc:
             # 传输层异常：标记为 error，避免 suite 崩溃
             return TestCaseResult(
@@ -295,3 +309,9 @@ class CaseExecutor:
             triggered_collectors=case.on_fail.get("collectors", []),
             tags=case.tags,
         )
+
+    def _capture_host_command(self, command: str, timeout_sec: float) -> CommandCapture:
+        """在主机侧执行命令并构造 CommandCapture。"""
+        result = run_host_command(command, timeout_sec)
+        lines = [ObservedLine(t=0.0, text=line) for line in result.output.splitlines()]
+        return CommandCapture(lines=lines, prompt_visible=False, exit_code=result.exit_code)

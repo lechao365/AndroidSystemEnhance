@@ -517,3 +517,95 @@ def test_executor_action_case_fail_includes_stage_in_reason():
     assert result.status == "fail"
     assert "timeout" in result.failure_reason
     assert "l1_boot_start" in result.failure_reason
+
+
+def test_host_case_passes_with_contains_assertion(tmp_path):
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: host_ok
+    run_on: host
+    command: "echo connected to 192.168.1.55:5555"
+    assert: {type: contains, value: "connected to"}
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+    transport = _make_transport([])
+    transport.acquire_writer()
+    bundle = CaseExecutor(transport, AssertionEngine()).execute_suite(
+        suite,
+        device_id="rp5",
+        prompt_markers=["console:/ $"],
+    )
+    assert bundle.cases[0].status == "pass"
+    assert "connected to" in bundle.cases[0].output
+
+
+def test_host_case_fails_when_assertion_not_met(tmp_path):
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: host_fail
+    run_on: host
+    command: "echo offline"
+    assert: {type: contains, value: "connected to"}
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+    transport = _make_transport([])
+    transport.acquire_writer()
+    bundle = CaseExecutor(transport, AssertionEngine()).execute_suite(
+        suite,
+        device_id="rp5",
+        prompt_markers=["console:/ $"],
+    )
+    assert bundle.cases[0].status == "fail"
+    assert "expected output to contain 'connected to'" in bundle.cases[0].failure_reason
+
+
+def test_host_case_supports_exit_code_zero_assertion(tmp_path):
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: host_exit
+    run_on: host
+    command: "true"
+    assert: {type: exit_code_zero}
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+    transport = _make_transport([])
+    transport.acquire_writer()
+    bundle = CaseExecutor(transport, AssertionEngine()).execute_suite(
+        suite,
+        device_id="rp5",
+        prompt_markers=["console:/ $"],
+    )
+    assert bundle.cases[0].status == "pass"
+
+
+def test_host_case_runtime_error_maps_to_error_status(tmp_path):
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: host_err
+    run_on: host
+    command: "sleep 2"
+    assert: {type: contains, value: "ok"}
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+    transport = _make_transport([])
+    transport.acquire_writer()
+    bundle = CaseExecutor(transport, AssertionEngine()).execute_suite(
+        suite,
+        device_id="rp5",
+        prompt_markers=["console:/ $"],
+        capture_timeout=0.2,
+    )
+    assert bundle.cases[0].status == "error"
+    assert bundle.cases[0].error_type in {"host_error", "HostCommandError"}
