@@ -41,6 +41,7 @@
 | [rules/](./rules/) | 全局约束规则，AI 与人都必须遵守的硬性约定 |
 | [scripts/](./scripts/) | 独立脚本与静态校验入口；后续 validator 默认从本目录进入 |
 | [templates/](./templates/) | 技术文档模板（只读契约），设计文档必须遵循 |
+| [reference/](./reference/) | 参考文档承载层（命令模板、操作指南等非约束性参考） |
 | [workflows/](./workflows/) | 多步闭环工作流，每个子目录 = 一个完整流程（脚本 + WORKFLOW.md） |
 
 ## 与 `engineering/loop/` 的边界
@@ -83,4 +84,5 @@ harness_init "<script-name>"
   - 新增/删除/重命名 `lib/*.sh`、`scripts/*.sh`、`workflows/*/`、`rules/*.md`、`config/*.yaml`、`config/*.json`、`templates/*` → 更新对应子目录 README.md 的文件清单
   - 公共 API 变动（`lib/*.sh` 新增/删除函数对外暴露）→ 额外更新本 README 的「lib 公共能力速查」章节
   - 新增/删除 `rules/*.md` → 同步更新 `rules/README.md` 文件说明表 + 本 README 快速导航表
+  - 新增/删除/重命名 `reference/*.md` → 更新 `reference/README.md` 文件清单 + 本 README 快速导航表
   - 仅修改文件内容（文件名/结构不变）→ 无需更新 README

@@ -22,7 +22,7 @@
 
 | 文件 | 职责 | 被谁引用 |
 |------|------|---------|
-| `build-reference.md` | RPI5 AOSP/内核编译命令参考（BLD-001~008） | `AGENTS.md`（编译时加载）、`../rules/README.md`（索引） |
+| [build-reference.md](./build-reference.md) | RPI5 AOSP/内核编译命令参考（BLD-001~008） | `AGENTS.md`（编译时加载）、`../rules/README.md`（索引） |
 
 > 本目录仅承载参考文档，不承载约束规则。规则约束见 `../rules/`。
 
