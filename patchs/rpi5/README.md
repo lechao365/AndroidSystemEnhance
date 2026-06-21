@@ -1,20 +1,35 @@
 # Raspberry Pi 5 系统增强 Patches
 
-## 概述
+> **AI 读取指引**：本 README 采用三层结构。先读「大纲」判断需要哪些章节，
+> 再按需精读对应章节，避免全量解析。带 🔖 的章节为高频引用，优先阅读。
 
-### 本目录用途
+## 定位
+- **是什么**：Raspberry Pi 5 平台 AOSP + Linux kernel 定制改动的归档镜像（`~/workspace/` 编译源码树的精确镜像）
+- **职责边界**：归档层，非编译树（编译在 `~/workspace/`）
+- **上下游依赖**：由 `sync-code-to-patchs` 从 workspace 写入，被 `revert-code-from-patchs` 读回 workspace、被 `sync-patchs-to-doc` 读为文档源
 
-本目录归档 **Raspberry Pi 5** 平台的 AOSP 和 Linux kernel 定制改动。
+## 大纲
 
-### 工作流
+| 章节 | 内容摘要 | 何时读取 |
+|------|---------|---------|
+| [定位](#定位) | 本目录做什么、不做什么 | 首次进入 |
+| [大纲](#大纲) | 本 README 章节索引 | 判断需要读哪些段 |
+| [目录说明](#目录说明) | 顶层目录清单与职责 | 了解结构时 |
+| [特性概览](#特性概览) | 内核态 / 用户态特性索引 | 了解改动范围时 |
+| [使用方式](#使用方式) | 归档 / 回退 / 手动回写部署 | 实际操作时 🔖 |
+| [文件映射表](#文件映射表) | 五张表（自动维护，请勿手编） | 查找具体文件时 🔖 |
+| [关联资源](#关联资源) | workflow、规则、配置链接 | 深入理解时 |
 
-```
-workspace 改动 → 执行同步规则 → 更新本 README 文件映射表
-```
+## 目录说明
 
-每次在 `~/workspace/aosp` 或 `~/workspace/rpi5-kernel-build` 中完成改动后，通过 `/sync-code-to-patchs` 命令执行归档，脚本会自动更新本文件的**文件映射表**。
+| 子目录/文件 | 职责 | 关键入口/被谁引用 |
+|------------|------|------------------|
+| `kernel/` | ← `~/workspace/rpi5-kernel-build/common/`，modified diff + new 全新文件 | 被 `revert-code-from-patchs` 读回 |
+| `aosp/` | ← `~/workspace/aosp/`，modified diff + new 全新文件 | 被 `revert-code-from-patchs` 读回 |
+| `others/` | 树莓派5专用工具，直接 Git 维护，不同步 | 独立编译运行 |
+| `manifest.yaml` | 文件清单元数据，由 sync-code-to-patchs 维护 | 被 revert/sync workflow 读取 |
 
-### 包含的特性
+### 特性概览
 
 #### 内核态
 
@@ -33,73 +48,21 @@ workspace 改动 → 执行同步规则 → 更新本 README 文件映射表
 | lechao_lcview HAL + Daemon | HAL（epoll 批量读取）+ Daemon（Schema 校验 + JSONL 落盘） |
 | Device tree 集成 | BoardConfig.mk、device.mk、sepolicy、ueventd 等 AOSP 设备配置 |
 
----
+## 使用方式
 
-## 目录结构
+本目录无可执行入口，作为归档承载层。
 
-```
-rpi5/
-├── README.md                      # 本文档
-├── kernel/                        # ← ~/workspace/rpi5-kernel-build/common/
-│   ├── modified/                  # 上游已有文件的 unified diff
-│   │   ├── Kbuild.diff
-│   │   ├── Kconfig.diff
-│   │   ├── arch/arm64/configs/android_rpi5_defconfig.diff
-│   │   └── drivers/usb/storage/
-│   │       ├── transport.c.diff
-│   │       ├── usb.c.diff
-│   │       └── usb.h.diff
-│   └── new/                       # 全部新增文件（完整文件）
-│       └── vendor/
-│           ├── Kconfig
-│           ├── Makefile
-│           └── lechao/
-│               ├── Kconfig
-│               ├── Makefile
-│               ├── kernel_lechao_log.h
-│               ├── LcIod/
-│               └── LcView/
-├── aosp/                          # ← ~/workspace/aosp/
-│   ├── modified/                  # 上游已有文件的 unified diff
-│   │   └── device/brcm/rpi5/
-│   │       ├── BoardConfig.mk.diff
-│   │       ├── README.md.diff
-│   │       ├── aosp_rpi5.mk.diff
-│   │       ├── boot/config.txt.diff
-│   │       ├── device.mk.diff
-│   │       ├── manifest.xml.diff
-│   │       ├── mkbootimg.mk.diff
-│   │       ├── overlay/SettingsProviderRpiOverlay/res/values/defaults.xml.diff
-│   │       ├── ramdisk/init.rpi5.rc.diff
-│   │       ├── ramdisk/ueventd.rpi5.rc.diff
-│   │       ├── sepolicy/file_contexts.diff
-│   │       ├── sepolicy/service_contexts.diff
-│   │       └── vendor.prop.diff
-│   └── new/                       # 全部新增文件（完整文件）
-│       ├── device/brcm/rpi5/
-│       │   ├── boot/wifi.conf
-│       │   ├── ramdisk/init.rpi5.wifi.rc
-│       │   ├── scripts/
-│       │   └── sepolicy/
-│       │       ├── lechao_lciod.te
-│       │       ├── lechao_lciod_hal.te
-│       │       ├── lechao_lcview.te
-│       │       ├── lechao_lcview_hal.te
-│       │       └── rpi5_wifi_connect.te
-│       └── vendor/lechao/
-│           ├── Android.bp
-│           └── services/
-│               ├── include/
-│               ├── lechao_lciod/
-│               └── lechao_lcview/
-└── others/                        # 树莓派5专用程序（直接提交到 Git，不同步）
-```
+### 归档（workspace → patchs）
 
----
+`/sync-code-to-patchs` 命令自动镜像 workspace 改动 + 更新 manifest + 更新本 README 文件映射表。
 
-## 回写命令（patchs → 新环境部署）
+### 回退（patchs → workspace）
 
-### 内核
+`/revert-code-from-patchs` 命令，详见 [`engineering/harness/workflows/revert-code-from-patchs/WORKFLOW.md`](../../engineering/harness/workflows/revert-code-from-patchs/WORKFLOW.md)。
+
+### 手动回写部署（patchs → 新环境）
+
+#### 内核
 
 ```bash
 cd ~/workspace/rpi5-kernel-build/common
@@ -117,7 +80,7 @@ make menuconfig   # 确认 CONFIG_VENDOR_LECHAO=y, CONFIG_LCVIEW=y
 make -j$(nproc)
 ```
 
-### AOSP
+#### AOSP
 
 ```bash
 cd ~/workspace/aosp
@@ -137,7 +100,7 @@ lunch aosp_rpi5-bp1a-userdebug
 m vendorimage systemimage
 ```
 
-### 烧写与验证
+#### 烧写与验证
 
 ```bash
 adb reboot bootloader
@@ -158,9 +121,9 @@ adb shell service list | grep lechao
 adb shell ls -l /dev/vendor_lechao_lcview /dev/vendor_lechao_usbd*
 ```
 
----
-
 ## 文件映射表
+
+> 以下映射表由 `sync-code-to-patchs` 自动维护，请勿手动编辑。
 
 ### kernel/modified/
 
@@ -228,3 +191,14 @@ adb shell ls -l /dev/vendor_lechao_lcview /dev/vendor_lechao_usbd*
 | 路径 | 说明 |
 |------|------|
 | `usb-verify/` | USB 设备验证工具（Makefile + src/ + include/），含 ioctl 兼容层、CLI/check/device 子模块，独立编译运行 |
+
+## 关联资源
+
+| 类型 | 路径 | 说明 |
+|------|------|------|
+| 关联 workflow | `engineering/harness/workflows/sync-code-to-patchs/` | 归档（workspace → patchs） |
+| 关联 workflow | `engineering/harness/workflows/revert-code-from-patchs/` | 回退（patchs → workspace） |
+| 关联 workflow | `engineering/harness/workflows/sync-patchs-to-doc/` | 文档同步 |
+| 关联规则 | `engineering/harness/rules/source-code-modify.md` | workspace 是源头，patchs 是归档 |
+| 关联配置 | `engineering/harness/config/scope-mapping.yaml` | commit scope 判定 |
+| 设计文档 | `docs/specs/2026-06-21-engineering-doc-refactor-design.md` | 文档重构，映射表保留决策 |
