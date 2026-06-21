@@ -123,6 +123,61 @@ PYTHONPATH="engineering/loop/core/python:engineering/loop/connection/providers/r
   -v --import-mode=importlib
 ```
 
+## `run_on` 执行平面
+
+Loop case 与 collector 默认在 `device` 执行，即通过当前 transport（fixture / rp5-serial）向设备发送命令并采集输出。
+
+当场景需要 host 侧动作（例如 `adb connect 192.168.1.55:5555`）时，可在 case 或 collector 上显式声明：
+
+```yaml
+- id: host_adb_connect_success
+  run_on: host
+  command: "adb connect 192.168.1.55:5555"
+  assert:
+    type: regex
+    pattern: "(connected to|already connected to)"
+```
+
+约束：
+
+- `run_on` 只允许 `device` / `host`
+- `action: reboot` 仅允许 `run_on: device`
+- `prompt_visible` 与 `serial_context` 仅适用于 `device`
+
+## `system.network_adbd` 场景
+
+`engineering/loop/cases/system/network-adbd-success.yaml` 用于验证 RPi5 的开机自动联网与网络 adb 闭环：
+
+1. `trigger_reboot` + `shell_reachable`
+2. `boot_completed`
+3. `rpi5_wifi_connect` 服务已进入有效执行态
+4. `/data/boot/wifi.conf` 存在且非默认值
+5. 已连接目标 SSID
+6. `wlan0` 获得 `192.168.1.55`
+7. adbd TCP 属性正确，`adbd` 为 `running`
+8. host `adb connect 192.168.1.55:5555` 成功
+
+该场景继续以串口作为主执行与主取证通道；host adb 仅作为最终成功判据，而不是主 transport。
+
+### Live 运行示例
+
+```bash
+PYTHONPATH="engineering/loop/core/python:engineering/loop/connection/providers/rp5-serial/python" \
+python3 -m loop_core.cli run \
+  --suite engineering/loop/cases/system/network-adbd-success.yaml \
+  --device-profile engineering/loop/connection/profiles/devices/rp5/default.json \
+  --case-dirs engineering/loop/cases \
+  --artifacts-dir engineering/output/runs/network-adbd-live \
+  --host 127.0.0.1 \
+  --port 9700
+```
+
+运行前要求：
+
+- host 环境可直接调用 `adb`
+- 设备端 `wifi.conf` 已配置真实 `ssid/psk/static_ip`
+- 当前静态 IP 设计假定为 `192.168.1.55`
+
 ## EvidenceBundle 串口上下文
 
 `evidence_bundle.json` 包含 `serial_context` 字段，承载串口第一现场证据：
