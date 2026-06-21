@@ -1,81 +1,45 @@
 # Loop Engineering
 
-AI 驱动的设备验收闭环：用例驱动 + EvidenceBundle + opencode AI 分析修复。
+> **AI 读取指引**：本 README 采用三层结构。先读「大纲」判断需要哪些章节，
+> 再按需精读对应章节，避免全量解析。带 🔖 的章节为高频引用，优先阅读。
 
-## 架构
+## 定位
 
-```
-opencode (AI Driver)
-    ↓ le run
-LE 框架 (loop_core)
-    ├── case_loader       YAML 用例加载（include/requires）
-    ├── assertion_engine  确定性断言（6 种类型）
-    ├── executor          用例执行 + collector 触发
-    ├── runner            通用 LoopRunner（场景无关）
-    └── evidence          EvidenceBundle JSON 输出
-    ↓ transport
-connection (rp5-serial provider)
-```
+- **是什么**：AI 驱动的设备验收闭环——用例驱动 + EvidenceBundle + opencode AI 分析修复
+- **职责边界**：承载 loop engineering 专属能力（cases / connection / core / scripts / controller / workflows / contracts）；不承载公共 harness 基础设施（在 `../harness/`）
+- **上下游依赖**：依赖 `engineering/harness/`（规则/路径/observability）；被 `.opencode/commands/le.md` 通过 `@WORKFLOW.md` 消费
 
-## 目录结构
+## 大纲
 
-```
-engineering/loop/
-├── core/python/loop_core/       LE 框架（通用层）
-├── cases/                       声明式用例（YAML）
-│   ├── common/                    公共 suite（含 shell + 诊断 collector 库）
-│   ├── features/                  基于业务特性的验收场景（如 lcview）
-│   ├── modules/                   模块级用例（第二步）
-│   └── system/                    系统级用例
-├── templates/                   AI 生成约束模板
-│   └── case-template.md
-└── connection/                  连接层（provider）
-    ├── profiles/devices/rp5/
-    └── providers/rp5-serial/
-```
+| 章节 | 内容摘要 | 何时读取 |
+|------|---------|---------|
+| [定位](#定位) | 本目录做什么、不做什么 | 首次进入 |
+| [目录说明](#目录说明) | 子目录/文件清单与职责 | 了解结构时 |
+| [使用方式](#使用方式) | 快速开始、测试、添加场景 | 实际跑 le run 时 |
+| [关联资源](#关联资源) | 设计文档、规则、workflow、配置链接 | 深入理解时 |
+| 流程细节（架构/场景/诊断约束） | 见 `WORKFLOW.md` | 深入理解流程时 |
 
-> CLI 入口脚本已移至 `engineering/loop/scripts/le.sh`（亦可通过 opencode slash command `/le` 触发）  
-> Windows Host 启动脚本已移至 `engineering/loop/scripts/start_rp5_serial_host.bat`
-> loop 专属 workflow 位于 `engineering/loop/workflows/`，当前包含 `lcview-adb-run/` 多阶段验证样板
+## 目录说明
 
-### 公共 suite 与诊断 collector 库
+| 子目录/文件 | 职责 | 关键入口/被谁引用 |
+|------------|------|------------------|
+| `core/python/loop_core/` | LE 框架通用层 | 详见 WORKFLOW.md「core 模块清单」 |
+| `cases/` | 声明式用例（YAML），含 common/ features/ system/ | `cases/common/shell.yaml` 公共 suite + 诊断 collector（详见 WORKFLOW.md） |
+| `connection/` | 连接层（provider/profiles/protocol） | 详见 `connection/README.md` |
+| `scripts/` | CLI 入口 le.sh + host 启动脚本 | 详见 `scripts/README.md` |
+| `templates/case-template.md` | AI 用例生成约束模板 |
+| `workflows/` | loop 专属 workflow（lcview-adb-run） | 详见 `workflows/README.md` |
+| `controller/` | loop 控制层（预留） |
+| `contracts/` | loop 契约层（预留） |
+| `WORKFLOW.md` | **流程细节单一事实源**（架构拓扑 / core 模块 / 断言类型 / run_on / 场景细节 / serial_context / 诊断约束） | 被 `/le` 注入 |
 
-`cases/common/shell.yaml`（suite: `common.shell`）承载两类可复用资产：
+> 子目录自身的细节见其 `README.md`，本表只给一句话索引。流程级细节见 WORKFLOW.md。
 
-| 资产 | FQN | 说明 |
-|------|-----|------|
-| shell 可达性原子用例 | `common.shell.shell_reachable` | 作为系统用例的 `requires` 前置 |
-| boot 诊断 collector | `common.shell.boot_log` | dmesg |
-| init 诊断 collector | `common.shell.init_log` | getprop init.svc.* / logcat -b system |
-| 崩溃诊断 collector | `common.shell.crash_dump` | logcat -b crash / tombstones |
-| 串口上下文 collector | `common.shell.serial_recent` | transcript path + serial snippet（mode: serial_context） |
+## 使用方式
 
-业务 suite 通过 `include` 即可获得上述全部资产：
+### 快速开始
 
-```yaml
-suite: my.module
-include:
-  - common/shell    # 注入 shell_reachable 用例 + 三个公共 collector
-
-cases:
-  - id: my_check
-    command: "..."
-    assert: {type: contains, value: "..."}
-    requires: [shell_reachable]                 # 短名 → common.shell.shell_reachable
-    on_fail:
-      collectors: [crash_dump, init_log]        # 短名 → common.shell.<name>
-```
-
-> 短名解析规则见 `core/python/loop_core/case_loader.py:_resolve_case_links`：
-> 本地命名空间优先 → 显式 FQN → 全局唯一短名回退。
-
-> include 路径（如 `common/shell`）由 `--case-dirs` 解析。loader 会在每个
-> case_dir 下查找 `<name>.yaml`，因此 `--case-dirs` 必须包含 `cases/` 根目录
-> （见下方快速开始示例）。
-
-## 快速开始
-
-### fixture 模式（离线回放）
+**fixture 模式（离线回放）**：
 
 ```bash
 bash engineering/loop/scripts/le.sh run \
@@ -86,11 +50,10 @@ bash engineering/loop/scripts/le.sh run \
   --artifacts-dir <输出目录>
 ```
 
-### live 模式
+**live 模式**：
 
 ```bash
-# 先启动 Windows Host（COM5）
-# 然后在 WSL2 执行：
+# 先启动 Windows Host（COM5），然后在 WSL2 执行：
 bash engineering/loop/scripts/le.sh run \
   --suite engineering/loop/cases/system/boot-success.yaml \
   --host 127.0.0.1 --port 9700 \
@@ -99,23 +62,7 @@ bash engineering/loop/scripts/le.sh run \
   --artifacts-dir <输出目录>
 ```
 
-## 添加新场景
-
-只需写 1 个 YAML 用例文件，零 Python 代码：
-
-```bash
-# 1. 参照模板编写用例
-# 参考 engineering/loop/templates/case-template.md
-
-# 2. 创建用例文件
-# engineering/loop/cases/system/<your-scenario>.yaml
-
-# 3. 执行（case-dirs 指向 cases 根目录，保证 include: [common/shell] 可解析）
-bash engineering/loop/scripts/le.sh run --suite <path> \
-  --case-dirs engineering/loop/cases ...
-```
-
-## 测试
+### 测试
 
 ```bash
 PYTHONPATH="engineering/loop/core/python:engineering/loop/connection/providers/rp5-serial/python" \
@@ -125,111 +72,20 @@ PYTHONPATH="engineering/loop/core/python:engineering/loop/connection/providers/r
   -v --import-mode=importlib
 ```
 
-## `run_on` 执行平面
+### 添加新场景
 
-Loop case 与 collector 默认在 `device` 执行，即通过当前 transport（fixture / rp5-serial）向设备发送命令并采集输出。
+参照 `templates/case-template.md` 写 YAML，零 Python，详见 WORKFLOW.md「扩展新场景」。
 
-当场景需要 host 侧动作（例如 `adb connect 192.168.1.55:5555`）时，可在 case 或 collector 上显式声明：
+## 关联资源
 
-```yaml
-- id: host_adb_connect_success
-  run_on: host
-  command: "adb connect 192.168.1.55:5555"
-  assert:
-    type: regex
-    pattern: "(connected to|already connected to)"
-```
-
-约束：
-
-- `run_on` 只允许 `device` / `host`
-- `action: reboot` 仅允许 `run_on: device`
-- `prompt_visible` 与 `serial_context` 仅适用于 `device`
-
-## `system.network_adbd` 场景
-
-`engineering/loop/cases/system/network-adbd-success.yaml` 用于验证 RPi5 的开机自动联网与网络 adb 闭环：
-
-1. `trigger_reboot` + `shell_reachable`
-2. `boot_completed`
-3. `rpi5_wifi_connect` 服务已进入有效执行态
-4. `/data/boot/wifi.conf` 存在且非默认值
-5. 已连接目标 SSID
-6. `wlan0` 获得 `192.168.1.55`
-7. adbd TCP 属性正确，`adbd` 为 `running`
-8. host `adb connect 192.168.1.55:5555` 成功
-
-该场景继续以串口作为主执行与主取证通道；host adb 仅作为最终成功判据，而不是主 transport。
-
-### Live 运行示例
-
-```bash
-PYTHONPATH="engineering/loop/core/python:engineering/loop/connection/providers/rp5-serial/python" \
-python3 -m loop_core.cli run \
-  --suite engineering/loop/cases/system/network-adbd-success.yaml \
-  --device-profile engineering/loop/connection/profiles/devices/rp5/default.json \
-  --case-dirs engineering/loop/cases \
-  --artifacts-dir engineering/output/runs/network-adbd-live \
-  --host 127.0.0.1 \
-  --port 9700
-```
-
-运行前要求：
-
-- host 环境可直接调用 `adb`
-- 设备端 `wifi.conf` 已配置真实 `ssid/psk/static_ip`
-- 当前静态 IP 设计假定为 `192.168.1.55`
-
-## EvidenceBundle 串口上下文
-
-`evidence_bundle.json` 包含 `serial_context` 字段，承载串口第一现场证据：
-
-| 字段 | 说明 |
-|------|------|
-| `transcript_path` | host 持续落盘的串口 transcript 文件路径 |
-| `serial_snippet` | 最近 N 行（≤40）串口关键片段 |
-| `reboot_cycles` | 基于 `reboot_markers` 估算的最近重启周期数 |
-| `recent_line_count` | host 当前环形缓冲中的行数 |
-
-`summary.txt` 同步渲染上述内容，方便人工快速浏览。
-
-## 串口 transcript
-
-rp5-serial host 持续将串口正文写入 `transcript_path`（默认 `output/host-log/rp5-serial-transcript.log`），
-每行带 ISO 时间戳。`serial_recent` collector 通过 `mode: serial_context` 直接消费 host 上下文，
-无需 shell 可达即可获取串口根证据（transcript 路径 + 最近片段 + restart 周期）。
-
-## `/le` 失败后诊断
-
-当 `/le` 驱动 `le run` 得到 FAIL 时，opencode 会读取本次 run 的 `summary.txt`、`evidence_bundle.json`、`serial_context` 与关联 collector 产物，先可选询问一次调查线索（如 suspect 模块、最近改动范围、首次坏版本），再在与本次 `evidence_bundle.json` 同目录下生成 `diagnosis-report.md`。
-
-诊断报告只输出"确定事实 / 现象归类 / 当前不确定点 / 候选修复方向"，不强行给唯一根因。只有当证据足以指向 `~/workspace/` 的可操作范围时，才会给出候选补丁草案。
-
-## `system.adb_shell` 场景
-
-`engineering/loop/cases/system/adb-shell-success.yaml` 是 `transport=adb` 的最小 smoke suite：
-
-1. `adb shell` 可达
-2. `sys.boot_completed=1`
-3. `init.svc.adbd=running`
-4. `id` 命令可执行
-
-建议在实现任何 feature adb suite 前先单独跑通本场景。
-
-## `features.lcview` 场景
-
-`engineering/loop/cases/features/lcview/common.yaml` 提供：
-
-- adb shell reachability
-- `sys.boot_completed`
-- HAL / daemon service state
-- schema / data dir readiness
-- pull logs / invalid log / runtime context final collectors
-
-## 设计文档
-
-- `docs/specs/2026-06-19-loop-engineering-v2-design.md`（v2 架构，权威来源）
-- `docs/specs/2026-06-20-loop-zygote-restart-serial-observability-design.md`（串口观测补强设计）
-- `docs/specs/2026-06-20-le-zygote-diagnosis-and-patch-draft-design.md`（/le 第 4-5 步诊断与补丁草案）
-- `docs/specs/2026-06-19-loop-core-extraction-design.md`（core 抽取）
-- `docs/specs/2026-06-19-loop-engineering-design.md`（v1 原始设计，历史归档）
+| 类型 | 路径 | 说明 |
+|------|------|------|
+| 设计文档 | `docs/specs/2026-06-19-loop-engineering-v2-design.md` | v2 架构，权威 |
+| 设计文档 | `docs/specs/2026-06-20-loop-zygote-restart-serial-observability-design.md` | 串口观测 |
+| 设计文档 | `docs/specs/2026-06-20-le-zygote-diagnosis-and-patch-draft-design.md` | 诊断与补丁草案 |
+| 设计文档 | `docs/specs/2026-06-19-loop-core-extraction-design.md` | core 抽取 |
+| 设计文档 | `docs/specs/2026-06-19-loop-engineering-design.md` | v1 历史归档 |
+| 关联规则 | `../harness/rules/script-observability.md` | 改 loop 下 bash 脚本时 |
+| 关联规则 | `../harness/rules/path-management.md` | 路径引用 |
+| 关联 workflow | `workflows/lcview-adb-run/` | lcview serial→adb 双阶段验收 |
+| 关联配置 | `../harness/config/harness-paths.conf` | LOOP_* 路径 KEY |

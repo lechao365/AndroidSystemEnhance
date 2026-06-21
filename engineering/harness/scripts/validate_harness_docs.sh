@@ -218,7 +218,7 @@ scan_plantuml_in_file() {
     fi
 }
 
-# 扫描 templates/*.md 与 harness 下所有 README.md、CONTROL-CHARTER.md
+# 扫描 templates/*.md 与 harness 下所有 .md 文件（含 README.md、reference/ 等）
 # 排除：rules/plantuml.md（规则定义本身含反例，不参与扫描）
 PUML_TARGETS=()
 while IFS= read -r f; do

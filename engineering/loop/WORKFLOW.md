@@ -19,6 +19,21 @@ AI 接管设备验收：执行用例 → 输出证据 → AI 分析 → 修复�
 6. 编译部署（binary 自动 / 镜像确认）
 7. goto 2，直到全 pass 或 N=5 回退人工
 
+## 架构拓扑
+
+```
+opencode (AI Driver)
+    ↓ le run
+LE 框架 (loop_core)
+    ├── case_loader       YAML 用例加载（include/requires）
+    ├── assertion_engine  确定性断言（6 种类型）
+    ├── executor          用例执行 + collector 触发
+    ├── runner            通用 LoopRunner（场景无关）
+    └── evidence          EvidenceBundle JSON 输出
+    ↓ transport
+connection (rp5-serial provider)
+```
+
 ## 分层职责
 
 | 层 | 职责 |
@@ -69,6 +84,8 @@ AI 接管设备验收：执行用例 → 输出证据 → AI 分析 → 修复�
 | `collector.py` | 深度证据采集（含 `serial_context` 模式，消费 transport runtime context） |
 | `runner.py` | 通用 LoopRunner（场景无关） |
 | `evidence.py` | EvidenceBundle JSON 输出 |
+| `host_exec.py` | host 执行平面（`run_on: host` 的命令执行） |
+| `provider_loader.py` | provider 动态加载（按 transport 选择 provider） |
 | `report.py` | evidence.py 薄封装 |
 | `cli.py` | 统一 CLI（le run / gen-cases / deploy） |
 | `config.py` | DeviceProfile（设备语义 + 默认执行参数） |
@@ -84,6 +101,63 @@ AI 接管设备验收：执行用例 → 输出证据 → AI 分析 → 修复�
 
 无需写任何 Python 代码。
 
+## 场景细节
+
+### system.network_adbd
+
+`cases/system/network-adbd-success.yaml` 用于验证 RPi5 的开机自动联网与网络 adb 闭环：
+
+1. `trigger_reboot` + `shell_reachable`
+2. `boot_completed`
+3. `rpi5_wifi_connect` 服务已进入有效执行态
+4. `/data/boot/wifi.conf` 存在且非默认值
+5. 已连接目标 SSID
+6. `wlan0` 获得 `192.168.1.55`
+7. adbd TCP 属性正确，`adbd` 为 `running`
+8. host `adb connect 192.168.1.55:5555` 成功
+
+该场景继续以串口作为主执行与主取证通道；host adb 仅作为最终成功判据，而不是主 transport。
+
+Live 运行示例：
+
+```bash
+PYTHONPATH="engineering/loop/core/python:engineering/loop/connection/providers/rp5-serial/python" \
+python3 -m loop_core.cli run \
+  --suite engineering/loop/cases/system/network-adbd-success.yaml \
+  --device-profile engineering/loop/connection/profiles/devices/rp5/default.json \
+  --case-dirs engineering/loop/cases \
+  --artifacts-dir engineering/output/runs/network-adbd-live \
+  --host 127.0.0.1 \
+  --port 9700
+```
+
+运行前要求：
+
+- host 环境可直接调用 `adb`
+- 设备端 `wifi.conf` 已配置真实 `ssid/psk/static_ip`
+- 当前静态 IP 设计假定为 `192.168.1.55`
+
+### system.adb_shell
+
+`cases/system/adb-shell-success.yaml` 是 `transport=adb` 的最小 smoke suite：
+
+1. `adb shell` 可达
+2. `sys.boot_completed=1`
+3. `init.svc.adbd=running`
+4. `id` 命令可执行
+
+建议在实现任何 feature adb suite 前先单独跑通本场景。
+
+### features.lcview
+
+`cases/features/lcview/common.yaml` 提供：
+
+- adb shell reachability
+- `sys.boot_completed`
+- HAL / daemon service state
+- schema / data dir readiness
+- pull logs / invalid log / runtime context final collectors
+
 ## 断言类型
 
 | type | 用途 |
@@ -95,12 +169,43 @@ AI 接管设备验收：执行用例 → 输出证据 → AI 分析 → 修复�
 | `not_contains` | 输出不包含文本 |
 | `exit_code_zero` | 退出码为 0 |
 
+## `run_on` 执行平面
+
+Loop case 与 collector 默认在 `device` 执行，即通过当前 transport（fixture / rp5-serial）向设备发送命令并采集输出。
+
+当场景需要 host 侧动作（例如 `adb connect 192.168.1.55:5555`）时，可在 case 或 collector 上显式声明：
+
+```yaml
+- id: host_adb_connect_success
+  run_on: host
+  command: "adb connect 192.168.1.55:5555"
+  assert:
+    type: regex
+    pattern: "(connected to|already connected to)"
+```
+
+约束：
+
+- `run_on` 只允许 `device` / `host`
+- `action: reboot` 仅允许 `run_on: device`
+- `prompt_visible` 与 `serial_context` 仅适用于 `device`
+
 ## EvidenceBundle 串口上下文
 
-EvidenceBundle `serial_context` 字段提供串口第一现场证据：
-- `transcript_path`：host 持续落盘的串口 transcript 文件
-- `serial_snippet`：最近一段串口片段
-- `reboot_cycles`：基于 reboot marker 估算的最近重启周期数
+`evidence_bundle.json` 包含 `serial_context` 字段，承载串口第一现场证据：
+
+| 字段 | 说明 |
+|------|------|
+| `transcript_path` | host 持续落盘的串口 transcript 文件路径 |
+| `serial_snippet` | 最近 N 行（≤40）串口关键片段 |
+| `reboot_cycles` | 基于 `reboot_markers` 估算的最近重启周期数 |
+| `recent_line_count` | host 当前环形缓冲中的行数 |
+
+`summary.txt` 同步渲染上述内容，方便人工快速浏览。
+
+rp5-serial host 持续将串口正文写入 `transcript_path`（默认 `output/host-log/rp5-serial-transcript.log`），
+每行带 ISO 时间戳。`serial_recent` collector 通过 `mode: serial_context` 直接消费 host 上下文，
+无需 shell 可达即可获取串口根证据（transcript 路径 + 最近片段 + restart 周期）。
 
 shell 不可达时，AI/人工应优先分析 `serial_context`；shell 可达时再结合 `init_log` / `crash_dump` 等 collector 证据。
 
@@ -114,6 +219,8 @@ shell 不可达时，AI/人工应优先分析 `serial_context`；shell 可达时
 > `loop_ctrl` 后续落点为 `engineering/loop/controller/`，不进入 `engineering/harness/`。
 
 ## AI 诊断报告约束（`/le` 第 4-5 步首版）
+
+诊断报告只输出"确定事实 / 现象归类 / 当前不确定点 / 候选修复方向"，不强行给唯一根因。
 
 当 AI（opencode）通过 `/le` 触发诊断闭环并收到 EvidenceBundle 后，必须遵守以下规则：
 

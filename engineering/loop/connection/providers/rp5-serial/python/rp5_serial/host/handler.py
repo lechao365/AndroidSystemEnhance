@@ -6,7 +6,7 @@
 2. ``ClientHandler``：每个 client 连接一个实例，循环读取 JSON Lines 请求并分发到对应处理函数。
    对 ``stream.subscribe`` 的 client，进入"推送模式"，同时处理新请求和推送队列。
 
-协议请求详见 ``engineering/loop/connection/protocol/rp5_serial_protocol.md``。
+协议请求详见 ``engineering/loop/connection/protocol/rp5-serial-protocol.md``。
 """
 
 from __future__ import annotations

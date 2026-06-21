@@ -6,7 +6,7 @@
 3. 启动 TCP accept 循环（每个 client spawn 一个 handler 线程）
 4. Ctrl-C 优雅退出
 
-协议请求详见 ``engineering/loop/connection/protocol/rp5_serial_protocol.md``。
+协议请求详见 ``engineering/loop/connection/protocol/rp5-serial-protocol.md``。
 """
 
 from __future__ import annotations
