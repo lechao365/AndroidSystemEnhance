@@ -47,3 +47,10 @@ def test_device_profile_defaults_empty_markers():
     profile = DeviceProfile(device_id="x")
     assert profile.boot_markers == []
     assert profile.panic_markers == []
+
+
+def test_device_profile_allows_adb_transport():
+    from loop_core.config import DeviceProfile
+
+    profile = DeviceProfile(device_id="rp5", transport="adb")
+    assert profile.transport == "adb"

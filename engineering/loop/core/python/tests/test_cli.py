@@ -183,3 +183,112 @@ def test_cli_passes_boot_panic_markers_to_runner(tmp_path, monkeypatch):
 
     assert captured.get("boot_markers") == ["Booting Linux"]
     assert captured.get("panic_markers") == ["Kernel panic"]
+
+
+def test_cli_live_mode_uses_provider_loader(tmp_path, monkeypatch):
+    import loop_core.cli as cli
+
+    captured = {}
+
+    class FakeTransport:
+        def acquire_writer(self):
+            return True
+
+        def release(self):
+            pass
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run(self):
+            from loop_core.models import EvidenceBundle
+            return EvidenceBundle(
+                bundle_id="eb-test",
+                device_id="rp5",
+                suite="test",
+                timestamp="2026-06-21T00:00:00+08:00",
+                summary={"total": 0, "passed": 0, "failed": 0, "skipped": 0, "overall": "PASS"},
+                cases=[],
+                evidence={},
+            )
+
+        def build_failure_bundle(self, reason):
+            raise AssertionError(reason)
+
+    def fake_build_live_transport(profile, args):
+        captured["transport_name"] = profile.transport
+        captured["adb_endpoint"] = args.adb_endpoint
+        return FakeTransport()
+
+    monkeypatch.setattr(cli, "build_live_transport", fake_build_live_transport)
+    monkeypatch.setattr(cli, "LoopRunner", FakeRunner)
+
+    suite_path = tmp_path / "t.yaml"
+    suite_path.write_text("suite: test\nversion: 1\ncases: []\n", encoding="utf-8")
+    profile_path = tmp_path / "p.json"
+    profile_path.write_text('{"device_id":"rp5","transport":"adb"}', encoding="utf-8")
+
+    rc = cli.main([
+        "run",
+        "--suite", str(suite_path),
+        "--device-profile", str(profile_path),
+        "--artifacts-dir", str(tmp_path / "out"),
+        "--adb-endpoint", "192.168.1.55:5555",
+    ])
+
+    assert rc == 0
+    assert captured["transport_name"] == "adb"
+    assert captured["adb_endpoint"] == "192.168.1.55:5555"
+
+
+def test_cli_adb_suite_path_keeps_case_dirs(tmp_path, monkeypatch):
+    import loop_core.cli as cli
+
+    captured = {}
+
+    class FakeTransport:
+        def acquire_writer(self):
+            return True
+
+        def release(self):
+            pass
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run(self):
+            from loop_core.models import EvidenceBundle
+            return EvidenceBundle(
+                bundle_id="eb-test",
+                device_id="rp5",
+                suite="system.adb_shell",
+                timestamp="2026-06-21T00:00:00+08:00",
+                summary={"total": 0, "passed": 0, "failed": 0, "skipped": 0, "overall": "PASS"},
+                cases=[],
+                evidence={},
+            )
+
+        def build_failure_bundle(self, reason):
+            raise AssertionError(reason)
+
+    monkeypatch.setattr(cli, "build_live_transport", lambda profile, args: FakeTransport())
+    monkeypatch.setattr(cli, "LoopRunner", FakeRunner)
+
+    suite_path = tmp_path / "adb-shell-success.yaml"
+    suite_path.write_text("suite: system.adb_shell\nversion: 1\ncases: []\n", encoding="utf-8")
+    profile_path = tmp_path / "adb.json"
+    profile_path.write_text('{"device_id":"rp5","transport":"adb"}', encoding="utf-8")
+
+    rc = cli.main([
+        "run",
+        "--suite", str(suite_path),
+        "--device-profile", str(profile_path),
+        "--case-dirs", str(tmp_path),
+        "--artifacts-dir", str(tmp_path / "out"),
+        "--adb-endpoint", "192.168.1.55:5555",
+    ])
+
+    assert rc == 0
+    assert captured["suite"].name == "system.adb_shell"

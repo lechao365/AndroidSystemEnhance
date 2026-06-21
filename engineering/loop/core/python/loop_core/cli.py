@@ -19,6 +19,7 @@ from pathlib import Path
 from loop_core.case_loader import load_suite
 from loop_core.config import DeviceProfile
 from loop_core.evidence import write_evidence_bundle
+from loop_core.provider_loader import build_live_transport
 from loop_core.report import render_summary
 from loop_core.runner import LoopRunner
 from loop_core.transport import FixtureTransport
@@ -64,6 +65,16 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="采集行数上限，缺省按 CLI > suite.defaults > profile 默认 兜底",
     )
+    run_parser.add_argument("--adb-endpoint", default="", help="adb endpoint，例如 192.168.1.55:5555")
+    run_parser.add_argument("--adb-serial", default="", help="adb device serial；缺省回落到 endpoint")
+    run_parser.add_argument(
+        "--adb-root-mode",
+        choices=["auto", "adb_root", "su0", "none"],
+        default="auto",
+        help="adb 提权策略",
+    )
+    run_parser.add_argument("--adb-connect-timeout", type=float, default=15.0, help="adb connect / wait 超时")
+    run_parser.add_argument("--adb-command-timeout", type=float, default=10.0, help="adb 单命令默认超时")
 
     # gen-cases 占位
     sub.add_parser("gen-cases", help="AI 辅助用例生成（第二步实现）")
@@ -108,21 +119,16 @@ def _cmd_run(args) -> int:
         transport = FixtureTransport.from_jsonl(args.fixture)
     else:
         try:
-            from rp5_serial.client.automation import AutomationClient
-            from rp5_serial.transport import Rp5SerialTransport
+            transport = build_live_transport(profile, args)
         except ImportError:
             print(
-                "ERROR: live mode 需要 rp5_serial provider，请设置 PYTHONPATH",
+                "ERROR: live mode provider 缺失，请检查 PYTHONPATH",
                 file=sys.stderr,
             )
             return 1
-        client = AutomationClient(args.host, args.port)
-        try:
-            client.connect()
-        except OSError as e:
-            print(f"ERROR: 无法连接 host {args.host}:{args.port}: {e}", file=sys.stderr)
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: live mode 初始化失败: {exc}", file=sys.stderr)
             return 1
-        transport = Rp5SerialTransport(client)
 
     # 执行
     # 参数优先级：CLI 显式 > suite.defaults > profile 默认 > 硬编码兜底
