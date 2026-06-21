@@ -4,7 +4,7 @@
   "prompt_markers": ["console:/ $", "console:/ #", "localhost:/ #", "# ", "$ "],
   "boot_markers": [
     "Booting Linux on physical CPU",
-    "init: ... started service 'zygote' has pid"
+    "init: init second stage started!"
   ],
   "reboot_markers": [
     "reboot: Restarting system",

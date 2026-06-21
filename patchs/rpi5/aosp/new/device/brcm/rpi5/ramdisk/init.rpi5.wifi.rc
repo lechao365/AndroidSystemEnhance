@@ -14,6 +14,7 @@ service rpi5_wifi_connect /system/bin/rpi5_wifi_connect
     class late_start
     user root
     group root
+    seclabel u:r:shell:s0
     disabled
     oneshot
 

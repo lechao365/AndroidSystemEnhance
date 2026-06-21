@@ -15,3 +15,15 @@ baselines:
     board_verify: PASS
     approved_by: lechao
     approved_at: "2026-06-20T12:34:56+08:00"
+
+  - baseline_id: BL-20260621-01
+    status: promoted
+    source_branch: android-15.0
+    source_commit: f8de5aa
+    sync_manifest: log/sync_code_to_patchs/artifacts/20260621-080703-manifest.yaml
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    approved_by: lechao
+    approved_at: "2026-06-21T08:07:03+08:00"
+    summary: wifi.conf psk 从 default 改为真实密码（HUAWEI-BE7P AP 调试用）

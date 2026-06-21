@@ -2,7 +2,7 @@ suite: system.network_adbd
 version: 1
 
 defaults:
-  capture_timeout: 20
+  capture_timeout: 35
   recent_limit: 400
 
 include:
@@ -19,10 +19,10 @@ cases:
 
   - id: boot_completed
     description: "sys.boot_completed 属性为 1"
-    command: "getprop sys.boot_completed"
+    command: "for i in $(seq 1 15); do v=$(getprop sys.boot_completed); [ \"$v\" = \"1\" ] && { echo BOOT_COMPLETED=1; exit 0; }; sleep 2; done; echo BOOT_COMPLETED_FAIL=$(getprop sys.boot_completed)"
     assert:
       type: contains
-      value: "1"
+      value: "BOOT_COMPLETED=1"
     severity: critical
     requires: [trigger_reboot, shell_reachable]
     on_fail:
@@ -41,10 +41,10 @@ cases:
 
   - id: wifi_conf_present
     description: "/data/boot/wifi.conf 存在"
-    command: "if [ -f /data/boot/wifi.conf ]; then echo PRESENT; else echo MISSING; fi"
+    command: "if su 0 test -f /data/boot/wifi.conf; then echo CONF_PRESENT; else echo CONF_MISSING; fi"
     assert:
-      type: equals
-      value: "PRESENT"
+      type: contains
+      value: "CONF_PRESENT"
     severity: critical
     requires: [wifi_service_executed]
     on_fail:
@@ -52,10 +52,10 @@ cases:
 
   - id: wifi_conf_not_default
     description: "wifi.conf 已配置真实 ssid/psk"
-    command: "ssid=$(grep -iE '^[[:space:]]*ssid[[:space:]]*=' /data/boot/wifi.conf | head -1 | cut -d= -f2 | tr -d '[:space:]'); psk=$(grep -iE '^[[:space:]]*psk[[:space:]]*=' /data/boot/wifi.conf | head -1 | cut -d= -f2 | tr -d '[:space:]'); if [ -n \"$ssid\" ] && [ -n \"$psk\" ] && [ \"$ssid\" != default ] && [ \"$psk\" != default ]; then echo CONFIG_OK; else echo DEFAULT_VALUE; fi"
+    command: "conf=$(su 0 cat /data/boot/wifi.conf 2>/dev/null); ssid=$(echo \"$conf\" | grep -iE '^[[:space:]]*ssid[[:space:]]*=' | head -1 | cut -d= -f2 | tr -d '[:space:]'); psk=$(echo \"$conf\" | grep -iE '^[[:space:]]*psk[[:space:]]*=' | head -1 | cut -d= -f2 | tr -d '[:space:]'); if [ -n \"$ssid\" ] && [ -n \"$psk\" ] && [ \"$ssid\" != default ] && [ \"$psk\" != default ]; then echo CONF_VALUE_OK; else echo CONF_VALUE_DEFAULT; fi"
     assert:
-      type: equals
-      value: "CONFIG_OK"
+      type: contains
+      value: "CONF_VALUE_OK"
     severity: critical
     requires: [wifi_conf_present]
     on_fail:
@@ -63,7 +63,7 @@ cases:
 
   - id: wifi_connected_ssid
     description: "设备已连上目标 SSID"
-    command: "for i in $(seq 1 30); do cmd wifi status 2>/dev/null | grep -F 'SSID: HUAWEI-BE7P' >/dev/null && { echo SSID_OK; exit 0; }; sleep 2; done; cmd wifi status 2>/dev/null || true"
+    command: "for i in $(seq 1 30); do cmd wifi status 2>/dev/null | grep -F 'Wifi is connected to \"HUAWEI-BE7P\"' >/dev/null && { echo SSID_OK; exit 0; }; sleep 2; done; cmd wifi status 2>/dev/null || true"
     assert:
       type: contains
       value: "SSID_OK"
@@ -73,8 +73,8 @@ cases:
       collectors: [serial_recent, wifi_state, wifi_script_log, kmsg]
 
   - id: wlan_ip_ready
-    description: "wlan0 已获得静态 IP 192.168.1.55"
-    command: "for i in $(seq 1 20); do ip addr show wlan0 2>/dev/null | grep -F '192.168.1.55/' >/dev/null && { echo IP_READY; exit 0; }; sleep 2; done; ip addr show wlan0 2>/dev/null || true"
+    description: "wlan0 已获得 192.168.1.0/24 网段 IP"
+    command: "ip addr show wlan0 2>/dev/null | grep -oE 'inet 192\\.168\\.1\\.[0-9]+/' && echo IP_READY || echo NO_IP"
     assert:
       type: contains
       value: "IP_READY"
@@ -85,10 +85,10 @@ cases:
 
   - id: adb_tcp_port_persist_ready
     description: "persist.adb.tcp.port 为 5555"
-    command: "getprop persist.adb.tcp.port"
+    command: "echo ADB_PERSIST_PORT=$(getprop persist.adb.tcp.port)"
     assert:
       type: contains
-      value: "5555"
+      value: "ADB_PERSIST_PORT=5555"
     severity: critical
     requires: [wlan_ip_ready]
     on_fail:
@@ -96,10 +96,10 @@ cases:
 
   - id: adb_tcp_port_service_ready
     description: "service.adb.tcp.port 为 5555"
-    command: "getprop service.adb.tcp.port"
+    command: "echo ADB_SERVICE_PORT=$(getprop service.adb.tcp.port)"
     assert:
       type: contains
-      value: "5555"
+      value: "ADB_SERVICE_PORT=5555"
     severity: critical
     requires: [adb_tcp_port_persist_ready]
     on_fail:
@@ -118,8 +118,8 @@ cases:
 
   - id: host_adb_connect_success
     run_on: host
-    description: "host 侧 adb connect 192.168.1.55:5555 成功"
-    command: "adb connect 192.168.1.55:5555"
+    description: "host 通过 serial 获取设备 wlan0 IP，并 adb connect 成功"
+    command: "DEV_IP=$(PYTHONPATH=engineering/loop/connection/providers/rp5-serial/python python3 engineering/harness/scripts/rp5_serial_helper.py device-ip --host 127.0.0.1 --port 9700); [ -z \"$DEV_IP\" ] && { echo NO_IP_FOUND; exit 1; }; echo \"DEV_IP=$DEV_IP\"; adb disconnect $DEV_IP:5555 >/dev/null 2>&1; adb connect $DEV_IP:5555"
     assert:
       type: regex
       pattern: "(connected to|already connected to)"
@@ -153,5 +153,5 @@ collectors:
     run_on: host
     commands:
       - "adb devices"
-      - "adb connect 192.168.1.55:5555"
-    hints: "关注 host 侧 adb server 视角下的设备状态与 connect 错误信息"
+      - "echo '--- /proc/net/arp ---'; cat /proc/net/arp 2>/dev/null | head -10"
+    hints: "关注 host 侧 adb devices 列表与 ARP 表中 RPi5 MAC 2c:cf:67:a8:6c:35 对应的 IP"

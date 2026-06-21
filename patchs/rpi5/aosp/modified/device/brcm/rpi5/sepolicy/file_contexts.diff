@@ -1,8 +1,8 @@
 diff --git a/sepolicy/file_contexts b/sepolicy/file_contexts
-index 9692b33..da8e968 100644
+index 9692b33..b6a11b4 100644
 --- a/sepolicy/file_contexts
 +++ b/sepolicy/file_contexts
-@@ -28,3 +28,35 @@
+@@ -28,3 +28,41 @@
  /dev/block/sda5       u:object_r:system_block_device:s0
  /dev/block/sda6       u:object_r:system_block_device:s0
  /dev/block/sda7       u:object_r:metadata_block_device:s0
@@ -29,6 +29,12 @@ index 9692b33..da8e968 100644
 +#  显示设备节点 /dev/vendor_lechao_lcview（单实例，固定名称）
 +#  标签 lechao_lcview_hal_device → lcview_hal 域有权控制此设备
 +/dev/vendor_lechao_lcview                    u:object_r:lechao_lcview_hal_device:s0
++
++# ===== rpi5_wifi_connect - 开机自动连接 WiFi 脚本（system 分区） =====
++#  shell 脚本 /system/bin/rpi5_wifi_connect
++#  标签 rpi5_wifi_connect_exec（te 中声明的 exec_type）
++#  rc 中 seclabel u:r:shell:s0，init 不做 domain transition，直接以 shell 域 exec
++/system/bin/rpi5_wifi_connect                    u:object_r:rpi5_wifi_connect_exec:s0
 +
 +# ===== lechao_lcview - 自定义显示系统服务（system 分区） =====
 +#  system 端守护进程 /system/bin/lechao_lcview
