@@ -1,0 +1,78 @@
+suite: features.lcview.end_to_end
+version: 1
+include:
+  - common/shell
+  - features/lcview/common
+defaults:
+  capture_timeout: 20.0
+  recent_limit: 500
+cases:
+  - id: lcview_cleanup_old_logs
+    command: "rm -f /data/vendor/lechao_lcview/logs/*.jsonl /data/vendor/lechao_lcview/invalid_records.log && echo cleaned"
+    assert: {type: contains, value: "cleaned"}
+    severity: critical
+    requires: [adb_shell_reachable, lcview_data_dir_ready]
+    on_fail:
+      collectors: [lcview_files, lcview_logcat, serial_recent]
+
+  - id: lcview_capture_pre_state
+    command: "ls -lt /data/vendor/lechao_lcview/logs || true"
+    assert: {type: not_contains, value: ".jsonl"}
+    severity: warn
+    requires: [lcview_cleanup_old_logs]
+
+  - id: lcview_restart_hal
+    command: "setprop ctl.restart lechao_lcview_hal && echo hal_restarted"
+    assert: {type: contains, value: "hal_restarted"}
+    severity: critical
+    requires: [lcview_cleanup_old_logs]
+    on_fail:
+      collectors: [lcview_logcat, lcview_service_state, serial_recent]
+
+  - id: lcview_restart_daemon
+    command: "setprop ctl.restart lechao_lcview && echo daemon_restarted"
+    assert: {type: contains, value: "daemon_restarted"}
+    severity: critical
+    requires: [lcview_restart_hal]
+    on_fail:
+      collectors: [lcview_logcat, lcview_service_state, serial_recent]
+
+  - id: lcview_trigger_usb_read_window
+    command: "TARGET=$(ls /storage | head -n 1); FILE=$(find /storage/$TARGET -type f | head -n 1); dd if=$FILE of=/dev/null bs=1M count=8 && echo trigger_done"
+    assert: {type: contains, value: "trigger_done"}
+    severity: critical
+    requires: [lcview_restart_daemon]
+    on_fail:
+      collectors: [lcview_logcat, lcview_kmsg, lcview_service_state, serial_recent]
+
+  - id: lcview_jsonl_generated
+    command: "ls /data/vendor/lechao_lcview/logs/*.jsonl"
+    assert: {type: regex, pattern: ".*\\.jsonl"}
+    severity: critical
+    requires: [lcview_trigger_usb_read_window]
+    on_fail:
+      collectors: [lcview_files, lcview_logcat, lcview_kmsg, serial_recent]
+
+  - id: lcview_jsonl_non_empty
+    command: "for f in /data/vendor/lechao_lcview/logs/*.jsonl; do test -s $f && echo non_empty:$f; done"
+    assert: {type: contains, value: "non_empty:"}
+    severity: critical
+    requires: [lcview_jsonl_generated]
+    on_fail:
+      collectors: [lcview_files, lcview_pull_logs, lcview_logcat, serial_recent]
+
+  - id: lcview_invalid_log_clean_or_bounded
+    command: "test ! -f /data/vendor/lechao_lcview/invalid_records.log || wc -l /data/vendor/lechao_lcview/invalid_records.log"
+    assert: {type: regex, pattern: "(^$|^[[:space:]]*[0-9]+[[:space:]]+)"}
+    severity: warn
+    requires: [lcview_jsonl_generated]
+    on_fail:
+      collectors: [lcview_invalid_log, lcview_logcat]
+
+  - id: lcview_logcat_no_fatal_breakage
+    command: "logcat -d -s lechao_lcview:V lechao_lcview_hal:V | grep -E 'open failed|schema load failed|failed to connect|cannot open' || true"
+    assert: {type: equals, value: ""}
+    severity: critical
+    requires: [lcview_jsonl_generated]
+    on_fail:
+      collectors: [lcview_logcat, lcview_service_state, serial_recent]

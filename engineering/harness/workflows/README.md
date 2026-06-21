@@ -10,6 +10,7 @@
 | [sync-code-to-patchs](./sync-code-to-patchs/) | workspace 源码归档到 patchs 镜像 | 将 workspace 变更受控归档到 patchs；archive 不自动等同于 promoted baseline | `sync_code_to_patchs.sh` |
 | [revert-code-from-patchs](./revert-code-from-patchs/) | workspace 坏了，从 patchs 基线回退 | 仅允许以 promoted baseline 执行恢复；用于 workspace 坏状态回退 | `revert_code_from_patchs.sh` |
 | [sync-patchs-to-doc](./sync-patchs-to-doc/) | patchs 变动后同步更新技术文档 | 方案先行（动作清单），确认后落盘，模板只读 | `sync_patchs_to_doc.sh` |
+| [lcview-adb-run](./lcview-adb-run/) | 串口 bootstrap 后切换 adb 执行 lcview | 两阶段 transport 编排 + fallback evidence | `run_lcview_adb_suite.sh` |
 
 ## 结构约定
 
