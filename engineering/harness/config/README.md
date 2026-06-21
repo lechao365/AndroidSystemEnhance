@@ -21,7 +21,7 @@ workflow 依赖的映射配置表——把"目录特征 → scope / 文档归属
 
 | 文件 | 作用 | 校验方式 |
 |------|------|---------|
-| [harness-paths.conf](./harness-paths.conf) | 统一路径配置（shell / python / bat 三方共用的单一事实源），定义工程内所有路径 KEY | 规则 [rules/path-management.md](../rules/path-management.md) (PATH-001) |
+| [harness-paths.conf](./harness-paths.conf) | 统一路径配置（shell / python / bat 三方共用的单一事实源），定义 `harness/`、`loop/`、`output/` 等工程路径 KEY | 规则 [rules/path-management.md](../rules/path-management.md) (PATH-001) |
 
 ### YAML 字段速查
 
@@ -68,4 +68,5 @@ workflow 依赖的映射配置表——把"目录特征 → scope / 文档归属
 
 - **新增工程目录**：在 `scope-mapping.yaml` 追加 scope 映射行（注意 priority 顺序），同步更新 `description`
 - **新增特性文档目录**（如 `03-*`）：在 `doc-sync-mapping.yaml` 追加 patchs 路径特征 → 文档目录的映射
+- **新增 loop / harness 目录入口**：若脚本需要新的工程路径 KEY（如 `LOOP_SCRIPTS_DIR`、`LOOP_WORKFLOWS_DIR`），必须先更新 `harness-paths.conf`，再修改脚本引用。
 - 两份配置均采用"按 priority 降序、首条命中即归属"的匹配规则，新增条目注意优先级顺序
