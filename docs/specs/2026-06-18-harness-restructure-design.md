@@ -188,7 +188,7 @@ engineering/harness/
 | 行号 | 旧 | 新 | 说明 |
 |------|----|----|------|
 | L17-18 | `bash skills/git-push-to-server/collect_diff.sh`（2 处） | `bash engineering/harness/workflows/git-push-to-server/collect_diff.sh` | 用法示例 |
-| L48-62 | scope 词表（整块表格） | **删除，替换为引用**：`详见 [scope 映射表](../../config/scope-mapping.md)` | 数据抽到 config |
+| L48-62 | scope 词表（整块表格） | **删除，替换为引用**：`详见 [scope 映射表](../../engineering/harness/config/scope-mapping.yaml)` | 数据抽到 config |
 | L112 | `bash skills/git-push-to-server/commit_and_push.sh` | `bash engineering/harness/workflows/git-push-to-server/commit_and_push.sh` | 用法示例 |
 
 #### sync-patchs-to-doc/WORKFLOW.md

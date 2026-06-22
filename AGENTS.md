@@ -27,3 +27,7 @@
 `engineering/` 下所有脚本（shell / python / bat）禁止硬编码工程内路径，统一通过 `engineering/harness/config/harness-paths.conf`（单一事实源）+ 三方路径工具获取。
 改动任何脚本的路径引用前，必须先加载 [engineering/harness/rules/path-management.md](engineering/harness/rules/path-management.md)（PATH-001）。
 目录调整时仅修改 `paths.conf`，无需改动脚本。
+
+## RPI5 编译参考
+涉及 RPI5 AOSP/内核编译时，必须先加载 [engineering/harness/reference/build-reference.md](engineering/harness/reference/build-reference.md)。
+该规则记录了本项目正确的编译命令与约束，防止 LLM 使用错误参数。

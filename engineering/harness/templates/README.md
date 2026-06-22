@@ -44,5 +44,5 @@
 |------|------|------|
 | 设计文档 | `docs/specs/2026-06-21-engineering-doc-refactor-design.md` §四 | 模板定义（§4.1 engineering-readme-template、§4.2 rules-template） |
 | 关联规则 | `../rules/doc-paths.md`（DOC-001） | 文档路径约束 |
-| 关联规则 | `../rules/plantuml.md`（PLANTUML-001） | 模板内 PlantUML 约束 |
+| 关联规则 | `../rules/plantuml.md`（DOC-002） | 模板内 PlantUML 约束 |
 | 关联 workflow | `../workflows/sync-patchs-to-doc/` | 消费本目录模板为只读契约 |

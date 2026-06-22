@@ -96,7 +96,7 @@ engineering/harness/
 ```markdown
 # {workflow 名}
 
-{一句话定位}。完整流程见 [WORKFLOW.md](./WORKFLOW.md)。
+{一句话定位}。完整流程见 [WORKFLOW.md](../../engineering/harness/workflows/README.md)。
 ```
 
 ## 已确认的边界决策

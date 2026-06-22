@@ -51,7 +51,7 @@ rp5-serial/
     └── tests/                 单元 + 流程测试
 ```
 
-> 协议定义见 [../protocol/rp5-serial-protocol.md](../protocol/rp5-serial-protocol.md)。
+> 协议定义见 [../../protocol/rp5-serial-protocol.md](../../protocol/rp5-serial-protocol.md)。
 
 ## 使用方式
 
@@ -121,7 +121,7 @@ bash engineering/loop/connection/providers/rp5-serial/bin/loop_rp5_serial_automa
 |------|------|------|
 | 设计文档 | `docs/specs/2026-06-19-loop-engineering-design.md` | loop engineering 设计 |
 | 关联计划 | `docs/plans/2026-06-19-rp5-serial-host-client-mvp.md` | MVP 实施计划 |
-| 关联协议 | [../protocol/rp5-serial-protocol.md](../protocol/rp5-serial-protocol.md) | host/client JSON Lines 协议定义 |
+| 关联协议 | [../../protocol/rp5-serial-protocol.md](../../protocol/rp5-serial-protocol.md) | host/client JSON Lines 协议定义 |
 
 ## 运行流程
 

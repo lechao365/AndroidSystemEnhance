@@ -367,7 +367,7 @@ scope 词表抽取（L48-62）：将整个 `#### scope 词表` 小节（含表�
 
 > 完整映射表已抽出至独立配置，新增目录只改配置不动 workflow。
 
-详见 [scope 映射表](../../config/scope-mapping.md)
+详见 [scope 映射表](../../config/scope-mapping.yaml)
 ```
 
 - [ ] **Step 3: 改 sync-patchs-to-doc/WORKFLOW.md（8 处引用）**
@@ -386,7 +386,7 @@ scope 词表抽取（L48-62）：将整个 `#### scope 词表` 小节（含表�
 新 L25: bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh --check-only  # 仅检查，不输出提示
 
 旧 L32: - **精确匹配**：...必须依据 [patchs→文档映射规则](../../rules/doc-sync-mapping.md)：
-新 L32: - **精确匹配**：...必须依据 [patchs→文档映射规则](../../config/doc-sync-mapping.md)：
+新 L32: - **精确匹配**：...必须依据 [patchs→文档映射规则](../../config/doc-sync-mapping.yaml)：
 
 旧 L108: | `UPDATE-图` | 重画 PlantUML（遵守 `rules/plantuml.md`）|
 新 L108: | `UPDATE-图` | 重画 PlantUML（遵守 `engineering/harness/rules/plantuml.md`）|

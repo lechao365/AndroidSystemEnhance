@@ -36,7 +36,7 @@
 | 特性 | 说明 |
 |------|------|
 | USB Storage notifier 基础设施 | 修改 transport.c/usb.c/usb.h，注入 TIMEOUT/STALL/DATA_CORRUPT/TRANSPORT_START/END 回调 |
-| LcIod 内核驱动 | 新增 vendor/lechao/LcIod/（misc char 设备、ioctl 统计接口、event ring buffer） |
+| LcIod 内核驱动 | 新增 vendor/lechao/LcIod/（cdev 字符设备、ioctl 统计接口、event ring buffer） |
 | LcView 内核打点框架 | 新增 vendor/lechao/LcView/（Builder 序列化 API、环形缓冲区、char 设备 `/dev/vendor_lechao_lcview`） |
 | 内核编译系统 | Kbuild/Kconfig 添加 vendor/ 入口，defconfig 启用 USB_SERIAL_CONSOLE/DYNAMIC_DEBUG |
 

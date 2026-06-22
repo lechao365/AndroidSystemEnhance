@@ -68,7 +68,7 @@ bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh
 | 类型 | 路径 | 说明 |
 |------|------|------|
 | 设计文档 | `docs/specs/2026-06-21-engineering-doc-refactor-design.md` | 文档重构设计（WORKFLOW 保留决策 D-WF） |
-| 关联规则 | `../rules/script-observability.md`（SCRIPT-001） | 脚本维测约束 |
+| 关联规则 | `../rules/script-observability.md`（OBS-001） | 脚本维测约束 |
 | 关联规则 | `../rules/source-code-modify.md`（SRC-001） | 归档 / 回退约束 |
 | 关联配置 | `../config/scope-mapping.yaml` | git-push-to-server 消费 |
 | 关联配置 | `../config/doc-sync-mapping.yaml` | sync-patchs-to-doc 消费 |

@@ -329,9 +329,9 @@ skinparam packageStyle rectangle
 
 package "Pi Zero 2W (USB Device)" {
     component "usb-fault-inject\n02.04" as INJECT {
-        component "Raw Gadget 驱动层\nraw-gadget.c (252行)" as RG
-        component "12 类故障实现\nfaults.c (264行)" as FAULTS
-        component "期望值契约表\nexpect.c (123行)" as EXPECT
+        component "Raw Gadget 驱动层\nraw-gadget.c (543行)" as RG
+        component "11 类故障实现\nfaults.c (145行)" as FAULTS
+        component "期望值契约表\nexpect.c (114行)" as EXPECT
     }
 }
 
