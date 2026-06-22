@@ -51,6 +51,17 @@ collectors:        # 可选：collector 定义
 | shell prompt 可见 | `prompt_visible` | （无参数） |
 | 确认无错误输出 | `not_contains` | value: "error" |
 | 命令执行成功 | `exit_code_zero` | （无参数） |
+| JSON 字段校验 | `json_field` | `{type: json_field, path: "read_bytes", op: "gt", value: 0}` |
+| 指定退出码 | `exit_code_equals` | `{type: exit_code_equals, value: 5}` |
+| 枚举状态 | `contains_any` | `{type: contains_any, values: ["running", "stopped"]}` |
+
+### 新增断言类型详情
+
+**`json_field`**：解析 JSON 输出，按点号分隔的 path 提取字段，用 op 比较。支持 op：`eq`/`ne`/`gt`/`ge`/`lt`/`le`/`exists`/`not_exists`。path 支持嵌套（`event.type`）。例：`assert: {type: json_field, path: "read_bytes", op: "gt", value: 0}`
+
+**`exit_code_equals`**：校验命令退出码等于指定值。适用于退出码语义化场景（如 fault-verify 用 exit_code=0 PASS，exit_code=5 CHECK_FAIL）。例：`assert: {type: exit_code_equals, value: 0}`
+
+**`contains_any`**：校验输出包含列表中任一项。适用于枚举类状态校验。例：`assert: {type: contains_any, values: ["running", "stopped"]}`
 
 ## 3. coverage 要求
 

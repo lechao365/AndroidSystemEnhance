@@ -158,6 +158,23 @@ python3 -m loop_core.cli run \
 - schema / data dir readiness
 - pull logs / invalid log / runtime context final collectors
 
+### features.lciod
+
+`cases/features/lciod/common.yaml` 提供：
+
+- adb shell reachability + boot_completed + fault-verify 工具就绪
+- HAL / Daemon 服务注册检查
+- 设备节点 `/dev/vendor_lechao_usbd*` 存在性
+- HAL / Daemon logcat / kmsg / fault-verify JSON / device_state 诊断 collector
+
+`cases/features/lciod/kernel_driver.yaml` 覆盖 16 个内核驱动能力点（22 case）。
+
+`cases/features/lciod/hal.yaml` 覆盖 8 个 HAL 能力点（10 case）。
+
+`cases/features/lciod/daemon.yaml` 覆盖 8 个 Daemon 能力点（9 case）。
+
+`cases/features/lciod/end_to_end.yaml` 覆盖 4 个端到端场景。
+
 ## 断言类型
 
 | type | 用途 |
@@ -168,6 +185,9 @@ python3 -m loop_core.cli run \
 | `prompt_visible` | shell prompt 可见 |
 | `not_contains` | 输出不包含文本 |
 | `exit_code_zero` | 退出码为 0 |
+| `json_field` | 解析 JSON，按 path 取字段，op 比较（eq/ne/gt/ge/lt/le/exists/not_exists） |
+| `exit_code_equals` | 退出码等于指定值 |
+| `contains_any` | 输出包含列表中任一项 |
 
 ## `run_on` 执行平面
 
