@@ -1090,7 +1090,7 @@ def test_load_lciod_hal_suite():
     case_dirs = ["engineering/loop/cases"]
     suite = load_suite(path, case_dirs)
     assert suite.name == "features.lciod.hal"
-    assert len(suite.cases) == 10
+    assert len(suite.cases) == 16
 
 
 def test_load_lciod_daemon_suite():
@@ -1098,7 +1098,7 @@ def test_load_lciod_daemon_suite():
     case_dirs = ["engineering/loop/cases"]
     suite = load_suite(path, case_dirs)
     assert suite.name == "features.lciod.daemon"
-    assert len(suite.cases) == 10
+    assert len(suite.cases) == 15
 
 
 def test_load_lciod_end_to_end_suite():
@@ -1106,5 +1106,5 @@ def test_load_lciod_end_to_end_suite():
     case_dirs = ["engineering/loop/cases"]
     suite = load_suite(path, case_dirs)
     assert suite.name == "features.lciod.end_to_end"
-    assert len(suite.cases) == 4
+    assert len(suite.cases) == 10
 

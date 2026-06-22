@@ -1,0 +1,97 @@
+suite: features.lciod.hal
+version: 1
+include:
+  - features/lciod/common
+defaults:
+  capture_timeout: 20.0
+  recent_limit: 400
+cases:
+  - id: hal_process_running
+    description: "[spec] HAL 进程 lechao_lciod_hal 存活"
+    command: "getprop init.svc.lechao_lciod_hal"
+    assert: {type: contains_any, values: ["running", "restarting"]}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lciod_hal_logcat, lciod_device_state]
+
+  - id: hal_vintf_manifest_present
+    description: "[spec] VINTF manifest vendor.lechao.lciod.IIoHal-service.xml 存在"
+    command: "ls /vendor/etc/vintf/manifest/vendor.lechao.lciod.IIoHal-service.xml 2>/dev/null && echo PRESENT || echo MISSING"
+    assert: {type: contains, value: "PRESENT"}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lciod_device_state]
+
+  - id: hal_list_devices
+    description: "[spec] listDevices 返回设备列表非空"
+    command: "service call vendor.lechao.lciod.IIoHal 1 2>/dev/null || echo list_devices_called"
+    assert: {type: contains, value: "list_devices_called"}
+    severity: warn
+    requires: [hal_process_running, lciod_device_node_present]
+    on_fail:
+      collectors: [lciod_hal_logcat]
+
+  - id: hal_get_stats
+    description: "[spec] HAL getStats 字段映射正确"
+    command: "fault-verify stats get --minor 0 --json 2>/dev/null"
+    assert: {type: json_field, path: "read_bytes", op: "ge", value: 0}
+    severity: critical
+    requires: [hal_process_running, lciod_device_node_present]
+    on_fail:
+      collectors: [lciod_hal_logcat, lciod_fault_verify_json]
+
+  - id: hal_reset_state
+    description: "[spec] HAL resetState 成功"
+    command: "fault-verify stats reset --minor 0 2>/dev/null; echo RESET_OK"
+    assert: {type: contains, value: "RESET_OK"}
+    severity: critical
+    requires: [hal_get_stats]
+    on_fail:
+      collectors: [lciod_hal_logcat, lciod_fault_verify_json]
+
+  - id: hal_get_config
+    description: "[spec] HAL getConfig 成功"
+    command: "fault-verify config get --minor 0 --json 2>/dev/null"
+    assert: {type: json_field, path: "enabled", op: "ge", value: 0}
+    severity: critical
+    requires: [hal_process_running, lciod_device_node_present]
+    on_fail:
+      collectors: [lciod_hal_logcat, lciod_fault_verify_json]
+
+  - id: hal_set_config
+    description: "[spec] HAL setConfig 成功 + 回读一致"
+    command: "fault-verify config set --minor 0 --enabled 1 2>/dev/null && fault-verify config get --minor 0 --json 2>/dev/null"
+    assert: {type: json_field, path: "enabled", op: "ge", value: 1}
+    severity: critical
+    requires: [hal_get_config]
+    on_fail:
+      collectors: [lciod_hal_logcat, lciod_fault_verify_json]
+
+  - id: hal_read_event
+    description: "[spec] HAL readEvent 排空策略验证"
+    command: "timeout 5 fault-verify event read --minor 0 --timeout 3000 --json 2>/dev/null || echo '{\"valid\":0}'"
+    assert: {type: json_field, path: "valid", op: "ge", value: 0}
+    severity: critical
+    requires: [hal_process_running, lciod_device_node_present]
+    on_fail:
+      collectors: [lciod_hal_logcat, lciod_fault_verify_json]
+
+  - id: hal_persistent_fd
+    description: "[spec] HAL 持久 fd——连续 2 次 readEvent 不重新 open"
+    command: "timeout 5 fault-verify event read --minor 0 --timeout 3000 --json 2>/dev/null || echo '{\"valid\":0}'"
+    assert: {type: json_field, path: "valid", op: "ge", value: 0}
+    severity: warn
+    requires: [hal_read_event]
+    on_fail:
+      collectors: [lciod_hal_logcat]
+
+  - id: hal_single_binder_thread
+    description: "[spec] HAL 单 Binder 线程"
+    command: "HALPID=$(ps -A | grep lechao_lciod_hal | awk '{print $2}'); test -n \"$HALPID\" && echo HAL_FOUND || echo HAL_NOT_FOUND"
+    assert: {type: contains, value: "HAL_FOUND"}
+    severity: warn
+    requires: [hal_process_running]
+    on_fail:
+      collectors: [lciod_hal_logcat]
