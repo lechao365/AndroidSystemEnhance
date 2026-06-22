@@ -71,6 +71,8 @@ class AssertionEngine:
             return self._not_contains(assertion, context)
         if atype == "exit_code_zero":
             return self._exit_code_zero(context)
+        if atype == "json_field":
+            return self._json_field(assertion, context)
         raise ValueError(f"unknown assertion type: {atype}")
 
     def _contains(self, assertion: dict, ctx: AssertionContext) -> AssertionResult:
@@ -124,3 +126,62 @@ class AssertionEngine:
         return AssertionResult(
             passed=False, reason=f"expected exit code 0, got {ctx.exit_code}"
         )
+
+    def _json_field(self, assertion: dict, ctx: AssertionContext) -> AssertionResult:
+        import json as _json
+        path = assertion["path"]
+        op = assertion["op"]
+        expected = assertion.get("value")
+
+        try:
+            data = _json.loads(ctx.output)
+        except _json.JSONDecodeError as e:
+            return AssertionResult(passed=False, reason=f"output is not valid JSON: {e}")
+
+        parts = path.split(".")
+        current = data
+        for part in parts:
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            elif isinstance(current, list) and part.isdigit():
+                idx = int(part)
+                if idx < len(current):
+                    current = current[idx]
+                else:
+                    return AssertionResult(passed=False, reason=f"path '{path}' array index {idx} out of range (len={len(current)})")
+            else:
+                if op == "not_exists":
+                    return AssertionResult(passed=True)
+                return AssertionResult(passed=False, reason=f"path '{path}' not found, missing key '{part}'")
+
+        if op == "exists":
+            return AssertionResult(passed=True)
+        if op == "not_exists":
+            return AssertionResult(passed=False, reason=f"path '{path}' exists but expected not_exists, value={current!r}")
+
+        try:
+            actual_num = float(current)
+            exp_num = float(expected)
+            ops_map = {
+                "eq": lambda a, b: a == b, "ne": lambda a, b: a != b,
+                "gt": lambda a, b: a > b, "ge": lambda a, b: a >= b,
+                "lt": lambda a, b: a < b, "le": lambda a, b: a <= b,
+            }
+            if op not in ops_map:
+                return AssertionResult(passed=False, reason=f"unknown op: {op}")
+            ok = ops_map[op](actual_num, exp_num)
+            if ok:
+                return AssertionResult(passed=True)
+            return AssertionResult(passed=False, reason=f"json_field '{path}' {op} {expected} failed, actual={current}")
+        except (ValueError, TypeError):
+            actual_str = str(current).lower()
+            exp_str = str(expected).lower()
+            if op == "eq":
+                ok = actual_str == exp_str
+            elif op == "ne":
+                ok = actual_str != exp_str
+            else:
+                return AssertionResult(passed=False, reason=f"cannot compare non-numeric '{current!r}' with op '{op}'")
+            if ok:
+                return AssertionResult(passed=True)
+            return AssertionResult(passed=False, reason=f"json_field '{path}' {op} {expected} failed, actual={current}")

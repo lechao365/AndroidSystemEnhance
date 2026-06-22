@@ -295,6 +295,7 @@ _VALID_ASSERT_TYPES = {
     "prompt_visible",
     "not_contains",
     "exit_code_zero",
+    "json_field",
 }
 # 允许的 action 取值（与 command 互斥）
 _VALID_ACTIONS = {"reboot"}
@@ -462,6 +463,14 @@ def _validate_assertion_shape(assert_spec: dict) -> None:
         raise ValueError(f"assert type '{atype}' requires value")
     if atype == "regex" and "pattern" not in assert_spec:
         raise ValueError("assert type 'regex' requires pattern")
+    if atype == "json_field":
+        if "path" not in assert_spec:
+            raise ValueError("assert type 'json_field' requires path")
+        if "op" not in assert_spec:
+            raise ValueError("assert type 'json_field' requires op")
+        _VALID_JSON_FIELD_OPS = {"eq", "ne", "gt", "ge", "lt", "le", "exists", "not_exists"}
+        if assert_spec["op"] not in _VALID_JSON_FIELD_OPS:
+            raise ValueError(f"unknown json_field op: {assert_spec['op']}")
     if atype not in _VALID_ASSERT_TYPES:
         raise ValueError(f"unknown assertion type: {atype}")
 
