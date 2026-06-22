@@ -1052,3 +1052,59 @@ collectors:
     with pytest.raises(ValueError, match="adb_pull collector requires remote_paths"):
         load_suite(path, [str(tmp_path)])
 
+
+def test_load_lciod_common_suite():
+    """加载 lciod common suite，校验 6 case + 5 collector。"""
+    path = "engineering/loop/cases/features/lciod/common.yaml"
+    case_dirs = ["engineering/loop/cases"]
+    suite = load_suite(path, case_dirs)
+    assert suite.name == "features.lciod.common"
+    assert len(suite.cases) == 6
+    case_ids = {c.id for c in suite.cases}
+    assert case_ids == {
+        "adb_shell_reachable", "boot_completed", "fault_verify_present",
+        "lciod_hal_service_registered", "lciod_daemon_service_registered",
+        "lciod_device_node_present",
+    }
+    assert len(suite.collectors) >= 5
+    assert "features.lciod.common.lciod_hal_logcat" in suite.collectors
+    assert "features.lciod.common.lciod_daemon_logcat" in suite.collectors
+    assert "features.lciod.common.lciod_kmsg" in suite.collectors
+    assert "features.lciod.common.lciod_fault_verify_json" in suite.collectors
+    assert "features.lciod.common.lciod_device_state" in suite.collectors
+    assert len(suite.final_collectors) == 4
+
+
+def test_load_lciod_kernel_driver_suite():
+    path = "engineering/loop/cases/features/lciod/kernel_driver.yaml"
+    case_dirs = ["engineering/loop/cases"]
+    suite = load_suite(path, case_dirs)
+    assert suite.name == "features.lciod.kernel_driver"
+    assert len(suite.cases) >= 20
+    assert len(suite.warnings) == 0
+    assert "features.lciod.common.lciod_kmsg" in suite.collectors
+
+
+def test_load_lciod_hal_suite():
+    path = "engineering/loop/cases/features/lciod/hal.yaml"
+    case_dirs = ["engineering/loop/cases"]
+    suite = load_suite(path, case_dirs)
+    assert suite.name == "features.lciod.hal"
+    assert len(suite.cases) == 10
+
+
+def test_load_lciod_daemon_suite():
+    path = "engineering/loop/cases/features/lciod/daemon.yaml"
+    case_dirs = ["engineering/loop/cases"]
+    suite = load_suite(path, case_dirs)
+    assert suite.name == "features.lciod.daemon"
+    assert len(suite.cases) == 10
+
+
+def test_load_lciod_end_to_end_suite():
+    path = "engineering/loop/cases/features/lciod/end_to_end.yaml"
+    case_dirs = ["engineering/loop/cases"]
+    suite = load_suite(path, case_dirs)
+    assert suite.name == "features.lciod.end_to_end"
+    assert len(suite.cases) == 4
+

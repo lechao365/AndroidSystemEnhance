@@ -1,0 +1,89 @@
+suite: features.lciod.common
+version: 1
+defaults:
+  capture_timeout: 15.0
+  recent_limit: 400
+final_collectors:
+  - lciod_hal_logcat
+  - lciod_daemon_logcat
+  - lciod_kmsg
+  - lciod_device_state
+cases:
+  - id: adb_shell_reachable
+    description: "[code] adb shell 连通性"
+    command: "echo lciod_adb_ok"
+    assert: {type: contains, value: "lciod_adb_ok"}
+    severity: critical
+
+  - id: boot_completed
+    description: "[code] 系统启动完成"
+    command: "getprop sys.boot_completed"
+    assert: {type: contains, value: "1"}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lciod_hal_logcat, lciod_daemon_logcat, lciod_kmsg, lciod_device_state]
+
+  - id: fault_verify_present
+    description: "[code] usb-verify 工具就位"
+    command: "which fault-verify || find /vendor /system -name fault-verify 2>/dev/null | head -1"
+    assert: {type: regex, pattern: "fault-verify"}
+    severity: critical
+    requires: [adb_shell_reachable]
+
+  - id: lciod_hal_service_registered
+    description: "[spec] HAL 服务 vendor.lechao.lciod.IIoHal/default 注册"
+    command: "service list | grep vendor.lechao.lciod.IIoHal"
+    assert: {type: contains, value: "IIoHal"}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lciod_hal_logcat, lciod_device_state]
+
+  - id: lciod_daemon_service_registered
+    description: "[spec] Daemon 服务 system.lechao.lciod.IIoService/default 注册"
+    command: "service list | grep system.lechao.lciod.IIoService"
+    assert: {type: contains, value: "IIoService"}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lciod_daemon_logcat, lciod_device_state]
+
+  - id: lciod_device_node_present
+    description: "[spec] /dev/vendor_lechao_usbd* 设备节点存在（需插入 USB 存储设备）"
+    command: "ls -l /dev/vendor_lechao_usbd* 2>/dev/null || echo NO_NODE"
+    assert: {type: not_contains, value: "NO_NODE"}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lciod_kmsg, lciod_device_state]
+
+collectors:
+  lciod_hal_logcat:
+    mode: adb_logcat
+    buffers: [main, system, crash]
+    filters: ["lechao_lciod_hal"]
+    hints: "HAL 层日志，检查 ioctl/connect/readEvent 错误"
+
+  lciod_daemon_logcat:
+    mode: adb_logcat
+    buffers: [main, system, crash]
+    filters: ["lechao_lciod"]
+    hints: "Daemon 层日志，检查 monitor thread / HAL client 重连"
+
+  lciod_kmsg:
+    commands:
+      - "dmesg | grep -i 'vendor_lechao_usbd\\|lciod'"
+    hints: "内核侧 lciod 驱动日志"
+
+  lciod_fault_verify_json:
+    commands:
+      - "fault-verify stats get --minor 0 --json 2>/dev/null || echo '{\"error\":\"fault-verify failed\"}'"
+    hints: "fault-verify 完整 stats JSON 快照"
+
+  lciod_device_state:
+    commands:
+      - "ls -l /dev/vendor_lechao_usbd*"
+      - "ls -Z /dev/vendor_lechao_usbd* 2>/dev/null || echo 'SELinux label unavailable'"
+      - "service list | grep lechao"
+    hints: "设备节点 + 服务注册快照"
