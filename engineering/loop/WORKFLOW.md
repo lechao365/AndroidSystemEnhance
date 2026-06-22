@@ -261,4 +261,31 @@ reboot 诊断闭环的数据流：
 - reboot_and_wait 三级渐进判定（L1 boot 开始 / L2 init 阶段 / L3 boot_completed 验证）
 - 后续 case（requires: [trigger_reboot]）在设备回来后正常执行
 - on_fail 触发 collectors（含新增 kmsg）
-- EvidenceBundle 落盘 → AI 读后按模板产出诊断报告
+## `le deploy` 子命令
+
+部署模式由 git diff 内容自动决策：
+
+- `push_single`：mmm 单模块编译 → adb remount → push binary → restart service（秒级生效，无 reboot）
+- `dd_boot_reboot`：mk_rpi5_full_image.sh -mode 2 → push boot.img → dd + reboot（内核/init.rc 改动）
+- `flash_full`：需要人工全量刷机（sepolicy/.te 改动，vendor dd 未验证）
+
+用法：
+```bash
+le deploy --decide --diff-rev HEAD           # dry-run 查看决策
+le deploy --diff-rev HEAD --adb-endpoint ... # 执行部署
+```
+
+## `le control` 子命令
+
+AI 闭环控制 session 管理：
+
+```bash
+le control init --target lciod --max-attempts 5 --artifacts-dir <dir>
+le control run-verify --session <id> --suite features.lciod.*
+le control analyze-request --session <id>
+le control deploy --session <id>
+le control decide --session <id>
+le control status --session <id>
+```
+
+闭环 SOP：init → run-verify → analyze-request → (AI 改码) → deploy → run-verify → decide

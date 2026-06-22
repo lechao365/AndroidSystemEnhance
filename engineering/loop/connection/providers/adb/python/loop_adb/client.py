@@ -179,3 +179,14 @@ class AdbClient:
         for buffer_name in buffers:
             argv.extend(["-b", buffer_name])
         return self._runner(argv, timeout_sec)
+
+    def push(self, local_path: str, remote_path: str, timeout_sec: float) -> AdbCommandResult:
+        return self._runner(
+            ["adb", "-s", self.device_serial, "push", local_path, remote_path],
+            timeout_sec,
+        )
+
+    def remount(self, timeout_sec: float) -> AdbCommandResult:
+        return self._runner(
+            ["adb", "-s", self.device_serial, "remount"], timeout_sec
+        )

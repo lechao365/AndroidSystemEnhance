@@ -159,3 +159,21 @@ def test_wait_for_device_builds_command():
     assert runner.calls[0]["argv"] == [
         "adb", "-s", "192.168.1.55:5555", "wait-for-device",
     ]
+
+
+def test_push_builds_command():
+    runner = FakeRunner()
+    client = _make_client(runner)
+    client.push("/local/a", "/remote/b", timeout_sec=30.0)
+    assert runner.calls[0]["argv"] == [
+        "adb", "-s", "192.168.1.55:5555", "push", "/local/a", "/remote/b",
+    ]
+
+
+def test_remount_builds_command():
+    runner = FakeRunner()
+    client = _make_client(runner)
+    client.remount(timeout_sec=15.0)
+    assert runner.calls[0]["argv"] == [
+        "adb", "-s", "192.168.1.55:5555", "remount",
+    ]

@@ -79,8 +79,19 @@ def main(argv: list[str] | None = None) -> int:
     # gen-cases 占位
     sub.add_parser("gen-cases", help="AI 辅助用例生成（第二步实现）")
 
-    # deploy 占位
-    sub.add_parser("deploy", help="部署 binary/image（第二步实现）")
+    # deploy 子命令（loop_deploy 实现）
+    try:
+        from loop_deploy.cli import add_deploy_parser
+        add_deploy_parser(sub)
+    except ImportError:
+        sub.add_parser("deploy", help="部署 binary/image（loop_deploy 模块不可用）")
+
+    # control 子命令（loop_controller 实现）
+    try:
+        from loop_controller.control_cli import add_control_parser
+        add_control_parser(sub)
+    except ImportError:
+        sub.add_parser("control", help="AI 闭环控制（loop_controller 模块不可用）")
 
     args = parser.parse_args(argv)
 
@@ -90,8 +101,9 @@ def main(argv: list[str] | None = None) -> int:
         print("gen-cases 命令将在第二步实现", file=sys.stderr)
         return 1
     if args.command == "deploy":
-        print("deploy 命令将在第二步实现", file=sys.stderr)
-        return 1
+        return args.func(args)
+    if args.command == "control":
+        return args.func(args)
     return 1
 
 
