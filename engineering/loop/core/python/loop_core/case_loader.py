@@ -297,6 +297,7 @@ _VALID_ASSERT_TYPES = {
     "exit_code_zero",
     "json_field",
     "exit_code_equals",
+    "contains_any",
 }
 # 允许的 action 取值（与 command 互斥）
 _VALID_ACTIONS = {"reboot"}
@@ -472,6 +473,8 @@ def _validate_assertion_shape(assert_spec: dict) -> None:
         _VALID_JSON_FIELD_OPS = {"eq", "ne", "gt", "ge", "lt", "le", "exists", "not_exists"}
         if assert_spec["op"] not in _VALID_JSON_FIELD_OPS:
             raise ValueError(f"unknown json_field op: {assert_spec['op']}")
+    if atype == "contains_any" and "values" not in assert_spec:
+        raise ValueError("assert type 'contains_any' requires values")
     if atype not in _VALID_ASSERT_TYPES:
         raise ValueError(f"unknown assertion type: {atype}")
 

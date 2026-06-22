@@ -75,6 +75,8 @@ class AssertionEngine:
             return self._json_field(assertion, context)
         if atype == "exit_code_equals":
             return self._exit_code_equals(assertion, context)
+        if atype == "contains_any":
+            return self._contains_any(assertion, context)
         raise ValueError(f"unknown assertion type: {atype}")
 
     def _contains(self, assertion: dict, ctx: AssertionContext) -> AssertionResult:
@@ -195,3 +197,12 @@ class AssertionEngine:
         if ctx.exit_code == expected:
             return AssertionResult(passed=True)
         return AssertionResult(passed=False, reason=f"expected exit code {expected}, got {ctx.exit_code}")
+
+    def _contains_any(self, assertion: dict, ctx: AssertionContext) -> AssertionResult:
+        values = assertion.get("values", [])
+        if not values:
+            return AssertionResult(passed=False, reason="contains_any requires non-empty values list")
+        for v in values:
+            if v in ctx.output:
+                return AssertionResult(passed=True)
+        return AssertionResult(passed=False, reason=f"output contains none of {values}")

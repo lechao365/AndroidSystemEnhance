@@ -200,3 +200,26 @@ class TestExitCodeEquals:
         result = engine.evaluate({"type": "exit_code_equals", "value": 0}, ctx)
         assert result.passed is False
         assert "not available" in result.reason
+
+
+class TestContainsAny:
+    def test_pass_first(self, engine):
+        ctx = AssertionContext(output="running")
+        result = engine.evaluate({"type": "contains_any", "values": ["running", "stopped", "restarting"]}, ctx)
+        assert result.passed is True
+
+    def test_pass_second(self, engine):
+        ctx = AssertionContext(output="service is stopped")
+        result = engine.evaluate({"type": "contains_any", "values": ["running", "stopped"]}, ctx)
+        assert result.passed is True
+
+    def test_fail_none(self, engine):
+        ctx = AssertionContext(output="restarting")
+        result = engine.evaluate({"type": "contains_any", "values": ["running", "stopped"]}, ctx)
+        assert result.passed is False
+
+    def test_empty_values(self, engine):
+        ctx = AssertionContext(output="anything")
+        result = engine.evaluate({"type": "contains_any", "values": []}, ctx)
+        assert result.passed is False
+        assert "empty" in result.reason
