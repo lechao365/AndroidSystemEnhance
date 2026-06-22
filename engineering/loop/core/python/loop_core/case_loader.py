@@ -296,6 +296,7 @@ _VALID_ASSERT_TYPES = {
     "not_contains",
     "exit_code_zero",
     "json_field",
+    "exit_code_equals",
 }
 # 允许的 action 取值（与 command 互斥）
 _VALID_ACTIONS = {"reboot"}
@@ -459,7 +460,7 @@ def _validate_assertion_shape(assert_spec: dict) -> None:
     if not assert_spec:
         return  # action case 无断言
     atype = assert_spec.get("type")
-    if atype in {"contains", "equals", "not_contains"} and "value" not in assert_spec:
+    if atype in {"contains", "equals", "not_contains", "exit_code_equals"} and "value" not in assert_spec:
         raise ValueError(f"assert type '{atype}' requires value")
     if atype == "regex" and "pattern" not in assert_spec:
         raise ValueError("assert type 'regex' requires pattern")

@@ -177,3 +177,26 @@ class TestJsonField:
             {"type": "json_field", "path": "passed", "op": "eq", "value": "true"}, ctx
         )
         assert result.passed is True
+
+
+class TestExitCodeEquals:
+    def test_pass_eq5(self, engine):
+        ctx = AssertionContext(output="", exit_code=5)
+        result = engine.evaluate({"type": "exit_code_equals", "value": 5}, ctx)
+        assert result.passed is True
+
+    def test_pass_eq0(self, engine):
+        ctx = AssertionContext(output="", exit_code=0)
+        result = engine.evaluate({"type": "exit_code_equals", "value": 0}, ctx)
+        assert result.passed is True
+
+    def test_fail_mismatch(self, engine):
+        ctx = AssertionContext(output="", exit_code=5)
+        result = engine.evaluate({"type": "exit_code_equals", "value": 0}, ctx)
+        assert result.passed is False
+
+    def test_fail_no_exit_code(self, engine):
+        ctx = AssertionContext(output="", exit_code=None)
+        result = engine.evaluate({"type": "exit_code_equals", "value": 0}, ctx)
+        assert result.passed is False
+        assert "not available" in result.reason
