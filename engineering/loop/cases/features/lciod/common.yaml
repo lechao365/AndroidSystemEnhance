@@ -78,7 +78,7 @@ collectors:
 
   lciod_fault_verify_json:
     commands:
-      - "fault-verify stats get --minor 0 --json 2>/dev/null || echo '{\"error\":\"fault-verify failed\"}'"
+      - "fault-verify stats get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null || echo '{\"error\":\"fault-verify failed\"}'"
     hints: "fault-verify 完整 stats JSON 快照"
 
   lciod_device_state:

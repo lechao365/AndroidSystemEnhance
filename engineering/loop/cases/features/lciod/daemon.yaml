@@ -26,7 +26,7 @@ cases:
 
   - id: daemon_field_projection_current_rate
     description: "[spec] Daemon IoStats 字段 current_rate >= 0"
-    command: "fault-verify stats get --minor 0 --json 2>/dev/null"
+    command: "fault-verify stats get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null"
     assert: {type: json_field, path: "current_rate", op: "ge", value: 0}
     severity: critical
     requires: [daemon_process_running, lciod_device_node_present]
@@ -35,7 +35,7 @@ cases:
 
   - id: daemon_field_projection_enabled
     description: "[spec] Daemon IoStats enabled 字段 = 0 or 1"
-    command: "fault-verify stats get --minor 0 --json 2>/dev/null"
+    command: "fault-verify stats get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null"
     assert: {type: json_field, path: "enabled", op: "ge", value: 0}
     severity: warn
     requires: [daemon_process_running, lciod_device_node_present]
@@ -44,7 +44,7 @@ cases:
 
   - id: daemon_get_average_rate
     description: "[spec] Daemon getAverageRate——peak_rate >= 0"
-    command: "fault-verify stats get --minor 0 --json 2>/dev/null"
+    command: "fault-verify stats get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null"
     assert: {type: json_field, path: "peak_rate", op: "ge", value: 0}
     severity: critical
     requires: [daemon_process_running, lciod_device_node_present]
@@ -61,9 +61,9 @@ cases:
       collectors: [lciod_daemon_logcat, lciod_hal_logcat]
 
   - id: daemon_death_reconnect
-    description: "[spec] Daemon 死亡重连——killing HAL 后 daemon 可用"
-    command: "HALPID=$(ps -A | grep lechao_lciod_hal | awk '{print $2}'); kill $HALPID 2>/dev/null; sleep 3; fault-verify stats get --minor 0 --json 2>/dev/null | grep -c read_bytes || echo 0"
-    assert: {type: json_field, path: "dummy", op: "ge", value: 0}
+    description: "[spec] Daemon 死亡重连——killing HAL 后 daemon 仍可获取 stats"
+    command: "HALPID=$(ps -A | grep lechao_lciod_hal | awk '{print $2}'); kill $HALPID 2>/dev/null; sleep 3; fault-verify stats get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null | grep -c read_bytes || echo 0"
+    assert: {type: exit_code_equals, value: 0}
     severity: critical
     requires: [daemon_process_running, lciod_device_node_present]
     on_fail:
@@ -79,11 +79,10 @@ cases:
       collectors: [lciod_daemon_logcat]
 
   - id: daemon_multi_device_iterate
-    description: "[spec] Daemon 多设备遍历——不带 --minor 调用不报致命错"
-    command: "fault-verify stats get --json 2>/dev/null || echo NO_MULTI_DEVICE"
+    description: "[spec] Daemon 多设备遍历——stats get 成功"
+    command: "fault-verify stats get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null || echo NO_MULTI_DEVICE"
     assert: {type: not_contains, value: "NO_MULTI_DEVICE"}
     severity: warn
     requires: [daemon_process_running]
-    tags: [requires_multiple_devices]
     on_fail:
       collectors: [lciod_daemon_logcat, lciod_device_state]

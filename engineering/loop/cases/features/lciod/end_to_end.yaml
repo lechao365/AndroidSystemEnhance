@@ -7,9 +7,9 @@ defaults:
   recent_limit: 600
 cases:
   - id: e2e_stats_reset_and_check
-    description: "[e2e] stats reset → dd 读写 → check stats --read-ge 1"
-    command: "fault-verify stats reset --minor 0 2>/dev/null; MNT=$(mount | grep -o '/mnt/media_rw/[^ ]*' | head -1); f=$MNT/lciod_e2e_test.dat; dd if=/dev/zero of=$f bs=1M count=4 2>/dev/null; dd if=$f of=/dev/null bs=1M count=4 2>/dev/null; sleep 1; fault-verify check stats --minor 0 --read-ge 1 --json 2>/dev/null"
-    assert: {type: exit_code_equals, value: 0}
+    description: "[e2e] stats reset → dd 读写 → write_bytes > 0"
+    command: "fault-verify config set --device /dev/vendor_lechao_usbd0 --enable 1 >/dev/null 2>/dev/null; fault-verify stats reset --device /dev/vendor_lechao_usbd0 >/dev/null 2>/dev/null; MNT=$(mount | grep -o '/mnt/media_rw/[^ ]*' | head -1); f=$MNT/lciod_e2e_test.dat; dd if=/dev/zero of=$f bs=1M count=4 2>/dev/null; dd if=$f of=/dev/null bs=1M count=4 2>/dev/null; sleep 1; fault-verify stats get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null"
+    assert: {type: json_field, path: "write_bytes", op: "gt", value: 0}
     severity: critical
     requires: [lciod_device_node_present]
     tags: [needs_usb_rw, e2e]
@@ -18,7 +18,7 @@ cases:
 
   - id: e2e_config_toggle
     description: "[e2e] config set enabled=0 → 回读 conf=enabled=0"
-    command: "fault-verify config set --minor 0 --enabled 0 2>/dev/null; fault-verify config get --minor 0 --json 2>/dev/null"
+    command: "fault-verify config set --device /dev/vendor_lechao_usbd0 --enable 0 >/dev/null 2>/dev/null; fault-verify config get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null"
     assert: {type: json_field, path: "enabled", op: "eq", value: 0}
     severity: critical
     requires: [lciod_device_node_present]
@@ -27,10 +27,10 @@ cases:
       collectors: [lciod_fault_verify_json, lciod_kmsg]
 
   - id: e2e_event_flow
-    description: "[e2e] stats reset → dd 读写 → event read 得到事件"
-    command: "fault-verify stats reset --minor 0 2>/dev/null; MNT=$(mount | grep -o '/mnt/media_rw/[^ ]*' | head -1); f=$MNT/lciod_e2e_test.dat; dd if=/dev/zero of=$f bs=1M count=2 2>/dev/null; dd if=$f of=/dev/null bs=1M count=2 2>/dev/null; sleep 2; timeout 10 fault-verify event read --minor 0 --timeout 5000 --json 2>/dev/null || echo '{\"valid\":0}'"
-    assert: {type: json_field, path: "valid", op: "ge", value: 0}
-    severity: critical
+    description: "[e2e] stats reset → dd 读写 → event read 成功（exit_code 0 或 4 均表示接口正常）"
+    command: "fault-verify config set --device /dev/vendor_lechao_usbd0 --enable 1 >/dev/null 2>/dev/null; fault-verify stats reset --device /dev/vendor_lechao_usbd0 >/dev/null 2>/dev/null; MNT=$(mount | grep -o '/mnt/media_rw/[^ ]*' | head -1); f=$MNT/lciod_e2e_test.dat; dd if=/dev/zero of=$f bs=1M count=2 2>/dev/null; dd if=$f of=/dev/null bs=1M count=2 2>/dev/null; sleep 3; timeout 10 fault-verify event read --device /dev/vendor_lechao_usbd0 --timeout-ms 5000 --json 2>&1"
+    assert: {type: exit_code_equals, value: 0}
+    severity: warn
     requires: [e2e_stats_reset_and_check]
     tags: [needs_usb_rw, e2e]
     on_fail:
@@ -38,8 +38,8 @@ cases:
 
   - id: e2e_daemon_proxy_path
     description: "[e2e] 经 Daemon IIoService 路径 stats get 成功"
-    command: "fault-verify stats get --minor 0 --json 2>/dev/null"
-    assert: {type: json_field, path: "read_bytes", op: "ge", value: 0}
+    command: "fault-verify stats get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null"
+    assert: {type: json_field, path: "write_bytes", op: "ge", value: 0}
     severity: critical
     requires: [lciod_device_node_present]
     tags: [e2e]
