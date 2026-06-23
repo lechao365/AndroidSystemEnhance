@@ -50,11 +50,20 @@ def add_control_parser(subparsers: argparse._SubParsersAction) -> None:
 def _load_session(session_ref: str) -> dict:
     if os.path.isfile(session_ref):
         return json.loads(Path(session_ref).read_text(encoding="utf-8"))
-    artifacts_dir = os.path.dirname(session_ref) if os.path.isdir(session_ref) else session_ref
-    sid_base = os.path.basename(session_ref) if not os.path.isdir(session_ref) else ""
-    for f in Path(artifacts_dir).glob("*.json"):
-        if sid_base and sid_base in f.name:
-            return json.loads(f.read_text(encoding="utf-8"))
+    d = Path(session_ref)
+    if d.is_dir():
+        latest = d / "session.json"
+        if latest.exists():
+            return json.loads(latest.read_text(encoding="utf-8"))
+        files = sorted(d.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+        if files:
+            return json.loads(files[0].read_text(encoding="utf-8"))
+    parent = d.parent
+    name = d.name
+    if parent.is_dir():
+        for f in parent.glob("*.json"):
+            if name in f.name:
+                return json.loads(f.read_text(encoding="utf-8"))
     return {}
 
 
@@ -63,6 +72,8 @@ def _save_session(session: dict, artifacts_dir: str):
     p = Path(artifacts_dir) / f"{sid}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(session, indent=2, ensure_ascii=False), encoding="utf-8")
+    latest = Path(artifacts_dir) / "session.json"
+    latest.write_text(json.dumps(session, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def _handle_control_init(args: argparse.Namespace) -> int:
@@ -85,7 +96,10 @@ def _handle_control_init(args: argparse.Namespace) -> int:
 
 def _handle_control_run_verify(args: argparse.Namespace) -> int:
     session_data = _load_session(args.session)
-    artifacts_dir = session_data.get("artifacts_dir", os.path.dirname(args.session))
+    if not session_data:
+        session_data = {"artifacts_dir": os.path.dirname(args.session) if os.path.isfile(args.session) else args.session,
+                        "session_id": os.path.basename(args.session), "current_attempt": 0, "max_attempts": 5}
+    artifacts_dir = session_data.get("artifacts_dir", args.session if os.path.isdir(args.session) else os.path.dirname(args.session))
     sid = session_data.get("session_id", os.path.basename(args.session))
     attempt = session_data.get("current_attempt", 0) + 1
 
@@ -100,8 +114,14 @@ def _handle_control_run_verify(args: argparse.Namespace) -> int:
     if args.adb_endpoint:
         cmd += ["--adb-endpoint", args.adb_endpoint]
 
+    env = os.environ.copy()
+    extra_path = ":".join(p for p in sys.path if "loop" in p or "engineering" in p)
+    if extra_path:
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{extra_path}:{existing}" if existing else extra_path
+
     try:
-        result = subprocess.run(cmd, capture_output=False, timeout=600)
+        result = subprocess.run(cmd, capture_output=False, timeout=600, env=env)
         rc = result.returncode
     except subprocess.TimeoutExpired:
         rc = 1
@@ -143,7 +163,12 @@ def _handle_control_deploy(args: argparse.Namespace) -> int:
     cmd = [sys.executable, "-m", "loop_core.cli", "deploy", "--diff-rev", "HEAD"]
     if args.adb_endpoint:
         cmd += ["--adb-endpoint", args.adb_endpoint]
-    result = subprocess.run(cmd, timeout=3600)
+    env = os.environ.copy()
+    extra_path = ":".join(p for p in sys.path if "loop" in p or "engineering" in p)
+    if extra_path:
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{extra_path}:{existing}" if existing else extra_path
+    result = subprocess.run(cmd, timeout=3600, env=env)
     return result.returncode
 
 
