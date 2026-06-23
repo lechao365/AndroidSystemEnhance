@@ -31,3 +31,11 @@
 ## RPI5 编译参考
 涉及 RPI5 AOSP/内核编译时，必须先加载 [engineering/harness/reference/build-reference.md](engineering/harness/reference/build-reference.md)。
 该规则记录了本项目正确的编译命令与约束，防止 LLM 使用错误参数。
+
+## 文件删除规则
+1. **任何文件删除操作（无论是否被 git 跟踪）都必须逐个向用户确认，禁止自行删除。**
+   - 包括但不限于：临时产物（evidence_bundle.json / summary.txt 等）、测试输出、中间文件、日志、缓存。
+   - 操作前必须列出待删文件清单，等用户显式确认（`y` / 同意 / 删吧）后才执行。
+2. **`.gitignore` 排除的文件无需考虑删除问题**——它们不会被提交到 git server，不影响仓库状态。
+   - 判断依据：`git check-ignore <file>` 返回 0（被忽略）则无需确认。
+3. **禁止以"清理"为由批量删除**——即使看似无用，也必须逐个确认。

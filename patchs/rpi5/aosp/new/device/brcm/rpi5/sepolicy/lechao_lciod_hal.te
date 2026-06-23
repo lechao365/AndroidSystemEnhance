@@ -31,8 +31,8 @@ allow lechao_lciod_hal lechao_lciod_hal_device:chr_file { open read write ioctl 
 allow lechao_lciod_hal lechao_lciod_hal_service:service_manager add;
 
 # 允许 HAL 搜索 /dev 目录 —— 内核注册设备节点时，HAL 需要遍历 /dev 查找设备
-#   为什么：/dev 是 device(tmpfs)，HAL 进程在启动时可能需枚举已注册的设备
-allow lechao_lciod_hal device:dir { search read open };
+#   收敛为仅 search：实际设备访问通过 chr_file 规则，read/open 目录非必需
+allow lechao_lciod_hal device:dir search;
 
 # 允许 HAL 写入 logd —— vendor 域默认无 logd 权限，不添加则 logcat 看不到 HAL 日志
 allow lechao_lciod_hal logd:unix_dgram_socket write;

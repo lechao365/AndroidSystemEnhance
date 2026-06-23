@@ -23,6 +23,9 @@ cc_binary {
         "system.lechao.lciod-ndk",  // system AIDL 接口 NDK 生成代码
         "vendor.lechao.lciod-V1-ndk", // vendor AIDL 接口 NDK 生成代码
     ],
+    static_libs: [
+        "lechao_lciod_common",   // 公共解析工具（minor_utils）
+    ],
     header_libs: [
         "vendor_lechao_log_headers",
     ],

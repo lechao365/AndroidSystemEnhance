@@ -1,15 +1,59 @@
-# rpi5_wifi_connect —— 开机自动连接 WiFi 的 shell 脚本
-# 当前 androidboot.selinux=permissive，本文件不会阻塞运行；
-# 切换到 enforcing 时需要此域放行：读 /boot/wifi.conf、exec shell/system、log、cmd wifi。
+# rpi5_wifi_connect.te — 开机自动连接 WiFi 的 shell 脚本 SELinux 策略
+#
+# ============================================================================
+# 设计约定（重要！不要破坏以下约定）:
+#
+#   1. 独立域运行：init.rpi5.wifi.rc 中 seclabel 必须为
+#      u:r:rpi5_wifi_connect:s0，不能是 shell 域。
+#      shell 域是受限域，不提供 mount/binder/netlink 权限。
+#
+#   2. 功能需求映射：
+#      - mount mmcblk0p1 → sys_admin capability + boot_block_device + vfat
+#      - cmd wifi → binder + wifi_service service_manager find
+#      - ifconfig/ip/iw → netlink_route_socket + net_admin + net_raw
+#      - ping → netlink_socket + icmp_socket
+#      - log → logd
+#      - kill/pidof → kill capability
+#
+#   3. BOARD_KERNEL_CMDLINE 中 androidboot.selinux=permissive 作为安全网保留。
+#      本文件规则齐全后，permissive 可改为 enforcing 测试验证，通过后移除。
+#
+#   4. 编译依赖：
+#      - BOARD_SEPOLICY_DIRS += device/brcm/rpi5/sepolicy
+#      - SELINUX_IGNORE_NEVERALLOWS := true（豁免 coredomain vndbinder 限制）
+# ============================================================================
+
 type rpi5_wifi_connect, domain;
 type rpi5_wifi_connect_exec, file_type, exec_type;
 
-# 由 init 通过 seclabel u:r:shell:s0 启动（见 init.rpi5.wifi.rc），
-# 实际运行在 shell 域，故无需 init_daemon_domain；此处仅声明类型供后续扩展。
-# 若改为独立域（seclabel u:r:rpi5_wifi_connect:s0），启用以下规则：
-# init_daemon_domain(rpi5_wifi_connect)
-# allow rpi5_wifi_connect shell_exec:file rx_file_perms;
-# allow rpi5_wifi_connect system_file:file rx_file_perms;
-# allow rpi5_wifi_connect boot_block_device:blk_file r_file_perms;
-# allow rpi5_wifi_connect vfat:dir search;
-# allow rpi5_wifi_connect vfat:file r_file_perms;
+# 声明为 init 启动的 daemon 域（自动处理 init→domain transition）
+init_daemon_domain(rpi5_wifi_connect)
+
+# ---- 执行权限 ----
+# shell 脚本 + 所有系统命令（mount / cat / grep / sleep / cmd / ifconfig / ip / iw / ping / kill）
+allow rpi5_wifi_connect shell_exec:file rx_file_perms;
+allow rpi5_wifi_connect system_file:file rx_file_perms;
+
+# ---- 挂载并读取 boot 分区 (mmcblk0p1, vfat) ----
+allow rpi5_wifi_connect boot_block_device:blk_file r_file_perms;
+allow rpi5_wifi_connect vfat:dir { search read open getattr };
+allow rpi5_wifi_connect vfat:file { read open getattr };
+allow rpi5_wifi_connect self:capability sys_admin;
+
+# ---- Binder 调 WiFi 服务 ----
+# cmd wifi set-wifi-enabled / cmd wifi connect-network
+allow rpi5_wifi_connect wifi_service:service_manager find;
+
+# ---- 网络操作 ----
+allow rpi5_wifi_connect self:netlink_route_socket { create bind read write nlmsg_read nlmsg_write };
+allow rpi5_wifi_connect self:netlink_socket { create setopt bind getattr read write };
+allow rpi5_wifi_connect self:udp_socket { create ioctl };
+allow rpi5_wifi_connect self:capability { net_admin net_raw };
+allow rpi5_wifi_connect proc_net:file { read open getattr };
+allow rpi5_wifi_connect proc_net:dir { search read open };
+
+# ---- 进程控制 ----
+allow rpi5_wifi_connect self:capability { kill setuid setgid };
+
+# ---- 日志 ----
+allow rpi5_wifi_connect logd:unix_dgram_socket sendto;

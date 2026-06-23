@@ -1,17 +1,38 @@
 diff --git a/BoardConfig.mk b/BoardConfig.mk
-index a93cb46..5f3f276 100644
+index a93cb46..56026b6 100644
 --- a/BoardConfig.mk
 +++ b/BoardConfig.mk
-@@ -25,7 +25,7 @@ TARGET_SCREEN_DENSITY := 240
+@@ -25,7 +25,28 @@ TARGET_SCREEN_DENSITY := 240
  # Kernel
  BOARD_CUSTOM_BOOTIMG := true
  BOARD_CUSTOM_BOOTIMG_MK := $(DEVICE_PATH)/mkbootimg.mk
 -BOARD_KERNEL_CMDLINE := console=ttyAMA10,115200 no_console_suspend root=/dev/ram0 rootwait androidboot.hardware=rpi5
-+BOARD_KERNEL_CMDLINE := console=ttyAMA0,115200 no_console_suspend root=/dev/ram0 rootwait androidboot.hardware=rpi5 androidboot.verifiedbootstate=orange
++
++# Kernel cmdline
++# ==============
++# androidboot.selinux=permissive 是 rpi5 无头调试场景的**必需项**：
++#
++#   1. rpi5_wifi_connect 脚本（开机自动连接 WiFi）运行在 shell 域，访问
++#      mmcblk0p1 boot 分区读取 /boot/wifi.conf。sepolicy 中 rpi5_wifi_connect.te
++#      仅定义了类型（type），**未编写完整的 allow 规则**，依赖 permissive
++#      模式才能在 enforcing 下运行。
++#
++#   2. 项目当前阶段处于调试/验证期，自定义 HAL/Daemon（lechao_lciod、
++#      lechao_lcview）的 sepolicy 规则尚未完全覆盖所有操作路径，permissive
++#      模式避免 SELinux 阻塞日志采集和诊断。
++#
++#   3. 切换到 enforcing 前必须：
++#      - 补齐 rpi5_wifi_connect.te 的 allow 规则（读 vfat、exec shell、
++#        use netlink socket、binder call wifi service 等）
++#      - 补齐 lcview/lciod 自定义域的完整 allow 规则
++#      - 验证无关键 avc denied 后，再移除本参数
++#
++#   改动影响：仅修改这行 cmdline，需编译 boot.img（mode 2 或 mode 1）。
++BOARD_KERNEL_CMDLINE := console=ttyAMA0,115200 no_console_suspend root=/dev/ram0 rootwait androidboot.hardware=rpi5 androidboot.verifiedbootstate=orange androidboot.selinux=permissive
  
  # Manifest
  DEVICE_FRAMEWORK_COMPATIBILITY_MATRIX_FILE := $(DEVICE_PATH)/framework_compatibility_matrix.xml
-@@ -55,8 +55,16 @@ TARGET_VENDOR_PROP += $(DEVICE_PATH)/vendor.prop
+@@ -55,8 +76,24 @@ TARGET_VENDOR_PROP += $(DEVICE_PATH)/vendor.prop
  TARGET_NO_RECOVERY := true
  
  # SELinux
@@ -21,14 +42,23 @@ index a93cb46..5f3f276 100644
 +# 自定义服务和 HAL 需要自己的 SELinux 域，必须在 BOARD_SEPOLICY_DIRS 中声明，
 +# 否则这些 .te 文件不会被编译进 sepolicy，导致新服务无法启动（avc denied）
  BOARD_SEPOLICY_DIRS += device/brcm/rpi5/sepolicy
- BOARD_KERNEL_CMDLINE += androidboot.selinux=permissive
-+# TODO(debug): 以下选项跳过 SELinux neverallow 检查，仅用于开发调试阶段
-+# 上板验证完成后必须删除此行，否则生产环境可能导致系统无法启动
+-BOARD_KERNEL_CMDLINE += androidboot.selinux=permissive
++
++# SELinux neverallow 豁免
++#
++# 项目调试阶段：自定义 system daemon 需通过 vndbinder 调用 vendor HAL，
++# 这与 full_treble 的 coredomain 限制冲突。保留编译期豁免以便通过编译。
++#
++# 运行时通过 BOARD_KERNEL_CMDLINE 中 androidboot.selinux=permissive 确保
++# 自定义服务（rpi5_wifi_connect、lechao_lciod、lechao_lcview）的 sepolicy
++# 不阻塞启动流程。
++#
++# 调试完成、所有自定义域 allow 规则补齐后，可同时移除本豁免和 cmdline 中的 permissive。
 +SELINUX_IGNORE_NEVERALLOWS := true
  
  # Treble
  TARGET_COPY_OUT_VENDOR := vendor
-@@ -68,3 +76,6 @@ BOARD_HOSTAPD_PRIVATE_LIB := lib_driver_cmd_$(BOARD_WLAN_DEVICE)
+@@ -68,3 +105,6 @@ BOARD_HOSTAPD_PRIVATE_LIB := lib_driver_cmd_$(BOARD_WLAN_DEVICE)
  BOARD_WPA_SUPPLICANT_DRIVER := NL80211
  BOARD_WPA_SUPPLICANT_PRIVATE_LIB := lib_driver_cmd_$(BOARD_WLAN_DEVICE)
  WPA_SUPPLICANT_VERSION := VER_0_8_X

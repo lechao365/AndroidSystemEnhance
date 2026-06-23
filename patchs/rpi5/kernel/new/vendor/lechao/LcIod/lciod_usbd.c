@@ -200,7 +200,9 @@ static int vendor_lechao_usbd_release(struct inode *inode, struct file *file)
  * vendor_lechao_usbd_read — 字符设备 read 回调
  *
  * 从设备的环形事件缓冲区中读取一条事件记录（固定大小）。
- * 如果没有事件可读，进程进入可中断睡眠等待。
+ * 如果没有事件可读：
+ *   - 阻塞模式（默认）：进程进入可中断睡眠等待
+ *   - 非阻塞模式（O_NONBLOCK）：立即返回 -EAGAIN
  *
  * 为什么 read() 返回固定大小的 struct vendor_lechao_usbd_event：
  * 环形缓冲区中的每个条目都是定长的，用户态必须提供足够的
@@ -210,6 +212,9 @@ static int vendor_lechao_usbd_release(struct inode *inode, struct file *file)
  * 当 USB 设备断开或模块卸载时，等待 read() 的进程应被唤醒
  * 并得到 EOF（返回 0），而不是永远阻塞。event_shutdown 标志
  * 和 EPOLLHUP 共同实现这个"优雅关闭"协议。
+ *
+ * 断连后 ring 中可能仍有未消费的尾部事件；read() 允许先 drain
+ * 这些事件（返回事件），ring 清空后再返回 0 (EOF)。
  */
 static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
                                        size_t count, loff_t *ppos)
@@ -224,6 +229,19 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
     if (count < sizeof(ev)) {
         pr_warn(PREFIX "read: buffer too small (%zu < %zu)\n", count, sizeof(ev));
         return -EINVAL;
+    }
+
+    /* 非阻塞快速路径：ring 空 + 未 shutdown 时立即返回 -EAGAIN */
+    if (file->f_flags & O_NONBLOCK) {
+        spin_lock_irqsave(&dev->event_lock, flags);
+        bool empty = (dev->event_head == dev->event_tail);
+        bool shutdown = READ_ONCE(dev->event_shutdown);
+        spin_unlock_irqrestore(&dev->event_lock, flags);
+        if (shutdown)
+            return 0;
+        if (empty)
+            return -EAGAIN;
+        /* ring 非空：落到下面的循环（首次 wait 不会真正阻塞） */
     }
 
     for (;;) {
@@ -261,7 +279,13 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
  *
  * 返回的掩码语义：
  *   EPOLLIN | EPOLLRDNORM — 有事件可读
- *   EPOLLHUP — 设备已断开或模块卸载（读将返回 EOF）
+ *   EPOLLHUP — 设备已断开或模块卸载（ring 排空后 read 返回 EOF）
+ *
+ * 为什么 ring 非空与 shutdown 可叠加（而非 else if）：
+ *   断连后 ring 中可能仍有未消费的尾部事件。若 shutdown 时
+ *   直接屏蔽 EPOLLIN，用户态只能看到 HUP 而不会继续 drain，
+ *   尾部事件会丢失。两者叠加后，用户态会先读到全部尾部事件，
+ *   ring 清空后才表现为纯 HUP。read() 语义与此一致。
  *
  * 为什么不使用 EPOLLERR：断开是预期行为，不是错误。
  */
@@ -272,10 +296,10 @@ static __poll_t vendor_lechao_usbd_poll(struct file *file, poll_table *wait)
 
     poll_wait(file, &dev->event_wq, wait);
 
+    if (dev->event_head != dev->event_tail)
+        mask |= EPOLLIN | EPOLLRDNORM;
     if (READ_ONCE(dev->event_shutdown))
         mask |= EPOLLHUP;
-    else if (dev->event_head != dev->event_tail)
-        mask |= EPOLLIN | EPOLLRDNORM;
 
     return mask;
 }

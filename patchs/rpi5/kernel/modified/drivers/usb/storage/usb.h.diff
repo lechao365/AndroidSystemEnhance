@@ -1,8 +1,8 @@
 diff --git a/drivers/usb/storage/usb.h b/drivers/usb/storage/usb.h
-index fd3f32670873..02882639374f 100644
+index fd3f32670873..1ef7bb36f998 100644
 --- a/drivers/usb/storage/usb.h
 +++ b/drivers/usb/storage/usb.h
-@@ -38,6 +38,77 @@
+@@ -38,6 +38,78 @@
  struct us_data;
  struct scsi_cmnd;
  
@@ -34,8 +34,10 @@ index fd3f32670873..02882639374f 100644
 + *   STALL：interpret_urb_result 解析 URB 返回 -EPIPE 时
 + *   TIMEOUT：usb_stor_msg_common wait_for_completion 超时后
 + *   DATA_CORRUPT：interpret_urb_result 解析 URB 返回 -EOVERFLOW 时
-+ *   RATE_DEGRADED：vendor 驱动内部判定（不在 usb-storage 核心发射）
 + *   DEVICE_PROBE / DISCONNECT：厂商 notifier 链（见 usb.c）
++ *
++ * 注意：RATE_DEGRADED 是 vendor 驱动内部派生事件，不在核心 notifier
++ * 枚举中发射。vendor 侧自行维护该事件类型。
 + * ============================================================
 + */
 +enum usb_stor_notifier_event {
@@ -48,7 +50,6 @@ index fd3f32670873..02882639374f 100644
 +	USB_STOR_NOTIFIER_STALL,             /* USB STALL：URB 返回 -EPIPE，端点被挂起 */
 +	USB_STOR_NOTIFIER_TIMEOUT,           /* 传输超时：URB 等待超时或被信号中断 */
 +	USB_STOR_NOTIFIER_DATA_CORRUPT,      /* 数据损坏：URB 返回 -EOVERFLOW（babble） */
-+	USB_STOR_NOTIFIER_RATE_DEGRADED,     /* 性能降级：vendor 驱动内部判定（不在核心发射） */
 +};
 +
 +/*
@@ -80,7 +81,7 @@ index fd3f32670873..02882639374f 100644
  /*
   * Unusual device list definitions 
   */
-@@ -148,6 +219,21 @@ struct us_data {
+@@ -148,6 +220,21 @@ struct us_data {
  	/* hacks for READ CAPACITY bug handling */
  	int			use_last_sector_hacks;
  	int			last_sector_retries;
@@ -102,7 +103,7 @@ index fd3f32670873..02882639374f 100644
  };
  
  /* Convert between us_data and the corresponding Scsi_Host */
-@@ -207,4 +293,45 @@ static void __exit __driver##_exit(void) \
+@@ -207,4 +294,45 @@ static void __exit __driver##_exit(void) \
  } \
  module_exit(__driver##_exit)
  

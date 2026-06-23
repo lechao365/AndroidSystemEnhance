@@ -26,6 +26,7 @@
 #include <aidl/vendor/lechao/lciod/IIoHal.h>
 #include <aidl/vendor/lechao/lciod/IoEvent.h>
 #include "hal_client.h"
+#include "minor_utils.h"
 #include "lechao_log.h"
 
 #define LOG_TAG "lechao_lciod"
@@ -37,17 +38,7 @@ using aidl::system::lechao::lciod::IoStats;
 using aidl::system::lechao::lciod::IoConfig;
 using aidl::system::lechao::lciod::IoEvent;
 using VendorIoEvent = aidl::vendor::lechao::lciod::IoEvent;
-
-/*
- * extract_minor_from_path — 从设备节点路径解析 minor 编号
- * 与 hal_service.cpp 中的 extract_minor() 功能相同，
- * 此处为 system daemon 的独立副本（避免跨进程依赖）。
- */
-static int extract_minor_from_path(const std::string& path) {
-    const char prefix[] = "/dev/vendor_lechao_usbd";
-    if (path.compare(0, sizeof(prefix) - 1, prefix) != 0) return -1;
-    return std::atoi(path.c_str() + sizeof(prefix) - 1);
-}
+using lechao::lciod::ParseMinorFromPath;
 
 /*
  * IoServiceImpl — IIoService AIDL 接口的实现类
@@ -59,7 +50,18 @@ static int extract_minor_from_path(const std::string& path) {
  */
 class IoServiceImpl : public BnIoService {
 public:
-    IoServiceImpl() {
+    /*
+     * 构造函数仅做初始化，不启动监控线程。
+     * 监控线程由 main() 在服务注册成功后显式调用 start() 启动，
+     * 避免注册失败时 detach 线程已无法回收。
+     */
+    IoServiceImpl() = default;
+
+    /*
+     * start — 在 main() 服务注册成功后显式启动后台监控线程
+     * 确保注册失败时不会留下 detach 线程。
+     */
+    void start() {
         start_monitor();
     }
 
@@ -75,8 +77,9 @@ public:
         if (!status.isOk()) { LC_ALOGW("listDeviceMinors: listDevices failed"); return status; }
         _aidl_return->clear();
         for (auto& path : devices) {
-            int minor = extract_minor_from_path(path);
-            if (minor >= 0) _aidl_return->push_back(minor);
+            int32_t minor = -1;
+            if (ParseMinorFromPath(path, &minor))
+                _aidl_return->push_back(minor);
         }
         return ndk::ScopedAStatus::ok();
     }
@@ -92,7 +95,7 @@ public:
 
         aidl::vendor::lechao::lciod::IoStats stats;
         auto status = hal->getStats(in_deviceMinor, &stats);
-        if (!status.isOk()) { LC_ALOGW("getAverageRate: getStats failed"); *_aidl_return = 0; return ndk::ScopedAStatus::ok(); }
+        if (!status.isOk()) { LC_ALOGW("getAverageRate: getStats failed"); *_aidl_return = 0; return status; }
 
         uint64_t total = stats.readBytes + stats.writeBytes;
         uint64_t totalNs = stats.readNs + stats.writeNs;
@@ -113,6 +116,7 @@ public:
      *           peakRate（仅 degrade check 内部使用）
      */
     ndk::ScopedAStatus getIoStats(int32_t in_deviceMinor, IoStats* _aidl_return) override {
+        *_aidl_return = {};
         auto hal = hal_client_.get();
         if (!hal) { LC_ALOGW("getIoStats: HAL not connected"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
         aidl::vendor::lechao::lciod::IoStats vstats;
@@ -151,6 +155,7 @@ public:
 
     /* getIoConfig — 代理转发到 HAL getConfig() */
     ndk::ScopedAStatus getIoConfig(int32_t in_deviceMinor, IoConfig* _aidl_return) override {
+        *_aidl_return = {};
         auto hal = hal_client_.get();
         if (!hal) { LC_ALOGW("getIoConfig: HAL not connected"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
         aidl::vendor::lechao::lciod::IoConfig vcfg;
@@ -173,11 +178,12 @@ public:
 
     /* readIoEvent — 代理转发到 HAL readEvent()，1:1 字段直传 */
     ndk::ScopedAStatus readIoEvent(int32_t in_deviceMinor, int32_t in_timeoutMs, IoEvent* _aidl_return) override {
+        *_aidl_return = {};
         auto hal = hal_client_.get();
-        if (!hal) { LC_ALOGW("readIoEvent: HAL not connected"); _aidl_return->valid = false; return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
+        if (!hal) { LC_ALOGW("readIoEvent: HAL not connected"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
         aidl::vendor::lechao::lciod::IoEvent vev;
         auto status = hal->readEvent(in_deviceMinor, in_timeoutMs, &vev);
-        if (!status.isOk()) { LC_ALOGW("readIoEvent: readEvent failed"); _aidl_return->valid = false; return status; }
+        if (!status.isOk()) { LC_ALOGW("readIoEvent: readEvent failed"); return status; }
         _aidl_return->timestampNs = vev.timestampNs;
         _aidl_return->eventType = vev.eventType;
         _aidl_return->eventValue = vev.eventValue;
@@ -196,6 +202,8 @@ private:
      * 线程行为:
      *   - 每 50ms 轮询一次事件（readEvent, 50ms timeout）
      *   - 每 10s（200 个 tick）刷新设备列表和打印统计信息
+     *   - 遍历所有活跃设备，不再只监控 devices[0]
+     *   - 单设备调用失败仅跳过该设备，不中断本轮其他设备
      *   - 收到有效事件时打印事件详情到 logcat
      *   - 线程 detach，随进程生命周期自动终止
      *
@@ -206,72 +214,93 @@ private:
     void start_monitor() {
         std::thread([this]() {
             int tick = 0;
-            int deviceMinor = 0;
+            std::vector<int32_t> deviceMinors;  /* 当前活跃设备 minor 列表（按 HAL 返回顺序，已排序） */
+
+            /* 启动前立即 refresh 一次，避免首轮空转或误读 minor=0 */
+            auto hal = hal_client_.get();
+            if (hal) {
+                std::vector<std::string> devices;
+                if (hal->listDevices(&devices).isOk()) {
+                    for (auto& path : devices) {
+                        int32_t minor = -1;
+                        if (ParseMinorFromPath(path, &minor))
+                            deviceMinors.push_back(minor);
+                    }
+                }
+            }
+
             while (true) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 tick++;
-                auto hal = hal_client_.get();
+                hal = hal_client_.get();
                 if (!hal) { LC_ALOGW("monitor: HAL not connected, skipping cycle"); continue; }
 
                 /* 每 200 tick（10s）刷新设备列表 */
                 if (tick % 200 == 0) {
                     std::vector<std::string> devices;
                     auto dev_status = hal->listDevices(&devices);
-                    if (dev_status.isOk() && !devices.empty()) {
-                        deviceMinor = extract_minor_from_path(devices[0]);
-                        if (deviceMinor < 0) deviceMinor = 0;
-                    } else {
-                        deviceMinor = -1;
+                    deviceMinors.clear();
+                    if (dev_status.isOk()) {
+                        for (auto& path : devices) {
+                            int32_t minor = -1;
+                            if (ParseMinorFromPath(path, &minor))
+                                deviceMinors.push_back(minor);
+                        }
                     }
                 }
 
-                if (deviceMinor < 0) continue;
+                if (deviceMinors.empty()) continue;
 
-                /* 每 tick 轮询事件 */
-                VendorIoEvent vev;
-                auto ev_status = hal->readEvent(deviceMinor, 50, &vev);
-                if (ev_status.isOk() && vev.valid) {
-                    const char *type_name = "UNKNOWN";
-                    switch (vev.eventType) {
-                        case 1: type_name = "TRANSPORT_ERROR"; break;
-                        case 2: type_name = "STALL"; break;
-                        case 3: type_name = "DATA_CORRUPT"; break;
-                        case 4: type_name = "TIMEOUT"; break;
-                        case 5: type_name = "RESET"; break;
-                        case 6: type_name = "RATE_DEGRADED"; break;
-                    }
-                    const char *dir = (vev.dataDirection == 1) ? "READ"
-                                      : (vev.dataDirection == 2) ? "WRITE" : "NONE";
+                /* 遍历所有活跃设备，单设备失败不中断本轮 */
+                for (int32_t minor : deviceMinors) {
+                    VendorIoEvent vev;
+                    auto ev_status = hal->readEvent(minor, 50, &vev);
+                    if (ev_status.isOk() && vev.valid) {
+                        const char *type_name = "UNKNOWN";
+                        switch (vev.eventType) {
+                            case 1: type_name = "TRANSPORT_ERROR"; break;
+                            case 2: type_name = "STALL"; break;
+                            case 3: type_name = "DATA_CORRUPT"; break;
+                            case 4: type_name = "TIMEOUT"; break;
+                            case 5: type_name = "RESET"; break;
+                            case 6: type_name = "RATE_DEGRADED"; break;
+                        }
+                        const char *dir = (vev.dataDirection == 1) ? "READ"
+                                          : (vev.dataDirection == 2) ? "WRITE" : "NONE";
 
-                    LC_ALOGD("event: type=%s(%d) val=%d dir=%s ts=%llu",
-                          type_name, vev.eventType, vev.eventValue, dir,
-                          (unsigned long long)vev.timestampNs);
-                } else if (!ev_status.isOk()) {
-                    LC_ALOGW("monitor: readEvent failed: %s", ev_status.getDescription().c_str());
-                }
-
-                /* 每 200 tick（10s）打印统计信息 */
-                if (tick % 200 == 0) {
-                    aidl::vendor::lechao::lciod::IoStats stats;
-                    auto st_status = hal->getStats(deviceMinor, &stats);
-                    if (!st_status.isOk()) {
-                        ALOGW("monitor: getStats failed");
-                        continue;
+                        LC_ALOGD("event: minor=%d type=%s(%d) val=%d dir=%s ts=%llu",
+                              minor, type_name, vev.eventType, vev.eventValue, dir,
+                              (unsigned long long)vev.timestampNs);
+                    } else if (!ev_status.isOk()) {
+                        /* 单设备失败仅告警，继续下一个设备 */
+                        LC_ALOGW("monitor: readEvent failed for minor=%d: %s", minor,
+                              ev_status.getDescription().c_str());
                     }
 
-                    /* 计算 KB/s 速率 */
-                    auto calc_rate = [](long bytes, long ns) -> uint64_t {
-                        if (ns == 0) return 0;
-                        return (static_cast<uint64_t>(bytes) * 1000000000ULL)
-                               / static_cast<uint64_t>(ns) / 1024ULL;
-                    };
-                    uint64_t read_rate = calc_rate(stats.readBytes, stats.readNs);
-                    uint64_t write_rate = calc_rate(stats.writeBytes, stats.writeNs);
+                    /* 每 200 tick（10s）打印统计信息 */
+                    if (tick % 200 == 0) {
+                        aidl::vendor::lechao::lciod::IoStats stats;
+                        auto st_status = hal->getStats(minor, &stats);
+                        if (!st_status.isOk()) {
+                            ALOGW("monitor: getStats failed for minor=%d", minor);
+                            continue;  /* 跳过该设备统计，继续下一个 */
+                        }
 
-                    ALOGI("monitor: read_rate=%llu KB/s, write_rate=%llu KB/s, "
-                          "rx_pkts=%lld, tx_pkts=%lld",
-                          (unsigned long long)read_rate, (unsigned long long)write_rate,
-                          (long long)stats.readCmds, (long long)stats.writeCmds);
+                        /* 计算 KB/s 速率 */
+                        auto calc_rate = [](long bytes, long ns) -> uint64_t {
+                            if (ns == 0) return 0;
+                            return (static_cast<uint64_t>(bytes) * 1000000000ULL)
+                                   / static_cast<uint64_t>(ns) / 1024ULL;
+                        };
+                        uint64_t read_rate = calc_rate(stats.readBytes, stats.readNs);
+                        uint64_t write_rate = calc_rate(stats.writeBytes, stats.writeNs);
+
+                        ALOGI("monitor: minor=%d read_rate=%llu KB/s, write_rate=%llu KB/s, "
+                              "rx_pkts=%lld, tx_pkts=%lld",
+                              minor,
+                              (unsigned long long)read_rate, (unsigned long long)write_rate,
+                              (long long)stats.readCmds, (long long)stats.writeCmds);
+                    }
                 }
             }
         }).detach();
@@ -302,6 +331,10 @@ int main() {
         return 1;
     }
     ALOGI("Registered %s", name.c_str());
+
+    /* 服务注册成功后才启动后台监控线程 */
+    service->start();
+
     ABinderProcess_joinThreadPool();
     return 1;
 }

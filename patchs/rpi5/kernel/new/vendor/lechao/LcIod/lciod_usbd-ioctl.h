@@ -20,6 +20,13 @@
  * 【版本约定】
  *   结构体中预留 reserved 字段用于未来扩展，新增字段应追加到末尾，
  *   不得修改已有字段的偏移和大小。
+ *
+ * 【ABI 版本】
+ *   本头文件为内核-用户态共享 ABI 的真相源。AOSP HAL 与 usb-verify
+ *   的镜像副本必须与本文件保持 1:1 同步。每次 ABI 变更必须递增
+ *   VENDOR_LECHAO_USBD_ABI_VERSION 并三方整体重编。
+ *   - v1：初始版本
+ *   - v2：stats 末尾追加 event_drop_count
  * ============================================================
  */
 
@@ -27,6 +34,9 @@
 #define _VENDOR_LECHAO_USBD_IOCTL_H
 
 #include <linux/types.h>
+
+/* ABI 版本号：与 AOSP HAL / usb-verify 镜像副本必须一致 */
+#define VENDOR_LECHAO_USBD_ABI_VERSION  2
 
 /*
  * struct vendor_lechao_usbd_stats — 单设备粒度的传输统计快照
@@ -71,6 +81,7 @@ struct vendor_lechao_usbd_stats {
 	u8 enabled;                      /* 配置：监控是否启用（1=启用, 0=禁用） */
 	u8 reserved[3];                  /* 预留：对齐填充，未来扩展用 */
 	u32 flags;                       /* 配置：运行时标志位，预留扩展 */
+	u64 event_drop_count;            /* 累计：环形缓冲区溢出丢弃的事件数（event_lock 保护） */
 };
 
 /*

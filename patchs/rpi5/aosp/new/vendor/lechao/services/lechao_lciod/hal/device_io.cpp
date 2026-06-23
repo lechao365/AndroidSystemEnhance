@@ -39,25 +39,38 @@ std::vector<std::string> list_devices() {
     return result;
 }
 
-/* 设备节点打开重试参数：应对 udev 权限设置延迟等场景 */
-#define OPEN_RETRY_MAX    10
-#define OPEN_RETRY_DELAY_MS 200
+/*
+ * 设备节点打开重试参数：默认 3 次 × 50ms（总最长 150ms）
+ *
+ * 历史值为 10 × 200ms（2s），在 HAL 单线程模型下会严重阻塞
+ * getStats/listDevices 等前台调用。新默认值将阻塞时间压到 150ms，
+ * 调用方可在需要更长等待的场景（如 readEvent 的持久 fd 懒打开）
+ * 显式传入更大的 max_retries / delay_ms。
+ */
+#define OPEN_RETRY_MAX_DEFAULT    3
+#define OPEN_RETRY_DELAY_MS_DEFAULT 50
 
 /*
  * open_device — 带重试的设备节点打开
- * 重试 10 次，每次间隔 200ms，应对设备节点短暂不可用的情况。
- * 返回: >= 0 为有效 fd，-1 表示全部重试失败
+ * @path:      设备节点路径
+ * @max_retries: 最大重试次数（<1 表示不重试，立即返回）
+ * @delay_ms:  每次重试间隔（毫秒）
+ *
+ * 返回: >= 0 为有效 fd，-1 表示全部重试失败（errno 保留最后一次错误）
  */
-int open_device(const char *path) {
+int open_device(const char *path, int max_retries, int delay_ms) {
+    if (max_retries <= 0) max_retries = OPEN_RETRY_MAX_DEFAULT;
+    if (delay_ms  <= 0) delay_ms  = OPEN_RETRY_DELAY_MS_DEFAULT;
     int fd = -1;
-    for (int i = 0; i < OPEN_RETRY_MAX; i++) {
+    for (int i = 0; i < max_retries; i++) {
         fd = open(path, O_RDONLY);
         if (fd >= 0)
             return fd;
-        LC_LOGD("open: attempt failed: " << strerror(errno));
-        usleep(OPEN_RETRY_DELAY_MS * 1000);
+        LC_LOGD("open: attempt " << (i + 1) << "/" << max_retries << " failed: " << strerror(errno));
+        if (i + 1 < max_retries && delay_ms > 0)
+            usleep(delay_ms * 1000);
     }
-    LOG(ERROR) << "Cannot open " << path << " after " << OPEN_RETRY_MAX
+    LOG(ERROR) << "Cannot open " << path << " after " << max_retries
                << " retries: " << strerror(errno);
     return fd;
 }

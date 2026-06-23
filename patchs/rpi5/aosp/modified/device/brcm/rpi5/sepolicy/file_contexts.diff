@@ -1,5 +1,5 @@
 diff --git a/sepolicy/file_contexts b/sepolicy/file_contexts
-index 9692b33..b6a11b4 100644
+index 9692b33..503c891 100644
 --- a/sepolicy/file_contexts
 +++ b/sepolicy/file_contexts
 @@ -28,3 +28,41 @@
@@ -32,8 +32,8 @@ index 9692b33..b6a11b4 100644
 +
 +# ===== rpi5_wifi_connect - 开机自动连接 WiFi 脚本（system 分区） =====
 +#  shell 脚本 /system/bin/rpi5_wifi_connect
-+#  标签 rpi5_wifi_connect_exec（te 中声明的 exec_type）
-+#  rc 中 seclabel u:r:shell:s0，init 不做 domain transition，直接以 shell 域 exec
++#  标签 rpi5_wifi_connect_exec（te 中声明的 exec_type，init_daemon_domain 处理 domain transition）
++#  init.rpi5.wifi.rc 中 seclabel 为 u:r:rpi5_wifi_connect:s0，以独立域运行
 +/system/bin/rpi5_wifi_connect                    u:object_r:rpi5_wifi_connect_exec:s0
 +
 +# ===== lechao_lcview - 自定义显示系统服务（system 分区） =====

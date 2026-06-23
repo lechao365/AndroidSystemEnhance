@@ -25,10 +25,12 @@
 #include <aidl/vendor/lechao/lciod/BnIoHal.h>
 #include <aidl/vendor/lechao/lciod/IIoHal.h>
 #include "device_io.h"
+#include "minor_utils.h"
 #include <android-base/logging.h>
 #include "lechao_log.h"
 #include <unordered_map>
 #include <array>
+#include <algorithm>
 #include <cinttypes>
 
 using namespace ndk;
@@ -36,25 +38,7 @@ using aidl::vendor::lechao::lciod::BnIoHal;
 using aidl::vendor::lechao::lciod::IoStats;
 using aidl::vendor::lechao::lciod::IoConfig;
 using aidl::vendor::lechao::lciod::IoEvent;
-
-/*
- * extract_minor — 从设备节点路径解析出 minor 编号
- * @path: 设备节点路径，如 "/dev/vendor_lechao_usbd0"
- * 返回: minor 编号（整数），-1 表示路径格式无效
- *
- * 解析逻辑: 去掉前缀 "/dev/vendor_lechao_usbd" 后剩余部分转为整数。
- * 示例: "/dev/vendor_lechao_usbd0" → suffix="0" → minor=0
- *       "/dev/vendor_lechao_usbd1" → suffix="1" → minor=1
- */
-static int extract_minor(const std::string& path) {
-    const char prefix[] = "/dev/vendor_lechao_usbd";
-    if (path.compare(0, sizeof(prefix) - 1, prefix) != 0) {
-        LC_LOGW("extract_minor: invalid path '" << path << "'");
-        return -1;
-    }
-    std::string suffix = path.substr(sizeof(prefix) - 1);
-    return std::atoi(suffix.c_str());
-}
+using lechao::lciod::ParseMinorFromPath;
 
 /*
  * DeviceEntry — 设备节点缓存条目
@@ -109,8 +93,12 @@ public:
         std::unordered_map<int, DeviceEntry> newMap;
 
         for (auto& path : current) {
-            int minor = extract_minor(path);
-            if (minor < 0) { LC_LOGW("refresh_devices: skipping invalid minor"); continue; }
+            int32_t minor32 = -1;
+            if (!ParseMinorFromPath(path, &minor32)) {
+                LC_LOGW("refresh_devices: skipping invalid path '" << path << "'");
+                continue;
+            }
+            int minor = static_cast<int>(minor32);
 
             auto old = mDeviceMap.find(minor);
             if (old != mDeviceMap.end() && old->second.path == path) {
@@ -146,12 +134,21 @@ public:
     /*
      * listDevices — 返回所有在线设备的路径列表
      * AIDL 接口实现，返回设备节点路径而非 minor 编号。
+     *
+     * 按 minor 升序排序输出，保证多设备场景下顺序稳定，
+     * 便于上层监控遍历与测试断言。
      */
     ndk::ScopedAStatus listDevices(std::vector<std::string>* _aidl_return) override {
         refresh_devices();
         _aidl_return->clear();
+        /* 收集 minor 后排序，避免 unordered_map 无序遍历 */
+        std::vector<int> minors;
+        minors.reserve(mDeviceMap.size());
         for (auto& [minor, entry] : mDeviceMap)
-            _aidl_return->push_back(entry.path);
+            minors.push_back(minor);
+        std::sort(minors.begin(), minors.end());
+        for (int minor : minors)
+            _aidl_return->push_back(mDeviceMap[minor].path);
         return ndk::ScopedAStatus::ok();
     }
 
@@ -165,17 +162,18 @@ public:
      * 注意: 每次调用临时打开 fd，调用后立即关闭（不占用持久 fd）
      */
     ndk::ScopedAStatus getStats(int32_t in_deviceMinor, IoStats* _aidl_return) override {
+        *_aidl_return = {};  /* 失败前清零，避免上层读到未初始化字段 */
         auto* entry = resolve_device(in_deviceMinor);
-        if (!entry) { LC_LOGW("getStats: device not found for minor"); return ndk::ScopedAStatus::ok(); }
+        if (!entry) { LC_LOGW("getStats: device not found for minor"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
 
         /* 临时打开 fd，避免占用 readEvent 的持久 fd */
         int fd = ::open_device(entry->path.c_str());
-        if (fd < 0) { LC_LOGE("getStats: open device failed: " << strerror(errno)); return ndk::ScopedAStatus::ok(); }
+        if (fd < 0) { LC_LOGE("getStats: open device failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
 
         struct vendor_lechao_usbd_stats raw;
         int ret = ::get_stats(fd, &raw);
         close(fd);
-        if (ret < 0) { LC_LOGE("getStats: ioctl GET_STATS failed: " << strerror(errno)); return ndk::ScopedAStatus::ok(); }
+        if (ret < 0) { LC_LOGE("getStats: ioctl GET_STATS failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
 
         /* --- 字段映射: raw → _aidl_return --- */
         _aidl_return->vid = raw.vid;
@@ -211,14 +209,14 @@ public:
      */
     ndk::ScopedAStatus resetState(int32_t in_deviceMinor) override {
         auto* entry = resolve_device(in_deviceMinor);
-        if (!entry) { LC_LOGW("resetState: device not found for minor"); return ndk::ScopedAStatus::ok(); }
+        if (!entry) { LC_LOGW("resetState: device not found for minor"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
 
         int fd = ::open_device(entry->path.c_str());
-        if (fd < 0) { LC_LOGE("resetState: open device failed: " << strerror(errno)); return ndk::ScopedAStatus::ok(); }
+        if (fd < 0) { LC_LOGE("resetState: open device failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
 
         int ret = ::reset_state(fd);
         close(fd);
-        if (ret < 0) LC_LOGE("resetState: ioctl RESET_STATE failed: " << strerror(errno));
+        if (ret < 0) { LC_LOGE("resetState: ioctl RESET_STATE failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
         return ndk::ScopedAStatus::ok();
     }
 
@@ -226,21 +224,20 @@ public:
      * getConfig — 获取指定设备的运行时配置
      */
     ndk::ScopedAStatus getConfig(int32_t in_deviceMinor, IoConfig* _aidl_return) override {
+        *_aidl_return = {};
         auto* entry = resolve_device(in_deviceMinor);
-        if (!entry) { LC_LOGW("getConfig: device not found"); return ndk::ScopedAStatus::ok(); }
+        if (!entry) { LC_LOGW("getConfig: device not found"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
 
         int fd = ::open_device(entry->path.c_str());
-        if (fd < 0) { LC_LOGE("getConfig: open failed: " << strerror(errno)); return ndk::ScopedAStatus::ok(); }
+        if (fd < 0) { LC_LOGE("getConfig: open failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
 
         struct vendor_lechao_usbd_config raw;
         int cfg_ret = ::get_config(fd, &raw);
-        if (cfg_ret != 0)
-            LC_LOGE("getConfig: ioctl GET_CONFIG failed: " << strerror(errno));
-        if (cfg_ret == 0) {
-            _aidl_return->enabled = raw.enabled;
-            _aidl_return->flags = raw.flags;
-        }
         close(fd);
+        if (cfg_ret != 0) { LC_LOGE("getConfig: ioctl GET_CONFIG failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
+
+        _aidl_return->enabled = raw.enabled;
+        _aidl_return->flags = raw.flags;
         return ndk::ScopedAStatus::ok();
     }
 
@@ -249,20 +246,21 @@ public:
      * 返回 bool 表示内核是否接受配置。
      */
     ndk::ScopedAStatus setConfig(int32_t in_deviceMinor, const IoConfig& in_config, bool* _aidl_return) override {
+        *_aidl_return = false;
         auto* entry = resolve_device(in_deviceMinor);
-        if (!entry) { LC_LOGW("setConfig: device not found"); *_aidl_return = false; return ndk::ScopedAStatus::ok(); }
+        if (!entry) { LC_LOGW("setConfig: device not found"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
 
         int fd = ::open_device(entry->path.c_str());
-        if (fd < 0) { LC_LOGE("setConfig: open failed: " << strerror(errno)); *_aidl_return = false; return ndk::ScopedAStatus::ok(); }
+        if (fd < 0) { LC_LOGE("setConfig: open failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
 
         struct vendor_lechao_usbd_config raw;
         raw.enabled = in_config.enabled;
         raw.flags = in_config.flags;
         int set_ret = ::set_config(fd, &raw);
-        if (set_ret != 0)
-            LC_LOGE("setConfig: ioctl SET_CONFIG failed: " << strerror(errno));
-        *_aidl_return = (set_ret == 0);
         close(fd);
+        if (set_ret != 0) { LC_LOGE("setConfig: ioctl SET_CONFIG failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
+
+        *_aidl_return = true;
         return ndk::ScopedAStatus::ok();
     }
 
@@ -276,41 +274,45 @@ public:
      * 下次调用时尝试重新打开（设备可能重新 probe）。
      */
     ndk::ScopedAStatus readEvent(int32_t in_deviceMinor, int32_t in_timeoutMs, IoEvent* _aidl_return) override {
+        *_aidl_return = {};
         /* 先刷新设备列表，将已消失的设备从 map 中移除 */
         refresh_devices();
 
         auto* entry = resolve_device(in_deviceMinor);
-        if (!entry) { LC_LOGW("readEvent: device not found"); _aidl_return->valid = false; return ndk::ScopedAStatus::ok(); }
+        if (!entry) { LC_LOGW("readEvent: device not found"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
 
         /* 检查持久 fd 是否有效，无效时尝试重新打开 */
         if (entry->fd < 0) {
             LC_LOGD("readEvent: reopening persistent fd");
             entry->fd = ::open_device(entry->path.c_str());
         }
-        if (entry->fd < 0) { LC_LOGE("readEvent: reopen failed: " << strerror(errno)); _aidl_return->valid = false; return ndk::ScopedAStatus::ok(); }
+        if (entry->fd < 0) { LC_LOGE("readEvent: reopen failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
 
         struct vendor_lechao_usbd_event raw;
         int ret = ::read_event(entry->fd, &raw, in_timeoutMs);
 
         if (ret < 0) {
-            if (errno != ETIMEDOUT && errno != EAGAIN) {
-                LC_LOGE("readEvent: read_event failed: " << strerror(errno));
-                if (errno == ENODEV || errno == EIO) {
-                    LC_LOGW("readEvent: device removed (errno=" << errno << ")");
-                    ::close_device(entry->fd);
-                    entry->fd = -1;
-                }
+            /* ETIMEDOUT/EAGAIN 是"暂无事件"的正常语义，返回 ok + valid=false */
+            if (errno == ETIMEDOUT || errno == EAGAIN) {
+                _aidl_return->valid = false;
+                return ndk::ScopedAStatus::ok();
             }
-            _aidl_return->valid = false;
-        } else {
-            /* 字段映射: raw → _aidl_return */
-            _aidl_return->timestampNs = raw.timestamp_ns;
-            _aidl_return->eventType = raw.event_type;
-            _aidl_return->eventValue = raw.event_value;
-            _aidl_return->dataDirection = raw.data_direction;
-            _aidl_return->status = raw.status;
-            _aidl_return->valid = raw.valid;
+            LC_LOGE("readEvent: read_event failed: " << strerror(errno));
+            if (errno == ENODEV || errno == EIO) {
+                LC_LOGW("readEvent: device removed (errno=" << errno << ")");
+                ::close_device(entry->fd);
+                entry->fd = -1;
+            }
+            return ndk::ScopedAStatus::fromServiceSpecificError(-errno);
         }
+
+        /* 字段映射: raw → _aidl_return */
+        _aidl_return->timestampNs = raw.timestamp_ns;
+        _aidl_return->eventType = raw.event_type;
+        _aidl_return->eventValue = raw.event_value;
+        _aidl_return->dataDirection = raw.data_direction;
+        _aidl_return->status = raw.status;
+        _aidl_return->valid = raw.valid;
         return ndk::ScopedAStatus::ok();
     }
 

@@ -1,0 +1,25 @@
+// ============================================================
+// common/Android.bp — LcIod 公共工具库
+// 模块: lechao_lciod_common (静态库)
+// 设计目的: 提供 HAL 与 Daemon 共用的解析/工具函数，
+//           消除重复实现（extract_minor 等）。
+// ============================================================
+
+cc_library_static {
+    name: "lechao_lciod_common",
+    owner: "lechao",
+    srcs: [
+        "minor_utils.cpp",
+    ],
+    export_include_dirs: ["."],
+    shared_libs: [
+        "libbase",
+    ],
+    header_libs: [
+        "vendor_lechao_log_headers",
+    ],
+    cflags: [
+        "-Wall",
+        "-Werror",
+    ],
+}

@@ -4,7 +4,7 @@
 
 # 声明 lechao_lciod 为 SELinux domain
 type lechao_lciod, domain;
-# 声明 lechao_lciod 可执行文件的类型标签（用于 file_contexts 中匹配 /system/bin/lechao_lciod）
+# 声明 lechao_lciod 可执行文件的类型标签
 type lechao_lciod_exec, exec_type, file_type;
 
 # 标记为 init 启动的守护进程域 —— 使得 init 进程可以向此域转换（domain transition）
@@ -25,10 +25,6 @@ allow lechao_lciod lechao_lciod_hal_service:service_manager find;
 # 允许 iod 通过 /dev/binder 与 servicemanager 通信（注册 system 服务时需要）
 binder_use(lechao_lciod, servicemanager)
 allow lechao_lciod binder_device:chr_file rw_file_perms;
-
-# 允许 iod 使用 syslog（capability2）—— 用于日志输出，方便调试
-#   capability2 是 Linux capability 的扩展集，syslog 对应 CAP_SYSLOG
-allow lechao_lciod self:capability2 syslog;
 
 # 允许 iod 将自己的服务注册到 service_manager —— 这样客户端可以通过
 #   IServiceManager::getService("system.lechao.lciod.IIoService/default") 找到 iod

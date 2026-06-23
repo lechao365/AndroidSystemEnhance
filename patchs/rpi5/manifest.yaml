@@ -117,6 +117,12 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lciod/aidl_api/vendor.lechao.lciod/current/vendor/lechao/lciod/IoEvent.aidl
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/aidl_api/vendor.lechao.lciod/current/vendor/lechao/lciod/IoStats.aidl
       source: aosp/vendor/lechao/services/lechao_lciod/aidl_api/vendor.lechao.lciod/current/vendor/lechao/lciod/IoStats.aidl
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/common/Android.bp
+      source: aosp/vendor/lechao/services/lechao_lciod/common/Android.bp
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/common/minor_utils.cpp
+      source: aosp/vendor/lechao/services/lechao_lciod/common/minor_utils.cpp
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/common/minor_utils.h
+      source: aosp/vendor/lechao/services/lechao_lciod/common/minor_utils.h
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/Android.bp
       source: aosp/vendor/lechao/services/lechao_lciod/daemon/Android.bp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/hal_client.cpp
@@ -200,6 +206,8 @@ deletions:
     - source: aosp/device/brcm/rpi5-kernel/overlays/README
 others:
   - patch: others/usb-verify/Makefile
+    source: null
+  - patch: others/usb-verify/fault-verify
     source: null
   - patch: others/usb-verify/include/fv_ioctl_compat.h
     source: null

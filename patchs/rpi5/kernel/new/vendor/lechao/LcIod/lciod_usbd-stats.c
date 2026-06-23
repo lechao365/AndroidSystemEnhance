@@ -122,18 +122,23 @@ static inline void vendor_lechao_usbd_update_current_rate_locked(
  *
  * 【degrade 判定算法】
  *   使用 1 秒滑动窗口对比历史基线速率与当前瞬时速率：
- *   1. 如果是第一次调用或窗口未满（< 1秒），累计字节数并返回
+ *   1. 如果是第一次调用或窗口未满（< 1秒），累计字节数并返回 false
  *   2. 窗口满 1 秒后，计算窗口内的基线速率（window_bytes / window_ns）
- *   3. 如果基线速率 > 当前瞬时速率 × 2，认为发生了性能降级
+ *   3. 如果基线速率 > 当前瞬时速率 × 2，认为发生了性能降级，返回 true
  *   4. 重置窗口，开始新一轮累计
  *
  *   倍率阈值 2 的设计考量：USB 传输速率本身有波动（±30% 是正常的），
  *   2 倍阈值可以过滤掉正常的速率抖动，只捕获真正的性能问题
  *   （如 USB 2.0 降级到 Full Speed、线缆接触不良等）。
  *
+ * 【职责边界】
+ *   本函数仅返回是否判定为降级，不修改 degrade_count、不推送事件、
+ *   不发射 lcview trace。所有副作用统一由调用方（TRANSPORT_END 分支）
+ *   在确认 degraded 后单点执行，避免双计数。
+ *
  * 调用上下文：必须持有 rate_dev->lock 自旋锁。
  */
-static inline void vendor_lechao_usbd_update_degrade_context_locked(
+static inline bool vendor_lechao_usbd_update_degrade_context_locked(
     struct vendor_lechao_usbd_device *rate_dev,
     u64 bytes)
 {
@@ -144,23 +149,23 @@ static inline void vendor_lechao_usbd_update_degrade_context_locked(
     if (!rate_dev->last_degrade_window_start) {
         rate_dev->last_degrade_window_start = now;
         rate_dev->last_degrade_window_bytes = bytes;
-        return;
+        return false;
     }
 
     window_ns = ktime_to_ns(ktime_sub(now, rate_dev->last_degrade_window_start));
     if (window_ns < VENDOR_LECHAO_USBD_DEGRADE_WINDOW_NS) {
         rate_dev->last_degrade_window_bytes += bytes;
-        return;
+        return false;
     }
 
     baseline_rate = div64_u64(rate_dev->last_degrade_window_bytes * NSEC_PER_SEC,
                               window_ns);
-    if (baseline_rate > 0 &&
-        rate_dev->stats.current_rate < div64_u64(baseline_rate, 2))
-        rate_dev->stats.degrade_count++;
+    bool degraded = (baseline_rate > 0 &&
+                     rate_dev->stats.current_rate < div64_u64(baseline_rate, 2));
 
     rate_dev->last_degrade_window_start = now;
     rate_dev->last_degrade_window_bytes = bytes;
+    return degraded;
 }
 
 /*
@@ -373,6 +378,8 @@ static inline void vendor_lechao_usbd_event_push(
     dev->event_head = (dev->event_head + 1) % VENDOR_LECHAO_USBD_EVENT_BUF_SIZE;
     if (dev->event_head == dev->event_tail) {
         pr_warn_ratelimited(PREFIX "event_push ring overflow, dropped old event\n");
+        /* 统计丢弃事件数，归 event_lock 保护域；fill_stats 在 dev->lock 下读取为原子读 */
+        dev->stats.event_drop_count++;
         dev->event_tail = (dev->event_tail + 1) % VENDOR_LECHAO_USBD_EVENT_BUF_SIZE;
     }
     spin_unlock_irqrestore(&dev->event_lock, flags);
@@ -381,13 +388,17 @@ static inline void vendor_lechao_usbd_event_push(
 }
 
 /*
- * vendor_lechao_usbd_do_reset — 重置所有统计计数器
+ * vendor_lechao_usbd_do_reset — 重置传输类统计计数器
  * @rate_dev: 目标设备实例
  *
- * 清零所有累计计数器（bytes/cmds/errors/degrade/stall/timeout/corrupt）
+ * 清零所有传输类累计计数器（bytes/cmds/errors/degrade/stall/timeout/corrupt）
  * 和快照字段（current_rate/peak_rate/latency/last_event）。
- * 同时重置 degrade 检测窗口和 transport 状态。
+ * 同时重置 degrade 检测窗口、transport 状态和 event_drop_count。
  * 保留 config 和设备标识不变。
+ *
+ * 【生命周期计数器保留策略】
+ *   probe_count / disconnect_count 不清零，它们反映设备热插拔历史，
+ *   对排查连接不稳定问题至关重要。用户态 reset 仅用于清传输统计。
  *
  * 调用上下文：必须持有 rate_dev->lock 自旋锁。
  */
@@ -401,8 +412,7 @@ void vendor_lechao_usbd_do_reset(struct vendor_lechao_usbd_device *rate_dev)
     rate_dev->stats.write_cmds = 0;
     rate_dev->stats.error_count = 0;
     rate_dev->stats.reset_count = 0;
-    rate_dev->stats.probe_count = 0;
-    rate_dev->stats.disconnect_count = 0;
+    /* probe_count / disconnect_count 为设备生命周期计数，reset 不清零 */
     rate_dev->stats.degrade_count = 0;
     rate_dev->stats.current_rate = 0;
     rate_dev->stats.peak_rate = 0;
@@ -413,6 +423,7 @@ void vendor_lechao_usbd_do_reset(struct vendor_lechao_usbd_device *rate_dev)
     rate_dev->stats.stall_count = 0;
     rate_dev->stats.corrupt_count = 0;
     rate_dev->stats.timeout_count = 0;
+    rate_dev->stats.event_drop_count = 0;
     rate_dev->transport_start_time = ktime_set(0, 0);
     rate_dev->transport_active = false;
     rate_dev->last_transport_latency_ns = 0;
@@ -521,7 +532,9 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
 
     case USB_STOR_NOTIFIER_STALL:
         rate_dev->stats.stall_count++;
-        trace.dir = nd ? (int)nd->data_direction : 0;
+        /* 优先从 srb 取方向；TIMEOUT 等分支 transport.c 未填 nd->data_direction */
+        trace.dir = srb ? (int)vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction)
+                        : (nd ? (int)nd->data_direction : 0);
         trace.status = nd ? nd->status : 0;
         vendor_lechao_usbd_record_last_event_locked(rate_dev,
             VENDOR_LECHAO_USBD_EVENT_STALL,
@@ -533,7 +546,9 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
 
     case USB_STOR_NOTIFIER_TIMEOUT:
         rate_dev->stats.timeout_count++;
-        trace.dir = nd ? (int)nd->data_direction : 0;
+        /* transport.c 的 TIMEOUT 发射点未填 nd->data_direction，fallback srb */
+        trace.dir = srb ? (int)vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction)
+                        : (nd ? (int)nd->data_direction : 0);
         trace.status = nd ? nd->status : 0;
         vendor_lechao_usbd_record_last_event_locked(rate_dev,
             VENDOR_LECHAO_USBD_EVENT_TIMEOUT,
@@ -545,7 +560,8 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
 
     case USB_STOR_NOTIFIER_DATA_CORRUPT:
         rate_dev->stats.corrupt_count++;
-        trace.dir = nd ? (int)nd->data_direction : 0;
+        trace.dir = srb ? (int)vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction)
+                        : (nd ? (int)nd->data_direction : 0);
         trace.status = nd ? nd->status : 0;
         vendor_lechao_usbd_record_last_event_locked(rate_dev,
             VENDOR_LECHAO_USBD_EVENT_DATA_CORRUPT,
@@ -562,8 +578,10 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
             break;
         }
 
-        elapsed_ns = ktime_to_ns(ktime_sub(ktime_get(),
-                                           rate_dev->transport_start_time));
+        /* 优先消费 usb-storage 核心侧已测得的传输耗时，仅在缺失时 fallback */
+        elapsed_ns = (nd && nd->duration_ns) ? nd->duration_ns
+                     : ktime_to_ns(ktime_sub(ktime_get(),
+                                             rate_dev->transport_start_time));
         trace.was_error = rate_dev->last_transport_error ? 1 : 0;
 
         if (srb && !rate_dev->last_transport_error) {
@@ -591,11 +609,14 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
                     degraded = true;
             }
 
-            vendor_lechao_usbd_update_degrade_context_locked(rate_dev, bytes);
+            /* 滑动窗口判定结果合并入 degraded，统计/事件/trace 统一在下方单点执行 */
+            degraded = degraded ||
+                       vendor_lechao_usbd_update_degrade_context_locked(rate_dev, bytes);
             trace.ev_bytes = bytes;
             trace.ev_elapsed_ns = elapsed_ns;
         }
 
+        /* degrade 统计/事件/trace 的唯一出口，避免双计数 */
         if (degraded) {
             rate_dev->stats.degrade_count++;
             vendor_lechao_usbd_record_last_event_locked(rate_dev,

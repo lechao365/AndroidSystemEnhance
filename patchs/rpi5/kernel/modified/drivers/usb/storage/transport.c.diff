@@ -1,8 +1,8 @@
 diff --git a/drivers/usb/storage/transport.c b/drivers/usb/storage/transport.c
-index 7449e379077a..6428ede59922 100644
+index 7449e379077a..a9472dd0129f 100644
 --- a/drivers/usb/storage/transport.c
 +++ b/drivers/usb/storage/transport.c
-@@ -168,10 +168,31 @@ static int usb_stor_msg_common(struct us_data *us, int timeout)
+@@ -168,10 +168,36 @@ static int usb_stor_msg_common(struct us_data *us, int timeout)
   
  	clear_bit(US_FLIDX_URB_ACTIVE, &us->dflags);
  
@@ -28,13 +28,18 @@ index 7449e379077a..6428ede59922 100644
 +				.us = us, .srb = us->srb,
 +				.result = USB_STOR_XFER_ERROR,
 +				.status = us->current_urb->status,
++				/* 补齐方向与长度：LcIod 依赖这些字段还原故障上下文 */
++				.data_direction = us->srb ?
++					(us->srb->sc_data_direction == DMA_FROM_DEVICE ? 1 :
++					 us->srb->sc_data_direction == DMA_TO_DEVICE ? 2 : 0) : 0,
++				.data_len = us->srb ? scsi_bufflen(us->srb) : 0,
 +			};
 +			usb_stor_notifier_call(us, USB_STOR_NOTIFIER_TIMEOUT, &nd);
 +		}
  	}
  
  	/* return the URB status */
-@@ -252,10 +273,28 @@ EXPORT_SYMBOL_GPL(usb_stor_clear_halt);
+@@ -252,10 +278,28 @@ EXPORT_SYMBOL_GPL(usb_stor_clear_halt);
   * This function prints appropriate debugging messages, clears halts on
   * non-control endpoints, and translates the status to the corresponding
   * USB_STOR_XFER_xxx return code.
@@ -64,7 +69,7 @@ index 7449e379077a..6428ede59922 100644
  	usb_stor_dbg(us, "Status code %d; transferred %u/%u\n",
  		     result, partial, length);
  	switch (result) {
-@@ -278,19 +317,40 @@ static int interpret_urb_result(struct us_data *us, unsigned int pipe,
+@@ -278,19 +322,40 @@ static int interpret_urb_result(struct us_data *us, unsigned int pipe,
  		 */
  		if (usb_pipecontrol(pipe)) {
  			usb_stor_dbg(us, "-- stall on control pipe\n");
@@ -106,7 +111,7 @@ index 7449e379077a..6428ede59922 100644
  		return USB_STOR_XFER_LONG;
  
  	/* the transfer was cancelled by abort, disconnect, or timeout */
-@@ -605,32 +665,83 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
+@@ -605,32 +670,83 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
  {
  	int need_auto_sense;
  	int result;
@@ -194,7 +199,7 @@ index 7449e379077a..6428ede59922 100644
  		return;
  	}
  
-@@ -893,6 +1004,16 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
+@@ -893,6 +1009,16 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
  		srb->result = DID_ERROR << 16;
  
  	last_sector_hacks(us, srb);
@@ -211,7 +216,7 @@ index 7449e379077a..6428ede59922 100644
  	return;
  
  	/*
-@@ -927,6 +1048,16 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
+@@ -927,6 +1053,16 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
  	}
  	clear_bit(US_FLIDX_RESETTING, &us->dflags);
  	last_sector_hacks(us, srb);

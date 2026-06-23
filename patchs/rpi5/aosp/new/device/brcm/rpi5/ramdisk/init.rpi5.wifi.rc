@@ -1,20 +1,24 @@
-# rpi5 WiFi 自动连接服务（oneshot 模式，执行完毕即退出）
-# 等 sys.boot_completed 后触发，脚本读取 wifi.conf 连接 WiFi 并设置静态 IP。
+# rpi5 WiFi 自动连接服务（oneshot 模式）
 #
-# 用 oneshot 而非 daemon：
-#   - 脚本内部已有 while true 循环（connect → monitor → reconnect）
-#   - 但 wifi.conf 不存在 / ssid=default 时脚本 exit 0 正常退出
-#   - 不加 oneshot 会导致 init 每 5 秒重启已退出的服务，形成噪声循环
+# 依赖链（任意环节断裂均会导致 WiFi 不可用）:
+#   1. sys.boot_completed=1 触发 → start rpi5_wifi_connect
+#   2. 脚本读取 /boot/wifi.conf（mmcblk0p1 vfat，需 SELinux permissive 或 allow 规则）
+#   3. 等待 WifiService 就绪（cmd wifi）→ set-wifi-enabled + connect-network
+#   4. 脚本进入 daemon 循环（断线重连）
 #
-# 触发流程：
-#   sys.boot_completed=1 → start rpi5_wifi_connect（仅一次）
-#   脚本挂载 boot 分区 → 等待 WifiService → connect-network → daemon 循环
-
+# 关键前提:
+#   - androidboot.selinux=permissive 为必须（见 BoardConfig.mk cmdline）
+#   - seclabel u:r:rpi5_wifi_connect:s0 将服务运行在独立的 WiFi 连接域
+#   - oneshot + disabled: 仅由 boot_completed 触发一次，不自动重启
+#
+# 脚本: /system/bin/rpi5_wifi_connect (Android.bp sh_binary)
+# 配置: /boot/wifi.conf (mkbootimg.mk 拷贝到 mmcblk0p1 FAT32)
+#
 service rpi5_wifi_connect /system/bin/rpi5_wifi_connect
     class late_start
     user root
     group root
-    seclabel u:r:shell:s0
+    seclabel u:r:rpi5_wifi_connect:s0
     disabled
     oneshot
 

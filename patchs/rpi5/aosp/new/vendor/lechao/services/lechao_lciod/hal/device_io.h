@@ -19,12 +19,16 @@
 #include <vector>
 
 /*
- * open_device — 打开 USB 设备节点
- * @path: 设备节点路径，如 "/dev/vendor_lechao_usbd0"
- * 返回: >= 0 为有效 fd，-1 表示失败（重试 10 次后仍无法打开）
- * 内部带重试机制（200ms × 10次），应对设备节点短暂不可用的情况
+ * open_device — 打开 USB 设备节点（带重试）
+ * @path:        设备节点路径，如 "/dev/vendor_lechao_usbd0"
+ * @max_retries: 最大重试次数（默认 3，传 0 则使用默认值）
+ * @delay_ms:    每次重试间隔（默认 50ms）
+ * 返回: >= 0 为有效 fd，-1 表示失败
+ *
+ * 默认 3 × 50ms = 最长 150ms，适合 HAL 前台调用（getStats 等）。
+ * readEvent 的持久 fd 懒打开可显式传入更大的重试参数。
  */
-int open_device(const char *path);
+int open_device(const char *path, int max_retries = 0, int delay_ms = 0);
 
 /*
  * close_device — 关闭 USB 设备节点

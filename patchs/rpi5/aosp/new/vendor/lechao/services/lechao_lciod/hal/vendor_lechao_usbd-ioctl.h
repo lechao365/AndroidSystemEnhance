@@ -11,12 +11,22 @@
  *
  * 任何字段顺序、大小、对齐的变更都可能导致用户态程序读取错误数据。
  * 因此修改此文件后，所有使用方必须重新编译。
+ *
+ * 【ABI 真相源】
+ *   内核源码树 vendor/lechao/LcIod/lciod_usbd-ioctl.h 是唯一真相源。
+ *   本文件是 AOSP 侧镜像副本，必须与真相源 1:1 同步。每次 ABI 变更
+ *   必须递增 VENDOR_LECHAO_USBD_ABI_VERSION 并三方整体重编。
+ *   - v1：初始版本
+ *   - v2：stats 末尾追加 event_drop_count
  */
 
 #ifndef _VENDOR_LECHAO_USBD_IOCTL_H
 #define _VENDOR_LECHAO_USBD_IOCTL_H
 
 #include <linux/types.h>
+
+/* ABI 版本号：必须与内核真相源保持一致 */
+#define VENDOR_LECHAO_USBD_ABI_VERSION  2
 
 #ifdef __KERNEL__
 /* 内核态：u8/u16/u32/u64/s32/s64 由 linux/types.h 直接提供 */
@@ -81,6 +91,7 @@ struct vendor_lechao_usbd_stats {
 	u8  enabled;         /* 设备监控/统计功能启用标志：0=禁用，1=启用 */
 	u8  reserved[3];     /* 保留，保证 4 字节对齐 */
 	u32 flags;           /* 配置标志位，保留给内核扩展使用 */
+	u64 event_drop_count;/* 累计：环形缓冲区溢出丢弃的事件数 */
 };
 
 /*
