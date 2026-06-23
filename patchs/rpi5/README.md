@@ -152,11 +152,11 @@ adb shell ls -l /dev/vendor_lechao_lcview /dev/vendor_lechao_usbd*
 
 | .diff 文件 | 目标源码路径 | 改动要点 |
 |-----------|-------------|---------|
-| `device/brcm/rpi5/BoardConfig.mk.diff` | `device/brcm/rpi5/BoardConfig.mk` | UART ttyAMA0、SELinux 配置、禁用 dm-verity、androidboot.verifiedbootstate=orange |
+| `device/brcm/rpi5/BoardConfig.mk.diff` | `device/brcm/rpi5/BoardConfig.mk` | UART ttyAMA0、`androidboot.selinux=permissive`（调试期 SELinux 宽容，自定义域 allow 规则补齐后可移除）、禁用 dm-verity、androidboot.verifiedbootstate=orange、SELINUX_IGNORE_NEVERALLOWS |
 | `device/brcm/rpi5/README.md.diff` | `device/brcm/rpi5/README.md` | 新增串口配置文档 |
 | `device/brcm/rpi5/aosp_rpi5.mk.diff` | `device/brcm/rpi5/aosp_rpi5.mk` | 跳过 VINTF kernel 校验 |
 | `device/brcm/rpi5/boot/config.txt.diff` | `device/brcm/rpi5/boot/config.txt` | hdmi_force_hotplug=1、vc4-kms-v3d-pi5（RPi5 专用 overlay，修复无显示器时 surfaceflinger EGLConfig 崩溃）、UART overlay |
-| `device/brcm/rpi5/device.mk.diff` | `device/brcm/rpi5/device.mk` | Soong 命名空间 + lciod/lcview 产品包 |
+| `device/brcm/rpi5/device.mk.diff` | `device/brcm/rpi5/device.mk` | Soong 命名空间 + lciod/lcview 产品包 + WiFi 自动连接脚本 + `debug.sf.no_hwc=1`（无头模式 SF 软件合成，避免无 HDMI 时 HWC GraphicBufferMapper abort） |
 | `device/brcm/rpi5/manifest.xml.diff` | `device/brcm/rpi5/manifest.xml` | 格式调整 |
 | `device/brcm/rpi5/mkbootimg.mk.diff` | `device/brcm/rpi5/mkbootimg.mk` | 修复 boot 分区 Make 依赖缺失：config.txt/Image/dtb/overlays 加入 rpiboot 依赖，避免增量编译时 boot 改动不生效 |
 | `device/brcm/rpi5/overlay/SettingsProviderRpiOverlay/res/values/defaults.xml.diff` | `.../SettingsProviderRpiOverlay/res/values/defaults.xml` | 默认设置覆盖 |
@@ -171,17 +171,17 @@ adb shell ls -l /dev/vendor_lechao_lcview /dev/vendor_lechao_usbd*
 | 路径 | 说明 |
 |------|------|
 | `device/brcm/rpi5/boot/wifi.conf` | WiFi 自动连接配置文件（SSID/PSK/key_mgmt） |
-| `device/brcm/rpi5/ramdisk/init.rpi5.wifi.rc` | WiFi 连接服务 init.rc |
+| `device/brcm/rpi5/ramdisk/init.rpi5.wifi.rc` | WiFi 连接服务 init.rc（seclabel 独立域 `u:r:rpi5_wifi_connect:s0`，boot_completed 触发 oneshot） |
 | `device/brcm/rpi5/scripts/Android.bp` | rpi5-wifi-connect 脚本构建规则 |
 | `device/brcm/rpi5/scripts/rpi5-wifi-connect.sh` | 开机自动连接 WiFi 脚本（读 wifi.conf → wpa_cli 连接 → 静态 IP 维持） |
 | `device/brcm/rpi5/sepolicy/lechao_lciod.te` | lciod 系统服务 SELinux 策略 |
 | `device/brcm/rpi5/sepolicy/lechao_lciod_hal.te` | lciod HAL SELinux 策略 |
 | `device/brcm/rpi5/sepolicy/lechao_lcview.te` | lcview 系统服务 SELinux 策略 |
 | `device/brcm/rpi5/sepolicy/lechao_lcview_hal.te` | lcview HAL SELinux 策略 |
-| `device/brcm/rpi5/sepolicy/rpi5_wifi_connect.te` | WiFi 连接脚本 SELinux 策略 |
+| `device/brcm/rpi5/sepolicy/rpi5_wifi_connect.te` | WiFi 连接脚本独立 SELinux 域（init_daemon_domain + 完整 allow 规则：shell_exec/vfat/binder/netlink/capability/logd，支持 enforcing 模式） |
 | `vendor/lechao/Android.bp` | Soong 命名空间声明 |
 | `vendor/lechao/services/include/` | 共享头文件（lechao_log.h） |
-| `vendor/lechao/services/lechao_lciod/` | IO 监控 HAL + System Service |
+| `vendor/lechao/services/lechao_lciod/` | IO 监控 HAL + System Service + common 公共工具库（minor 编号解析、ioctl 接口重构、HAL getStats 字段映射、Daemon getAverageRate 派生计算、HAL readEvent 排空策略） |
 | `vendor/lechao/services/lechao_lcview/` | 打点框架 HAL + Daemon |
 
 ### others/
@@ -190,7 +190,7 @@ adb shell ls -l /dev/vendor_lechao_lcview /dev/vendor_lechao_usbd*
 
 | 路径 | 说明 |
 |------|------|
-| `usb-verify/` | USB 设备验证工具（Makefile + src/ + include/），含 ioctl 兼容层、CLI/check/device 子模块，独立编译运行 |
+| `usb-verify/` | USB 设备验证工具（Makefile + src/ + include/），含 ioctl 兼容层、CLI/check/device 子模块，ARM64 静态交叉编译（aarch64-linux-gnu-gcc -static），独立编译运行 |
 
 ## 关联资源
 
