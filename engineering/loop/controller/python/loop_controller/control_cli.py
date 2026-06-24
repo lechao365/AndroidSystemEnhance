@@ -46,6 +46,21 @@ def add_control_parser(subparsers: argparse._SubParsersAction) -> None:
     st.add_argument("--session", required=True)
     st.set_defaults(func=_handle_control_status)
 
+    ap = sub_c.add_parser("apply-patch", help="应用 AI 生成的补丁（含白名单+语法校验+stash 备份）")
+    ap.add_argument("--session", required=True)
+    ap.add_argument("--patch", required=True, help="patch.json 路径（FileChange[] 序列化）")
+    ap.add_argument("--workspace-root", default="", help="workspace 根路径，缺省从 AOSP_ROOT 获取")
+    ap.set_defaults(func=_handle_control_apply_patch)
+
+    cp = sub_c.add_parser("compile", help="编译当前 workspace 改动（不部署）")
+    cp.add_argument("--session", required=True)
+    cp.add_argument("--workspace-root", default="")
+    cp.set_defaults(func=_handle_control_compile)
+
+    rv = sub_c.add_parser("revert", help="回滚最近一次 apply-patch")
+    rv.add_argument("--session", required=True)
+    rv.set_defaults(func=_handle_control_revert)
+
 
 def _load_session(session_ref: str) -> dict:
     if os.path.isfile(session_ref):
@@ -277,3 +292,174 @@ def _get_workspace_diff() -> str:
         return result.stdout[:2000]
     except (subprocess.SubprocessError, OSError):
         return ""
+
+
+def _load_target_paths(target: str) -> list[str]:
+    import yaml
+    config_path = Path(__file__).resolve().parent.parent.parent.parent / "config" / "target-paths.yaml"
+    if not config_path.exists():
+        return []
+    try:
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError):
+        return []
+    entries = data.get(target, []) if isinstance(data, dict) else []
+    return list(entries)
+
+
+def _handle_control_apply_patch(args: argparse.Namespace) -> int:
+    import hashlib
+    from loop_controller.analyzer_protocol import FileChange
+    from loop_controller.patch_guard import check_white_list, detect_risk, check_syntax
+    from loop_controller.patch_applier import apply_file_changes
+
+    session_data = _load_session(args.session)
+    artifacts_dir = session_data.get("artifacts_dir", os.path.dirname(args.session))
+    target = session_data.get("target", "")
+
+    patch_path = Path(args.patch)
+    if not patch_path.exists():
+        print(f"patch file not found: {args.patch}", file=sys.stderr)
+        return 1
+    try:
+        raw_changes = json.loads(patch_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"invalid patch file: {e}", file=sys.stderr)
+        return 1
+
+    changes = [FileChange(**c) for c in raw_changes]
+
+    allowed = _load_target_paths(target)
+    guard_result = check_white_list(changes, allowed)
+    if not guard_result.allowed:
+        print(f"PATCH_REJECTED: files outside white list: {guard_result.rejected_files}", file=sys.stderr)
+        return 1
+
+    ws_root = args.workspace_root or os.environ.get("AOSP_ROOT", os.path.expanduser("~/workspace/aosp"))
+    syntax_errors = check_syntax(changes, ws_root)
+    if syntax_errors:
+        for err in syntax_errors:
+            print(f"SYNTAX_ERROR: {err}", file=sys.stderr)
+        return 1
+
+    stash_ref = ""
+    try:
+        stash_result = subprocess.run(
+            ["git", "stash", "create", "-u"],
+            capture_output=True, text=True, timeout=10, cwd=ws_root,
+        )
+        stash_ref = stash_result.stdout.strip() or ""
+    except (subprocess.SubprocessError, OSError):
+        stash_ref = ""
+
+    result = apply_file_changes(changes, ws_root)
+    if not result.success:
+        if stash_ref:
+            subprocess.run(["git", "stash", "apply", stash_ref], capture_output=True, timeout=10, cwd=ws_root)
+        print(f"apply failed: {result.error}", file=sys.stderr)
+        return 1
+
+    risk = detect_risk(changes)
+    patch_hash = hashlib.sha256(json.dumps(raw_changes, sort_keys=True).encode()).hexdigest()
+
+    current_attempt = session_data.get("current_attempt", 0)
+    session_data.setdefault("attempts", []).append({
+        "attempt_index": current_attempt,
+        "verify_result": "APPLIED",
+        "evidence_path": "",
+        "failed_cases": [],
+        "failure_code": "",
+        "patch_applied": {
+            "files": result.applied_files,
+            "stash_ref": stash_ref,
+            "patch_hash": patch_hash,
+            "risk": risk,
+            "workspace_root": ws_root,
+        },
+    })
+    _save_session(session_data, artifacts_dir)
+    print(f"apply=OK files={result.applied_files} risk={risk}")
+    return 0
+
+
+def _handle_control_compile(args: argparse.Namespace) -> int:
+    from loop_deploy.compiler import compile_plan
+    from loop_deploy.decider import get_diff_files, decide
+    from loop_deploy.models import DeployPlan, DeployMode
+
+    session_data = _load_session(args.session)
+    artifacts_dir = session_data.get("artifacts_dir", os.path.dirname(args.session))
+    ws_root = args.workspace_root or os.environ.get("AOSP_ROOT", os.path.expanduser("~/workspace/aosp"))
+
+    try:
+        diff_files = get_diff_files("HEAD")
+    except RuntimeError as e:
+        print(f"compile failed: cannot get diff: {e}", file=sys.stderr)
+        return 1
+    plan = decide(diff_files)
+
+    if plan.mode == DeployMode.SKIP and diff_files:
+        plan = DeployPlan(
+            mode=DeployMode.PUSH_SINGLE,
+            changed_files=diff_files,
+            reason="manual compile",
+            build_targets=[],
+            deploy_targets=[],
+            requires_reboot=False,
+            estimated_seconds=600,
+        )
+
+    result = compile_plan(plan, ws_root)
+
+    session_data.setdefault("attempts", []).append({
+        "attempt_index": session_data.get("current_attempt", 0),
+        "verify_result": "COMPILED" if result.success else "COMPILE_FAILED",
+        "evidence_path": "",
+        "failed_cases": [],
+        "failure_code": "" if result.success else "COMPILE_FAILED",
+        "compile_result": "SUCCESS" if result.success else "FAILED",
+        "compile_artifacts": result.artifacts,
+        "compile_error": result.error,
+    })
+    _save_session(session_data, artifacts_dir)
+
+    if result.success:
+        print(f"compile=OK artifacts={result.artifacts}")
+        return 0
+    else:
+        print(f"compile=FAILED error={result.error}", file=sys.stderr)
+        return 1
+
+
+def _handle_control_revert(args: argparse.Namespace) -> int:
+    session_data = _load_session(args.session)
+    artifacts_dir = session_data.get("artifacts_dir", os.path.dirname(args.session))
+    attempts = session_data.get("attempts", [])
+    if not attempts:
+        print("no attempts to revert", file=sys.stderr)
+        return 1
+
+    for att in reversed(attempts):
+        patch_applied = att.get("patch_applied", {})
+        stash_ref = patch_applied.get("stash_ref", "")
+        if stash_ref:
+            ws_root = patch_applied.get("workspace_root", "")
+            try:
+                result = subprocess.run(
+                    ["git", "stash", "apply", stash_ref],
+                    capture_output=True, text=True, timeout=30,
+                    cwd=ws_root or None,
+                )
+            except (subprocess.SubprocessError, OSError) as e:
+                print(f"revert error: {e}", file=sys.stderr)
+                return 1
+            if result.returncode != 0:
+                print(f"revert failed: {result.stderr}", file=sys.stderr)
+                return 1
+            att["reverted"] = True
+            _save_session(session_data, artifacts_dir)
+            print(f"revert=OK stash_ref={stash_ref}")
+            return 0
+
+    print("no stash ref found in any attempt", file=sys.stderr)
+    return 1

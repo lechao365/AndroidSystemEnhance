@@ -215,3 +215,145 @@ def test_g5_decide_stop_on_repeated_failure(tmp_path: Path):
     _, out = _capture_stdout(_handle_control_decide, _decide_args(artifacts / "session.json"))
     assert "decision=STOP" in out
     assert "same_failure_repeated" in out
+
+
+def test_apply_patch_rejects_outside_whitelist(tmp_path: Path):
+    """apply-patch 拒绝白名单外的文件。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    session = {
+        "session_id": "ap-test", "artifacts_dir": str(artifacts),
+        "target": "lciod", "current_attempt": 1, "max_attempts": 5,
+        "status": "FAIL", "attempts": [],
+    }
+    (artifacts / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+    patch_data = [{"workspace_path": "vendor/other/foo.cpp", "change_type": "edit",
+                   "old_marker": "x", "new_content": "y"}]
+    patch_file = artifacts / "patch.json"
+    patch_file.write_text(json.dumps(patch_data), encoding="utf-8")
+
+    import argparse
+    from loop_controller.control_cli import _handle_control_apply_patch, _load_target_paths
+    allowed_prefixes = _load_target_paths("lciod")
+    assert "vendor/lechao/services/lechao_lciod/" in allowed_prefixes
+
+    args = argparse.Namespace(
+        session=str(artifacts / "session.json"),
+        patch=str(patch_file),
+        workspace_root="",
+    )
+    rc = _handle_control_apply_patch(args)
+    assert rc == 1
+
+
+def test_apply_patch_success(tmp_path: Path, monkeypatch):
+    """apply-patch 成功应用白名单内补丁。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    session = {
+        "session_id": "ap-ok", "artifacts_dir": str(artifacts),
+        "target": "lciod", "current_attempt": 1, "max_attempts": 5,
+        "status": "FAIL", "attempts": [],
+    }
+    (artifacts / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+    target_file = tmp_path / "test.cpp"
+    target_file.write_text("int x = 1;\n", encoding="utf-8")
+
+    patch_data = [{"workspace_path": "test.cpp", "change_type": "edit",
+                   "old_marker": "int x = 1;", "new_content": "int x = 42;"}]
+    patch_file = artifacts / "patch.json"
+    patch_file.write_text(json.dumps(patch_data), encoding="utf-8")
+
+    monkeypatch.setattr("loop_controller.control_cli._load_target_paths", lambda target: [""])
+
+    import argparse
+    from loop_controller.control_cli import _handle_control_apply_patch
+    args = argparse.Namespace(
+        session=str(artifacts / "session.json"),
+        patch=str(patch_file),
+        workspace_root=str(tmp_path),
+    )
+    rc = _handle_control_apply_patch(args)
+    assert rc == 0
+
+    assert "int x = 42;" in target_file.read_text()
+
+    loaded = json.loads((artifacts / "session.json").read_text(encoding="utf-8"))
+    last = loaded["attempts"][-1]
+    assert "patch_applied" in last
+    assert "test.cpp" in last["patch_applied"]["files"]
+    assert "patch_hash" in last["patch_applied"]
+
+
+def test_apply_patch_patch_file_not_found(tmp_path: Path, monkeypatch):
+    """apply-patch 补丁文件不存在时返回 1。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    session = {"session_id": "ap-nf", "artifacts_dir": str(artifacts),
+               "target": "lciod", "current_attempt": 1, "max_attempts": 5, "attempts": []}
+    (artifacts / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+    monkeypatch.setattr("loop_controller.control_cli._load_target_paths", lambda target: [""])
+
+    import argparse
+    from loop_controller.control_cli import _handle_control_apply_patch
+    args = argparse.Namespace(
+        session=str(artifacts / "session.json"),
+        patch=str(artifacts / "no_such_patch.json"),
+        workspace_root=str(tmp_path),
+    )
+    rc = _handle_control_apply_patch(args)
+    assert rc == 1
+
+
+def test_apply_patch_invalid_json(tmp_path: Path, monkeypatch):
+    """apply-patch 补丁文件 JSON 非法时返回 1。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    session = {"session_id": "ap-bad", "artifacts_dir": str(artifacts),
+               "target": "lciod", "current_attempt": 1, "max_attempts": 5, "attempts": []}
+    (artifacts / "session.json").write_text(json.dumps(session), encoding="utf-8")
+    (artifacts / "patch.json").write_text("{not valid json", encoding="utf-8")
+
+    monkeypatch.setattr("loop_controller.control_cli._load_target_paths", lambda target: [""])
+
+    import argparse
+    from loop_controller.control_cli import _handle_control_apply_patch
+    args = argparse.Namespace(
+        session=str(artifacts / "session.json"),
+        patch=str(artifacts / "patch.json"),
+        workspace_root=str(tmp_path),
+    )
+    rc = _handle_control_apply_patch(args)
+    assert rc == 1
+
+
+def test_revert_no_attempts(tmp_path: Path):
+    """revert 无 attempt 时返回 1。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    session = {"session_id": "rv-test", "artifacts_dir": str(artifacts),
+               "current_attempt": 0, "max_attempts": 5, "attempts": []}
+    (artifacts / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+    import argparse
+    from loop_controller.control_cli import _handle_control_revert
+    rc = _handle_control_revert(argparse.Namespace(session=str(artifacts / "session.json")))
+    assert rc == 1
+
+
+def test_revert_no_stash_ref(tmp_path: Path):
+    """revert 无 stash_ref 时返回 1。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    session = {"session_id": "rv-test2", "artifacts_dir": str(artifacts),
+               "current_attempt": 1, "max_attempts": 5,
+               "attempts": [{"attempt_index": 1, "patch_applied": {"stash_ref": ""}}]}
+    (artifacts / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+    import argparse
+    from loop_controller.control_cli import _handle_control_revert
+    rc = _handle_control_revert(argparse.Namespace(session=str(artifacts / "session.json")))
+    assert rc == 1
