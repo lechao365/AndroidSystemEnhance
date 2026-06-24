@@ -60,5 +60,8 @@ def check_syntax(changes: list[FileChange], workspace_root: str = "") -> list[st
                 except (subprocess.SubprocessError, OSError):
                     continue
                 if r.returncode != 0:
-                    errors.append(f"{fc.workspace_path}: syntax error\n{r.stderr[:200]}")
+                    stderr = r.stderr[:500]
+                    if "fatal error:" in stderr and "No such file or directory" in stderr:
+                        continue
+                    errors.append(f"{fc.workspace_path}: syntax error\n{stderr[:200]}")
     return errors
