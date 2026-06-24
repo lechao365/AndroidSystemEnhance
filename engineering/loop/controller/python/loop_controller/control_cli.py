@@ -103,7 +103,6 @@ def _handle_control_run_verify(args: argparse.Namespace) -> int:
     sid = session_data.get("session_id", os.path.basename(args.session))
     attempt = session_data.get("current_attempt", 0) + 1
 
-    evidence_path = os.path.join(artifacts_dir, f"evidence_{attempt}.json")
     cmd = [
         sys.executable, "-m", "loop_core.cli", "run",
         "--suite", args.suite,
@@ -129,10 +128,25 @@ def _handle_control_run_verify(args: argparse.Namespace) -> int:
     status = "PASS" if rc == 0 else "FAIL"
     session_data["current_attempt"] = attempt
     session_data["status"] = status
+
+    bundle_path = os.path.join(artifacts_dir, "evidence_bundle.json")
+    if os.path.isfile(bundle_path):
+        evidence_path = bundle_path
+        try:
+            with open(bundle_path, encoding="utf-8") as f:
+                bundle_data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            bundle_data = {}
+    else:
+        bundle_data = {}
+        evidence_path = ""
+
     session_data.setdefault("attempts", []).append({
         "attempt_index": attempt,
         "verify_result": status,
         "evidence_path": evidence_path,
+        "failed_cases": _extract_failed_cases(bundle_data),
+        "failure_code": "RUN_FAILED" if status == "FAIL" else "",
     })
     _save_session(session_data, artifacts_dir)
     print(f"verify={status} attempt={attempt}")
@@ -142,15 +156,28 @@ def _handle_control_run_verify(args: argparse.Namespace) -> int:
 def _handle_control_analyze_request(args: argparse.Namespace) -> int:
     session_data = _load_session(args.session)
     artifacts_dir = session_data.get("artifacts_dir", os.path.dirname(args.session))
-    attempts = session_data.get("attempts", [{}])
+    attempts = session_data.get("attempts", [])
     last = attempts[-1] if attempts else {}
+
+    failed_cases = last.get("failed_cases", [])
+
     evidence_path = last.get("evidence_path", "")
-    raw = _load_session(os.path.join(artifacts_dir, f"evidence_{session_data.get('current_attempt', 0)}.json"))
+    collectors_output = {}
+    if evidence_path and os.path.isfile(evidence_path):
+        try:
+            with open(evidence_path, encoding="utf-8") as f:
+                bundle = json.load(f)
+            collectors_output = bundle.get("evidence", {})
+        except (json.JSONDecodeError, OSError):
+            pass
 
     request = AnalysisRequest(
         session_id=session_data.get("session_id", ""),
         attempt_index=session_data.get("current_attempt", 0),
-        failed_cases=last.get("failed_cases", raw.get("failed_cases", [])),
+        failed_cases=failed_cases,
+        evidence_bundle_path=evidence_path,
+        collectors_output=collectors_output,
+        workspace_diff_so_far=_get_workspace_diff(),
     )
     req_path = os.path.join(artifacts_dir, "analysis_request.json")
     Path(req_path).write_text(json.dumps(dataclasses.asdict(request), indent=2, ensure_ascii=False),
@@ -174,15 +201,53 @@ def _handle_control_deploy(args: argparse.Namespace) -> int:
 
 def _handle_control_decide(args: argparse.Namespace) -> int:
     session_data = _load_session(args.session)
+    from loop_contracts.models import StageResult
+    from loop_contracts.failure_codes import FailureCode
+    from loop_controller.policy import decide_termination
+
     status = session_data.get("status", "PENDING")
     current = session_data.get("current_attempt", 0)
     max_att = session_data.get("max_attempts", 5)
-    if status == "PASS":
-        print("decision=STOP reason=verification_passed")
-    elif current >= max_att:
-        print("decision=STOP reason=max_attempts_exceeded should_escalate=true")
-    else:
-        print(f"decision=RETRY attempt={current}/{max_att}")
+    attempts = session_data.get("attempts", [])
+
+    last = attempts[-1] if attempts else {}
+
+    if len(attempts) >= 2:
+        prev_fc = attempts[-2].get("failure_code", "")
+        curr_fc = last.get("failure_code", "")
+        if prev_fc and curr_fc and prev_fc == curr_fc:
+            print(f"decision=STOP reason=same_failure_repeated failure_code={curr_fc} escalate=true")
+            return 0
+
+    try:
+        fc = FailureCode(last.get("failure_code", "RUN_FAILED") or "RUN_FAILED")
+    except ValueError:
+        fc = FailureCode.RUN_FAILED
+
+    latest_stage = StageResult(
+        stage_name="verify",
+        status="PASS" if status == "PASS" else "FAIL",
+        failure_code=fc,
+    )
+
+    prev_codes: list[FailureCode] = []
+    for att in attempts[:-1]:
+        fc_str = att.get("failure_code", "")
+        if fc_str:
+            try:
+                prev_codes.append(FailureCode(fc_str))
+            except ValueError:
+                pass
+
+    decision = decide_termination(
+        max_attempts=max_att,
+        current_attempt=current,
+        latest_stage=latest_stage,
+        previous_failure_codes=prev_codes,
+    )
+
+    reason_slug = decision.reason_summary.replace(" ", "_")
+    print(f"decision={decision.decision} reason={reason_slug} code={decision.reason_code.value} escalate={str(decision.should_escalate).lower()}")
     return 0
 
 
@@ -190,3 +255,25 @@ def _handle_control_status(args: argparse.Namespace) -> int:
     session_data = _load_session(args.session)
     print(json.dumps(session_data, indent=2, ensure_ascii=False))
     return 0
+
+
+def _extract_failed_cases(bundle_data: dict) -> list[dict]:
+    cases = bundle_data.get("cases", [])
+    failed = []
+    for c in cases:
+        if c.get("status") in ("fail", "error"):
+            failed.append({
+                "id": c.get("id", ""),
+                "status": c.get("status", ""),
+                "failure_reason": c.get("failure_reason", ""),
+                "command": c.get("command", ""),
+            })
+    return failed
+
+
+def _get_workspace_diff() -> str:
+    try:
+        result = subprocess.run(["git", "diff", "HEAD"], capture_output=True, text=True, timeout=10)
+        return result.stdout[:2000]
+    except (subprocess.SubprocessError, OSError):
+        return ""
