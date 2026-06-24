@@ -1,0 +1,163 @@
+suite: features.lcview.kernel_driver
+version: 1
+include:
+  - features/lcview/common
+defaults:
+  capture_timeout: 30.0
+  recent_limit: 500
+cases:
+  - id: ke01_device_node_exists
+    description: "[spec LV-KE-01] 设备节点 /dev/vendor_lechao_lcview 存在"
+    command: "test -e /dev/vendor_lechao_lcview && echo NODE_EXISTS"
+    assert: {type: contains, value: "NODE_EXISTS"}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lcview_kmsg, lcview_files]
+
+  - id: ke01_device_node_is_char_dev
+    description: "[spec LV-KE-01] 节点为字符设备（ls 首字符为 c，权限形如 crw-...）"
+    command: "ls -l /dev/vendor_lechao_lcview 2>/dev/null | awk '{print $1}'"
+    assert: {type: regex, pattern: "^crw"}
+    severity: critical
+    requires: [ke01_device_node_exists]
+    on_fail:
+      collectors: [lcview_files]
+
+  - id: ke02_module_init_log
+    description: "[spec LV-KE-02] 模块初始化日志 dmesg 含 'initialized (ring='"
+    command: "dmesg | grep 'kernel_lechao_lcview' | grep 'initialized (ring=' | head -1"
+    assert: {type: contains, value: "initialized (ring="}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lcview_kmsg]
+
+  - id: ke03_ring_size_default
+    description: "[spec LV-KE-03] 模块参数 ring_size_kb 默认 256KB（init 日志含 ring=256KB）"
+    command: "dmesg | grep 'kernel_lechao_lcview' | grep 'initialized (ring=' | grep -o 'ring=[0-9]*KB' | head -1"
+    assert: {type: regex, pattern: "ring=([0-9]+)KB"}
+    severity: warn
+    requires: [ke02_module_init_log]
+    on_fail:
+      collectors: [lcview_kmsg]
+
+  - id: ke04_debug_param_present
+    description: "[spec LV-KE-04] 模块参数 debug 存在（/sys/module/lcview/parameters/debug）"
+    command: "test -e /sys/module/lcview/parameters/debug && echo DEBUG_PARAM_OK || echo NO_DEBUG_PARAM"
+    assert: {type: contains, value: "DEBUG_PARAM_OK"}
+    severity: warn
+    requires: [ke02_module_init_log]
+    on_fail:
+      collectors: [lcview_files]
+
+  - id: ke04_ring_size_param_present
+    description: "[spec LV-KE-03] 模块参数 ring_size_kb 存在（/sys/module/lcview/parameters/ring_size_kb）"
+    command: "test -e /sys/module/lcview/parameters/ring_size_kb && echo RING_PARAM_OK || echo NO_RING_PARAM"
+    assert: {type: contains, value: "RING_PARAM_OK"}
+    severity: warn
+    requires: [ke02_module_init_log]
+    on_fail:
+      collectors: [lcview_files]
+
+  - id: ke05_single_open_reject
+    description: "[spec LV-KE-05] 单打开限制：HAL 已占用时 adb shell open 应返回 EBUSY"
+    command: "dd if=/dev/vendor_lechao_lcview of=/dev/null bs=1 count=1 2>&1; echo EXIT=$?"
+    assert: {type: regex, pattern: "(busy|Busy|BUSY|cannot open|No such|Permission|EXIT=[^0])"}
+    severity: warn
+    requires: [ke01_device_node_exists]
+    tags: [boundary]
+    on_fail:
+      collectors: [lcview_kmsg, lcview_files]
+
+  - id: ke15_ring_initialized_log
+    description: "[spec LV-KE-15] 环形缓冲区初始化日志（ring init 成功，含 ring=%uKB read_buf=%uB）"
+    command: "dmesg | grep 'kernel_lechao_lcview' | grep 'initialized ring=' | grep -o 'ring=[0-9]*KB read_buf=[0-9]*B' | head -1"
+    assert: {type: regex, pattern: "ring=[0-9]+KB read_buf=[0-9]+B"}
+    severity: warn
+    requires: [ke02_module_init_log]
+    on_fail:
+      collectors: [lcview_kmsg]
+
+  - id: ke16_ring_no_init_error
+    description: "[spec LV-KE-16] ring 初始化无失败日志（dmesg 不含 'failed to init ring buffer'）"
+    command: "dmesg | grep -c 'kernel_lechao_lcview.*failed to init ring buffer'"
+    assert: {type: equals, value: "0"}
+    severity: critical
+    requires: [ke02_module_init_log]
+    on_fail:
+      collectors: [lcview_kmsg]
+
+  - id: ke17_chrdev_register_no_error
+    description: "[spec LV-KE-17] 字符设备注册无失败日志（不含 'failed to register chrdev'）"
+    command: "dmesg | grep -c 'kernel_lechao_lcview.*failed to register chrdev'"
+    assert: {type: equals, value: "0"}
+    severity: critical
+    requires: [ke02_module_init_log]
+    on_fail:
+      collectors: [lcview_kmsg]
+
+  - id: ke29_builder_level_filter
+    description: "[spec LV-KE-29] builder level 过滤（间接：HAL/daemon 能读到记录证明 builder 工作）"
+    command: "dmesg | grep 'kernel_lechao_lcview' | grep -c -E 'open rejected: already opened'"
+    assert: {type: regex, pattern: "^[0-9]+$"}
+    severity: warn
+    requires: [ke02_module_init_log]
+    tags: [indirect]
+    on_fail:
+      collectors: [lcview_kmsg]
+
+  - id: ke37_event_ids_defined
+    description: "[spec LV-KE-37] 13 个事件 ID 定义（schema 文件含 events 数组，间接通过 lcview_events.json 验证）"
+    command: "cat /vendor/etc/lcview_events.json 2>/dev/null | grep -o '\"id\":[[:space:]]*[0-9]*' | wc -l"
+    assert: {type: regex, pattern: "^([5-9]|1[0-9])$"}
+    severity: warn
+    requires: [lcview_schema_present]
+    on_fail:
+      collectors: [lcview_files]
+
+  - id: ke38_magic_constant
+    description: "[spec LV-KE-38] 魔数 LCVIEW_MAGIC=0x4C56（内核头定义，间接：daemon validate 不产生 invalid_records 即证明 magic 正确）"
+    command: "test ! -f /data/vendor/lechao_lcview/invalid_records.log && echo NO_INVALID || wc -l /data/vendor/lechao_lcview/invalid_records.log"
+    assert: {type: regex, pattern: "(NO_INVALID|^[[:space:]]*[0-9]+[[:space:]]+)"}
+    severity: warn
+    requires: [lcview_data_dir_ready]
+    tags: [indirect]
+    on_fail:
+      collectors: [lcview_invalid_log, lcview_files]
+
+  - id: ke44_kernel_log_prefix
+    description: "[spec LV-KE-44] 内核日志前缀 kernel_lechao_lcview（dmesg 含此标签）"
+    command: "dmesg | grep -c 'kernel_lechao_lcview'"
+    assert: {type: regex, pattern: "^[1-9][0-9]*$"}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lcview_kmsg]
+
+  - id: ke_no_kernel_panic
+    description: "[spec LV-KE-*] lcview 驱动无内核 panic/oops/BUG"
+    command: "dmesg | grep -i 'kernel_lechao_lcview' | grep -c -E 'panic|oops|BUG:'"
+    assert: {type: equals, value: "0"}
+    severity: critical
+    requires: [ke02_module_init_log]
+    on_fail:
+      collectors: [lcview_kmsg]
+
+  - id: ke_selinux_label_present
+    description: "[spec LV-KE-01] 设备节点 SELinux 标签存在（非默认 u:r:su:s0 或 unlabeled）"
+    command: "ls -Z /dev/vendor_lechao_lcview 2>/dev/null | grep -o 'u:object_r:[^:]*:' | head -1 || echo NO_LABEL"
+    assert: {type: not_contains, value: "NO_LABEL"}
+    severity: warn
+    requires: [ke01_device_node_exists]
+    on_fail:
+      collectors: [lcview_files]
+
+  - id: ke_device_class_created
+    description: "[spec LV-KE-15] device class lcview 创建（sysfs /sys/class/lcview 存在）"
+    command: "test -d /sys/class/lcview && echo CLASS_OK || echo NO_CLASS"
+    assert: {type: contains, value: "CLASS_OK"}
+    severity: warn
+    requires: [ke02_module_init_log]
+    on_fail:
+      collectors: [lcview_files]

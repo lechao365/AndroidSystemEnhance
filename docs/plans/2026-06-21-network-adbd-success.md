@@ -1,5 +1,7 @@
 # Network ADB Success Implementation Plan
 
+> **2026-06-24 更新**：设备 IP 发现已从"固定 IP"切换为"串口动态发现"，见 `engineering/loop/scripts/rp5_serial_helper.py` 和 `engineering/loop/WORKFLOW.md` 的「传输层依赖链」章节。本文档中残留的 `192.168.1.55` 仅为历史决策记录。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 为 Loop Engineering 增加 `system.network_adbd` 验收场景，并以最小框架改动支持 `run_on: host|device` 双执行平面，从串口主链完成 reboot→Wi‑Fi→adbd→host `adb connect 192.168.1.55:5555` 的自动验收闭环。

@@ -1,7 +1,7 @@
 #!/bin/bash
 # lcview-adb-run — serial bootstrap → adb feature run → serial fallback
 # 用法:
-#   run_lcview_adb_suite.sh --serial-host 127.0.0.1 --serial-port 9700 [--adb-endpoint 192.168.1.55:5555] [--artifacts-dir <dir>]
+#   run_lcview_adb_suite.sh --serial-host 127.0.0.1 --serial-port 9700 [--adb-endpoint <ip>:5555] [--artifacts-dir <dir>]
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

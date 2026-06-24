@@ -46,6 +46,28 @@ connection (rp5-serial provider)
 | `connection` | 传输层（串口 / ADB） |
 | `engineering/harness/` | 公共规则、路径管理、脚本 bootstrap、日志与 observability 基础设施 |
 
+## 传输层依赖链（serial → adb）
+
+RPi5 采用 DHCP 动态分配 IP，**不使用固定 IP**。因此网络 adb 连接必须遵循以下依赖链：
+
+1. **串口是唯一可信的 IP 发现通道**：设备启动后，host 无法预先知道 wlan0 的 IP，
+   只能通过串口执行 `ip -4 addr show wlan0` 或从串口缓冲中提取。
+2. **串口取 IP 是 adb 连接的硬性前置**：任何 `transport=adb` 的 suite / `run_on: host`
+   的 adb 动作，都必须在串口 bootstrap 成功后才能执行。
+3. **IP 发现由 `rp5_serial_helper.py device-ip` 统一承接**：
+   - writer 空闲时：主动向设备发 `ip addr` 命令并读回
+   - writer 被占用时（le run 期间）：从 host 环形缓冲捞最近 400 行匹配
+4. **endpoint 传递**：
+   - case 内闭环：`run_on: host` 的 case 在 command 内联调用 helper 取 IP（见
+     `cases/system/network-adbd-success.yaml` 的 `host_adb_connect_success`）
+   - workflow 级闭环：`run_lcview_adb_suite.sh` 的 `discover-adb-endpoint` 阶段取 IP
+     后通过 `--adb-endpoint` 传给 feature suite
+5. **禁止硬编码设备 IP**：源码 / yaml / 脚本中不得出现固定的设备 IP 字面量作为
+   fallback 或默认值。`le deploy` 缺失 `--adb-endpoint` 时报错退出。
+
+> 标准前置 suite：`cases/system/network-adbd-success.yaml` 是"串口 bootstrap →
+> adb connect 成功"的闭环验证，所有 feature adb suite 应在其 PASS 后执行。
+
 ## 规则复用模型
 
 ### FQN 命名
@@ -112,9 +134,9 @@ connection (rp5-serial provider)
 3. `rpi5_wifi_connect` 服务已进入有效执行态
 4. `/data/boot/wifi.conf` 存在且非默认值
 5. 已连接目标 SSID
-6. `wlan0` 获得 `192.168.1.55`
+6. `wlan0` 获得 `192.168.1.x`（DHCP 分配，由串口动态发现）
 7. adbd TCP 属性正确，`adbd` 为 `running`
-8. host `adb connect 192.168.1.55:5555` 成功
+8. host 通过 `rp5_serial_helper.py` 动态发现设备 IP 并 `adb connect` 成功
 
 该场景继续以串口作为主执行与主取证通道；host adb 仅作为最终成功判据，而不是主 transport。
 
@@ -134,8 +156,8 @@ python3 -m loop_core.cli run \
 运行前要求：
 
 - host 环境可直接调用 `adb`
-- 设备端 `wifi.conf` 已配置真实 `ssid/psk/static_ip`
-- 当前静态 IP 设计假定为 `192.168.1.55`
+- 设备端 `wifi.conf` 已配置真实 `ssid/psk`（DHCP 模式，无 static_ip）
+- 设备 IP 由串口 helper 动态发现，不硬编码
 
 ### system.adb_shell
 
@@ -193,12 +215,12 @@ python3 -m loop_core.cli run \
 
 Loop case 与 collector 默认在 `device` 执行，即通过当前 transport（fixture / rp5-serial）向设备发送命令并采集输出。
 
-当场景需要 host 侧动作（例如 `adb connect 192.168.1.55:5555`）时，可在 case 或 collector 上显式声明：
+当场景需要 host 侧动作（例如 `adb connect <ip>:5555`）时，可在 case 或 collector 上显式声明：
 
 ```yaml
 - id: host_adb_connect_success
   run_on: host
-  command: "adb connect 192.168.1.55:5555"
+  command: "DEV_IP=$(python3 rp5_serial_helper.py device-ip --host 127.0.0.1 --port 9700); adb connect $DEV_IP:5555"
   assert:
     type: regex
     pattern: "(connected to|already connected to)"

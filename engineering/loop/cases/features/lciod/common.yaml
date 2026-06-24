@@ -10,13 +10,13 @@ final_collectors:
   - lciod_device_state
 cases:
   - id: adb_shell_reachable
-    description: "[code] adb shell 连通性"
+    description: "[prereq] adb shell 连通性基线（依赖 network-adbd bootstrap 已通过串口取 IP 并 adb connect）"
     command: "echo lciod_adb_ok"
     assert: {type: contains, value: "lciod_adb_ok"}
     severity: critical
 
   - id: boot_completed
-    description: "[code] 系统启动完成"
+    description: "[prereq / DA-07] 系统启动完成 sys.boot_completed=1（daemon 启动条件）"
     command: "getprop sys.boot_completed"
     assert: {type: contains, value: "1"}
     severity: critical
@@ -25,14 +25,14 @@ cases:
       collectors: [lciod_hal_logcat, lciod_daemon_logcat, lciod_kmsg, lciod_device_state]
 
   - id: fault_verify_present
-    description: "[code] usb-verify 工具就位"
+    description: "[prereq] fault-verify 工具就位（stats/config/event/check 子命令前置）"
     command: "which fault-verify || find /vendor /system -name fault-verify 2>/dev/null | head -1"
     assert: {type: regex, pattern: "fault-verify"}
     severity: critical
     requires: [adb_shell_reachable]
 
   - id: lciod_hal_service_registered
-    description: "[spec] HAL 服务 vendor.lechao.lciod.IIoHal/default 注册"
+    description: "[HA-11] HAL 服务 vendor.lechao.lciod.IIoHal/default 已注册"
     command: "service list | grep vendor.lechao.lciod.IIoHal"
     assert: {type: contains, value: "IIoHal"}
     severity: critical
@@ -41,7 +41,7 @@ cases:
       collectors: [lciod_hal_logcat, lciod_device_state]
 
   - id: lciod_daemon_service_registered
-    description: "[spec] Daemon 服务 system.lechao.lciod.IIoService/default 注册"
+    description: "[DA-08] Daemon 服务 system.lechao.lciod.IIoService/default 已注册"
     command: "service list | grep system.lechao.lciod.IIoService"
     assert: {type: contains, value: "IIoService"}
     severity: critical
@@ -50,7 +50,7 @@ cases:
       collectors: [lciod_daemon_logcat, lciod_device_state]
 
   - id: lciod_device_node_present
-    description: "[spec] /dev/vendor_lechao_usbd* 设备节点存在（需插入 USB 存储设备）"
+    description: "[KE-01] /dev/vendor_lechao_usbd* 设备节点存在（需插入 USB 存储设备）"
     command: "ls -l /dev/vendor_lechao_usbd* 2>/dev/null || echo NO_NODE"
     assert: {type: not_contains, value: "NO_NODE"}
     severity: critical
@@ -63,7 +63,7 @@ collectors:
     mode: adb_logcat
     buffers: [main, system, crash]
     filters: ["lechao_lciod_hal"]
-    hints: "HAL 层日志，检查 ioctl/connect/readEvent 错误"
+    hints: "HAL 层日志，检查 ioctl/connect/readEvent/open_device 错误"
 
   lciod_daemon_logcat:
     mode: adb_logcat
@@ -74,16 +74,16 @@ collectors:
   lciod_kmsg:
     commands:
       - "dmesg | grep -i 'vendor_lechao_usbd\\|lciod'"
-    hints: "内核侧 lciod 驱动日志"
+    hints: "内核侧 lciod 驱动日志（registered device / vendor patch / probe / disconnect）"
 
   lciod_fault_verify_json:
     commands:
       - "fault-verify stats get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null || echo '{\"error\":\"fault-verify failed\"}'"
-    hints: "fault-verify 完整 stats JSON 快照"
+    hints: "fault-verify 完整 stats JSON 快照（失败现场必采）"
 
   lciod_device_state:
     commands:
       - "ls -l /dev/vendor_lechao_usbd*"
       - "ls -Z /dev/vendor_lechao_usbd* 2>/dev/null || echo 'SELinux label unavailable'"
       - "service list | grep lechao"
-    hints: "设备节点 + 服务注册快照"
+    hints: "设备节点权限/SELinux 标签 + 服务注册快照"

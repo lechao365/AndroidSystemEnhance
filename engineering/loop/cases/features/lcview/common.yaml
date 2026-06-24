@@ -10,11 +10,13 @@ final_collectors:
   - lcview_runtime_context
 cases:
   - id: adb_shell_reachable
+    description: "[code] adb shell 连通性基线（依赖 network-adbd bootstrap 已通过串口取 IP 并 adb connect）"
     command: "echo lcview_adb_ok"
     assert: {type: contains, value: "lcview_adb_ok"}
     severity: critical
 
   - id: boot_completed
+    description: "[code] 系统启动完成（daemon 依赖 sys.boot_completed=1 启动）"
     command: "getprop sys.boot_completed"
     assert: {type: contains, value: "1"}
     severity: critical
@@ -22,23 +24,53 @@ cases:
     on_fail:
       collectors: [lcview_logcat, lcview_kmsg, serial_recent]
 
+  - id: lcview_device_node_present
+    description: "[spec LV-KE-01] /dev/vendor_lechao_lcview 字符设备节点存在"
+    command: "ls -l /dev/vendor_lechao_lcview 2>/dev/null || echo NO_NODE"
+    assert: {type: not_contains, value: "NO_NODE"}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lcview_kmsg, lcview_files, serial_recent]
+
+  - id: lcview_device_node_is_char
+    description: "[spec LV-KE-01] 节点为字符设备（权限首字符为 c）"
+    command: "ls -l /dev/vendor_lechao_lcview 2>/dev/null | awk '{print $1}'"
+    assert: {type: regex, pattern: "^c"}
+    severity: critical
+    requires: [lcview_device_node_present]
+    on_fail:
+      collectors: [lcview_files, lcview_kmsg]
+
+  - id: lcview_kernel_module_loaded
+    description: "[spec LV-KE-02] 内核模块已加载（dmesg 含 initialized ring=）"
+    command: "dmesg | grep 'kernel_lechao_lcview' | grep 'initialized (ring=' | head -1"
+    assert: {type: contains, value: "initialized (ring="}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lcview_kmsg, serial_recent]
+
   - id: lcview_hal_service_state
+    description: "[code] HAL 服务状态（oneshot，可能 stopped 或 running）[LV-CHAIN-01]"
     command: "getprop init.svc.lechao_lcview_hal"
-    assert: {type: regex, pattern: "running|stopped"}
+    assert: {type: regex, pattern: "running|stopped|restarting"}
     severity: critical
     requires: [adb_shell_reachable]
     on_fail:
       collectors: [lcview_logcat, lcview_service_state, serial_recent]
 
   - id: lcview_daemon_service_state
+    description: "[code] daemon 服务状态（oneshot，boot_completed=1 后启动）[LV-CHAIN-01]"
     command: "getprop init.svc.lechao_lcview"
-    assert: {type: regex, pattern: "running|stopped"}
+    assert: {type: regex, pattern: "running|stopped|restarting"}
     severity: critical
     requires: [adb_shell_reachable]
     on_fail:
       collectors: [lcview_logcat, lcview_service_state, serial_recent]
 
   - id: lcview_schema_present
+    description: "[code] schema 文件 /vendor/etc/lcview_events.json 存在 [LV-FW-01]"
     command: "test -f /vendor/etc/lcview_events.json && echo present"
     assert: {type: contains, value: "present"}
     severity: critical
@@ -47,6 +79,7 @@ cases:
       collectors: [lcview_files, lcview_logcat, serial_recent]
 
   - id: lcview_data_dir_ready
+    description: "[code] 数据目录 /data/vendor/lechao_lcview/logs 存在（post-fs-data 创建）"
     command: "test -d /data/vendor/lechao_lcview/logs && echo ready"
     assert: {type: contains, value: "ready"}
     severity: critical
@@ -84,8 +117,10 @@ collectors:
       - "ls -l /vendor/etc/lcview_events.json"
       - "ls -l /data/vendor/lechao_lcview"
       - "ls -lt /data/vendor/lechao_lcview/logs"
+      - "ls -l /dev/vendor_lechao_lcview"
+      - "ls -Z /dev/vendor_lechao_lcview"
     failure_code: LCVIEW_PREREQ_FAIL
-    hints: "检查 schema / data dir / logs 目录状态"
+    hints: "检查 schema / data dir / logs 目录 / 设备节点状态"
 
   lcview_pull_logs:
     mode: adb_pull

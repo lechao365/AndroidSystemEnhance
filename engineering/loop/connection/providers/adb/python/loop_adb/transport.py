@@ -23,7 +23,7 @@ class AdbTransport(BaseTransport):
     """通过 adb CLI 实现的 live transport。
 
     Args:
-        endpoint: adb 网络端点，如 192.168.1.55:5555
+        endpoint: adb 网络端点（格式 <ip>:5555，由 serial bootstrap 动态发现）
         device_serial: adb -s 指定的设备 serial；缺省回落到 endpoint
         root_mode: 提权策略 auto/adb_root/su0/none
         connect_timeout_sec: connect / wait-for-device 超时

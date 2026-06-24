@@ -1,5 +1,7 @@
 # `network-adbd-success` 设计
 
+> **2026-06-24 更新**：设备 IP 发现已从"固定 IP"切换为"串口动态发现"，见 `engineering/loop/scripts/rp5_serial_helper.py` 和 `engineering/loop/WORKFLOW.md` 的「传输层依赖链」章节。本文档中残留的 `192.168.1.55` 仅为历史决策记录。
+
 > **日期**：2026-06-21
 > **状态**：已确认，待实施
 > **范围**：为 Loop Engineering 增加 `system.network_adbd` 场景，用于验证“重启后自动打开 WLAN → 读取 `wifi.conf` 连接 AP → 启动网络 adbd → host 侧 `adb connect 192.168.1.55:5555` 成功”这一整条链路；同时为 `loop_core` 增加最小可复用的 `host/device` 双执行平面。**不含**完整 ADB provider、DHCP 动态 IP 传值、transport 动态切换。

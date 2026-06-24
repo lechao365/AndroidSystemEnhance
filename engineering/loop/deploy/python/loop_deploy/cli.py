@@ -21,7 +21,7 @@ def add_deploy_parser(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--artifact", help="手动指定编译产物路径")
     p.add_argument("--remote", help="手动指定远程推送路径")
     p.add_argument("--service", default="", help="手动指定 restart 的服务名")
-    p.add_argument("--adb-endpoint", default="", help="adb endpoint，如 192.168.1.55:5555")
+    p.add_argument("--adb-endpoint", default="", help="adb endpoint（格式 <ip>:5555，由 serial bootstrap 动态发现）")
     p.add_argument("--adb-serial", default="", help="adb device serial")
     p.set_defaults(func=_handle_deploy)
 
@@ -59,7 +59,13 @@ def _handle_deploy(args: argparse.Namespace) -> int:
             return 1
         artifacts = compile_result.artifacts
 
-    endpoint = args.adb_endpoint or "192.168.1.55:5555"
+    if not args.adb_endpoint:
+        print("ERROR: --adb-endpoint 未指定。", file=sys.stderr)
+        print("动态 IP 场景下必须先跑 serial bootstrap 获取设备 IP：", file=sys.stderr)
+        print("  le run --suite cases/system/network-adbd-success.yaml --host <serial_host> --port <serial_port>", file=sys.stderr)
+        print("或手动通过 rp5_serial_helper.py device-ip 获取后传入 --adb-endpoint <ip>:5555", file=sys.stderr)
+        return 1
+    endpoint = args.adb_endpoint
     serial = args.adb_serial or endpoint
     client = AdbClient(endpoint, serial)
     deployer = Deployer(client)

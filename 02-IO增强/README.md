@@ -360,7 +360,7 @@ CHECK --> OUT : PASS / FAIL\n退出码 0/5
 
 | ID | 故障 | Device 命令 | 内核捕获事件 | 校验命令 |
 |----|------|------------|-------------|---------|
-| F1/F2 | STALL | `stall --ep in/out` | STALL + ERROR + RESET | `check stats --stall-ge 1` |
+| F1/F2 | STALL | `stall-in` / `stall-out` | STALL + ERROR + RESET | `check stats --stall-ge 1` |
 | F3 | Timeout | `timeout --duration 5000` | TIMEOUT + ERROR + RESET | `check stats --timeout-ge 1` |
 | F4-F7 | Corrupt | `corrupt --field cbw-sig/csw-sig/csw-tag/csw-status` | CORRUPT + ERROR + RESET | `check stats --corrupt-ge 1` |
 | F8 | Short | `short --bytes 512` | CORRUPT + ERROR | `check stats --corrupt-ge 1` |
@@ -373,7 +373,7 @@ CHECK --> OUT : PASS / FAIL\n退出码 0/5
 
 ```
 1. usb-verify stats reset --device /dev/vendor_lechao_usbd0   # Host 清零统计
-2. usb-fault-inject stall --ep in                              # Device 注入故障
+2. usb-fault-inject stall-out                              # Device 注入故障
    → stdout: {"fault":"stall","expect":{"error_count":1,...}}
 3. usb-verify check stats --device /dev/vendor_lechao_usbd0 \  # Host 校验
      --stall-ge 1 --error-ge 1 --reset-ge 1

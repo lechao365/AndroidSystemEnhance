@@ -1,5 +1,7 @@
 # lciod Loop 自动化验证与 AI 闭环设计
 
+> **2026-06-24 更新**：设备 IP 发现已从"固定 IP"切换为"串口动态发现"，见 `engineering/loop/scripts/rp5_serial_helper.py` 和 `engineering/loop/WORKFLOW.md` 的「传输层依赖链」章节。本文档中残留的 `192.168.1.55` 仅为历史决策记录。
+
 > **日期**：2026-06-22
 > **状态**：已确认，待实施计划
 > **范围**：为 Loop Engineering 增加 lciod feature 验收 case（覆盖 32 个单设备能力点）+ loop_deploy 部署层（git diff 决策 + mmm/push + boot.img dd/reboot）+ loop_controller AI 闭环（主会话内调度 + LlmAnalyzer 抽象接口 + 预设 bug 演练）。目标覆盖三大诉求：1）验证 lciod 基础能力与新增代码能力；2）case 发现问题后自动改 workspace 代码并根据改动范围决策刷机/推包；3）至少完成一次"定位→修改→打包→上板复测"完整闭环。**不含** 双设备故障注入（Zero2W + RP5 的 12 类故障 F1-F12）、LlmAnalyzer API 实现、vendor dd 在线刷机、DD_BOOT_REBOOT 内核 bug 闭环演练。

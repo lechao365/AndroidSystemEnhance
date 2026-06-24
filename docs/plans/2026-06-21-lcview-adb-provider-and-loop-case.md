@@ -1,5 +1,7 @@
 # lcview ADB Provider + Loop Case Implementation Plan
 
+> **2026-06-24 更新**：设备 IP 发现已从"固定 IP"切换为"串口动态发现"，见 `engineering/loop/scripts/rp5_serial_helper.py` 和 `engineering/loop/WORKFLOW.md` 的「传输层依赖链」章节。本文档中残留的 `192.168.1.55` 仅为历史决策记录。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 为 Loop Engineering 增加可复用 `adb` provider、通用 `transport=adb` 运行通道、`lcview` feature suite，以及“serial bootstrap → adb feature run → serial fallback evidence”的单入口 workflow。

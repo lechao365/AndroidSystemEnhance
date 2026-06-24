@@ -1,5 +1,7 @@
 # lciod Loop P2+P3: Deploy + Controller AI 闭环 — 实施计划
 
+> **2026-06-24 更新**：设备 IP 发现已从"固定 IP"切换为"串口动态发现"，见 `engineering/loop/scripts/rp5_serial_helper.py` 和 `engineering/loop/WORKFLOW.md` 的「传输层依赖链」章节。本文档中残留的 `192.168.1.55` 仅为历史决策记录。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 实现 loop_deploy 部署层（git diff 决策器 + mmm/push + boot.img dd/reboot）+ loop_controller AI 闭环（主会话内调度 + LlmAnalyzer 抽象 + 3 个预设 bug 演练脚本）。

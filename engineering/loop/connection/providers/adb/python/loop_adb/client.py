@@ -42,7 +42,7 @@ class AdbClient:
     通过 runner 回调执行实际命令，便于测试注入 FakeRunner。
 
     Args:
-        endpoint: adb 网络端点，如 192.168.1.55:5555
+        endpoint: adb 网络端点（格式 <ip>:5555，由 serial bootstrap 动态发现）
         device_serial: adb -s 指定的设备 serial；通常与 endpoint 相同
         runner: callable (argv, timeout_sec) -> AdbCommandResult，缺省走真实 subprocess
     """

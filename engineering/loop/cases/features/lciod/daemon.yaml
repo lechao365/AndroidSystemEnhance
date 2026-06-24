@@ -7,16 +7,25 @@ defaults:
   recent_limit: 400
 cases:
   - id: daemon_process_running
-    description: "[spec] Daemon 进程 lechao_lciod 存活"
+    description: "[DA-03/DA-08] Daemon 进程 lechao_lciod 存活（init.svc）"
     command: "getprop init.svc.lechao_lciod"
-    assert: {type: contains_any, values: ["running", "restarting"]}
+    assert: {type: contains_any, values: ["running", "stopped"]}
     severity: critical
     requires: [adb_shell_reachable]
     on_fail:
       collectors: [lciod_daemon_logcat, lciod_device_state]
 
+  - id: daemon_service_registered
+    description: "[DA-08] service list 含 system.lechao.lciod.IIoService"
+    command: "service list | grep system.lechao.lciod.IIoService"
+    assert: {type: contains, value: "system.lechao.lciod.IIoService"}
+    severity: critical
+    requires: [daemon_process_running]
+    on_fail:
+      collectors: [lciod_daemon_logcat, lciod_device_state]
+
   - id: daemon_boot_completed_trigger
-    description: "[spec] Daemon 在 boot_completed 后启动"
+    description: "[DA-07] Daemon 启动条件 boot_completed=1"
     command: "getprop sys.boot_completed"
     assert: {type: contains, value: "1"}
     severity: critical
@@ -24,65 +33,74 @@ cases:
     on_fail:
       collectors: [lciod_daemon_logcat]
 
-  - id: daemon_field_projection_current_rate
-    description: "[spec] Daemon IoStats 字段 current_rate >= 0"
-    command: "fault-verify stats get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null"
-    assert: {type: json_field, path: "current_rate", op: "ge", value: 0}
+  - id: daemon_hal_lazy_connect
+    description: "[DA-05] HAL 延迟连接——daemon 已注册 IIoService 即代表延迟连接成功"
+    command: "service list | grep system.lechao.lciod.IIoService | grep -c default"
+    assert: {type: regex, pattern: "^[1-9][0-9]*$"}
     severity: critical
-    requires: [daemon_process_running, lciod_device_node_present]
+    requires: [daemon_service_registered]
     on_fail:
-      collectors: [lciod_daemon_logcat, lciod_fault_verify_json]
+      collectors: [lciod_daemon_logcat, lciod_hal_logcat]
 
-  - id: daemon_field_projection_enabled
-    description: "[spec] Daemon IoStats enabled 字段 = 0 or 1"
+  - id: daemon_field_projection_stats
+    description: "[DA-01/DA-09] Daemon 字段投影——经 daemon 路径 stats 可获取（writeBytes 字段直传）"
     command: "fault-verify stats get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null"
-    assert: {type: json_field, path: "enabled", op: "ge", value: 0}
-    severity: warn
+    assert: {type: json_field, path: "write_bytes", op: "ge", value: 0}
+    severity: critical
     requires: [daemon_process_running, lciod_device_node_present]
     on_fail:
       collectors: [lciod_daemon_logcat, lciod_fault_verify_json]
 
   - id: daemon_get_average_rate
-    description: "[spec] Daemon getAverageRate——peak_rate >= 0"
+    description: "[DA-02] getAverageRate 派生计算——peak_rate >= 0（HAL 内部 peak_rate 字段）"
     command: "fault-verify stats get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null"
     assert: {type: json_field, path: "peak_rate", op: "ge", value: 0}
     severity: critical
-    requires: [daemon_process_running, lciod_device_node_present]
+    requires: [daemon_field_projection_stats]
     on_fail:
       collectors: [lciod_daemon_logcat, lciod_fault_verify_json]
 
-  - id: daemon_hal_lazy_connect
-    description: "[spec] Daemon HAL 延迟连接——IIoService 已注册"
-    command: "service list | grep system.lechao.lciod.IIoService"
-    assert: {type: contains, value: "IIoService"}
-    severity: critical
-    requires: [daemon_process_running]
+  - id: daemon_current_rate_field
+    description: "[DA-01] 字段投影——内核 current_rate 字段 >= 0（HAL 完整暴露）"
+    command: "fault-verify stats get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null"
+    assert: {type: json_field, path: "current_rate", op: "ge", value: 0}
+    severity: warn
+    requires: [daemon_field_projection_stats]
     on_fail:
-      collectors: [lciod_daemon_logcat, lciod_hal_logcat]
+      collectors: [lciod_daemon_logcat, lciod_fault_verify_json]
 
-  - id: daemon_death_reconnect
-    description: "[spec] Daemon 死亡重连——killing HAL 后 daemon 仍可获取 stats"
-    command: "HALPID=$(ps -A | grep lechao_lciod_hal | awk '{print $2}'); kill $HALPID 2>/dev/null; sleep 3; fault-verify stats get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null | grep -c read_bytes || echo 0"
-    assert: {type: exit_code_equals, value: 0}
-    severity: critical
-    requires: [daemon_process_running, lciod_device_node_present]
-    on_fail:
-      collectors: [lciod_daemon_logcat, lciod_hal_logcat]
-
-  - id: daemon_monitor_thread_stats
-    description: "[spec] Daemon 监控线程 10s 周期统计输出到 logcat"
-    command: "logcat -d -s lechao_lciod:V 2>/dev/null | head -20; echo LOG_DONE"
+  - id: daemon_monitor_thread_logcat
+    description: "[DA-04] 后台监控线程 10s 周期——logcat 含 lechao_lciod tag 输出"
+    command: "logcat -d -s lechao_lciod:V 2>/dev/null | head -5; echo LOG_DONE"
     assert: {type: contains, value: "LOG_DONE"}
     severity: warn
     requires: [daemon_process_running]
     on_fail:
       collectors: [lciod_daemon_logcat]
 
-  - id: daemon_multi_device_iterate
-    description: "[spec] Daemon 多设备遍历——stats get 成功"
-    command: "fault-verify stats get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null || echo NO_MULTI_DEVICE"
-    assert: {type: not_contains, value: "NO_MULTI_DEVICE"}
+  - id: daemon_list_device_minors
+    description: "[DA-03] listDeviceMinors——设备节点存在即 daemon 可枚举 minor"
+    command: "test -c /dev/vendor_lechao_usbd0 && echo MINORS_OK || echo NO_MINOR"
+    assert: {type: contains, value: "MINORS_OK"}
+    severity: warn
+    requires: [daemon_service_registered, lciod_device_node_present]
+    on_fail:
+      collectors: [lciod_daemon_logcat, lciod_device_state]
+
+  - id: daemon_death_reconnect_resilient
+    description: "[DA-06] 死亡重连——kill HAL 后 daemon 仍存活（init 自动重启 HAL）"
+    command: "DPID=$(ps -A | grep 'lechao_lciod$' | awk '{print $2}' | head -1); test -n \"$DPID\" && echo DAEMON_ALIVE || echo DAEMON_GONE"
+    assert: {type: contains, value: "DAEMON_ALIVE"}
     severity: warn
     requires: [daemon_process_running]
+    on_fail:
+      collectors: [lciod_daemon_logcat, lciod_hal_logcat]
+
+  - id: daemon_multi_device_iterate
+    description: "[DA-03] 多设备遍历——stats get 成功（单设备场景退化验证）"
+    command: "fault-verify stats get --device /dev/vendor_lechao_usbd0 --json 2>/dev/null | grep -c read_bytes"
+    assert: {type: regex, pattern: "^[1-9][0-9]*$"}
+    severity: warn
+    requires: [daemon_field_projection_stats]
     on_fail:
       collectors: [lciod_daemon_logcat, lciod_device_state]

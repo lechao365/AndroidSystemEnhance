@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="采集行数上限，缺省按 CLI > suite.defaults > profile 默认 兜底",
     )
-    run_parser.add_argument("--adb-endpoint", default="", help="adb endpoint，例如 192.168.1.55:5555")
+    run_parser.add_argument("--adb-endpoint", default="", help="adb endpoint（格式 <ip>:5555，由 serial bootstrap 动态发现）")
     run_parser.add_argument("--adb-serial", default="", help="adb device serial；缺省回落到 endpoint")
     run_parser.add_argument(
         "--adb-root-mode",
