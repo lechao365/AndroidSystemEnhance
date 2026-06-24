@@ -234,6 +234,15 @@ def _handle_control_decide(args: argparse.Namespace) -> int:
             print(f"decision=STOP reason=same_failure_repeated failure_code={curr_fc} escalate=true")
             return 0
 
+    patch_applied = last.get("patch_applied", {})
+    current_hash = patch_applied.get("patch_hash", "")
+    if current_hash:
+        for att in attempts[:-1]:
+            prev_hash = att.get("patch_applied", {}).get("patch_hash", "")
+            if prev_hash and prev_hash == current_hash:
+                print(f"decision=STOP reason=duplicate_patch_detected patch_hash={current_hash[:12]} escalate=true")
+                return 0
+
     try:
         fc = FailureCode(last.get("failure_code", "RUN_FAILED") or "RUN_FAILED")
     except ValueError:

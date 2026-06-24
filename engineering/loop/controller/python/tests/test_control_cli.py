@@ -217,6 +217,52 @@ def test_g5_decide_stop_on_repeated_failure(tmp_path: Path):
     assert "same_failure_repeated" in out
 
 
+def test_g5_decide_stop_on_duplicate_patch(tmp_path: Path):
+    """decide: 当前 patch_hash 与之前相同 → STOP escalate。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    session = _make_session(
+        artifacts, current_attempt=2, status="FAIL",
+        attempts=[
+            {"attempt_index": 1, "verify_result": "FAIL",
+             "evidence_path": "", "failed_cases": [], "failure_code": "COMPILE_FAILED",
+             "patch_applied": {"patch_hash": "abc123def456"}},
+            {"attempt_index": 2, "verify_result": "FAIL",
+             "evidence_path": "", "failed_cases": [], "failure_code": "RUN_FAILED",
+             "patch_applied": {"patch_hash": "abc123def456"}},
+        ],
+    )
+    (artifacts / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+    from loop_controller.control_cli import _handle_control_decide
+    _, out = _capture_stdout(_handle_control_decide, _decide_args(artifacts / "session.json"))
+    assert "decision=STOP" in out
+    assert "duplicate_patch" in out
+    assert "escalate=true" in out
+
+
+def test_g5_decide_retry_different_patch(tmp_path: Path):
+    """decide: 不同 patch_hash 且不同 failure_code → RETRY（不误杀）。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    session = _make_session(
+        artifacts, current_attempt=2, status="FAIL",
+        attempts=[
+            {"attempt_index": 1, "verify_result": "FAIL",
+             "evidence_path": "", "failed_cases": [], "failure_code": "COMPILE_FAILED",
+             "patch_applied": {"patch_hash": "aaa111"}},
+            {"attempt_index": 2, "verify_result": "FAIL",
+             "evidence_path": "", "failed_cases": [], "failure_code": "RUN_FAILED",
+             "patch_applied": {"patch_hash": "bbb222"}},
+        ],
+    )
+    (artifacts / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+    from loop_controller.control_cli import _handle_control_decide
+    _, out = _capture_stdout(_handle_control_decide, _decide_args(artifacts / "session.json"))
+    assert "decision=RETRY" in out
+
+
 def test_apply_patch_rejects_outside_whitelist(tmp_path: Path):
     """apply-patch 拒绝白名单外的文件。"""
     artifacts = tmp_path / "artifacts"
