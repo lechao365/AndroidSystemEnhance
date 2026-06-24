@@ -88,6 +88,23 @@ class Deployer:
             return DeployResult(success=False, mode=DeployMode.DD_BOOT_REBOOT,
                                 error=f"sha256 mismatch: host={host_sha[:16]}... remote={remote_sha[:16]}...")
 
+        from loop_deploy.image_verify import verify_image
+
+        backup_dir = Path("/tmp") / f"le_backup_{int(time.time())}"
+        verify_result = verify_image(boot_img, "boot.img", backup_dir)
+        if not verify_result.passed:
+            return DeployResult(success=False, mode=DeployMode.DD_BOOT_REBOOT,
+                                error=f"image verify failed: {verify_result.reason}")
+
+        try:
+            health = self._client.shell("getprop sys.boot_completed", timeout_sec=10.0)
+            if health.command_exit_code != 0 or "1" not in health.raw_stdout:
+                return DeployResult(success=False, mode=DeployMode.DD_BOOT_REBOOT,
+                                    error="device not healthy (boot_completed != 1), abort dd")
+        except Exception as e:
+            return DeployResult(success=False, mode=DeployMode.DD_BOOT_REBOOT,
+                                error=f"health check failed: {e}")
+
         self._client.shell("dd if=/data/local/tmp/boot.img of=/dev/block/mmcblk0p1 bs=4M", timeout_sec=30.0, as_root=True)
         self._client.shell("sync", timeout_sec=10.0, as_root=True)
         self._client.shell(f"rm {remote}", timeout_sec=5.0, as_root=True)
@@ -96,6 +113,13 @@ class Deployer:
         if not self._ops.wait_boot_completed(timeout=120.0):
             return DeployResult(success=False, mode=DeployMode.DD_BOOT_REBOOT,
                                 error="boot_completed not reached after reboot")
+        try:
+            logcat = self._client.logcat(["crash"], timeout_sec=10.0)
+            if logcat.exit_code == 0 and any("panic" in line.lower() for line in logcat.stdout.splitlines()):
+                return DeployResult(success=False, mode=DeployMode.DD_BOOT_REBOOT,
+                                    error="kernel panic detected in logcat after reboot")
+        except Exception:
+            pass
         self._client.connect(timeout_sec=15.0)
         return DeployResult(success=True, mode=DeployMode.DD_BOOT_REBOOT, requires_reboot=True,
                             duration_seconds=time.time() - start)
