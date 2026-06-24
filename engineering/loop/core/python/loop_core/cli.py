@@ -2,7 +2,7 @@
 
 子命令：
 - run：执行用例集，输出 EvidenceBundle
-- gen-cases：AI 辅助用例生成（第二步实现，当前占位）
+- gen-cases：用例校验（--validate 模式）
 - deploy：部署 binary/image（第二步实现，当前占位）
 
 用法：
@@ -76,8 +76,10 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--adb-connect-timeout", type=float, default=15.0, help="adb connect / wait 超时")
     run_parser.add_argument("--adb-command-timeout", type=float, default=10.0, help="adb 单命令默认超时")
 
-    # gen-cases 占位
-    sub.add_parser("gen-cases", help="AI 辅助用例生成（第二步实现）")
+    # gen-cases 子命令
+    gc = sub.add_parser("gen-cases", help="用例校验与生成辅助")
+    gc.add_argument("--validate", nargs="+", help="校验一个或多个 YAML 用例文件/目录")
+    gc.set_defaults(func=_cmd_gen_cases)
 
     # deploy 子命令（loop_deploy 实现）
     try:
@@ -98,8 +100,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         return _cmd_run(args)
     if args.command == "gen-cases":
-        print("gen-cases 命令将在第二步实现", file=sys.stderr)
-        return 1
+        return args.func(args)
     if args.command == "deploy":
         return args.func(args)
     if args.command == "control":
@@ -183,6 +184,38 @@ def _cmd_run(args) -> int:
     print(f"\nEvidenceBundle: {paths['evidence_json']}")
 
     return 0 if bundle.summary["overall"] == "PASS" else 1
+
+
+def _cmd_gen_cases(args) -> int:
+    if not args.validate:
+        print("请指定 --validate <file|dir> ...", file=sys.stderr)
+        return 1
+    errors = 0
+    for path_str in args.validate:
+        p = Path(path_str)
+        targets = []
+        if p.is_dir():
+            targets.extend(p.glob("*.yaml"))
+            targets.extend(p.glob("*.yml"))
+        elif p.is_file():
+            targets.append(p)
+        else:
+            print(f"路径不存在: {path_str}", file=sys.stderr)
+            errors += 1
+            continue
+        for target in targets:
+            search_dirs = [str(target.parent)]
+            for parent in target.parents:
+                if parent.name == "cases":
+                    search_dirs.append(str(parent))
+                    break
+            try:
+                load_suite(str(target), search_dirs)
+                print(f"OK: {target}")
+            except Exception as e:
+                print(f"FAIL: {target} — {e}", file=sys.stderr)
+                errors += 1
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":

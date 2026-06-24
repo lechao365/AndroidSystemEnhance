@@ -1,0 +1,14 @@
+# 补丁白名单配置：target → 允许修改的文件路径前缀
+# apply-patch 子命令会校验每个 FileChange.workspace_path 是否落在对应的前缀内
+# 若 target 未在此配置中登记，apply-patch 默认拒绝所有改动（fail-closed）
+lciod:
+  - vendor/lechao/services/lechao_lciod/
+  - device/brcm/rpi5/sepolicy/lechao_lciod/
+  - device/brcm/rpi5/lciod/
+lcview:
+  - vendor/lechao/services/lechao_lcview/
+  - device/brcm/rpi5/sepolicy/lechao_lcview.te
+  - device/brcm/rpi5/sepolicy/lechao_lcview_hal.te
+system.boot:
+  - device/brcm/rpi5/
+  - vendor/brcm/

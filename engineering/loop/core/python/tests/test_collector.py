@@ -150,11 +150,11 @@ def test_host_collector_partial_failure_becomes_degraded():
             "run_on": "host",
             "commands": [
                 "python3 -c 'print(\"ok\")'",
-                "python3 -c 'import time; time.sleep(2)'",
+                "python3 -c 'import time; time.sleep(10)'",
             ],
             "hints": "host side",
         },
-        capture_timeout=0.2,
+        capture_timeout=1.0,
         recent_limit=100,
     )
     assert result.status == "degraded"
@@ -171,12 +171,12 @@ def test_host_collector_all_failures_become_error():
         {
             "run_on": "host",
             "commands": [
-                "python3 -c 'import time; time.sleep(2)'",
-                "python3 -c 'import time; time.sleep(2)'",
+                "python3 -c 'import time; time.sleep(10)'",
+                "python3 -c 'import time; time.sleep(10)'",
             ],
             "hints": "host side",
         },
-        capture_timeout=0.2,
+        capture_timeout=1.0,
         recent_limit=100,
     )
     assert result.status == "error"

@@ -8,8 +8,9 @@ from loop_deploy.models import DeployMode, DeployPlan, DeployTarget
 
 _KERNEL_PATTERNS = ["kernel/"]
 _PUSH_CPP_PATTERNS = ["vendor/lechao/services/lechao_lciod"]
+_PUSH_CPP_PATTERNS_LCVIEW = ["vendor/lechao/services/lechao_lcview"]
 _TE_PATTERNS = ["sepolicy/"]
-_RC_PATTERNS = ["lechao_lciod"]
+_RC_PATTERNS = ["lechao_lciod", "lechao_lcview"]
 _USB_VERIFY_PATTERNS = ["usb-verify", "usb-fault-inject"]
 _SKIP_SUFFIXES = {".md", ".yaml", ".txt"}
 
@@ -28,6 +29,16 @@ _DAEMON_TARGET = DeployTarget(
     remote_path="/system/bin/lechao_lciod",
     service_name="lechao_lciod",
 )
+_LCVIEW_HAL_TARGET = DeployTarget(
+    artifact_name="lechao_lcview_hal",
+    remote_path="/vendor/bin/hw/lechao_lcview_hal",
+    service_name="lechao_lcview_hal",
+)
+_LCVIEW_DAEMON_TARGET = DeployTarget(
+    artifact_name="lechao_lcview",
+    remote_path="/system/bin/lechao_lcview",
+    service_name="lechao_lcview",
+)
 
 
 def decide(diff_files: list[str]) -> DeployPlan:
@@ -37,6 +48,7 @@ def decide(diff_files: list[str]) -> DeployPlan:
     has_kernel = False
     has_te = False
     has_cpp = False
+    has_cpp_lcview = False
     has_rc = False
     has_usb_verify = False
     all_docs = True
@@ -52,6 +64,9 @@ def decide(diff_files: list[str]) -> DeployPlan:
         if any(p in f for p in _PUSH_CPP_PATTERNS) and not f.endswith(".rc"):
             has_cpp = True
             all_docs = False
+        if any(p in f for p in _PUSH_CPP_PATTERNS_LCVIEW) and not f.endswith(".rc"):
+            has_cpp_lcview = True
+            all_docs = False
         if any(p in f for p in _RC_PATTERNS) and f.endswith(".rc"):
             has_rc = True
             all_docs = False
@@ -64,7 +79,7 @@ def decide(diff_files: list[str]) -> DeployPlan:
     if all_docs:
         return DeployPlan.skip(f"all changed files are docs: {diff_files}")
 
-    type_count = sum([has_kernel, has_te, has_cpp, has_rc, has_usb_verify])
+    type_count = sum([has_kernel, has_te, has_cpp, has_cpp_lcview, has_rc, has_usb_verify])
     if type_count >= 2:
         return DeployPlan.flash_full(diff_files, f"mixed changes: {type_count} types")
 
@@ -91,6 +106,14 @@ def decide(diff_files: list[str]) -> DeployPlan:
             reason="lciod cpp changes: mmm + push binary",
             build_targets=["vendor/lechao/services/lechao_lciod"],
             deploy_targets=[_HAL_TARGET, _DAEMON_TARGET],
+            requires_reboot=False, estimated_seconds=300,
+        )
+    if has_cpp_lcview:
+        return DeployPlan(
+            mode=DeployMode.PUSH_SINGLE, changed_files=diff_files,
+            reason="lcview cpp changes: mmm + push binary",
+            build_targets=["vendor/lechao/services/lechao_lcview"],
+            deploy_targets=[_LCVIEW_HAL_TARGET, _LCVIEW_DAEMON_TARGET],
             requires_reboot=False, estimated_seconds=300,
         )
     if has_usb_verify:

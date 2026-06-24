@@ -9,15 +9,58 @@ description: loop engineering v2 工作流（用例驱动 + AI 修复闭环）
 
 AI 接管设备验收：执行用例 → 输出证据 → AI 分析 → 修复代码 → 重测 → 循环直到全 pass。
 
-## 核心流程
+## 核心流程（全自动闭环）
 
-1. AI 读代码/spec + template → 生成 YAML 用例
-2. le run 执行用例 → EvidenceBundle JSON
-3. 全 pass → 功能 OK
-4. 有 fail → AI 读 EvidenceBundle 分析证据并收敛候选修复方向
-5. AI 生成候选补丁草案（人工确认后再实施）
-6. 编译部署（binary 自动 / 镜像确认）
-7. goto 2，直到全 pass 或 N=5 回退人工
+```
+[Step 0] (可选) AI 读代码/spec + case-template.md → 生成 YAML 用例
+         → le gen-cases --validate <file>   # 校验 schema/断言/命名/依赖
+
+[Step 1] le control init --target <module> --max-attempts 5 --artifacts-dir <dir>
+
+[Step 2] le control run-verify --session <sid> --suite <suite> [--adb-endpoint <ep>]
+         → 执行用例 → evidence_bundle.json → 提取 failed_cases 写入 session
+
+[Step 3] le control decide --session <sid>
+         → PASS → STOP（成功）
+         → RETRY → 继续 Step 4
+         → STOP + escalate → 人工介入
+
+[Step 4] (仅 RETRY) le control analyze-request --session <sid>
+         → analysis_request.json（failed_cases + collectors_output）
+         → 主会话 AI 读 evidence_bundle.json + analysis_request.json → 生成 patch.json
+
+[Step 5] (仅 RETRY) le control apply-patch --session <sid> --patch <patch.json>
+         → 白名单校验 → 语法检查 → git stash 备份 → apply
+
+[Step 6] (仅 RETRY) le control compile --session <sid>
+         → 成功 → 继续 Step 7
+         → 失败 → le control revert --session <sid> → 计入 N → goto Step 3
+
+[Step 7] (仅 RETRY) le control deploy --session <sid> [--adb-endpoint <ep>]
+         → DeployDecider 决策（能 PUSH_SINGLE 则不 dd）
+         → DD_BOOT_REBOOT: 四阶段防护网（镜像验证/健康检查/dd/panic检测）
+
+[Step 8] goto Step 2，直到全 pass 或 escalate
+```
+
+### escalate 触发条件
+
+- N > max_attempts（默认 5）
+- 同 failure_code 连续重复（REPEATED_FAILURE）
+- 补丁内容重复（patch_hash 相同）
+- 白名单拒绝（PATCH_REJECTED）
+- 编译失败（COMPILE_FAILED）
+- boot_completed 超时 + serial 无 shell（kernel 死）
+
+### 部署约束（硬规则）
+
+1. **能 PUSH_SINGLE 不 dd**：只要改动可走推送（二进制/.cpp/脚本），绝不上 dd boot.img
+2. **dd 前四阶段防护网**：
+   - 阶段1：补丁白名单 + 内核改动风险标记
+   - 阶段2：镜像完整性/大小校验 + 备份
+   - 阶段3：设备健康基线 + 备份完整性 + 磁盘空间
+   - 阶段4：boot_completed + panic marker + 关键 service 存活 + serial shell 可达
+3. **kernel 死 escalate 人工**：serial 无 shell 时软件无法自救，需物理重刷 SD
 
 ## 架构拓扑
 
@@ -253,12 +296,13 @@ shell 不可达时，AI/人工应优先分析 `serial_context`；shell 可达时
 
 ## 遗留点
 
-1. **gen-cases 未实现**：第二步实现 AI 用例生成（reboot 诊断闭环属范围 A，已实现）
-2. **deploy 未实现**：第二步实现 binary/image 部署（范围 A 不含 deploy）
-3. **loop_ctrl 未实现**：第三步实现循环控制（N=5 / 回归检测 / 升级人工）
-4. **参数化用例**：case_loader 预留 parameters 字段，第一步未实现展开
+1. **gen-cases 已实现（校验器）**：`le gen-cases --validate <file>` 复用 load_suite 做 schema/断言/命名/依赖校验
+2. **deploy 已实现**：`le deploy` + `le control deploy` 支持 push_single/dd_boot_reboot + 四阶段防护网
+3. **loop_ctrl 已实现**：`le control {init,run-verify,analyze-request,apply-patch,compile,revert,deploy,decide,status}` 全链路全自动闭环
+4. **FLASH_FULL 需人工刷机**：sepolicy/.te 大改动仍需人工物理重刷（serial 无 shell 时软件无法自救）
+5. **参数化用例**：case_loader 预留 parameters 字段，当前未实现展开
 
-> `loop_ctrl` 后续落点为 `engineering/loop/controller/`，不进入 `engineering/harness/`。
+> loop 控制面落地于 `engineering/loop/controller/`，不进入 `engineering/harness/`。
 
 ## AI 诊断报告约束（`/le` 第 4-5 步首版）
 
@@ -297,17 +341,24 @@ le deploy --decide --diff-rev HEAD           # dry-run 查看决策
 le deploy --diff-rev HEAD --adb-endpoint ... # 执行部署
 ```
 
-## `le control` 子命令
-
-AI 闭环控制 session 管理：
+## `le control` 子命令（全自动闭环）
 
 ```bash
 le control init --target lciod --max-attempts 5 --artifacts-dir <dir>
-le control run-verify --session <id> --suite features.lciod.*
-le control analyze-request --session <id>
-le control deploy --session <id>
+le control run-verify --session <id> --suite <path> [--adb-endpoint <ep>]
 le control decide --session <id>
+le control analyze-request --session <id>
+le control apply-patch --session <id> --patch <patch.json>
+le control compile --session <id>
+le control revert --session <id>
+le control deploy --session <id> [--adb-endpoint <ep>]
 le control status --session <id>
 ```
 
-闭环 SOP：init → run-verify → analyze-request → (AI 改码) → deploy → run-verify → decide
+全自动闭环 SOP：init → run-verify → decide → (RETRY) analyze-request → apply-patch → compile → deploy → goto run-verify
+
+护栏：
+- apply-patch：白名单（target-paths.yaml）+ 语法检查 + git stash 备份
+- compile：失败 → revert → 计入 N
+- decide：N=5 / 同 failure_code 重复 / patch_hash 重复 → STOP escalate
+- deploy：能 PUSH_SINGLE 不 dd；dd 前后四阶段防护网

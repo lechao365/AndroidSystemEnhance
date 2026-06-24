@@ -28,8 +28,11 @@ def test_diagnosis_template_uses_fact_based_sections() -> None:
 def test_workflow_documents_fail_path_and_optional_user_clues() -> None:
     text = _read("engineering/loop/WORKFLOW.md")
 
-    assert "有 fail → AI 读 EvidenceBundle 分析证据并收敛候选修复方向" in text
-    assert "AI 生成候选补丁草案（人工确认后再实施）" in text
+    # 核心流程已升级为全自动闭环——断言新流程关键标记
+    assert "le control decide" in text
+    assert "le control apply-patch" in text
+    assert "le control compile" in text
+    assert "le control revert" in text
     assert "任何 FAIL 都进入诊断阶段" in text
     assert "调查线索（用户提供，未验证）" in text
     assert "不强行给唯一根因" in text

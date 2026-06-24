@@ -64,3 +64,16 @@ def test_mixed_changes_to_flash_full():
     plan = decide(["kernel/new/vendor/lechao/LcIod/lciod_usbd.c",
                    "vendor/lechao/services/lechao_lciod/hal/hal_service.cpp"])
     assert plan.mode == DeployMode.FLASH_FULL
+
+
+def test_lcview_cpp_changes_to_push_single():
+    plan = decide(["vendor/lechao/services/lechao_lcview/hal/LcView.cpp"])
+    assert plan.mode == DeployMode.PUSH_SINGLE
+    assert not plan.requires_reboot
+    assert plan.deploy_targets[0].artifact_name == "lechao_lcview_hal"
+    assert plan.deploy_targets[1].artifact_name == "lechao_lcview"
+
+
+def test_lcview_rc_changes_to_dd_boot():
+    plan = decide(["vendor/lechao/services/lechao_lcview/hal/lechao_lcview_hal.rc"])
+    assert plan.mode == DeployMode.DD_BOOT_REBOOT

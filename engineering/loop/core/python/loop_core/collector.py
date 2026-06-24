@@ -17,6 +17,8 @@ class Collector:
     通过 transport 执行命令列表，采集输出作为 AI 分析证据。
     """
 
+    _HOST_CMD_MIN_TIMEOUT = 5.0
+
     def __init__(self, transport) -> None:
         self.transport = transport
 
@@ -126,7 +128,8 @@ class Collector:
             for cmd in commands:
                 start = time.monotonic()
                 try:
-                    result = run_host_command(cmd, capture_timeout)
+                    host_timeout = max(capture_timeout, self._HOST_CMD_MIN_TIMEOUT)
+                    result = run_host_command(cmd, host_timeout)
                     outputs.append({
                         "command": cmd,
                         "lines": result.output.splitlines(),
