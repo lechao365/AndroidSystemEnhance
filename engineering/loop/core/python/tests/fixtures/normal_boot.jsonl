@@ -1,7 +1,0 @@
-{"t": 0.0, "text": "Booting Linux on physical CPU 0x0"}
-{"t": 0.5, "text": "Linux version 6.1.0-android14-loom (gcc version 13) #1 SMP PREEMPT"}
-{"t": 1.2, "text": "Machine model: Raspberry Pi 5 Model B Rev 1.0"}
-{"t": 2.0, "text": "console [ram0] enabled"}
-{"t": 3.5, "text": "init: starting service 'zygote'"}
-{"t": 8.0, "text": "init: starting service 'media'"}
-{"t": 12.0, "text": "console:/ $"}

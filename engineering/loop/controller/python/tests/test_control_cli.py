@@ -403,3 +403,201 @@ def test_revert_no_stash_ref(tmp_path: Path):
     from loop_controller.control_cli import _handle_control_revert
     rc = _handle_control_revert(argparse.Namespace(session=str(artifacts / "session.json")))
     assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# D2: compile SKIP 降级修正
+# ---------------------------------------------------------------------------
+
+def _compile_args(session_path: Path) -> "argparse.Namespace":
+    import argparse
+    return argparse.Namespace(session=str(session_path), workspace_root="")
+
+
+def test_compile_skip_stays_skip_for_docs_only(tmp_path: Path, monkeypatch):
+    """compile: diff 全是 .md 文件时保持 SKIP，不误触发编译。"""
+    import loop_deploy.models as dm
+    from loop_deploy.models import CompileResult
+
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    session = _make_session(artifacts, current_attempt=1, status="FAIL")
+    (artifacts / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+    monkeypatch.setattr("loop_deploy.decider.get_diff_files", lambda rev="HEAD": ["docs/foo.md"])
+    monkeypatch.setattr(
+        "loop_deploy.compiler.compile_plan",
+        lambda plan, ws="": CompileResult(success=True, artifacts=[]),
+    )
+    monkeypatch.setattr("os.environ.get", lambda *a, **kw: "/tmp")
+
+    from loop_controller.control_cli import _handle_control_compile
+    rc, _ = _capture_stdout(_handle_control_compile, _compile_args(artifacts / "session.json"))
+    assert rc == 0
+
+    loaded = json.loads((artifacts / "session.json").read_text(encoding="utf-8"))
+    last = loaded["attempts"][-1]
+    assert last["compile_result"] == "SUCCESS"
+
+
+def test_compile_skip_downgrades_for_code(tmp_path: Path, monkeypatch):
+    """compile: diff 含 .cpp 文件时 SKIP 降级为 PUSH_SINGLE。"""
+    import loop_deploy.models as dm
+    from loop_deploy.models import CompileResult
+
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    session = _make_session(artifacts, current_attempt=1, status="FAIL")
+    (artifacts / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+    monkeypatch.setattr(
+        "loop_deploy.decider.get_diff_files",
+        lambda rev="HEAD": ["docs/foo.md", "vendor/bar/hello.cpp"],
+    )
+    monkeypatch.setattr(
+        "loop_deploy.compiler.compile_plan",
+        lambda plan, ws="": CompileResult(success=True, artifacts=[]),
+    )
+    monkeypatch.setattr("os.environ.get", lambda *a, **kw: "/tmp")
+
+    from loop_controller.control_cli import _handle_control_compile
+    rc, _ = _capture_stdout(_handle_control_compile, _compile_args(artifacts / "session.json"))
+    assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# A1: deploy 子命令闭环（写 session + 异常处理）
+# ---------------------------------------------------------------------------
+
+def _deploy_args(session_path: Path, adb_endpoint: str = "") -> "argparse.Namespace":
+    import argparse
+    return argparse.Namespace(
+        session=str(session_path),
+        adb_endpoint=adb_endpoint,
+    )
+
+
+def test_deploy_writes_session_on_success(tmp_path: Path, monkeypatch):
+    """deploy 成功时 session 应追加 deploy_result=SUCCESS 的 attempt。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    session = _make_session(artifacts, current_attempt=1, status="FAIL")
+    (artifacts / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(
+        a[0] if a else [], 0, stdout="DEPLOY OK", stderr=""))
+
+    from loop_controller.control_cli import _handle_control_deploy
+    rc, _ = _capture_stdout(_handle_control_deploy, _deploy_args(artifacts / "session.json"))
+    assert rc == 0
+
+    loaded = json.loads((artifacts / "session.json").read_text(encoding="utf-8"))
+    last = loaded["attempts"][-1]
+    assert last["deploy_result"] == "SUCCESS"
+    assert last["failure_code"] == ""
+    assert last["verify_result"] == "DEPLOYED"
+
+
+def test_deploy_writes_session_on_failure(tmp_path: Path, monkeypatch):
+    """deploy 失败时 session 应追加 failure_code=DEPLOY_FATAL。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    session = _make_session(artifacts, current_attempt=1, status="FAIL")
+    (artifacts / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(
+        a[0] if a else [], 1, stdout="", stderr="DEPLOY FAILED: push error"))
+
+    from loop_controller.control_cli import _handle_control_deploy
+    rc, _ = _capture_stdout(_handle_control_deploy, _deploy_args(artifacts / "session.json"))
+    assert rc == 1
+
+    loaded = json.loads((artifacts / "session.json").read_text(encoding="utf-8"))
+    last = loaded["attempts"][-1]
+    assert last["deploy_result"] == "FAILED"
+    assert last["failure_code"] == "DEPLOY_FATAL"
+    assert "push error" in last["deploy_error"]
+
+
+def test_deploy_handles_timeout(tmp_path: Path, monkeypatch):
+    """deploy 超时时 session 应记录 deploy_error 并返回 1。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    session = _make_session(artifacts, current_attempt=1, status="FAIL")
+    (artifacts / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+    def raise_timeout(*a, **kw):
+        raise subprocess.TimeoutExpired(cmd="deploy", timeout=3600)
+
+    monkeypatch.setattr(subprocess, "run", raise_timeout)
+
+    from loop_controller.control_cli import _handle_control_deploy
+    rc, _ = _capture_stdout(_handle_control_deploy, _deploy_args(artifacts / "session.json"))
+    assert rc == 1
+
+    loaded = json.loads((artifacts / "session.json").read_text(encoding="utf-8"))
+    last = loaded["attempts"][-1]
+    assert last["deploy_result"] == "FAILED"
+    assert "timed out" in last["deploy_error"]
+
+
+# ---------------------------------------------------------------------------
+# A2: apply-patch 回滚失败时打印 WARNING
+# ---------------------------------------------------------------------------
+
+def test_apply_patch_rollback_warns_on_failure(tmp_path: Path, monkeypatch):
+    """apply-patch 失败且回滚 stash apply 也失败时，stderr 应含 WARNING。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    session = {
+        "session_id": "ap-rb", "artifacts_dir": str(artifacts),
+        "target": "lciod", "current_attempt": 1, "max_attempts": 5,
+        "status": "FAIL", "attempts": [],
+    }
+    (artifacts / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+    patch_data = [{"workspace_path": "test.cpp", "change_type": "edit",
+                   "old_marker": "old", "new_content": "new"}]
+    patch_file = artifacts / "patch.json"
+    patch_file.write_text(json.dumps(patch_data), encoding="utf-8")
+
+    monkeypatch.setattr("loop_controller.control_cli._load_target_paths", lambda target: [""])
+
+    call_count = {"git_stash_apply": 0}
+
+    def fake_git_run(cmd, **kwargs):
+        if "stash" in cmd and "create" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="fake_stash_ref_123", stderr="")
+        if "stash" in cmd and "apply" in cmd:
+            call_count["git_stash_apply"] += 1
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="merge conflict")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_git_run)
+    monkeypatch.setattr(
+        "loop_controller.patch_applier.apply_file_changes",
+        lambda changes, ws_root: __import__("loop_controller.patch_applier",
+                                            fromlist=["ApplyResult"]).ApplyResult(
+            success=False, applied_files=[], error="old_marker not found"),
+    )
+
+    import argparse
+    import io
+    captured_err = io.StringIO()
+    old_err = sys.stderr
+    sys.stderr = captured_err
+    try:
+        from loop_controller.control_cli import _handle_control_apply_patch
+        args = argparse.Namespace(
+            session=str(artifacts / "session.json"),
+            patch=str(patch_file),
+            workspace_root=str(tmp_path),
+        )
+        rc = _handle_control_apply_patch(args)
+    finally:
+        sys.stderr = old_err
+
+    assert rc == 1
+    assert call_count["git_stash_apply"] == 1
+    assert "WARNING" in captured_err.getvalue()
+    assert "rollback failed" in captured_err.getvalue()

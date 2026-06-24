@@ -1,4 +1,0 @@
-{"t": 0.0, "text": "Booting Linux on physical CPU 0x0"}
-{"t": 1.0, "text": "Linux version 6.1.0-android14-loom"}
-{"t": 3.0, "text": "init: starting service 'zygote'"}
-{"t": 4.0, "text": "console:/ $"}

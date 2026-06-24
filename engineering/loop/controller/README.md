@@ -7,7 +7,7 @@
 
 - **是什么**：loop engineering 控制面（session / attempt / 状态机 / terminate / retry / regression policy）。
 - **职责边界**：决策层，不含 transport / case 定义 / 产物 IO。
-- **上下游依赖**：依赖 `loop/contracts`（数据模型 + FailureCode），被 `loop/workflows` 与 `le.sh` 调用。
+- **上下游依赖**：依赖 `loop/contracts`（数据模型 + FailureCode），被 `le.sh` 调用。
 
 ## 大纲
 
@@ -22,13 +22,12 @@
 
 | 子目录/文件 | 职责 | 关键入口 |
 |------------|------|---------|
-| `python/loop_controller/engine.py` | `apply_stage_result`：把 StageResult 应用到 SessionState | 被 workflows 调用 |
-| `python/loop_controller/policy.py` | `decide_termination`：PASS→STOP / 超次数→STOP+escalate / 重复失败→STOP+escalate / 否则 RETRY | 被 workflows 调用 |
-| `python/loop_controller/state.py` | `new_session`：session 工厂 | 被 workflows 调用 |
+| `python/loop_controller/engine.py` | `apply_stage_result`：把 StageResult 应用到 SessionState | 被 control_cli 调用 |
+| `python/loop_controller/policy.py` | `decide_termination`：PASS→STOP / 超次数→STOP+escalate / 重复失败→STOP+escalate / 否则 RETRY | 被 control_cli 调用 |
+| `python/loop_controller/state.py` | `new_session`：session 工厂 | 被 control_cli 调用 |
 | `python/loop_controller/analyzer_protocol.py` | `AnalysisRequest` / `FileChange` / `PatchSuggestion` / `LlmAnalyzer` 抽象接口 | 被 control_cli / patch_applier 引用 |
 | `python/loop_controller/patch_applier.py` | `apply_file_changes`：将 `FileChange[]` 写入 workspace | `le control apply-patch` 调用 |
 | `python/loop_controller/patch_guard.py` | `check_white_list` / `detect_risk` / `check_syntax`：白名单校验 + 风险标记 + gcc 语法预检 | `le control apply-patch` 调用 |
-| `python/loop_controller/cycle_orchestrator.py` | `build_analysis_request` / `record_stage` / `decide_next_from_session`：单 attempt 编排 | 被 control_cli 调用 |
 | `python/loop_controller/control_cli.py` | `le control` 子命令：init / run-verify / analyze-request / deploy / decide / status / **apply-patch / compile / revert** | `le.sh` 入口 |
 | `python/loop_controller/__init__.py` | 导出 `apply_stage_result` / `decide_termination` / `new_session` / `add_control_parser` / `apply_file_changes` 等 | import 入口 |
 | `python/tests/` | `test_engine.py` / `test_policy.py` / `test_patch_applier.py` / `test_patch_guard.py` / `test_control_cli.py` | pytest |
@@ -75,6 +74,5 @@ PYTHONPATH="engineering/loop/core/python:engineering/loop/controller/python:engi
 
 | 类型 | 路径 | 说明 |
 |------|------|------|
-| 关联 workflow | `../workflows/` | 消费 controller 决策 |
 | 关联 workflow | `../contracts/` | 数据模型源 |
 | 设计文档 | `docs/specs/2026-06-19-loop-engineering-design.md` | 控制面设计 |

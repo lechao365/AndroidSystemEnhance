@@ -69,7 +69,7 @@ opencode (AI Driver)
     ↓ le run
 LE 框架 (loop_core)
     ├── case_loader       YAML 用例加载（include/requires）
-    ├── assertion_engine  确定性断言（6 种类型）
+    ├── assertion_engine  确定性断言（9 种类型）
     ├── executor          用例执行 + collector 触发
     ├── runner            通用 LoopRunner（场景无关）
     └── evidence          EvidenceBundle JSON 输出
@@ -300,7 +300,7 @@ shell 不可达时，AI/人工应优先分析 `serial_context`；shell 可达时
 2. **deploy 已实现**：`le deploy` + `le control deploy` 支持 push_single/dd_boot_reboot + 四阶段防护网
 3. **loop_ctrl 已实现**：`le control {init,run-verify,analyze-request,apply-patch,compile,revert,deploy,decide,status}` 全链路全自动闭环
 4. **FLASH_FULL 需人工刷机**：sepolicy/.te 大改动仍需人工物理重刷（serial 无 shell 时软件无法自救）
-5. **参数化用例**：case_loader 预留 parameters 字段，当前未实现展开
+5. **参数化用例已实现**：case_loader `_expand_parameterized_cases` 支持 `parameters` 字段展开（test_case_loader 已覆盖）
 
 > loop 控制面落地于 `engineering/loop/controller/`，不进入 `engineering/harness/`。
 

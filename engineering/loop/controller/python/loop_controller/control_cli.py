@@ -9,8 +9,36 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from loop_controller.cycle_orchestrator import build_analysis_request
 from loop_controller.analyzer_protocol import AnalysisRequest
+
+
+# ---------------------------------------------------------------------------
+# 路径常量（优先使用 harness_path_util，回退到相对路径）
+# ---------------------------------------------------------------------------
+def _resolve_loop_paths() -> tuple[str, str, str]:
+    """返回 (cases_dir, device_profile, target_paths_yaml) 绝对路径。
+
+    优先从 harness-paths.conf（单一事实源）解析；
+    若 harness_path_util 不可用（测试/独立运行），回退到 __file__ 相对推导。
+    """
+    try:
+        from harness_path_util import path as _hp
+        loop_dir = _hp("LOOP_DIR")
+        return (
+            str(_hp("LOOP_CASES_DIR")),
+            str(loop_dir / "connection" / "profiles" / "devices" / "rp5" / "adb.json"),
+            str(loop_dir / "config" / "target-paths.yaml"),
+        )
+    except (ImportError, RuntimeError, KeyError):
+        loop_dir = Path(__file__).resolve().parent.parent.parent.parent
+        return (
+            str(loop_dir / "cases"),
+            str(loop_dir / "connection" / "profiles" / "devices" / "rp5" / "adb.json"),
+            str(loop_dir / "config" / "target-paths.yaml"),
+        )
+
+
+_CASES_DIR, _DEVICE_PROFILE, _TARGET_PATHS_YAML = _resolve_loop_paths()
 
 
 def add_control_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -121,8 +149,8 @@ def _handle_control_run_verify(args: argparse.Namespace) -> int:
     cmd = [
         sys.executable, "-m", "loop_core.cli", "run",
         "--suite", args.suite,
-        "--case-dirs", "engineering/loop/cases",
-        "--device-profile", "engineering/loop/connection/profiles/devices/rp5/adb.json",
+        "--case-dirs", _CASES_DIR,
+        "--device-profile", _DEVICE_PROFILE,
         "--artifacts-dir", artifacts_dir,
     ]
     if args.adb_endpoint:
@@ -202,6 +230,9 @@ def _handle_control_analyze_request(args: argparse.Namespace) -> int:
 
 
 def _handle_control_deploy(args: argparse.Namespace) -> int:
+    session_data = _load_session(args.session)
+    artifacts_dir = session_data.get("artifacts_dir", os.path.dirname(args.session))
+
     cmd = [sys.executable, "-m", "loop_core.cli", "deploy", "--diff-rev", "HEAD"]
     if args.adb_endpoint:
         cmd += ["--adb-endpoint", args.adb_endpoint]
@@ -210,8 +241,39 @@ def _handle_control_deploy(args: argparse.Namespace) -> int:
     if extra_path:
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = f"{extra_path}:{existing}" if existing else extra_path
-    result = subprocess.run(cmd, timeout=3600, env=env)
-    return result.returncode
+
+    deploy_success = False
+    deploy_error = ""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, env=env)
+        rc = result.returncode
+        deploy_success = (rc == 0)
+        if not deploy_success:
+            deploy_error = (result.stderr or result.stdout or "")[-500:]
+    except subprocess.TimeoutExpired:
+        rc = 1
+        deploy_error = "deploy timed out (60min)"
+    except (OSError, ValueError) as e:
+        rc = 1
+        deploy_error = f"deploy subprocess error: {e}"
+
+    session_data.setdefault("attempts", []).append({
+        "attempt_index": session_data.get("current_attempt", 0),
+        "verify_result": "DEPLOYED" if deploy_success else "DEPLOY_FAILED",
+        "evidence_path": "",
+        "failed_cases": [],
+        "failure_code": "" if deploy_success else "DEPLOY_FATAL",
+        "deploy_result": "SUCCESS" if deploy_success else "FAILED",
+        "deploy_error": deploy_error,
+    })
+    _save_session(session_data, artifacts_dir)
+
+    if deploy_success:
+        print(f"deploy=OK")
+        return 0
+    else:
+        print(f"deploy=FAILED error={deploy_error}", file=sys.stderr)
+        return 1
 
 
 def _handle_control_decide(args: argparse.Namespace) -> int:
@@ -305,7 +367,7 @@ def _get_workspace_diff() -> str:
 
 def _load_target_paths(target: str) -> list[str]:
     import yaml
-    config_path = Path(__file__).resolve().parent.parent.parent.parent / "config" / "target-paths.yaml"
+    config_path = Path(_TARGET_PATHS_YAML)
     if not config_path.exists():
         return []
     try:
@@ -364,7 +426,13 @@ def _handle_control_apply_patch(args: argparse.Namespace) -> int:
     result = apply_file_changes(changes, ws_root)
     if not result.success:
         if stash_ref:
-            subprocess.run(["git", "stash", "apply", stash_ref], capture_output=True, timeout=10, cwd=ws_root)
+            rollback_r = subprocess.run(
+                ["git", "stash", "apply", stash_ref],
+                capture_output=True, text=True, timeout=10, cwd=ws_root,
+            )
+            if rollback_r.returncode != 0:
+                print(f"WARNING: rollback failed (stash apply rc={rollback_r.returncode}): "
+                      f"{(rollback_r.stderr or '')[:200]}", file=sys.stderr)
         print(f"apply failed: {result.error}", file=sys.stderr)
         return 1
 
@@ -408,15 +476,18 @@ def _handle_control_compile(args: argparse.Namespace) -> int:
     plan = decide(diff_files)
 
     if plan.mode == DeployMode.SKIP and diff_files:
-        plan = DeployPlan(
-            mode=DeployMode.PUSH_SINGLE,
-            changed_files=diff_files,
-            reason="manual compile",
-            build_targets=[],
-            deploy_targets=[],
-            requires_reboot=False,
-            estimated_seconds=600,
-        )
+        _COMPILABLE_SUFFIXES = {".cpp", ".c", ".cc", ".h", ".hpp", ".bp", ".java", ".kt"}
+        has_code = any(Path(f).suffix.lower() in _COMPILABLE_SUFFIXES for f in diff_files)
+        if has_code:
+            plan = DeployPlan(
+                mode=DeployMode.PUSH_SINGLE,
+                changed_files=diff_files,
+                reason="manual compile (code files detected despite SKIP decision)",
+                build_targets=[],
+                deploy_targets=[],
+                requires_reboot=False,
+                estimated_seconds=600,
+            )
 
     result = compile_plan(plan, ws_root)
 

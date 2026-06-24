@@ -81,7 +81,8 @@ class Deployer:
             return DeployResult(success=False, mode=DeployMode.DD_BOOT_REBOOT,
                                 error=f"adb push boot.img failed: {push_r.stderr}")
 
-        host_sha = hashlib.sha256(open(boot_img, "rb").read()).hexdigest()
+        with open(boot_img, "rb") as f:
+            host_sha = hashlib.sha256(f.read()).hexdigest()
         sha_result = self._client.shell(f"sha256sum {remote}", timeout_sec=10.0)
         remote_sha = sha_result.raw_stdout.strip().split()[0] if sha_result.command_exit_code == 0 else ""
         if host_sha != remote_sha:
@@ -105,7 +106,12 @@ class Deployer:
             return DeployResult(success=False, mode=DeployMode.DD_BOOT_REBOOT,
                                 error=f"health check failed: {e}")
 
-        self._client.shell("dd if=/data/local/tmp/boot.img of=/dev/block/mmcblk0p1 bs=4M", timeout_sec=30.0, as_root=True)
+        dd_r = self._client.shell("dd if=/data/local/tmp/boot.img of=/dev/block/mmcblk0p1 bs=4M", timeout_sec=30.0, as_root=True)
+        if dd_r.command_exit_code != 0:
+            return DeployResult(success=False, mode=DeployMode.DD_BOOT_REBOOT,
+                                requires_reboot=False,
+                                error=f"dd write failed (exit {dd_r.command_exit_code}): {(dd_r.raw_stdout or '')[:200]}",
+                                duration_seconds=time.time() - start)
         self._client.shell("sync", timeout_sec=10.0, as_root=True)
         self._client.shell(f"rm {remote}", timeout_sec=5.0, as_root=True)
         self._client.reboot(timeout_sec=15.0)
@@ -129,7 +135,7 @@ class Deployer:
             if a.endswith(name) or name in a:
                 return a
         if self._aosp_out:
-            for root, _dirs, files in Path(self._aosp_out).walk():
+            for root, _dirs, files in os.walk(self._aosp_out):
                 for f in files:
                     if f == name:
                         return str(Path(root) / f)

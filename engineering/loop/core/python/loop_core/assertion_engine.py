@@ -1,12 +1,15 @@
 """断言引擎：对用例输出求值确定性断言。
 
-支持 6 种断言类型：
+支持 9 种断言类型：
 - contains: 输出包含指定文本
 - regex: 输出匹配正则
 - equals: 输出完全等于
 - prompt_visible: prompt 标记可见
 - not_contains: 输出不包含指定文本
 - exit_code_zero: 命令退出码为 0
+- json_field: 解析 JSON 按 path 取字段后 op 比较
+- exit_code_equals: 命令退出码等于指定值
+- contains_any: 输出包含列表中任一项
 """
 from __future__ import annotations
 

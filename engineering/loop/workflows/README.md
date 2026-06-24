@@ -23,8 +23,6 @@
 | 子目录/文件 | 职责 | 关键入口 |
 |------------|------|---------|
 | `lcview-adb-run/` | 串口 bootstrap 后切 adb 跑 lcview suite，失败补采 serial fallback；含 `WORKFLOW.md` 契约 + `run_lcview_adb_suite.sh` 入口 | 被 `le.sh` 编排 |
-| `python/loop_workflows/base.py` | `WorkflowDefinition` dataclass（workflow_id + phases） | 被 import |
-| `python/loop_workflows/builtin.py` | `SingleRunVerifyWorkflow`（run→verify）/ `MultiPhaseVerifyWorkflow`（bootstrap→feature→fallback） | 被 import |
 
 ## 使用方式
 

@@ -7,7 +7,7 @@
 
 - **是什么**：loop 控制面 machine-readable contract（数据模型 + 失败码枚举）。
 - **职责边界**：纯数据定义层，不含逻辑 / transport / IO。
-- **上下游依赖**：无上游依赖（最底层），被 `loop/controller`、`loop/core`、`loop/workflows` 共享依赖。
+- **上下游依赖**：无上游依赖（最底层），被 `loop/controller` 共享依赖。
 
 ## 大纲
 
@@ -22,8 +22,8 @@
 
 | 子目录/文件 | 职责 | 关键入口 |
 |------------|------|---------|
-| `python/loop_contracts/models.py` | 四 dataclass：`StageResult`、`AttemptState`、`SessionState`、`TerminationDecision` | 被 controller / core / workflows import |
-| `python/loop_contracts/failure_codes.py` | `FailureCode` StrEnum：NONE / RUN_FAILED / EVIDENCE_INSUFFICIENT / REPEATED_FAILURE / REGRESSION_DETECTED / DEPLOY_FATAL / SESSION_STATE_ERROR | 被 policy 引用 |
+| `python/loop_contracts/models.py` | 四 dataclass：`StageResult`、`AttemptState`、`SessionState`、`TerminationDecision` | 被 controller import |
+| `python/loop_contracts/failure_codes.py` | `FailureCode` StrEnum：NONE / RUN_FAILED / EVIDENCE_INSUFFICIENT / REPEATED_FAILURE / REGRESSION_DETECTED / DEPLOY_FATAL / SESSION_STATE_ERROR / COMPILE_FAILED / PATCH_REJECTED / BOOT_TIMEOUT_ROLLBACK | 被 policy 引用 |
 | `python/loop_contracts/__init__.py` | 导出五符号（AttemptState / FailureCode / SessionState / StageResult / TerminationDecision） | import 入口 |
 | `python/tests/test_models.py` | 数据模型单元测试 | pytest |
 
