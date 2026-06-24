@@ -6,8 +6,9 @@ lciod:
   - device/brcm/rpi5/sepolicy/lechao_lciod/
   - device/brcm/rpi5/lciod/
 lcview:
-  - vendor/lcview/
-  - device/brcm/rpi5/lcview/
+  - vendor/lechao/services/lechao_lcview/
+  - device/brcm/rpi5/sepolicy/lechao_lcview.te
+  - device/brcm/rpi5/sepolicy/lechao_lcview_hal.te
 system.boot:
   - device/brcm/rpi5/
   - vendor/brcm/
