@@ -23,6 +23,7 @@ def test_session_state_tracks_attempts():
         session_id="sess-001",
         workflow_id="single_run_verify",
         target="system.boot",
+        suite="test",
         max_attempts=5,
     )
     assert session.current_attempt == 0
