@@ -29,10 +29,10 @@
 | `scripts/` | CLI 入口 le.sh + host 启动脚本 | 详见 `scripts/README.md` |
 | `templates/case-template.md` | AI 用例生成约束模板 |
 | `workflows/` | loop 专属 workflow（lcview-adb-run） | 详见 `workflows/README.md` |
-| `controller/` | loop 控制层（已实现，含 `loop_controller` Python 包：session/状态机/policy/apply-patch/revert） | 详见 `controller/README.md` |
-| `contracts/` | loop 契约层（已实现，含 `loop_contracts` Python 包：数据模型 + FailureCode 失败码枚举） | 详见 `contracts/README.md` |
+| `controller/` | loop 控制面与 runtime 编排中心（`loop_controller` Python 包：状态图 runtime engine + guard + checkpoint + stages + patch） | 详见 `controller/README.md` |
+| `contracts/` | loop 契约层（`loop_contracts` Python 包：LoopSession / RuntimeState / CheckpointRecord / FailureCode） | 详见 `contracts/README.md` |
 | `config/` | loop 配置文件（`target-paths.yaml` 等补丁白名单） | 被 `controller/patch_guard.py` 读取 |
-| `deploy/` | loop 部署契约层（`loop_deploy` Python 包） | 被 `le control deploy` 调用 |
+| `deploy/` | loop 部署层（`loop_deploy` Python 包：compile / deploy / rollback / image_verify） | 被 runtime nodes 与 `le control deploy` 调用 |
 | `WORKFLOW.md` | **流程细节单一事实源**（架构拓扑 / core 模块 / 断言类型 / run_on / 场景细节 / serial_context / 诊断约束） | 被 `/le` 注入 |
 
 > 子目录自身的细节见其 `README.md`，本表只给一句话索引。流程级细节见 WORKFLOW.md。
