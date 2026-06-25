@@ -50,3 +50,39 @@ def test_checkpoint_store_round_trip_failure_code(tmp_path: Path):
     loaded = store.latest()
     assert loaded is not None
     assert loaded.failure_code == FailureCode.COMPILE_FAILED
+
+
+def test_checkpoint_store_filters_by_session_id(tmp_path: Path):
+    """latest()/all() must only return checkpoints for the constructed session."""
+    from loop_contracts.models import CheckpointRecord
+
+    # Write checkpoints for two different sessions into the same artifacts dir
+    store_a = CheckpointStore(str(tmp_path), "sess-A")
+    store_a.save(CheckpointRecord(
+        checkpoint_id="a-1", session_id="sess-A", attempt_index=1,
+        current_node="RUN_VERIFY", input_summary={}, output_summary={},
+        failure_code=FailureCode.NONE, matched_guards=[],
+        next_node="DECIDE_NEXT", timestamp="2026-06-26T10:00:00+08:00",
+    ))
+    store_b = CheckpointStore(str(tmp_path), "sess-B")
+    store_b.save(CheckpointRecord(
+        checkpoint_id="b-1", session_id="sess-B", attempt_index=1,
+        current_node="INIT_SESSION", input_summary={}, output_summary={},
+        failure_code=FailureCode.NONE, matched_guards=[],
+        next_node="RUN_VERIFY", timestamp="2026-06-26T11:00:00+08:00",
+    ))
+
+    # store_a should only see sess-A checkpoint despite sess-B being newer
+    latest_a = store_a.latest()
+    assert latest_a is not None
+    assert latest_a.session_id == "sess-A"
+    assert latest_a.checkpoint_id == "a-1"
+
+    # store_b should only see sess-B checkpoint
+    latest_b = store_b.latest()
+    assert latest_b is not None
+    assert latest_b.session_id == "sess-B"
+
+    # all() also filters
+    assert len(store_a.all()) == 1
+    assert len(store_b.all()) == 1

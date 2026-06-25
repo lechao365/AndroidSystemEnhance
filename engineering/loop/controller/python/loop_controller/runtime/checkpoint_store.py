@@ -25,13 +25,24 @@ class CheckpointStore:
         lines = self._path.read_text(encoding="utf-8").strip().splitlines()
         if not lines:
             return None
-        return self._from_line(lines[-1])
+        # Scan from the end for the latest checkpoint belonging to this session.
+        for line in reversed(lines):
+            if not line:
+                continue
+            cp = self._from_line(line)
+            if cp.session_id == self._session_id:
+                return cp
+        return None
 
     def all(self) -> list[CheckpointRecord]:
         if not self._path.exists():
             return []
         lines = self._path.read_text(encoding="utf-8").strip().splitlines()
-        return [self._from_line(line) for line in lines if line]
+        return [
+            self._from_line(line)
+            for line in lines
+            if line and self._from_line(line).session_id == self._session_id
+        ]
 
     def _from_line(self, line: str) -> CheckpointRecord:
         data = json.loads(line)

@@ -96,9 +96,9 @@ class LoopRuntime:
         updated, stage_result = stages.run_verify_stage(
             str(session_path), self._session.suite, ""
         )
-        self._session.current_attempt = updated["current_attempt"]
-        self._session.status = updated["status"]
-        self._session.attempts = updated["attempts"]
+        self._session.current_attempt = updated.get("current_attempt", self._session.current_attempt)
+        self._session.status = updated.get("status", stage_result.status)
+        self._session.attempts = updated.get("attempts", self._session.attempts)
         self._session.latest_failure_code = stage_result.failure_code
         self._state.node_status = stage_result.status
         self._checkpoint(f"verify {stage_result.status}", stage_result.failure_code)
@@ -139,18 +139,22 @@ class LoopRuntime:
     # -- transition & checkpoint -------------------------------------------
 
     def _transition(self) -> None:
-        node = self._state.current_node
-        next_node = _LINEAR_NEXT.get(node, "")
-        # DECIDE_NEXT is a branch point: STOP terminals are handled inside
-        # _execute_decide_next; a RETRY routes to BUILD_ANALYSIS_REQUEST.
-        if node == NodeKind.DECIDE_NEXT.value and self._state.node_status == "RETRY":
-            next_node = NodeKind.BUILD_ANALYSIS_REQUEST.value
+        next_node = self._compute_next_node()
         if next_node:
             self._state.previous_node = self._state.current_node
             self._state.current_node = next_node
 
+    def _compute_next_node(self) -> str:
+        """Compute the next node from the current state (used by both _transition and _checkpoint)."""
+        node = self._state.current_node
+        # DECIDE_NEXT is a branch point: STOP terminals are handled inside
+        # _execute_decide_next; a RETRY routes to BUILD_ANALYSIS_REQUEST.
+        if node == NodeKind.DECIDE_NEXT.value and self._state.node_status == "RETRY":
+            return NodeKind.BUILD_ANALYSIS_REQUEST.value
+        return _LINEAR_NEXT.get(node, "")
+
     def _checkpoint(self, reason: str, failure_code: FailureCode) -> None:
-        next_node = _LINEAR_NEXT.get(self._state.current_node, "")
+        next_node = self._compute_next_node()
         cp = CheckpointRecord(
             checkpoint_id=f"cp-{uuid.uuid4().hex[:12]}",
             session_id=self._session.session_id,
