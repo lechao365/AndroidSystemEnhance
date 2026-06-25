@@ -37,6 +37,7 @@
 1. **协议与实现分离**：`protocol/` 定义 host/client 契约，provider 实现遵循但不内嵌协议定义。
 2. **profile 与运行配置分离**：`profiles/` 描述设备语义（prompt marker / boot marker / timeout 等），provider 自身只保留最小运行配置。
 3. **provider 自治**：每个 provider 同仓管理 host/client/shared/tests，运行位置可不同但代码集中。
+4. **Runtime 边界**：connection providers 只负责传输与数据转发，不包含任何业务编排逻辑。所有 verify → decide → analyze → patch → compile → deploy → rerun 编排均由 runtime 引擎（`loop/controller/runtime/`）驱动。
 
 ## 关联资源
 
