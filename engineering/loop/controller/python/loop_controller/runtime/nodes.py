@@ -175,12 +175,11 @@ def node_compile(session_dict: dict, workspace_root: str = "") -> dict:
     }
 
 
-def node_deploy(
-    session_dict: dict, artifacts: list[str] | None = None, adb_endpoint: str = ""
-) -> dict:
+def node_deploy(session_dict: dict, adb_endpoint: str = "") -> dict:
     """部署到设备。
 
     当前实现委托给 loop_core.cli deploy subprocess（与旧 control_cli 一致）。
+    部署由 git diff HEAD 驱动，编译产物由 workspace 落盘后自动发现。
     返回 {status, failure_code, mode, error}。
     """
     cmd = [sys.executable, "-m", "loop_core.cli", "deploy", "--diff-rev", "HEAD"]
