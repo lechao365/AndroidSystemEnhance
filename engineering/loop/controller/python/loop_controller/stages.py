@@ -120,6 +120,13 @@ def _build_env() -> dict:
 def run_verify_stage(session_path: str, suite: str, adb_endpoint: str) -> tuple[dict, StageResult]:
     """执行一次验证，返回 (updated_session_dict, StageResult)。"""
     session_data = _load_session(session_path)
+    # 与旧 control_cli 保持一致的空 session 回退语义
+    if not session_data:
+        session_data = {
+            "session_id": os.path.basename(session_path) if not os.path.isdir(session_path) else "unknown",
+            "current_attempt": 0,
+            "max_attempts": 5,
+        }
     artifacts_dir = session_data.get(
         "artifacts_dir",
         os.path.dirname(session_path) if os.path.isfile(session_path) else session_path,
@@ -205,7 +212,6 @@ def analyze_request_stage(session_data: dict) -> str:
 
 def decide_stage(session_data: dict) -> dict[str, object]:
     """判定下一步：返回 {decision, reason, should_escalate, failure_code}。"""
-    from loop_contracts.models import StageResult
     from loop_controller.policy import decide_termination
 
     status = session_data.get("status", "PENDING")

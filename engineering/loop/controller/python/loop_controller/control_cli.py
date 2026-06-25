@@ -19,6 +19,7 @@ from loop_controller.stages import (  # noqa: F401  (re-exported for tests/monke
     _CASES_DIR,
     _DEVICE_PROFILE,
     _TARGET_PATHS_YAML,
+    _build_env,
     _extract_failed_cases,
     _get_workspace_diff,
     _load_session,
@@ -122,11 +123,7 @@ def _handle_control_deploy(args: argparse.Namespace) -> int:
     cmd = [sys.executable, "-m", "loop_core.cli", "deploy", "--diff-rev", "HEAD"]
     if args.adb_endpoint:
         cmd += ["--adb-endpoint", args.adb_endpoint]
-    env = os.environ.copy()
-    extra_path = ":".join(p for p in sys.path if "loop" in p or "engineering" in p)
-    if extra_path:
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = f"{extra_path}:{existing}" if existing else extra_path
+    env = _build_env()
 
     deploy_success = False
     deploy_error = ""
