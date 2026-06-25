@@ -54,5 +54,6 @@ class GuardEvalRequest:
 @dataclass
 class GuardEvalResult:
     matched: bool
+    guard_name: str = ""
     next_node: str = ""
     reason: str = ""

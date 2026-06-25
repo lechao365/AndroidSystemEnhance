@@ -113,5 +113,6 @@ def guard_chain(guard_names: list[str], req: GuardEvalRequest) -> GuardEvalResul
             previous_patch_hashes=req.previous_patch_hashes,
         ))
         if result.matched:
+            result.guard_name = name
             return result
     return GuardEvalResult(matched=False)

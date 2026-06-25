@@ -104,23 +104,44 @@ class LoopRuntime:
         self._checkpoint(f"verify {stage_result.status}", stage_result.failure_code)
 
     def _execute_decide_next(self) -> None:
+        from loop_controller.runtime.guards import guard_chain
         decision = stages.decide_stage(self._to_session_dict())
         self._state.transition_reason = str(decision.get("reason", ""))
         try:
             fc = FailureCode(decision.get("failure_code", "NONE"))
         except ValueError:
             fc = FailureCode.NONE
-
-        if decision["decision"] == "STOP":
-            if decision.get("should_escalate"):
+        guard_req = self._build_guard_eval_request()
+        guard_result = guard_chain(
+            [
+                "all_cases_passed",
+                "attempt_limit_reached",
+                "repeated_failure_code",
+                "duplicate_patch_hash",
+                "kernel_dead_no_shell",
+                "patch_rejected",
+                "attempts_below_limit",
+            ],
+            guard_req,
+        )
+        matched_guards: list[str] = []
+        if guard_result.matched:
+            matched_guards.append(guard_result.guard_name)
+            next_nk = NodeKind(guard_result.next_node)
+            if next_nk == NodeKind.ESCALATE_HUMAN:
                 self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
-            else:
+                self._state.pending_human_gate = True
+            elif next_nk == NodeKind.DONE_SUCCESS:
                 self._state.terminal_state = RuntimeTerminalState.DONE_SUCCESS
-            self._checkpoint(f"decide=STOP/{decision.get('reason', '')}", fc)
+            # Non-terminal guard → drive transition via _compute_next_node
+            self._state.node_status = "RETRY" if self._state.terminal_state == RuntimeTerminalState.NONE else guard_result.reason
         else:
-            # RETRY: route to BUILD_ANALYSIS_REQUEST to request a fresh patch.
             self._state.node_status = "RETRY"
-            self._checkpoint(f"decide=RETRY/{decision.get('reason', '')}", fc)
+        self._checkpoint(
+            f"decide={guard_result.reason or 'RETRY'}",
+            fc,
+            matched_guards=matched_guards,
+        )
 
     def _execute_build_analysis_request(self) -> None:
         stages.analyze_request_stage(self._to_session_dict())
@@ -153,7 +174,7 @@ class LoopRuntime:
             return NodeKind.BUILD_ANALYSIS_REQUEST.value
         return _LINEAR_NEXT.get(node, "")
 
-    def _checkpoint(self, reason: str, failure_code: FailureCode) -> None:
+    def _checkpoint(self, reason: str, failure_code: FailureCode, matched_guards: list[str] | None = None) -> None:
         next_node = self._compute_next_node()
         cp = CheckpointRecord(
             checkpoint_id=f"cp-{uuid.uuid4().hex[:12]}",
@@ -163,12 +184,47 @@ class LoopRuntime:
             input_summary={"suite": self._session.suite},
             output_summary={"node_status": self._state.node_status, "reason": reason},
             failure_code=failure_code,
-            matched_guards=[],
+            matched_guards=matched_guards or [],
             next_node=next_node,
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%S+08:00"),
         )
         self._store.save(cp)
         self._state.last_checkpoint_at = cp.timestamp
+
+    def _build_guard_eval_request(self):
+        from loop_controller.runtime.types import GuardEvalRequest
+        previous_codes: list[FailureCode] = []
+        previous_hashes: list[str] = []
+        latest_attempt: dict = {}
+        if self._session.attempts:
+            for att in self._session.attempts[:-1]:
+                if isinstance(att, dict):
+                    fc_str = att.get("failure_code", "")
+                    ph = att.get("patch_applied", {}).get("patch_hash", "")
+                else:
+                    fc_str = getattr(att, "failure_code", "") or ""
+                    ph = ""
+                if fc_str:
+                    try:
+                        previous_codes.append(FailureCode(fc_str))
+                    except ValueError:
+                        pass
+                if ph:
+                    previous_hashes.append(ph)
+            latest = self._session.attempts[-1] if self._session.attempts else {}
+            latest_attempt = latest if isinstance(latest, dict) else {}
+        current_hash = latest_attempt.get("patch_applied", {}).get("patch_hash", "") if isinstance(latest_attempt, dict) else ""
+
+        return GuardEvalRequest(
+            guard_name="",
+            attempt_count=self._session.current_attempt,
+            max_attempts=self._session.max_attempts,
+            latest_status=self._state.node_status or self._session.status,
+            latest_failure_code=self._session.latest_failure_code,
+            previous_failure_codes=previous_codes,
+            current_patch_hash=current_hash,
+            previous_patch_hashes=previous_hashes,
+        )
 
     def _to_session_dict(self) -> dict:
         return {
