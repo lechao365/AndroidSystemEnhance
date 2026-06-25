@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from pathlib import Path
@@ -14,8 +15,10 @@ from loop_contracts.models import (
 )
 from loop_controller.runtime.types import NodeKind
 from loop_controller.runtime.checkpoint_store import CheckpointStore
+from loop_controller.runtime.guards import guard_chain
 
 import loop_controller.stages as stages
+from loop_controller.runtime import nodes as _runtime_nodes
 
 # Linear transitions: node -> next node (no branch condition required).
 _LINEAR_NEXT: dict[str, str] = {
@@ -24,7 +27,6 @@ _LINEAR_NEXT: dict[str, str] = {
     NodeKind.BUILD_ANALYSIS_REQUEST.value: NodeKind.WAIT_ANALYZER_PATCH.value,
     NodeKind.WAIT_ANALYZER_PATCH.value: NodeKind.APPLY_PATCH.value,
     NodeKind.APPLY_PATCH.value: NodeKind.COMPILE_PATCH.value,
-    NodeKind.COMPILE_PATCH.value: NodeKind.DEPLOY_PATCH.value,
     NodeKind.DEPLOY_PATCH.value: NodeKind.RUN_VERIFY.value,
     NodeKind.REVERT_PATCH.value: NodeKind.DECIDE_NEXT.value,
 }
@@ -78,14 +80,88 @@ class LoopRuntime:
         elif node == NodeKind.WAIT_ANALYZER_PATCH.value:
             self._execute_wait_analyzer_patch()
         elif node == NodeKind.APPLY_PATCH.value:
-            # Placeholder: full implementation arrives in Task 4 (nodes.py)
-            self._state.node_status = "PATCH_NODE_PENDING"
+            patch_path = os.path.join(self._session.artifacts_dir, "patch_suggestion.json")
+            if not os.path.isfile(patch_path):
+                self._state.node_status = "NO_PATCH_FILE"
+                self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
+                self._state.pending_human_gate = True
+                self._checkpoint("no patch file found", FailureCode.PATCH_REJECTED)
+                return
+            result = _runtime_nodes.node_apply_patch(patch_path, self._to_session_dict(), "")
+            self._state.node_status = result["status"]
+            fc = result.get("failure_code", FailureCode.NONE)
+            if isinstance(fc, str):
+                fc = FailureCode(fc)
+            self._session.latest_failure_code = fc
+            if result["status"] == "APPLIED":
+                pa = {
+                    "patch_hash": result.get("patch_hash", ""),
+                    "stash_ref": result.get("stash_ref", ""),
+                    "workspace_root": result.get("workspace_root", ""),
+                    "risk": result.get("risk", {}),
+                }
+                latest = self._session.attempts[-1] if self._session.attempts else None
+                if isinstance(latest, dict):
+                    latest["patch_applied"] = pa
+                    if not self._session.attempts:
+                        self._session.attempts.append(latest)
+                elif latest is not None and hasattr(latest, "patch_applied"):
+                    latest.patch_applied = pa
+                    if not self._session.attempts:
+                        self._session.attempts.append(latest)
+                else:
+                    self._session.attempts.append({"patch_applied": pa})
+            guard_req = self._build_guard_eval_request()
+            guard_result = guard_chain(["patch_rejected", "patch_applied_successfully"], guard_req)
+            matched_guards = []
+            if guard_result.matched:
+                matched_guards.append(guard_result.guard_name)
+                next_nk = NodeKind(guard_result.next_node)
+                if next_nk == NodeKind.ESCALATE_HUMAN:
+                    self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
+                    self._state.pending_human_gate = True
+            self._checkpoint(f"apply_patch={result['status']}", fc, matched_guards=matched_guards)
         elif node == NodeKind.COMPILE_PATCH.value:
-            self._state.node_status = "COMPILE_NODE_PENDING"
+            result = _runtime_nodes.node_compile(self._to_session_dict(), "")
+            self._state.node_status = result["status"]
+            fc = result.get("failure_code", FailureCode.NONE)
+            if isinstance(fc, str):
+                fc = FailureCode(fc)
+            self._session.latest_failure_code = fc
+            if result["status"] == "COMPILE_FAILED":
+                guard_req = self._build_guard_eval_request()
+                guard_result = guard_chain(["compile_failed_but_recoverable"], guard_req)
+                if guard_result.matched:
+                    self._state.node_status = "COMPILE_FAILED_REVERT"
+            self._checkpoint(f"compile={result['status']}", fc)
         elif node == NodeKind.DEPLOY_PATCH.value:
-            self._state.node_status = "DEPLOY_NODE_PENDING"
+            result = _runtime_nodes.node_deploy(self._to_session_dict(), adb_endpoint="")
+            self._state.node_status = result["status"]
+            fc = result.get("failure_code", FailureCode.NONE)
+            if isinstance(fc, str):
+                fc = FailureCode(fc)
+            self._session.latest_failure_code = fc
+            if result["status"] == "DEPLOY_FAILED":
+                guard_req = self._build_guard_eval_request()
+                guard_result = guard_chain(
+                    ["kernel_dead_no_shell", "deploy_failed_but_recoverable"], guard_req,
+                )
+                if guard_result.matched:
+                    next_nk = NodeKind(guard_result.next_node)
+                    if next_nk == NodeKind.ESCALATE_HUMAN:
+                        self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
+                        self._state.pending_human_gate = True
+                    elif next_nk == NodeKind.DECIDE_NEXT:
+                        self._state.node_status = "DEPLOY_FAILED_RECOVERABLE"
+            self._checkpoint(f"deploy={result['status']}", fc)
         elif node == NodeKind.REVERT_PATCH.value:
-            self._state.node_status = "REVERT_NODE_PENDING"
+            result = _runtime_nodes.node_revert(self._to_session_dict())
+            self._state.node_status = result["status"]
+            fc = result.get("failure_code", FailureCode.NONE)
+            if isinstance(fc, str):
+                fc = FailureCode(fc)
+            self._session.latest_failure_code = fc
+            self._checkpoint(f"revert={result['status']}", fc)
 
     def _execute_run_verify(self) -> None:
         session_path = Path(self._session.artifacts_dir) / "session.json"
@@ -104,7 +180,6 @@ class LoopRuntime:
         self._checkpoint(f"verify {stage_result.status}", stage_result.failure_code)
 
     def _execute_decide_next(self) -> None:
-        from loop_controller.runtime.guards import guard_chain
         decision = stages.decide_stage(self._to_session_dict())
         self._state.transition_reason = str(decision.get("reason", ""))
         try:
@@ -149,9 +224,13 @@ class LoopRuntime:
         self._checkpoint("analysis_request written", FailureCode.NONE)
 
     def _execute_wait_analyzer_patch(self) -> None:
-        # Analyzer is an external boundary (main session AI). In full-auto mode,
-        # reaching this node requires a human/AI to produce a patch; the loop
-        # therefore escalates here. Full patch automation arrives in Task 4.
+        # In full-auto mode: if patch_suggestion.json already exists, proceed to APPLY_PATCH.
+        # Otherwise, escalate for human/AI to produce a patch.
+        patch_path = os.path.join(self._session.artifacts_dir, "patch_suggestion.json")
+        if os.path.isfile(patch_path):
+            self._state.node_status = "PATCH_READY"
+            self._checkpoint("patch file ready for apply", FailureCode.NONE)
+            return
         self._state.node_status = "WAITING_PATCH"
         self._state.pending_human_gate = True
         self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
@@ -172,6 +251,12 @@ class LoopRuntime:
         # _execute_decide_next; a RETRY routes to BUILD_ANALYSIS_REQUEST.
         if node == NodeKind.DECIDE_NEXT.value and self._state.node_status == "RETRY":
             return NodeKind.BUILD_ANALYSIS_REQUEST.value
+        if node == NodeKind.COMPILE_PATCH.value:
+            if self._state.node_status.startswith("COMPILE_FAILED"):
+                return NodeKind.REVERT_PATCH.value
+            return NodeKind.DEPLOY_PATCH.value
+        if node == NodeKind.DEPLOY_PATCH.value and self._state.node_status == "DEPLOY_FAILED_RECOVERABLE":
+            return NodeKind.DECIDE_NEXT.value
         return _LINEAR_NEXT.get(node, "")
 
     def _checkpoint(self, reason: str, failure_code: FailureCode, matched_guards: list[str] | None = None) -> None:

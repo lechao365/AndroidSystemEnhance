@@ -135,3 +135,69 @@ def test_runtime_guard_chain_escalate_on_limit(tmp_path: Path, monkeypatch):
     decide_cps = [cp for cp in cps if cp.current_node == "DECIDE_NEXT"]
     assert len(decide_cps) >= 1
     assert "attempt_limit_reached" in decide_cps[0].matched_guards
+
+
+def test_runtime_wires_apply_compile_deploy(tmp_path, monkeypatch):
+    """patched FAIL cycle routes APPLY->COMPILE->DEPLOY->RUN_VERIFY->DONE_SUCCESS"""
+    _write_bundle(tmp_path, "FAIL", 1)
+
+    call_log = []
+
+    def fake_run(cmd, **kwargs):
+        cmd_str = " ".join(cmd)
+        call_log.append(cmd_str)
+        class R:
+            stdout = ""
+            stderr = ""
+            # first verify call returns fail (1), subsequent verify returns pass (0)
+            if "loop_core.cli" in cmd_str:
+                if len([c for c in call_log if "loop_core.cli" in c]) == 1:
+                    returncode = 1
+                else:
+                    returncode = 0
+            else:
+                returncode = 0
+        return R()
+
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+
+    # mock nodes.py handlers to return success
+    from loop_contracts.failure_codes import FailureCode as FC
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_apply_patch",
+        lambda patch_path, session_dict, workspace_root: {
+            "status": "APPLIED", "failure_code": FC.NONE,
+            "files": ["test.cpp"], "stash_ref": "fake-stash",
+            "patch_hash": "abc123", "risk": {},
+            "workspace_root": str(tmp_path),
+        },
+    )
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_compile",
+        lambda session_dict, workspace_root: {
+            "status": "COMPILED", "failure_code": FC.NONE,
+            "artifacts": ["out/test"],
+        },
+    )
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_deploy",
+        lambda session_dict, adb_endpoint: {
+            "status": "DEPLOYED", "failure_code": FC.NONE,
+            "mode": "PUSH_SINGLE",
+        },
+    )
+
+    # create patch_suggestion.json so WAIT_ANALYZER_PATCH proceeds to APPLY_PATCH
+    (tmp_path / "patch_suggestion.json").write_text(
+        json.dumps([{"path": "test.cpp", "action": "modify", "content": "// test"}]),
+        encoding="utf-8",
+    )
+
+    session = LoopSession(
+        session_id="sess-wire", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=2, artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, "cases", "profile.json")
+    state = rt.run()
+    # Should end at DONE_SUCCESS since deploy mocked ok + re-verify passes
+    assert state.terminal_state == RuntimeTerminalState.DONE_SUCCESS
