@@ -73,7 +73,12 @@ def get_prop(host: str, port: int, name: str) -> int:
 
 
 def run_shell(host: str, port: int, command: str, timeout: float) -> int:
-    """在设备上执行命令并输出所有采集到的文本。"""
+    """在设备上执行命令并输出所有采集到的文本。
+
+    安全契约：command 原样透传给设备端 shell，本函数不做任何转义/校验。
+    调用方负责确保 command 不包含恶意输入（如未转义的用户可控数据、
+    命令注入字符等）。仅在受信上下文中使用。
+    """
     from rp5_serial.client.automation import AutomationClient
 
     with AutomationClient(host, port) as c:

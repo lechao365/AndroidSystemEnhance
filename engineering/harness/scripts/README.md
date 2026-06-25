@@ -28,6 +28,7 @@
 | [`validate_harness_docs.sh`](./validate_harness_docs.sh) | 文档 / 契约层静态校验（README 链接、文件清单、PlantUML 闭合、WORKFLOW front matter） | `bash engineering/harness/scripts/validate_harness_docs.sh` |
 | [`validate_harness_scripts.sh`](./validate_harness_scripts.sh) | bash 脚本合规校验（bootstrap source、`harness_init`、裸 `exit` / `/tmp/` / 私有符号） | `bash engineering/harness/scripts/validate_harness_scripts.sh` |
 | [`validate_harness_config.sh`](./validate_harness_config.sh) | 配置层校验（YAML 可解析性、字段合法性、命名规范） | `bash engineering/harness/scripts/validate_harness_config.sh` |
+| [`apply_preset_bugs.sh`](./apply_preset_bugs.sh) | 向 workspace 注入预设 bug，验证 AI 闭环修复能力（`--bug N` 选 bug，`--revert` 回滚） | `bash engineering/harness/scripts/apply_preset_bugs.sh --bug 1,2,3` |
 
 **已迁出到 `../../loop/scripts/`**：`le.sh`、`le_runs_cleanup.sh`、`rp5_serial_helper.py`、`start_rp5_serial_host.bat` → 见 `../../loop/scripts/README.md`。
 

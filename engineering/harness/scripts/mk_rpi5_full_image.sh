@@ -25,8 +25,7 @@
 #   P1（dm-verity）和 P2（串口）patch 已应用（见 00.7 章节）
 #==============================================================================
 
-set -e
-set -o pipefail
+set -euo pipefail
 
 # --- 锚点 + 公共库（bootstrap 统一入口）-------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -176,28 +175,31 @@ if [ "$DO_KERNEL" = true ]; then
     export PATH="${CLANG_BIN}:${PATH}"
 
     # 内核编译命令（使用 AOSP Clang + LLD 工具链）
-    KERNEL_MAKE_CMD="make O=${KERNEL_OUT} \
-        ARCH=arm64 \
-        CC=clang \
-        LD=ld.lld \
-        AR=llvm-ar \
-        NM=llvm-nm \
-        STRIP=llvm-strip \
-        OBJCOPY=llvm-objcopy \
-        OBJDUMP=llvm-objdump \
-        READELF=llvm-readelf \
-        HOSTCC=clang \
-        HOSTCXX=clang++ \
-        HOSTAR=llvm-ar \
-        HOSTLD=ld.lld \
-        CROSS_COMPILE=aarch64-linux-gnu- \
-        CLANG_TRIPLE=${CLANG_TRIPLE}"
+    # 使用 bash 数组，避免字符串非引号展开的脆弱性（#26）
+    KERNEL_MAKE_CMD=(
+        make O=${KERNEL_OUT}
+        ARCH=arm64
+        CC=clang
+        LD=ld.lld
+        AR=llvm-ar
+        NM=llvm-nm
+        STRIP=llvm-strip
+        OBJCOPY=llvm-objcopy
+        OBJDUMP=llvm-objdump
+        READELF=llvm-readelf
+        HOSTCC=clang
+        HOSTCXX=clang++
+        HOSTAR=llvm-ar
+        HOSTLD=ld.lld
+        CROSS_COMPILE=aarch64-linux-gnu-
+        CLANG_TRIPLE=${CLANG_TRIPLE}
+    )
 
     cd "$KERNEL_SRC"
 
     # 应用 defconfig（首次或配置变更时执行，增量编译时 .config 已存在则快速通过）
     log_info "应用内核配置: ${KERNEL_DEFCONFIG}"
-    if ! ${KERNEL_MAKE_CMD} ${KERNEL_DEFCONFIG}; then
+    if ! "${KERNEL_MAKE_CMD[@]}" "${KERNEL_DEFCONFIG}"; then
         log_error "defconfig 配置失败"
         harness_exit 1
     fi
@@ -206,7 +208,7 @@ if [ "$DO_KERNEL" = true ]; then
     # Image：树莓派5 非压缩内核镜像
     # dtbs： 包含 bcm2712*.dtb（主设备树）和 overlays/*.dtbo（设备树覆盖）
     log_info "编译内核 Image + dtbs（预计 5-20 分钟）"
-    if ! ${KERNEL_MAKE_CMD} Image dtbs -j${BUILD_JOBS}; then
+    if ! "${KERNEL_MAKE_CMD[@]}" Image dtbs -j${BUILD_JOBS}; then
         log_error "内核编译失败"
         harness_exit 1
     fi
@@ -406,10 +408,11 @@ fi
 log_info "清理旧的 ${VERSION_PREFIX}-*-rpi5.img"
 OLD_IMGS=$(ls "${ANDROID_PRODUCT_OUT}/${VERSION_PREFIX}"-*-rpi5.img 2>/dev/null || true)
 if [ -n "$OLD_IMGS" ]; then
-    echo "$OLD_IMGS" | while read -r old_img; do
+    while read -r old_img; do
+        [ -z "$old_img" ] && continue
         log_info "删除: $(basename "$old_img")"
         rm -f "$old_img"
-    done
+    done < <(printf '%s\n' "$OLD_IMGS")
 else
     log_info "无旧镜像需要清理"
 fi
@@ -451,12 +454,11 @@ fi
 OLD_COUNT=$(ls "${WINDOWS_IMG_DIR}/${VERSION_PREFIX}"-*-rpi5.img 2>/dev/null | wc -l || true)
 if [ "$OLD_COUNT" -gt 0 ]; then
     KEEP=2
-    ls -t "${WINDOWS_IMG_DIR}/${VERSION_PREFIX}"-*-rpi5.img 2>/dev/null \
-        | tail -n +$((KEEP+1)) \
-        | while read -r old; do
-            log_info "删除旧镜像: $(basename "$old")"
-            rm -f "$old"
-        done
+    while read -r old; do
+        [ -z "$old" ] && continue
+        log_info "删除旧镜像: $(basename "$old")"
+        rm -f "$old"
+    done < <(ls -t "${WINDOWS_IMG_DIR}/${VERSION_PREFIX}"-*-rpi5.img 2>/dev/null | tail -n +$((KEEP+1)))
     DELETED=$((OLD_COUNT > KEEP ? OLD_COUNT - KEEP : 0))
     log_info "保留最近 ${KEEP} 个，清理 ${DELETED} 个旧镜像"
 fi

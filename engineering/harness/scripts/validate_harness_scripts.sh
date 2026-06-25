@@ -33,14 +33,14 @@ LIB_BASENAMES=(
 )
 
 # --- 辅助：记录一条告警 ------------------------------------------------------
-_report_warn() {
+report_warn() {
     local where="$1" msg="$2"
     log_warn "$where | $msg"
     harness_status_emit "MISS" "$where" "$msg"
     WARN_COUNT=$((WARN_COUNT + 1))
 }
 
-_is_in_list() {
+is_in_list() {
     local target="$1"; shift
     local e
     for e in "$@"; do
@@ -49,8 +49,8 @@ _is_in_list() {
     return 1
 }
 
-_is_lib_self() {
-    _is_in_list "$1" "${LIB_BASENAMES[@]}"
+is_lib_self() {
+    is_in_list "$1" "${LIB_BASENAMES[@]}"
 }
 
 # --- 代码净化：剔除注释、字符串字面量、heredoc、trap 子句 ---------------------
@@ -62,7 +62,7 @@ _is_lib_self() {
 #   4. 把反引号命令替换内容替换为空（`xxx` -> ``）
 #   5. 把 --exit-code 替换为占位符（exit-code 中的 exit 不算裸 exit）
 # 净化后剩余即为"代码骨架"，供后续 grep 使用。
-_strip_literals() {
+strip_literals() {
     local line="$1"
     # 1) 去除整行注释（行首 # 开头，允许前导空白）
     local trimmed
@@ -95,7 +95,7 @@ done < <(find "$HARNESS_DIR" -name '*.sh' -type f \
     -not -path '*/log/*' \
     -not -path '*/tests/*' \
     -not -path '*/lib/*' \
-    2>/dev/null | sort)
+    2>/dev/null | sort || true)
 
 log_info "待校验脚本 ${#TARGETS[@]} 个"
 for t in "${TARGETS[@]}"; do
@@ -115,16 +115,16 @@ for f in "${TARGETS[@]}"; do
     SCAN_COUNT=$((SCAN_COUNT + 1))
 
     # ---- 2.1 bootstrap source 校验（业务脚本必须 source harness_bootstrap.sh）---
-    if ! _is_lib_self "$bn"; then
+    if ! is_lib_self "$bn"; then
         if ! grep -qE 'source.*harness_bootstrap\.sh' "$f"; then
-            _report_warn "$f:1" "未 source harness_bootstrap.sh（违反 RID-OBS-001 MUST1）"
+            report_warn "$f:1" "未 source harness_bootstrap.sh（违反 RID-OBS-001 MUST1）"
         fi
     fi
 
     # ---- 2.2 harness_init 调用校验（公共库豁免）---
-    if ! _is_lib_self "$bn"; then
+    if ! is_lib_self "$bn"; then
         if ! grep -qE 'harness_init\b' "$f"; then
-            _report_warn "$f:1" "未调用 harness_init（违反 RID-OBS-001 MUST2）"
+            report_warn "$f:1" "未调用 harness_init（违反 RID-OBS-001 MUST2）"
         fi
     fi
 
@@ -150,34 +150,34 @@ for f in "${TARGETS[@]}"; do
             continue
         fi
 
-        skeleton=$(_strip_literals "$line")
+        skeleton=$(strip_literals "$line")
 
         # ---- 2.3 裸 exit 校验（公共库豁免）---
-        if ! _is_lib_self "$bn"; then
+        if ! is_lib_self "$bn"; then
             # skeleton 中去掉 harness_exit 后检查是否还有裸 exit
             sk_exit=$(printf '%s' "$skeleton" | sed -E 's/harness_exit//g')
             if printf '%s' "$sk_exit" | LC_ALL=C grep -qE '\bexit\b'; then
-                _report_warn "$f:$lineno" "出现裸 exit（应使用 harness_exit，违反 RID-OBS-001 MUST8）"
+                report_warn "$f:$lineno" "出现裸 exit（应使用 harness_exit，违反 RID-OBS-001 MUST8）"
             fi
         fi
 
         # ---- 2.4 裸 /tmp/ 校验（公共库豁免）---
-        if ! _is_lib_self "$bn"; then
+        if ! is_lib_self "$bn"; then
             # skeleton 中已剔除字符串；检查代码层是否含 /tmp/
             # 允许 harness_tmp_file / harness_tmp_dir
             sk_tmp=$(printf '%s' "$skeleton" | sed -E 's/harness_tmp_file//g; s/harness_tmp_dir//g')
             if printf '%s' "$sk_tmp" | grep -qE '/tmp/'; then
-                _report_warn "$f:$lineno" "出现裸 /tmp/（应使用 harness_tmp_file/dir，违反 RID-OBS-001 MUST7）"
+                report_warn "$f:$lineno" "出现裸 /tmp/（应使用 harness_tmp_file/dir，违反 RID-OBS-001 MUST7）"
             fi
         fi
 
         # ---- 2.5 私有 API 依赖校验（禁止 _H_* / _h_*，公共库豁免）---
-        if ! _is_lib_self "$bn"; then
+        if ! is_lib_self "$bn"; then
             if printf '%s' "$skeleton" | LC_ALL=C grep -qE '\b_h_[a-z]+' 2>/dev/null; then
-                _report_warn "$f:$lineno" "直接依赖私有符号 _h_*（违反 RID-OBS-001 MUST9）"
+                report_warn "$f:$lineno" "直接依赖私有符号 _h_*（违反 RID-OBS-001 MUST9）"
             fi
             if printf '%s' "$skeleton" | LC_ALL=C grep -qE '\b_H_[A-Z]+' 2>/dev/null; then
-                _report_warn "$f:$lineno" "直接依赖私有符号 _H_*（违反 RID-OBS-001 MUST9）"
+                report_warn "$f:$lineno" "直接依赖私有符号 _H_*（违反 RID-OBS-001 MUST9）"
             fi
         fi
     done < "$f"

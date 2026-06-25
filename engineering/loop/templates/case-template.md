@@ -33,6 +33,9 @@ collectors:        # 可选：collector 定义
   <collector名称>:
     commands: [<命令1>, <命令2>]
     hints: "<给AI的分析提示>"
+
+final_collectors:  # 可选：suite 级，suite 结束后执行的收集器列表（无论是否有用例失败）
+  - <collector名称>   # 如 lcview_pull_logs / lcview_invalid_log
 ```
 
 ### 必填字段 checklist

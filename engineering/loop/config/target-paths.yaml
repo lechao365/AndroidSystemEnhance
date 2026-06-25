@@ -1,3 +1,7 @@
+# target-paths.yaml — 补丁白名单配置（功能 target → 路径 glob 映射）
+# 注意：本文件的 key 是功能 target 名（lciod/lcview/system.boot 等），
+# 与 harness/config/harness-paths.conf 的路径 KEY 是独立命名空间，
+# 不属于 PATH-001 管辖范围。
 # 补丁白名单配置：target → 允许修改的文件路径前缀
 # apply-patch 子命令会校验每个 FileChange.workspace_path 是否落在对应的前缀内
 # 若 target 未在此配置中登记，apply-patch 默认拒绝所有改动（fail-closed）

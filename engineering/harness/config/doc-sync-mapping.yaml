@@ -1,9 +1,11 @@
-version: 1
+version: 1 
 
-# 文档目录清单：
+# 文档目录清单（业务规划目录，由业务层按需创建）：
 #   docs/00-环境准备/ — 环境搭建、构建、刷机（静态文档，不随 patchs 变动）
 #   docs/01-打点增强/ — LcView 内核态/HAL/Daemon（来源：**/LcView/**、**/lcview*）
 #   docs/02-IO增强/    — LcIod 内核态/HAL/Service + USB 工具（来源：**/LcIod/**、**/lciod*、others/usb-*）
+# 注意：上述目录为业务文档规划目标，由业务方按需创建；当前 docs/ 下仅有 plans/、specs/。
+#       route 命中后，若目标目录尚未创建，由调用方（sync_patchs_to_doc.sh）跳过并 log_warn。
 
 # patchs → 技术文档分发规则（机器层）
 # 匹配语义：按 priority 降序遍历，首条命中即归属（等价 md 的"自上而下首条命中即归属"）
@@ -33,10 +35,6 @@ routes:
     docs: ["docs/02-IO增强"]
     mode: fixed
     priority: 80
-  - match: "others/usb-fault-inject/**"
-    docs: ["docs/02-IO增强"]
-    mode: fixed
-    priority: 79
   - match: "kernel/modified/drivers/usb/**"
     docs: ["docs/02-IO增强"]
     mode: fixed

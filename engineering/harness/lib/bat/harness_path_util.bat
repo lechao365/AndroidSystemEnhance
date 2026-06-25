@@ -87,11 +87,17 @@ for /f "tokens=* delims= " %%k in ("!_h_sv_key!") do set "_h_sv_key=%%k"
 if "!_h_sv_key!"=="" goto :eof
 REM Strip all quotes from value
 set "_h_sv_val=!_h_sv_val:"=!"
+REM Expand $HOME to %USERPROFILE% (bat has no POSIX $HOME expansion)
+REM Only ENV_* keys carry shell-style $HOME references in harness-paths.conf
+set "_h_sv_val=!_h_sv_val:$HOME=%USERPROFILE%!"
 REM Prepend REPO_ROOT if relative path, except for PYTHON_PATH_ROOTS
 if /i not "!_h_sv_key!"=="PYTHON_PATH_ROOTS" (
     set "_h_sv_first=!_h_sv_val:~0,1!"
     if not "!_h_sv_first!"=="\" if not "!_h_sv_first!"=="/" (
-        set "_h_sv_val=!_H_PATH_ROOT!\!_h_sv_val!"
+        REM Skip prepend if value references a Windows env var (e.g. %USERPROFILE%)
+        if not "!_h_sv_first!"=="%%" (
+            set "_h_sv_val=!_H_PATH_ROOT!\!_h_sv_val!"
+        )
     )
 )
 REM Convert forward slashes to backslashes
@@ -148,11 +154,16 @@ set "_h_val=%~2"
 for /f "tokens=* delims= " %%k in ("%_h_key%") do set "_h_key=%%k"
 if "%_h_key%"=="" goto :eof
 set "_h_val=%_h_val:"=%"
+REM Expand $HOME to %USERPROFILE% (bat has no POSIX $HOME expansion)
+set "_h_val=%_h_val:$HOME=%USERPROFILE%%"
 REM Prepend REPO_ROOT if relative path, except for PYTHON_PATH_ROOTS
 if /i not "%_h_key%"=="PYTHON_PATH_ROOTS" (
     set "_h_first=%_h_val:~0,1%"
     if not "%_h_first%"=="\" if not "%_h_first%"=="/" (
-        set "_h_val=%REPO_ROOT%\%_h_val%"
+        REM Skip prepend if value references a Windows env var (e.g. %USERPROFILE%)
+        if not "%_h_first%"=="%%" (
+            set "_h_val=%REPO_ROOT%\%_h_val%"
+        )
     )
 )
 set "_h_val=%_h_val:/=\%"

@@ -51,5 +51,5 @@ PYTHONPATH="engineering/loop/core/python:engineering/loop/connection/providers/a
 
 | 类型 | 路径 | 说明 |
 |------|------|------|
-| 关联 workflow | `../../workflows/lcview-adb-run/` | adb feature suite 消费本 provider |
+| 关联 workflow | `../../../workflows/lcview-adb-run/` | adb feature suite 消费本 provider |
 | 设计文档 | `docs/specs/2026-06-21-lcview-adb-provider-and-loop-case-design.md` | adb provider 设计 |

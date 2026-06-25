@@ -9,7 +9,9 @@ version: 1
 
 cases:
   - id: shell_reachable
-    description: "shell prompt 可见，设备串口可达"
+    # 空 command 表示仅探测 prompt：不发任何命令，依赖 transport 实现的
+    # prompt_visible 断言（host 等待 prompt 出现即判定设备串口可达）。
+    description: "shell prompt 可见，设备串口可达（空 command = 仅探测 prompt）"
     command: ""
     assert:
       type: prompt_visible

@@ -27,7 +27,7 @@ WARN_COUNT=0
 SCAN_COUNT=0
 
 # --- 辅助：记录一条告警 ------------------------------------------------------
-_report_warn() {
+report_warn() {
     local where="$1" msg="$2"
     log_warn "$where | $msg"
     harness_status_emit "MISS" "$where" "$msg"
@@ -72,7 +72,7 @@ scan_readme_links() {
             local norm
             norm=$(cd "$dir" 2>/dev/null && { [ -e "$path" ] && realpath "$path" 2>/dev/null || echo "MISS"; } || echo "MISS")
             if [ "$norm" = "MISS" ]; then
-                _report_warn "$readme:$lineno" "链接目标不存在: $t"
+                report_warn "$readme:$lineno" "链接目标不存在: $t"
             else
                 SCAN_COUNT=$((SCAN_COUNT + 1))
             fi
@@ -81,13 +81,15 @@ scan_readme_links() {
 }
 
 # 收集所有 README.md
+# NOTE: find 在进程替换 <(...) 内，其退出码无法被外层 $/?|| 捕获；
+#       此处仅抑制 stderr，扫描缺失由后续 ${#README_FILES[@]} 判空兜底。
 README_FILES=()
 while IFS= read -r f; do
     README_FILES+=("$f")
 done < <(find "$HARNESS_DIR" -name 'README.md' -type f \
     -not -path '*/__pycache__/*' \
     -not -path '*/.pytest_cache/*' \
-    2>/dev/null)
+    2>/dev/null || true)
 
 if [ "${#README_FILES[@]}" -eq 0 ]; then
     log_warn "未发现任何 README.md，跳过链接扫描"
@@ -139,9 +141,9 @@ scan_readme_inventory() {
         if printf '%s\n' "$referenced" | grep -qxF "$bn"; then
             SCAN_COUNT=$((SCAN_COUNT + 1))
         else
-            _report_warn "$readme" "目录文件未在 README 文件清单中登记: $bn"
+            report_warn "$readme" "目录文件未在 README 文件清单中登记: $bn"
         fi
-    done < <(find "$dir" -maxdepth 1 -type f 2>/dev/null)
+    done < <(find "$dir" -maxdepth 1 -type f 2>/dev/null || true)
 }
 
 if [ "${#README_FILES[@]}" -eq 0 ]; then
@@ -184,10 +186,10 @@ scan_plantuml_in_file() {
         if printf '%s' "$line" | grep -qE '^\s*```\s*$'; then
             # 块结束，校验闭合
             if [ "$has_start" -eq 1 ] && [ "$has_end" -eq 0 ]; then
-                _report_warn "$file:$start_line" "PlantUML 块 @startuml 未配对 @enduml"
+                report_warn "$file:$start_line" "PlantUML 块 @startuml 未配对 @enduml"
             fi
             if [ "$has_start" -eq 0 ] && [ "$has_end" -eq 1 ]; then
-                _report_warn "$file:$start_line" "PlantUML 块出现 @enduml 但缺少 @startuml"
+                report_warn "$file:$start_line" "PlantUML 块出现 @enduml 但缺少 @startuml"
             fi
             in_puml=0
             continue
@@ -202,31 +204,33 @@ scan_plantuml_in_file() {
         # 块内：检测花括号占位符 {{ 或 {模块 / {中文...}
         # 双花括号 {{ 直接命中
         if printf '%s' "$line" | grep -qE '\{\{'; then
-            _report_warn "$file:$lineno" "PlantUML 块内出现双花括号占位符 {{...}}（违反 RID-PLANTUML-001 规则2）"
+            report_warn "$file:$lineno" "PlantUML 块内出现双花括号占位符 {{...}}（违反 RID-PLANTUML-001 规则2）"
         fi
         # 单花括号占位符 {非空文字} 紧凑形式（占位符）；
         # 注意：PlantUML 自身合法的 package { / object { 块定义的 { 一般出现在行尾或独立行，
         # 而占位符是 {文字} 紧凑形式（中间有 1-30 个非 } 字符且不以 { 或 } 结尾）。
         # 使用 LC_ALL=C 避免 UTF-8 collation 报错；模式仅匹配 ASCII 字母/中文/下划线开头的紧凑占位符。
         if printf '%s' "$line" | LC_ALL=C grep -qE '\{[A-Za-z_][^{}]{0,30}\}'; then
-            _report_warn "$file:$lineno" "PlantUML 块内出现花括号占位符 {xxx}（违反 RID-PLANTUML-001 规则2）"
+            report_warn "$file:$lineno" "PlantUML 块内出现花括号占位符 {xxx}（违反 RID-PLANTUML-001 规则2）"
         fi
     done < "$file"
     # 文件结束时若仍在 puml 块内
     if [ "$in_puml" -eq 1 ]; then
-            _report_warn "$file:$start_line" "PlantUML fenced code block 未闭合（缺少结束 fence）"
+            report_warn "$file:$start_line" "PlantUML fenced code block 未闭合（缺少结束 fence）"
     fi
 }
 
 # 扫描 templates/*.md 与 harness 下所有 .md 文件（含 README.md、reference/ 等）
 # 排除：rules/plantuml.md（规则定义本身含反例，不参与扫描）
+# NOTE: find 在进程替换内，退出码无法外层捕获；此处用 || true 兜底防止管道破裂，
+#       扫描缺失由后续 ${#PUML_TARGETS[@]} 判空兜底。
 PUML_TARGETS=()
 while IFS= read -r f; do
     case "$f" in
         */rules/plantuml.md) continue ;;
     esac
     PUML_TARGETS+=("$f")
-done < <(find "$HARNESS_DIR/templates" "$HARNESS_DIR" -name '*.md' -type f 2>/dev/null | sort -u)
+done < <(find "$HARNESS_DIR/templates" "$HARNESS_DIR" -name '*.md' -type f 2>/dev/null | sort -u || true)
 
 if [ "${#PUML_TARGETS[@]}" -eq 0 ]; then
     log_warn "未发现任何 .md 文件，跳过 PlantUML 扫描"
@@ -245,36 +249,37 @@ step_end 0
 step_begin "workflow contract 头部完整性"
 
 # 每个 workflows/*/WORKFLOW.md 必须有 YAML front matter（--- 起止），且含 name: 与 description:
+# NOTE: find 在进程替换内，退出码无法外层捕获；此处用 || true 兜底防止管道破裂。
 WORKFLOW_FILES=()
 while IFS= read -r f; do
     WORKFLOW_FILES+=("$f")
-done < <(find "$HARNESS_DIR/workflows" -name 'WORKFLOW.md' -type f 2>/dev/null)
+done < <(find "$HARNESS_DIR/workflows" -name 'WORKFLOW.md' -type f 2>/dev/null || true)
 
 if [ "${#WORKFLOW_FILES[@]}" -eq 0 ]; then
     log_warn "未发现任何 WORKFLOW.md，跳过 contract 校验"
 else
     for wf in "${WORKFLOW_FILES[@]}"; do
-        local_name="${wf#$HARNESS_DIR/}"
-        log_info "扫描 contract: $local_name"
+        wf_name="${wf#$HARNESS_DIR/}"
+        log_info "扫描 contract: $wf_name"
         # 第一行必须是 ---
         first_line=$(head -n 1 "$wf")
         if [ "$first_line" != "---" ]; then
-            _report_warn "$wf:1" "缺少 YAML front matter 起始 ---"
+            report_warn "$wf:1" "缺少 YAML front matter 起始 ---"
             continue
         fi
         # 找到第二个 ---（结束）
         end_line=$(grep -nE '^---\s*$' "$wf" | sed -n '2p' | cut -d: -f1)
         if [ -z "$end_line" ]; then
-            _report_warn "$wf:1" "YAML front matter 未闭合（缺少第二个 ---）"
+            report_warn "$wf:1" "YAML front matter 未闭合（缺少第二个 ---）"
             continue
         fi
         # 在 front matter 内检查 name / description
         fm_content=$(head -n "$end_line" "$wf")
         if ! printf '%s' "$fm_content" | grep -qE '^name:'; then
-            _report_warn "$wf:1" "YAML front matter 缺少 name 字段"
+            report_warn "$wf:1" "YAML front matter 缺少 name 字段"
         fi
         if ! printf '%s' "$fm_content" | grep -qE '^description:'; then
-            _report_warn "$wf:1" "YAML front matter 缺少 description 字段"
+            report_warn "$wf:1" "YAML front matter 缺少 description 字段"
         fi
         SCAN_COUNT=$((SCAN_COUNT + 1))
     done

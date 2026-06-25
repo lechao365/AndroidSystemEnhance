@@ -45,6 +45,7 @@ apply_bug() {
             ;;
         *)
             log_error "Unknown bug number: $bug_num (valid: 1,2,3)"
+            step_end 1
             return 1
             ;;
     esac

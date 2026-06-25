@@ -18,12 +18,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../lib/shell/harness_bootstrap.sh
 source "$SCRIPT_DIR/../../lib/shell/harness_bootstrap.sh"
 
+# --- 接入维测库（模式 A：扫描为主，apply 内部显式失败处理）-------------------
+harness_init "revert_code_from_patchs"
+
+# --- 路径变量（harness_init 后获取，确保日志管道已就绪）-----------------------
 PATCH_ROOT="$(harness_path PATCHS_DIR)"
 KERNEL_WS="${KERNEL_WS:-$(harness_env_path ENV_KERNEL_WS)}"
 AOSP_WS="${AOSP_WS:-$(harness_env_path ENV_AOSP_WS)}"
-
-# --- 接入维测库（模式 A：扫描为主，apply 内部显式失败处理）-------------------
-harness_init "revert_code_from_patchs"
 
 # 临时文件清理：通过公共库 exit hook 注册（不再手写 trap）
 TMP_FILES=()

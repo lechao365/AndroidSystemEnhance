@@ -13,9 +13,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../lib/shell/harness_bootstrap.sh
 source "$SCRIPT_DIR/../../lib/shell/harness_bootstrap.sh"
 
-PATCH_DIR="$(harness_path PATCHS_DIR)"
-
 harness_init "sync_patchs_to_doc"
+
+# --- 路径变量（harness_init 后获取，确保日志管道已就绪）-----------------------
+PATCH_DIR="$(harness_path PATCHS_DIR)"
 
 # ============================================================================
 # 参数解析
@@ -69,7 +70,7 @@ fi
 # ============================================================================
 # 按目录分组输出
 # ============================================================================
-step_begin "Patchs → Doc 变动报告"
+step_begin "获取变动列表"
 
 # 统计
 TOTAL_A=0
@@ -86,6 +87,9 @@ GROUP_aosp_modified=""
 GROUP_aosp_new=""
 GROUP_others=""
 GROUP_root=""
+
+step_end 0
+step_begin "按目录分组"
 
 while IFS=$'\t' read -r status path1 path2; do
     # 去除 status 可能的数字后缀（如 R100, C75）
@@ -171,6 +175,9 @@ while IFS=$'\t' read -r status path1 path2; do
 
 done <<< "$DIFF_OUTPUT"
 
+step_end 0
+step_begin "分组汇总输出"
+
 # 按固定顺序输出分组
 output_group() {
     local label="$1" content="$2"
@@ -187,6 +194,9 @@ output_group "aosp/new"        "$GROUP_aosp_new"
 output_group "others"          "$GROUP_others"
 output_group "(root)"          "$GROUP_root"
 
+step_end 0
+step_begin "汇总统计"
+
 # ============================================================================
 # 汇总
 # ============================================================================
@@ -194,10 +204,13 @@ echo ""
 TOTAL=$((TOTAL_A + TOTAL_M + TOTAL_D + TOTAL_R + TOTAL_OTHER))
 echo "总计: $TOTAL 个文件变动 ($([ $TOTAL_A -gt 0 ] && echo -n "$TOTAL_A 新增, ")$([ $TOTAL_M -gt 0 ] && echo -n "$TOTAL_M 修改, ")$([ $TOTAL_D -gt 0 ] && echo -n "$TOTAL_D 删除")$([ $TOTAL_R -gt 0 ] && echo -n ", $TOTAL_R 重命名")$([ $TOTAL_OTHER -gt 0 ] && echo -n ", $TOTAL_OTHER 其他"))"
 
+step_end 0
+
 # ============================================================================
 # （可选）输出完整 diff 正文，供 AI 零往返读取
 # ============================================================================
 if [ "$FULL_DIFF" = true ]; then
+    step_begin "完整 diff 正文（HEAD）"
     echo ""
     echo "========== 完整 diff 正文（HEAD） =========="
     # tracked 改动的 diff
@@ -215,6 +228,7 @@ if [ "$FULL_DIFF" = true ]; then
             sed 's/^/+/' "$f" 2>/dev/null || echo "(无法读取)"
         done <<< "$_untracked_files"
     fi
+    step_end 0
 fi
 
 # ============================================================================
@@ -234,5 +248,4 @@ if [ "$CHECK_ONLY" = false ]; then
 TIP
 fi
 
-step_end 0
 harness_exit 0

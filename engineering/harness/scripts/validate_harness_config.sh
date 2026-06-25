@@ -29,7 +29,7 @@ WARN_COUNT=0
 SCAN_COUNT=0
 
 # --- 辅助：记录一条告警 ------------------------------------------------------
-_report_warn() {
+report_warn() {
     local where="$1" msg="$2"
     log_warn "$where | $msg"
     harness_status_emit "MISS" "$where" "$msg"
@@ -56,7 +56,7 @@ YAML_FOUND_COUNT=0
 for yname in "${YAML_TARGETS[@]}"; do
     ypath="$CONFIG_DIR/$yname"
     if [ ! -f "$ypath" ]; then
-        _report_warn "$CONFIG_DIR/$yname" "必需的 YAML 映射文件缺失"
+        report_warn "$CONFIG_DIR/$yname" "必需的 YAML 映射文件缺失"
         continue
     fi
     YAML_FOUND_COUNT=$((YAML_FOUND_COUNT + 1))
@@ -74,7 +74,7 @@ try:
         print('OK')
 except Exception as e:
     print('ERR:'+str(e))
-" 2>&1)
+" 2>&1) || on_err "${BASH_LINENO[0]}" "$BASH_COMMAND" $?
     case "$parse_err" in
         OK)
             log_info "  YAML 解析通过"
@@ -85,7 +85,7 @@ except Exception as e:
             SCAN_COUNT=$((SCAN_COUNT + 1))
             ;;
         ERR:*)
-            _report_warn "$ypath" "YAML 解析失败: ${parse_err#ERR:}"
+            report_warn "$ypath" "YAML 解析失败: ${parse_err#ERR:}"
             ;;
     esac
 
@@ -156,11 +156,11 @@ for i, it in enumerate(items):
 
 for e in errs:
     print(e)
-" 2>&1)
+" 2>&1) || on_err "${BASH_LINENO[0]}" "$BASH_COMMAND" $?
     if [ -n "$field_err" ]; then
         while IFS= read -r l; do
             [ -z "$l" ] && continue
-            _report_warn "$ypath" "$l"
+            report_warn "$ypath" "$l"
         done <<< "$field_err"
     fi
 done
@@ -172,7 +172,7 @@ step_end 0
 # Step 2: 汇总与退出
 # ============================================================================
 if [ "$YAML_FOUND_COUNT" -eq 0 ]; then
-    _report_warn "$CONFIG_DIR" "未发现任何 YAML 配置文件，config 机器层缺失"
+    report_warn "$CONFIG_DIR" "未发现任何 YAML 配置文件，config 机器层缺失"
 fi
 
 if [ "$WARN_COUNT" -gt 0 ]; then

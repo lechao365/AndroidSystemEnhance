@@ -13,12 +13,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../lib/shell/harness_bootstrap.sh
 source "$SCRIPT_DIR/../../lib/shell/harness_bootstrap.sh"
 
+# --- 接入维测库（模式 B：高密度写操作，fail-fast）---------------------------
+harness_init --with-errexit "sync_code_to_patchs"
+
+# --- 路径变量（harness_init 后获取，确保日志管道已就绪）-----------------------
 PATCH_ROOT="$(harness_path PATCHS_DIR)"
 KERNEL_WS="${KERNEL_WS:-$(harness_env_path ENV_KERNEL_WS)}"
 AOSP_WS="${AOSP_WS:-$(harness_env_path ENV_AOSP_WS)}"
-
-# --- 接入维测库（模式 B：高密度写操作，fail-fast）---------------------------
-harness_init --with-errexit "sync_code_to_patchs"
 
 # --- Counters ---------------------------------------------------------------
 TOTAL_OK=0
@@ -170,7 +171,7 @@ if [ "$KERNEL_OK" = true ]; then
         KERNEL_DELETIONS+=("$f")
     done < <(git diff "$BASE" --diff-filter=D --name-only 2>/dev/null | grep -vE "$HARNESS_EXCLUDE_RE" || true)
 
-    echo "--- Modified ---"
+    log_info "--- Modified ---"
     while IFS= read -r f; do
         [ -z "$f" ] && continue
         target="$PATCH_ROOT/kernel/modified/${f}.diff"
@@ -195,7 +196,7 @@ if [ "$KERNEL_OK" = true ]; then
         fi
     done < <(git diff "$BASE" --diff-filter=M --name-only 2>/dev/null | grep -vE "$HARNESS_EXCLUDE_RE" || true)
 
-    echo "--- New (tracked) ---"
+    log_info "--- New (tracked) ---"
     while IFS= read -r f; do
         [ -z "$f" ] && continue
         target="$PATCH_ROOT/kernel/new/${f}"
@@ -210,7 +211,7 @@ if [ "$KERNEL_OK" = true ]; then
         fi
     done < <(git diff "$BASE" --diff-filter=ACR --name-only 2>/dev/null | grep -vE "$HARNESS_EXCLUDE_RE" || true)
 
-    echo "--- New (untracked) ---"
+    log_info "--- New (untracked) ---"
     while IFS= read -r f; do
         [ -z "$f" ] && continue
         target="$PATCH_ROOT/kernel/new/${f}"
@@ -257,7 +258,7 @@ if [ "$AOSP_OK" = true ]; then
             cd "$AOSP_WS"; continue
         fi
 
-        echo "--- $proj_dir ---"
+        log_info "--- $proj_dir ---"
 
         # Tracked deletion detection
         while IFS= read -r f; do
@@ -325,7 +326,7 @@ if [ "$AOSP_OK" = true ]; then
 
     # 非 repo 目录
     if [ ${#NON_REPO_DIRS[@]} -gt 0 ]; then
-        echo "--- 非 repo 目录 ---"
+        log_info "--- 非 repo 目录 ---"
         for nr_dir in "${NON_REPO_DIRS[@]}"; do
             cd "$AOSP_WS"
             [ ! -d "$nr_dir" ] && continue
@@ -378,13 +379,13 @@ sync_prune() {
 }
 
 if [ "$KERNEL_OK" = true ]; then
-    echo "--- Kernel ---"
+    log_info "--- Kernel ---"
     sync_prune "kernel/modified" "$KERNEL_WS" 1
     sync_prune "kernel/new"      "$KERNEL_WS" 0
 fi
 
 if [ "$AOSP_OK" = true ]; then
-    echo "--- AOSP ---"
+    log_info "--- AOSP ---"
     sync_prune "aosp/modified" "$AOSP_WS" 1
     sync_prune "aosp/new"      "$AOSP_WS" 0
 fi
@@ -507,7 +508,8 @@ fi
 # 汇总
 # ============================================================================
 step_begin "汇总"
-echo "OK: $TOTAL_OK  MISS: $TOTAL_MISS  SKIP: $TOTAL_SKIP  STALE: $TOTAL_STALE  PRUNE: $TOTAL_PRUNE"
+log_result "SYNC 结果" "ok=$TOTAL_OK" "miss=$TOTAL_MISS" "skip=$TOTAL_SKIP" "stale=$TOTAL_STALE" "prune=$TOTAL_PRUNE"
+log_info "OK=$TOTAL_OK MISS=$TOTAL_MISS SKIP=$TOTAL_SKIP STALE=$TOTAL_STALE PRUNE=$TOTAL_PRUNE"
 [ "$CHECK_ONLY" = true ] && log_info "本次为仅检查模式，未执行实际归档/删除操作"
 step_end 0
 

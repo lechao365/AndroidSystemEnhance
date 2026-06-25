@@ -1,6 +1,11 @@
 #!/bin/bash
 # test_le_runs_cleanup.sh — le_runs_cleanup.sh 单元测试
 #
+# 归属说明：本测试验证 loop/scripts/le_runs_cleanup.sh 的清理契约，
+# 该脚本依赖 harness observability 公共库（harness_bootstrap.sh），
+# 因此其契约测试放在 harness/tests/ 下使用 harness 测试基础设施。
+# 跨边界引用仅限被测脚本本身，不构成 harness→loop 实现依赖。
+#
 # 验证点:
 #   1. 超过 KEEP 份时，最旧目录被删除，最新 KEEP 份保留
 #   2. 散文件（probe-reboot.log 等）不被删除
@@ -17,7 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../lib/shell/harness_path_util.sh"
 REPO_ROOT="$(harness_repo_root)"
 
-CLEANUP_SCRIPT="$REPO_ROOT/engineering/loop/scripts/le_runs_cleanup.sh"
+# 通过 PATH-001 路径工具获取被测脚本路径（避免硬编码 loop 路径字面值）
+CLEANUP_SCRIPT="$(harness_path LOOP_SCRIPTS_DIR)/le_runs_cleanup.sh"
 TEST_SANDBOX="$(harness_path TEST_SANDBOX_DIR)/le-runs-cleanup-tests"
 rm -rf "$TEST_SANDBOX"
 mkdir -p "$TEST_SANDBOX"
