@@ -1,0 +1,200 @@
+"""runtime_cli：新 runtime 主入口——le runtime {init,run,resume,status,explain}。
+
+替代旧 le control 主闭环模式，由 runtime engine 自动驱动状态机。
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from pathlib import Path
+
+from loop_contracts.failure_codes import FailureCode
+from loop_contracts.models import LoopSession, RuntimeTerminalState
+from loop_controller.runtime.engine import LoopRuntime
+
+
+# ---------------------------------------------------------------------------
+# 路径解析（与 stages._resolve_loop_paths 一致：优先 harness_path_util，回退相对路径）
+# ---------------------------------------------------------------------------
+def _resolve_paths() -> tuple[str, str]:
+    try:
+        from harness_path_util import path as _hp
+
+        return (
+            str(_hp("LOOP_CASES_DIR")),
+            str(
+                _hp("LOOP_DIR")
+                / "connection"
+                / "profiles"
+                / "devices"
+                / "rp5"
+                / "adb.json"
+            ),
+        )
+    except Exception:
+        loop_dir = Path(__file__).resolve().parent.parent.parent.parent
+        return (
+            str(loop_dir / "cases"),
+            str(
+                loop_dir
+                / "connection"
+                / "profiles"
+                / "devices"
+                / "rp5"
+                / "adb.json"
+            ),
+        )
+
+
+_CASES_DIR, _DEVICE_PROFILE = _resolve_paths()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Loop Runtime CLI")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    init_p = sub.add_parser("init", help="initialize loop session")
+    init_p.add_argument("--target", required=True)
+    init_p.add_argument("--suite", required=True)
+    init_p.add_argument("--max-attempts", type=int, default=5)
+    init_p.add_argument("--artifacts-dir", required=True)
+    init_p.set_defaults(func=_handle_init)
+
+    run_p = sub.add_parser("run", help="execute full auto-loop")
+    run_p.add_argument("--session", required=True)
+    run_p.add_argument("--adb-endpoint", default="")
+    run_p.set_defaults(func=_handle_run)
+
+    resume_p = sub.add_parser("resume", help="resume from last checkpoint")
+    resume_p.add_argument("--session", required=True)
+    resume_p.set_defaults(func=_handle_resume)
+
+    status_p = sub.add_parser("status", help="show session state")
+    status_p.add_argument("--session", required=True)
+    status_p.set_defaults(func=_handle_status)
+
+    explain_p = sub.add_parser("explain", help="explain runtime behavior")
+    explain_p.set_defaults(func=_handle_explain)
+
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+# ---------------------------------------------------------------------------
+# 子命令 handlers
+# ---------------------------------------------------------------------------
+def _handle_init(args: argparse.Namespace) -> int:
+    sid = f"{args.target}-{time.strftime('%Y%m%d%H%M%S')}"
+    session = LoopSession(
+        session_id=sid,
+        workflow_id="runtime",
+        target=args.target,
+        suite=args.suite,
+        max_attempts=args.max_attempts,
+        artifacts_dir=args.artifacts_dir,
+    )
+    out_path = Path(args.artifacts_dir) / f"{sid}.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(_session_to_dict(session), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    latest = Path(args.artifacts_dir) / "session.json"
+    latest.write_text(
+        json.dumps(_session_to_dict(session), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    print(f"session_id={sid}")
+    print(f"artifacts_dir={args.artifacts_dir}")
+    print(f"session_path={out_path}")
+    return 0
+
+
+def _handle_run(args: argparse.Namespace) -> int:
+    session = _load_session(args.session)
+    rt = LoopRuntime(session, _CASES_DIR, _DEVICE_PROFILE)
+    state = rt.run()
+    print(f"terminal_state={state.terminal_state.value}")
+    if state.terminal_state == RuntimeTerminalState.DONE_SUCCESS:
+        return 0
+    return 1
+
+
+def _handle_resume(args: argparse.Namespace) -> int:
+    session = _load_session(args.session)
+    rt = LoopRuntime(session, _CASES_DIR, _DEVICE_PROFILE)
+    state = rt.resume()
+    print(f"resumed_to_node={state.current_node}")
+    print(f"terminal_state={state.terminal_state.value}")
+    return 0
+
+
+def _handle_status(args: argparse.Namespace) -> int:
+    session = _load_session(args.session)
+    print(json.dumps(_session_to_dict(session), indent=2, ensure_ascii=False))
+    return 0
+
+
+def _handle_explain(args: argparse.Namespace) -> int:
+    print("Runtime state machine:")
+    print("  INIT_SESSION -> RUN_VERIFY -> DECIDE_NEXT")
+    print("  DECIDE_NEXT -> DONE_SUCCESS (on PASS)")
+    print(
+        "  DECIDE_NEXT -> BUILD_ANALYSIS_REQUEST -> WAIT_ANALYZER_PATCH (on RETRY)"
+    )
+    print(
+        "  DECIDE_NEXT -> ESCALATE_HUMAN (on max attempts / repeated failure)"
+    )
+    print("")
+    print(
+        "Guards: all_cases_passed, attempt_limit_reached, repeated_failure_code,"
+    )
+    print(
+        "        duplicate_patch_hash, kernel_dead_no_shell, patch_rejected, ..."
+    )
+    print("")
+    print("Terminal states: DONE_SUCCESS, ESCALATE_HUMAN, DONE_FAILURE")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+def _load_session(path_str: str) -> LoopSession:
+    data = json.loads(Path(path_str).read_text(encoding="utf-8"))
+    try:
+        fc = FailureCode(data.get("latest_failure_code", "NONE"))
+    except ValueError:
+        fc = FailureCode.NONE
+    return LoopSession(
+        session_id=data.get("session_id", ""),
+        workflow_id=data.get("workflow_id", "runtime"),
+        target=data.get("target", ""),
+        suite=data.get("suite", ""),
+        max_attempts=data.get("max_attempts", 5),
+        current_attempt=data.get("current_attempt", 0),
+        status=data.get("status", "PENDING"),
+        latest_failure_code=fc,
+        attempts=data.get("attempts", []),
+        artifacts_dir=data.get("artifacts_dir", ""),
+    )
+
+
+def _session_to_dict(session: LoopSession) -> dict:
+    return {
+        "session_id": session.session_id,
+        "workflow_id": session.workflow_id,
+        "target": session.target,
+        "suite": session.suite,
+        "max_attempts": session.max_attempts,
+        "current_attempt": session.current_attempt,
+        "status": session.status,
+        "latest_failure_code": session.latest_failure_code.value,
+        "attempts": session.attempts,
+        "artifacts_dir": session.artifacts_dir,
+    }
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

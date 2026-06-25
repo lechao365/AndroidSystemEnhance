@@ -13,6 +13,16 @@ harness_init "le"
 
 export PYTHONPATH="$(harness_pythonpath)${PYTHONPATH:+:$PYTHONPATH}"
 
+# Runtime 子命令直接分发到 runtime_cli
+if [ "${1:-}" = "runtime" ]; then
+    shift
+    step_begin "le runtime"
+    python3 -m loop_controller.runtime_cli "$@" || on_err --continue "${BASH_LINENO[0]}" "$BASH_COMMAND" $?
+    rc=$?
+    step_end "$rc"
+    harness_exit "$rc"
+fi
+
 # 主执行：分发到 loop_core.cli（run/control/setup 等子命令透传 "$@"）
 step_begin "le run"
 python3 -m loop_core.cli "$@" || on_err --continue "${BASH_LINENO[0]}" "$BASH_COMMAND" $?
