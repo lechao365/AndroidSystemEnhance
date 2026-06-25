@@ -8,6 +8,7 @@ def test_apply_stage_result_appends_attempt_and_updates_status():
         session_id="sess-001",
         workflow_id="single_run_verify",
         target="system.boot",
+        suite="test",
         max_attempts=5,
     )
 
