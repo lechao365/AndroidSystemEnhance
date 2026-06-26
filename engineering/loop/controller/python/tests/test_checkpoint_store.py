@@ -86,3 +86,30 @@ def test_checkpoint_store_filters_by_session_id(tmp_path: Path):
     # all() also filters
     assert len(store_a.all()) == 1
     assert len(store_b.all()) == 1
+
+
+def test_checkpoint_store_all_performance(tmp_path: Path):
+    """all() works correctly for many checkpoints"""
+    store = CheckpointStore(str(tmp_path), "sess-001")
+    for i in range(100):
+        store.save(_make_cp(f"cp-{i:03d}", attempt=i + 1))
+    results = store.all()
+    assert len(results) == 100
+
+
+def test_checkpoint_store_all_single_parse_per_line(tmp_path: Path):
+    """_from_line is called exactly once per line during all()"""
+    store = CheckpointStore(str(tmp_path), "sess-001")
+    store.save(_make_cp("cp-001"))
+    store.save(_make_cp("cp-002"))
+    call_count = [0]
+    orig = store._from_line
+
+    def counting_from_line(line):
+        call_count[0] += 1
+        return orig(line)
+
+    store._from_line = counting_from_line
+    results = store.all()
+    assert len(results) == 2
+    assert call_count[0] == 2

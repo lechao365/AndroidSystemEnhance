@@ -38,11 +38,14 @@ class CheckpointStore:
         if not self._path.exists():
             return []
         lines = self._path.read_text(encoding="utf-8").strip().splitlines()
-        return [
-            self._from_line(line)
-            for line in lines
-            if line and self._from_line(line).session_id == self._session_id
-        ]
+        results: list[CheckpointRecord] = []
+        for line in lines:
+            if not line:
+                continue
+            cp = self._from_line(line)
+            if cp.session_id == self._session_id:
+                results.append(cp)
+        return results
 
     def _from_line(self, line: str) -> CheckpointRecord:
         data = json.loads(line)
