@@ -1,9 +1,9 @@
 ---
-name: sync-patchs-to-doc
+name: lc-sync-patchs-to-doc
 description: patchs/rpi5 变动后生成报告，按模板规范将代码 diff 精准转换为文档更新（方案先行，确认后落盘）。
 ---
 
-# sync-patchs-to-doc
+# lc-sync-patchs-to-doc
 
 当 `patchs/rpi5/` 发生变动后，生成结构化变动报告，并**按模板规范将代码 diff 精准转换为文档更新**。
 
@@ -11,13 +11,13 @@ description: patchs/rpi5 变动后生成报告，按模板规范将代码 diff �
 
 ## Trigger（触发条件）
 
-- 用户执行完归档（sync-code-to-patchs）后
+- 用户执行完归档（lc-sync-code-to-patchs）后
 - 用户提到"更新文档""文档同步""patchs 变了"
 - `patchs/rpi5/` 相对 git HEAD 有未同步到文档的变动
 
 ## Preconditions（前置条件）
 
-- `patchs/rpi5/manifest.yaml` 存在（首次未归档时停下提示用户先执行 `/sync-code-to-patchs`）
+- `patchs/rpi5/manifest.yaml` 存在（首次未归档时停下提示用户先执行 `/lc-sync-code-to-patchs`）
 - `engineering/harness/config/doc-sync-mapping.yaml` 可读（patchs→文档映射规则）
 - 目标设计文档（`01-*/02-*`）与模板（`engineering/harness/templates/*.md`）存在
 
@@ -50,7 +50,7 @@ description: patchs/rpi5 变动后生成报告，按模板规范将代码 diff �
 
 | 场景 | 处理 |
 |------|------|
-| manifest 缺失（首次未归档） | 停下提示用户先执行 `/sync-code-to-patchs` |
+| manifest 缺失（首次未归档） | 停下提示用户先执行 `/lc-sync-code-to-patchs` |
 | diff 引入内容无模板章节承载 | 标记 `TEMPLATE-CONFLICT`，等用户确认后才动模板 |
 | 行号锚点失效 | 一致性自检标记，刷新含形态 D 盲区、区间终点、重复出现处 |
 | 代码路径违规（workspace 绝对路径） | 一致性自检标记，应改为 patchs 相对路径 |
@@ -70,9 +70,9 @@ description: patchs/rpi5 变动后生成报告，按模板规范将代码 diff �
 ### 1. 生成变动报告
 
 ```bash
-bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh              # 生成变动报告
-bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh --full-diff  # 报告 + 完整 diff 正文（AI 零往返）
-bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh --check-only  # 仅检查，不输出提示
+bash engineering/harness/workflows/lc-sync-patchs-to-doc/sync_patchs_to_doc.sh              # 生成变动报告
+bash engineering/harness/workflows/lc-sync-patchs-to-doc/sync_patchs_to_doc.sh --full-diff  # 报告 + 完整 diff 正文（AI 零往返）
+bash engineering/harness/workflows/lc-sync-patchs-to-doc/sync_patchs_to_doc.sh --check-only  # 仅检查，不输出提示
 ```
 
 ### 2. 按映射规则定位文档（依据 engineering/harness/config/doc-sync-mapping.yaml）
@@ -85,7 +85,7 @@ bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh --ch
 
 ### 3. 取全量上下文（依据 manifest.yaml）
 
-`patchs/` 中 modified 类只有 `.diff`、无全量上下文。通过 `patchs/rpi5/manifest.yaml`（由 sync-code-to-patchs 生成）拿到 patch↔workspace 映射，去 `~/workspace/` 读全量源码：
+`patchs/` 中 modified 类只有 `.diff`、无全量上下文。通过 `patchs/rpi5/manifest.yaml`（由 lc-sync-code-to-patchs 生成）拿到 patch↔workspace 映射，去 `~/workspace/` 读全量源码：
 
 ```
 manifest.yaml 条目示例：
@@ -99,7 +99,7 @@ manifest.yaml 条目示例：
     - aosp：`~/workspace/{source}` → `~/workspace/aosp/...`
   （`source` 值如 `rpi5-kernel-build/common/vendor/lechao/LcView/builder.c`，直接接到 `~/workspace/` 之后）
 
-> **边界**：若 manifest 缺失（首次未归档），停下提示用户先执行 `/sync-code-to-patchs`。
+> **边界**：若 manifest 缺失（首次未归档），停下提示用户先执行 `/lc-sync-code-to-patchs`。
 
 ### 4. 定位受影响文档章节（行号锚点 + 符号名）
 
@@ -227,4 +227,4 @@ manifest.yaml 条目示例：
 
 ## 不涉及的文档
 
-`patchs/rpi5/README.md` 文件映射表的更新仍走 sync-code-to-patchs 末尾提示，不纳入本流程。
+`patchs/rpi5/README.md` 文件映射表的更新仍走 lc-sync-code-to-patchs 末尾提示，不纳入本流程。

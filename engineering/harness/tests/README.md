@@ -26,7 +26,7 @@
 | [`test_le_runs_cleanup.sh`](./test_le_runs_cleanup.sh) | `le_runs_cleanup.sh` 清理契约测试（跨边界测试 loop 脚本，验证 harness observability 依赖） | `bash test_le_runs_cleanup.sh` |
 | [`test_revert_code_from_patchs.sh`](./test_revert_code_from_patchs.sh) | `revert_code_from_patchs.sh` workflow 契约测试（non-repo-extra / upstream-missing / verify-matrix 三场景） | `bash test_revert_code_from_patchs.sh` |
 | [`test_sync_code_to_patchs.sh`](./test_sync_code_to_patchs.sh) | `sync_code_to_patchs.sh` workflow 契约测试 | `bash test_sync_code_to_patchs.sh` |
-| [`fixtures/`](./fixtures) | 测试夹具目录（observability/basic、revert-code-from-patchs/*、sync-code-to-patchs/*） | 各测试脚本通过 `FIXTURE*` 变量引用 |
+| [`fixtures/`](./fixtures) | 测试夹具目录（observability/basic、lc-revert-code-from-patchs/*、lc-sync-code-to-patchs/*） | 各测试脚本通过 `FIXTURE*` 变量引用 |
 
 ## 使用方式
 
@@ -44,6 +44,6 @@ for t in engineering/harness/tests/test_*.sh; do bash "$t" || break; done
 |------|------|------|
 | 被测公共库 | `../lib/shell/harness_bootstrap.sh` | observability 公共库 |
 | 被测公共库 | `../lib/shell/harness_path_util.sh` | 路径工具 |
-| 被测 workflow | `../workflows/sync-code-to-patchs/`、`../workflows/revert-code-from-patchs/` | workflow 脚本 |
+| 被测 workflow | `../workflows/lc-sync-code-to-patchs/`、`../workflows/lc-revert-code-from-patchs/` | workflow 脚本 |
 | 跨边界被测 | `../../loop/scripts/le_runs_cleanup.sh` | loop 清理脚本（依赖 harness observability） |
 | 关联规则 | `../rules/script-observability.md`（OBS-001/002） | observability 契约定义 |

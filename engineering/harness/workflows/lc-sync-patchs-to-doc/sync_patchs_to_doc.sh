@@ -3,8 +3,8 @@ set -uo pipefail
 
 # ============================================================================
 # sync_patchs_to_doc.sh — patchs/rpi5 变动报告生成器
-# 规则详见: engineering/harness/workflows/sync-patchs-to-doc/WORKFLOW.md
-# 用法:    bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh [--check-only] [--full-diff]
+# 规则详见: engineering/harness/workflows/lc-sync-patchs-to-doc/WORKFLOW.md
+# 用法:    bash engineering/harness/workflows/lc-sync-patchs-to-doc/sync_patchs_to_doc.sh [--check-only] [--full-diff]
 # 退出码:  0=成功(有变动); 3=参数/环境错误; 4=无变动
 # ============================================================================
 
@@ -28,7 +28,7 @@ for arg in "$@"; do
         --check-only|--dry-run) CHECK_ONLY=true ;;
         --full-diff) FULL_DIFF=true ;;
         -h|--help)
-            echo "Usage: bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh [--check-only] [--full-diff]"
+            echo "Usage: bash engineering/harness/workflows/lc-sync-patchs-to-doc/sync_patchs_to_doc.sh [--check-only] [--full-diff]"
             echo "  --check-only  仅输出报告，不输出 AI 操作提示"
             echo "  --full-diff   在报告末尾追加 git diff 正文，供 AI 直接读取（零往返）"
             harness_exit 0 ;;

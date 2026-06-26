@@ -30,7 +30,7 @@
 | [lib/](./lib/) | bash/python/bat 公共库：路径工具 + bootstrap + observability | [lib/README.md](./lib/README.md) |
 | [rules/](./rules/) | 全局约束规则（AI 与人都必须遵守的硬性约定），被 `AGENTS.md` 强制加载 | [rules/README.md](./rules/README.md) |
 | [scripts/](./scripts/) | 独立脚本与静态校验入口（validator） | [scripts/README.md](./scripts/README.md) |
-| [templates/](./templates/) | 技术文档模板（只读契约），被 `sync-patchs-to-doc` 消费 | [templates/README.md](./templates/README.md) |
+| [templates/](./templates/) | 技术文档模板（只读契约），被 `lc-sync-patchs-to-doc` 消费 | [templates/README.md](./templates/README.md) |
 | [reference/](./reference/) | 参考文档承载层（命令模板、操作指南等非约束性参考） | [reference/README.md](./reference/README.md) |
 | [workflows/](./workflows/) | 多步闭环工作流，每个子目录 = 一个完整流程（脚本 + WORKFLOW.md） | [workflows/README.md](./workflows/README.md) |
 | [tests/](./tests/) | harness 自测脚本与 fixtures（observability / workflow 测试） | — |
@@ -46,10 +46,10 @@
 | 先判断任务能不能直接做 | [config/README.md#任务准入矩阵](./config/README.md#任务准入矩阵) |
 | 理解 harness 总体边界与真相源 | [#控制总纲](#控制总纲) |
 | 改 `~/workspace/` 源码 | [rules/source-code-modify.md](./rules/source-code-modify.md) |
-| 提交并推送 | [workflows/git-push-to-server/](./workflows/git-push-to-server/) |
-| 归档源码到 patchs | [workflows/sync-code-to-patchs/](./workflows/sync-code-to-patchs/) |
-| workspace 坏了要回退 | [workflows/revert-code-from-patchs/](./workflows/revert-code-from-patchs/) |
-| patchs 变了更新技术文档 | [workflows/sync-patchs-to-doc/](./workflows/sync-patchs-to-doc/) |
+| 提交并推送 | [workflows/lc-git-push-to-server/](./workflows/lc-git-push-to-server/) |
+| 归档源码到 patchs | [workflows/lc-sync-code-to-patchs/](./workflows/lc-sync-code-to-patchs/) |
+| workspace 坏了要回退 | [workflows/lc-revert-code-from-patchs/](./workflows/lc-revert-code-from-patchs/) |
+| patchs 变了更新技术文档 | [workflows/lc-sync-patchs-to-doc/](./workflows/lc-sync-patchs-to-doc/) |
 | 跑 lcview 的 serial→adb 双阶段验收 | [../loop/workflows/lcview-adb-run/](../loop/workflows/lcview-adb-run/) |
 | 写 / 改技术文档 | [templates/](./templates/) + [rules/doc-paths.md](./rules/doc-paths.md) |
 | 画 PlantUML 图 | [rules/plantuml.md](./rules/plantuml.md) |
@@ -84,10 +84,10 @@ harness 无统一可执行入口，各子目录有独立入口。常见入口：
 | 关联规则 | [rules/source-code-modify.md](./rules/source-code-modify.md)（SRC-001~004） | 改 `~/workspace/` 源码前加载 |
 | 关联规则 | [rules/script-observability.md](./rules/script-observability.md)（OBS-001~002） | 改 harness bash 脚本前加载 |
 | 关联规则 | [rules/path-management.md](./rules/path-management.md)（PATH-001） | 改脚本路径引用前加载 |
-| 关联 workflow | [workflows/git-push-to-server/](./workflows/git-push-to-server/) | 收集 diff → commit → push |
-| 关联 workflow | [workflows/sync-code-to-patchs/](./workflows/sync-code-to-patchs/) | workspace → patchs 受控归档 |
-| 关联 workflow | [workflows/revert-code-from-patchs/](./workflows/revert-code-from-patchs/) | patchs promoted baseline → workspace 回退 |
-| 关联 workflow | [workflows/sync-patchs-to-doc/](./workflows/sync-patchs-to-doc/) | patchs diff → 技术文档同步 |
+| 关联 workflow | [workflows/lc-git-push-to-server/](./workflows/lc-git-push-to-server/) | 收集 diff → commit → push |
+| 关联 workflow | [workflows/lc-sync-code-to-patchs/](./workflows/lc-sync-code-to-patchs/) | workspace → patchs 受控归档 |
+| 关联 workflow | [workflows/lc-revert-code-from-patchs/](./workflows/lc-revert-code-from-patchs/) | patchs promoted baseline → workspace 回退 |
+| 关联 workflow | [workflows/lc-sync-patchs-to-doc/](./workflows/lc-sync-patchs-to-doc/) | patchs diff → 技术文档同步 |
 | 关联配置 | [config/scope-mapping.yaml](./config/scope-mapping.yaml) | commit scope 判定 |
 | 关联配置 | [config/harness-paths.conf](./config/harness-paths.conf) | 工程路径单一事实源 |
 
@@ -145,7 +145,7 @@ archive -> candidate baseline -> promoted baseline
 
 | 状态 | 来源 | 最低证据要求 | 是否允许作为 revert 真相源 |
 |------|------|-------------|-------------------------|
-| archive | `sync-code-to-patchs` 完成同步 | sync manifest（含 `source_branch`、`source_commit`） | ❌ 否 |
+| archive | `lc-sync-code-to-patchs` 完成同步 | sync manifest（含 `source_branch`、`source_commit`） | ❌ 否 |
 | candidate baseline | archive 基础上补充部分验证 | sync manifest + `build_result` + `package_result` | ❌ 否 |
 | promoted baseline | candidate 完成全部验证并人工批准 | sync manifest + `build_result` + `package_result` + `board_verify` + `approved_by` + `approved_at` | ✅ 是 |
 

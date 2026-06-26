@@ -3,8 +3,8 @@ set -eo pipefail
 
 # ============================================================================
 # sync_code_to_patchs.sh — workspace → patchs/rpi5 全量镜像同步脚本
-# 规则详见: engineering/harness/workflows/sync-code-to-patchs/WORKFLOW.md
-# 用法:    bash engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh [--check-only] [--no-prune]
+# 规则详见: engineering/harness/workflows/lc-sync-code-to-patchs/WORKFLOW.md
+# 用法:    bash engineering/harness/workflows/lc-sync-code-to-patchs/sync_code_to_patchs.sh [--check-only] [--no-prune]
 # 退出码:  0=成功; 1=有MISS(需检查); 3=参数/环境错误
 # ============================================================================
 
@@ -49,7 +49,7 @@ for arg in "$@"; do
         --check-only|--dry-run) CHECK_ONLY=true ;;
         --no-prune) PRUNE=false ;;
         -h|--help)
-            echo "Usage: bash engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh [--check-only] [--no-prune]"
+            echo "Usage: bash engineering/harness/workflows/lc-sync-code-to-patchs/sync_code_to_patchs.sh [--check-only] [--no-prune]"
             echo "  --check-only  仅扫描和验证，不执行归档（STALE 仅报告）"
             echo "  --no-prune    仅添加/更新，不删除对齐（默认全量镜像含删除）"
             harness_exit 0 ;;

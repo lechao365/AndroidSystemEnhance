@@ -1,4 +1,4 @@
-# sync-code-to-patchs
+# lc-sync-code-to-patchs
 
 > **AI 读取指引**：本 README 采用三层结构。先读「大纲」判断需要哪些章节，
 > 再按需精读对应章节，避免全量解析。
@@ -22,7 +22,7 @@
 
 | 文件 | 职责 | 关键入口 |
 |------|------|---------|
-| `WORKFLOW.md` | workflow 契约：trigger / preconditions / 全量镜像语义 / 删除对齐规则 | 被 `.opencode/commands/sync-code-to-patchs.md` `@` 消费 |
+| `WORKFLOW.md` | workflow 契约：trigger / preconditions / 全量镜像语义 / 删除对齐规则 | 被 `.opencode/commands/lc-sync-code-to-patchs.md` `@` 消费 |
 | `sync_code_to_patchs.sh` | bash 入口：扫描 workspace 改动 → 全量镜像 → 更新 manifest + README 映射表 | 由 workflow 编排 |
 
 ## 使用方式
@@ -31,8 +31,8 @@
 
 | 触发方式 | 说明 |
 |---------|------|
-| `/sync-code-to-patchs` | 全量镜像同步（默认含删除对齐） |
-| `/sync-code-to-patchs --check-only` | 仅检查不执行 |
+| `/lc-sync-code-to-patchs` | 全量镜像同步（默认含删除对齐） |
+| `/lc-sync-code-to-patchs --check-only` | 仅检查不执行 |
 
 ## 关联资源
 

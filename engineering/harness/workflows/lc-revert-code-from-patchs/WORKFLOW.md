@@ -1,13 +1,13 @@
 ---
-name: revert-code-from-patchs
+name: lc-revert-code-from-patchs
 description: 仅以 promoted baseline 为真相源，把 workspace 偏离部分拉回一致（计划生成 → AI 逐条确认 → 执行 → 落盘校验）。
 ---
 
-# revert-code-from-patchs
+# lc-revert-code-from-patchs
 
 将 `~/workspace/` 中偏离 `patchs/rpi5/` 基线的部分**拉回一致**，用于在 workspace 改坏后回到上次归档的可工作状态。
 
-**核心语义**：`patchs/rpi5/` 是 workspace 定制改动的**已知良好基线**（真相源）。本工作流是 `sync-code-to-patchs` 的逆操作：sync 是 workspace→patchs 归档，revert 是 patchs→workspace 回退。
+**核心语义**：`patchs/rpi5/` 是 workspace 定制改动的**已知良好基线**（真相源）。本工作流是 `lc-sync-code-to-patchs` 的逆操作：sync 是 workspace→patchs 归档，revert 是 patchs→workspace 回退。
 
 > **与 source-code-modify.md 的关系**：本工作流是该规则"workspace 是源头"原则的**受控例外**——当 workspace 处于不可用的坏状态时，允许反向把 patchs 状态写回 workspace。不改变日常归档流程，仅作灾难恢复。
 
@@ -18,7 +18,7 @@ description: 仅以 promoted baseline 为真相源，把 workspace 偏离部分�
 
 ## Preconditions（前置条件）
 
-1. **真相源资格**：本 workflow 使用的 patchs 基线必须是 **promoted baseline**（已完成晋升，证据完整）。未证据化 baseline 不得作为恢复真相源（`SRC-004`）。证据字段以 `engineering/harness/config/baseline-evidence-template.yaml` 为模板，状态登记维护在 `engineering/harness/config/baseline-status.yaml`。若 patchs 资产未完成晋升，本 workflow **拒绝执行**，提示用户先走 sync-code-to-patchs + 晋升流程。
+1. **真相源资格**：本 workflow 使用的 patchs 基线必须是 **promoted baseline**（已完成晋升，证据完整）。未证据化 baseline 不得作为恢复真相源（`SRC-004`）。证据字段以 `engineering/harness/config/baseline-evidence-template.yaml` 为模板，状态登记维护在 `engineering/harness/config/baseline-status.yaml`。若 patchs 资产未完成晋升，本 workflow **拒绝执行**，提示用户先走 lc-sync-code-to-patchs + 晋升流程。
 2. 操作对象仅限 `~/workspace/`（kernel + aosp），**不动 `patchs/`**
 3. 执行前建议 `git stash`/commit 保存当前坏状态现场（脚本不自动备份，便于事后定位根因）
 4. **不自动 `git add`/`git commit`**：执行后 working tree 处于回退后状态，由用户决定是否提交（便于 `git diff` 复查）
@@ -95,9 +95,9 @@ description: 仅以 promoted baseline 为真相源，把 workspace 偏离部分�
 ### 1. 生成回退计划（脚本）
 
 ```bash
-bash engineering/harness/workflows/revert-code-from-patchs/revert_code_from_patchs.sh              # 生成 plan 到 artifacts
-bash engineering/harness/workflows/revert-code-from-patchs/revert_code_from_patchs.sh --plan-file X # 指定 plan 路径
-bash engineering/harness/workflows/revert-code-from-patchs/revert_code_from_patchs.sh --check-only  # 仅预览，不生成 plan
+bash engineering/harness/workflows/lc-revert-code-from-patchs/revert_code_from_patchs.sh              # 生成 plan 到 artifacts
+bash engineering/harness/workflows/lc-revert-code-from-patchs/revert_code_from_patchs.sh --plan-file X # 指定 plan 路径
+bash engineering/harness/workflows/lc-revert-code-from-patchs/revert_code_from_patchs.sh --check-only  # 仅预览，不生成 plan
 ```
 
 plan 默认输出路径：`engineering/output/log/revert_code_from_patchs/artifacts/<ts>-plan.tsv`，不再写到 `/tmp/`。可用 `--plan-file <path>` 指定外部路径。

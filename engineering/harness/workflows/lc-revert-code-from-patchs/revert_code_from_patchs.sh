@@ -4,7 +4,7 @@ set -uo pipefail
 # ============================================================================
 # revert_code_from_patchs.sh — patchs/rpi5 → workspace 回退脚本
 # 以 patchs/rpi5 为已知良好基线，把 workspace 中偏离 patchs 的部分拉回一致。
-# 规则详见: engineering/harness/workflows/revert-code-from-patchs/WORKFLOW.md
+# 规则详见: engineering/harness/workflows/lc-revert-code-from-patchs/WORKFLOW.md
 #
 # 用法:
 #   bash .../revert_code_from_patchs.sh [--plan-file <path>]         # 生成回退计划

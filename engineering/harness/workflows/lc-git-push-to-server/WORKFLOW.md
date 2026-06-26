@@ -1,9 +1,9 @@
 ---
-name: git-push-to-server
+name: lc-git-push-to-server
 description: 收集 diff → AI 生成中文 type commit message → 单次确认（支持多轮编辑）→ 提交并推送到 origin。
 ---
 
-# git-push-to-server
+# lc-git-push-to-server
 
 一键完成"收集 diff → AI 生成规范化 commit message → 单次确认 → 提交并推送"，解决手动写 message 和推送的繁琐。
 
@@ -54,7 +54,7 @@ description: 收集 diff → AI 生成中文 type commit message → 单次确�
 ────────── 提交预览 ──────────
 type:    新增
 scope:   skills
-subject: sync-code-to-patchs 支持删除对齐
+subject: lc-sync-code-to-patchs 支持删除对齐
 
 body:
   - skills: 新增 sync_prune 函数实现删除对齐
@@ -102,8 +102,8 @@ body:
 ### 1. 收集 diff（脚本）
 
 ```bash
-bash engineering/harness/workflows/git-push-to-server/collect_diff.sh              # 完整输出（status + stat + diff）
-bash engineering/harness/workflows/git-push-to-server/collect_diff.sh --stat-only  # 仅 status + stat，跳过 diff 正文
+bash engineering/harness/workflows/lc-git-push-to-server/collect_diff.sh              # 完整输出（status + stat + diff）
+bash engineering/harness/workflows/lc-git-push-to-server/collect_diff.sh --stat-only  # 仅 status + stat，跳过 diff 正文
 ```
 
 脚本输出当前分支、远程、git status、改动统计、diff 正文。无改动时输出 `nothing to commit` 并退出码 4（无操作，非错误），AI 见此**停止流程**。
@@ -151,7 +151,7 @@ bash engineering/harness/workflows/git-push-to-server/collect_diff.sh --stat-onl
 #### 示例
 
 ```
-新增(skills): sync-code-to-patchs 支持删除对齐
+新增(skills): lc-sync-code-to-patchs 支持删除对齐
 
 - skills: 新增 sync_prune 函数实现 patchs 删除对齐
 - rules: 更新 source-code-modify.md 镜像规则说明
@@ -164,7 +164,7 @@ bash engineering/harness/workflows/git-push-to-server/collect_diff.sh --stat-onl
 用户确认后，AI 将最终 message 写入临时文件，调脚本：
 
 ```bash
-bash engineering/harness/workflows/git-push-to-server/commit_and_push.sh \
+bash engineering/harness/workflows/lc-git-push-to-server/commit_and_push.sh \
     --message-file <临时文件> \
     [--branch <分支>] \
     [--remote origin] \

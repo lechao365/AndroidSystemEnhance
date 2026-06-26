@@ -7,7 +7,7 @@
 
 - **是什么**：根据自由文本检视意见自动修复代码并提交推送的一键工作流。
 - **职责边界**：脚本做确定性工作（探测测试环境、git 提交推送），AI 做语义工作（理解检视意图、定位源码、设计方案、修复代码、调试）。
-- **上下游依赖**：消费 `detect_test_env.sh`（探测）和 `git-push-to-server/commit_and_push.sh`（提交推送）；依赖 `config/scope-mapping.yaml`（commit scope）。
+- **上下游依赖**：消费 `detect_test_env.sh`（探测）和 `lc-git-push-to-server/commit_and_push.sh`（提交推送）；依赖 `config/scope-mapping.yaml`（commit scope）。
 
 ## 大纲
 
@@ -41,6 +41,6 @@ bash engineering/harness/workflows/lc-quick-fix-issue/detect_test_env.sh
 | 类型 | 路径 | 说明 |
 |------|------|------|
 | 关联 workflow | `./WORKFLOW.md` | 完整流程契约 |
-| 关联 workflow | `../git-push-to-server/commit_and_push.sh` | Stage 7 调用 |
+| 关联 workflow | `../lc-git-push-to-server/commit_and_push.sh` | Stage 7 调用 |
 | 关联配置 | `../../config/scope-mapping.yaml` | commit scope 判定规则 |
 | 关联配置 | `../../config/harness-paths.conf` | PYTHON_PATH_ROOTS（PYTHONPATH 事实源） |

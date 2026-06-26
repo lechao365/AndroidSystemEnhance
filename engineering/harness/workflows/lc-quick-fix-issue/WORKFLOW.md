@@ -32,7 +32,7 @@ description: 根据自由文本检视意见自动分析→定位→诊断→修�
 
 **调用本工作流即视为用户授权全部后续操作（分析→修复→测试→提交→推送），中间无确认点。**
 
-这与 `git-push-to-server` 的"单次确认门"不同。`git-push-to-server` 要求提交前等待用户确认 message；本工作流在 Stage 7 直接调用 `commit_and_push.sh`，跳过确认门。
+这与 `lc-git-push-to-server` 的"单次确认门"不同。`lc-git-push-to-server` 要求提交前等待用户确认 message；本工作流在 Stage 7 直接调用 `commit_and_push.sh`，跳过确认门。
 
 豁免理由：用户执行 `/lc-quick-fix-issue` 并附检视意见时，已表达明确的修复+提交意图，无需重复确认。
 
@@ -186,7 +186,7 @@ cat > "$MSG_FILE" << 'EOF'
 <commit message 内容>
 EOF
 
-bash engineering/harness/workflows/git-push-to-server/commit_and_push.sh \
+bash engineering/harness/workflows/lc-git-push-to-server/commit_and_push.sh \
     --message-file "$MSG_FILE"
 ```
 
@@ -208,7 +208,7 @@ bash engineering/harness/workflows/git-push-to-server/commit_and_push.sh \
 |------|--------|------|
 | 全部 issue 修复并推送成功 | 0 | 正常完成 |
 | 测试 3 次重试失败 | 1 | 已 `git checkout -- .` 回退改动，输出失败报告 |
-| commit 成功但 push 失败 | 2 | 透传 git-push-to-server 退出码 2，commit 已保留 |
+| commit 成功但 push 失败 | 2 | 透传 lc-git-push-to-server 退出码 2，commit 已保留 |
 | 前置检查失败（探测失败、git 脏区） | 3 | 不启动流程，提示原因 |
 | 无 CONFIRMED issue（全部 REJECTED 或 LOCATE_FAILED） | 4 | 输出分析结果，不修改任何代码 |
 
@@ -227,4 +227,4 @@ bash engineering/harness/workflows/git-push-to-server/commit_and_push.sh \
 
 | 工作流 | 关系 |
 |--------|------|
-| `git-push-to-server` | Stage 7 直接调用 `commit_and_push.sh`，跳过确认门 |
+| `lc-git-push-to-server` | Stage 7 直接调用 `commit_and_push.sh`，跳过确认门 |

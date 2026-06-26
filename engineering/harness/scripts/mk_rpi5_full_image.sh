@@ -316,8 +316,12 @@ if [ "$DO_BOOT" = true ] || [ "$DO_SYSTEM" = true ] || [ "$DO_VENDOR" = true ]; 
     fi
 
     log_info "source build/envsetup.sh && lunch ${LUNCH_TARGET}"
+    # AOSP 的 envsetup.sh / lunch 不兼容 set -u（依赖未定义变量在 [ -n ] 中返回空）
+    # 临时关闭 -u，保留 -e + trap ERR 错误捕获；结束后立即恢复
+    set +u
     source build/envsetup.sh
     lunch "$LUNCH_TARGET"
+    set -u
 
     if [ -z "${ANDROID_PRODUCT_OUT}" ]; then
         log_error "ANDROID_PRODUCT_OUT 未设置，lunch 可能失败"
@@ -374,8 +378,11 @@ else
 
     # mode 0 也需要 lunch 以设置 rpi5-mkimg.sh 依赖的环境变量
     cd "$AOSP_ROOT"
+    # AOSP 的 envsetup.sh / lunch 不兼容 set -u（依赖未定义变量在 [ -n ] 中返回空）
+    set +u
     source build/envsetup.sh
     lunch "$LUNCH_TARGET"
+    set -u
 
     # 确认三个 .img 都存在
     for img in boot.img system.img vendor.img; do

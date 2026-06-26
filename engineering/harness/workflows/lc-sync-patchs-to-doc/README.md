@@ -1,4 +1,4 @@
-# sync-patchs-to-doc
+# lc-sync-patchs-to-doc
 
 > **AI 读取指引**：本 README 采用三层结构。先读「大纲」判断需要哪些章节，
 > 再按需精读对应章节，避免全量解析。
@@ -22,7 +22,7 @@
 
 | 文件 | 职责 | 关键入口 |
 |------|------|---------|
-| `WORKFLOW.md` | workflow 契约：trigger / 报告生成 / 模板校验 / 文档更新流程 | 被 `.opencode/commands/sync-patchs-to-doc.md` `@` 消费 |
+| `WORKFLOW.md` | workflow 契约：trigger / 报告生成 / 模板校验 / 文档更新流程 | 被 `.opencode/commands/lc-sync-patchs-to-doc.md` `@` 消费 |
 | `sync_patchs_to_doc.sh` | bash 入口：扫描 patchs diff → 生成结构化报告 → 按模板映射转文档更新 | 由 workflow 编排 |
 
 ## 使用方式
@@ -31,9 +31,9 @@
 
 | 触发方式 | 说明 |
 |---------|------|
-| `/sync-patchs-to-doc` | 生成变动报告（通常在 `/sync-code-to-patchs` 之后） |
-| `/sync-patchs-to-doc --full-diff` | 报告 + 完整 diff 正文 |
-| `/sync-patchs-to-doc --check-only` | 仅检查，不输出 |
+| `/lc-sync-patchs-to-doc` | 生成变动报告（通常在 `/lc-sync-code-to-patchs` 之后） |
+| `/lc-sync-patchs-to-doc --full-diff` | 报告 + 完整 diff 正文 |
+| `/lc-sync-patchs-to-doc --check-only` | 仅检查，不输出 |
 
 ## 关联资源
 

@@ -6,8 +6,8 @@
 ## 定位
 
 - **是什么**：文档结构模板集——engineering 下 README 与 rules 的章节契约，以及技术文档（`docs/01-*`、`docs/02-*`）的设计模板
-- **职责边界**：做结构约束模板；不做内容撰写（模板只读，由 `sync-patchs-to-doc` workflow 消费）
-- **上下游依赖**：被 `sync-patchs-to-doc` workflow 作为只读契约消费；engineering 下所有 README 遵循 `engineering-readme-template.md`，所有 rules 遵循 `rules-template.md`
+- **职责边界**：做结构约束模板；不做内容撰写（模板只读，由 `lc-sync-patchs-to-doc` workflow 消费）
+- **上下游依赖**：被 `lc-sync-patchs-to-doc` workflow 作为只读契约消费；engineering 下所有 README 遵循 `engineering-readme-template.md`，所有 rules 遵循 `rules-template.md`
 
 ## 大纲
 
@@ -35,8 +35,8 @@
 
 - **新增/修改 engineering 下 README**：遵循 [`engineering-readme-template.md`](./engineering-readme-template.md) 的核心 5 节骨架与扩展块选配清单。
 - **新增/修改 rules**：遵循 [`rules-template.md`](./rules-template.md) 的核心 5 节（规则 ID / 适用范围 / MUST / MUST NOT / 例外清单）+ 附录。
-- **技术文档同步**：由 `sync-patchs-to-doc` workflow 按模板校验，diff 无法归入现有章节时标记 `TEMPLATE-CONFLICT`，由用户确认后才可调整模板。
-- **文档结构与模板章节不一致**：`sync-patchs-to-doc` 的自检环节会标记缺失 / 多余章节。
+- **技术文档同步**：由 `lc-sync-patchs-to-doc` workflow 按模板校验，diff 无法归入现有章节时标记 `TEMPLATE-CONFLICT`，由用户确认后才可调整模板。
+- **文档结构与模板章节不一致**：`lc-sync-patchs-to-doc` 的自检环节会标记缺失 / 多余章节。
 
 ## 关联资源
 
@@ -45,4 +45,4 @@
 | 设计文档 | `docs/specs/2026-06-21-engineering-doc-refactor-design.md` §四 | 模板定义（§4.1 engineering-readme-template、§4.2 rules-template） |
 | 关联规则 | `../rules/doc-paths.md`（DOC-001） | 文档路径约束 |
 | 关联规则 | `../rules/plantuml.md`（DOC-002） | 模板内 PlantUML 约束 |
-| 关联 workflow | `../workflows/sync-patchs-to-doc/` | 消费本目录模板为只读契约 |
+| 关联 workflow | `../workflows/lc-sync-patchs-to-doc/` | 消费本目录模板为只读契约 |

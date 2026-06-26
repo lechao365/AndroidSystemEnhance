@@ -1,7 +1,7 @@
 # Engineering README 模板
 
 > 本模板定义 engineering/ 下所有 README.md 的章节结构。新增或重构 README 时，
-> 复制「核心 5 节骨架」并按需追加「扩展块」。模板为只读契约，被 `sync-patchs-to-doc`
+> 复制「核心 5 节骨架」并按需追加「扩展块」。模板为只读契约，被 `lc-sync-patchs-to-doc`
 > workflow 消费，改动需用户确认。
 
 ---

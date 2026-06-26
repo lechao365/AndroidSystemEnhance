@@ -24,10 +24,10 @@
 
 | 工作流 | 触发场景 | 核心语义 | 入口 |
 |--------|---------|---------|------|
-| [git-push-to-server](./git-push-to-server/) | 收集 diff → 生成 commit → 推送 | 脚本做机械工作，AI 做语义工作（生成 message） | `collect_diff.sh` → AI → `commit_and_push.sh` |
-| [sync-code-to-patchs](./sync-code-to-patchs/) | workspace 源码归档到 patchs 镜像 | 将 workspace 变更受控归档到 patchs；archive 不自动等同于 promoted baseline | `sync_code_to_patchs.sh` |
-| [revert-code-from-patchs](./revert-code-from-patchs/) | workspace 坏了，从 patchs 基线回退 | 仅允许以 promoted baseline 执行恢复；用于 workspace 坏状态回退 | `revert_code_from_patchs.sh` |
-| [sync-patchs-to-doc](./sync-patchs-to-doc/) | patchs 变动后同步更新技术文档 | 方案先行（动作清单），确认后落盘，模板只读 | `sync_patchs_to_doc.sh` |
+| [lc-git-push-to-server](./lc-git-push-to-server/) | 收集 diff → 生成 commit → 推送 | 脚本做机械工作，AI 做语义工作（生成 message） | `collect_diff.sh` → AI → `commit_and_push.sh` |
+| [lc-sync-code-to-patchs](./lc-sync-code-to-patchs/) | workspace 源码归档到 patchs 镜像 | 将 workspace 变更受控归档到 patchs；archive 不自动等同于 promoted baseline | `sync_code_to_patchs.sh` |
+| [lc-revert-code-from-patchs](./lc-revert-code-from-patchs/) | workspace 坏了，从 patchs 基线回退 | 仅允许以 promoted baseline 执行恢复；用于 workspace 坏状态回退 | `revert_code_from_patchs.sh` |
+| [lc-sync-patchs-to-doc](./lc-sync-patchs-to-doc/) | patchs 变动后同步更新技术文档 | 方案先行（动作清单），确认后落盘，模板只读 | `sync_patchs_to_doc.sh` |
 | [lc-quick-fix-issue](./lc-quick-fix-issue/) | 根据检视意见自动修复代码→测试→零确认提交推送 | 脚本做确定性工作（探测/提交），AI 做语义工作（分析/定位/修复） | `detect_test_env.sh` → AI → `commit_and_push.sh` |
 
 ## 使用方式
@@ -36,16 +36,16 @@
 
 ```bash
 # git 推送
-bash engineering/harness/workflows/git-push-to-server/collect_diff.sh
+bash engineering/harness/workflows/lc-git-push-to-server/collect_diff.sh
 
 # workspace → patchs 归档
-bash engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh
+bash engineering/harness/workflows/lc-sync-code-to-patchs/sync_code_to_patchs.sh
 
 # patchs → workspace 回退
-bash engineering/harness/workflows/revert-code-from-patchs/revert_code_from_patchs.sh
+bash engineering/harness/workflows/lc-revert-code-from-patchs/revert_code_from_patchs.sh
 
 # patchs → 文档同步
-bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh
+bash engineering/harness/workflows/lc-sync-patchs-to-doc/sync_patchs_to_doc.sh
 
 # 根据检视意见自动修复并提交（通过 /lc-quick-fix-issue 命令触发，无需手动调用脚本）
 bash engineering/harness/workflows/lc-quick-fix-issue/detect_test_env.sh
@@ -74,7 +74,7 @@ bash engineering/harness/workflows/lc-quick-fix-issue/detect_test_env.sh
 | 设计文档 | `docs/specs/2026-06-21-engineering-doc-refactor-design.md` | 文档重构设计（WORKFLOW 保留决策 D-WF） |
 | 关联规则 | `../rules/script-observability.md`（OBS-001） | 脚本维测约束 |
 | 关联规则 | `../rules/source-code-modify.md`（SRC-001） | 归档 / 回退约束 |
-| 关联配置 | `../config/scope-mapping.yaml` | git-push-to-server 消费 |
-| 关联配置 | `../config/doc-sync-mapping.yaml` | sync-patchs-to-doc 消费 |
-| 关联配置 | `../config/baseline-status.yaml` | revert-code-from-patchs 消费 |
+| 关联配置 | `../config/scope-mapping.yaml` | lc-git-push-to-server 消费 |
+| 关联配置 | `../config/doc-sync-mapping.yaml` | lc-sync-patchs-to-doc 消费 |
+| 关联配置 | `../config/baseline-status.yaml` | lc-revert-code-from-patchs 消费 |
 | 关联 workflow | `../../loop/workflows/` | loop 专属 workflow 见 `../../loop/workflows/README.md` |

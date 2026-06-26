@@ -1,9 +1,9 @@
 ---
-name: sync-code-to-patchs
+name: lc-sync-code-to-patchs
 description: workspace 源码改动归档到 patchs/rpi5，并自动更新 README 文件映射表。
 ---
 
-# sync-code-to-patchs
+# lc-sync-code-to-patchs
 
 将 `~/workspace/` 编译源码树的定制改动**全量镜像**到 `patchs/rpi5/`，并一键更新 README 文件映射表。
 
@@ -12,7 +12,7 @@ workspace 删除的文件，patchs 同步删除（默认全量镜像，含删除
 
 ## Trigger（触发条件）
 
-- 用户请求"归档"/"同步 patchs"/"sync-code-to-patchs"
+- 用户请求"归档"/"同步 patchs"/"lc-sync-code-to-patchs"
 - workspace 存在已验证（`SRC-001` 验证流程）但尚未归档的定制改动
 
 ## Preconditions（前置条件）
@@ -86,9 +86,9 @@ workspace 删除的文件，patchs 同步删除（默认全量镜像，含删除
 ### 2. 执行同步
 
 ```bash
-bash engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh              # 全量镜像同步（默认含删除）
-bash engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh --check-only  # 仅检查，不执行（STALE 仅报告将删除项）
-bash engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh --no-prune    # 仅添加/更新，不删除对齐
+bash engineering/harness/workflows/lc-sync-code-to-patchs/sync_code_to_patchs.sh              # 全量镜像同步（默认含删除）
+bash engineering/harness/workflows/lc-sync-code-to-patchs/sync_code_to_patchs.sh --check-only  # 仅检查，不执行（STALE 仅报告将删除项）
+bash engineering/harness/workflows/lc-sync-code-to-patchs/sync_code_to_patchs.sh --no-prune    # 仅添加/更新，不删除对齐
 ```
 
 ### 3. 检查输出（必须）

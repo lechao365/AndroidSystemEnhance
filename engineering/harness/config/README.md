@@ -7,7 +7,7 @@
 
 - **是什么**：workflow 依赖的映射配置层——把「目录特征 → scope / 文档归属 / baseline 状态」的规则抽成独立 YAML 数据源
 - **职责边界**：做机器可读的映射数据；不做解释性文档（解释在 YAML 注释与 `description`/`note` 字段内嵌）
-- **上下游依赖**：被 `workflows/git-push-to-server/`（scope-mapping）、`workflows/sync-patchs-to-doc/`（doc-sync-mapping）、`source-code-modify.md`（baseline-*）、`../README.md#控制总纲`（优先级链）引用
+- **上下游依赖**：被 `workflows/lc-git-push-to-server/`（scope-mapping）、`workflows/lc-sync-patchs-to-doc/`（doc-sync-mapping）、`source-code-modify.md`（baseline-*）、`../README.md#控制总纲`（优先级链）引用
 
 ## 大纲
 
@@ -27,10 +27,10 @@
 
 | 文件 | 作用 | 被谁引用 |
 |------|------|---------|
-| [`scope-mapping.yaml`](./scope-mapping.yaml) | Git commit 的 scope 判定规则：按改动行数最多目录映射到 scope 词（如 `kernel-lcview`） | `../workflows/git-push-to-server/` |
-| [`doc-sync-mapping.yaml`](./doc-sync-mapping.yaml) | patchs → 技术文档的精准分发规则：按路径 glob 匹配分发到 `01-*` / `02-*` 文档目录 | `../workflows/sync-patchs-to-doc/` |
+| [`scope-mapping.yaml`](./scope-mapping.yaml) | Git commit 的 scope 判定规则：按改动行数最多目录映射到 scope 词（如 `kernel-lcview`） | `../workflows/lc-git-push-to-server/` |
+| [`doc-sync-mapping.yaml`](./doc-sync-mapping.yaml) | patchs → 技术文档的精准分发规则：按路径 glob 匹配分发到 `01-*` / `02-*` 文档目录 | `../workflows/lc-sync-patchs-to-doc/` |
 | [`baseline-status.yaml`](./baseline-status.yaml) | baseline 状态登记表：记录每次同步归档的 archive / candidate / promoted 状态 | [`../README.md#控制总纲`](../README.md#控制总纲)、`../rules/source-code-modify.md` |
-| [`baseline-evidence-template.yaml`](./baseline-evidence-template.yaml) | baseline 证据模板：晋升为 promoted baseline 前必须填写的证据字段 | `../rules/source-code-modify.md`、`../workflows/revert-code-from-patchs/` |
+| [`baseline-evidence-template.yaml`](./baseline-evidence-template.yaml) | baseline 证据模板：晋升为 promoted baseline 前必须填写的证据字段 | `../rules/source-code-modify.md`、`../workflows/lc-revert-code-from-patchs/` |
 
 ### 其他配置
 
@@ -91,10 +91,10 @@
 | 任务类型 | 允许直接修改 | 必读规则 | 必经 workflow | 是否先出 plan | 是否需用户确认 | 是否需 evidence |
 |----------|--------------|----------|---------------|---------------|----------------|-----------------|
 | `~/workspace/` 源码修改 | 否 | `rules/source-code-modify.md` | 视任务而定 | 否 | 视任务而定 | 是 |
-| `patchs/` 归档（workspace → patchs） | 否 | `rules/source-code-modify.md` | `workflows/sync-code-to-patchs/` | 否 | README/附加说明按 workflow 约束 | 是 |
-| `patchs/` 回退（patchs → workspace） | 否 | `rules/source-code-modify.md` | `workflows/revert-code-from-patchs/` | 是 | 是 | 是 |
-| patchs → 技术文档同步 | 否 | `rules/doc-paths.md`、`rules/plantuml.md` | `workflows/sync-patchs-to-doc/` | 是 | 是 | 是 |
-| commit / push | 否 | workflow 契约 + commit scope 配置 | `workflows/git-push-to-server/` | 否 | 是 | 是 |
+| `patchs/` 归档（workspace → patchs） | 否 | `rules/source-code-modify.md` | `workflows/lc-sync-code-to-patchs/` | 否 | README/附加说明按 workflow 约束 | 是 |
+| `patchs/` 回退（patchs → workspace） | 否 | `rules/source-code-modify.md` | `workflows/lc-revert-code-from-patchs/` | 是 | 是 | 是 |
+| patchs → 技术文档同步 | 否 | `rules/doc-paths.md`、`rules/plantuml.md` | `workflows/lc-sync-patchs-to-doc/` | 是 | 是 | 是 |
+| commit / push | 否 | workflow 契约 + commit scope 配置 | `workflows/lc-git-push-to-server/` | 否 | 是 | 是 |
 | harness bash 脚本改造 | 是 | `rules/script-observability.md` | 视脚本而定 | 否 | 否 | 是 |
 | harness 规则文档改造 | 是 | [`../README.md#控制总纲`](../README.md#控制总纲) + 对应 `rules/*.md` | 无 | 视范围而定 | 视风险而定 | 建议保留 |
 | harness 模板改造 | 是 | `rules/plantuml.md` + `templates/README.md` | 无 | 建议先出方案 | 是 | 建议保留 |
@@ -123,6 +123,6 @@
 | 设计文档 | [`docs/specs/2026-06-21-engineering-doc-refactor-design.md`](../../../docs/specs/2026-06-21-engineering-doc-refactor-design.md) | 文档重构设计 |
 | 关联规则 | [`../rules/path-management.md`](../rules/path-management.md)（PATH-001） | harness-paths.conf 校验 |
 | 关联规则 | [`../rules/source-code-modify.md`](../rules/source-code-modify.md) | baseline 证据 |
-| 关联 workflow | [`../workflows/git-push-to-server/`](../workflows/git-push-to-server/) | scope-mapping 消费 |
-| 关联 workflow | [`../workflows/sync-patchs-to-doc/`](../workflows/sync-patchs-to-doc/) | doc-sync-mapping 消费 |
-| 关联 workflow | [`../workflows/revert-code-from-patchs/`](../workflows/revert-code-from-patchs/) | baseline-evidence 消费 |
+| 关联 workflow | [`../workflows/lc-git-push-to-server/`](../workflows/lc-git-push-to-server/) | scope-mapping 消费 |
+| 关联 workflow | [`../workflows/lc-sync-patchs-to-doc/`](../workflows/lc-sync-patchs-to-doc/) | doc-sync-mapping 消费 |
+| 关联 workflow | [`../workflows/lc-revert-code-from-patchs/`](../workflows/lc-revert-code-from-patchs/) | baseline-evidence 消费 |

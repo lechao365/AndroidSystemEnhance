@@ -5,9 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../../lib/shell/harness_path_util.sh
 source "$SCRIPT_DIR/../lib/shell/harness_path_util.sh"
 REPO_ROOT="$(harness_repo_root)"
-SYNC_SCRIPT="$REPO_ROOT/engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh"
-FIXTURE_ROOT="$REPO_ROOT/engineering/harness/tests/fixtures/sync-code-to-patchs"
-TMP_ROOT="$(harness_path TEST_SANDBOX_DIR)/test-sync-code-to-patchs"
+SYNC_SCRIPT="$REPO_ROOT/engineering/harness/workflows/lc-sync-code-to-patchs/sync_code_to_patchs.sh"
+FIXTURE_ROOT="$REPO_ROOT/engineering/harness/tests/fixtures/lc-sync-code-to-patchs"
+TMP_ROOT="$(harness_path TEST_SANDBOX_DIR)/test-lc-sync-code-to-patchs"
 PATCH_ROOT="$TMP_ROOT/repo/patchs/rpi5"
 
 fail() {
@@ -63,7 +63,7 @@ run_sync() {
     HOME="$TMP_ROOT/home" \
     KERNEL_WS="$repo_root/workspace/rpi5-kernel-build/common" \
     AOSP_WS="$repo_root/workspace/aosp" \
-    bash "$repo_root/engineering/harness/workflows/sync-code-to-patchs/sync_code_to_patchs.sh" "$@"
+    bash "$repo_root/engineering/harness/workflows/lc-sync-code-to-patchs/sync_code_to_patchs.sh" "$@"
 }
 
 setup_kernel_delete_fixture() {

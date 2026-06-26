@@ -1,4 +1,4 @@
-# git-push-to-server
+# lc-git-push-to-server
 
 > **AI 读取指引**：本 README 采用三层结构。先读「大纲」判断需要哪些章节，
 > 再按需精读对应章节，避免全量解析。
@@ -22,7 +22,7 @@
 
 | 文件 | 职责 | 关键入口 |
 |------|------|---------|
-| `WORKFLOW.md` | workflow 契约：trigger / preconditions / inputs / 完整阶段 | 被 `.opencode/commands/git-push-to-server.md` `@` 消费 |
+| `WORKFLOW.md` | workflow 契约：trigger / preconditions / inputs / 完整阶段 | 被 `.opencode/commands/lc-git-push-to-server.md` `@` 消费 |
 | `collect_diff.sh` | diff 收集（生成结构化 diff 摘要供 AI 理解） | 由 workflow 编排，不单独调用 |
 | `commit_and_push.sh` | 提交推送（git add → commit → push） | 由 workflow 编排，不单独调用 |
 
@@ -32,9 +32,9 @@
 
 | 触发方式 | 说明 |
 |---------|------|
-| `/git-push-to-server` | 完整流程：collect → AI 生成 message → 确认 → commit + push |
-| `/git-push-to-server --dry-run` | 只 collect + 生成 message 展示，不 commit 不 push |
-| `/git-push-to-server --no-push` | 确认后只 commit 不 push |
+| `/lc-git-push-to-server` | 完整流程：collect → AI 生成 message → 确认 → commit + push |
+| `/lc-git-push-to-server --dry-run` | 只 collect + 生成 message 展示，不 commit 不 push |
+| `/lc-git-push-to-server --no-push` | 确认后只 commit 不 push |
 
 ## 关联资源
 
