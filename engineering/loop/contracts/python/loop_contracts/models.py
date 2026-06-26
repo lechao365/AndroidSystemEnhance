@@ -46,7 +46,7 @@ class LoopSession:
     status: str = "PENDING"
     termination_reason: str = ""
     latest_failure_code: FailureCode = FailureCode.NONE
-    attempts: list[AttemptState] = field(default_factory=list)
+    attempts: list[dict] = field(default_factory=list)
     artifacts_dir: str = ""
 
 

@@ -51,13 +51,6 @@ def _guard_attempts_below_limit(req: GuardEvalRequest) -> GuardEvalResult:
     return GuardEvalResult(matched=False)
 
 
-@_register("deploy_success_and_verify_passed")
-def _guard_deploy_success_and_verify_passed(req: GuardEvalRequest) -> GuardEvalResult:
-    if req.latest_status == "PASS" and req.latest_failure_code == FailureCode.NONE:
-        return GuardEvalResult(matched=True, next_node=NodeKind.DONE_SUCCESS.value, reason="deploy and verify passed")
-    return GuardEvalResult(matched=False)
-
-
 @_register("patch_rejected")
 def _guard_patch_rejected(req: GuardEvalRequest) -> GuardEvalResult:
     if req.latest_failure_code == FailureCode.PATCH_REJECTED:
@@ -90,6 +83,34 @@ def _guard_kernel_dead_no_shell(req: GuardEvalRequest) -> GuardEvalResult:
 def _guard_deploy_failed_but_recoverable(req: GuardEvalRequest) -> GuardEvalResult:
     if req.latest_failure_code == FailureCode.DEPLOY_FATAL:
         return GuardEvalResult(matched=True, next_node=NodeKind.DECIDE_NEXT.value, reason="deploy failed, back to decide")
+    return GuardEvalResult(matched=False)
+
+
+@_register("rollback_failed")
+def _guard_rollback_failed(req: GuardEvalRequest) -> GuardEvalResult:
+    if req.latest_failure_code == FailureCode.ROLLBACK_FAILED:
+        return GuardEvalResult(matched=True, next_node=NodeKind.ESCALATE_HUMAN.value, reason="rollback failed, escalate")
+    return GuardEvalResult(matched=False)
+
+
+@_register("transport_unrecoverable")
+def _guard_transport_unrecoverable(req: GuardEvalRequest) -> GuardEvalResult:
+    if req.latest_failure_code == FailureCode.TRANSPORT_UNRECOVERABLE:
+        return GuardEvalResult(matched=True, next_node=NodeKind.ESCALATE_HUMAN.value, reason="transport unrecoverable")
+    return GuardEvalResult(matched=False)
+
+
+@_register("session_state_corrupted")
+def _guard_session_state_corrupted(req: GuardEvalRequest) -> GuardEvalResult:
+    if req.latest_failure_code == FailureCode.SESSION_STATE_ERROR:
+        return GuardEvalResult(matched=True, next_node=NodeKind.ESCALATE_HUMAN.value, reason="session state corrupted")
+    return GuardEvalResult(matched=False)
+
+
+@_register("boot_timeout_no_recovery")
+def _guard_boot_timeout_no_recovery(req: GuardEvalRequest) -> GuardEvalResult:
+    if req.latest_failure_code == FailureCode.BOOT_TIMEOUT_ROLLBACK:
+        return GuardEvalResult(matched=True, next_node=NodeKind.ESCALATE_HUMAN.value, reason="boot timeout, rollback exhausted")
     return GuardEvalResult(matched=False)
 
 

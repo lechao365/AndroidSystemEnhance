@@ -115,7 +115,7 @@ def _handle_init(args: argparse.Namespace) -> int:
 def _handle_run(args: argparse.Namespace) -> int:
     try:
         session = _load_session(args.session)
-        rt = LoopRuntime(session, _CASES_DIR, _DEVICE_PROFILE)
+        rt = LoopRuntime(session, _CASES_DIR, _DEVICE_PROFILE, adb_endpoint=args.adb_endpoint)
         state = rt.run()
         print(f"terminal_state={state.terminal_state.value}")
         if state.terminal_state == RuntimeTerminalState.DONE_SUCCESS:
@@ -125,6 +125,17 @@ def _handle_run(args: argparse.Namespace) -> int:
         print(f"RUNTIME_FATAL: {type(e).__name__}: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc(file=sys.stderr)
+        # Persist session as DONE_FAILURE so resume knows it crashed
+        try:
+            session = _load_session(args.session)
+            session_path = Path(args.session)
+            if session_path.exists():
+                data = json.loads(session_path.read_text(encoding="utf-8"))
+                data["terminal_state"] = RuntimeTerminalState.DONE_FAILURE.value
+                data["transition_reason"] = f"RUNTIME_FATAL: {type(e).__name__}: {e}"
+                session_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
         return 2
 
 

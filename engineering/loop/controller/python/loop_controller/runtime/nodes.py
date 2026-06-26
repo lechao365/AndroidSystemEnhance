@@ -161,7 +161,14 @@ def node_compile(session_dict: dict, workspace_root: str = "") -> dict:
                 estimated_seconds=600,
             )
 
-    result = compile_plan(plan, ws_root)
+    try:
+        result = compile_plan(plan, ws_root)
+    except Exception as e:
+        return {
+            "status": "COMPILE_FAILED",
+            "failure_code": FailureCode.COMPILE_FAILED,
+            "error": f"compile_plan exception: {type(e).__name__}: {e}",
+        }
     if result.success:
         return {
             "status": "COMPILED",
@@ -201,6 +208,18 @@ def node_deploy(session_dict: dict, adb_endpoint: str = "") -> dict:
                 "mode": "OK",
             }
         error = (result.stderr or result.stdout or "")[-500:]
+        # Kernel dead detection: no serial shell response
+        _KERNEL_DEAD_PATTERNS = (
+            "kernel panic", "not syncing", "no response from serial",
+            "boot timeout", "device offline", "connection refused",
+        )
+        error_lower = error.lower()
+        if any(p in error_lower for p in _KERNEL_DEAD_PATTERNS):
+            return {
+                "status": "KERNEL_DEAD",
+                "failure_code": FailureCode.KERNEL_DEAD_NO_SHELL,
+                "error": error,
+            }
         return {
             "status": "DEPLOY_FAILED",
             "failure_code": FailureCode.DEPLOY_FATAL,

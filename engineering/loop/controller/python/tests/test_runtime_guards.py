@@ -67,11 +67,6 @@ def test_guard_attempts_below_limit_not_matched():
     assert r.matched is False
 
 
-def test_guard_deploy_success_and_verify_passed():
-    r = evaluate_guard(_req("deploy_success_and_verify_passed", latest_status="PASS", latest_failure_code=FailureCode.NONE))
-    assert r.matched is True
-
-
 def test_guard_patch_rejected():
     r = evaluate_guard(_req("patch_rejected", latest_failure_code=FailureCode.PATCH_REJECTED))
     assert r.matched is True
@@ -119,3 +114,27 @@ def test_guard_chain_returns_no_match():
     chain = ["all_cases_passed"]
     r = guard_chain(chain, _req("dummy"))
     assert r.matched is False
+
+
+def test_guard_rollback_failed():
+    r = evaluate_guard(_req("rollback_failed", latest_failure_code=FailureCode.ROLLBACK_FAILED))
+    assert r.matched is True
+    assert r.next_node == "ESCALATE_HUMAN"
+
+
+def test_guard_transport_unrecoverable():
+    r = evaluate_guard(_req("transport_unrecoverable", latest_failure_code=FailureCode.TRANSPORT_UNRECOVERABLE))
+    assert r.matched is True
+    assert r.next_node == "ESCALATE_HUMAN"
+
+
+def test_guard_session_state_corrupted():
+    r = evaluate_guard(_req("session_state_corrupted", latest_failure_code=FailureCode.SESSION_STATE_ERROR))
+    assert r.matched is True
+    assert r.next_node == "ESCALATE_HUMAN"
+
+
+def test_guard_boot_timeout_no_recovery():
+    r = evaluate_guard(_req("boot_timeout_no_recovery", latest_failure_code=FailureCode.BOOT_TIMEOUT_ROLLBACK))
+    assert r.matched is True
+    assert r.next_node == "ESCALATE_HUMAN"

@@ -39,10 +39,11 @@ class LoopRuntime:
     BUILD_ANALYSIS_REQUEST -> WAIT_ANALYZER_PATCH -> ESCALATE_HUMAN).
     """
 
-    def __init__(self, session: LoopSession, cases_dir: str, device_profile: str) -> None:
+    def __init__(self, session: LoopSession, cases_dir: str, device_profile: str, adb_endpoint: str = "") -> None:
         self._session = session
         self._state = RuntimeState(current_node=NodeKind.INIT_SESSION.value)
         self._store = CheckpointStore(session.artifacts_dir, session.session_id)
+        self._adb_endpoint = adb_endpoint
         # TODO: Replace module-level stage globals with proper DI.
         # stages module uses _CASES_DIR/_DEVICE_PROFILE as module constants;
         # this override works for now but prevents isolation in concurrent usage.
@@ -59,8 +60,14 @@ class LoopRuntime:
             self._state.last_checkpoint_at = cp.timestamp
         return self._state
 
-    def run(self) -> RuntimeState:
+    def run(self, max_iterations: int = 100) -> RuntimeState:
+        iterations = 0
         while self._state.terminal_state == RuntimeTerminalState.NONE:
+            iterations += 1
+            if iterations > max_iterations:
+                self._state.terminal_state = RuntimeTerminalState.DONE_FAILURE
+                self._state.transition_reason = f"max_iterations({max_iterations}) exceeded"
+                break
             self._execute_current_node()
             if self._state.terminal_state != RuntimeTerminalState.NONE:
                 break
@@ -139,7 +146,7 @@ class LoopRuntime:
                     self._state.node_status = "COMPILE_FAILED_REVERT"
             self._checkpoint(f"compile={result['status']}", fc)
         elif node == NodeKind.DEPLOY_PATCH.value:
-            result = _runtime_nodes.node_deploy(self._to_session_dict(), adb_endpoint="")
+            result = _runtime_nodes.node_deploy(self._to_session_dict(), adb_endpoint=self._adb_endpoint)
             self._state.node_status = result["status"]
             fc = result.get("failure_code", FailureCode.NONE)
             if isinstance(fc, str):
@@ -165,6 +172,12 @@ class LoopRuntime:
             if isinstance(fc, str):
                 fc = FailureCode(fc)
             self._session.latest_failure_code = fc
+            # Revert failure must escalate immediately (spec: deploy 回退失败 → 立即退人工)
+            guard_req = self._build_guard_eval_request()
+            guard_result = guard_chain(["rollback_failed"], guard_req)
+            if guard_result.matched:
+                self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
+                self._state.pending_human_gate = True
             self._checkpoint(f"revert={result['status']}", fc)
 
     def _execute_run_verify(self) -> None:
@@ -184,12 +197,7 @@ class LoopRuntime:
         self._checkpoint(f"verify {stage_result.status}", stage_result.failure_code)
 
     def _execute_decide_next(self) -> None:
-        decision = stages.decide_stage(self._to_session_dict())
-        self._state.transition_reason = str(decision.get("reason", ""))
-        try:
-            fc = FailureCode(decision.get("failure_code", "NONE"))
-        except ValueError:
-            fc = FailureCode.NONE
+        # guard_chain is the single source of truth for transition decisions.
         guard_req = self._build_guard_eval_request()
         guard_result = guard_chain(
             [
@@ -199,6 +207,10 @@ class LoopRuntime:
                 "duplicate_patch_hash",
                 "kernel_dead_no_shell",
                 "patch_rejected",
+                "session_state_corrupted",
+                "transport_unrecoverable",
+                "rollback_failed",
+                "boot_timeout_no_recovery",
                 "attempts_below_limit",
             ],
             guard_req,
@@ -214,10 +226,15 @@ class LoopRuntime:
                 self._state.terminal_state = RuntimeTerminalState.DONE_SUCCESS
             # Non-terminal guard → drive transition via _compute_next_node
             self._state.node_status = "RETRY" if self._state.terminal_state == RuntimeTerminalState.NONE else guard_result.reason
+            self._state.transition_reason = guard_result.reason
         else:
-            self._state.node_status = "RETRY"
+            # No guard matched — should not happen in normal operation.
+            self._state.terminal_state = RuntimeTerminalState.DONE_FAILURE
+            self._state.transition_reason = "no guard matched in DECIDE_NEXT"
+            self._state.node_status = "NO_GUARD_MATCH"
+        fc = self._session.latest_failure_code
         self._checkpoint(
-            f"decide={guard_result.reason or 'RETRY'}",
+            f"decide={guard_result.reason or 'NO_MATCH'}",
             fc,
             matched_guards=matched_guards,
         )
