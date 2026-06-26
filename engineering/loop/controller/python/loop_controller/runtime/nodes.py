@@ -26,27 +26,35 @@ def _workspace_root(workspace_root: str = "") -> str:
     )
 
 
-def _parse_deploy_result(stdout: str, mode: str = "OK") -> dict:
-    """从 deploy CLI stdout 解析结构化 DEPLOY_CTX，跨进程传递 backup 元数据。"""
+def _parse_deploy_ctx(stdout: str) -> dict | None:
+    """从 deploy CLI stdout 解析 DEPLOY_CTX JSON，返回 dict 或 None。"""
     for line in stdout.split("\n"):
         if line.startswith("DEPLOY_CTX:"):
             try:
-                ctx = json.loads(line[len("DEPLOY_CTX:"):].strip())
-                return {
-                    "status": "DEPLOYED",
-                    "failure_code": FailureCode.NONE,
-                    "mode": ctx.get("mode", mode),
-                    "backup_path": ctx.get("backup_path", ""),
-                    "backup_sha": ctx.get("backup_sha", ""),
-                    "deployed_files": ctx.get("deployed_files", []),
-                }
+                return json.loads(line[len("DEPLOY_CTX:"):].strip())
             except json.JSONDecodeError:
                 pass
-    return {
-        "status": "DEPLOYED",
-        "failure_code": FailureCode.NONE,
-        "mode": mode,
-    }
+    return None
+
+
+def _classify_deploy_failure(ctx: dict) -> tuple[str, FailureCode]:
+    """根据 Deployer 结构化错误字符串判定 failure_code。
+    返回 (status, failure_code)。分类依据 deployer.py 实际错误消息。
+    """
+    error = ctx.get("error", "").lower()
+    # kernel panic → 立即升级
+    if "kernel panic" in error:
+        return ("KERNEL_DEAD", FailureCode.KERNEL_DEAD_NO_SHELL)
+    # boot timeout / reboot 后未完成启动 → 可回滚
+    if "boot_completed not reached" in error or "boot timeout" in error:
+        return ("BOOT_TIMEOUT", FailureCode.BOOT_TIMEOUT_ROLLBACK)
+    # dd 写入失败 → 可回滚
+    if "dd write failed" in error:
+        return ("BOOT_TIMEOUT", FailureCode.BOOT_TIMEOUT_ROLLBACK)
+    # 其余 deploy 错误（adb root/remount/push/sha256/health/service 等）→ 尝试回滚
+    if error:
+        return ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL)
+    return ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL)
 
 
 def node_apply_patch(
@@ -206,13 +214,22 @@ def node_compile(session_dict: dict, workspace_root: str = "") -> dict:
 
 
 def node_deploy(session_dict: dict, adb_endpoint: str = "") -> dict:
-    """部署到设备。
+    """部署编译产物到设备。
 
-    当前实现委托给 loop_core.cli deploy subprocess（与旧 control_cli 一致）。
-    部署由 git diff HEAD 驱动，编译产物由 workspace 落盘后自动发现。
-    返回 {status, failure_code, mode, error}。
+    从 session 的 compile_result.artifacts 取编译产物，通过 --artifact 传给 deploy CLI。
+    deploy CLI 收到 --artifact 后跳过内置编译，避免重复。
+    通过 DEPLOY_CTX 结构化输出传递 backup 元数据和错误信息。
+    返回 {status, failure_code, mode, backup_path, backup_sha, deployed_files, error}。
     """
-    cmd = [sys.executable, "-m", "loop_core.cli", "deploy", "--diff-rev", "HEAD"]
+    # 从上一次编译结果获取 artifacts，跳过 deploy CLI 内置编译
+    artifacts = _get_compile_artifacts(session_dict)
+    cmd = [
+        sys.executable, "-m", "loop_core.cli", "deploy",
+        "--diff-rev", "HEAD",
+        "--skip-compile",
+    ]
+    for art in artifacts:
+        cmd += ["--artifact", art]
     if adb_endpoint:
         cmd += ["--adb-endpoint", adb_endpoint]
 
@@ -224,37 +241,6 @@ def node_deploy(session_dict: dict, adb_endpoint: str = "") -> dict:
             timeout=3600,
             env=_build_env(),
         )
-        if result.returncode == 0:
-            return _parse_deploy_result(result.stdout or "", mode="OK")
-        error = (result.stderr or result.stdout or "")[-500:]
-        error_lower = error.lower()
-
-        # 真正内核死透：kernel panic / not syncing / 串口完全无响应
-        _KERNEL_DEAD_PATTERNS = (
-            "kernel panic", "not syncing", "no response from serial",
-        )
-        if any(p in error_lower for p in _KERNEL_DEAD_PATTERNS):
-            return {
-                "status": "KERNEL_DEAD",
-                "failure_code": FailureCode.KERNEL_DEAD_NO_SHELL,
-                "error": error,
-            }
-
-        # 可恢复的启动超时：设备可能仍在启动中，串口可达，可尝试 DD 回滚
-        _BOOT_TIMEOUT_PATTERNS = (
-            "boot timeout", "device offline", "connection refused",
-        )
-        if any(p in error_lower for p in _BOOT_TIMEOUT_PATTERNS):
-            return {
-                "status": "BOOT_TIMEOUT",
-                "failure_code": FailureCode.BOOT_TIMEOUT_ROLLBACK,
-                "error": error,
-            }
-        return {
-            "status": "DEPLOY_FAILED",
-            "failure_code": FailureCode.DEPLOY_FATAL,
-            "error": error,
-        }
     except subprocess.TimeoutExpired:
         return {
             "status": "DEPLOY_FAILED",
@@ -267,6 +253,56 @@ def node_deploy(session_dict: dict, adb_endpoint: str = "") -> dict:
             "failure_code": FailureCode.DEPLOY_FATAL,
             "error": str(e),
         }
+
+    ctx = _parse_deploy_ctx(result.stdout or "")
+
+    if result.returncode == 0:
+        return _build_deploy_result("DEPLOYED", FailureCode.NONE, ctx)
+
+    # 失败路径：从 DEPLOY_CTX 提取结构化错误和回滚元数据
+    if ctx:
+        status, fc = _classify_deploy_failure(ctx)
+        return _build_deploy_result(status, fc, ctx)
+    # 无 DEPLOY_CTX（deploy CLI 在到达 Deployer 之前就退出了）
+    error = (result.stderr or result.stdout or "")[:500]
+    return {
+        "status": "DEPLOY_FAILED",
+        "failure_code": FailureCode.DEPLOY_FATAL,
+        "error": error,
+    }
+
+
+def _get_compile_artifacts(session_dict: dict) -> list[str]:
+    """从 session attempts 最近一次 compile_result 提取编译产物路径。"""
+    attempts = session_dict.get("attempts", [])
+    if not attempts:
+        return []
+    latest = attempts[-1]
+    if not isinstance(latest, dict):
+        return []
+    compile_result = latest.get("compile_result", {})
+    if isinstance(compile_result, dict):
+        return compile_result.get("artifacts", [])
+    return []
+
+
+def _build_deploy_result(status: str, fc: FailureCode, ctx: dict | None) -> dict:
+    """从 DEPLOY_CTX 构造统一的 deploy 返回 dict。"""
+    if not ctx:
+        return {
+            "status": status,
+            "failure_code": fc,
+            "mode": "",
+        }
+    return {
+        "status": status,
+        "failure_code": fc,
+        "mode": ctx.get("mode", ""),
+        "backup_path": ctx.get("backup_path", ""),
+        "backup_sha": ctx.get("backup_sha", ""),
+        "deployed_files": ctx.get("deployed_files", []),
+        "error": ctx.get("error", ""),
+    }
 
 
 def node_revert_workspace(session_dict: dict) -> dict:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json as _json
 import sys
 from loop_deploy.decider import decide, get_diff_files
 from loop_deploy.compiler import compile_plan
@@ -18,12 +19,25 @@ def add_deploy_parser(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--decide", action="store_true", help="仅输出决策不执行（dry-run）")
     p.add_argument("--diff-rev", default="HEAD", help="git diff 基准（默认 HEAD）")
     p.add_argument("--mode", choices=_DEPLOY_MODES, help="强制指定部署模式（跳过决策器）")
-    p.add_argument("--artifact", help="手动指定编译产物路径")
+    p.add_argument("--artifact", action="append", default=[], help="手动指定编译产物路径（可重复）")
     p.add_argument("--remote", help="手动指定远程推送路径")
     p.add_argument("--service", default="", help="手动指定 restart 的服务名")
     p.add_argument("--adb-endpoint", default="", help="adb endpoint（格式 <ip>:5555，由 serial bootstrap 动态发现）")
     p.add_argument("--adb-serial", default="", help="adb device serial")
+    p.add_argument("--skip-compile", action="store_true", help="跳过内置编译（artifacts 由 --artifact 提供）")
     p.set_defaults(func=_handle_deploy)
+
+
+def _emit_deploy_ctx(result) -> None:
+    """输出结构化 deploy_context 到 stdout，供调用方跨进程解析。"""
+    ctx = {
+        "mode": result.mode.value,
+        "backup_path": result.backup_path,
+        "backup_sha": result.backup_sha,
+        "deployed_files": result.deployed_files,
+        "error": result.error,
+    }
+    print(f"DEPLOY_CTX: {_json.dumps(ctx)}")
 
 
 def _handle_deploy(args: argparse.Namespace) -> int:
@@ -51,8 +65,8 @@ def _handle_deploy(args: argparse.Namespace) -> int:
         print(f"SKIP: {plan.reason}")
         return 0
 
-    artifacts = [args.artifact] if args.artifact else []
-    if not args.artifact:
+    artifacts: list[str] = list(args.artifact)
+    if not args.skip_compile and not artifacts:
         compile_result = compile_plan(plan)
         if not compile_result.success:
             print(f"COMPILE FAILED: {compile_result.error}", file=sys.stderr)
@@ -61,9 +75,6 @@ def _handle_deploy(args: argparse.Namespace) -> int:
 
     if not args.adb_endpoint:
         print("ERROR: --adb-endpoint 未指定。", file=sys.stderr)
-        print("动态 IP 场景下必须先跑 serial bootstrap 获取设备 IP：", file=sys.stderr)
-        print("  le run --suite cases/system/network-adbd-success.yaml --host <serial_host> --port <serial_port>", file=sys.stderr)
-        print("或手动通过 rp5_serial_helper.py device-ip 获取后传入 --adb-endpoint <ip>:5555", file=sys.stderr)
         return 1
     endpoint = args.adb_endpoint
     serial = args.adb_serial or endpoint
@@ -71,17 +82,11 @@ def _handle_deploy(args: argparse.Namespace) -> int:
     deployer = Deployer(client)
     result = deployer.deploy(plan, artifacts)
 
+    # 无论成功失败都输出 DEPLOY_CTX（回滚元数据不能丢在进程边界）
+    _emit_deploy_ctx(result)
+
     if result.success:
         print(f"DEPLOY OK: mode={result.mode.value} duration={result.duration_seconds:.1f}s reboot={result.requires_reboot}")
-        # 输出结构化 deploy_context（供调用方解析，跨进程传递 backup/deploy 元数据）
-        import json as _json
-        _ctx = {
-            "mode": result.mode.value,
-            "backup_path": result.backup_path,
-            "backup_sha": result.backup_sha,
-            "deployed_files": result.deployed_files,
-        }
-        print(f"DEPLOY_CTX: {_json.dumps(_ctx)}")
         return 0
     else:
         print(f"DEPLOY FAILED: {result.error}", file=sys.stderr)

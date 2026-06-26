@@ -175,6 +175,7 @@ class LoopRuntime:
                     "status": result["status"],
                     "failure_code": fc.value,
                     "error": result.get("error", ""),
+                    "artifacts": result.get("artifacts", []),
                 }
             if result["status"] == "COMPILE_FAILED":
                 guard_req = self._build_guard_eval_request()
