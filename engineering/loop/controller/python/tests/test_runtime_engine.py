@@ -257,3 +257,125 @@ def test_resume_restores_full_state(tmp_path, monkeypatch):
     assert state.previous_node == "RUN_VERIFY"
     assert state.node_status == "FAIL"
     assert state.last_checkpoint_at == "2026-06-26T12:30:00+08:00"
+
+
+def test_resume_then_run_reaches_done_success(tmp_path, monkeypatch):
+    """resume 从中间 checkpoint 恢复后 run() 续跑到 DONE_SUCCESS"""
+    from loop_controller.runtime.checkpoint_store import CheckpointStore
+    from loop_contracts.models import CheckpointRecord
+    from loop_contracts.failure_codes import FailureCode
+
+    _write_bundle(tmp_path, "PASS", 0)
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+
+    # 构造 checkpoint：RUN_VERIFY(PASS) 已完成，next=DECIDE_NEXT
+    store = CheckpointStore(str(tmp_path), "sess-resume-run")
+    store.save(CheckpointRecord(
+        checkpoint_id="cp-1", session_id="sess-resume-run", attempt_index=1,
+        current_node="RUN_VERIFY",
+        input_summary={}, output_summary={"node_status": "PASS"},
+        failure_code=FailureCode.NONE, matched_guards=[],
+        next_node="DECIDE_NEXT", timestamp="2026-06-26T12:00:00+08:00",
+    ))
+
+    session = LoopSession(
+        session_id="sess-resume-run", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=5, artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, "cases", "profile.json")
+    rt.resume()
+    # resume 后 current_node=DECIDE_NEXT，run() 续跑应直达 DONE_SUCCESS
+    assert rt._state.current_node == "DECIDE_NEXT"
+    state = rt.run()
+    assert state.terminal_state == RuntimeTerminalState.DONE_SUCCESS
+
+
+def test_resume_on_already_terminal_is_noop(tmp_path):
+    """对已终态的 session 调 resume 不恢复、不执行"""
+    from loop_controller.runtime.checkpoint_store import CheckpointStore
+    from loop_contracts.models import CheckpointRecord
+    from loop_contracts.failure_codes import FailureCode
+
+    store = CheckpointStore(str(tmp_path), "sess-terminal")
+    store.save(CheckpointRecord(
+        checkpoint_id="cp-1", session_id="sess-terminal", attempt_index=1,
+        current_node="DECIDE_NEXT", input_summary={},
+        output_summary={"node_status": "PASS"},
+        failure_code=FailureCode.NONE, matched_guards=["all_cases_passed"],
+        next_node="DONE_SUCCESS", timestamp="2026-06-26T12:00:00+08:00",
+    ))
+
+    session = LoopSession(
+        session_id="sess-terminal", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=5, artifacts_dir=str(tmp_path),
+    )
+    # 传入 initial_terminal_state=DONE_SUCCESS 模拟已终态
+    rt = LoopRuntime(session, "cases", "profile.json",
+                     initial_terminal_state=RuntimeTerminalState.DONE_SUCCESS)
+    state = rt.resume()
+    # 幂等：不恢复 checkpoint
+    assert state.current_node == "INIT_SESSION"
+    assert state.terminal_state == RuntimeTerminalState.DONE_SUCCESS
+
+
+def test_resume_restores_failure_code_for_guard(tmp_path, monkeypatch):
+    """中断在 RUN_VERIFY(FAIL) 后 → resume 恢复 fc=RUN_FAILED → guard 正确判定"""
+    from loop_controller.runtime.checkpoint_store import CheckpointStore
+    from loop_contracts.models import CheckpointRecord
+    from loop_contracts.failure_codes import FailureCode
+
+    store = CheckpointStore(str(tmp_path), "sess-fc")
+    store.save(CheckpointRecord(
+        checkpoint_id="cp-1", session_id="sess-fc", attempt_index=1,
+        current_node="RUN_VERIFY",
+        input_summary={}, output_summary={"node_status": "FAIL"},
+        failure_code=FailureCode.RUN_FAILED, matched_guards=[],
+        next_node="DECIDE_NEXT", timestamp="2026-06-26T12:00:00+08:00",
+    ))
+
+    session = LoopSession(
+        session_id="sess-fc", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=5, artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, "cases", "profile.json")
+    rt.resume()
+    # resume 后 latest_failure_code 必须是 RUN_FAILED 而非 NONE
+    assert rt._session.latest_failure_code == FailureCode.RUN_FAILED
+    # guard_eval_request 的 latest_failure_code 也应该是 RUN_FAILED
+    guard_req = rt._build_guard_eval_request()
+    assert guard_req.latest_failure_code == FailureCode.RUN_FAILED
+
+
+def test_resume_restores_attempt_count(tmp_path):
+    """中断在 attempt=3 后 → resume 恢复 current_attempt=3"""
+    from loop_controller.runtime.checkpoint_store import CheckpointStore
+    from loop_contracts.models import CheckpointRecord
+    from loop_contracts.failure_codes import FailureCode
+
+    store = CheckpointStore(str(tmp_path), "sess-att")
+    store.save(CheckpointRecord(
+        checkpoint_id="cp-1", session_id="sess-att", attempt_index=3,
+        current_node="RUN_VERIFY",
+        input_summary={}, output_summary={"node_status": "FAIL"},
+        failure_code=FailureCode.RUN_FAILED, matched_guards=[],
+        next_node="DECIDE_NEXT", timestamp="2026-06-26T12:00:00+08:00",
+    ))
+
+    session = LoopSession(
+        session_id="sess-att", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=5, artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, "cases", "profile.json")
+    rt.resume()
+    # current_attempt 从 checkpoint 的 attempt_index 恢复
+    assert rt._session.current_attempt == 3
+    guard_req = rt._build_guard_eval_request()
+    assert guard_req.attempt_count == 3

@@ -69,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
 
     resume_p = sub.add_parser("resume", help="resume from last checkpoint")
     resume_p.add_argument("--session", required=True)
+    resume_p.add_argument("--adb-endpoint", default="")
     resume_p.set_defaults(func=_handle_resume)
 
     status_p = sub.add_parser("status", help="show session state")
@@ -114,8 +115,12 @@ def _handle_init(args: argparse.Namespace) -> int:
 
 def _handle_run(args: argparse.Namespace) -> int:
     try:
-        session = _load_session(args.session)
-        rt = LoopRuntime(session, _CASES_DIR, _DEVICE_PROFILE, adb_endpoint=args.adb_endpoint)
+        session, ts = _load_session(args.session)
+        # 幂等：已终态的 session 不重复执行
+        if ts != RuntimeTerminalState.NONE:
+            print(f"terminal_state={ts.value}")
+            return 0 if ts == RuntimeTerminalState.DONE_SUCCESS else 1
+        rt = LoopRuntime(session, _CASES_DIR, _DEVICE_PROFILE, adb_endpoint=args.adb_endpoint, initial_terminal_state=ts)
         state = rt.run()
         print(f"terminal_state={state.terminal_state.value}")
         if state.terminal_state == RuntimeTerminalState.DONE_SUCCESS:
@@ -125,32 +130,37 @@ def _handle_run(args: argparse.Namespace) -> int:
         print(f"RUNTIME_FATAL: {type(e).__name__}: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc(file=sys.stderr)
-        # Persist session as DONE_FAILURE so resume knows it crashed
-        try:
-            session = _load_session(args.session)
-            session_path = Path(args.session)
-            if session_path.exists():
-                data = json.loads(session_path.read_text(encoding="utf-8"))
-                data["terminal_state"] = RuntimeTerminalState.DONE_FAILURE.value
-                data["transition_reason"] = f"RUNTIME_FATAL: {type(e).__name__}: {e}"
-                session_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        except Exception:
-            pass
+        _persist_failure(args.session, e)
         return 2
 
 
 def _handle_resume(args: argparse.Namespace) -> int:
-    session = _load_session(args.session)
-    rt = LoopRuntime(session, _CASES_DIR, _DEVICE_PROFILE)
-    state = rt.resume()
-    print(f"resumed_to_node={state.current_node}")
-    print(f"terminal_state={state.terminal_state.value}")
-    return 0
+    try:
+        session, ts = _load_session(args.session)
+        # 幂等：已终态的 session 不续跑
+        if ts != RuntimeTerminalState.NONE:
+            print(f"terminal_state={ts.value}")
+            return 0 if ts == RuntimeTerminalState.DONE_SUCCESS else 1
+        rt = LoopRuntime(session, _CASES_DIR, _DEVICE_PROFILE, adb_endpoint=args.adb_endpoint, initial_terminal_state=ts)
+        rt.resume()
+        state = rt.run()
+        print(f"terminal_state={state.terminal_state.value}")
+        if state.terminal_state == RuntimeTerminalState.DONE_SUCCESS:
+            return 0
+        return 1
+    except Exception as e:
+        print(f"RUNTIME_FATAL: {type(e).__name__}: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        _persist_failure(args.session, e)
+        return 2
 
 
 def _handle_status(args: argparse.Namespace) -> int:
-    session = _load_session(args.session)
-    print(json.dumps(_session_to_dict(session), indent=2, ensure_ascii=False))
+    session, ts = _load_session(args.session)
+    data = _session_to_dict(session)
+    data["terminal_state"] = ts.value
+    print(json.dumps(data, indent=2, ensure_ascii=False))
     return 0
 
 
@@ -179,13 +189,13 @@ def _handle_explain(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-def _load_session(path_str: str) -> LoopSession:
+def _load_session(path_str: str) -> tuple[LoopSession, RuntimeTerminalState]:
     data = json.loads(Path(path_str).read_text(encoding="utf-8"))
     try:
         fc = FailureCode(data.get("latest_failure_code", "NONE"))
     except ValueError:
         fc = FailureCode.NONE
-    return LoopSession(
+    session = LoopSession(
         session_id=data.get("session_id", ""),
         workflow_id=data.get("workflow_id", "runtime"),
         target=data.get("target", ""),
@@ -197,6 +207,12 @@ def _load_session(path_str: str) -> LoopSession:
         attempts=data.get("attempts", []),
         artifacts_dir=data.get("artifacts_dir", ""),
     )
+    ts_str = data.get("terminal_state", "NONE")
+    try:
+        ts = RuntimeTerminalState(ts_str)
+    except ValueError:
+        ts = RuntimeTerminalState.NONE
+    return session, ts
 
 
 def _session_to_dict(session: LoopSession) -> dict:
@@ -212,6 +228,27 @@ def _session_to_dict(session: LoopSession) -> dict:
         "attempts": session.attempts,
         "artifacts_dir": session.artifacts_dir,
     }
+
+
+def _persist_failure(session_path_str: str, e: Exception) -> None:
+    """异常时同时写回原始 session 文件和 session.json，标记 DONE_FAILURE。"""
+    try:
+        p = Path(session_path_str)
+        if not p.exists():
+            return
+        data = json.loads(p.read_text(encoding="utf-8"))
+        data["terminal_state"] = RuntimeTerminalState.DONE_FAILURE.value
+        data["transition_reason"] = f"RUNTIME_FATAL: {type(e).__name__}: {e}"
+        updated = json.dumps(data, indent=2, ensure_ascii=False)
+        p.write_text(updated, encoding="utf-8")
+        # 同步到 session.json
+        artifacts = data.get("artifacts_dir", "")
+        if artifacts:
+            sp = Path(artifacts) / "session.json"
+            if sp != p:
+                sp.write_text(updated, encoding="utf-8")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

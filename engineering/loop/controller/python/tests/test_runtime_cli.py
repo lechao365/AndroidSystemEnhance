@@ -110,8 +110,8 @@ def test_runtime_run_escalate_on_max(tmp_path, monkeypatch):
     assert "ESCALATE_HUMAN" in out
 
 
-def test_runtime_resume(tmp_path):
-    """resume loads from checkpoint."""
+def test_runtime_resume(tmp_path, monkeypatch):
+    """resume loads from checkpoint and continues to terminal state."""
     from loop_controller.runtime.checkpoint_store import CheckpointStore
     from loop_contracts.models import CheckpointRecord
     from loop_contracts.failure_codes import FailureCode
@@ -124,17 +124,20 @@ def test_runtime_resume(tmp_path):
     ])
     sid = _extract_sid(out)
 
+    # checkpoint: RUN_VERIFY 已 PASS，resume 后 DECIDE_NEXT 应判 DONE_SUCCESS
     store = CheckpointStore(str(artifacts), sid)
     store.save(CheckpointRecord(
         checkpoint_id="cp-1", session_id=sid, attempt_index=1,
-        current_node="RUN_VERIFY", input_summary={}, output_summary={},
+        current_node="RUN_VERIFY", input_summary={},
+        output_summary={"node_status": "PASS"},
         failure_code=FailureCode.NONE, matched_guards=[],
         next_node="DECIDE_NEXT", timestamp="2026-06-26T12:00:00+08:00",
     ))
 
     rc, out = _capture(["resume", "--session", str(artifacts / f"{sid}.json")])
+    # resume 续跑到终态：DECIDE_NEXT guard 匹配 all_cases_passed → DONE_SUCCESS
     assert rc == 0
-    assert "DECIDE_NEXT" in out
+    assert "DONE_SUCCESS" in out
 
 
 def test_runtime_status(tmp_path):
@@ -191,3 +194,76 @@ def test_runtime_run_writes_session_json(tmp_path, monkeypatch):
     data = json.loads(session_path.read_text())
     assert data["session_id"] == sid
     assert "terminal_state" in data
+
+
+def test_cli_resume_then_run_reaches_terminal(tmp_path):
+    """CLI resume 子命令从 checkpoint 恢复后续跑到终态"""
+    from loop_controller.runtime.checkpoint_store import CheckpointStore
+    from loop_contracts.models import CheckpointRecord
+    from loop_contracts.failure_codes import FailureCode
+
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    rc, out = _capture([
+        "init", "--target", "test", "--suite", "test.yaml",
+        "--max-attempts", "3", "--artifacts-dir", str(artifacts),
+    ])
+    sid = _extract_sid(out)
+
+    # checkpoint: RUN_VERIFY(PASS) 已完成，resume 后 DECIDE_NEXT → DONE_SUCCESS
+    store = CheckpointStore(str(artifacts), sid)
+    store.save(CheckpointRecord(
+        checkpoint_id="cp-1", session_id=sid, attempt_index=1,
+        current_node="RUN_VERIFY", input_summary={},
+        output_summary={"node_status": "PASS"},
+        failure_code=FailureCode.NONE, matched_guards=[],
+        next_node="DECIDE_NEXT", timestamp="2026-06-26T12:00:00+08:00",
+    ))
+
+    rc, out = _capture(["resume", "--session", str(artifacts / f"{sid}.json")])
+    assert rc == 0
+    assert "DONE_SUCCESS" in out
+
+
+def test_cli_resume_on_already_terminal_is_idempotent(tmp_path):
+    """对已终态的 session 调 resume 幂等返回"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    rc, out = _capture([
+        "init", "--target", "test", "--suite", "test.yaml",
+        "--max-attempts", "3", "--artifacts-dir", str(artifacts),
+    ])
+    sid = _extract_sid(out)
+
+    # 手动标记 session 为 DONE_SUCCESS
+    session_file = artifacts / f"{sid}.json"
+    data = json.loads(session_file.read_text())
+    data["terminal_state"] = "DONE_SUCCESS"
+    session_file.write_text(json.dumps(data), encoding="utf-8")
+
+    rc, out = _capture(["resume", "--session", str(session_file)])
+    # 幂等：直接返回，不续跑
+    assert rc == 0
+    assert "DONE_SUCCESS" in out
+
+
+def test_cli_run_on_already_terminal_is_idempotent(tmp_path):
+    """对已终态的 session 调 run 幂等返回"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    rc, out = _capture([
+        "init", "--target", "test", "--suite", "test.yaml",
+        "--max-attempts", "3", "--artifacts-dir", str(artifacts),
+    ])
+    sid = _extract_sid(out)
+
+    # 手动标记 session 为 ESCALATE_HUMAN
+    session_file = artifacts / f"{sid}.json"
+    data = json.loads(session_file.read_text())
+    data["terminal_state"] = "ESCALATE_HUMAN"
+    session_file.write_text(json.dumps(data), encoding="utf-8")
+
+    rc, out = _capture(["run", "--session", str(session_file)])
+    # 幂等：非 SUCCESS 终态返回 rc=1
+    assert rc == 1
+    assert "ESCALATE_HUMAN" in out

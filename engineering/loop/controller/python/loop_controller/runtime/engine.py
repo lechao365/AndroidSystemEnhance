@@ -39,9 +39,10 @@ class LoopRuntime:
     BUILD_ANALYSIS_REQUEST -> WAIT_ANALYZER_PATCH -> ESCALATE_HUMAN).
     """
 
-    def __init__(self, session: LoopSession, cases_dir: str, device_profile: str, adb_endpoint: str = "") -> None:
+    def __init__(self, session: LoopSession, cases_dir: str, device_profile: str, adb_endpoint: str = "", initial_terminal_state: RuntimeTerminalState = RuntimeTerminalState.NONE) -> None:
         self._session = session
         self._state = RuntimeState(current_node=NodeKind.INIT_SESSION.value)
+        self._state.terminal_state = initial_terminal_state
         self._store = CheckpointStore(session.artifacts_dir, session.session_id)
         self._adb_endpoint = adb_endpoint
         # TODO: Replace module-level stage globals with proper DI.
@@ -51,13 +52,37 @@ class LoopRuntime:
         stages._DEVICE_PROFILE = device_profile
 
     def resume(self) -> RuntimeState:
+        # 幂等：已终态的 session 不恢复
+        if self._state.terminal_state != RuntimeTerminalState.NONE:
+            return self._state
         cp = self._store.latest()
-        if cp:
-            self._state.current_node = cp.next_node
-            self._state.previous_node = cp.current_node
-            self._state.node_status = cp.output_summary.get("node_status", "")
-            self._state.interrupted = False
-            self._state.last_checkpoint_at = cp.timestamp
+        if not cp:
+            return self._state
+        # 校验 next_node 非空且合法
+        if not cp.next_node:
+            return self._state
+        try:
+            NodeKind(cp.next_node)
+        except ValueError:
+            return self._state
+        # 不恢复到终态 node（DONE_SUCCESS/ESCALATE_HUMAN/DONE_FAILURE）
+        _TERMINAL_NODES = frozenset({
+            NodeKind.DONE_SUCCESS.value,
+            NodeKind.ESCALATE_HUMAN.value,
+            NodeKind.DONE_FAILURE.value,
+        })
+        if cp.next_node in _TERMINAL_NODES:
+            return self._state
+        # 全面恢复运行时状态
+        self._state.current_node = cp.next_node
+        self._state.previous_node = cp.current_node
+        self._state.node_status = cp.output_summary.get("node_status", "")
+        self._state.last_checkpoint_at = cp.timestamp
+        self._state.interrupted = False
+        # 恢复 session 级字段，保证 guard_chain 判定数据一致
+        self._session.latest_failure_code = cp.failure_code
+        if cp.attempt_index:
+            self._session.current_attempt = cp.attempt_index
         return self._state
 
     def run(self, max_iterations: int = 100) -> RuntimeState:
