@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import tempfile
 import time
 from pathlib import Path
 from loop_adb.client import AdbClient
@@ -30,6 +31,7 @@ class Deployer:
 
     def _deploy_push_single(self, plan: DeployPlan, artifacts: list[str]) -> DeployResult:
         start = time.time()
+        backup_files: list[str] = []
 
         root_r = self._client.root(timeout_sec=10.0)
         if root_r.exit_code != 0:
@@ -40,6 +42,9 @@ class Deployer:
             return DeployResult(success=False, mode=DeployMode.PUSH_SINGLE,
                                 error=f"adb remount failed: {remount_r.stderr}", duration_seconds=time.time() - start)
 
+        backup_dir = Path(tempfile.gettempdir()) / f"le_push_backup_{int(time.time())}"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
         for target in plan.deploy_targets:
             if not target.artifact_name:
                 continue
@@ -48,20 +53,34 @@ class Deployer:
                 return DeployResult(success=False, mode=DeployMode.PUSH_SINGLE,
                                     error=f"artifact {target.artifact_name} not found",
                                     duration_seconds=time.time() - start)
+            # adb pull 当前远端文件作为备份（用于 rollback）
+            if target.remote_path:
+                backup_local = backup_dir / Path(target.remote_path).name
+                try:
+                    self._client.pull(target.remote_path, str(backup_local), timeout_sec=15.0)
+                    backup_files.append(target.remote_path)
+                except Exception:
+                    pass
             push_r = self._client.push(local_path, target.remote_path, timeout_sec=30.0)
             if push_r.exit_code != 0:
                 return DeployResult(success=False, mode=DeployMode.PUSH_SINGLE,
                                     error=f"adb push failed: {push_r.stderr}",
-                                    duration_seconds=time.time() - start)
+                                    duration_seconds=time.time() - start,
+                                    backup_path=str(backup_dir),
+                                    deployed_files=backup_files)
             if target.service_name:
                 self._client.shell(f"setprop ctl.restart {target.service_name}", timeout_sec=5.0)
                 if not self._ops.wait_service_running(target.service_name, timeout=15.0):
                     return DeployResult(success=False, mode=DeployMode.PUSH_SINGLE,
                                         error=f"service {target.service_name} did not start",
-                                        duration_seconds=time.time() - start)
+                                        duration_seconds=time.time() - start,
+                                        backup_path=str(backup_dir),
+                                        deployed_files=backup_files)
 
         return DeployResult(success=True, mode=DeployMode.PUSH_SINGLE,
-                            duration_seconds=time.time() - start)
+                            duration_seconds=time.time() - start,
+                            backup_path=str(backup_dir),
+                            deployed_files=backup_files)
 
     def _deploy_dd_boot(self, artifacts: list[str]) -> DeployResult:
         start = time.time()
@@ -106,29 +125,49 @@ class Deployer:
             return DeployResult(success=False, mode=DeployMode.DD_BOOT_REBOOT,
                                 error=f"health check failed: {e}")
 
+        # DD 写入前备份原 boot 分区到设备 /data/local/tmp
+        remote_backup = "/data/local/tmp/boot_backup.img"
+        try:
+            backup_r = self._client.shell(
+                f"dd if=/dev/block/mmcblk0p1 of={remote_backup} bs=4M",
+                timeout_sec=60.0, as_root=True,
+            )
+            backup_sha_r = self._client.shell(f"sha256sum {remote_backup}", timeout_sec=15.0, as_root=True)
+            backup_sha = backup_sha_r.raw_stdout.strip().split()[0] if backup_sha_r.command_exit_code == 0 else ""
+        except Exception:
+            backup_sha = ""
+
         dd_r = self._client.shell("dd if=/data/local/tmp/boot.img of=/dev/block/mmcblk0p1 bs=4M", timeout_sec=30.0, as_root=True)
         if dd_r.command_exit_code != 0:
             return DeployResult(success=False, mode=DeployMode.DD_BOOT_REBOOT,
                                 requires_reboot=False,
                                 error=f"dd write failed (exit {dd_r.command_exit_code}): {(dd_r.raw_stdout or '')[:200]}",
-                                duration_seconds=time.time() - start)
+                                duration_seconds=time.time() - start,
+                                backup_path=remote_backup,
+                                backup_sha=backup_sha)
         self._client.shell("sync", timeout_sec=10.0, as_root=True)
         self._client.shell(f"rm {remote}", timeout_sec=5.0, as_root=True)
         self._client.reboot(timeout_sec=15.0)
         time.sleep(5)
         if not self._ops.wait_boot_completed(timeout=120.0):
             return DeployResult(success=False, mode=DeployMode.DD_BOOT_REBOOT,
-                                error="boot_completed not reached after reboot")
+                                error="boot_completed not reached after reboot",
+                                backup_path=remote_backup,
+                                backup_sha=backup_sha)
         try:
             logcat = self._client.logcat(["crash"], timeout_sec=10.0)
             if logcat.exit_code == 0 and any("panic" in line.lower() for line in logcat.stdout.splitlines()):
                 return DeployResult(success=False, mode=DeployMode.DD_BOOT_REBOOT,
-                                    error="kernel panic detected in logcat after reboot")
+                                    error="kernel panic detected in logcat after reboot",
+                                    backup_path=remote_backup,
+                                    backup_sha=backup_sha)
         except Exception:
             pass
         self._client.connect(timeout_sec=15.0)
         return DeployResult(success=True, mode=DeployMode.DD_BOOT_REBOOT, requires_reboot=True,
-                            duration_seconds=time.time() - start)
+                            duration_seconds=time.time() - start,
+                            backup_path=remote_backup,
+                            backup_sha=backup_sha)
 
     def _find_artifact(self, artifacts: list[str], name: str) -> str:
         for a in artifacts:

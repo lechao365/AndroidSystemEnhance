@@ -54,3 +54,6 @@ class DeployResult:
     duration_seconds: float = 0.0
     requires_reboot: bool = False
     error: str = ""
+    backup_path: str = ""
+    backup_sha: str = ""
+    deployed_files: list[str] = field(default_factory=list)

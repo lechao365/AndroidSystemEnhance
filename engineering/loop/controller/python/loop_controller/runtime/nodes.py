@@ -239,8 +239,8 @@ def node_deploy(session_dict: dict, adb_endpoint: str = "") -> dict:
         }
 
 
-def node_revert(session_dict: dict) -> dict:
-    """回滚最近一次 apply-patch。
+def node_revert_workspace(session_dict: dict) -> dict:
+    """回滚最近一次 apply-patch 的源码改动（git stash apply）。
 
     从 attempts 倒序查找 stash_ref，git stash apply 恢复。
     返回 {status, failure_code, error}。
@@ -283,3 +283,113 @@ def node_revert(session_dict: dict) -> dict:
         "failure_code": FailureCode.ROLLBACK_FAILED,
         "error": "no stash ref found in any attempt",
     }
+
+
+def node_rollback_deploy(
+    session_dict: dict,
+    deploy_context: dict,
+    serial_shell: callable | None = None,
+) -> dict:
+    """部署失败后的设备回滚，根据 deploy mode 选择策略。
+
+    PUSH_SINGLE: 从 deploy_context 取 backup_path（adb pull 备份目录），
+                 adb push 回旧文件 + restart service。
+    DD_BOOT:     从 deploy_context 取 backup_path（设备端路径）+ backup_sha，
+                 通过 serial_shell 调 serial_rollback_dd；
+                 若 serial_shell 不可用，fallback 返回 REVERT_FAILED。
+    其他/无 context: 返回 NO_DEPLOY_CONTEXT。
+    返回 {status, failure_code, error}。
+    """
+    mode = deploy_context.get("mode", "")
+    backup_path = deploy_context.get("backup_path", "")
+    backup_sha = deploy_context.get("backup_sha", "")
+    deployed_files: list[str] = deploy_context.get("deployed_files", [])
+
+    # -- PUSH_SINGLE 回滚 --
+    if mode in ("PUSH_SINGLE", "push_single"):
+        if not backup_path or not deployed_files:
+            return {
+                "status": "NO_BACKUP",
+                "failure_code": FailureCode.ROLLBACK_FAILED,
+                "error": "no backup available for push_single rollback",
+            }
+        from pathlib import Path
+        backup_dir = Path(backup_path)
+        try:
+            from loop_adb.client import AdbClient
+            client = AdbClient()
+        except Exception as e:
+            return {
+                "status": "REVERT_FAILED",
+                "failure_code": FailureCode.ROLLBACK_FAILED,
+                "error": f"adb client unavailable: {e}",
+            }
+        try:
+            client.connect(timeout_sec=10.0)
+        except Exception:
+            pass
+        errors: list[str] = []
+        for remote_path in deployed_files:
+            local_backup = backup_dir / Path(remote_path).name
+            if not local_backup.exists():
+                errors.append(f"backup not found: {local_backup}")
+                continue
+            try:
+                push_r = client.push(str(local_backup), remote_path, timeout_sec=30.0)
+                if push_r.exit_code != 0:
+                    errors.append(f"push failed: {remote_path}")
+            except Exception as e:
+                errors.append(f"push exception {remote_path}: {e}")
+        if errors:
+            return {
+                "status": "REVERT_FAILED",
+                "failure_code": FailureCode.ROLLBACK_FAILED,
+                "error": "; ".join(errors)[:300],
+            }
+        return {
+            "status": "REVERTED",
+            "failure_code": FailureCode.NONE,
+        }
+
+    # -- DD_BOOT 回滚 --
+    if mode in ("DD_BOOT_REBOOT", "dd_boot_reboot", "DD_BOOT"):
+        if not backup_path:
+            return {
+                "status": "NO_BACKUP",
+                "failure_code": FailureCode.ROLLBACK_FAILED,
+                "error": "no backup_path for dd rollback",
+            }
+        if serial_shell is None:
+            return {
+                "status": "REVERT_FAILED",
+                "failure_code": FailureCode.ROLLBACK_FAILED,
+                "error": "serial_shell unavailable, cannot perform dd rollback",
+            }
+        from loop_deploy.rollback import serial_rollback_dd
+        block_device = "/dev/block/mmcblk0p1"
+        result = serial_rollback_dd(
+            serial_shell=serial_shell,
+            backup_path=backup_path if "/" not in backup_path else "/tmp/" + Path(backup_path).name,
+            block_device=block_device,
+        )
+        if result.success:
+            return {
+                "status": "REVERTED",
+                "failure_code": FailureCode.NONE,
+            }
+        return {
+            "status": "REVERT_FAILED",
+            "failure_code": FailureCode.ROLLBACK_FAILED,
+            "error": result.reason,
+        }
+
+    return {
+        "status": "NO_DEPLOY_CONTEXT",
+        "failure_code": FailureCode.ROLLBACK_FAILED,
+        "error": f"unknown deploy mode or no context: mode={mode}",
+    }
+
+
+def node_revert(session_dict: dict) -> dict:
+    """兼容旧调用：委托给 node_revert_workspace。"""
+    return node_revert_workspace(session_dict)

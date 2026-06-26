@@ -39,12 +39,14 @@ class LoopRuntime:
     BUILD_ANALYSIS_REQUEST -> WAIT_ANALYZER_PATCH -> ESCALATE_HUMAN).
     """
 
-    def __init__(self, session: LoopSession, cases_dir: str, device_profile: str, adb_endpoint: str = "", initial_terminal_state: RuntimeTerminalState = RuntimeTerminalState.NONE) -> None:
+    def __init__(self, session: LoopSession, cases_dir: str, device_profile: str, adb_endpoint: str = "", initial_terminal_state: RuntimeTerminalState = RuntimeTerminalState.NONE, serial_shell_provider: callable | None = None) -> None:
         self._session = session
         self._state = RuntimeState(current_node=NodeKind.INIT_SESSION.value)
         self._state.terminal_state = initial_terminal_state
         self._store = CheckpointStore(session.artifacts_dir, session.session_id)
         self._adb_endpoint = adb_endpoint
+        self._serial_shell_provider = serial_shell_provider
+        self._deploy_context: dict = {}
         # TODO: Replace module-level stage globals with proper DI.
         # stages module uses _CASES_DIR/_DEVICE_PROFILE as module constants;
         # this override works for now but prevents isolation in concurrent usage.
@@ -177,33 +179,61 @@ class LoopRuntime:
             if isinstance(fc, str):
                 fc = FailureCode(fc)
             self._session.latest_failure_code = fc
-            if result["status"] == "DEPLOY_FAILED":
+            # Save deploy context for REVERT_PATCH rollback
+            self._deploy_context = {
+                "mode": result.get("mode", ""),
+                "backup_path": result.get("backup_path", ""),
+                "backup_sha": result.get("backup_sha", ""),
+                "deployed_files": result.get("deployed_files", []),
+            }
+            # Record deploy context into latest attempt
+            if self._session.attempts:
+                latest = self._session.attempts[-1]
+                if isinstance(latest, dict):
+                    latest["deploy_context"] = self._deploy_context
+            if result["status"] in ("DEPLOY_FAILED", "KERNEL_DEAD", "DEPLOY_TIMEOUT"):
                 guard_req = self._build_guard_eval_request()
                 guard_result = guard_chain(
-                    ["kernel_dead_no_shell", "deploy_failed_but_recoverable"], guard_req,
+                    ["kernel_dead_no_shell", "boot_timeout_kernel_panic", "deploy_failed_but_recoverable"], guard_req,
                 )
                 if guard_result.matched:
                     next_nk = NodeKind(guard_result.next_node)
                     if next_nk == NodeKind.ESCALATE_HUMAN:
                         self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
                         self._state.pending_human_gate = True
+                    elif next_nk == NodeKind.REVERT_PATCH:
+                        self._state.node_status = "DEPLOY_FAILED_REVERT"
                     elif next_nk == NodeKind.DECIDE_NEXT:
                         self._state.node_status = "DEPLOY_FAILED_RECOVERABLE"
             self._checkpoint(f"deploy={result['status']}", fc)
         elif node == NodeKind.REVERT_PATCH.value:
-            result = _runtime_nodes.node_revert(self._to_session_dict())
-            self._state.node_status = result["status"]
-            fc = result.get("failure_code", FailureCode.NONE)
+            # Phase 1: 设备回滚（若 deploy_context 存在）
+            if self._deploy_context and self._deploy_context.get("mode"):
+                d_result = _runtime_nodes.node_rollback_deploy(
+                    self._to_session_dict(),
+                    self._deploy_context,
+                    serial_shell=self._serial_shell_provider,
+                )
+                if d_result["status"] != "REVERTED":
+                    # 设备回滚失败 → 立即退人工
+                    self._state.node_status = d_result["status"]
+                    self._session.latest_failure_code = d_result.get("failure_code", FailureCode.ROLLBACK_FAILED)
+                    self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
+                    self._state.pending_human_gate = True
+                    self._checkpoint(f"revert_device=failed:{d_result['status']}", self._session.latest_failure_code)
+                    return
+            # Phase 2: 源码回滚（git stash apply）
+            ws_result = _runtime_nodes.node_revert_workspace(self._to_session_dict())
+            self._state.node_status = ws_result["status"]
+            fc = ws_result.get("failure_code", FailureCode.NONE)
             if isinstance(fc, str):
                 fc = FailureCode(fc)
             self._session.latest_failure_code = fc
-            # Revert failure must escalate immediately (spec: deploy 回退失败 → 立即退人工)
-            guard_req = self._build_guard_eval_request()
-            guard_result = guard_chain(["rollback_failed"], guard_req)
-            if guard_result.matched:
+            if ws_result["status"] != "REVERTED":
+                # 源码回滚失败 → 立即退人工
                 self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
                 self._state.pending_human_gate = True
-            self._checkpoint(f"revert={result['status']}", fc)
+            self._checkpoint(f"revert={ws_result['status']}", fc)
 
     def _execute_run_verify(self) -> None:
         session_path = Path(self._session.artifacts_dir) / "session.json"
@@ -303,6 +333,8 @@ class LoopRuntime:
             return NodeKind.DEPLOY_PATCH.value
         if node == NodeKind.DEPLOY_PATCH.value and self._state.node_status == "DEPLOY_FAILED_RECOVERABLE":
             return NodeKind.DECIDE_NEXT.value
+        if node == NodeKind.DEPLOY_PATCH.value and self._state.node_status == "DEPLOY_FAILED_REVERT":
+            return NodeKind.REVERT_PATCH.value
         return _LINEAR_NEXT.get(node, "")
 
     def _checkpoint(self, reason: str, failure_code: FailureCode, matched_guards: list[str] | None = None) -> None:

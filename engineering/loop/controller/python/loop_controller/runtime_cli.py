@@ -113,6 +113,20 @@ def _handle_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_serial_shell() -> callable | None:
+    """尝试加载 rp5-serial helper 作为 serial_shell_provider。
+
+    若加载成功返回 callable(remote_cmd: str) -> str | None；
+    若 rp5-serial 不可用返回 None。
+    """
+    try:
+        from rp5_serial_helper import SerialHelper
+        helper = SerialHelper()
+        return helper.execute
+    except (ImportError, Exception):
+        return None
+
+
 def _handle_run(args: argparse.Namespace) -> int:
     try:
         session, ts = _load_session(args.session)
@@ -120,7 +134,8 @@ def _handle_run(args: argparse.Namespace) -> int:
         if ts != RuntimeTerminalState.NONE:
             print(f"terminal_state={ts.value}")
             return 0 if ts == RuntimeTerminalState.DONE_SUCCESS else 1
-        rt = LoopRuntime(session, _CASES_DIR, _DEVICE_PROFILE, adb_endpoint=args.adb_endpoint, initial_terminal_state=ts)
+        serial_sh = _resolve_serial_shell()
+        rt = LoopRuntime(session, _CASES_DIR, _DEVICE_PROFILE, adb_endpoint=args.adb_endpoint, initial_terminal_state=ts, serial_shell_provider=serial_sh)
         state = rt.run()
         print(f"terminal_state={state.terminal_state.value}")
         if state.terminal_state == RuntimeTerminalState.DONE_SUCCESS:
@@ -141,7 +156,8 @@ def _handle_resume(args: argparse.Namespace) -> int:
         if ts != RuntimeTerminalState.NONE:
             print(f"terminal_state={ts.value}")
             return 0 if ts == RuntimeTerminalState.DONE_SUCCESS else 1
-        rt = LoopRuntime(session, _CASES_DIR, _DEVICE_PROFILE, adb_endpoint=args.adb_endpoint, initial_terminal_state=ts)
+        serial_sh = _resolve_serial_shell()
+        rt = LoopRuntime(session, _CASES_DIR, _DEVICE_PROFILE, adb_endpoint=args.adb_endpoint, initial_terminal_state=ts, serial_shell_provider=serial_sh)
         rt.resume()
         state = rt.run()
         print(f"terminal_state={state.terminal_state.value}")

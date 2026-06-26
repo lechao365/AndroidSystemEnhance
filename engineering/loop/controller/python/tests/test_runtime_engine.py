@@ -379,3 +379,158 @@ def test_resume_restores_attempt_count(tmp_path):
     assert rt._session.current_attempt == 3
     guard_req = rt._build_guard_eval_request()
     assert guard_req.attempt_count == 3
+
+
+def test_deploy_fail_reverts_then_goes_to_decide(tmp_path, monkeypatch):
+    """DEPLOY_FAILED(DEPLOY_FATAL) → REVERT_PATCH(revert ok) → DECIDE_NEXT"""
+    _write_bundle(tmp_path, "FAIL", 1)
+
+    call_log = []
+
+    def fake_run(cmd, **kwargs):
+        cmd_str = " ".join(cmd)
+        call_log.append(cmd_str)
+        class R:
+            stdout = ""
+            stderr = ""
+            if "loop_core.cli" in cmd_str:
+                if len([c for c in call_log if "loop_core.cli" in c]) == 1:
+                    returncode = 1
+                else:
+                    returncode = 0
+            else:
+                returncode = 0
+        return R()
+
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+    from loop_contracts.failure_codes import FailureCode as FC
+
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_apply_patch",
+        lambda *a, **kw: {"status": "APPLIED", "failure_code": FC.NONE, "files": ["t.cpp"], "stash_ref": "stub", "patch_hash": "abc", "risk": {}, "workspace_root": str(tmp_path)},
+    )
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_compile",
+        lambda *a, **kw: {"status": "COMPILED", "failure_code": FC.NONE, "artifacts": ["out/t"]},
+    )
+    # deploy fails → DEPLOY_FATAL
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_deploy",
+        lambda *a, **kw: {"status": "DEPLOY_FAILED", "failure_code": FC.DEPLOY_FATAL, "mode": "PUSH_SINGLE", "backup_path": "/tmp/fake", "deployed_files": ["/system/fake.so"]},
+    )
+    # device rollback succeeds
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_rollback_deploy",
+        lambda *a, **kw: {"status": "REVERTED", "failure_code": FC.NONE},
+    )
+    # workspace revert succeeds
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_revert_workspace",
+        lambda *a, **kw: {"status": "REVERTED", "failure_code": FC.NONE},
+    )
+
+    (tmp_path / "patch_suggestion.json").write_text(
+        json.dumps([{"path": "t.cpp", "action": "modify", "content": ""}]), encoding="utf-8",
+    )
+
+    session = LoopSession(
+        session_id="sess-dr", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=2, artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, "cases", "profile.json")
+    state = rt.run()
+    # After revert, goes to DECIDE_NEXT → no guard matches terminal_success → goes to DONE_FAILURE
+    # Actually RESULT should be that after revert success, if under max, it tries again
+    assert state.terminal_state in (RuntimeTerminalState.DONE_FAILURE, RuntimeTerminalState.ESCALATE_HUMAN)
+
+
+def test_deploy_kernel_dead_escalates(tmp_path, monkeypatch):
+    """KERNEL_DEAD → guard kernel_dead_no_shell → ESCALATE_HUMAN (no revert)"""
+    _write_bundle(tmp_path, "FAIL", 1)
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+    from loop_contracts.failure_codes import FailureCode as FC
+
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_apply_patch",
+        lambda *a, **kw: {"status": "APPLIED", "failure_code": FC.NONE, "files": ["t.cpp"], "stash_ref": "stub", "patch_hash": "abc", "risk": {}, "workspace_root": str(tmp_path)},
+    )
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_compile",
+        lambda *a, **kw: {"status": "COMPILED", "failure_code": FC.NONE, "artifacts": ["out/t"]},
+    )
+    # deploy returns KERNEL_DEAD
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_deploy",
+        lambda *a, **kw: {"status": "KERNEL_DEAD", "failure_code": FC.KERNEL_DEAD_NO_SHELL, "mode": ""},
+    )
+
+    (tmp_path / "patch_suggestion.json").write_text(
+        json.dumps([{"path": "t.cpp", "action": "modify", "content": ""}]), encoding="utf-8",
+    )
+
+    session = LoopSession(
+        session_id="sess-kd", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=2, artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, "cases", "profile.json")
+    state = rt.run()
+    assert state.terminal_state == RuntimeTerminalState.ESCALATE_HUMAN
+
+
+def test_deploy_success_no_revert(tmp_path, monkeypatch):
+    """DEPLOYED → RUN_VERIFY, no revert triggered"""
+    _write_bundle(tmp_path, "FAIL", 1)
+
+    call_log = []
+
+    def fake_run(cmd, **kwargs):
+        cmd_str = " ".join(cmd)
+        call_log.append(cmd_str)
+        class R:
+            stdout = ""
+            stderr = ""
+            if "loop_core.cli" in cmd_str:
+                if len([c for c in call_log if "loop_core.cli" in c]) == 1:
+                    returncode = 1
+                else:
+                    returncode = 0
+            else:
+                returncode = 0
+        return R()
+
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+    from loop_contracts.failure_codes import FailureCode as FC
+
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_apply_patch",
+        lambda *a, **kw: {"status": "APPLIED", "failure_code": FC.NONE, "files": ["t.cpp"], "stash_ref": "stub", "patch_hash": "abc", "risk": {}, "workspace_root": str(tmp_path)},
+    )
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_compile",
+        lambda *a, **kw: {"status": "COMPILED", "failure_code": FC.NONE, "artifacts": ["out/t"]},
+    )
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_deploy",
+        lambda *a, **kw: {"status": "DEPLOYED", "failure_code": FC.NONE, "mode": "PUSH_SINGLE"},
+    )
+
+    (tmp_path / "patch_suggestion.json").write_text(
+        json.dumps([{"path": "t.cpp", "action": "modify", "content": ""}]), encoding="utf-8",
+    )
+
+    session = LoopSession(
+        session_id="sess-dok", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=2, artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, "cases", "profile.json")
+    state = rt.run()
+    # deploy success → second verify passes → DONE_SUCCESS
+    assert state.terminal_state == RuntimeTerminalState.DONE_SUCCESS

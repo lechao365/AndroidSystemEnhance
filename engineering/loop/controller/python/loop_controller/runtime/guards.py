@@ -82,7 +82,14 @@ def _guard_kernel_dead_no_shell(req: GuardEvalRequest) -> GuardEvalResult:
 @_register("deploy_failed_but_recoverable")
 def _guard_deploy_failed_but_recoverable(req: GuardEvalRequest) -> GuardEvalResult:
     if req.latest_failure_code == FailureCode.DEPLOY_FATAL:
-        return GuardEvalResult(matched=True, next_node=NodeKind.DECIDE_NEXT.value, reason="deploy failed, back to decide")
+        return GuardEvalResult(matched=True, next_node=NodeKind.REVERT_PATCH.value, reason="deploy failed, rollback")
+    return GuardEvalResult(matched=False)
+
+
+@_register("boot_timeout_kernel_panic")
+def _guard_boot_timeout_kernel_panic(req: GuardEvalRequest) -> GuardEvalResult:
+    if req.latest_failure_code == FailureCode.BOOT_TIMEOUT_ROLLBACK:
+        return GuardEvalResult(matched=True, next_node=NodeKind.REVERT_PATCH.value, reason="boot timeout/kernel panic, attempt rollback")
     return GuardEvalResult(matched=False)
 
 

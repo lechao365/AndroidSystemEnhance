@@ -88,7 +88,7 @@ def test_guard_kernel_dead_no_shell():
 def test_guard_deploy_failed_but_recoverable():
     r = evaluate_guard(_req("deploy_failed_but_recoverable", latest_failure_code=FailureCode.DEPLOY_FATAL))
     assert r.matched is True
-    assert r.next_node == "DECIDE_NEXT"
+    assert r.next_node == "REVERT_PATCH"
 
 
 def test_guard_patch_applied_successfully():
@@ -138,3 +138,9 @@ def test_guard_boot_timeout_no_recovery():
     r = evaluate_guard(_req("boot_timeout_no_recovery", latest_failure_code=FailureCode.BOOT_TIMEOUT_ROLLBACK))
     assert r.matched is True
     assert r.next_node == "ESCALATE_HUMAN"
+
+
+def test_guard_boot_timeout_kernel_panic():
+    r = evaluate_guard(_req("boot_timeout_kernel_panic", latest_failure_code=FailureCode.BOOT_TIMEOUT_ROLLBACK))
+    assert r.matched is True
+    assert r.next_node == "REVERT_PATCH"
