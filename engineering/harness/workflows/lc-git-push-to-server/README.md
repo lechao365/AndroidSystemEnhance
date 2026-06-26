@@ -5,7 +5,7 @@
 
 ## 定位
 
-- **是什么**：git 提交推送 workflow（收集 diff → AI 生成中文 commit message → 单次确认 → 提交推送到 origin）。
+- **是什么**：git 提交推送 workflow（收集 diff → AI 生成中文 commit message → 单次确认 → 提交推送到 origin）。working tree 干净但有未推送 commit 时，自动走仅推送模式（跳过 add/commit，直接 push 已有本地 commit）。
 - **职责边界**：脚本做机械工作（diff 收集、git add/commit/push），AI 做语义工作（理解 diff、生成 message、多轮编辑交互）。
 - **上下游依赖**：消费 `config/scope-mapping.yaml` 判定 commit scope，写入 `origin`。
 
@@ -31,8 +31,9 @@
 本目录无可独立调用的入口，由 workflow 编排触发。
 
 | 触发方式 | 说明 |
-|---------|------|
-| `/lc-git-push-to-server` | 完整流程：collect → AI 生成 message → 确认 → commit + push |
+|---------|---------|
+| `/lc-git-push-to-server` | working tree 有改动：collect → AI 生成 message → 确认 → commit + push |
+| `/lc-git-push-to-server` | working tree 干净 + 有未推送 commit：collect → 确认 → 仅 push（`--push-only`） |
 | `/lc-git-push-to-server --dry-run` | 只 collect + 生成 message 展示，不 commit 不 push |
 | `/lc-git-push-to-server --no-push` | 确认后只 commit 不 push |
 

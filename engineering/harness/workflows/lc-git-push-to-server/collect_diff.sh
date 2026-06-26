@@ -54,9 +54,33 @@ HEAD_SHORT=$(git rev-parse --short HEAD 2>/dev/null || echo "none")
 STATUS_OUTPUT=$(git status --porcelain 2>/dev/null)
 
 if [ -z "$STATUS_OUTPUT" ]; then
-    echo "nothing to commit, working tree clean"
-    log_info "无改动，退出码 4"
-    harness_exit 4
+    # working tree 干净，检测是否有未推送 commit（ahead of upstream）
+    UNPUSHED_LOG=""
+    UPSTREAM_REF=$(harness_git_upstream_ref)
+    if [ -n "$UPSTREAM_REF" ]; then
+        UNPUSHED_LOG=$(git --no-pager log --oneline "${UPSTREAM_REF}..HEAD" 2>/dev/null || true)
+    fi
+
+    if [ -z "$UNPUSHED_LOG" ]; then
+        echo "nothing to commit, working tree clean"
+        log_info "无改动，退出码 4"
+        harness_exit 4
+    fi
+
+    # 有未推送 commit：输出列表 + 标注，驱动 AI 走仅推送分支
+    UNPUSHED_COUNT=$(echo "$UNPUSHED_LOG" | grep -c '.' || true)
+    step_begin "收集未推送 commit"
+    echo "working tree clean, $UNPUSHED_COUNT unpushed commit(s)"
+    echo "当前分支: $CURRENT_BRANCH"
+    echo "远程:     $REMOTE_NAME ($REMOTE_URL)"
+    echo "upstream: $UPSTREAM_REF"
+    echo ""
+    echo "========== 未推送 commit =========="
+    echo "$UNPUSHED_LOG"
+    echo "===================================="
+    log_info "working tree clean，检测到 $UNPUSHED_COUNT 个未推送 commit，跳过 commit step"
+    step_end 0
+    harness_exit 0
 fi
 
 # 文件数统计

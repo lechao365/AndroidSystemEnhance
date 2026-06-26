@@ -1,6 +1,6 @@
 ---
 name: lc-git-push-to-server
-description: 收集 diff → AI 生成中文 type commit message → 单次确认（支持多轮编辑）→ 提交并推送到 origin。
+description: 收集 diff → AI 生成中文 type commit message → 单次确认（支持多轮编辑）→ 提交并推送到 origin。支持 working tree 干净时仅推送已有本地 commit。
 ---
 
 # lc-git-push-to-server
@@ -9,10 +9,14 @@ description: 收集 diff → AI 生成中文 type commit message → 单次确�
 
 **核心语义**：脚本做机械工作（diff 收集、git add/commit/push），AI 做语义工作（理解 diff、生成 message、多轮编辑交互）。
 
+**两种工作模式**：
+- **完整模式**（working tree 有改动）：collect diff → 生成 message → 确认 → commit + push
+- **仅推送模式**（working tree 干净 + 有未推送 commit）：collect 列出未推送 commit → 确认 → push（跳过 add/commit）
+
 ## Trigger（触发条件）
 
 - 用户表达"提交"/"推送"/"commit"/"push"意图
-- 收集到非空 diff（`collect_diff.sh` 退出码 ≠ 4）
+- 收集到非空 diff（`collect_diff.sh` 退出码 ≠ 4）—— 含"working tree 干净但有未推送 commit"场景
 
 ## Preconditions（前置条件）
 
@@ -24,13 +28,15 @@ description: 收集 diff → AI 生成中文 type commit message → 单次确�
 
 | 参数 | 说明 |
 |------|------|
-| 无参数 | 完整流程：collect → 生成 → 确认 → commit + push |
+| 无参数 | 完整流程：collect → 生成 → 确认 → commit + push（working tree 干净时自动走仅推送模式） |
 | `--dry-run` | 只 collect + 生成 message 展示，不 commit 不 push |
 | `--no-push` | 确认后只 commit 不 push |
 | `--branch <b>` | 指定推送分支（默认当前分支） |
 | `--remote <r>` | 指定远程（默认 origin） |
 
 > 注：`--dry-run` 由 AI 在工作流层处理（collect 后不进入 commit 步骤）；`--no-push` / `--branch` / `--remote` 透传给 `commit_and_push.sh`。
+>
+> **仅推送模式**由 `collect_diff.sh` 输出自动驱动（无需用户显式加参数）：当输出含 `working tree clean, N unpushed commit(s)` 时，AI 跳过 message 生成，展示待推送 commit 列表，确认后调 `commit_and_push.sh --push-only`。
 
 ## Human confirmation gates（人工确认门）
 
@@ -39,14 +45,15 @@ description: 收集 diff → AI 生成中文 type commit message → 单次确�
 无论用户在何时、以何种措辞表达"提交"或"推送"意图（如"同意提交""可以提交""提交吧"），AI 都**必须**：
 
 1. 先完成 collect diff（第 1 步）
-2. 生成 commit message（第 2 步）
-3. 展示完整 message 预览（本步）
-4. **等待用户对该 message 的显式确认**（`y` / `n` / 修改意见）
+2. 根据模式分支：
+   - **完整模式**：生成 commit message（第 2 步）→ 展示 message 预览
+   - **仅推送模式**：展示待推送 commit 列表（无需生成 message）
+3. **等待用户显式确认**（`y` / `n` / 修改意见）
 
-**禁止**将用户在 collect 之前的任何"同意"视为对后续 message 的确认。
-**禁止**跳过第 3 步直接调用 `commit_and_push.sh`。
+**禁止**将用户在 collect 之前的任何"同意"视为对后续操作的确认。
+**禁止**跳过确认门直接调用 `commit_and_push.sh`。
 
-#### 展示格式
+#### 展示格式（完整模式）
 
 （**只展示 type/scope/subject/body + 分支，不重复完整 message**）：
 
@@ -65,13 +72,29 @@ body:
 确认？(y 确认 / n 取消 / 或说明要改的地方)
 ```
 
+#### 展示格式（仅推送模式）
+
+（working tree 干净，`collect_diff.sh` 输出含 `working tree clean, N unpushed commit(s)`）
+
+```
+────────── 推送预览 ──────────
+（无新改动，仅推送已有本地 commit）
+
+待推送 commit (1 个):
+  7f79767 refactor(harness): unify workflow naming with lc- prefix
+
+分支: main → origin/main
+──────────────────────────────
+确认推送？(y 确认 / n 取消)
+```
+
 #### 交互分支
 
-| 用户输入 | AI 行为 |
-|----------|---------|
-| `y` | 调 `commit_and_push.sh` 执行 commit + push |
-| `n` | 取消，不 commit |
-| 文字描述修改意见（如 `scope 改成 tooling，body 第二条删掉`） | AI 按意见改 message，**重新展示**，再次确认（可多轮） |
+| 用户输入 | 完整模式 | 仅推送模式 |
+|----------|---------|-----------|
+| `y` | 调 `commit_and_push.sh --message-file` 执行 commit + push | 调 `commit_and_push.sh --push-only` 只 push |
+| `n` | 取消 | 取消 |
+| 文字描述修改意见 | AI 按意见改 message，**重新展示**，再次确认（可多轮） | 提示仅推送模式无 message 可改，可取消后手动处理 |
 
 ## Outputs / artifacts（输出/产物）
 
@@ -84,6 +107,8 @@ body:
 | 场景 | 处理 |
 |------|------|
 | 无改动 | collect_diff.sh 输出 `nothing to commit` + 退出码 4（无操作），AI 停止流程 |
+| working tree 干净 + 有未推送 commit | collect 输出 `working tree clean, N unpushed commit(s)` + 退出码 0，AI 走仅推送模式 |
+| 无 upstream（仅推送模式依赖） | `harness_git_upstream_ref` 返回空，collect 退出码 4（无法检测未推送 commit），AI 停止并提示设置 upstream |
 | diff 过大（>50 文件或 >5000 行） | collect 自动降级为 --stat + 每文件前 20 行摘要 |
 | push 失败 | 保留 commit，脚本退出码 2，提示手动处理（不自动回退）：`git push` 重试 / `git pull --rebase` / `git reset --soft HEAD~1` 回退 |
 | AI 生成失败 | 停下提示用户手动写 message |
@@ -106,7 +131,13 @@ bash engineering/harness/workflows/lc-git-push-to-server/collect_diff.sh        
 bash engineering/harness/workflows/lc-git-push-to-server/collect_diff.sh --stat-only  # 仅 status + stat，跳过 diff 正文
 ```
 
-脚本输出当前分支、远程、git status、改动统计、diff 正文。无改动时输出 `nothing to commit` 并退出码 4（无操作，非错误），AI 见此**停止流程**。
+脚本输出当前分支、远程、git status、改动统计、diff 正文。三种结果：
+
+1. **有改动**：输出完整 diff（退出码 0），AI 走完整模式
+2. **working tree 干净 + 有未推送 commit**：输出 `working tree clean, N unpushed commit(s)` + commit 列表（退出码 0），AI 走仅推送模式
+3. **真正无操作**：输出 `nothing to commit`（退出码 4），AI 停止流程
+
+**无 upstream 场景**：working tree 干净但无 upstream 时，`harness_git_upstream_ref` 返回空，无法检测未推送 commit，collect 退出码 4，AI 停止并提示 `git branch --set-upstream-to=origin/<branch>`。
 
 **空仓库/全 untracked 场景**：脚本无论 HEAD 是否存在，都会收集 `git ls-files --others --exclude-standard` 作为 untracked 列表，并输出每个新文件的完整内容（或大 diff 降级时输出前 20 行）。因此新仓初始化场景下 AI 也能拿到足够上下文生成 commit message。空仓库时 stat 段会输出简化版并标注"空仓库，无 upstream base"。
 
@@ -161,6 +192,8 @@ bash engineering/harness/workflows/lc-git-push-to-server/collect_diff.sh --stat-
 
 ### 4. 执行提交推送（脚本）
 
+#### 完整模式（working tree 有改动）
+
 用户确认后，AI 将最终 message 写入临时文件，调脚本：
 
 ```bash
@@ -172,6 +205,19 @@ bash engineering/harness/workflows/lc-git-push-to-server/commit_and_push.sh \
 ```
 
 脚本行为：`git add -A` → `git commit -F` → `git push <remote> <branch>`。
+
+#### 仅推送模式（working tree 干净 + 有未推送 commit）
+
+用户确认后，AI 直接调脚本（无需 message-file）：
+
+```bash
+bash engineering/harness/workflows/lc-git-push-to-server/commit_and_push.sh \
+    --push-only \
+    [--branch <分支>] \
+    [--remote origin]
+```
+
+脚本行为：跳过 `git add` / `git commit`，直接 `git push <remote> <branch>`。若检测到无未推送 commit，退出码 4。
 
 **push 失败处理**：脚本保留 commit 不回退（退出码 2），提示用户手动处理（`git push` 重试 / `git pull --rebase` / `git reset --soft HEAD~1` 回退）。**禁止 force push**。
 

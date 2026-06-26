@@ -23,6 +23,7 @@ MESSAGE_FILE=""
 BRANCH=""
 REMOTE="origin"
 NO_PUSH=false
+PUSH_ONLY=false
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -37,12 +38,16 @@ while [ $# -gt 0 ]; do
             REMOTE="$2"; shift 2 ;;
         --no-push)
             NO_PUSH=true; shift ;;
+        --push-only)
+            PUSH_ONLY=true; shift ;;
         -h|--help)
             echo "Usage: bash engineering/harness/workflows/lc-git-push-to-server/commit_and_push.sh --message-file <path> [--branch <b>] [--remote origin] [--no-push]"
+            echo "       bash engineering/harness/workflows/lc-git-push-to-server/commit_and_push.sh --push-only [--branch <b>] [--remote origin]"
             echo "  --message-file <path>  message 文本文件（git commit -F 读取）"
             echo "  --branch <b>           推送分支（默认当前分支）"
             echo "  --remote <name>        远程名（默认 origin）"
             echo "  --no-push              只 commit 不 push"
+            echo "  --push-only            跳过 add/commit，只 push（用于推送已有本地 commit）"
             harness_exit 0 ;;
         *) log_error "未知参数: $1"; harness_exit 3 ;;
     esac
@@ -53,17 +58,32 @@ done
 # ============================================================================
 cd "$REPO_ROOT" || { log_error "无法进入仓库根目录: $REPO_ROOT"; harness_exit 3; }
 
-if [ -z "$MESSAGE_FILE" ]; then
-    log_error "缺少必填参数 --message-file"
-    harness_exit 3
+# 互斥校验：--push-only 与 --message-file / --no-push 不兼容
+if [ "$PUSH_ONLY" = true ]; then
+    if [ "$NO_PUSH" = true ]; then
+        log_error "--push-only 与 --no-push 互斥"
+        harness_exit 3
+    fi
+    if [ -n "$MESSAGE_FILE" ]; then
+        log_error "--push-only 与 --message-file 互斥"
+        harness_exit 3
+    fi
 fi
-if [ ! -f "$MESSAGE_FILE" ]; then
-    log_error "message 文件不存在: $MESSAGE_FILE"
-    harness_exit 3
-fi
-if [ ! -s "$MESSAGE_FILE" ]; then
-    log_error "message 文件为空: $MESSAGE_FILE"
-    harness_exit 3
+
+# --push-only 模式不要求 message-file；否则必填
+if [ "$PUSH_ONLY" = false ]; then
+    if [ -z "$MESSAGE_FILE" ]; then
+        log_error "缺少必填参数 --message-file"
+        harness_exit 3
+    fi
+    if [ ! -f "$MESSAGE_FILE" ]; then
+        log_error "message 文件不存在: $MESSAGE_FILE"
+        harness_exit 3
+    fi
+    if [ ! -s "$MESSAGE_FILE" ]; then
+        log_error "message 文件为空: $MESSAGE_FILE"
+        harness_exit 3
+    fi
 fi
 
 # 分支默认值：当前分支
@@ -74,6 +94,26 @@ if [ -z "$BRANCH" ]; then
         harness_exit 3
     fi
 fi
+
+# ============================================================================
+# --push-only 模式：跳过 add/commit，直接进入 push
+# ============================================================================
+if [ "$PUSH_ONLY" = true ]; then
+    step_begin "跳过 add/commit (--push-only)"
+    COMMIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    UPSTREAM_REF=$(harness_git_upstream_ref)
+    UNPUSHED_COUNT=0
+    if [ -n "$UPSTREAM_REF" ]; then
+        UNPUSHED_COUNT=$(git --no-pager log --oneline "${UPSTREAM_REF}..HEAD" 2>/dev/null | grep -c '.' || true)
+    fi
+    if [ "$UNPUSHED_COUNT" -eq 0 ]; then
+        log_error "--push-only 模式但无未推送 commit"
+        harness_exit 4
+    fi
+    log_info "--push-only：HEAD=$COMMIT_HASH，待推送 $UNPUSHED_COUNT 个 commit"
+    log_result "PUSH-ONLY 进入" "head=$COMMIT_HASH" "branch=$BRANCH" "unpushed=$UNPUSHED_COUNT"
+    step_end 0
+else
 
 # ============================================================================
 # Step 1: git add -A
@@ -98,6 +138,8 @@ COMMIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 log_info "提交成功: $COMMIT_HASH"
 log_result "COMMIT 结果" "commit=$COMMIT_HASH" "branch=$BRANCH" "staged=$STAGED_COUNT"
 step_end 0
+
+fi # end PUSH_ONLY else
 
 # ============================================================================
 # Step 3: git push（可选）
