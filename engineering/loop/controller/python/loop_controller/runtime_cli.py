@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -112,13 +113,19 @@ def _handle_init(args: argparse.Namespace) -> int:
 
 
 def _handle_run(args: argparse.Namespace) -> int:
-    session = _load_session(args.session)
-    rt = LoopRuntime(session, _CASES_DIR, _DEVICE_PROFILE)
-    state = rt.run()
-    print(f"terminal_state={state.terminal_state.value}")
-    if state.terminal_state == RuntimeTerminalState.DONE_SUCCESS:
-        return 0
-    return 1
+    try:
+        session = _load_session(args.session)
+        rt = LoopRuntime(session, _CASES_DIR, _DEVICE_PROFILE)
+        state = rt.run()
+        print(f"terminal_state={state.terminal_state.value}")
+        if state.terminal_state == RuntimeTerminalState.DONE_SUCCESS:
+            return 0
+        return 1
+    except Exception as e:
+        print(f"RUNTIME_FATAL: {type(e).__name__}: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return 2
 
 
 def _handle_resume(args: argparse.Namespace) -> int:

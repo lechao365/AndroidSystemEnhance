@@ -43,7 +43,9 @@ class LoopRuntime:
         self._session = session
         self._state = RuntimeState(current_node=NodeKind.INIT_SESSION.value)
         self._store = CheckpointStore(session.artifacts_dir, session.session_id)
-        # Inject paths into stages module (same as control_cli does)
+        # TODO: Replace module-level stage globals with proper DI.
+        # stages module uses _CASES_DIR/_DEVICE_PROFILE as module constants;
+        # this override works for now but prevents isolation in concurrent usage.
         stages._CASES_DIR = cases_dir
         stages._DEVICE_PROFILE = device_profile
 
