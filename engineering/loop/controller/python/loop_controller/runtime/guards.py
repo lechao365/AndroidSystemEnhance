@@ -31,9 +31,8 @@ def _guard_attempt_limit_reached(req: GuardEvalRequest) -> GuardEvalResult:
 
 @_register("repeated_failure_code")
 def _guard_repeated_failure_code(req: GuardEvalRequest) -> GuardEvalResult:
-    if req.previous_failure_codes and req.latest_failure_code == req.previous_failure_codes[-1]:
-        if req.latest_failure_code != FailureCode.NONE:
-            return GuardEvalResult(matched=True, next_node=NodeKind.ESCALATE_HUMAN.value, reason="same failure repeated")
+    if req.latest_failure_code != FailureCode.NONE and req.latest_failure_code in req.previous_failure_codes:
+        return GuardEvalResult(matched=True, next_node=NodeKind.ESCALATE_HUMAN.value, reason="same failure repeated")
     return GuardEvalResult(matched=False)
 
 

@@ -46,12 +46,9 @@ class LoopRuntime:
         self._store = CheckpointStore(session.artifacts_dir, session.session_id)
         self._adb_endpoint = adb_endpoint
         self._serial_shell_provider = serial_shell_provider
+        self._cases_dir = cases_dir
+        self._device_profile = device_profile
         self._deploy_context: dict = {}
-        # TODO: Replace module-level stage globals with proper DI.
-        # stages module uses _CASES_DIR/_DEVICE_PROFILE as module constants;
-        # this override works for now but prevents isolation in concurrent usage.
-        stages._CASES_DIR = cases_dir
-        stages._DEVICE_PROFILE = device_profile
 
     def resume(self) -> RuntimeState:
         # 幂等：已终态的 session 不恢复
@@ -174,7 +171,6 @@ class LoopRuntime:
             # COMPILE 结果写入 attempts 历史，供 guard 判定与审计
             if self._session.attempts and isinstance(self._session.attempts[-1], dict):
                 att = self._session.attempts[-1]
-                att["failure_code"] = fc.value
                 att["compile_result"] = {
                     "status": result["status"],
                     "failure_code": fc.value,
@@ -203,7 +199,6 @@ class LoopRuntime:
             # DEPLOY 结果 + deploy_context 写入 attempts 历史，供 guard 判定与审计
             if self._session.attempts and isinstance(self._session.attempts[-1], dict):
                 latest_att = self._session.attempts[-1]
-                latest_att["failure_code"] = fc.value
                 latest_att["deploy_context"] = self._deploy_context
                 latest_att["deploy_result"] = {
                     "status": result["status"],
@@ -250,9 +245,6 @@ class LoopRuntime:
             if isinstance(fc, str):
                 fc = FailureCode(fc)
             self._session.latest_failure_code = fc
-            # 同步写入顶层 failure_code 到当前 attempt
-            if self._session.attempts and isinstance(self._session.attempts[-1], dict):
-                self._session.attempts[-1]["failure_code"] = fc.value
             if ws_result["status"] != "REVERTED":
                 # 源码回滚失败 → 立即退人工
                 self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
@@ -266,7 +258,8 @@ class LoopRuntime:
             json.dumps(self._to_session_dict(), ensure_ascii=False), encoding="utf-8"
         )
         updated, stage_result = stages.run_verify_stage(
-            str(session_path), self._session.suite, ""
+            str(session_path), self._session.suite, "",
+            cases_dir=self._cases_dir, device_profile=self._device_profile,
         )
         self._session.current_attempt = updated.get("current_attempt", self._session.current_attempt)
         self._session.status = updated.get("status", stage_result.status)
@@ -419,22 +412,26 @@ class LoopRuntime:
         )
 
     def _collect_failure_codes_from_attempt(self, att: dict) -> list[str]:
-        """从一个 attempt dict 中收集所有 failure_code（顶层 + 嵌套结果）。"""
+        """从一个 attempt dict 中收集所有 failure_code（顶层 + 嵌套结果），过滤 NONE。"""
         codes: list[str] = []
         if not isinstance(att, dict):
             return codes
         # 顶层（verify 失败时由 run_verify_stage 写入）
         top_fc = att.get("failure_code", "")
-        if top_fc:
+        if top_fc and top_fc != "NONE":
             codes.append(top_fc)
         # 嵌套 compile_result
         compile_result = att.get("compile_result", {})
-        if isinstance(compile_result, dict) and compile_result.get("failure_code"):
-            codes.append(compile_result["failure_code"])
+        if isinstance(compile_result, dict):
+            fc = compile_result.get("failure_code", "")
+            if fc and fc != "NONE":
+                codes.append(fc)
         # 嵌套 deploy_result
         deploy_result = att.get("deploy_result", {})
-        if isinstance(deploy_result, dict) and deploy_result.get("failure_code"):
-            codes.append(deploy_result["failure_code"])
+        if isinstance(deploy_result, dict):
+            fc = deploy_result.get("failure_code", "")
+            if fc and fc != "NONE":
+                codes.append(fc)
         return codes
 
     def _persist_session(self) -> None:

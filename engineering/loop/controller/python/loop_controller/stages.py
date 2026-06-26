@@ -92,9 +92,9 @@ def _get_workspace_diff() -> str:
         return ""
 
 
-def _load_target_paths(target: str) -> list[str]:
+def _load_target_paths(target: str, target_paths_yaml: str = "") -> list[str]:
     import yaml
-    config_path = Path(_TARGET_PATHS_YAML)
+    config_path = Path(target_paths_yaml or _TARGET_PATHS_YAML)
     if not config_path.exists():
         return []
     try:
@@ -117,8 +117,11 @@ def _build_env() -> dict:
 # ---------------------------------------------------------------------------
 # 阶段 handlers（纯函数）
 # ---------------------------------------------------------------------------
-def run_verify_stage(session_path: str, suite: str, adb_endpoint: str) -> tuple[dict, StageResult]:
+def run_verify_stage(session_path: str, suite: str, adb_endpoint: str,
+                     cases_dir: str = "", device_profile: str = "") -> tuple[dict, StageResult]:
     """执行一次验证，返回 (updated_session_dict, StageResult)。"""
+    _cases = cases_dir or _CASES_DIR
+    _profile = device_profile or _DEVICE_PROFILE
     session_data = _load_session(session_path)
     # 与旧 control_cli 保持一致的空 session 回退语义
     if not session_data:
@@ -136,8 +139,8 @@ def run_verify_stage(session_path: str, suite: str, adb_endpoint: str) -> tuple[
     cmd = [
         sys.executable, "-m", "loop_core.cli", "run",
         "--suite", suite,
-        "--case-dirs", _CASES_DIR,
-        "--device-profile", _DEVICE_PROFILE,
+        "--case-dirs", _cases,
+        "--device-profile", _profile,
         "--artifacts-dir", artifacts_dir,
     ]
     if adb_endpoint:

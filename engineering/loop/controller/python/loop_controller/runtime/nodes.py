@@ -26,6 +26,29 @@ def _workspace_root(workspace_root: str = "") -> str:
     )
 
 
+def _parse_deploy_result(stdout: str, mode: str = "OK") -> dict:
+    """从 deploy CLI stdout 解析结构化 DEPLOY_CTX，跨进程传递 backup 元数据。"""
+    for line in stdout.split("\n"):
+        if line.startswith("DEPLOY_CTX:"):
+            try:
+                ctx = json.loads(line[len("DEPLOY_CTX:"):].strip())
+                return {
+                    "status": "DEPLOYED",
+                    "failure_code": FailureCode.NONE,
+                    "mode": ctx.get("mode", mode),
+                    "backup_path": ctx.get("backup_path", ""),
+                    "backup_sha": ctx.get("backup_sha", ""),
+                    "deployed_files": ctx.get("deployed_files", []),
+                }
+            except json.JSONDecodeError:
+                pass
+    return {
+        "status": "DEPLOYED",
+        "failure_code": FailureCode.NONE,
+        "mode": mode,
+    }
+
+
 def node_apply_patch(
     patch_path: str, session_dict: dict, workspace_root: str = ""
 ) -> dict:
@@ -202,11 +225,7 @@ def node_deploy(session_dict: dict, adb_endpoint: str = "") -> dict:
             env=_build_env(),
         )
         if result.returncode == 0:
-            return {
-                "status": "DEPLOYED",
-                "failure_code": FailureCode.NONE,
-                "mode": "OK",
-            }
+            return _parse_deploy_result(result.stdout or "", mode="OK")
         error = (result.stderr or result.stdout or "")[-500:]
         error_lower = error.lower()
 

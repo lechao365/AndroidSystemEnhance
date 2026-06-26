@@ -73,6 +73,15 @@ def _handle_deploy(args: argparse.Namespace) -> int:
 
     if result.success:
         print(f"DEPLOY OK: mode={result.mode.value} duration={result.duration_seconds:.1f}s reboot={result.requires_reboot}")
+        # 输出结构化 deploy_context（供调用方解析，跨进程传递 backup/deploy 元数据）
+        import json as _json
+        _ctx = {
+            "mode": result.mode.value,
+            "backup_path": result.backup_path,
+            "backup_sha": result.backup_sha,
+            "deployed_files": result.deployed_files,
+        }
+        print(f"DEPLOY_CTX: {_json.dumps(_ctx)}")
         return 0
     else:
         print(f"DEPLOY FAILED: {result.error}", file=sys.stderr)
