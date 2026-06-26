@@ -196,6 +196,7 @@ class LoopRuntime:
                 "backup_path": result.get("backup_path", ""),
                 "backup_sha": result.get("backup_sha", ""),
                 "deployed_files": result.get("deployed_files", []),
+                "block_device": result.get("block_device", ""),
             }
             # DEPLOY 结果 + deploy_context 写入 attempts 历史，供 guard 判定与审计
             if self._session.attempts and isinstance(self._session.attempts[-1], dict):
@@ -218,7 +219,12 @@ class LoopRuntime:
                         self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
                         self._state.pending_human_gate = True
                     elif next_nk == NodeKind.REVERT_PATCH:
-                        self._state.node_status = "DEPLOY_FAILED_REVERT"
+                        # 只有实际写入设备的错误才做设备回滚；未写入的直接走源码回滚
+                        if result.get("needs_rollback", False):
+                            self._state.node_status = "DEPLOY_FAILED_REVERT"
+                        else:
+                            self._state.node_status = "DEPLOY_FAILED_NO_DEVICE_ROLLBACK"
+                            self._deploy_context = {}  # 清空 deploy_context，REVERT 节点跳过设备回滚
                     elif next_nk == NodeKind.DECIDE_NEXT:
                         self._state.node_status = "DEPLOY_FAILED_RECOVERABLE"
             self._checkpoint(f"deploy={result['status']}", fc)
@@ -352,6 +358,8 @@ class LoopRuntime:
         if node == NodeKind.DEPLOY_PATCH.value and self._state.node_status == "DEPLOY_FAILED_RECOVERABLE":
             return NodeKind.DECIDE_NEXT.value
         if node == NodeKind.DEPLOY_PATCH.value and self._state.node_status == "DEPLOY_FAILED_REVERT":
+            return NodeKind.REVERT_PATCH.value
+        if node == NodeKind.DEPLOY_PATCH.value and self._state.node_status == "DEPLOY_FAILED_NO_DEVICE_ROLLBACK":
             return NodeKind.REVERT_PATCH.value
         return _LINEAR_NEXT.get(node, "")
 

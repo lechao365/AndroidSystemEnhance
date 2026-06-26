@@ -63,7 +63,44 @@ def _compile_push_single(plan: DeployPlan, workspace_root: str) -> CompileResult
     if result.returncode != 0:
         err = (result.stderr or result.stdout)[-500:]
         return CompileResult(success=False, error=f"mmm failed (exit {result.returncode}): {err}")
-    return CompileResult(success=True, artifacts=[], elapsed_seconds=elapsed)
+
+    # 从 $OUT 目录查找编译产物，匹配 plan.deploy_targets 的 artifact_name
+    aosp_out = os.environ.get("ANDROID_PRODUCT_OUT", os.path.expanduser("~/workspace/aosp/out/target/product/rpi5"))
+    artifacts = _find_artifacts_in_out(aosp_out, plan)
+    return CompileResult(success=True, artifacts=artifacts, elapsed_seconds=elapsed)
+
+
+def _find_artifacts_in_out(aosp_out: str, plan: DeployPlan) -> list[str]:
+    """在 $OUT 目录下递归查找 plan.deploy_targets 的 artifact_name 对应文件。"""
+    found: list[str] = []
+    if not plan.deploy_targets:
+        return found
+    for target in plan.deploy_targets:
+        if not target.artifact_name:
+            continue
+        matched = _find_file_in_out(aosp_out, target.artifact_name)
+        if matched:
+            found.append(matched)
+    return found
+
+
+def _find_file_in_out(aosp_out: str, name: str) -> str:
+    """在 $OUT 目录下查找 name 文件的绝对路径。"""
+    out_path = Path(aosp_out)
+    if not out_path.exists():
+        return ""
+    # 直接路径优先
+    direct = out_path / name
+    if direct.is_file():
+        return str(direct)
+    # 递归查找（最多2层）
+    for root, _dirs, files in os.walk(str(out_path)):
+        if name in files:
+            return str(Path(root) / name)
+        # 限制深度
+        if Path(root).relative_to(out_path).parts and len(Path(root).relative_to(out_path).parts) > 2:
+            _dirs.clear()
+    return ""
 
 
 def _find_workspace_root() -> str:

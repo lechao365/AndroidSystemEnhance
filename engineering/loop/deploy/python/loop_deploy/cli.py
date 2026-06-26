@@ -28,8 +28,9 @@ def add_deploy_parser(subparsers: argparse._SubParsersAction) -> None:
     p.set_defaults(func=_handle_deploy)
 
 
-def _emit_deploy_ctx(result) -> None:
+def _emit_deploy_ctx(result, plan) -> None:
     """输出结构化 deploy_context 到 stdout，供调用方跨进程解析。"""
+    block_device = plan.deploy_targets[0].block_device if plan.deploy_targets else "/dev/block/mmcblk0p1"
     ctx = {
         "mode": result.mode.value,
         "backup_path": result.backup_path,
@@ -37,6 +38,7 @@ def _emit_deploy_ctx(result) -> None:
         "deployed_files": result.deployed_files,
         "error": result.error,
         "error_code": result.error_code.value,
+        "block_device": block_device,
     }
     print(f"DEPLOY_CTX: {_json.dumps(ctx)}")
 
@@ -84,7 +86,7 @@ def _handle_deploy(args: argparse.Namespace) -> int:
     result = deployer.deploy(plan, artifacts)
 
     # 无论成功失败都输出 DEPLOY_CTX（回滚元数据不能丢在进程边界）
-    _emit_deploy_ctx(result)
+    _emit_deploy_ctx(result, plan)
 
     if result.success:
         print(f"DEPLOY OK: mode={result.mode.value} duration={result.duration_seconds:.1f}s reboot={result.requires_reboot}")

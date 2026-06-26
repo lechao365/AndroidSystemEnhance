@@ -37,23 +37,34 @@ def _parse_deploy_ctx(stdout: str) -> dict | None:
     return None
 
 
-# DeployErrorCode → (status, FailureCode) 映射，消除字符串匹配
-_DEPLOY_ERROR_MAP: dict[str, tuple[str, FailureCode]] = {
-    "KERNEL_PANIC": ("KERNEL_DEAD", FailureCode.KERNEL_DEAD_NO_SHELL),
-    "BOOT_COMPLETED_NOT_REACHED": ("BOOT_TIMEOUT", FailureCode.BOOT_TIMEOUT_ROLLBACK),
-    "DD_WRITE_FAILED": ("BOOT_TIMEOUT", FailureCode.BOOT_TIMEOUT_ROLLBACK),
+# DeployErrorCode → (status, FailureCode, needs_rollback) 映射
+# needs_rollback: 只有实际写入设备的错误才需要设备回滚，未写入的跳过
+_DEPLOY_ERROR_MAP: dict[str, tuple[str, FailureCode, bool]] = {
+    # --- 实际写入设备，需要设备回滚 ---
+    "KERNEL_PANIC": ("KERNEL_DEAD", FailureCode.KERNEL_DEAD_NO_SHELL, True),
+    "BOOT_COMPLETED_NOT_REACHED": ("BOOT_TIMEOUT", FailureCode.BOOT_TIMEOUT_ROLLBACK, True),
+    "DD_WRITE_FAILED": ("BOOT_TIMEOUT", FailureCode.BOOT_TIMEOUT_ROLLBACK, True),
+    "ADB_PUSH_FAILED": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, True),
+    "SERVICE_NOT_STARTED": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, True),
+    # --- 未写入设备，无需设备回滚 ---
+    "ADB_ROOT_FAILED": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
+    "ADB_REMOUNT_FAILED": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
+    "SHA256_MISMATCH": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
+    "IMAGE_VERIFY_FAILED": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
+    "DEVICE_NOT_HEALTHY": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
+    "ARTIFACT_NOT_FOUND": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
+    "HEALTH_CHECK_FAILED": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
 }
 
 
-def _classify_deploy_failure(ctx: dict) -> tuple[str, FailureCode]:
-    """根据 DeployErrorCode 结构化错误码判定 failure_code，不依赖字符串匹配。"""
+def _classify_deploy_failure(ctx: dict) -> tuple[str, FailureCode, bool]:
+    """根据 DeployErrorCode 结构化错误码判定 failure_code 和是否需要设备回滚。"""
     error_code = ctx.get("error_code", "")
     if error_code in _DEPLOY_ERROR_MAP:
         return _DEPLOY_ERROR_MAP[error_code]
-    # 其余错误统一按 DEPLOY_FATAL 处理（可尝试回滚）
     if ctx.get("error"):
-        return ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL)
-    return ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL)
+        return ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False)
+    return ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False)
 
 
 def node_apply_patch(
@@ -260,8 +271,10 @@ def node_deploy(session_dict: dict, adb_endpoint: str = "") -> dict:
 
     # 失败路径：从 DEPLOY_CTX 提取结构化错误和回滚元数据
     if ctx:
-        status, fc = _classify_deploy_failure(ctx)
-        return _build_deploy_result(status, fc, ctx)
+        status, fc, needs_rollback = _classify_deploy_failure(ctx)
+        r = _build_deploy_result(status, fc, ctx)
+        r["needs_rollback"] = needs_rollback
+        return r
     # 无 DEPLOY_CTX（deploy CLI 在到达 Deployer 之前就退出了）
     error = (result.stderr or result.stdout or "")[:500]
     return {
@@ -300,6 +313,7 @@ def _build_deploy_result(status: str, fc: FailureCode, ctx: dict | None) -> dict
         "backup_path": ctx.get("backup_path", ""),
         "backup_sha": ctx.get("backup_sha", ""),
         "deployed_files": ctx.get("deployed_files", []),
+        "block_device": ctx.get("block_device", ""),
         "error": ctx.get("error", ""),
     }
 
@@ -431,11 +445,9 @@ def node_rollback_deploy(
                 "failure_code": FailureCode.ROLLBACK_FAILED,
                 "error": "serial_shell unavailable, cannot perform dd rollback",
             }
-        from pathlib import Path as _P
         from loop_deploy.rollback import serial_rollback_dd
-        block_device = "/dev/block/mmcblk0p1"
-        # backup_path 是设备端绝对路径（如 /data/local/tmp/boot_backup.img），
-        # 直接传给 serial_rollback_dd，不硬编码拼接。
+        # block_device 从 deploy_context 读取（由 decider → deployer → DEPLOY_CTX 全链路传递）
+        block_device = deploy_context.get("block_device", "") or "/dev/block/mmcblk0p1"
         result = serial_rollback_dd(
             serial_shell=serial_shell,
             backup_path=backup_path,

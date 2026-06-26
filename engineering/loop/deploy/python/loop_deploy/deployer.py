@@ -26,7 +26,7 @@ class Deployer:
         if plan.mode == DeployMode.PUSH_SINGLE:
             return self._deploy_push_single(plan, artifacts)
         if plan.mode == DeployMode.DD_BOOT_REBOOT:
-            return self._deploy_dd_boot(artifacts)
+            return self._deploy_dd_boot(plan, artifacts)
         return DeployResult(success=False, mode=plan.mode, error=f"unknown mode: {plan.mode}")
 
     def _deploy_push_single(self, plan: DeployPlan, artifacts: list[str]) -> DeployResult:
@@ -89,8 +89,9 @@ class Deployer:
                             backup_path=str(backup_dir),
                             deployed_files=backup_files)
 
-    def _deploy_dd_boot(self, artifacts: list[str]) -> DeployResult:
+    def _deploy_dd_boot(self, plan: DeployPlan, artifacts: list[str]) -> DeployResult:
         start = time.time()
+        block_device = plan.deploy_targets[0].block_device if plan.deploy_targets else "/dev/block/mmcblk0p1"
         boot_img = None
         for a in artifacts:
             if a.endswith("boot.img"):
