@@ -208,16 +208,27 @@ def node_deploy(session_dict: dict, adb_endpoint: str = "") -> dict:
                 "mode": "OK",
             }
         error = (result.stderr or result.stdout or "")[-500:]
-        # Kernel dead detection: no serial shell response
+        error_lower = error.lower()
+
+        # 真正内核死透：kernel panic / not syncing / 串口完全无响应
         _KERNEL_DEAD_PATTERNS = (
             "kernel panic", "not syncing", "no response from serial",
-            "boot timeout", "device offline", "connection refused",
         )
-        error_lower = error.lower()
         if any(p in error_lower for p in _KERNEL_DEAD_PATTERNS):
             return {
                 "status": "KERNEL_DEAD",
                 "failure_code": FailureCode.KERNEL_DEAD_NO_SHELL,
+                "error": error,
+            }
+
+        # 可恢复的启动超时：设备可能仍在启动中，串口可达，可尝试 DD 回滚
+        _BOOT_TIMEOUT_PATTERNS = (
+            "boot timeout", "device offline", "connection refused",
+        )
+        if any(p in error_lower for p in _BOOT_TIMEOUT_PATTERNS):
+            return {
+                "status": "BOOT_TIMEOUT",
+                "failure_code": FailureCode.BOOT_TIMEOUT_ROLLBACK,
                 "error": error,
             }
         return {

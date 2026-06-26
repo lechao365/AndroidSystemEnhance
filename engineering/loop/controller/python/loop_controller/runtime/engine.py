@@ -173,7 +173,9 @@ class LoopRuntime:
             self._session.latest_failure_code = fc
             # COMPILE 结果写入 attempts 历史，供 guard 判定与审计
             if self._session.attempts and isinstance(self._session.attempts[-1], dict):
-                self._session.attempts[-1]["compile_result"] = {
+                att = self._session.attempts[-1]
+                att["failure_code"] = fc.value
+                att["compile_result"] = {
                     "status": result["status"],
                     "failure_code": fc.value,
                     "error": result.get("error", ""),
@@ -201,6 +203,7 @@ class LoopRuntime:
             # DEPLOY 结果 + deploy_context 写入 attempts 历史，供 guard 判定与审计
             if self._session.attempts and isinstance(self._session.attempts[-1], dict):
                 latest_att = self._session.attempts[-1]
+                latest_att["failure_code"] = fc.value
                 latest_att["deploy_context"] = self._deploy_context
                 latest_att["deploy_result"] = {
                     "status": result["status"],
@@ -208,7 +211,7 @@ class LoopRuntime:
                     "mode": result.get("mode", ""),
                     "error": result.get("error", ""),
                 }
-            if result["status"] in ("DEPLOY_FAILED", "KERNEL_DEAD", "DEPLOY_TIMEOUT"):
+            if result["status"] in ("DEPLOY_FAILED", "KERNEL_DEAD", "BOOT_TIMEOUT", "DEPLOY_TIMEOUT"):
                 guard_req = self._build_guard_eval_request()
                 guard_result = guard_chain(
                     ["kernel_dead_no_shell", "boot_timeout_kernel_panic", "deploy_failed_but_recoverable"], guard_req,
@@ -247,6 +250,9 @@ class LoopRuntime:
             if isinstance(fc, str):
                 fc = FailureCode(fc)
             self._session.latest_failure_code = fc
+            # 同步写入顶层 failure_code 到当前 attempt
+            if self._session.attempts and isinstance(self._session.attempts[-1], dict):
+                self._session.attempts[-1]["failure_code"] = fc.value
             if ws_result["status"] != "REVERTED":
                 # 源码回滚失败 → 立即退人工
                 self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
@@ -380,16 +386,21 @@ class LoopRuntime:
         if self._session.attempts:
             for att in self._session.attempts[:-1]:
                 if isinstance(att, dict):
-                    fc_str = att.get("failure_code", "")
                     ph = att.get("patch_applied", {}).get("patch_hash", "")
+                    # 聚合顶层 + 嵌套 compile/deploy failure_code
+                    for fc_str in self._collect_failure_codes_from_attempt(att):
+                        try:
+                            previous_codes.append(FailureCode(fc_str))
+                        except ValueError:
+                            pass
                 else:
                     fc_str = getattr(att, "failure_code", "") or ""
+                    if fc_str:
+                        try:
+                            previous_codes.append(FailureCode(fc_str))
+                        except ValueError:
+                            pass
                     ph = ""
-                if fc_str:
-                    try:
-                        previous_codes.append(FailureCode(fc_str))
-                    except ValueError:
-                        pass
                 if ph:
                     previous_hashes.append(ph)
             latest = self._session.attempts[-1] if self._session.attempts else {}
@@ -406,6 +417,25 @@ class LoopRuntime:
             current_patch_hash=current_hash,
             previous_patch_hashes=previous_hashes,
         )
+
+    def _collect_failure_codes_from_attempt(self, att: dict) -> list[str]:
+        """从一个 attempt dict 中收集所有 failure_code（顶层 + 嵌套结果）。"""
+        codes: list[str] = []
+        if not isinstance(att, dict):
+            return codes
+        # 顶层（verify 失败时由 run_verify_stage 写入）
+        top_fc = att.get("failure_code", "")
+        if top_fc:
+            codes.append(top_fc)
+        # 嵌套 compile_result
+        compile_result = att.get("compile_result", {})
+        if isinstance(compile_result, dict) and compile_result.get("failure_code"):
+            codes.append(compile_result["failure_code"])
+        # 嵌套 deploy_result
+        deploy_result = att.get("deploy_result", {})
+        if isinstance(deploy_result, dict) and deploy_result.get("failure_code"):
+            codes.append(deploy_result["failure_code"])
+        return codes
 
     def _persist_session(self) -> None:
         session_path = Path(self._session.artifacts_dir) / "session.json"

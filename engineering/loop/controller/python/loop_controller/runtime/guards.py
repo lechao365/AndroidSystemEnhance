@@ -116,7 +116,8 @@ def _guard_session_state_corrupted(req: GuardEvalRequest) -> GuardEvalResult:
 
 @_register("boot_timeout_no_recovery")
 def _guard_boot_timeout_no_recovery(req: GuardEvalRequest) -> GuardEvalResult:
-    if req.latest_failure_code == FailureCode.BOOT_TIMEOUT_ROLLBACK:
+    # 检查历史中是否出现过 BOOT_TIMEOUT_ROLLBACK（说明已尝试过回滚仍无效）
+    if FailureCode.BOOT_TIMEOUT_ROLLBACK in req.previous_failure_codes:
         return GuardEvalResult(matched=True, next_node=NodeKind.ESCALATE_HUMAN.value, reason="boot timeout, rollback exhausted")
     return GuardEvalResult(matched=False)
 

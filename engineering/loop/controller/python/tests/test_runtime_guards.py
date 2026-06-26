@@ -135,9 +135,14 @@ def test_guard_session_state_corrupted():
 
 
 def test_guard_boot_timeout_no_recovery():
-    r = evaluate_guard(_req("boot_timeout_no_recovery", latest_failure_code=FailureCode.BOOT_TIMEOUT_ROLLBACK))
+    r = evaluate_guard(_req("boot_timeout_no_recovery", previous_failure_codes=[FailureCode.BOOT_TIMEOUT_ROLLBACK]))
     assert r.matched is True
     assert r.next_node == "ESCALATE_HUMAN"
+
+
+def test_guard_boot_timeout_no_recovery_no_history():
+    r = evaluate_guard(_req("boot_timeout_no_recovery", previous_failure_codes=[]))
+    assert r.matched is False
 
 
 def test_guard_boot_timeout_kernel_panic():
