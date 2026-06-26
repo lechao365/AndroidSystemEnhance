@@ -85,6 +85,11 @@ class LoopRuntime:
         self._session.latest_failure_code = cp.failure_code
         if cp.attempt_index:
             self._session.current_attempt = cp.attempt_index
+        # 从 attempts 恢复 deploy_context（防止 resume 后设备回滚被跳过）
+        if self._session.attempts:
+            latest = self._session.attempts[-1]
+            if isinstance(latest, dict) and latest.get("deploy_context"):
+                self._deploy_context = latest["deploy_context"]
         return self._state
 
     def run(self, max_iterations: int = 100) -> RuntimeState:
@@ -166,6 +171,13 @@ class LoopRuntime:
             if isinstance(fc, str):
                 fc = FailureCode(fc)
             self._session.latest_failure_code = fc
+            # COMPILE 结果写入 attempts 历史，供 guard 判定与审计
+            if self._session.attempts and isinstance(self._session.attempts[-1], dict):
+                self._session.attempts[-1]["compile_result"] = {
+                    "status": result["status"],
+                    "failure_code": fc.value,
+                    "error": result.get("error", ""),
+                }
             if result["status"] == "COMPILE_FAILED":
                 guard_req = self._build_guard_eval_request()
                 guard_result = guard_chain(["compile_failed_but_recoverable"], guard_req)
@@ -186,11 +198,16 @@ class LoopRuntime:
                 "backup_sha": result.get("backup_sha", ""),
                 "deployed_files": result.get("deployed_files", []),
             }
-            # Record deploy context into latest attempt
-            if self._session.attempts:
-                latest = self._session.attempts[-1]
-                if isinstance(latest, dict):
-                    latest["deploy_context"] = self._deploy_context
+            # DEPLOY 结果 + deploy_context 写入 attempts 历史，供 guard 判定与审计
+            if self._session.attempts and isinstance(self._session.attempts[-1], dict):
+                latest_att = self._session.attempts[-1]
+                latest_att["deploy_context"] = self._deploy_context
+                latest_att["deploy_result"] = {
+                    "status": result["status"],
+                    "failure_code": fc.value,
+                    "mode": result.get("mode", ""),
+                    "error": result.get("error", ""),
+                }
             if result["status"] in ("DEPLOY_FAILED", "KERNEL_DEAD", "DEPLOY_TIMEOUT"):
                 guard_req = self._build_guard_eval_request()
                 guard_result = guard_chain(
@@ -213,6 +230,7 @@ class LoopRuntime:
                     self._to_session_dict(),
                     self._deploy_context,
                     serial_shell=self._serial_shell_provider,
+                    adb_endpoint=self._adb_endpoint,
                 )
                 if d_result["status"] != "REVERTED":
                     # 设备回滚失败 → 立即退人工

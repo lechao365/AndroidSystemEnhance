@@ -289,6 +289,7 @@ def node_rollback_deploy(
     session_dict: dict,
     deploy_context: dict,
     serial_shell: callable | None = None,
+    adb_endpoint: str = "",
 ) -> dict:
     """部署失败后的设备回滚，根据 deploy mode 选择策略。
 
@@ -317,7 +318,7 @@ def node_rollback_deploy(
         backup_dir = Path(backup_path)
         try:
             from loop_adb.client import AdbClient
-            client = AdbClient()
+            client = AdbClient(endpoint=adb_endpoint) if adb_endpoint else AdbClient()
         except Exception as e:
             return {
                 "status": "REVERT_FAILED",
@@ -365,11 +366,14 @@ def node_rollback_deploy(
                 "failure_code": FailureCode.ROLLBACK_FAILED,
                 "error": "serial_shell unavailable, cannot perform dd rollback",
             }
+        from pathlib import Path as _P
         from loop_deploy.rollback import serial_rollback_dd
         block_device = "/dev/block/mmcblk0p1"
+        # backup_path 是设备端绝对路径（如 /data/local/tmp/boot_backup.img），
+        # 直接传给 serial_rollback_dd，不硬编码拼接。
         result = serial_rollback_dd(
             serial_shell=serial_shell,
-            backup_path=backup_path if "/" not in backup_path else "/tmp/" + Path(backup_path).name,
+            backup_path=backup_path,
             block_device=block_device,
         )
         if result.success:

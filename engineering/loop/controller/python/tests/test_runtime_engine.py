@@ -534,3 +534,148 @@ def test_deploy_success_no_revert(tmp_path, monkeypatch):
     state = rt.run()
     # deploy success → second verify passes → DONE_SUCCESS
     assert state.terminal_state == RuntimeTerminalState.DONE_SUCCESS
+
+
+def test_resume_restores_deploy_context(tmp_path, monkeypatch):
+    """resume 后 deploy_context 从 attempts 恢复，设备回滚不会被跳过"""
+    from loop_controller.runtime.checkpoint_store import CheckpointStore
+    from loop_contracts.models import CheckpointRecord
+    from loop_contracts.failure_codes import FailureCode
+
+    # checkpoint: DEPLOY_PATCH 失败后 next=REVERT_PATCH
+    store = CheckpointStore(str(tmp_path), "sess-dc")
+    store.save(CheckpointRecord(
+        checkpoint_id="cp-1", session_id="sess-dc", attempt_index=1,
+        current_node="DEPLOY_PATCH",
+        input_summary={},
+        output_summary={"node_status": "DEPLOY_FAILED_REVERT"},
+        failure_code=FailureCode.DEPLOY_FATAL, matched_guards=["deploy_failed_but_recoverable"],
+        next_node="REVERT_PATCH", timestamp="2026-06-26T12:00:00+08:00",
+    ))
+
+    # session 带 deploy_context 的 attempt
+    session = LoopSession(
+        session_id="sess-dc", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=5, artifacts_dir=str(tmp_path),
+    )
+    session.attempts = [{
+        "attempt_index": 1,
+        "failure_code": "DEPLOY_FATAL",
+        "deploy_context": {
+            "mode": "PUSH_SINGLE",
+            "backup_path": "/tmp/fake_backup",
+            "backup_sha": "",
+            "deployed_files": ["/system/lib/test.so"],
+        },
+    }]
+
+    rt = LoopRuntime(session, "cases", "profile.json")
+    rt.resume()
+    # resume 后 deploy_context 必须从 attempts 恢复
+    assert rt._deploy_context.get("mode") == "PUSH_SINGLE"
+    assert rt._deploy_context.get("backup_path") == "/tmp/fake_backup"
+    assert "/system/lib/test.so" in rt._deploy_context.get("deployed_files", [])
+
+
+def test_compile_deploy_results_recorded_in_attempts(tmp_path, monkeypatch):
+    """COMPILE 和 DEPLOY 结果写入 attempts[] 历史"""
+    _write_bundle(tmp_path, "FAIL", 1)
+
+    call_log = []
+
+    def fake_run(cmd, **kwargs):
+        cmd_str = " ".join(cmd)
+        call_log.append(cmd_str)
+        class R:
+            stdout = ""
+            stderr = ""
+            if "loop_core.cli" in cmd_str:
+                if len([c for c in call_log if "loop_core.cli" in c]) == 1:
+                    returncode = 1
+                else:
+                    returncode = 0
+            else:
+                returncode = 0
+        return R()
+
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+    from loop_contracts.failure_codes import FailureCode as FC
+
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_apply_patch",
+        lambda *a, **kw: {"status": "APPLIED", "failure_code": FC.NONE, "files": ["t.cpp"], "stash_ref": "stub", "patch_hash": "abc", "risk": {}, "workspace_root": str(tmp_path)},
+    )
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_compile",
+        lambda *a, **kw: {"status": "COMPILED", "failure_code": FC.NONE, "artifacts": ["out/t"]},
+    )
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_deploy",
+        lambda *a, **kw: {"status": "DEPLOYED", "failure_code": FC.NONE, "mode": "PUSH_SINGLE"},
+    )
+
+    (tmp_path / "patch_suggestion.json").write_text(
+        json.dumps([{"path": "t.cpp", "action": "modify", "content": ""}]), encoding="utf-8",
+    )
+
+    session = LoopSession(
+        session_id="sess-att-cd", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=2, artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, "cases", "profile.json")
+    rt.run()
+
+    # 验证 attempts 里有 compile_result 和 deploy_result
+    # 注意：re-verify 会新增一个 attempt，compile/deploy 在前一个 attempt 里
+    assert len(session.attempts) >= 2
+    # 找包含 compile_result 的 attempt
+    compile_att = None
+    for att in session.attempts:
+        if isinstance(att, dict) and "compile_result" in att:
+            compile_att = att
+            break
+    assert compile_att is not None, "no attempt contains compile_result"
+    assert compile_att["compile_result"]["status"] == "COMPILED"
+    assert "deploy_result" in compile_att, "deploy_result missing from same attempt"
+    assert compile_att["deploy_result"]["status"] == "DEPLOYED"
+    assert compile_att["deploy_result"]["mode"] == "PUSH_SINGLE"
+
+
+def test_rollback_deploy_uses_adb_endpoint(tmp_path, monkeypatch):
+    """node_rollback_deploy 使用 adb_endpoint 参数连接设备"""
+    from loop_controller.runtime.nodes import node_rollback_deploy
+    from loop_contracts.failure_codes import FailureCode as FC
+
+    # 准备 backup 目录和文件
+    import tempfile
+    backup_dir = Path(tempfile.mkdtemp())
+    (backup_dir / "test.so").write_bytes(b"fake_old_binary")
+
+    # mock AdbClient
+    endpoint_used = []
+
+    class FakePushResult:
+        exit_code = 0
+
+    class FakeAdbClient:
+        def __init__(self, endpoint=None, **kw):
+            endpoint_used.append(endpoint)
+        def connect(self, **kw):
+            pass
+        def push(self, local, remote, **kw):
+            return FakePushResult()
+
+    monkeypatch.setattr("loop_adb.client.AdbClient", FakeAdbClient)
+
+    result = node_rollback_deploy(
+        session_dict={},
+        deploy_context={
+            "mode": "PUSH_SINGLE",
+            "backup_path": str(backup_dir),
+            "deployed_files": ["/system/lib/test.so"],
+        },
+        adb_endpoint="192.168.1.100:5555",
+    )
+    assert result["status"] == "REVERTED"
+    # 验证 endpoint 被传入
+    assert "192.168.1.100:5555" in endpoint_used
