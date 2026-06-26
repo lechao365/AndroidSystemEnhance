@@ -63,7 +63,7 @@ if [ -f "$REPO_ROOT/pytest.ini" ]; then
     if [ -n "$PYTEST_TESTPATHS" ]; then
         TEST_CMD="python3 -m pytest $PYTEST_TESTPATHS -v"
     else
-        TEST_CMD="python3 -m pytest -v"
+        TEST_CMD="python3 -m pytest engineering/ --tb=short -v"
     fi
     log_info "发现 pytest.ini，TEST_CMD=$TEST_CMD"
 
@@ -71,6 +71,7 @@ if [ -f "$REPO_ROOT/pytest.ini" ]; then
 elif [ -f "$REPO_ROOT/pyproject.toml" ]; then
     PYTEST_TESTPATHS=$(sed -n '/\[tool.pytest.ini_options\]/,/^\[/p' "$REPO_ROOT/pyproject.toml" \
         | grep -iE 'testpaths' | head -1 | sed 's/.*=.*\[\(.*\)\]/\1/' | tr -d '"' | tr ',' ' ' | tr -d ' ' || true)
+    # 注意：仅支持单行数组格式，多行数组（testpaths = [\n "a",\n]）不适用
     if [ -n "$PYTEST_TESTPATHS" ]; then
         TEST_CMD="python3 -m pytest $PYTEST_TESTPATHS -v"
     else
@@ -107,9 +108,9 @@ step_end 0
 # ============================================================================
 # 输出结果（两行，供 AI 解析）
 # ============================================================================
+log_result "探测完成" "TEST_CMD=$TEST_CMD" "PYTHONPATH=$PYTHONPATH_OUT"
+
 echo "TEST_CMD=$TEST_CMD"
 echo "PYTHONPATH=$PYTHONPATH_OUT"
-
-log_result "探测完成" "TEST_CMD=$TEST_CMD" "PYTHONPATH=$PYTHONPATH_OUT"
 
 harness_exit 0
