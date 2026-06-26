@@ -52,6 +52,7 @@ class LoopRuntime:
         if cp:
             self._state.current_node = cp.next_node
             self._state.previous_node = cp.current_node
+            self._state.node_status = cp.output_summary.get("node_status", "")
             self._state.interrupted = False
             self._state.last_checkpoint_at = cp.timestamp
         return self._state
@@ -62,6 +63,7 @@ class LoopRuntime:
             if self._state.terminal_state != RuntimeTerminalState.NONE:
                 break
             self._transition()
+        self._persist_session()
         return self._state
 
     # -- node execution -----------------------------------------------------
@@ -310,6 +312,30 @@ class LoopRuntime:
             current_patch_hash=current_hash,
             previous_patch_hashes=previous_hashes,
         )
+
+    def _persist_session(self) -> None:
+        session_path = Path(self._session.artifacts_dir) / "session.json"
+        session_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "session_id": self._session.session_id,
+            "workflow_id": self._session.workflow_id,
+            "target": self._session.target,
+            "suite": self._session.suite,
+            "max_attempts": self._session.max_attempts,
+            "current_attempt": self._session.current_attempt,
+            "status": self._session.status,
+            "latest_failure_code": self._session.latest_failure_code.value
+                if hasattr(self._session.latest_failure_code, "value")
+                else str(self._session.latest_failure_code),
+            "attempts": self._session.attempts,
+            "artifacts_dir": self._session.artifacts_dir,
+            "terminal_state": self._state.terminal_state.value,
+            "current_node": self._state.current_node,
+            "node_status": self._state.node_status,
+            "transition_reason": self._state.transition_reason,
+            "last_checkpoint_at": self._state.last_checkpoint_at,
+        }
+        session_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def _to_session_dict(self) -> dict:
         return {

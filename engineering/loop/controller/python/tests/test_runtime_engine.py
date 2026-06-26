@@ -201,3 +201,59 @@ def test_runtime_wires_apply_compile_deploy(tmp_path, monkeypatch):
     state = rt.run()
     # Should end at DONE_SUCCESS since deploy mocked ok + re-verify passes
     assert state.terminal_state == RuntimeTerminalState.DONE_SUCCESS
+
+
+def test_run_writes_back_session_json(tmp_path, monkeypatch):
+    """run() writes session.json after completion"""
+    _write_bundle(tmp_path, "PASS", 0)
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+
+    session = LoopSession(
+        session_id="sess-wb", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=5, artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, "cases", "profile.json")
+    state = rt.run()
+    assert state.terminal_state == RuntimeTerminalState.DONE_SUCCESS
+
+    session_path = tmp_path / "session.json"
+    assert session_path.exists()
+    saved = json.loads(session_path.read_text())
+    assert saved["session_id"] == "sess-wb"
+    assert "terminal_state" in saved
+    assert saved["terminal_state"] == "DONE_SUCCESS"
+
+
+def test_resume_restores_full_state(tmp_path, monkeypatch):
+    """resume() restores node_status, last_checkpoint_at, and previous_node"""
+    from loop_controller.runtime.checkpoint_store import CheckpointStore
+    from loop_contracts.models import CheckpointRecord
+    from loop_contracts.failure_codes import FailureCode
+
+    store = CheckpointStore(str(tmp_path), "sess-full")
+    store.save(CheckpointRecord(
+        checkpoint_id="cp-1", session_id="sess-full", attempt_index=2,
+        current_node="RUN_VERIFY",
+        input_summary={}, output_summary={"node_status": "FAIL", "reason": "verify FAIL"},
+        failure_code=FailureCode.RUN_FAILED, matched_guards=["attempts_below_limit"],
+        next_node="DECIDE_NEXT", timestamp="2026-06-26T12:30:00+08:00",
+    ))
+
+    session = LoopSession(
+        session_id="sess-full", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=5, artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, "cases", "profile.json")
+    state = rt.resume()
+    assert state.current_node == "DECIDE_NEXT"
+    assert state.previous_node == "RUN_VERIFY"
+    assert state.node_status == "FAIL"
+    assert state.last_checkpoint_at == "2026-06-26T12:30:00+08:00"

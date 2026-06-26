@@ -159,3 +159,35 @@ def test_runtime_explain():
     assert rc == 0
     assert "INIT_SESSION" in out
     assert "DONE_SUCCESS" in out
+
+
+def test_runtime_run_writes_session_json(tmp_path, monkeypatch):
+    """run subcommand writes session.json after completion"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    rc, out = _capture([
+        "init", "--target", "test", "--suite", "test.yaml",
+        "--max-attempts", "3", "--artifacts-dir", str(artifacts),
+    ])
+    sid = _extract_sid(out)
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+    (artifacts / "evidence_bundle.json").write_text(json.dumps({
+        "summary": {"overall": "PASS", "total": 1, "passed": 1, "failed": 0, "skipped": 0},
+        "cases": [],
+    }), encoding="utf-8")
+
+    rc, out = _capture(["run", "--session", str(artifacts / f"{sid}.json")])
+    assert rc == 0
+    session_path = artifacts / "session.json"
+    assert session_path.exists()
+    data = json.loads(session_path.read_text())
+    assert data["session_id"] == sid
+    assert "terminal_state" in data
