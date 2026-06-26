@@ -7,7 +7,7 @@
 
 - **是什么**：多步闭环工作流集——每个子目录是一个完整流程（可执行脚本 + WORKFLOW.md 流程契约）
 - **职责边界**：做 harness 公共工程 workflow（git / 归档 / 回退 / 文档同步）；不做 loop 专属 workflow（在 `../../loop/workflows/`）
-- **上下游依赖**：被 `.opencode/commands/*.md`（4 份）通过 `@WORKFLOW.md` 注入 AI 上下文；依赖 `lib/`（bootstrap）、`config/`（scope / doc-sync mapping）、`rules/`
+- **上下游依赖**：被 `.opencode/commands/*.md`（5 份）通过 `@WORKFLOW.md` 注入 AI 上下文；依赖 `lib/`（bootstrap）、`config/`（scope / doc-sync mapping）、`rules/`
 
 ## 大纲
 
@@ -15,7 +15,7 @@
 |------|---------|---------|
 | [定位](#定位) | 本目录做什么、不做什么 | 首次进入 |
 | [大纲](#大纲) | 本 README 章节索引 | 判断需要读哪些段 |
-| [目录说明](#目录说明) | 4 个工作流清单（触发场景 / 核心语义 / 入口） | 了解结构时 |
+| [目录说明](#目录说明) | 5 个工作流清单（触发场景 / 核心语义 / 入口） | 了解结构时 |
 | [使用方式](#使用方式) | 进入方式与入口脚本调用示例 | 实际使用时 |
 | [结构约定](#结构约定) | 子目录组成 + WORKFLOW.md 工具消费事实 + 产物位置 | 新增 / 修改 workflow 时 🔖 |
 | [关联资源](#关联资源) | 设计文档、规则、配置、workflow 链接 | 深入理解时 |
@@ -28,6 +28,7 @@
 | [sync-code-to-patchs](./sync-code-to-patchs/) | workspace 源码归档到 patchs 镜像 | 将 workspace 变更受控归档到 patchs；archive 不自动等同于 promoted baseline | `sync_code_to_patchs.sh` |
 | [revert-code-from-patchs](./revert-code-from-patchs/) | workspace 坏了，从 patchs 基线回退 | 仅允许以 promoted baseline 执行恢复；用于 workspace 坏状态回退 | `revert_code_from_patchs.sh` |
 | [sync-patchs-to-doc](./sync-patchs-to-doc/) | patchs 变动后同步更新技术文档 | 方案先行（动作清单），确认后落盘，模板只读 | `sync_patchs_to_doc.sh` |
+| [lc-quick-fix-issue](./lc-quick-fix-issue/) | 根据检视意见自动修复代码→测试→零确认提交推送 | 脚本做确定性工作（探测/提交），AI 做语义工作（分析/定位/修复） | `detect_test_env.sh` → AI → `commit_and_push.sh` |
 
 ## 使用方式
 
@@ -45,6 +46,9 @@ bash engineering/harness/workflows/revert-code-from-patchs/revert_code_from_patc
 
 # patchs → 文档同步
 bash engineering/harness/workflows/sync-patchs-to-doc/sync_patchs_to_doc.sh
+
+# 根据检视意见自动修复并提交（通过 /lc-quick-fix-issue 命令触发，无需手动调用脚本）
+bash engineering/harness/workflows/lc-quick-fix-issue/detect_test_env.sh
 ```
 
 ## 结构约定
