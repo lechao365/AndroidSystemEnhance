@@ -37,22 +37,21 @@ def _parse_deploy_ctx(stdout: str) -> dict | None:
     return None
 
 
+# DeployErrorCode → (status, FailureCode) 映射，消除字符串匹配
+_DEPLOY_ERROR_MAP: dict[str, tuple[str, FailureCode]] = {
+    "KERNEL_PANIC": ("KERNEL_DEAD", FailureCode.KERNEL_DEAD_NO_SHELL),
+    "BOOT_COMPLETED_NOT_REACHED": ("BOOT_TIMEOUT", FailureCode.BOOT_TIMEOUT_ROLLBACK),
+    "DD_WRITE_FAILED": ("BOOT_TIMEOUT", FailureCode.BOOT_TIMEOUT_ROLLBACK),
+}
+
+
 def _classify_deploy_failure(ctx: dict) -> tuple[str, FailureCode]:
-    """根据 Deployer 结构化错误字符串判定 failure_code。
-    返回 (status, failure_code)。分类依据 deployer.py 实际错误消息。
-    """
-    error = ctx.get("error", "").lower()
-    # kernel panic → 立即升级
-    if "kernel panic" in error:
-        return ("KERNEL_DEAD", FailureCode.KERNEL_DEAD_NO_SHELL)
-    # boot timeout / reboot 后未完成启动 → 可回滚
-    if "boot_completed not reached" in error or "boot timeout" in error:
-        return ("BOOT_TIMEOUT", FailureCode.BOOT_TIMEOUT_ROLLBACK)
-    # dd 写入失败 → 可回滚
-    if "dd write failed" in error:
-        return ("BOOT_TIMEOUT", FailureCode.BOOT_TIMEOUT_ROLLBACK)
-    # 其余 deploy 错误（adb root/remount/push/sha256/health/service 等）→ 尝试回滚
-    if error:
+    """根据 DeployErrorCode 结构化错误码判定 failure_code，不依赖字符串匹配。"""
+    error_code = ctx.get("error_code", "")
+    if error_code in _DEPLOY_ERROR_MAP:
+        return _DEPLOY_ERROR_MAP[error_code]
+    # 其余错误统一按 DEPLOY_FATAL 处理（可尝试回滚）
+    if ctx.get("error"):
         return ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL)
     return ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL)
 

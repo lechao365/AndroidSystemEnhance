@@ -36,6 +36,7 @@ def _emit_deploy_ctx(result) -> None:
         "backup_sha": result.backup_sha,
         "deployed_files": result.deployed_files,
         "error": result.error,
+        "error_code": result.error_code.value,
     }
     print(f"DEPLOY_CTX: {_json.dumps(ctx)}")
 

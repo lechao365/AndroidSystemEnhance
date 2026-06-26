@@ -12,6 +12,24 @@ class DeployMode(StrEnum):
     FLASH_FULL = "flash_full"
 
 
+class DeployErrorCode(StrEnum):
+    """Deployer 结构化错误码，用于 runtime 精确路由 (guard/revert)，消除字符串匹配。"""
+    NONE = "NONE"
+    ADB_ROOT_FAILED = "ADB_ROOT_FAILED"
+    ADB_REMOUNT_FAILED = "ADB_REMOUNT_FAILED"
+    ADB_PUSH_FAILED = "ADB_PUSH_FAILED"
+    SHA256_MISMATCH = "SHA256_MISMATCH"
+    IMAGE_VERIFY_FAILED = "IMAGE_VERIFY_FAILED"
+    DEVICE_NOT_HEALTHY = "DEVICE_NOT_HEALTHY"
+    DD_WRITE_FAILED = "DD_WRITE_FAILED"
+    BOOT_COMPLETED_NOT_REACHED = "BOOT_COMPLETED_NOT_REACHED"
+    KERNEL_PANIC = "KERNEL_PANIC"
+    SERVICE_NOT_STARTED = "SERVICE_NOT_STARTED"
+    ARTIFACT_NOT_FOUND = "ARTIFACT_NOT_FOUND"
+    HEALTH_CHECK_FAILED = "HEALTH_CHECK_FAILED"
+    UNKNOWN = "UNKNOWN"
+
+
 @dataclass
 class DeployTarget:
     artifact_name: str
@@ -54,6 +72,7 @@ class DeployResult:
     duration_seconds: float = 0.0
     requires_reboot: bool = False
     error: str = ""
+    error_code: DeployErrorCode = DeployErrorCode.NONE
     backup_path: str = ""
     backup_sha: str = ""
     deployed_files: list[str] = field(default_factory=list)
