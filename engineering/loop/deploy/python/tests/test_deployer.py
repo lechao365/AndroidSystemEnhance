@@ -82,7 +82,9 @@ def test_dd_boot_aborts_on_dd_failure(tmp_path):
         "push": ok_cmd,
         "sha256sum": sha_ok,
         "getprop sys.boot_completed": boot_ok,
-        "dd if=": dd_fail,
+        "dd if=/dev/block/mmcblk0p1 bs=4M": ok_cmd,  # 备份读取（L147）
+        "dd if=/dev/block/mmcblk0p1 of=": ok_cmd,    # 设备端备份写入（L161）
+        "dd if=/data/local/tmp/boot.img": dd_fail,   # 正式 dd 写入（L168）
     })
 
     client = mod.AdbClient("1.2.3.4:5555", "1.2.3.4:5555", runner=runner)

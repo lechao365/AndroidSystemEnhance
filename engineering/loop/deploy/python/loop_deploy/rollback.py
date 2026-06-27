@@ -45,20 +45,25 @@ def serial_rollback_dd(
             return RollbackResult(success=False, reason=f"serial push failed for {backup_path}")
         dd_cmd = f"dd if={device_tmp} of={block_device} bs=4M && sync"
         result = serial_shell(f"su 0 sh -c '{dd_cmd}'")
-        if result and "error" not in result.lower():
-            serial_shell(f"rm -f {device_tmp}")
-            serial_shell("reboot")
-            return RollbackResult(success=True, reason="rollback initiated via serial (host backup)")
+        if result:
+            lowered = result.lower()
+            if "no such file" in lowered:
+                return RollbackResult(success=False, reason=f"remote backup not found: {device_tmp}")
+            if "dd:" not in lowered:
+                serial_shell(f"rm -f {device_tmp}")
+                serial_shell("reboot")
+                return RollbackResult(success=True, reason="rollback initiated via serial (host backup)")
         return RollbackResult(success=False, reason=f"dd rollback failed: {result}")
 
     # --- 分支2：backup 在设备端（旧行为，/data 路径回退）---
     remote_backup = f"{remote_backup_dir}/{backup.name}"
     check = serial_shell(f"ls {remote_backup} 2>/dev/null")
-    if not check or "No such file" in check:
+    # ls 成功时返回值包含文件名；失败时返回空或不包含文件名
+    if not check or backup.name not in check:
         return RollbackResult(success=False, reason=f"remote backup not found: {remote_backup}")
     dd_cmd = f"dd if={remote_backup} of={block_device} bs=4M && sync"
     result = serial_shell(f"su 0 sh -c '{dd_cmd}'")
-    if result and "error" not in result.lower():
+    if result and "dd:" not in result.lower() and "no such file" not in result.lower():
         serial_shell("reboot")
         return RollbackResult(success=True, reason="rollback initiated via serial")
     return RollbackResult(success=False, reason=f"dd rollback failed: {result}")
