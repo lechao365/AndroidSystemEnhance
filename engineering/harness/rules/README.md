@@ -13,7 +13,7 @@
 ## 规则 ID 说明
 
 - 规则采用 **RID（Rule ID）** 标识，格式为 `<主题>-<序号>`（如 `SRC-001`、`OBS-002`）。
-- 主题前缀：`SRC`（source-code-modify）、`DOC`（doc-paths / plantuml）、`OBS`（script-observability）、`PAR`（parallel-strategy）、`PATH`（path-management）。
+- 主题前缀：`SRC`（source-code-modify）、`DOC`（doc-paths / plantuml）、`OBS`（script-observability）、`PAR`（parallel-strategy）、`PATH`（path-management）、`CXX`（cxx-coding-rules）。
 - `BLD`（build-reference）已迁至 `../reference/`，详见 [../reference/README.md](../reference/README.md)。
 - RID 用于在 README、workflow contract、plan、review 与 validator 输出中做稳定引用，避免仅靠文件名沟通。
 - 同一规则文件可包含多个 RID；README 负责给出入口与摘要，不替代规则正文。
@@ -29,6 +29,7 @@
 | `PAR-001` | [parallel-strategy.md](./parallel-strategy.md) | 子 agent 并行策略：独立优先、文件不重叠、粒度上限（≤5 文件/agent） | 多任务并行处理时 |
 | `OBS-001` / `OBS-002` | [script-observability.md](./script-observability.md) | `OBS-001` 必须通过 bootstrap 接入 `harness_init`；`OBS-002` 统一退出码、禁裸 exit、禁裸 `/tmp/`、产物归档 | 改动 `engineering/` 下任何 bash 脚本前 |
 | `PATH-001` | [path-management.md](./path-management.md) | 统一路径管理：禁止硬编码工程路径，三方工具（shell/python/bat）从 harness-paths.conf 单一事实源加载 | 新增/改动任何脚本的路径引用前 |
+| `CXX-001` / `CXX-002` / `CXX-003` / `CXX-004` | [cxx-coding-rules.md](./cxx-coding-rules.md) | `CXX-001` 跨进程二进制协议字段必须显式 `cpu_to_le*/le*toh`；`CXX-002` 错误路径还原状态、运算前防溢出、重启后从持久层恢复；`CXX-003` JSON/二进制字段前置 `isMember+isXxx` 校验、禁 try/catch 兜底；`CXX-004` 长生命周期线程致命错误必须 4 步退出（置 false / notify / ERROR / exit） | 编写或修改 lcview 及内核/用户态协议栈的 C/C++ 源码前 |
 
 > 本目录文件均被 `AGENTS.md` 声明为强制加载规则，改动会直接影响 AI 在对应场景的行为。
 > 规则优先级遵循 [../README.md#控制总纲](../README.md#控制总纲)：用户指令 > 控制总纲 > `rules/*.md` > `workflows/*/WORKFLOW.md` > README。

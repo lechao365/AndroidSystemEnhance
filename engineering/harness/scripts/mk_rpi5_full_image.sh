@@ -373,6 +373,15 @@ if [ "$DO_BOOT" = true ] || [ "$DO_SYSTEM" = true ] || [ "$DO_VENDOR" = true ]; 
 
     step_end 0
 
+    # 编译 lcview 单元测试（编译期防护，确保测试代码无语法错误）
+    # 注：运行测试需刷机后 adb shell 执行，当前仅做编译校验。
+    step_begin "编译 lcview 单元测试（编译期防护）"
+    if ! make lechao_lcview_unit_test lechao_lcview_hal_test -j${BUILD_JOBS}; then
+        log_error "lcview 单元测试编译失败（退出码 4 = 测试编译失败）"
+        harness_exit 4
+    fi
+    step_end 0
+
 else
     step_begin "确认镜像就绪（跳过编译，仅验证 .img 文件存在）"
 

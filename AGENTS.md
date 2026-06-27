@@ -32,6 +32,14 @@
 涉及 RPI5 AOSP/内核编译时，必须先加载 [engineering/harness/reference/build-reference.md](engineering/harness/reference/build-reference.md)。
 该规则记录了本项目正确的编译命令与约束，防止 LLM 使用错误参数。
 
+## C++/内核编码规范
+改动 lcview 及内核/用户态协议栈（HAL / Daemon / 内核打点模块）的 C/C++ 源码前，必须先加载 [engineering/harness/rules/cxx-coding-rules.md](engineering/harness/rules/cxx-coding-rules.md)。
+该规则将 P0 检视修复中暴露的 4 类 bug（字节序、资源生命周期、输入防御、故障静默）提炼为 CXX-001~004 硬规则。
+
+## 测试防护
+lcview 模块改动后必须通过单元测试编译验证：`make lechao_lcview_unit_test lechao_lcview_hal_test -j$(nproc)` 无编译错误。
+测试源码见 `~/workspace/aosp/vendor/lechao/services/lechao_lcview/tests/`。
+
 ## 文件删除规则
 1. **任何文件删除操作（无论是否被 git 跟踪）都必须逐个向用户确认，禁止自行删除。**
    - 包括但不限于：临时产物（evidence_bundle.json / summary.txt 等）、测试输出、中间文件、日志、缓存。
