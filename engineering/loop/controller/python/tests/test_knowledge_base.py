@@ -1,7 +1,14 @@
 """知识库与 fingerprint 计算单元测试。"""
+import json
 import re
 
-from loop_controller.analyzer_protocol import AnalysisRequest, _compute_fingerprint
+from loop_controller.analyzer_protocol import (
+    AnalysisRequest,
+    FileChange,
+    KBEntry,
+    KnowledgeBaseAnalyzer,
+    _compute_fingerprint,
+)
 
 
 def test_fingerprint_stable_for_same_input():
@@ -49,3 +56,64 @@ def test_fingerprint_order_independent():
     req2 = AnalysisRequest(session_id="s1", attempt_index=1, target="t", suite="s",
         failed_cases=[{"id": "A", "failure_reason": "y"}, {"id": "B", "failure_reason": "x"}])
     assert _compute_fingerprint(req1) == _compute_fingerprint(req2)
+
+
+# ---------------------------------------------------------------------------
+# KnowledgeBaseAnalyzer
+# ---------------------------------------------------------------------------
+def _make_kb_file(tmp_path, entries):
+    kb = tmp_path / "kb.json"
+    kb.write_text(json.dumps({"version": 1, "entries": entries}), encoding="utf-8")
+    return str(kb)
+
+
+def test_kb_analyzer_loads_from_file(tmp_path):
+    entry = {
+        "fingerprint": "sha256:abc",
+        "patch": [{"workspace_path": "foo.c", "change_type": "edit",
+                    "old_marker": "x", "new_content": "y"}],
+        "description": "test entry",
+        "deploy_mode_hint": "PUSH_SINGLE",
+    }
+    kb_path = _make_kb_file(tmp_path, [entry])
+    analyzer = KnowledgeBaseAnalyzer(kb_path)
+    assert len(analyzer._kb) == 1
+
+
+def test_kb_analyzer_hit_returns_patch(tmp_path):
+    entry = {
+        "fingerprint": "sha256:abc",
+        "patch": [{"workspace_path": "foo.c", "change_type": "edit",
+                    "old_marker": "x", "new_content": "y"}],
+        "description": "test",
+    }
+    kb_path = _make_kb_file(tmp_path, [entry])
+    analyzer = KnowledgeBaseAnalyzer(kb_path)
+    analyzer._compute_fingerprint = lambda r: "sha256:abc"
+    req = AnalysisRequest(session_id="s", attempt_index=1)
+    suggestion = analyzer.analyze(req)
+    assert len(suggestion.target_files) == 1
+    assert suggestion.target_files[0].workspace_path == "foo.c"
+    assert suggestion.confidence == 0.98
+
+
+def test_kb_analyzer_miss_returns_empty(tmp_path):
+    kb_path = _make_kb_file(tmp_path, [])
+    analyzer = KnowledgeBaseAnalyzer(kb_path)
+    req = AnalysisRequest(session_id="s", attempt_index=1,
+                          failed_cases=[{"id": "C1", "failure_reason": "x"}])
+    suggestion = analyzer.analyze(req)
+    assert suggestion.target_files == []
+    assert suggestion.confidence == 0.0
+
+
+def test_kb_analyzer_missing_file_returns_empty_list(tmp_path):
+    analyzer = KnowledgeBaseAnalyzer(str(tmp_path / "nonexistent.json"))
+    assert analyzer._kb == []
+
+
+def test_kb_analyzer_corrupt_json_returns_empty_list(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("not json", encoding="utf-8")
+    analyzer = KnowledgeBaseAnalyzer(str(bad))
+    assert analyzer._kb == []

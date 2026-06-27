@@ -242,3 +242,49 @@ def _compute_fingerprint(request: AnalysisRequest, reason_length: int = 80) -> s
         components.append(f"{case_id}:{reason}")
     raw = f"{request.target}|{request.suite}|{'|'.join(components)}"
     return "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
+
+
+class KnowledgeBaseAnalyzer(LlmAnalyzer):
+    """从 patch_knowledge_base.json 加载历史成功补丁，按 fingerprint 匹配。
+
+    命中：返回 KB 中对应补丁，confidence=hit_confidence（默认 0.98）。
+    未命中/加载失败：返回空补丁，confidence=0.0。
+    """
+
+    def __init__(self, kb_path: str, hit_confidence: float = 0.98):
+        self._kb_path = kb_path
+        self._hit_confidence = hit_confidence
+        self._kb: list[KBEntry] = self._load_kb(kb_path)
+
+    def analyze(self, request: AnalysisRequest) -> PatchSuggestion:
+        fingerprint = self._compute_fingerprint(request)
+        for entry in self._kb:
+            if entry.fingerprint == fingerprint:
+                patches = [FileChange(**p) for p in entry.patch]
+                return PatchSuggestion(
+                    target_files=patches,
+                    rationale=f"知识库命中：{entry.description}",
+                    confidence=self._hit_confidence,
+                    deploy_mode_hint=entry.deploy_mode_hint,
+                )
+        return PatchSuggestion(target_files=[], confidence=0.0)
+
+    @staticmethod
+    def _load_kb(kb_path: str) -> list[KBEntry]:
+        if not kb_path or not os.path.isfile(kb_path):
+            return []
+        try:
+            data = json.loads(Path(kb_path).read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+        entries = []
+        for e in data.get("entries", []):
+            try:
+                entries.append(KBEntry(**e))
+            except TypeError:
+                continue
+        return entries
+
+    @staticmethod
+    def _compute_fingerprint(request: AnalysisRequest) -> str:
+        return _compute_fingerprint(request)
