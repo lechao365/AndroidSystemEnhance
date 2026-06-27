@@ -8,8 +8,9 @@ import hashlib
 import json
 import os
 import re
+import time as _time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -222,6 +223,46 @@ class KBEntry:
     created_at: str = ""
     hit_count: int = 0
     last_hit_at: str = ""
+
+
+def save_kb(kb_path: str, entries: list[KBEntry], max_entries: int = 100) -> None:
+    """保存知识库到 kb_path，条目数超限时按 hit_count 降序淘汰低命中条目。"""
+    if len(entries) > max_entries:
+        entries.sort(key=lambda e: e.hit_count, reverse=True)
+        entries = entries[:max_entries]
+    data = {"version": 1, "entries": [asdict(e) for e in entries]}
+    parent = os.path.dirname(kb_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    Path(kb_path).write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def update_kb(kb_path: str, fingerprint: str, fingerprint_components: dict,
+              patch: list[dict], description: str, deploy_mode_hint: str,
+              source_session: str, source_attempt: int, max_entries: int = 100) -> None:
+    """更新知识库：同 fingerprint 则覆盖更新，否则追加新条目。"""
+    analyzer = KnowledgeBaseAnalyzer(kb_path)
+    entries = analyzer._kb
+    now = _time.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+    existing = next((e for e in entries if e.fingerprint == fingerprint), None)
+    if existing:
+        existing.patch = patch
+        existing.description = description
+        existing.deploy_mode_hint = deploy_mode_hint
+        existing.source_session = source_session
+        existing.source_attempt = source_attempt
+        existing.created_at = now
+    else:
+        entries.append(KBEntry(
+            fingerprint=fingerprint,
+            fingerprint_components=fingerprint_components,
+            patch=patch, description=description,
+            deploy_mode_hint=deploy_mode_hint,
+            source_session=source_session, source_attempt=source_attempt,
+            created_at=now,
+        ))
+    save_kb(kb_path, entries, max_entries)
 
 
 def _compute_fingerprint(request: AnalysisRequest, reason_length: int = 80) -> str:

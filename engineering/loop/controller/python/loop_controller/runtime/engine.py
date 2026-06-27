@@ -51,6 +51,10 @@ class LoopRuntime:
         self._deploy_context: dict = {}
         # ISSUE-1：注入 LlmAnalyzer，缺省用 ScriptedAnalyzer（规则库留空，产出失败则退人工）
         self._analyzer = analyzer
+        # 知识库归档路径（由 runtime_cli 注入，DONE_SUCCESS 时归档成功补丁）
+        self._kb_path: str = ""
+        # 置信度阈值（由 runtime_cli 注入，低于阈值的补丁触发人工 gate）
+        self._confidence_threshold: float = 0.0
 
     def resume(self) -> RuntimeState:
         # 幂等：已终态的 session 不恢复
@@ -333,6 +337,8 @@ class LoopRuntime:
                 self._state.pending_human_gate = True
             elif next_nk == NodeKind.DONE_SUCCESS:
                 self._state.terminal_state = RuntimeTerminalState.DONE_SUCCESS
+                # ISSUE-3：DONE_SUCCESS 时把成功补丁归档到知识库（Reflexion 模式）
+                self._archive_to_knowledge_base()
                 # ISSUE-3：成功收敛后清理所有 attempts 中的 worktree（生命周期对齐）
                 self._cleanup_all_worktrees()
             # Non-terminal guard → drive transition via _compute_next_node
@@ -366,6 +372,62 @@ class LoopRuntime:
                         created=wt_dict.get("created", False),
                     )
                     remove_patch_worktree(handle)
+        except Exception:
+            pass
+
+    def _archive_to_knowledge_base(self) -> None:
+        """DONE_SUCCESS 时把最后一次成功补丁归档到知识库（Reflexion 模式）。
+
+        幂等性：update_kb 按 fingerprint 去重，相同指纹覆盖更新而非追加。
+        容错：任何异常静默吞掉，绝不影响主流程的成功路径。
+        """
+        if not self._kb_path:
+            return
+        try:
+            from loop_controller.analyzer_protocol import (
+                AnalysisRequest,
+                _compute_fingerprint,
+                update_kb,
+            )
+            patch_path = os.path.join(
+                self._session.artifacts_dir, "patch_suggestion.json")
+            if not os.path.isfile(patch_path):
+                return
+            raw = json.loads(Path(patch_path).read_text(encoding="utf-8"))
+            # 兼容两种格式：{"patches": [...]} 或裸 list[FileChange dict]
+            if isinstance(raw, dict) and "patches" in raw:
+                patches = raw["patches"]
+            elif isinstance(raw, list):
+                patches = raw
+            else:
+                return
+            if not isinstance(patches, list) or not patches:
+                return
+            latest = self._session.attempts[-1] if self._session.attempts else {}
+            if isinstance(latest, dict):
+                failed_cases = latest.get("verify", {}).get("failed_cases", [])
+                if not failed_cases:
+                    case_results = latest.get("verify", {}).get("case_results", [])
+                    failed_cases = [c for c in case_results
+                                    if isinstance(c, dict)
+                                    and c.get("status") in ("fail", "error")]
+            else:
+                failed_cases = []
+            req = AnalysisRequest(
+                session_id=self._session.session_id,
+                attempt_index=self._session.current_attempt,
+                failed_cases=failed_cases,
+                target=self._session.target,
+                suite=self._session.suite,
+            )
+            fp = _compute_fingerprint(req)
+            update_kb(
+                self._kb_path, fp, {}, patches,
+                description=f"自动归档 from {self._session.session_id}",
+                deploy_mode_hint="",
+                source_session=self._session.session_id,
+                source_attempt=self._session.current_attempt,
+            )
         except Exception:
             pass
 

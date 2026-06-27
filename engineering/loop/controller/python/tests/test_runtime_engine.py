@@ -1143,3 +1143,71 @@ def test_done_success_cleans_worktrees(tmp_path, monkeypatch):
     assert rt._state.terminal_state == RuntimeTerminalState.DONE_SUCCESS
     # worktree 应被清理
     assert not Path(wt_path).exists(), f"worktree not cleaned: {wt_path}"
+
+
+# ---------------------------------------------------------------------------
+# Task 6: DONE_SUCCESS 归档到知识库（Reflexion 模式）
+# ---------------------------------------------------------------------------
+def test_done_success_archives_to_kb(tmp_path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    patch_data = [{"workspace_path": "foo.c", "change_type": "edit",
+                   "old_marker": "x", "new_content": "y"}]
+    (artifacts / "patch_suggestion.json").write_text(
+        json.dumps({"patches": patch_data, "confidence": 0.9}), encoding="utf-8")
+    kb_path = str(tmp_path / "kb.json")
+
+    session = LoopSession(
+        session_id="lciod-test", workflow_id="runtime", target="lciod",
+        suite="features.lciod.end_to_end", max_attempts=3,
+        current_attempt=1, artifacts_dir=str(artifacts),
+        attempts=[{
+            "verify": {
+                "case_results": [{"id": "HA-03", "status": "fail"}],
+                "failed_count": 1,
+                "failed_cases": [{"id": "HA-03", "failure_reason": "field mismatch"}],
+            },
+            "patch_applied": {"patch_hash": "abc"},
+        }],
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp", device_profile="dummy")
+    rt._kb_path = kb_path
+    rt._archive_to_knowledge_base()
+
+    kb = json.loads(Path(kb_path).read_text())
+    assert len(kb["entries"]) == 1
+    assert kb["entries"][0]["source_session"] == "lciod-test"
+
+
+def test_archive_does_not_duplicate_same_fingerprint(tmp_path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    patch1 = [{"workspace_path": "a.c", "old_marker": "x", "new_content": "y"}]
+    (artifacts / "patch_suggestion.json").write_text(
+        json.dumps({"patches": patch1, "confidence": 0.9}), encoding="utf-8")
+    kb_path = str(tmp_path / "kb.json")
+
+    session = LoopSession(
+        session_id="s1", workflow_id="runtime", target="lciod", suite="s",
+        max_attempts=3, current_attempt=1, artifacts_dir=str(artifacts),
+        attempts=[{"verify": {"failed_cases": [{"id": "C1", "failure_reason": "err"}]}}],
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp", device_profile="dummy")
+    rt._kb_path = kb_path
+    rt._archive_to_knowledge_base()
+    rt._archive_to_knowledge_base()
+
+    kb = json.loads(Path(kb_path).read_text())
+    assert len(kb["entries"]) == 1
+
+
+def test_archive_silent_failure_on_missing_patch(tmp_path):
+    kb_path = str(tmp_path / "kb.json")
+    session = LoopSession(
+        session_id="s1", workflow_id="runtime", target="t", suite="s", max_attempts=1,
+        current_attempt=0, artifacts_dir=str(tmp_path), attempts=[],
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp", device_profile="dummy")
+    rt._kb_path = kb_path
+    rt._archive_to_knowledge_base()
+    assert not Path(kb_path).exists()
