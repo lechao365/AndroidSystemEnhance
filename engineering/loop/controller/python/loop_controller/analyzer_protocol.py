@@ -390,3 +390,30 @@ class OpencodeAnalyzer(LlmAnalyzer):
         except (json.JSONDecodeError, TypeError):
             pass
         return PatchSuggestion(target_files=[], confidence=0.0)
+
+
+class ChainedAnalyzer(LlmAnalyzer):
+    """三层降级：KB → 规则 → opencode。首个非空产出即返回。
+
+    - 顺序求值 layers，命中（target_files 非空）即返回。
+    - 某层抛异常则跳过，继续下一层（容错）。
+    - 全部为空时返回空补丁，rationale 标注"三层 analyzer 均无产出"。
+    - 命中层的 rationale 前缀追加该层类名，便于审计来源。
+    """
+
+    def __init__(self, layers: list[LlmAnalyzer]):
+        self._layers = layers
+
+    def analyze(self, request: AnalysisRequest) -> PatchSuggestion:
+        for layer in self._layers:
+            try:
+                suggestion = layer.analyze(request)
+            except Exception:
+                continue
+            if suggestion.target_files:
+                suggestion.rationale = f"[{type(layer).__name__}] {suggestion.rationale}"
+                return suggestion
+        return PatchSuggestion(
+            target_files=[], confidence=0.0,
+            rationale="三层 analyzer 均无产出",
+        )
