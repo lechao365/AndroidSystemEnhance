@@ -20,23 +20,16 @@
 
 ## 目录说明
 
-| 子目录/文件 | 职责 | 关键入口 |
-|------------|------|---------|
-| `lcview-adb-run/` | 串口 bootstrap 后切 adb 跑 lcview suite，失败补采 serial fallback；含 `WORKFLOW.md` 契约 + `run_lcview_adb_suite.sh` 入口 | 被 `le.sh` 编排 |
+当前 `workflows/` 为空。v1 的手工编排脚本 `lcview-adb-run/`（serial bootstrap → adb feature → fallback）已删除，全部能力由 runtime engine 自动驱动状态机承接（详见 `../controller/README.md` 与 `../WORKFLOW.md`）。未来如有新的 loop 专属 workflow 入驻，应在本表登记。
 
 ## 使用方式
 
-本目录无可执行入口（workflow 由 `le.sh` 或 `run_lcview_adb_suite.sh` 触发）。
-
-### 入口清单
-
-| 入口 | 作用 | 调用方式 |
-|------|------|---------|
-| `lcview-adb-run/run_lcview_adb_suite.sh` | 多阶段编排（serial bootstrap → adb feature → fallback） | `bash run_lcview_adb_suite.sh --serial-host ... --adb-profile ...` |
+本目录当前无可执行入口。runtime 主入口在 `le runtime`（详见 `../controller/README.md`）。
 
 ## 关联资源
 
 | 类型 | 路径 | 说明 |
 |------|------|------|
-| 关联 workflow | `lcview-adb-run/WORKFLOW.md` | 被 `.opencode/commands/le.md` 间接编排 |
+| 流程细节 | `../WORKFLOW.md` | loop engineering 流程单一事实源 |
+| runtime 设计 | `docs/specs/2026-06-26-loop-runtime-rearchitecture-design.md` | runtime 重构设计（权威） |
 | 设计文档 | `docs/specs/2026-06-19-loop-engineering-design.md` | workflow 归属规则 |

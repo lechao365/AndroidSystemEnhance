@@ -24,17 +24,15 @@
 | 子目录/文件 | 职责 | 关键入口 |
 |------------|------|---------|
 | `python/loop_controller/runtime/` | **状态图 runtime 引擎**（types / guards / checkpoint_store / engine / nodes） | `LoopRuntime.run()` / `resume()` |
-| `python/loop_controller/runtime_cli.py` | **runtime CLI**：`le runtime {init,run,resume,status,explain}` | `le.sh runtime` |
-| `python/loop_controller/stages.py` | 可复用阶段 handler（run_verify / analyze_request / decide 纯函数）+ 通用 helpers | 被 runtime engine 与 control_cli 共用 |
-| `python/loop_controller/control_cli.py` | 旧 `le control` 子命令（break-glass，等 engine 完整接管后删除） | `le.sh control` |
-| `python/loop_controller/patch_applier.py` | `apply_file_changes`：将 `FileChange[]` 写入 workspace | 被 nodes/control_cli 调用 |
-| `python/loop_controller/patch_guard.py` | `check_white_list` / `detect_risk` / `check_syntax` | 被 nodes/control_cli 调用 |
+| `python/loop_controller/runtime_cli.py` | **runtime CLI**：`le runtime {init,run,resume,status,explain}`（唯一入口） | `le.sh runtime` |
+| `python/loop_controller/stages.py` | 可复用阶段 handler（run_verify / analyze_request / decide 纯函数）+ 通用 helpers | 被 runtime engine 调用 |
+| `python/loop_controller/patch_applier.py` | `apply_file_changes`：将 `FileChange[]` 写入 workspace | 被 runtime nodes 调用 |
+| `python/loop_controller/patch_guard.py` | `check_white_list` / `detect_risk` / `check_syntax` | 被 runtime nodes 调用 |
 | `python/loop_controller/analyzer_protocol.py` | `AnalysisRequest` / `FileChange` / `PatchSuggestion` / `LlmAnalyzer` | analyzer 边界契约 |
-| `python/loop_controller/policy.py` | `decide_termination`：旧终止规则（被 stages.decide_stage 复用） | 被 stages 调用 |
 
 ## 使用方式
 
-### Runtime CLI（新主入口）
+### Runtime CLI（唯一主入口）
 
 ```bash
 # 初始化 session
@@ -53,9 +51,7 @@ le runtime status --session <session.json>
 le runtime explain
 ```
 
-### 旧 `le control`（break-glass / 调试）
-
-旧 `le control {init,run-verify,decide,analyze-request,apply-patch,compile,deploy,revert,status}` 仍可用，用于人工干预与调试。等 runtime engine 完整接管 patch/compile/deploy 节点后将从项目中删除。
+> v1 的 `le control {init,run-verify,decide,...}` 子命令已彻底删除，全部能力由 runtime engine 自动驱动状态机承接。
 
 ### 测试
 

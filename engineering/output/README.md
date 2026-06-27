@@ -43,5 +43,5 @@
 | 类型 | 路径 | 说明 |
 |------|------|------|
 | 关联 workflow | `../harness/workflows/` | 脚本运行产物落入 log/ |
-| 关联 workflow | `../loop/workflows/lcview-adb-run/` | 产物落入 runs/ |
+| 关联 runtime | `../loop/controller/README.md` | runtime 产物落入 runs/ |
 | 设计文档 | `docs/specs/2026-06-21-engineering-doc-refactor-design.md` | output 定位：本地维测，不归档 |

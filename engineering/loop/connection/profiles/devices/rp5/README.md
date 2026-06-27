@@ -30,7 +30,7 @@
 本目录无可执行入口，作为 profile 文件被引用：
 
 - `le.sh --device-profile .../rp5/default.json`
-- `run_lcview_adb_suite.sh --serial-profile .../rp5/default.json --adb-profile .../rp5/adb.json`
+- `le.sh runtime --device-profile .../rp5/default.json`（runtime engine 自动驱动）
 
 串口参数：baudrate 115200，8N1。
 
@@ -38,5 +38,5 @@
 
 | 类型 | 路径 | 说明 |
 |------|------|------|
-| 关联 workflow | `../../../workflows/lcview-adb-run/` | 消费本目录 profile |
+| 关联 runtime | `../../../controller/README.md` | runtime engine 消费本目录 profile |
 | 设计文档 | `docs/specs/2026-06-21-lcview-adb-provider-and-loop-case-design.md` | profile 设计 |

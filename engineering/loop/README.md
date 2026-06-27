@@ -28,11 +28,11 @@
 | `connection/` | 连接层（provider/profiles/protocol） | 详见 `connection/README.md` |
 | `scripts/` | CLI 入口 le.sh + host 启动脚本 | 详见 `scripts/README.md` |
 | `templates/case-template.md` | AI 用例生成约束模板 |
-| `workflows/` | loop 专属 workflow（lcview-adb-run） | 详见 `workflows/README.md` |
+| `workflows/` | loop 专属 workflow 容器（当前为空，待未来 phase plan 入驻） | 详见 `workflows/README.md` |
 | `controller/` | loop 控制面与 runtime 编排中心（`loop_controller` Python 包：状态图 runtime engine + guard + checkpoint + stages + patch） | 详见 `controller/README.md` |
 | `contracts/` | loop 契约层（`loop_contracts` Python 包：LoopSession / RuntimeState / CheckpointRecord / FailureCode） | 详见 `contracts/README.md` |
 | `config/` | loop 配置文件（`target-paths.yaml` 等补丁白名单） | 被 `controller/patch_guard.py` 读取 |
-| `deploy/` | loop 部署层（`loop_deploy` Python 包：compile / deploy / rollback / image_verify） | 被 runtime nodes 与 `le control deploy` 调用 |
+| `deploy/` | loop 部署层（`loop_deploy` Python 包：compile / deploy / rollback / image_verify） | 被 runtime nodes 与 `le deploy` 调用 |
 | `WORKFLOW.md` | **流程细节单一事实源**（架构拓扑 / core 模块 / 断言类型 / run_on / 场景细节 / serial_context / 诊断约束） | 被 `/le` 注入 |
 
 > 子目录自身的细节见其 `README.md`，本表只给一句话索引。流程级细节见 WORKFLOW.md。
@@ -89,5 +89,4 @@ PYTHONPATH="engineering/loop/core/python:engineering/loop/connection/providers/r
 | 设计文档 | `docs/specs/2026-06-19-loop-engineering-design.md` | v1 历史归档 |
 | 关联规则 | `../harness/rules/script-observability.md` | 改 loop 下 bash 脚本时 |
 | 关联规则 | `../harness/rules/path-management.md` | 路径引用 |
-| 关联 workflow | `workflows/lcview-adb-run/` | lcview serial→adb 双阶段验收 |
 | 关联配置 | `../harness/config/harness-paths.conf` | LOOP_* 路径 KEY |

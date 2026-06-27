@@ -44,4 +44,4 @@
 | 类型 | 路径 | 说明 |
 |------|------|------|
 | 设计文档 | `docs/specs/2026-06-19-loop-engineering-design.md` | connection 域设计 |
-| 关联 workflow | `../workflows/lcview-adb-run/` | 使用 rp5-serial bootstrap + adb feature |
+| 关联 runtime | `../controller/README.md` | runtime engine 消费 rp5-serial bootstrap + adb feature |

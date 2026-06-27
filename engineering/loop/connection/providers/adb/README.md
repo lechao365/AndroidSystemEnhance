@@ -7,7 +7,7 @@
 
 - **是什么**：loop engineering 的 `transport=adb` live transport provider。
 - **职责边界**：提供 adb connect/disconnect/shell（带 exit code 解析）/root-su0 提权/pull/logcat 多 buffer/reboot+wait-for-device/runtime context。
-- **上下游依赖**：依赖 `loop/core`（BaseTransport 契约），被 `loop/workflows/lcview-adb-run` 消费。
+- **上下游依赖**：依赖 `loop/core`（BaseTransport 契约），被 `loop/controller`（runtime engine）消费。
 
 ## 大纲
 
@@ -51,5 +51,5 @@ PYTHONPATH="engineering/loop/core/python:engineering/loop/connection/providers/a
 
 | 类型 | 路径 | 说明 |
 |------|------|------|
-| 关联 workflow | `../../../workflows/lcview-adb-run/` | adb feature suite 消费本 provider |
+| 关联 runtime | `../../../controller/README.md` | runtime engine 的 adb feature suite 消费本 provider |
 | 设计文档 | `docs/specs/2026-06-21-lcview-adb-provider-and-loop-case-design.md` | adb provider 设计 |

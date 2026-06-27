@@ -64,4 +64,4 @@ Windows `.bat` 文件的格式要求（CRLF / 纯 ASCII / CMD 运行 / 修改后
 |------|------|------|
 | 设计文档 | `docs/specs/2026-06-19-loop-engineering-design.md` | loop 架构 |
 | 关联规则 | `../../harness/rules/path-management.md`（PATH-001） | `.bat` 路径工具约束 |
-| 关联 workflow | `../workflows/lcview-adb-run/` | `le.sh` 编排 lcview suite |
+| 关联 runtime | `../controller/README.md` | `le.sh runtime` 由 runtime engine 驱动 |

@@ -9,48 +9,41 @@ description: loop engineering v2 工作流（用例驱动 + AI 修复闭环）
 
 AI 接管设备验收：执行用例 → 输出证据 → AI 分析 → 修复代码 → 重测 → 循环直到全 pass。
 
-## 核心流程（全自动闭环）
+## 核心流程（runtime engine 自动驱动）
 
 ```
 [Step 0] (可选) AI 读代码/spec + case-template.md → 生成 YAML 用例
          → le gen-cases --validate <file>   # 校验 schema/断言/命名/依赖
 
-[Step 1] le control init --target <module> --max-attempts 5 --artifacts-dir <dir>
+[Step 1] le runtime init --target <module> --suite <suite.yaml> \
+            --max-attempts 5 --artifacts-dir <dir>
+         → 生成 LoopSession + 进入 INIT_SESSION 节点
 
-[Step 2] le control run-verify --session <sid> --suite <suite> [--adb-endpoint <ep>]
-         → 执行用例 → evidence_bundle.json → 提取 failed_cases 写入 session
+[Step 2] le runtime run --session <session.json> [--adb-endpoint <ep>]
+         → runtime engine 自动驱动状态机：
+              RUN_VERIFY → DECIDE_NEXT
+                → 全 PASS → DONE_SUCCESS
+                → RETRY   → BUILD_ANALYSIS_REQUEST → WAIT_ANALYZER_PATCH
+                              → COMPILE_PATCH → DEPLOY_PATCH → goto RUN_VERIFY
+                → 终态     → ESCALATE_HUMAN（人工介入）
 
-[Step 3] le control decide --session <sid>
-         → PASS → STOP（成功）
-         → RETRY → 继续 Step 4
-         → STOP + escalate → 人工介入
-
-[Step 4] (仅 RETRY) le control analyze-request --session <sid>
-         → analysis_request.json（failed_cases + collectors_output）
-         → 主会话 AI 读 evidence_bundle.json + analysis_request.json → 生成 patch.json
-
-[Step 5] (仅 RETRY) le control apply-patch --session <sid> --patch <patch.json>
-         → 白名单校验 → 语法检查 → git stash 备份 → apply
-
-[Step 6] (仅 RETRY) le control compile --session <sid>
-         → 成功 → 继续 Step 7
-         → 失败 → le control revert --session <sid> → 计入 N → goto Step 3
-
-[Step 7] (仅 RETRY) le control deploy --session <sid> [--adb-endpoint <ep>]
-         → DeployDecider 决策（能 PUSH_SINGLE 则不 dd）
-         → DD_BOOT_REBOOT: 四阶段防护网（镜像验证/健康检查/dd/panic检测）
-
-[Step 8] goto Step 2，直到全 pass 或 escalate
+[Step 3] runtime 终止后：
+         → DONE_SUCCESS  → 验收完成
+         → ESCALATE_HUMAN → 主会话 AI 读 evidence_bundle.json / analysis_request.json
+                             → 生成 patch.json → le runtime resume 续跑
 ```
 
-### escalate 触发条件
+主入口：`le runtime {init,run,resume,status,explain}`（详见 `controller/README.md`）。
+runtime engine 状态机、guard 清单、checkpoint 持久化等细节见 `docs/specs/2026-06-26-loop-runtime-rearchitecture-design.md`。
+
+### escalate 触发条件（由 runtime guard 判定）
 
 - N > max_attempts（默认 5）
-- 同 failure_code 连续重复（REPEATED_FAILURE）
-- 补丁内容重复（patch_hash 相同）
-- 白名单拒绝（PATCH_REJECTED）
-- 编译失败（COMPILE_FAILED）
-- boot_completed 超时 + serial 无 shell（kernel 死）
+- 同 failure_code 连续重复（repeated_failure_code）
+- 补丁内容重复（duplicate_patch_hash）
+- 白名单拒绝（patch_rejected）
+- 编译失败不可恢复（compile_failed）
+- boot_completed 超时 + serial 无 shell（kernel_dead_no_shell）
 
 ### 部署约束（硬规则）
 
@@ -103,8 +96,8 @@ RPi5 采用 DHCP 动态分配 IP，**不使用固定 IP**。因此网络 adb 连
 4. **endpoint 传递**：
    - case 内闭环：`run_on: host` 的 case 在 command 内联调用 helper 取 IP（见
      `cases/system/network-adbd-success.yaml` 的 `host_adb_connect_success`）
-   - workflow 级闭环：`run_lcview_adb_suite.sh` 的 `discover-adb-endpoint` 阶段取 IP
-     后通过 `--adb-endpoint` 传给 feature suite
+   - runtime 级闭环：runtime engine 在 DEPLOY_PATCH 节点取 IP 后通过 `--adb-endpoint`
+     传给 feature suite 与 deploy 动作
 5. **禁止硬编码设备 IP**：源码 / yaml / 脚本中不得出现固定的设备 IP 字面量作为
    fallback 或默认值。`le deploy` 缺失 `--adb-endpoint` 时报错退出。
 
@@ -297,8 +290,8 @@ shell 不可达时，AI/人工应优先分析 `serial_context`；shell 可达时
 ## 遗留点
 
 1. **gen-cases 已实现（校验器）**：`le gen-cases --validate <file>` 复用 load_suite 做 schema/断言/命名/依赖校验
-2. **deploy 已实现**：`le deploy` + `le control deploy` 支持 push_single/dd_boot_reboot + 四阶段防护网
-3. **loop_ctrl 已实现**：`le control {init,run-verify,analyze-request,apply-patch,compile,revert,deploy,decide,status}` 全链路全自动闭环
+2. **deploy 已实现**：`le deploy` 支持 push_single/dd_boot_reboot + 四阶段防护网
+3. **runtime engine 已实现**：`le runtime {init,run,resume,status,explain}` 由状态图引擎自动驱动 verify → decide → analyze → patch → compile → deploy 全闭环
 4. **FLASH_FULL 需人工刷机**：sepolicy/.te 大改动仍需人工物理重刷（serial 无 shell 时软件无法自救）
 5. **参数化用例已实现**：case_loader `_expand_parameterized_cases` 支持 `parameters` 字段展开（test_case_loader 已覆盖）
 
@@ -341,24 +334,30 @@ le deploy --decide --diff-rev HEAD           # dry-run 查看决策
 le deploy --diff-rev HEAD --adb-endpoint ... # 执行部署
 ```
 
-## `le control` 子命令（全自动闭环）
+## `le runtime` 子命令（runtime engine 自动驱动）
 
 ```bash
-le control init --target lciod --max-attempts 5 --artifacts-dir <dir>
-le control run-verify --session <id> --suite <path> [--adb-endpoint <ep>]
-le control decide --session <id>
-le control analyze-request --session <id>
-le control apply-patch --session <id> --patch <patch.json>
-le control compile --session <id>
-le control revert --session <id>
-le control deploy --session <id> [--adb-endpoint <ep>]
-le control status --session <id>
+# 初始化 session
+le runtime init --target lciod --suite <suite.yaml> --max-attempts 5 --artifacts-dir <dir>
+
+# 全自动闭环（INIT_SESSION → RUN_VERIFY → DECIDE_NEXT → ... → DONE/ESCALATE）
+le runtime run --session <session.json> [--adb-endpoint <ep>]
+
+# 从最近 checkpoint 恢复（patch/compile/deploy 节点失败后由 AI 介入产出补丁再续跑）
+le runtime resume --session <session.json>
+
+# 查看 session 状态
+le runtime status --session <session.json>
+
+# 解释 runtime 状态机
+le runtime explain
 ```
 
-全自动闭环 SOP：init → run-verify → decide → (RETRY) analyze-request → apply-patch → compile → deploy → goto run-verify
+runtime engine 状态机、guard 清单、checkpoint 持久化、terminal state 的细节见
+`docs/specs/2026-06-26-loop-runtime-rearchitecture-design.md` 与 `controller/README.md`。
 
 护栏：
-- apply-patch：白名单（target-paths.yaml）+ 语法检查 + git stash 备份
-- compile：失败 → revert → 计入 N
-- decide：N=5 / 同 failure_code 重复 / patch_hash 重复 → STOP escalate
-- deploy：能 PUSH_SINGLE 不 dd；dd 前后四阶段防护网
+- WAIT_ANALYZER_PATCH：白名单（target-paths.yaml）+ 语法检查 + git stash 备份
+- COMPILE_PATCH：失败 → REVERT_PATCH → 计入 N
+- DECIDE_NEXT：guard 判定（attempt_limit_reached / repeated_failure_code / duplicate_patch_hash / patch_rejected / kernel_dead_no_shell）→ ESCALATE_HUMAN
+- DEPLOY_PATCH：能 PUSH_SINGLE 不 dd；dd 前后四阶段防护网

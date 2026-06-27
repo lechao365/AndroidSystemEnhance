@@ -38,5 +38,5 @@
 
 | 类型 | 路径 | 说明 |
 |------|------|------|
-| 关联 workflow | `../../workflows/lcview-adb-run/` | 消费 rp5/default.json + rp5/adb.json |
+| 关联 runtime | `../../controller/README.md` | runtime engine 消费 rp5/default.json + rp5/adb.json |
 | 设计文档 | `docs/specs/2026-06-21-lcview-adb-provider-and-loop-case-design.md` | profile 设计 |
