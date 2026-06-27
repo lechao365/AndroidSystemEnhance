@@ -16,6 +16,7 @@ from loop_contracts.failure_codes import FailureCode
 from loop_controller.analyzer_protocol import FileChange
 from loop_controller.patch_guard import check_white_list, detect_risk, check_syntax
 from loop_controller.patch_applier import apply_file_changes
+from loop_controller.workspace_isolation import WorktreeHandle, remove_patch_worktree
 from loop_controller.stages import _load_target_paths, _build_env
 
 
@@ -68,13 +69,15 @@ def _classify_deploy_failure(ctx: dict) -> tuple[str, FailureCode, bool]:
 
 
 def node_apply_patch(
-    patch_path: str, session_dict: dict, workspace_root: str = ""
+    patch_path: str, session_dict: dict, workspace_root: str = "",
+    worktree_handle: WorktreeHandle | None = None,
 ) -> dict:
     """应用补丁。
 
-    流程：白名单校验 → 语法预检 → stash 备份 → 落盘 → 计算风险/hash。
-    失败时若已 stash 则尝试回滚。
-    返回 {status, failure_code, files, stash_ref, patch_hash, risk, workspace_root, error}。
+    流程：白名单校验 → 语法预检 → 备份 → 落盘 → 计算风险/hash。
+    备份策略：优先用独立 worktree（worktree_handle 非空时应用至 worktree 路径，
+              实现补丁隔离）；无 handle 时降级到 git stash（break-glass 兼容）。
+    返回 {status, failure_code, files, stash_ref, patch_hash, risk, workspace_root, worktree_handle, error}。
     """
     target = session_dict.get("target", "")
     ws_root = _workspace_root(workspace_root)
@@ -110,24 +113,31 @@ def node_apply_patch(
             "error": syntax_errors[0][:300],
         }
 
-    # stash 备份（用于失败回滚 / 显式 revert）
-    try:
-        stash_result = subprocess.run(
-            ["git", "stash", "create", "-u"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=ws_root,
-        )
-        stash_ref = stash_result.stdout.strip() or ""
-    except (subprocess.SubprocessError, OSError):
-        stash_ref = ""
+    # 应用目标路径：worktree 模式用 worktree_path，stash 模式用 workspace_root
+    apply_root = worktree_handle.worktree_path if worktree_handle else ws_root
+    stash_ref = ""
+
+    # stash 备份仅在 break-glass 模式下使用（worktree 模式隔离已天然提供回滚能力）
+    if not worktree_handle:
+        try:
+            stash_result = subprocess.run(
+                ["git", "stash", "create", "-u"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=ws_root,
+            )
+            stash_ref = stash_result.stdout.strip() or ""
+        except (subprocess.SubprocessError, OSError):
+            stash_ref = ""
 
     # 落盘
-    result = apply_file_changes(changes, ws_root)
+    result = apply_file_changes(changes, apply_root)
     if not result.success:
-        # 失败回滚：恢复到 stash 快照
-        if stash_ref:
+        # 失败回滚：stash 模式恢复快照；worktree 模式移除 worktree
+        if worktree_handle:
+            remove_patch_worktree(worktree_handle)
+        elif stash_ref:
             try:
                 subprocess.run(
                     ["git", "stash", "apply", stash_ref],
@@ -149,7 +159,7 @@ def node_apply_patch(
         json.dumps(raw_changes, sort_keys=True).encode()
     ).hexdigest()
 
-    return {
+    resp = {
         "status": "APPLIED",
         "failure_code": FailureCode.NONE,
         "files": result.applied_files,
@@ -158,6 +168,14 @@ def node_apply_patch(
         "risk": risk,
         "workspace_root": ws_root,
     }
+    if worktree_handle:
+        resp["worktree_handle"] = {
+            "worktree_path": worktree_handle.worktree_path,
+            "branch": worktree_handle.branch,
+            "workspace_root": worktree_handle.workspace_root,
+            "created": worktree_handle.created,
+        }
+    return resp
 
 
 def node_compile(session_dict: dict, workspace_root: str = "") -> dict:
@@ -319,16 +337,40 @@ def _build_deploy_result(status: str, fc: FailureCode, ctx: dict | None) -> dict
 
 
 def node_revert_workspace(session_dict: dict) -> dict:
-    """回滚最近一次 apply-patch 的源码改动（git stash apply）。
+    """回滚最近一次 apply-patch 的源码改动。
 
-    从 attempts 倒序查找 stash_ref，git stash apply 恢复。
+    优先策略：若 attempt 含 worktree_handle，移除独立 worktree（隔离式回滚，干净彻底）。
+    降级策略：若 attempt 含 stash_ref，git stash apply 恢复（break-glass 兼容旧路径）。
     返回 {status, failure_code, error}。
     """
     attempts = session_dict.get("attempts", [])
     ws_root = _workspace_root()
 
     for att in reversed(attempts):
-        patch_applied = att.get("patch_applied", {})
+        patch_applied = att.get("patch_applied", {}) if isinstance(att, dict) else {}
+
+        # 策略 1：worktree 隔离回滚（优先）
+        handle_dict = patch_applied.get("worktree_handle")
+        if handle_dict and isinstance(handle_dict, dict) and handle_dict.get("worktree_path"):
+            handle = WorktreeHandle(
+                worktree_path=handle_dict["worktree_path"],
+                branch=handle_dict.get("branch", ""),
+                workspace_root=handle_dict.get("workspace_root", ws_root),
+                created=handle_dict.get("created", False),
+            )
+            ok = remove_patch_worktree(handle)
+            if ok:
+                return {
+                    "status": "REVERTED",
+                    "failure_code": FailureCode.NONE,
+                }
+            return {
+                "status": "REVERT_FAILED",
+                "failure_code": FailureCode.ROLLBACK_FAILED,
+                "error": f"failed to remove worktree: {handle.worktree_path}",
+            }
+
+        # 策略 2：stash 降级回滚（向后兼容）
         stash_ref = patch_applied.get("stash_ref", "")
         if stash_ref:
             ws = patch_applied.get("workspace_root", ws_root)

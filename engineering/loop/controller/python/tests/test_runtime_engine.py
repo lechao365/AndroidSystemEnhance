@@ -21,6 +21,32 @@ def _write_bundle(tmp_path: Path, overall: str, failed: int) -> None:
     (tmp_path / "evidence_bundle.json").write_text(json.dumps(bundle), encoding="utf-8")
 
 
+def _write_bundle_n_failures(tmp_path: Path, n_failed: int, total: int = 5) -> None:
+    """写入指定失败用例数的 evidence_bundle（用于收敛判定测试）。
+
+    第 n_failed 个用例 fail，其余 pass。
+    """
+    cases = []
+    for i in range(total):
+        cases.append({
+            "id": f"case.{i}",
+            "status": "fail" if i < n_failed else "pass",
+            "failure_reason": "boom" if i < n_failed else "",
+            "command": f"echo {i}",
+        })
+    bundle = {
+        "summary": {
+            "overall": "PASS" if n_failed == 0 else "FAIL",
+            "total": total,
+            "passed": total - n_failed,
+            "failed": n_failed,
+            "skipped": 0,
+        },
+        "cases": cases,
+    }
+    (tmp_path / "evidence_bundle.json").write_text(json.dumps(bundle), encoding="utf-8")
+
+
 def test_runtime_pass_path_done_success(tmp_path: Path, monkeypatch):
     """verify PASS -> DECIDE_NEXT -> DONE_SUCCESS"""
     _write_bundle(tmp_path, "PASS", 0)
@@ -165,7 +191,7 @@ def test_runtime_wires_apply_compile_deploy(tmp_path, monkeypatch):
     from loop_contracts.failure_codes import FailureCode as FC
     monkeypatch.setattr(
         "loop_controller.runtime.nodes.node_apply_patch",
-        lambda patch_path, session_dict, workspace_root: {
+        lambda *a, **kw: {
             "status": "APPLIED", "failure_code": FC.NONE,
             "files": ["test.cpp"], "stash_ref": "fake-stash",
             "patch_hash": "abc123", "risk": {},
@@ -691,3 +717,217 @@ def test_rollback_deploy_uses_adb_endpoint(tmp_path, monkeypatch):
     assert result["status"] == "REVERTED"
     # 验证 endpoint 被传入
     assert "192.168.1.100:5555" in endpoint_used
+
+
+# ---------------------------------------------------------------------------
+# ISSUE-1：WAIT_ANALYZER_PATCH 缺 patch 文件时调用注入的 analyzer 产出
+# ---------------------------------------------------------------------------
+
+def test_wait_analyzer_invokes_injected_analyzer_when_no_patch_file(tmp_path, monkeypatch):
+    """缺 patch_suggestion.json 时，engine 调用注入的 analyzer 产出补丁文件。"""
+    _write_bundle_n_failures(tmp_path, 1, total=1)
+
+    analyzer_calls = []
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+
+    from loop_controller.analyzer_protocol import LlmAnalyzer, AnalysisRequest, PatchSuggestion, FileChange
+
+    class StubAnalyzer(LlmAnalyzer):
+        """测试用 analyzer：产出单个 FileChange 并写 patch_suggestion.json。"""
+        def analyze(self, request: AnalysisRequest) -> PatchSuggestion:
+            analyzer_calls.append(request.session_id)
+            # 产出补丁并落盘，让后续 APPLY_PATCH 能读到
+            change = FileChange(workspace_path="test.cpp", change_type="edit",
+                                old_marker="x", new_content="y")
+            suggestion = PatchSuggestion(target_files=[change], rationale="stub fix", confidence=0.5)
+            patch_data = [{
+                "workspace_path": "test.cpp", "change_type": "edit",
+                "old_marker": "x", "new_content": "y",
+            }]
+            (Path(tmp_path) / "patch_suggestion.json").write_text(
+                json.dumps(patch_data), encoding="utf-8",
+            )
+            return suggestion
+
+    # mock node_apply_patch 让 APPLY_PATCH 成功
+    from loop_contracts.failure_codes import FailureCode as FC
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_apply_patch",
+        lambda *a, **kw: {"status": "APPLIED", "failure_code": FC.NONE,
+                          "files": ["test.cpp"], "stash_ref": "", "patch_hash": "h1",
+                          "risk": {}, "workspace_root": str(tmp_path)},
+    )
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_compile",
+        lambda *a, **kw: {"status": "COMPILED", "failure_code": FC.NONE, "artifacts": []},
+    )
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_deploy",
+        lambda *a, **kw: {"status": "DEPLOYED", "failure_code": FC.NONE, "mode": "PUSH_SINGLE"},
+    )
+
+    # 第二次 verify PASS（让闭环收敛）
+    call_count = [0]
+
+    def fake_run_pass_on_second(cmd, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            _write_bundle_n_failures(tmp_path, 1, total=1)
+            class R1:
+                returncode = 1
+                stdout = ""
+                stderr = ""
+            return R1()
+        else:
+            _write_bundle_n_failures(tmp_path, 0, total=1)
+            class R2:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return R2()
+
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run_pass_on_second)
+
+    session = LoopSession(
+        session_id="sess-analyzer", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=2, artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, "cases", "profile.json", analyzer=StubAnalyzer())
+    state = rt.run()
+    assert state.terminal_state == RuntimeTerminalState.DONE_SUCCESS
+    assert len(analyzer_calls) == 1
+    assert analyzer_calls[0] == "sess-analyzer"
+
+
+def test_wait_analyzer_escalates_when_analyzer_returns_empty(tmp_path, monkeypatch):
+    """analyzer 返回空 PatchSuggestion（无可行补丁）→ 退人工。"""
+    _write_bundle_n_failures(tmp_path, 1, total=1)
+
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 1
+            stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+
+    from loop_controller.analyzer_protocol import LlmAnalyzer, AnalysisRequest, PatchSuggestion
+
+    class EmptyAnalyzer(LlmAnalyzer):
+        def analyze(self, request: AnalysisRequest) -> PatchSuggestion:
+            return PatchSuggestion(target_files=[], rationale="no rule", confidence=0.0)
+
+    session = LoopSession(
+        session_id="sess-empty-an", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=2, artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, "cases", "profile.json", analyzer=EmptyAnalyzer())
+    state = rt.run()
+    assert state.terminal_state == RuntimeTerminalState.ESCALATE_HUMAN
+    # patch_suggestion.json 不应被写入
+    assert not (tmp_path / "patch_suggestion.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# ISSUE-3：progress_converging 宽限（失败用例数严格下降时即使达上限也 RETRY）
+# ---------------------------------------------------------------------------
+
+def test_progress_converging_grants_retry_when_failures_decreasing(tmp_path, monkeypatch):
+    """失败用例数严格下降 → progress_converging 宽限 RETRY（即使 attempt 达上限）。
+
+    直接构造两次 verify 后的 session 状态，验证 _build_guard_eval_request 与
+    _execute_decide_next 的 guard 匹配，避免完整 run() 的链路复杂度。
+    """
+    # 构造 session：已有两次 attempt，failed_count 4 → 2（严格下降）
+    session = LoopSession(
+        session_id="sess-conv", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=2, artifacts_dir=str(tmp_path),
+    )
+    session.current_attempt = 2
+    session.attempts = [
+        {"attempt_index": 1, "failed_count": 4, "failure_code": "RUN_FAILED",
+         "verify_result": "FAIL"},
+        {"attempt_index": 2, "failed_count": 2, "failure_code": "RUN_FAILED",
+         "verify_result": "FAIL"},
+    ]
+    session.latest_failure_code = __import__("loop_contracts").failure_codes.FailureCode.RUN_FAILED
+
+    rt = LoopRuntime(session, "cases", "profile.json")
+    rt._state.current_node = "DECIDE_NEXT"
+    rt._state.node_status = "FAIL"
+
+    # 验证 guard_eval_request 字段填充正确
+    req = rt._build_guard_eval_request()
+    assert req.latest_failed_count == 2
+    assert req.previous_failed_count == 4
+    assert req.attempt_count == 2
+    assert req.max_attempts == 2  # 达上限
+
+    # 执行 DECIDE_NEXT，应匹配 progress_converging（RETRY 而非 escalate）
+    rt._execute_decide_next()
+    cps = CheckpointStore(str(tmp_path), "sess-conv").all()
+    decide_cp = [c for c in cps if c.current_node == "DECIDE_NEXT"][-1]
+    assert "progress_converging" in decide_cp.matched_guards
+    # 宽限 RETRY，不 escalate
+    assert rt._state.terminal_state != RuntimeTerminalState.ESCALATE_HUMAN
+
+
+def test_progress_converging_escalates_when_failures_stuck(tmp_path, monkeypatch):
+    """失败用例数持平不下降 → progress_converging 触发 ESCALATE（STUCK）。"""
+    session = LoopSession(
+        session_id="sess-stuck", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=5, artifacts_dir=str(tmp_path),
+    )
+    session.current_attempt = 2
+    session.attempts = [
+        {"attempt_index": 1, "failed_count": 3, "failure_code": "RUN_FAILED",
+         "verify_result": "FAIL"},
+        {"attempt_index": 2, "failed_count": 3, "failure_code": "RUN_FAILED",
+         "verify_result": "FAIL"},
+    ]
+    session.latest_failure_code = __import__("loop_contracts").failure_codes.FailureCode.RUN_FAILED
+
+    rt = LoopRuntime(session, "cases", "profile.json")
+    rt._state.current_node = "DECIDE_NEXT"
+    rt._state.node_status = "FAIL"
+
+    rt._execute_decide_next()
+    assert rt._state.terminal_state == RuntimeTerminalState.ESCALATE_HUMAN
+    cps = CheckpointStore(str(tmp_path), "sess-stuck").all()
+    decide_cp = [c for c in cps if c.current_node == "DECIDE_NEXT"][-1]
+    assert "progress_converging" in decide_cp.matched_guards
+
+
+def test_progress_converging_escalates_when_failures_increasing(tmp_path, monkeypatch):
+    """失败用例数上升 → progress_converging 触发 ESCALATE（REGRESSION）。"""
+    session = LoopSession(
+        session_id="sess-regress", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=5, artifacts_dir=str(tmp_path),
+    )
+    session.current_attempt = 2
+    session.attempts = [
+        {"attempt_index": 1, "failed_count": 2, "failure_code": "RUN_FAILED",
+         "verify_result": "FAIL"},
+        {"attempt_index": 2, "failed_count": 4, "failure_code": "RUN_FAILED",
+         "verify_result": "FAIL"},
+    ]
+    session.latest_failure_code = __import__("loop_contracts").failure_codes.FailureCode.RUN_FAILED
+
+    rt = LoopRuntime(session, "cases", "profile.json")
+    rt._state.current_node = "DECIDE_NEXT"
+    rt._state.node_status = "FAIL"
+
+    rt._execute_decide_next()
+    assert rt._state.terminal_state == RuntimeTerminalState.ESCALATE_HUMAN
+    cps = CheckpointStore(str(tmp_path), "sess-regress").all()
+    decide_cp = [c for c in cps if c.current_node == "DECIDE_NEXT"][-1]
+    assert "progress_converging" in decide_cp.matched_guards

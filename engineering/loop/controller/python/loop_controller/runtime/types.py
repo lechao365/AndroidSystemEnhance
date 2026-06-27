@@ -49,6 +49,8 @@ class GuardEvalRequest:
     previous_failure_codes: list[FailureCode]
     current_patch_hash: str
     previous_patch_hashes: list[str]
+    latest_failed_count: int = 0
+    previous_failed_count: int = 0
 
 
 @dataclass

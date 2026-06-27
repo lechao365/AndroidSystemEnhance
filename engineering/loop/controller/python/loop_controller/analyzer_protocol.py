@@ -40,3 +40,18 @@ class LlmAnalyzer(ABC):
     @abstractmethod
     def analyze(self, request: AnalysisRequest) -> PatchSuggestion:
         ...
+
+
+class ScriptedAnalyzer(LlmAnalyzer):
+    """基于确定性规则的占位分析器。
+
+    本期为规则库留空实现：无论输入如何，永远返回空补丁与零置信度，
+    表明无确定性规则可应用，需人工/AI 介入。规则库后续迭代补齐。
+    """
+
+    def analyze(self, request: AnalysisRequest) -> PatchSuggestion:
+        return PatchSuggestion(
+            target_files=[],
+            rationale="无确定性规则可应用，需人工/AI 介入",
+            confidence=0.0,
+        )

@@ -15,6 +15,11 @@ from loop_controller.runtime.nodes import (
     node_compile,
     node_deploy,
     node_revert,
+    node_revert_workspace,
+)
+from loop_controller.workspace_isolation import (
+    WorktreeHandle,
+    create_patch_worktree,
 )
 
 
@@ -167,3 +172,108 @@ def test_revert_stash_apply_failure(monkeypatch):
     result = node_revert(session)
     assert result["status"] == "REVERT_FAILED"
     assert "conflict" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# worktree 集成（ISSUE-2）：patch 应用到独立 worktree，revert 移除 worktree
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def git_workspace(tmp_path: Path) -> Path:
+    """构造真实 git 仓库作为 workspace_root。"""
+    repo = tmp_path / "workspace"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=repo, check=True)
+    (repo / "target.cpp").write_text("int x = 1;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+    return repo
+
+
+def test_apply_patch_uses_worktree_when_handle_provided(git_workspace: Path, monkeypatch):
+    """传入 worktree_handle 时，patch 应应用到 worktree 路径而非原 workspace。"""
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes._load_target_paths",
+        lambda target: [""],
+    )
+    handle = create_patch_worktree(str(git_workspace), "sess-wt", 0)
+
+    patch_data = [{"workspace_path": "target.cpp", "change_type": "edit",
+                   "old_marker": "int x = 1;", "new_content": "int x = 42;"}]
+    patch_file = git_workspace / "patch.json"
+    patch_file.write_text(json.dumps(patch_data), encoding="utf-8")
+
+    result = node_apply_patch(
+        str(patch_file), {"target": "test"}, str(git_workspace),
+        worktree_handle=handle,
+    )
+    assert result["status"] == "APPLIED"
+    assert result.get("worktree_handle") is not None
+    assert "worktree_path" in result["worktree_handle"]
+    # worktree 内文件已改，原 workspace 文件未改（隔离生效）
+    wt_path = Path(handle.worktree_path)
+    assert (wt_path / "target.cpp").read_text() == "int x = 42;\n"
+    assert (git_workspace / "target.cpp").read_text() == "int x = 1;\n"
+
+
+def test_apply_patch_falls_back_to_stash_when_no_handle(tmp_path: Path, monkeypatch):
+    """无 worktree_handle 时降级到原 stash 路径（break-glass 兼容）。"""
+    target_file = tmp_path / "test.cpp"
+    target_file.write_text("int x = 1;\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes._load_target_paths",
+        lambda target: [""],
+    )
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.subprocess.run",
+        lambda *a, **kw: subprocess.CompletedProcess(a[0], 0, "", ""),
+    )
+
+    patch_data = [{"workspace_path": "test.cpp", "change_type": "edit",
+                   "old_marker": "int x = 1;", "new_content": "int x = 42;"}]
+    patch_file = tmp_path / "patch.json"
+    patch_file.write_text(json.dumps(patch_data), encoding="utf-8")
+
+    result = node_apply_patch(str(patch_file), {"target": "test"}, str(tmp_path))
+    assert result["status"] == "APPLIED"
+    assert "stash_ref" in result
+    assert result.get("worktree_handle") is None
+
+
+def test_revert_workspace_removes_worktree_when_handle_present(git_workspace: Path):
+    """session attempt 含 worktree_handle 时，revert 应移除该 worktree。"""
+    handle = create_patch_worktree(str(git_workspace), "sess-rv", 0)
+    session = {
+        "attempts": [{
+            "patch_applied": {
+                "worktree_handle": {
+                    "worktree_path": handle.worktree_path,
+                    "branch": handle.branch,
+                    "workspace_root": handle.workspace_root,
+                    "created": True,
+                },
+                "workspace_root": str(git_workspace),
+            },
+        }],
+    }
+    # worktree 存在
+    assert Path(handle.worktree_path).exists()
+    result = node_revert_workspace(session)
+    assert result["status"] == "REVERTED"
+    assert result["failure_code"].value == "NONE"
+    # worktree 已清理
+    assert not Path(handle.worktree_path).exists()
+
+
+def test_revert_workspace_falls_back_to_stash_without_handle(monkeypatch):
+    """session attempt 无 worktree_handle 时降级到 stash 回滚（向后兼容）。"""
+    session = {"attempts": [{"patch_applied": {"stash_ref": "abc", "workspace_root": "/ws"}}]}
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.subprocess.run",
+        lambda *a, **kw: subprocess.CompletedProcess(a[0], 0, "", ""),
+    )
+    result = node_revert_workspace(session)
+    assert result["status"] == "REVERTED"

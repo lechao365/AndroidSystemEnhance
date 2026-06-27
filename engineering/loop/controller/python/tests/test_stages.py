@@ -143,6 +143,106 @@ def test_decide_stage_max_attempts_escalate():
     assert decision["should_escalate"] is True
 
 
+def test_run_verify_stage_records_case_results_and_failed_count(tmp_path: Path, monkeypatch):
+    """run_verify_stage 应在 attempt 中记录逐用例结果（case_results）与失败用例数（failed_count），供收敛判定。"""
+    bundle = {
+        "summary": {"overall": "FAIL", "total": 5, "passed": 3, "failed": 2, "skipped": 0},
+        "cases": [
+            {"id": "a.pass", "status": "pass", "failure_reason": "", "command": "echo a"},
+            {"id": "b.pass", "status": "pass", "failure_reason": "", "command": "echo b"},
+            {"id": "c.pass", "status": "pass", "failure_reason": "", "command": "echo c"},
+            {"id": "d.fail", "status": "fail", "failure_reason": "boom", "command": "echo d"},
+            {"id": "e.fail", "status": "fail", "failure_reason": "boom2", "command": "echo e"},
+        ],
+    }
+    session = {
+        "session_id": "sess-cv",
+        "artifacts_dir": str(tmp_path),
+        "current_attempt": 0,
+        "max_attempts": 5,
+        "attempts": [],
+        "status": "PENDING",
+    }
+    (tmp_path / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+    def fake_run(cmd, **kwargs):
+        (tmp_path / "evidence_bundle.json").write_text(json.dumps(bundle), encoding="utf-8")
+
+        class R:
+            returncode = 1
+        return R()
+
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+    updated, _ = run_verify_stage(str(tmp_path / "session.json"), "test.yaml", "")
+    att = updated["attempts"][-1]
+    assert att["failed_count"] == 2
+    ids_in_results = {c["id"] for c in att["case_results"]}
+    assert ids_in_results == {"a.pass", "b.pass", "c.pass", "d.fail", "e.fail"}
+    statuses = {c["id"]: c["status"] for c in att["case_results"]}
+    assert statuses["a.pass"] == "pass"
+    assert statuses["d.fail"] == "fail"
+
+
+def test_run_verify_stage_failed_count_zero_on_pass(tmp_path: Path, monkeypatch):
+    """全 PASS 时 failed_count 应为 0。"""
+    bundle = {
+        "summary": {"overall": "PASS", "total": 2, "passed": 2, "failed": 0, "skipped": 0},
+        "cases": [
+            {"id": "x.pass", "status": "pass", "failure_reason": "", "command": "echo x"},
+            {"id": "y.pass", "status": "pass", "failure_reason": "", "command": "echo y"},
+        ],
+    }
+    session = {
+        "session_id": "sess-ok2",
+        "artifacts_dir": str(tmp_path),
+        "current_attempt": 0,
+        "max_attempts": 5,
+        "attempts": [],
+        "status": "PENDING",
+    }
+    (tmp_path / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+    def fake_run(cmd, **kwargs):
+        (tmp_path / "evidence_bundle.json").write_text(json.dumps(bundle), encoding="utf-8")
+
+        class R:
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+    updated, _ = run_verify_stage(str(tmp_path / "session.json"), "test.yaml", "")
+    att = updated["attempts"][-1]
+    assert att["failed_count"] == 0
+    assert len(att["case_results"]) == 2
+
+
+def test_run_verify_stage_handles_empty_cases(tmp_path: Path, monkeypatch):
+    """无 cases 字段时 failed_count=0，case_results=[]。"""
+    bundle = {"summary": {"overall": "PASS", "total": 0, "passed": 0, "failed": 0, "skipped": 0}, "cases": []}
+    session = {
+        "session_id": "sess-empty",
+        "artifacts_dir": str(tmp_path),
+        "current_attempt": 0,
+        "max_attempts": 5,
+        "attempts": [],
+        "status": "PENDING",
+    }
+    (tmp_path / "session.json").write_text(json.dumps(session), encoding="utf-8")
+
+    def fake_run(cmd, **kwargs):
+        (tmp_path / "evidence_bundle.json").write_text(json.dumps(bundle), encoding="utf-8")
+
+        class R:
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+    updated, _ = run_verify_stage(str(tmp_path / "session.json"), "test.yaml", "")
+    att = updated["attempts"][-1]
+    assert att["failed_count"] == 0
+    assert att["case_results"] == []
+
+
 def test_analyze_request_stage_no_evidence_file(tmp_path: Path):
     """evidence_path 指向不存在的文件时不应抛异常。"""
     session = {

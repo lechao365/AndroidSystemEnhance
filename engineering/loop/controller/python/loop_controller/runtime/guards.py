@@ -121,6 +121,41 @@ def _guard_boot_timeout_no_recovery(req: GuardEvalRequest) -> GuardEvalResult:
     return GuardEvalResult(matched=False)
 
 
+@_register("progress_converging")
+def _guard_progress_converging(req: GuardEvalRequest) -> GuardEvalResult:
+    """逐用例收敛判定：严格单调下降才宽限 RETRY。
+
+    - latest < previous（且 latest > 0）：进度收敛 → RETRY（BUILD_ANALYSIS_REQUEST）
+    - latest == previous（且 latest > 0）：卡住无进展 → ESCALATE_HUMAN
+    - latest > previous：回归 → ESCALATE_HUMAN
+    - latest == 0：不应进入此 guard（由 all_cases_passed 接管）
+    - 无历史数据（previous == 0 且 latest > 0 且 attempt_count == 1）：不判定
+    """
+    latest = req.latest_failed_count
+    previous = req.previous_failed_count
+    if latest == 0:
+        return GuardEvalResult(matched=False)
+    if previous == 0 and req.attempt_count <= 1:
+        return GuardEvalResult(matched=False)
+    if latest < previous:
+        return GuardEvalResult(
+            matched=True,
+            next_node=NodeKind.BUILD_ANALYSIS_REQUEST.value,
+            reason="verification converging (failed cases decreasing)",
+        )
+    if latest == previous:
+        return GuardEvalResult(
+            matched=True,
+            next_node=NodeKind.ESCALATE_HUMAN.value,
+            reason="verification stuck (failed cases not decreasing)",
+        )
+    return GuardEvalResult(
+        matched=True,
+        next_node=NodeKind.ESCALATE_HUMAN.value,
+        reason="verification regressing (failed cases increasing)",
+    )
+
+
 def evaluate_guard(req: GuardEvalRequest) -> GuardEvalResult:
     handler = _GUARD_REGISTRY.get(req.guard_name)
     if handler is None:
@@ -139,6 +174,8 @@ def guard_chain(guard_names: list[str], req: GuardEvalRequest) -> GuardEvalResul
             previous_failure_codes=req.previous_failure_codes,
             current_patch_hash=req.current_patch_hash,
             previous_patch_hashes=req.previous_patch_hashes,
+            latest_failed_count=req.latest_failed_count,
+            previous_failed_count=req.previous_failed_count,
         ))
         if result.matched:
             result.guard_name = name

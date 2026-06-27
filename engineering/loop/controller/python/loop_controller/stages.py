@@ -84,6 +84,23 @@ def _extract_failed_cases(bundle_data: dict) -> list[dict]:
     return failed
 
 
+def _extract_case_results(bundle_data: dict) -> tuple[list[dict], int]:
+    """提取逐用例结构化结果与失败用例数。
+
+    返回 (case_results, failed_count)：
+    - case_results：每个用例的 {id, status}（pass/fail/error/skip）
+    - failed_count：status 为 fail 或 error 的用例数
+    供收敛判定（progress_converging）按用例粒度比较进度。
+    """
+    cases = bundle_data.get("cases", [])
+    case_results = [
+        {"id": c.get("id", ""), "status": c.get("status", "")}
+        for c in cases
+    ]
+    failed_count = sum(1 for c in cases if c.get("status") in ("fail", "error"))
+    return case_results, failed_count
+
+
 def _get_workspace_diff() -> str:
     try:
         result = subprocess.run(["git", "diff", "HEAD"], capture_output=True, text=True, timeout=10)
@@ -168,11 +185,15 @@ def run_verify_stage(session_path: str, suite: str, adb_endpoint: str,
         bundle_data = {}
         evidence_path = ""
 
+    case_results, failed_count = _extract_case_results(bundle_data)
+
     session_data.setdefault("attempts", []).append({
         "attempt_index": attempt,
         "verify_result": status,
         "evidence_path": evidence_path,
         "failed_cases": _extract_failed_cases(bundle_data),
+        "case_results": case_results,
+        "failed_count": failed_count,
         "failure_code": "RUN_FAILED" if status == "FAIL" else "",
     })
 

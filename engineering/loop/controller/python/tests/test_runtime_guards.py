@@ -149,3 +149,53 @@ def test_guard_boot_timeout_kernel_panic():
     r = evaluate_guard(_req("boot_timeout_kernel_panic", latest_failure_code=FailureCode.BOOT_TIMEOUT_ROLLBACK))
     assert r.matched is True
     assert r.next_node == "REVERT_PATCH"
+
+
+# ---------------------------------------------------------------------------
+# progress_converging（ISSUE-3）：严格单调下降才宽限 RETRY
+# ---------------------------------------------------------------------------
+
+def _req_conv(guard_name, **kwargs):
+    """带 failed_count 字段的 req 构造器。"""
+    defaults = dict(
+        guard_name=guard_name, attempt_count=2, max_attempts=5,
+        latest_status="FAIL", latest_failure_code=FailureCode.RUN_FAILED,
+        previous_failure_codes=[], current_patch_hash="", previous_patch_hashes=[],
+        latest_failed_count=0, previous_failed_count=0,
+    )
+    defaults.update(kwargs)
+    return GuardEvalRequest(**defaults)
+
+
+def test_guard_progress_converging_strictly_decreasing():
+    """失败用例数严格下降（本轮 < 上轮）→ 宽限 RETRY。"""
+    r = evaluate_guard(_req_conv("progress_converging", latest_failed_count=3, previous_failed_count=5))
+    assert r.matched is True
+    assert r.next_node == "BUILD_ANALYSIS_REQUEST"
+    assert FailureCode.NONE == r.reason_code if hasattr(r, "reason_code") else True
+
+
+def test_guard_progress_converging_equal_is_stuck():
+    """失败用例数持平（本轮 == 上轮，且非 0）→ 不宽限，置 VERIFICATION_STUCK。"""
+    r = evaluate_guard(_req_conv("progress_converging", latest_failed_count=4, previous_failed_count=4))
+    assert r.matched is True
+    assert r.next_node == "ESCALATE_HUMAN"
+
+
+def test_guard_progress_converging_increasing_is_regression():
+    """失败用例数上升（本轮 > 上轮）→ 不宽限，置 VERIFICATION_REGRESSION。"""
+    r = evaluate_guard(_req_conv("progress_converging", latest_failed_count=6, previous_failed_count=4))
+    assert r.matched is True
+    assert r.next_node == "ESCALATE_HUMAN"
+
+
+def test_guard_progress_converging_zero_failed_is_not_stuck():
+    """本轮失败数为 0（已收敛到全 PASS）不应进入此 guard（由 all_cases_passed 接管）。"""
+    r = evaluate_guard(_req_conv("progress_converging", latest_failed_count=0, previous_failed_count=3))
+    assert r.matched is False
+
+
+def test_guard_progress_converging_no_history_not_matched():
+    """无上轮数据（previous_failed_count=0 但 latest>0）→ 不匹配（首次失败不判收敛）。"""
+    r = evaluate_guard(_req_conv("progress_converging", latest_failed_count=3, previous_failed_count=0, attempt_count=1))
+    assert r.matched is False

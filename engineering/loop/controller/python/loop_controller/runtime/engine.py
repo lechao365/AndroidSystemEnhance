@@ -39,7 +39,7 @@ class LoopRuntime:
     BUILD_ANALYSIS_REQUEST -> WAIT_ANALYZER_PATCH -> ESCALATE_HUMAN).
     """
 
-    def __init__(self, session: LoopSession, cases_dir: str, device_profile: str, adb_endpoint: str = "", initial_terminal_state: RuntimeTerminalState = RuntimeTerminalState.NONE, serial_shell_provider: callable | None = None) -> None:
+    def __init__(self, session: LoopSession, cases_dir: str, device_profile: str, adb_endpoint: str = "", initial_terminal_state: RuntimeTerminalState = RuntimeTerminalState.NONE, serial_shell_provider: callable | None = None, analyzer: "LlmAnalyzer | None" = None) -> None:
         self._session = session
         self._state = RuntimeState(current_node=NodeKind.INIT_SESSION.value)
         self._state.terminal_state = initial_terminal_state
@@ -49,6 +49,8 @@ class LoopRuntime:
         self._cases_dir = cases_dir
         self._device_profile = device_profile
         self._deploy_context: dict = {}
+        # ISSUE-1：注入 LlmAnalyzer，缺省用 ScriptedAnalyzer（规则库留空，产出失败则退人工）
+        self._analyzer = analyzer
 
     def resume(self) -> RuntimeState:
         # 幂等：已终态的 session 不恢复
@@ -127,7 +129,20 @@ class LoopRuntime:
                 self._state.pending_human_gate = True
                 self._checkpoint("no patch file found", FailureCode.PATCH_REJECTED)
                 return
-            result = _runtime_nodes.node_apply_patch(patch_path, self._to_session_dict(), "")
+            # ISSUE-2：尝试创建独立 worktree 隔离补丁，失败降级到 stash 模式
+            worktree_handle = None
+            try:
+                from loop_controller.workspace_isolation import create_patch_worktree
+                ws_root = os.environ.get("AOSP_ROOT", os.path.expanduser("~/workspace/aosp"))
+                worktree_handle = create_patch_worktree(
+                    ws_root, self._session.session_id, self._session.current_attempt,
+                )
+            except Exception:
+                worktree_handle = None
+            result = _runtime_nodes.node_apply_patch(
+                patch_path, self._to_session_dict(), "",
+                worktree_handle=worktree_handle,
+            )
             self._state.node_status = result["status"]
             fc = result.get("failure_code", FailureCode.NONE)
             if isinstance(fc, str):
@@ -140,6 +155,8 @@ class LoopRuntime:
                     "workspace_root": result.get("workspace_root", ""),
                     "risk": result.get("risk", {}),
                 }
+                if worktree_handle is not None:
+                    pa["worktree_handle"] = result.get("worktree_handle")
                 latest = self._session.attempts[-1] if self._session.attempts else None
                 if isinstance(latest, dict):
                     latest["patch_applied"] = pa
@@ -277,12 +294,14 @@ class LoopRuntime:
 
     def _execute_decide_next(self) -> None:
         # guard_chain is the single source of truth for transition decisions.
+        # ISSUE-3：progress_converging 在 repeated_failure_code 之前，
+        # 让"失败用例数严格下降"的会话即使 failure_code 重复也宽限 RETRY。
+        # 严重错误（kernel_dead/patch_rejected/transport_unrecoverable 等）
+        # 由各自的专用 guard 在 progress_converging 之前拦截，不受收敛宽限影响。
         guard_req = self._build_guard_eval_request()
         guard_result = guard_chain(
             [
                 "all_cases_passed",
-                "attempt_limit_reached",
-                "repeated_failure_code",
                 "duplicate_patch_hash",
                 "kernel_dead_no_shell",
                 "patch_rejected",
@@ -290,6 +309,9 @@ class LoopRuntime:
                 "transport_unrecoverable",
                 "rollback_failed",
                 "boot_timeout_no_recovery",
+                "progress_converging",
+                "repeated_failure_code",
+                "attempt_limit_reached",
                 "attempts_below_limit",
             ],
             guard_req,
@@ -324,13 +346,41 @@ class LoopRuntime:
         self._checkpoint("analysis_request written", FailureCode.NONE)
 
     def _execute_wait_analyzer_patch(self) -> None:
-        # In full-auto mode: if patch_suggestion.json already exists, proceed to APPLY_PATCH.
-        # Otherwise, escalate for human/AI to produce a patch.
+        # ISSUE-1：缺 patch_suggestion.json 时先调 analyzer 产出，产出失败再退人工。
         patch_path = os.path.join(self._session.artifacts_dir, "patch_suggestion.json")
         if os.path.isfile(patch_path):
             self._state.node_status = "PATCH_READY"
             self._checkpoint("patch file ready for apply", FailureCode.NONE)
             return
+        # 无现成 patch 文件 → 调注入的 analyzer 自动产出
+        if self._analyzer is not None:
+            try:
+                from loop_controller.stages import analyze_request_stage
+                session_dict = self._to_session_dict()
+                req = analyze_request_stage(session_dict)
+                from loop_controller.analyzer_protocol import AnalysisRequest
+                import dataclasses
+                req_data = json.loads(Path(req).read_text(encoding="utf-8"))
+                request = AnalysisRequest(**{
+                    k: v for k, v in req_data.items()
+                    if k in AnalysisRequest.__dataclass_fields__
+                })
+                suggestion = self._analyzer.analyze(request)
+                if suggestion.target_files:
+                    # 将 PatchSuggestion 落盘为 patch_suggestion.json（FileChange list 格式）
+                    patch_data = [dataclasses.asdict(fc) for fc in suggestion.target_files]
+                    Path(patch_path).write_text(
+                        json.dumps(patch_data, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    self._state.node_status = "PATCH_READY"
+                    self._checkpoint("analyzer produced patch", FailureCode.NONE)
+                    return
+            except Exception as e:
+                # analyzer 异常不致命，降级到退人工
+                self._state.node_status = "ANALYZER_ERROR"
+                self._checkpoint(f"analyzer error: {e}", FailureCode.NONE)
+        # analyzer 无产出或未注入 → 退人工
         self._state.node_status = "WAITING_PATCH"
         self._state.pending_human_gate = True
         self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
@@ -409,6 +459,17 @@ class LoopRuntime:
             latest_attempt = latest if isinstance(latest, dict) else {}
         current_hash = latest_attempt.get("patch_applied", {}).get("patch_hash", "") if isinstance(latest_attempt, dict) else ""
 
+        # ISSUE-3：提取 failed_count 用于 progress_converging 收敛判定
+        latest_failed_count = 0
+        previous_failed_count = 0
+        if isinstance(latest_attempt, dict):
+            latest_failed_count = latest_attempt.get("failed_count", 0) or 0
+        # 上一次 attempt 的 failed_count（倒数第二个）
+        if len(self._session.attempts) >= 2:
+            prev = self._session.attempts[-2]
+            if isinstance(prev, dict):
+                previous_failed_count = prev.get("failed_count", 0) or 0
+
         return GuardEvalRequest(
             guard_name="",
             attempt_count=self._session.current_attempt,
@@ -418,6 +479,8 @@ class LoopRuntime:
             previous_failure_codes=previous_codes,
             current_patch_hash=current_hash,
             previous_patch_hashes=previous_hashes,
+            latest_failed_count=latest_failed_count,
+            previous_failed_count=previous_failed_count,
         )
 
     def _collect_failure_codes_from_attempt(self, att: dict) -> list[str]:
