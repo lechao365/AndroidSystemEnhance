@@ -29,6 +29,8 @@ class FileChange:
     change_type: Literal["edit", "create", "delete"] = "edit"
     old_marker: str = ""
     new_content: str = ""
+    line_range: tuple[int, int] | None = None
+    diff: str = ""
 
 
 @dataclass
