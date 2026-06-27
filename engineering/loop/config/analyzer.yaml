@@ -1,0 +1,22 @@
+opencode:
+  binary: "opencode"
+  model: ""
+  timeout: 300
+  format: "json"
+
+knowledge_base:
+  path: "config/patch_knowledge_base.json"
+  max_entries: 100
+  fingerprint_reason_length: 80
+
+confidence:
+  threshold: 0.7
+  rule_match: 0.95
+  kb_match: 0.98
+
+human_gate:
+  enabled: true
+  triggers:
+    - low_confidence
+    - kernel_patch
+    - dd_boot_reboot

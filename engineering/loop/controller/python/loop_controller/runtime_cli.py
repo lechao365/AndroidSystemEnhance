@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -127,6 +128,56 @@ def _resolve_serial_shell() -> callable | None:
         return None
 
 
+def _load_analyzer_config() -> dict:
+    """读取 engineering/loop/config/analyzer.yaml；缺失或 PyYAML 不可用返回空 dict。"""
+    config_path = Path(__file__).resolve().parent.parent.parent / "config" / "analyzer.yaml"
+    if not config_path.is_file():
+        return {}
+    try:
+        import yaml
+        return yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def _build_analyzer() -> tuple["object", str, float]:
+    """构建三层降级 ChainedAnalyzer。
+
+    返回 (analyzer, kb_path, confidence_threshold)。
+    顺序：KnowledgeBaseAnalyzer → ScriptedAnalyzer → OpencodeAnalyzer。
+    """
+    from loop_controller.analyzer_protocol import (
+        ChainedAnalyzer,
+        KnowledgeBaseAnalyzer,
+        OpencodeAnalyzer,
+        ScriptedAnalyzer,
+    )
+    cfg = _load_analyzer_config()
+    kb_cfg = cfg.get("knowledge_base", {})
+    oai_cfg = cfg.get("opencode", {})
+    conf_cfg = cfg.get("confidence", {})
+    loop_config_dir = Path(__file__).resolve().parent.parent.parent / "config"
+    kb_rel = kb_cfg.get("path", "patch_knowledge_base.json")
+    # 兼容配置中带 "config/" 前缀或裸文件名：统一取 basename 后拼到 loop/config 目录
+    kb_path = str(loop_config_dir / Path(kb_rel).name)
+    ws_root = os.environ.get("AOSP_ROOT", os.path.expanduser("~/workspace/aosp"))
+    layers = [
+        KnowledgeBaseAnalyzer(
+            kb_path,
+            hit_confidence=conf_cfg.get("kb_match", 0.98),
+        ),
+        ScriptedAnalyzer(),
+        OpencodeAnalyzer(
+            workspace_root=ws_root,
+            model=oai_cfg.get("model", ""),
+            timeout=oai_cfg.get("timeout", 300),
+            binary=oai_cfg.get("binary", "opencode"),
+        ),
+    ]
+    threshold = conf_cfg.get("threshold", 0.7)
+    return ChainedAnalyzer(layers), kb_path, threshold
+
+
 def _handle_run(args: argparse.Namespace) -> int:
     try:
         session, ts = _load_session(args.session)
@@ -135,7 +186,16 @@ def _handle_run(args: argparse.Namespace) -> int:
             print(f"terminal_state={ts.value}")
             return 0 if ts == RuntimeTerminalState.DONE_SUCCESS else 1
         serial_sh = _resolve_serial_shell()
-        rt = LoopRuntime(session, _CASES_DIR, _DEVICE_PROFILE, adb_endpoint=args.adb_endpoint, initial_terminal_state=ts, serial_shell_provider=serial_sh)
+        analyzer, kb_path, conf_threshold = _build_analyzer()
+        rt = LoopRuntime(
+            session, _CASES_DIR, _DEVICE_PROFILE,
+            adb_endpoint=args.adb_endpoint,
+            initial_terminal_state=ts,
+            serial_shell_provider=serial_sh,
+            analyzer=analyzer,
+        )
+        rt._kb_path = kb_path
+        rt._confidence_threshold = conf_threshold
         state = rt.run()
         print(f"terminal_state={state.terminal_state.value}")
         if state.terminal_state == RuntimeTerminalState.DONE_SUCCESS:
@@ -157,7 +217,16 @@ def _handle_resume(args: argparse.Namespace) -> int:
             print(f"terminal_state={ts.value}")
             return 0 if ts == RuntimeTerminalState.DONE_SUCCESS else 1
         serial_sh = _resolve_serial_shell()
-        rt = LoopRuntime(session, _CASES_DIR, _DEVICE_PROFILE, adb_endpoint=args.adb_endpoint, initial_terminal_state=ts, serial_shell_provider=serial_sh)
+        analyzer, kb_path, conf_threshold = _build_analyzer()
+        rt = LoopRuntime(
+            session, _CASES_DIR, _DEVICE_PROFILE,
+            adb_endpoint=args.adb_endpoint,
+            initial_terminal_state=ts,
+            serial_shell_provider=serial_sh,
+            analyzer=analyzer,
+        )
+        rt._kb_path = kb_path
+        rt._confidence_threshold = conf_threshold
         rt.resume()
         state = rt.run()
         print(f"terminal_state={state.terminal_state.value}")

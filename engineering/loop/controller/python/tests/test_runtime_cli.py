@@ -1,8 +1,10 @@
 import io
 import json
 import sys
+from unittest.mock import MagicMock, patch
 
 from loop_controller.runtime_cli import main as runtime_main
+from loop_controller.runtime_cli import _handle_run
 
 
 def _capture(argv):
@@ -267,3 +269,30 @@ def test_cli_run_on_already_terminal_is_idempotent(tmp_path):
     # 幂等：非 SUCCESS 终态返回 rc=1
     assert rc == 1
     assert "ESCALATE_HUMAN" in out
+
+
+# ---------------------------------------------------------------------------
+# Task 5: ChainedAnalyzer 注入
+# ---------------------------------------------------------------------------
+def test_run_injects_chained_analyzer(tmp_path):
+    session = tmp_path / "session.json"
+    session_data = {
+        "session_id": "test-s1", "workflow_id": "runtime", "target": "lciod",
+        "suite": "features.lciod.common", "max_attempts": 1, "current_attempt": 0,
+        "status": "PENDING", "latest_failure_code": "NONE", "attempts": [],
+        "artifacts_dir": str(tmp_path),
+    }
+    session.write_text(json.dumps(session_data), encoding="utf-8")
+
+    captured = {}
+
+    def fake_init(self, *args, **kwargs):
+        captured["analyzer"] = kwargs.get("analyzer")
+        from loop_contracts.models import RuntimeTerminalState
+        self._state = MagicMock(terminal_state=RuntimeTerminalState.DONE_SUCCESS)
+        self.run = lambda max_iterations=100: self._state
+
+    with patch("loop_controller.runtime.engine.LoopRuntime.__init__", fake_init):
+        args = MagicMock(session=str(session), adb_endpoint="")
+        _handle_run(args)
+    assert captured["analyzer"] is not None
