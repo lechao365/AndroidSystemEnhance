@@ -288,3 +288,105 @@ class KnowledgeBaseAnalyzer(LlmAnalyzer):
     @staticmethod
     def _compute_fingerprint(request: AnalysisRequest) -> str:
         return _compute_fingerprint(request)
+
+
+class OpencodeAnalyzer(LlmAnalyzer):
+    """通过 subprocess 调 opencode run，让 LLM 生成补丁。
+
+    设计要点：
+    - prompt 由失败用例 + evidence 路径 + 历史 diff 拼装。
+    - 输出要求严格 JSON 数组（FileChange 列表）。
+    - 任意异常（超时、非零退出、解析失败）都降级为空补丁，不阻断链式降级。
+    """
+
+    def __init__(self, workspace_root: str, model: str = "",
+                 timeout: int = 300, binary: str = "opencode"):
+        self._workspace_root = workspace_root
+        self._model = model
+        self._timeout = timeout
+        self._binary = binary
+
+    def analyze(self, request: AnalysisRequest) -> PatchSuggestion:
+        try:
+            prompt = self._build_prompt(request)
+            req_file = self._write_request_file(request)
+            result = self._invoke_opencode(prompt, req_file)
+            return self._parse_suggestion(result)
+        except Exception:
+            return PatchSuggestion(
+                target_files=[], confidence=0.0,
+                rationale="opencode analyzer 失败",
+            )
+
+    def _build_prompt(self, request: AnalysisRequest) -> str:
+        lines = [
+            "你是代码修复助手。以下测试用例失败了，请分析根因并生成修复补丁。",
+            "",
+            f"Target: {request.target}",
+            f"Suite: {request.suite}",
+            "",
+            "## 失败用例",
+        ]
+        for fc in request.failed_cases:
+            lines.append(f"- {fc.get('id', '?')}: {fc.get('failure_reason', '?')}")
+        if request.evidence_bundle_path:
+            lines.append(f"\n## EvidenceBundle\n路径: {request.evidence_bundle_path}")
+            lines.append("（可读取该文件获取完整上下文）")
+        if request.workspace_diff_so_far:
+            lines.append("\n## 当前 workspace diff（前 1000 字符）")
+            lines.append(request.workspace_diff_so_far[:1000])
+        lines.extend([
+            "",
+            "## 输出要求",
+            "输出严格 JSON 数组，每个元素格式：",
+            '{"workspace_path": "相对路径", "change_type": "edit|create|delete", '
+            '"old_marker": "要替换的唯一文本", "new_content": "替换后的内容"}',
+            "只输出 JSON 数组，不要其他文字。",
+        ])
+        return "\n".join(lines)
+
+    def _write_request_file(self, request: AnalysisRequest) -> str:
+        import os as _os
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix=".json", prefix="analyzer_req_")
+        with _os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({
+                "failed_cases": request.failed_cases,
+                "evidence_bundle_path": request.evidence_bundle_path,
+                "target": request.target,
+                "suite": request.suite,
+            }, f, ensure_ascii=False)
+        return path
+
+    def _invoke_opencode(self, prompt: str, req_file: str) -> str:
+        import subprocess
+        cmd = [self._binary, "run", "--format", "json"]
+        if self._model:
+            cmd.extend(["-m", self._model])
+        cmd.extend(["-f", req_file, prompt])
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=self._timeout, cwd=self._workspace_root,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"opencode exited {result.returncode}: {result.stderr[:200]}")
+        return result.stdout
+
+    def _parse_suggestion(self, output: str) -> PatchSuggestion:
+        try:
+            events = json.loads(output)
+            if isinstance(events, list):
+                for ev in reversed(events):
+                    if ev.get("type") == "assistant":
+                        content = ev.get("content", "")
+                        patches = json.loads(content)
+                        if isinstance(patches, list) and patches:
+                            changes = [FileChange(**p) for p in patches]
+                            return PatchSuggestion(
+                                target_files=changes, confidence=0.8,
+                                rationale="opencode LLM 生成",
+                            )
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return PatchSuggestion(target_files=[], confidence=0.0)
