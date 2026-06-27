@@ -28,7 +28,8 @@
 | `python/loop_controller/stages.py` | 可复用阶段 handler（run_verify / analyze_request / decide 纯函数）+ 通用 helpers | 被 runtime engine 调用 |
 | `python/loop_controller/patch_applier.py` | `apply_file_changes`：将 `FileChange[]` 写入 workspace | 被 runtime nodes 调用 |
 | `python/loop_controller/patch_guard.py` | `check_white_list` / `detect_risk` / `check_syntax` | 被 runtime nodes 调用 |
-| `python/loop_controller/analyzer_protocol.py` | `AnalysisRequest` / `FileChange` / `PatchSuggestion` / `LlmAnalyzer` | analyzer 边界契约 |
+| `python/loop_controller/analyzer_protocol.py` | `AnalysisRequest` / `FileChange` / `PatchSuggestion` / `LlmAnalyzer` / `ChainedAnalyzer` / `KnowledgeBaseAnalyzer` / `OpencodeAnalyzer` / `ScriptedAnalyzer` | 三层降级 analyzer 架构 |
+| `python/loop_controller/workspace_isolation.py` | `create_patch_worktree` / `remove_patch_worktree` / `WorktreeHandle` | git worktree 隔离 |
 
 ## 使用方式
 
@@ -46,6 +47,15 @@ le runtime resume --session <session.json>
 
 # 查看 session 状态
 le runtime status --session <session.json>
+
+# human-in-loop 门：查看待确认项
+le runtime pending --session <session.json>
+
+# human-in-loop 门：批准低置信度补丁并继续
+le runtime approve --session <session.json>
+
+# human-in-loop 门：拒绝补丁，升级人工
+le runtime reject --session <session.json>
 
 # 解释 runtime 状态机
 le runtime explain
@@ -76,16 +86,34 @@ INIT_SESSION -> RUN_VERIFY -> DECIDE_NEXT
 | Guard | 类型 | 触发终态/跳转 |
 |---|---|---|
 | `all_cases_passed` | success | DONE_SUCCESS |
-| `attempt_limit_reached` | terminal | ESCALATE_HUMAN |
-| `repeated_failure_code` | terminal | ESCALATE_HUMAN |
 | `duplicate_patch_hash` | terminal | ESCALATE_HUMAN |
-| `patch_rejected` | terminal | ESCALATE_HUMAN |
 | `kernel_dead_no_shell` | terminal | ESCALATE_HUMAN |
+| `patch_rejected` | terminal | ESCALATE_HUMAN |
+| `session_state_corrupted` | terminal | ESCALATE_HUMAN |
+| `transport_unrecoverable` | terminal | ESCALATE_HUMAN |
+| `rollback_failed` | terminal | ESCALATE_HUMAN |
+| `boot_timeout_no_recovery` | terminal | ESCALATE_HUMAN |
+| `progress_converging` | convergence | 严格下降→RETRY / 持平/上升→ESCALATE_HUMAN |
+| `repeated_failure_code` | terminal | ESCALATE_HUMAN |
+| `attempt_limit_reached` | terminal | ESCALATE_HUMAN |
 | `attempts_below_limit` | retry | BUILD_ANALYSIS_REQUEST |
 | `compile_failed_but_recoverable` | retry | REVERT_PATCH |
 | `deploy_failed_but_recoverable` | retry | DECIDE_NEXT |
 | `patch_applied_successfully` | transition | COMPILE_PATCH |
-| `deploy_success_and_verify_passed` | success | DONE_SUCCESS |
+
+### Analyzer 架构（三层降级）
+
+WAIT_ANALYZER_PATCH 节点通过 `ChainedAnalyzer` 编排三层降级分析器：
+
+1. **KnowledgeBaseAnalyzer**（confidence=0.98）：从 `patch_knowledge_base.json` 按 fingerprint 匹配历史成功补丁（Reflexion 模式）
+2. **ScriptedAnalyzer**（confidence=0.95）：确定性规则库，含 fault-verify stdout 污染、lciod HAL 字段反转/Daemon 公式/readEvent 排空等规则
+3. **OpencodeAnalyzer**（confidence=0.8）：通过 subprocess 调 `opencode run` 让 LLM 生成补丁
+
+配置：`config/analyzer.yaml`；知识库：`config/patch_knowledge_base.json`。DONE_SUCCESS 时自动归档成功补丁到知识库。
+
+### Human-in-the-Loop 门
+
+当 confidence < threshold（默认 0.7）时，`pending_human_gate` 被设置，runtime 主循环暂停（不设终态）。通过 `le runtime pending/approve/reject` 子命令控制流转。
 
 ### Terminal State
 
