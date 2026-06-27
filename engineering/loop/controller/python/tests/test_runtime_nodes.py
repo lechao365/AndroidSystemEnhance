@@ -81,22 +81,22 @@ def test_apply_patch_success(tmp_path: Path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_compile_returns_failed_on_diff_error(monkeypatch):
-    def boom(rev):
+    def boom(rev, cwd=None):
         raise RuntimeError("git error")
     monkeypatch.setattr("loop_deploy.decider.get_diff_files", boom)
 
-    result = node_compile({"target": "test"}, "/fake/workspace")
+    result = node_compile({"target": "test", "attempts": []}, "/fake/workspace")
     assert result["status"] == "COMPILE_FAILED"
-    assert "git error" in result["error"]
+    assert "no changed files" in result["error"]
 
 
 def test_compile_skip_for_empty_diff(monkeypatch):
     from loop_deploy.models import DeployMode, DeployPlan
-    monkeypatch.setattr("loop_deploy.decider.get_diff_files", lambda rev: [])
+    monkeypatch.setattr("loop_deploy.decider.get_diff_files", lambda rev, cwd=None: [])
     monkeypatch.setattr("loop_deploy.decider.decide", lambda files: DeployPlan.skip("no changes"))
-    result = node_compile({"target": "test"}, "/fake/workspace")
-    # SKIP with no diff files → compiler returns success (nothing to build)
-    assert result["status"] == "COMPILED"
+    result = node_compile({"target": "test", "attempts": []}, "/fake/workspace")
+    # SKIP with no diff files → COMPILE_FAILED (no changed files)
+    assert result["status"] == "COMPILE_FAILED"
 
 
 # ---------------------------------------------------------------------------
@@ -104,36 +104,54 @@ def test_compile_skip_for_empty_diff(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_deploy_success(monkeypatch):
-    def fake_run(cmd, **kwargs):
-        return subprocess.CompletedProcess(cmd, 0, "OK", "")
-    monkeypatch.setattr("loop_controller.runtime.nodes.subprocess.run", fake_run)
-    monkeypatch.setattr("loop_controller.runtime.nodes._build_env", lambda: {})
+    from loop_deploy.models import DeployResult, DeployMode
 
-    result = node_deploy({"target": "test"}, adb_endpoint="192.168.1.55:5555")
+    def fake_deployer_deploy(self, plan, artifacts):
+        return DeployResult(success=True, mode=DeployMode.PUSH_SINGLE,
+                            deployed_files=["/system/bin/foo"])
+
+    monkeypatch.setattr("loop_deploy.deployer.Deployer.deploy", fake_deployer_deploy)
+
+    session = {
+        "target": "lcview",
+        "attempts": [{"compile_result": {"artifacts": ["/tmp/lechao_lcview"]},
+                       "patch_applied": {"files": ["vendor/lechao/services/lechao_lcview/daemon/lechao_lcview.cpp"]}}],
+    }
+    result = node_deploy(session, adb_endpoint="192.168.1.55:5555")
     assert result["status"] == "DEPLOYED"
     assert result["failure_code"].value == "NONE"
 
 
 def test_deploy_failure(monkeypatch):
-    def fake_run(cmd, **kwargs):
-        return subprocess.CompletedProcess(cmd, 1, "", "deploy error")
-    monkeypatch.setattr("loop_controller.runtime.nodes.subprocess.run", fake_run)
-    monkeypatch.setattr("loop_controller.runtime.nodes._build_env", lambda: {})
+    from loop_deploy.models import DeployResult, DeployMode, DeployErrorCode
 
-    result = node_deploy({"target": "test"})
+    def fake_deployer_deploy(self, plan, artifacts):
+        return DeployResult(success=False, mode=DeployMode.PUSH_SINGLE,
+                            error="push failed",
+                            error_code=DeployErrorCode.ADB_PUSH_FAILED)
+
+    monkeypatch.setattr("loop_deploy.deployer.Deployer.deploy", fake_deployer_deploy)
+
+    session = {
+        "target": "lcview",
+        "attempts": [{"compile_result": {"artifacts": ["/tmp/lechao_lcview"]},
+                       "patch_applied": {"files": ["vendor/lechao/services/lechao_lcview/daemon/lechao_lcview.cpp"]}}],
+    }
+    result = node_deploy(session, adb_endpoint="192.168.1.55:5555")
     assert result["status"] == "DEPLOY_FAILED"
-    assert "deploy error" in result["error"]
+    assert "push failed" in result.get("error", "")
 
 
-def test_deploy_timeout(monkeypatch):
-    def fake_run(cmd, **kwargs):
-        raise subprocess.TimeoutExpired(cmd, 3600)
-    monkeypatch.setattr("loop_controller.runtime.nodes.subprocess.run", fake_run)
-    monkeypatch.setattr("loop_controller.runtime.nodes._build_env", lambda: {})
-
-    result = node_deploy({"target": "test"})
+def test_deploy_no_endpoint():
+    """无 adb endpoint 时应返回 DEPLOY_FAILED。"""
+    session = {
+        "target": "lcview",
+        "attempts": [{"compile_result": {"artifacts": ["/tmp/lechao_lcview"]},
+                       "patch_applied": {"files": ["vendor/lechao/services/lechao_lcview/daemon/lechao_lcview.cpp"]}}],
+    }
+    result = node_deploy(session, adb_endpoint="")
     assert result["status"] == "DEPLOY_FAILED"
-    assert "timed out" in result["error"]
+    assert "no adb endpoint" in result["error"]
 
 
 # ---------------------------------------------------------------------------

@@ -370,13 +370,18 @@ class OpencodeAnalyzer(LlmAnalyzer):
         ]
         for fc in request.failed_cases:
             lines.append(f"- {fc.get('id', '?')}: {fc.get('failure_reason', '?')}")
+            lines.append(f"  command: {fc.get('command', '?')}")
         if request.evidence_bundle_path:
             lines.append(f"\n## EvidenceBundle\n路径: {request.evidence_bundle_path}")
             lines.append("（可读取该文件获取完整上下文）")
-        if request.workspace_diff_so_far:
-            lines.append("\n## 当前 workspace diff（前 1000 字符）")
-            lines.append(request.workspace_diff_so_far[:1000])
         lines.extend([
+            "",
+            "## 重要约束",
+            f"1. 只修复源码 bug，禁止修改测试用例定义（.yaml/.json case 文件）。",
+            f"2. workspace_path 必须是相对 workspace 根目录的源码路径（如 vendor/lechao/.../foo.cpp）。",
+            "3. old_marker 必须是源码中存在的唯一文本（精确匹配，含缩进）。",
+            "4. 优先排查：注入的错误日志、逻辑反转、条件错误等。",
+            "5. 可使用 grep/rg 在 workspace 中搜索相关代码定位根因。",
             "",
             "## 输出要求",
             "输出严格 JSON 数组，每个元素格式：",
@@ -404,7 +409,7 @@ class OpencodeAnalyzer(LlmAnalyzer):
         cmd = [self._binary, "run", "--format", "json"]
         if self._model:
             cmd.extend(["-m", self._model])
-        cmd.extend(["-f", req_file, prompt])
+        cmd.extend(["-f", req_file, "--", prompt])
         result = subprocess.run(
             cmd, capture_output=True, text=True,
             timeout=self._timeout, cwd=self._workspace_root,
@@ -415,22 +420,83 @@ class OpencodeAnalyzer(LlmAnalyzer):
         return result.stdout
 
     def _parse_suggestion(self, output: str) -> PatchSuggestion:
+        """从 opencode run --format json 的 JSONL 流式输出中提取补丁。
+
+        opencode --format json 实际输出为 JSONL（每行一个事件），格式：
+            {"type":"text","part":{"text":"<LLM 文本片段>"}}
+        多个 text 事件需按顺序拼接为完整 LLM 文本，再从中提取 JSON 数组。
+
+        支持的 LLM 文本格式（健壮性兜底）：
+        - 裸 JSON 数组：[{"workspace_path": "..."}]
+        - markdown 围栏：```json\\n[...]\\n```
+        - 含解释文字：提取首个平衡的 [...] 块
+        """
+        full_text = self._extract_assistant_text(output)
+        if not full_text:
+            return PatchSuggestion(target_files=[], confidence=0.0)
+        patches_json = self._extract_json_array(full_text)
+        if patches_json is None:
+            return PatchSuggestion(target_files=[], confidence=0.0)
         try:
-            events = json.loads(output)
-            if isinstance(events, list):
-                for ev in reversed(events):
-                    if ev.get("type") == "assistant":
-                        content = ev.get("content", "")
-                        patches = json.loads(content)
-                        if isinstance(patches, list) and patches:
-                            changes = [FileChange(**p) for p in patches]
-                            return PatchSuggestion(
-                                target_files=changes, confidence=0.8,
-                                rationale="opencode LLM 生成",
-                            )
+            patches = json.loads(patches_json)
+            if isinstance(patches, list) and patches:
+                changes = [FileChange(**p) for p in patches]
+                return PatchSuggestion(
+                    target_files=changes, confidence=0.8,
+                    rationale="opencode LLM 生成",
+                )
         except (json.JSONDecodeError, TypeError):
             pass
         return PatchSuggestion(target_files=[], confidence=0.0)
+
+    @staticmethod
+    def _extract_assistant_text(output: str) -> str:
+        """从 JSONL 流式输出中提取所有 text 事件的 part.text 并拼接。
+
+        opencode --format json 输出每行一个 JSON 事件对象：
+            {"type":"text","part":{"text":"..."}}
+        兼容旧格式（type=assistant, content=...）。
+        """
+        parts: list[str] = []
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(ev, dict):
+                continue
+            ev_type = ev.get("type", "")
+            if ev_type == "text":
+                text = ev.get("part", {}).get("text", "") if isinstance(ev.get("part"), dict) else ""
+                if text:
+                    parts.append(text)
+            elif ev_type == "assistant":
+                content = ev.get("content", "")
+                if content:
+                    parts.append(content)
+        return "".join(parts)
+
+    @staticmethod
+    def _extract_json_array(text: str) -> str | None:
+        """从 LLM 文本中提取首个 JSON 数组字符串。
+
+        依次尝试：
+        1. 去除 markdown 围栏（```json ... ``` 或 ``` ... ```）
+        2. 正则匹配首个平衡的 [...] 块
+        3. 直接当作裸 JSON
+        返回 JSON 数组的原始字符串，或 None。
+        """
+        import re
+        fence_match = re.search(r"```(?:json)?\s*\n(\[.*?\])\s*\n```", text, re.DOTALL)
+        if fence_match:
+            return fence_match.group(1)
+        bare_match = re.search(r"(\[[\s\S]*\])", text)
+        if bare_match:
+            return bare_match.group(1)
+        return None
 
 
 class ChainedAnalyzer(LlmAnalyzer):

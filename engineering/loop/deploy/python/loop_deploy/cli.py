@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json as _json
+import os
 import sys
 from loop_deploy.decider import decide, get_diff_files
 from loop_deploy.compiler import compile_plan
@@ -48,7 +49,8 @@ def _handle_deploy(args: argparse.Namespace) -> int:
         mode = DeployMode(args.mode)
         plan = DeployPlan(mode=mode, reason="manual mode override")
     else:
-        diff_files = get_diff_files(args.diff_rev)
+        ws_root = os.environ.get("AOSP_ROOT", "")
+        diff_files = get_diff_files(args.diff_rev, cwd=ws_root)
         plan = decide(diff_files)
 
     if args.decide:

@@ -76,13 +76,23 @@ class Deployer:
                                     deployed_files=backup_files)
             if target.service_name:
                 self._client.shell(f"setprop ctl.restart {target.service_name}", timeout_sec=5.0)
-                if not self._ops.wait_service_running(target.service_name, timeout=15.0):
+                if target.oneshot:
+                    started = self._ops.wait_oneshot_started(target.service_name, timeout=15.0)
+                else:
+                    started = self._ops.wait_service_running(target.service_name, timeout=15.0)
+                if not started:
                     return DeployResult(success=False, mode=DeployMode.PUSH_SINGLE,
                                         error=f"service {target.service_name} did not start",
                                         error_code=DeployErrorCode.SERVICE_NOT_STARTED,
                                         duration_seconds=time.time() - start,
                                         backup_path=str(backup_dir),
                                         deployed_files=backup_files)
+
+        # 部署成功后清 logcat buffer，确保后续 verify 检查的是新 daemon 日志
+        try:
+            self._client.shell("logcat -c", timeout_sec=5.0)
+        except Exception:
+            pass
 
         return DeployResult(success=True, mode=DeployMode.PUSH_SINGLE,
                             duration_seconds=time.time() - start,

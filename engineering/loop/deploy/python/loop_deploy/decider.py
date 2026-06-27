@@ -28,6 +28,7 @@ _DAEMON_TARGET = DeployTarget(
     artifact_name="lechao_lciod",
     remote_path="/system/bin/lechao_lciod",
     service_name="lechao_lciod",
+    oneshot=True,
 )
 _LCVIEW_HAL_TARGET = DeployTarget(
     artifact_name="lechao_lcview_hal",
@@ -38,6 +39,7 @@ _LCVIEW_DAEMON_TARGET = DeployTarget(
     artifact_name="lechao_lcview",
     remote_path="/system/bin/lechao_lcview",
     service_name="lechao_lcview",
+    oneshot=True,
 )
 
 
@@ -128,11 +130,12 @@ def decide(diff_files: list[str]) -> DeployPlan:
     return DeployPlan.skip(f"no recognized patterns in: {diff_files}")
 
 
-def get_diff_files(rev: str = "HEAD") -> list[str]:
+def get_diff_files(rev: str = "HEAD", cwd: str = "") -> list[str]:
     try:
         result = subprocess.run(
             ["git", "diff", "--name-only", rev],
             capture_output=True, text=True, timeout=10,
+            cwd=cwd or None,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         raise RuntimeError(f"git diff failed: {exc}")

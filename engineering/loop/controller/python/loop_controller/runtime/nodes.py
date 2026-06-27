@@ -201,13 +201,23 @@ def node_compile(session_dict: dict, workspace_root: str = "") -> dict:
 
     ws_root = _workspace_root(workspace_root)
 
+    # 在 workspace 根目录获取 git diff；workspace 非 git 仓库时从 session patch 提取
+    diff_files: list[str] = []
     try:
-        diff_files = get_diff_files("HEAD")
-    except RuntimeError as e:
+        diff_files = get_diff_files("HEAD", cwd=ws_root)
+    except RuntimeError:
+        # workspace 非 git 仓库：从 session attempts 的 patch 中提取 workspace_path
+        for att in reversed(session_dict.get("attempts", [])):
+            if isinstance(att, dict):
+                pa = att.get("patch_applied", {})
+                if pa.get("files"):
+                    diff_files = pa["files"]
+                    break
+    if not diff_files:
         return {
             "status": "COMPILE_FAILED",
             "failure_code": FailureCode.COMPILE_FAILED,
-            "error": str(e),
+            "error": "no changed files detected (workspace not a git repo and no patch files)",
         }
 
     plan = decide(diff_files)
@@ -255,62 +265,84 @@ def node_compile(session_dict: dict, workspace_root: str = "") -> dict:
 def node_deploy(session_dict: dict, adb_endpoint: str = "") -> dict:
     """部署编译产物到设备。
 
-    从 session 的 compile_result.artifacts 取编译产物，通过 --artifact 传给 deploy CLI。
-    deploy CLI 收到 --artifact 后跳过内置编译，避免重复。
-    通过 DEPLOY_CTX 结构化输出传递 backup 元数据和错误信息。
+    从 session 的 compile_result.artifacts 取编译产物，直接调 Deployer.deploy，
+    deploy plan 从 patch_applied.files 推断（避免 git diff 在非 git workspace 失败）。
     返回 {status, failure_code, mode, backup_path, backup_sha, deployed_files, error}。
     """
-    # 从上一次编译结果获取 artifacts，跳过 deploy CLI 内置编译
+    from loop_deploy.decider import decide
+    from loop_deploy.deployer import Deployer
+    from loop_deploy.models import DeployMode, DeployPlan
+    from loop_adb.client import AdbClient
+
     artifacts = _get_compile_artifacts(session_dict)
-    cmd = [
-        sys.executable, "-m", "loop_core.cli", "deploy",
-        "--diff-rev", "HEAD",
-        "--skip-compile",
-    ]
-    for art in artifacts:
-        cmd += ["--artifact", art]
-    if adb_endpoint:
-        cmd += ["--adb-endpoint", adb_endpoint]
+
+    # 构造 deploy plan：优先从 patch files 推断，回退到 git diff
+    diff_files: list[str] = []
+    for att in reversed(session_dict.get("attempts", [])):
+        if isinstance(att, dict):
+            pa = att.get("patch_applied", {})
+            if pa.get("files"):
+                diff_files = pa["files"]
+                break
+    if not diff_files:
+        try:
+            from loop_deploy.decider import get_diff_files
+            ws_root = _workspace_root()
+            diff_files = get_diff_files("HEAD", cwd=ws_root)
+        except RuntimeError:
+            pass
+
+    plan = decide(diff_files) if diff_files else DeployPlan.skip("no changed files")
+
+    if plan.mode == DeployMode.SKIP:
+        return {
+            "status": "DEPLOY_FAILED",
+            "failure_code": FailureCode.DEPLOY_FATAL,
+            "error": f"deploy plan SKIP: {plan.reason}",
+        }
+
+    if not artifacts:
+        return {
+            "status": "DEPLOY_FAILED",
+            "failure_code": FailureCode.DEPLOY_FATAL,
+            "error": "no compile artifacts to deploy",
+        }
+
+    if not adb_endpoint:
+        return {
+            "status": "DEPLOY_FAILED",
+            "failure_code": FailureCode.DEPLOY_FATAL,
+            "error": "no adb endpoint",
+        }
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=3600,
-            env=_build_env(),
-        )
-    except subprocess.TimeoutExpired:
+        client = AdbClient(adb_endpoint, adb_endpoint)
+        deployer = Deployer(client)
+        result = deployer.deploy(plan, artifacts)
+    except Exception as e:
         return {
             "status": "DEPLOY_FAILED",
             "failure_code": FailureCode.DEPLOY_FATAL,
-            "error": "deploy timed out",
-        }
-    except (OSError, ValueError) as e:
-        return {
-            "status": "DEPLOY_FAILED",
-            "failure_code": FailureCode.DEPLOY_FATAL,
-            "error": str(e),
+            "error": f"deployer exception: {type(e).__name__}: {e}",
         }
 
-    ctx = _parse_deploy_ctx(result.stdout or "")
+    ctx = {
+        "mode": result.mode.value,
+        "backup_path": result.backup_path,
+        "backup_sha": result.backup_sha,
+        "deployed_files": result.deployed_files,
+        "error": result.error,
+        "error_code": result.error_code.value,
+        "block_device": plan.deploy_targets[0].block_device if plan.deploy_targets else "",
+    }
 
-    if result.returncode == 0:
+    if result.success:
         return _build_deploy_result("DEPLOYED", FailureCode.NONE, ctx)
 
-    # 失败路径：从 DEPLOY_CTX 提取结构化错误和回滚元数据
-    if ctx:
-        status, fc, needs_rollback = _classify_deploy_failure(ctx)
-        r = _build_deploy_result(status, fc, ctx)
-        r["needs_rollback"] = needs_rollback
-        return r
-    # 无 DEPLOY_CTX（deploy CLI 在到达 Deployer 之前就退出了）
-    error = (result.stderr or result.stdout or "")[:500]
-    return {
-        "status": "DEPLOY_FAILED",
-        "failure_code": FailureCode.DEPLOY_FATAL,
-        "error": error,
-    }
+    status, fc, needs_rollback = _classify_deploy_failure(ctx)
+    r = _build_deploy_result(status, fc, ctx)
+    r["needs_rollback"] = needs_rollback
+    return r
 
 
 def _get_compile_artifacts(session_dict: dict) -> list[str]:

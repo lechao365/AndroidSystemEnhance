@@ -1,4 +1,27 @@
 {
   "version": 1,
-  "entries": []
+  "entries": [
+    {
+      "fingerprint": "sha256:efede22c3ca66c8cedbdb36257e35ff82675340bb55e0aa832d383e27c1fc642",
+      "fingerprint_components": {},
+      "patch": [
+        {
+          "workspace_path": "vendor/lechao/services/lechao_lcview/daemon/lechao_lcview.cpp",
+          "change_type": "edit",
+          "old_marker": "    ALOGI(\"lechao_lcview: connected to HAL, entering main loop\");\n\n    // FAULT-INJECTED: 模拟 validate 故障，用于 LE 框架端到端验证\n    ALOGE(\"lechao_lcview: parse: validate failed: bad magic (fault injected)\");",
+          "new_content": "    ALOGI(\"lechao_lcview: connected to HAL, entering main loop\");",
+          "line_range": null,
+          "diff": ""
+        }
+      ],
+      "description": "自动归档 from lcview-20260627214701",
+      "confidence": 0.95,
+      "deploy_mode_hint": "",
+      "source_session": "lcview-20260627214701",
+      "source_attempt": 2,
+      "created_at": "2026-06-27T21:47:37+08:00",
+      "hit_count": 0,
+      "last_hit_at": ""
+    }
+  ]
 }

@@ -36,6 +36,7 @@ class DeployTarget:
     remote_path: str
     service_name: str = ""
     block_device: str = ""
+    oneshot: bool = False
 
 
 @dataclass

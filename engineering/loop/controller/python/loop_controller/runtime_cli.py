@@ -142,7 +142,7 @@ def _resolve_serial_shell() -> callable | None:
 
 def _load_analyzer_config() -> dict:
     """读取 engineering/loop/config/analyzer.yaml；缺失或 PyYAML 不可用返回空 dict。"""
-    config_path = Path(__file__).resolve().parent.parent.parent / "config" / "analyzer.yaml"
+    config_path = Path(__file__).resolve().parent.parent.parent.parent / "config" / "analyzer.yaml"
     if not config_path.is_file():
         return {}
     try:
@@ -168,7 +168,7 @@ def _build_analyzer() -> tuple["object", str, float]:
     kb_cfg = cfg.get("knowledge_base", {})
     oai_cfg = cfg.get("opencode", {})
     conf_cfg = cfg.get("confidence", {})
-    loop_config_dir = Path(__file__).resolve().parent.parent.parent / "config"
+    loop_config_dir = Path(__file__).resolve().parent.parent.parent.parent / "config"
     kb_rel = kb_cfg.get("path", "patch_knowledge_base.json")
     # 兼容配置中带 "config/" 前缀或裸文件名：统一取 basename 后拼到 loop/config 目录
     kb_path = str(loop_config_dir / Path(kb_rel).name)

@@ -201,6 +201,7 @@ class LoopRuntime:
                     "stash_ref": result.get("stash_ref", ""),
                     "workspace_root": result.get("workspace_root", ""),
                     "risk": result.get("risk", {}),
+                    "files": result.get("files", []),
                 }
                 # ISSUE-1：从 result 提取 worktree_handle（若有），供 COMPILE 定位 worktree
                 wt_from_result = result.get("worktree_handle")
@@ -337,7 +338,7 @@ class LoopRuntime:
             json.dumps(self._to_session_dict(), ensure_ascii=False), encoding="utf-8"
         )
         updated, stage_result = stages.run_verify_stage(
-            str(session_path), self._session.suite, "",
+            str(session_path), self._session.suite, self._adb_endpoint,
             cases_dir=self._cases_dir, device_profile=self._device_profile,
             ctx=self._stage_ctx,
         )

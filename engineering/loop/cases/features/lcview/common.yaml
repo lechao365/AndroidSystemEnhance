@@ -69,6 +69,15 @@ cases:
     on_fail:
       collectors: [lcview_logcat, lcview_service_state, serial_recent]
 
+  - id: lcview_no_validate_errors
+    description: "[code] daemon logcat 无 fault injected 或 validate failed 错误"
+    command: "logcat -d -s lechao_lcview:* 2>/dev/null | grep -E 'fault injected|validate failed: bad magic' | wc -l"
+    assert: {type: contains, value: "0"}
+    severity: critical
+    requires: [lcview_daemon_service_state]
+    on_fail:
+      collectors: [lcview_logcat, lcview_pull_logs]
+
   - id: lcview_schema_present
     description: "[code] schema 文件 /vendor/etc/lcview_events.json 存在 [LV-FW-01]"
     command: "test -f /vendor/etc/lcview_events.json && echo present"
