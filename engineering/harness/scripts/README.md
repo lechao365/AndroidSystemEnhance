@@ -29,10 +29,32 @@
 | [`validate_harness_scripts.sh`](./validate_harness_scripts.sh) | bash 脚本合规校验（bootstrap source、`harness_init`、裸 `exit` / `/tmp/` / 私有符号） | `bash engineering/harness/scripts/validate_harness_scripts.sh` |
 | [`validate_harness_config.sh`](./validate_harness_config.sh) | 配置层校验（YAML 可解析性、字段合法性、命名规范） | `bash engineering/harness/scripts/validate_harness_config.sh` |
 | [`apply_preset_bugs.sh`](./apply_preset_bugs.sh) | 向 workspace 注入预设 bug，验证 AI 闭环修复能力（`--bug N` 选 bug，`--revert` 回滚） | `bash engineering/harness/scripts/apply_preset_bugs.sh --bug 1,2,3` |
+| [`start-opencode-server.sh`](./start-opencode-server.sh) | 在 WSL2 内以 systemd user service 托管 `opencode web`，复用 `~/.config/opencode/server.env`，并在 Windows 宿主上自动配置 `tailscale serve`，输出手机可访问的 HTTPS WebUI URL | `bash engineering/harness/scripts/start-opencode-server.sh` |
 
 **已迁出到 `../../loop/scripts/`**：`le.sh`、`le_runs_cleanup.sh`、`rp5_serial_helper.py`、`start_rp5_serial_host.bat` → 见 `../../loop/scripts/README.md`。
 
 ## 使用方式
+
+### OpenCode WebUI 一键启动（WSL2 + Windows Tailscale）
+
+前置条件：
+- WSL2 已启用 `systemd`
+- Windows 已安装并登录 Tailscale
+- `~/.config/opencode/server.env` 已配置 `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD`
+
+常用命令：
+
+```bash
+bash engineering/harness/scripts/start-opencode-server.sh
+bash engineering/harness/scripts/start-opencode-server.sh --status-only
+bash engineering/harness/scripts/start-opencode-server.sh --restart-serve-only
+```
+
+默认行为：
+- WSL2 内生成/更新 `opencode-web.service`
+- 以项目根为 `WorkingDirectory` 启动 `opencode web --hostname 127.0.0.1 --port 4096`
+- Windows 侧执行 `tailscale serve --bg --https=443 http://localhost:4096`
+- 输出 tailnet HTTPS URL，供手机浏览器访问 WebUI
 
 ### 静态校验器（validator）
 
