@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from loop_contracts.failure_codes import FailureCode
-from loop_contracts.models import StageResult
+from loop_contracts.models import StageResult, TerminationDecision
 from loop_controller.analyzer_protocol import AnalysisRequest
 
 
@@ -263,8 +263,6 @@ def analyze_request_stage(session_data: dict) -> str:
 
 def decide_stage(session_data: dict) -> dict[str, object]:
     """判定下一步：返回 {decision, reason, should_escalate, failure_code}。"""
-    from loop_controller.policy import decide_termination
-
     status = session_data.get("status", "PENDING")
     current = session_data.get("current_attempt", 0)
     max_att = session_data.get("max_attempts", 5)
@@ -297,7 +295,7 @@ def decide_stage(session_data: dict) -> dict[str, object]:
                     "failure_code": FailureCode.DUPLICATE_PATCH.value,
                 }
 
-    # 3) delegate to policy.decide_termination
+    # 3) inline termination decision (原 policy.decide_termination 逻辑)
     try:
         fc = FailureCode(last.get("failure_code", "RUN_FAILED") or "RUN_FAILED")
     except ValueError:
@@ -318,12 +316,39 @@ def decide_stage(session_data: dict) -> dict[str, object]:
             except ValueError:
                 pass
 
-    decision = decide_termination(
-        max_attempts=max_att,
-        current_attempt=current,
-        latest_stage=latest_stage,
-        previous_failure_codes=prev_codes,
-    )
+    # ---- inline decide_termination（PASS / max_attempts / repeated fc / RETRY）----
+    if latest_stage.status == "PASS":
+        decision = TerminationDecision(
+            decision="STOP",
+            reason_code=FailureCode.NONE,
+            reason_summary="verification passed",
+            can_retry=False,
+            should_escalate=False,
+        )
+    elif current > max_att:
+        decision = TerminationDecision(
+            decision="STOP",
+            reason_code=FailureCode.REPEATED_FAILURE,
+            reason_summary="max attempts exceeded",
+            can_retry=False,
+            should_escalate=True,
+        )
+    elif prev_codes and latest_stage.failure_code == prev_codes[-1]:
+        decision = TerminationDecision(
+            decision="STOP",
+            reason_code=FailureCode.REPEATED_FAILURE,
+            reason_summary="same failure repeated",
+            can_retry=False,
+            should_escalate=True,
+        )
+    else:
+        decision = TerminationDecision(
+            decision="RETRY",
+            reason_code=latest_stage.failure_code,
+            reason_summary="retry allowed",
+            can_retry=True,
+            should_escalate=False,
+        )
 
     reason_slug = decision.reason_summary.replace(" ", "_")
     return {
