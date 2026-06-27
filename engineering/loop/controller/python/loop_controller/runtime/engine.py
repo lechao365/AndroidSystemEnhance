@@ -568,4 +568,5 @@ class LoopRuntime:
             "attempts": self._session.attempts,
             "status": self._session.status,
             "target": self._session.target,
+            "suite": self._session.suite,
         }

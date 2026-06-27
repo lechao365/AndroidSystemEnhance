@@ -4,8 +4,10 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +23,8 @@ class AnalysisRequest:
     collectors_output: dict = field(default_factory=dict)
     workspace_diff_so_far: str = ""
     hints: str = ""
+    target: str = ""
+    suite: str = ""
 
 
 @dataclass
@@ -202,3 +206,39 @@ class ScriptedAnalyzer(LlmAnalyzer):
             if key not in enriched and key in full:
                 enriched[key] = full[key]
         return enriched
+
+
+@dataclass
+class KBEntry:
+    """知识库条目：失败指纹 → 成功补丁映射。"""
+    fingerprint: str
+    fingerprint_components: dict = field(default_factory=dict)
+    patch: list[dict] = field(default_factory=list)
+    description: str = ""
+    confidence: float = 0.95
+    deploy_mode_hint: str = ""
+    source_session: str = ""
+    source_attempt: int = 0
+    created_at: str = ""
+    hit_count: int = 0
+    last_hit_at: str = ""
+
+
+def _compute_fingerprint(request: AnalysisRequest, reason_length: int = 80) -> str:
+    """计算失败指纹（sha256 前缀），保证同义失败归一为同一指纹。
+
+    归一化规则：
+    - 失败用例按 id 排序（顺序无关）。
+    - failure_reason 截断到 reason_length 字符。
+    - 空白字符合并、首尾去空、转小写。
+    - 文件路径 (/a/b.c) 替换为 <path>，消除环境差异。
+    """
+    components = []
+    for fc in sorted(request.failed_cases, key=lambda c: c.get("id", "")):
+        case_id = fc.get("id", "")
+        reason = (fc.get("failure_reason") or "")[:reason_length]
+        reason = re.sub(r"\s+", " ", reason).strip().lower()
+        reason = re.sub(r"/[\w/.-]+", "<path>", reason)
+        components.append(f"{case_id}:{reason}")
+    raw = f"{request.target}|{request.suite}|{'|'.join(components)}"
+    return "sha256:" + hashlib.sha256(raw.encode()).hexdigest()

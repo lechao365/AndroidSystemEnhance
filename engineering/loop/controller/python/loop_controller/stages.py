@@ -225,6 +225,8 @@ def analyze_request_stage(session_data: dict) -> str:
         evidence_bundle_path=evidence_path,
         collectors_output=collectors_output,
         workspace_diff_so_far=_get_workspace_diff(),
+        target=session_data.get("target", ""),
+        suite=session_data.get("suite", ""),
     )
     req_path = os.path.join(artifacts_dir, "analysis_request.json")
     Path(req_path).write_text(
