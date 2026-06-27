@@ -88,13 +88,6 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError:
         sub.add_parser("deploy", help="部署 binary/image（loop_deploy 模块不可用）")
 
-    # control 子命令（loop_controller 实现）
-    try:
-        from loop_controller.control_cli import add_control_parser
-        add_control_parser(sub)
-    except ImportError:
-        sub.add_parser("control", help="AI 闭环控制（loop_controller 模块不可用）")
-
     args = parser.parse_args(argv)
 
     if args.command == "run":
@@ -102,8 +95,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "gen-cases":
         return args.func(args)
     if args.command == "deploy":
-        return args.func(args)
-    if args.command == "control":
         return args.func(args)
     return 1
 
