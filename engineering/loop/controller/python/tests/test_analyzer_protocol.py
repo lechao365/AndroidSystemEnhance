@@ -8,6 +8,9 @@ from loop_controller.analyzer_protocol import (
     LlmAnalyzer,
     PatchSuggestion,
     ScriptedAnalyzer,
+    _rule_lciod_daemon_formula_error,
+    _rule_lciod_hal_field_inversion,
+    _rule_lciod_hal_readdrain_missing,
 )
 
 
@@ -148,3 +151,62 @@ def test_fv_stdout_pollution_does_not_trigger_on_unrelated_failure(tmp_path: Pat
     result = analyzer.analyze(request)
     assert result.target_files == []
     assert result.confidence == 0.0
+
+
+# ---------------------------------------------------------------------------
+# LCIOD HAL 字段反转：read_bytes 和 write_bytes 互换
+# ---------------------------------------------------------------------------
+
+def test_hal_field_inversion_detects_swapped_bytes():
+    case = {
+        "id": "HA-05",
+        "failure_reason": "json_field read_bytes expected>0 but got 0, "
+                          "write_bytes mismatch: expected 1024 got 2048",
+        "command": "fault-verify stats --json",
+    }
+    changes = _rule_lciod_hal_field_inversion(case)
+    assert changes is not None
+    assert len(changes) > 0
+
+
+# ---------------------------------------------------------------------------
+# LCIOD Daemon getAverageRate 公式错误
+# ---------------------------------------------------------------------------
+
+def test_daemon_formula_error_detects_negative_rate():
+    case = {
+        "id": "DA-07",
+        "failure_reason": "json_field getAverageRate expected ge 0 but got -1.5",
+        "command": "fault-verify stats --json",
+    }
+    changes = _rule_lciod_daemon_formula_error(case)
+    assert changes is not None
+
+
+# ---------------------------------------------------------------------------
+# LCIOD HAL readEvent 排空遗漏
+# ---------------------------------------------------------------------------
+
+def test_hal_readdrain_missing_detects_incomplete_events():
+    case = {
+        "id": "HA-09",
+        "failure_reason": "readEvent returned 0 events after dd write, expected > 0",
+        "command": "fault-verify event --read --count 5 --json",
+    }
+    changes = _rule_lciod_hal_readdrain_missing(case)
+    assert changes is not None
+
+
+# ---------------------------------------------------------------------------
+# LCIOD 规则不应对无关失败产生误报
+# ---------------------------------------------------------------------------
+
+def test_lciod_rules_no_false_positive_on_unrelated_failure():
+    case = {
+        "id": "HA-01",
+        "failure_reason": "service vendor.lechao.lciod not found",
+        "command": "adb shell service list",
+    }
+    assert _rule_lciod_hal_field_inversion(case) is None
+    assert _rule_lciod_daemon_formula_error(case) is None
+    assert _rule_lciod_hal_readdrain_missing(case) is None

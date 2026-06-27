@@ -46,6 +46,8 @@ class LlmAnalyzer(ABC):
 
 
 _FV_MAIN_C_PATH = "patchs/rpi5/others/usb-verify/src/cli/main.c"
+_LCIOD_HAL_PATH = "vendor/lechao/services/lechao_lciod/service.cpp"
+_LCIOD_DAEMON_PATH = "vendor/lechao/services/lechao_lciod/daemon.cpp"
 
 
 def _rule_fv_stdout_pollution(case: dict) -> list[FileChange] | None:
@@ -82,8 +84,69 @@ def _rule_fv_stdout_pollution(case: dict) -> list[FileChange] | None:
     return changes if changes else None
 
 
+def _rule_lciod_hal_field_inversion(case: dict) -> list[FileChange] | None:
+    """LCIOD HAL getStats 字段反转：read_bytes 和 write_bytes 值互换。
+
+    触发条件：failure_reason 同时提到 read_bytes / write_bytes，且含
+    "mismatch" 或 "expected"（断言失败说明两个字段被对调赋值）。
+    修复：在 HAL service.cpp 中把 read_bytes / write_bytes 的赋值交换回来。
+    """
+    reason = (case.get("failure_reason") or "").lower()
+    if "read_bytes" not in reason or "write_bytes" not in reason:
+        return None
+    if "mismatch" not in reason and "expected" not in reason:
+        return None
+    return [FileChange(
+        workspace_path=_LCIOD_HAL_PATH,
+        change_type="edit",
+        old_marker="stats.read_bytes = raw.read_bytes;\n    stats.write_bytes = raw.write_bytes;",
+        new_content="stats.write_bytes = raw.read_bytes;\n    stats.read_bytes = raw.write_bytes;",
+    )]
+
+
+def _rule_lciod_daemon_formula_error(case: dict) -> list[FileChange] | None:
+    """LCIOD Daemon getAverageRate 公式错误（速率出现负值或 NaN）。
+
+    触发条件：failure_reason 含 "getaveragerate" 且断言失败。
+    修复：把速率公式从 bytes / (interval_ns / 1e9) 修正为 bytes * 1e9 / interval_ns，
+    避免整数除法或量纲错误导致负值/除零。
+    """
+    reason = (case.get("failure_reason") or "").lower()
+    if "getaveragerate" not in reason:
+        return None
+    return [FileChange(
+        workspace_path=_LCIOD_DAEMON_PATH,
+        change_type="edit",
+        old_marker="double rate = static_cast<double>(bytes) / (interval_ns / 1000000000.0);",
+        new_content="double rate = static_cast<double>(bytes) * 1000000000.0 / interval_ns;",
+    )]
+
+
+def _rule_lciod_hal_readdrain_missing(case: dict) -> list[FileChange] | None:
+    """LCIOD HAL readEvent 排空遗漏（事件丢失）。
+
+    触发条件：failure_reason 含 "readevent" 且事件数异常
+    （"0 events" 或 "incomplete"），说明只读了一次未排空内核缓冲。
+    修复：在 service.cpp readEvent 返回前增加排空循环。
+    """
+    reason = (case.get("failure_reason") or "").lower()
+    if "readevent" not in reason:
+        return None
+    if "0 events" not in reason and "incomplete" not in reason:
+        return None
+    return [FileChange(
+        workspace_path=_LCIOD_HAL_PATH,
+        change_type="edit",
+        old_marker="return events;",
+        new_content="// 排空缓冲区\n    while (kernel_buf.has_data()) {\n        events.push_back(kernel_buf.read_one());\n    }\n    return events;",
+    )]
+
+
 _RULES = [
     _rule_fv_stdout_pollution,
+    _rule_lciod_hal_field_inversion,
+    _rule_lciod_daemon_formula_error,
+    _rule_lciod_hal_readdrain_missing,
 ]
 
 
