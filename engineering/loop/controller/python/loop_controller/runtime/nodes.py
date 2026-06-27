@@ -82,14 +82,25 @@ def node_apply_patch(
     target = session_dict.get("target", "")
     ws_root = _workspace_root(workspace_root)
 
-    # 读取补丁文件
+    # 读取补丁文件（兼容新旧格式）
     try:
-        raw_changes = json.loads(Path(patch_path).read_text(encoding="utf-8"))
+        raw = json.loads(Path(patch_path).read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
         return {
             "status": "PATCH_INVALID",
             "failure_code": FailureCode.PATCH_REJECTED,
             "error": f"invalid patch: {e}",
+        }
+
+    if isinstance(raw, dict) and "patches" in raw:
+        raw_changes = raw["patches"]
+    elif isinstance(raw, list):
+        raw_changes = raw
+    else:
+        return {
+            "status": "PATCH_INVALID",
+            "failure_code": FailureCode.PATCH_REJECTED,
+            "error": "patch_suggestion.json format unknown",
         }
 
     changes = [FileChange(**c) for c in raw_changes]

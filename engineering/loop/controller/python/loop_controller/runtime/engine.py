@@ -59,8 +59,8 @@ class LoopRuntime:
         self._analyzer = analyzer
         # 知识库归档路径（由 runtime_cli 注入，DONE_SUCCESS 时归档成功补丁）
         self._kb_path: str = ""
-        # 置信度阈值（由 runtime_cli 注入，低于阈值的补丁触发人工 gate）
-        self._confidence_threshold: float = 0.0
+        # 置信度阈值（低于阈值的补丁触发人工 gate；runtime_cli 可覆盖）
+        self._confidence_threshold: float = 0.7
 
     def resume(self) -> RuntimeState:
         # 幂等：已终态的 session 不恢复
@@ -118,6 +118,27 @@ class LoopRuntime:
 
     # -- node execution -----------------------------------------------------
 
+    def _read_suggestion_meta(self) -> dict | None:
+        """读取 patch_suggestion.json 的元数据（patches/confidence/rationale）。
+
+        兼容两种格式：
+        - 新格式 dict：{"patches": [...], "confidence": float, "rationale": str}
+        - 旧格式 list：[FileChange, ...] → 视为 confidence=1.0（高置信，不触发 gate）
+        解析失败或文件缺失返回 None。
+        """
+        patch_path = os.path.join(self._session.artifacts_dir, "patch_suggestion.json")
+        if not os.path.isfile(patch_path):
+            return None
+        try:
+            data = json.loads(Path(patch_path).read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        if isinstance(data, dict) and "patches" in data:
+            return data
+        if isinstance(data, list):
+            return {"patches": data, "confidence": 1.0}
+        return None
+
     def _execute_current_node(self) -> None:
         node = self._state.current_node
         if node == NodeKind.INIT_SESSION.value:
@@ -132,6 +153,18 @@ class LoopRuntime:
         elif node == NodeKind.WAIT_ANALYZER_PATCH.value:
             self._execute_wait_analyzer_patch()
         elif node == NodeKind.APPLY_PATCH.value:
+            # confidence 阈值检查：低于阈值的补丁触发人工 gate，不自动 apply
+            suggestion_meta = self._read_suggestion_meta()
+            if suggestion_meta:
+                conf = suggestion_meta.get("confidence", 1.0)
+                if conf < self._confidence_threshold:
+                    self._state.node_status = "LOW_CONFIDENCE"
+                    self._state.pending_human_gate = True
+                    self._checkpoint(
+                        f"confidence {conf} below threshold {self._confidence_threshold}",
+                        FailureCode.NONE,
+                    )
+                    return
             patch_path = os.path.join(self._session.artifacts_dir, "patch_suggestion.json")
             if not os.path.isfile(patch_path):
                 self._state.node_status = "NO_PATCH_FILE"
@@ -465,8 +498,13 @@ class LoopRuntime:
                 })
                 suggestion = self._analyzer.analyze(request)
                 if suggestion.target_files:
-                    # 将 PatchSuggestion 落盘为 patch_suggestion.json（FileChange list 格式）
-                    patch_data = [dataclasses.asdict(fc) for fc in suggestion.target_files]
+                    # 落盘为 patch_suggestion.json（新格式：带 confidence/rationale 元数据）
+                    import dataclasses
+                    patch_data = {
+                        "patches": [dataclasses.asdict(fc) for fc in suggestion.target_files],
+                        "confidence": suggestion.confidence,
+                        "rationale": suggestion.rationale,
+                    }
                     Path(patch_path).write_text(
                         json.dumps(patch_data, ensure_ascii=False, indent=2),
                         encoding="utf-8",

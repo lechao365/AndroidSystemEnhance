@@ -3,6 +3,7 @@ from pathlib import Path
 
 from loop_controller.runtime.engine import LoopRuntime
 from loop_controller.runtime.checkpoint_store import CheckpointStore
+from loop_controller.runtime.types import NodeKind
 from loop_contracts.models import LoopSession, RuntimeTerminalState
 
 
@@ -1211,3 +1212,80 @@ def test_archive_silent_failure_on_missing_patch(tmp_path):
     rt._kb_path = kb_path
     rt._archive_to_knowledge_base()
     assert not Path(kb_path).exists()
+
+
+# ---------------------------------------------------------------------------
+# Task 8: confidence 阈值检查 + patch_suggestion.json 新旧格式兼容
+# ---------------------------------------------------------------------------
+
+def test_low_confidence_triggers_human_gate(tmp_path):
+    """confidence < threshold 时触发 pending_human_gate 而非自动 apply。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    suggestion = {
+        "patches": [{"workspace_path": "foo.c", "change_type": "edit",
+                     "old_marker": "x", "new_content": "y"}],
+        "confidence": 0.3,
+        "rationale": "low confidence test",
+    }
+    (artifacts / "patch_suggestion.json").write_text(
+        json.dumps(suggestion), encoding="utf-8")
+
+    session = LoopSession(
+        session_id="test", workflow_id="runtime", target="lciod", suite="s",
+        max_attempts=3, current_attempt=0, artifacts_dir=str(artifacts),
+        attempts=[],
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp", device_profile="dummy")
+    rt._confidence_threshold = 0.7
+    rt._state.current_node = NodeKind.APPLY_PATCH.value
+    rt._execute_current_node()
+    assert rt._state.pending_human_gate is True
+    assert rt._state.node_status == "LOW_CONFIDENCE"
+    assert rt._state.terminal_state == RuntimeTerminalState.NONE
+
+
+def test_high_confidence_proceeds_to_apply(tmp_path):
+    """confidence >= threshold 时不触发 LOW_CONFIDENCE gate（marker 不匹配会走 PATCH_REJECTED，但不是 confidence gate）。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    suggestion = {
+        "patches": [{"workspace_path": "foo.c", "change_type": "edit",
+                     "old_marker": "x", "new_content": "y"}],
+        "confidence": 0.9,
+    }
+    (artifacts / "patch_suggestion.json").write_text(
+        json.dumps(suggestion), encoding="utf-8")
+
+    session = LoopSession(
+        session_id="test", workflow_id="runtime", target="lciod", suite="s",
+        max_attempts=3, current_attempt=0, artifacts_dir=str(artifacts),
+        attempts=[],
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp", device_profile="dummy")
+    rt._confidence_threshold = 0.7
+    rt._state.current_node = NodeKind.APPLY_PATCH.value
+    rt._execute_current_node()
+    # confidence 检查通过，不会进入 LOW_CONFIDENCE 分支
+    assert rt._state.node_status != "LOW_CONFIDENCE"
+
+
+def test_old_format_list_treated_as_high_confidence(tmp_path):
+    """旧格式 [FileChange] 列表视为 confidence=1.0，不触发 LOW_CONFIDENCE gate。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    patch_list = [{"workspace_path": "foo.c", "old_marker": "x", "new_content": "y"}]
+    (artifacts / "patch_suggestion.json").write_text(
+        json.dumps(patch_list), encoding="utf-8")
+
+    session = LoopSession(
+        session_id="test", workflow_id="runtime", target="lciod", suite="s",
+        max_attempts=3, current_attempt=0, artifacts_dir=str(artifacts),
+        attempts=[],
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp", device_profile="dummy")
+    rt._confidence_threshold = 0.7
+    rt._state.current_node = NodeKind.APPLY_PATCH.value
+    rt._execute_current_node()
+    # 旧格式视为高置信度，不进入 LOW_CONFIDENCE 分支
+    assert rt._state.node_status != "LOW_CONFIDENCE"
