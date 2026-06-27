@@ -18,6 +18,7 @@ from loop_controller.runtime.checkpoint_store import CheckpointStore
 from loop_controller.runtime.guards import guard_chain
 
 import loop_controller.stages as stages
+from loop_controller.stages import StageContext
 from loop_controller.runtime import nodes as _runtime_nodes
 
 # Linear transitions: node -> next node (no branch condition required).
@@ -49,6 +50,11 @@ class LoopRuntime:
         self._cases_dir = cases_dir
         self._device_profile = device_profile
         self._deploy_context: dict = {}
+        # Per-session stage 执行上下文，消除 stages 模块级全局状态依赖
+        self._stage_ctx = StageContext(
+            cases_dir=cases_dir, device_profile=device_profile,
+            artifacts_dir=session.artifacts_dir, session_id=session.session_id,
+        )
         # ISSUE-1：注入 LlmAnalyzer，缺省用 ScriptedAnalyzer（规则库留空，产出失败则退人工）
         self._analyzer = analyzer
         # 知识库归档路径（由 runtime_cli 注入，DONE_SUCCESS 时归档成功补丁）
@@ -296,6 +302,7 @@ class LoopRuntime:
         updated, stage_result = stages.run_verify_stage(
             str(session_path), self._session.suite, "",
             cases_dir=self._cases_dir, device_profile=self._device_profile,
+            ctx=self._stage_ctx,
         )
         self._session.current_attempt = updated.get("current_attempt", self._session.current_attempt)
         self._session.status = updated.get("status", stage_result.status)

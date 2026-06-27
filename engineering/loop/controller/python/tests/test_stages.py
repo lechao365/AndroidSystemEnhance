@@ -3,10 +3,28 @@ import subprocess
 from pathlib import Path
 
 from loop_controller.stages import (
+    StageContext,
     analyze_request_stage,
     decide_stage,
     run_verify_stage,
 )
+
+
+def test_stage_context_dataclass():
+    ctx = StageContext(
+        cases_dir="/tmp/cases", device_profile="rp5",
+        artifacts_dir="/tmp/artifacts", session_id="s1",
+    )
+    assert ctx.cases_dir == "/tmp/cases"
+    assert ctx.device_profile == "rp5"
+    assert ctx.artifacts_dir == "/tmp/artifacts"
+    assert ctx.session_id == "s1"
+
+
+def test_stage_context_defaults():
+    ctx = StageContext()
+    assert ctx.cases_dir == ""
+    assert ctx.device_profile == ""
 
 
 def test_run_verify_stage_reads_evidence_bundle(tmp_path: Path, monkeypatch):

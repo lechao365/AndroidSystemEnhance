@@ -6,11 +6,28 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from loop_contracts.failure_codes import FailureCode
 from loop_contracts.models import StageResult
 from loop_controller.analyzer_protocol import AnalysisRequest
+
+
+# ---------------------------------------------------------------------------
+# StageContext：每会话 stage 执行上下文，消除模块级全局状态
+# ---------------------------------------------------------------------------
+@dataclass
+class StageContext:
+    """Per-session stage 执行上下文，消除模块级全局状态。
+
+    通过显式参数注入，替代对模块级 _CASES_DIR / _DEVICE_PROFILE 的隐式依赖。
+    所有字段缺省空串，保证向后兼容（未传入时回退到模块级全局变量）。
+    """
+    cases_dir: str = ""
+    device_profile: str = ""
+    artifacts_dir: str = ""
+    session_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -135,8 +152,16 @@ def _build_env() -> dict:
 # 阶段 handlers（纯函数）
 # ---------------------------------------------------------------------------
 def run_verify_stage(session_path: str, suite: str, adb_endpoint: str,
-                     cases_dir: str = "", device_profile: str = "") -> tuple[dict, StageResult]:
-    """执行一次验证，返回 (updated_session_dict, StageResult)。"""
+                     cases_dir: str = "", device_profile: str = "",
+                     *,
+                     ctx: StageContext | None = None) -> tuple[dict, StageResult]:
+    """执行一次验证，返回 (updated_session_dict, StageResult)。
+
+    参数优先级：显式 cases_dir/device_profile > ctx（若传入）> 模块级全局变量。
+    """
+    if ctx is not None:
+        cases_dir = cases_dir or ctx.cases_dir
+        device_profile = device_profile or ctx.device_profile
     _cases = cases_dir or _CASES_DIR
     _profile = device_profile or _DEVICE_PROFILE
     session_data = _load_session(session_path)
