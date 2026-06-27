@@ -155,8 +155,10 @@ class LoopRuntime:
                     "workspace_root": result.get("workspace_root", ""),
                     "risk": result.get("risk", {}),
                 }
-                if worktree_handle is not None:
-                    pa["worktree_handle"] = result.get("worktree_handle")
+                # ISSUE-1：从 result 提取 worktree_handle（若有），供 COMPILE 定位 worktree
+                wt_from_result = result.get("worktree_handle")
+                if wt_from_result:
+                    pa["worktree_handle"] = wt_from_result
                 latest = self._session.attempts[-1] if self._session.attempts else None
                 if isinstance(latest, dict):
                     latest["patch_applied"] = pa
@@ -179,7 +181,13 @@ class LoopRuntime:
                     self._state.pending_human_gate = True
             self._checkpoint(f"apply_patch={result['status']}", fc, matched_guards=matched_guards)
         elif node == NodeKind.COMPILE_PATCH.value:
-            result = _runtime_nodes.node_compile(self._to_session_dict(), "")
+            # ISSUE-1：若补丁应用在独立 worktree，compile 必须在 worktree 内执行
+            compile_ws_root = ""
+            if self._session.attempts and isinstance(self._session.attempts[-1], dict):
+                wt_handle = self._session.attempts[-1].get("patch_applied", {}).get("worktree_handle")
+                if isinstance(wt_handle, dict) and wt_handle.get("worktree_path"):
+                    compile_ws_root = wt_handle["worktree_path"]
+            result = _runtime_nodes.node_compile(self._to_session_dict(), compile_ws_root)
             self._state.node_status = result["status"]
             fc = result.get("failure_code", FailureCode.NONE)
             if isinstance(fc, str):
@@ -325,6 +333,8 @@ class LoopRuntime:
                 self._state.pending_human_gate = True
             elif next_nk == NodeKind.DONE_SUCCESS:
                 self._state.terminal_state = RuntimeTerminalState.DONE_SUCCESS
+                # ISSUE-3：成功收敛后清理所有 attempts 中的 worktree（生命周期对齐）
+                self._cleanup_all_worktrees()
             # Non-terminal guard → drive transition via _compute_next_node
             self._state.node_status = "RETRY" if self._state.terminal_state == RuntimeTerminalState.NONE else guard_result.reason
             self._state.transition_reason = guard_result.reason
@@ -339,6 +349,25 @@ class LoopRuntime:
             fc,
             matched_guards=matched_guards,
         )
+
+    def _cleanup_all_worktrees(self) -> None:
+        """成功收敛后清理所有 attempts 中的 worktree（失败保留供 debug）。"""
+        try:
+            from loop_controller.workspace_isolation import WorktreeHandle, remove_patch_worktree
+            for att in self._session.attempts:
+                if not isinstance(att, dict):
+                    continue
+                wt_dict = att.get("patch_applied", {}).get("worktree_handle")
+                if isinstance(wt_dict, dict) and wt_dict.get("worktree_path"):
+                    handle = WorktreeHandle(
+                        worktree_path=wt_dict["worktree_path"],
+                        branch=wt_dict.get("branch", ""),
+                        workspace_root=wt_dict.get("workspace_root", ""),
+                        created=wt_dict.get("created", False),
+                    )
+                    remove_patch_worktree(handle)
+        except Exception:
+            pass
 
     def _execute_build_analysis_request(self) -> None:
         stages.analyze_request_stage(self._to_session_dict())

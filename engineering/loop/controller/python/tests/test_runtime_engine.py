@@ -931,3 +931,215 @@ def test_progress_converging_escalates_when_failures_increasing(tmp_path, monkey
     cps = CheckpointStore(str(tmp_path), "sess-regress").all()
     decide_cp = [c for c in cps if c.current_node == "DECIDE_NEXT"][-1]
     assert "progress_converging" in decide_cp.matched_guards
+
+
+# ---------------------------------------------------------------------------
+# ISSUE-1（本轮）：worktree 隔离的补丁，compile/deploy 必须在 worktree 内执行
+# ---------------------------------------------------------------------------
+
+def test_compile_receives_worktree_path_as_workspace_root(tmp_path, monkeypatch):
+    """APPLY_PATCH 用 worktree 隔离后，COMPILE_PATCH 必须把 worktree_path 传给 node_compile。
+
+    验证：当 attempt 含 worktree_handle 时，engine 调 node_compile 时 workspace_root
+    参数等于 worktree_path（而非空字符串或原 workspace root）。
+    """
+    _write_bundle(tmp_path, "FAIL", 1)
+
+    compile_calls = []
+    call_count = [0]
+
+    def fake_run(cmd, **kwargs):
+        call_count[0] += 1
+        # 第一次 verify FAIL，第二次 verify PASS（deploy 后收敛）
+        if call_count[0] == 1:
+            _write_bundle(tmp_path, "FAIL", 1)
+            class R:
+                returncode = 1
+                stdout = ""
+                stderr = ""
+            return R()
+        _write_bundle(tmp_path, "PASS", 0)
+        class R2:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R2()
+
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+
+    from loop_contracts.failure_codes import FailureCode as FC
+
+    fake_worktree_path = "/tmp/fake-worktree-sess-wt1"
+
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_apply_patch",
+        lambda *a, **kw: {
+            "status": "APPLIED", "failure_code": FC.NONE,
+            "files": ["test.cpp"], "stash_ref": "",
+            "patch_hash": "abc", "risk": {},
+            "workspace_root": str(tmp_path),
+            "worktree_handle": {
+                "worktree_path": fake_worktree_path,
+                "branch": "loop/sess-wt1/1",
+                "workspace_root": str(tmp_path),
+                "created": True,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_compile",
+        lambda session_dict, workspace_root="": (
+            compile_calls.append(workspace_root),
+            {"status": "COMPILED", "failure_code": FC.NONE, "artifacts": ["out/t"]},
+        )[1],
+    )
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_deploy",
+        lambda *a, **kw: {"status": "DEPLOYED", "failure_code": FC.NONE, "mode": "PUSH_SINGLE"},
+    )
+
+    (tmp_path / "patch_suggestion.json").write_text(
+        json.dumps([{"workspace_path": "t.cpp", "change_type": "edit",
+                     "old_marker": "x", "new_content": "y"}]),
+        encoding="utf-8",
+    )
+
+    session = LoopSession(
+        session_id="sess-wt1", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=2, artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, "cases", "profile.json")
+    state = rt.run()
+    assert len(compile_calls) == 1, f"expected 1 compile call, got {len(compile_calls)}"
+    assert compile_calls[0] == fake_worktree_path, (
+        f"compile workspace_root should be worktree path, got {compile_calls[0]}"
+    )
+
+
+def test_compile_falls_back_to_workspace_root_when_no_worktree(tmp_path, monkeypatch):
+    """无 worktree（降级 stash 模式）时，compile 仍用原 workspace_root（向后兼容）。"""
+    _write_bundle(tmp_path, "FAIL", 1)
+
+    compile_calls = []
+    call_count = [0]
+
+    def fake_run(cmd, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            _write_bundle(tmp_path, "FAIL", 1)
+            class R:
+                returncode = 1
+                stdout = ""
+                stderr = ""
+            return R()
+        _write_bundle(tmp_path, "PASS", 0)
+        class R2:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R2()
+
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+
+    from loop_contracts.failure_codes import FailureCode as FC
+
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_apply_patch",
+        lambda *a, **kw: {
+            "status": "APPLIED", "failure_code": FC.NONE,
+            "files": ["test.cpp"], "stash_ref": "fake-stash",
+            "patch_hash": "abc", "risk": {},
+            "workspace_root": str(tmp_path),
+        },
+    )
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_compile",
+        lambda session_dict, workspace_root="": (
+            compile_calls.append(workspace_root),
+            {"status": "COMPILED", "failure_code": FC.NONE, "artifacts": ["out/t"]},
+        )[1],
+    )
+    monkeypatch.setattr(
+        "loop_controller.runtime.nodes.node_deploy",
+        lambda *a, **kw: {"status": "DEPLOYED", "failure_code": FC.NONE, "mode": "PUSH_SINGLE"},
+    )
+
+    (tmp_path / "patch_suggestion.json").write_text(
+        json.dumps([{"workspace_path": "t.cpp", "change_type": "edit",
+                     "old_marker": "x", "new_content": "y"}]),
+        encoding="utf-8",
+    )
+
+    session = LoopSession(
+        session_id="sess-nowt", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=2, artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, "cases", "profile.json")
+    rt.run()
+    assert len(compile_calls) == 1
+    assert compile_calls[0] == ""
+
+
+# ---------------------------------------------------------------------------
+# ISSUE-3（本轮）：DONE_SUCCESS 时清理 worktree；revert 路径已清理（上一轮覆盖）
+# ---------------------------------------------------------------------------
+
+def test_done_success_cleans_worktrees(tmp_path, monkeypatch):
+    """全 PASS 收敛后，engine 应清理所有 attempts 中的 worktree。
+
+    用真实 git worktree 验证清理生效（目录消失 + worktree list 不再列出）。
+    """
+    import subprocess
+
+    # 构造真实 git 仓库作为 workspace
+    repo = tmp_path / "workspace"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=repo, check=True)
+    (repo / "a.txt").write_text("init")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+    # 在仓库内创建一个 worktree（模拟 APPLY_PATCH 产出的）
+    from loop_controller.workspace_isolation import create_patch_worktree, WorktreeHandle
+    wt_parent = tmp_path / "wts"
+    handle = create_patch_worktree(str(repo), "sess-clean", 1, worktree_parent=str(wt_parent))
+    wt_path = handle.worktree_path
+    # 确认 worktree 存在
+    assert Path(wt_path).exists()
+
+    # 构造 session：已有 attempt 含 worktree_handle，verify PASS
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir(exist_ok=True)
+    _write_bundle(artifacts_dir, "PASS", 0)
+
+    session = LoopSession(
+        session_id="sess-clean", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=2, artifacts_dir=str(artifacts_dir),
+    )
+    session.current_attempt = 1
+    session.attempts = [{
+        "attempt_index": 1,
+        "verify_result": "PASS",
+        "failed_count": 0,
+        "patch_applied": {
+            "worktree_handle": {
+                "worktree_path": wt_path,
+                "branch": handle.branch,
+                "workspace_root": str(repo),
+                "created": True,
+            },
+            "workspace_root": str(repo),
+        },
+    }]
+    session.latest_failure_code = __import__("loop_contracts").failure_codes.FailureCode.NONE
+
+    rt = LoopRuntime(session, "cases", "profile.json")
+    rt._state.current_node = "DECIDE_NEXT"
+    rt._state.node_status = "PASS"
+
+    rt._execute_decide_next()
+    assert rt._state.terminal_state == RuntimeTerminalState.DONE_SUCCESS
+    # worktree 应被清理
+    assert not Path(wt_path).exists(), f"worktree not cleaned: {wt_path}"

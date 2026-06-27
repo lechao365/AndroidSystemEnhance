@@ -9,6 +9,7 @@ lciod:
   - vendor/lechao/services/lechao_lciod/
   - device/brcm/rpi5/sepolicy/lechao_lciod/
   - device/brcm/rpi5/lciod/
+  - patchs/rpi5/others/usb-verify/
 lcview:
   - vendor/lechao/services/lechao_lcview/
   - device/brcm/rpi5/sepolicy/lechao_lcview.te
