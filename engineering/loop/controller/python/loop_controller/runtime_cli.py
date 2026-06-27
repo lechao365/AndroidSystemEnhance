@@ -80,6 +80,18 @@ def main(argv: list[str] | None = None) -> int:
     explain_p = sub.add_parser("explain", help="explain runtime behavior")
     explain_p.set_defaults(func=_handle_explain)
 
+    pending_p = sub.add_parser("pending", help="show pending human gate info")
+    pending_p.add_argument("--session", required=True)
+    pending_p.set_defaults(func=_handle_pending)
+
+    approve_p = sub.add_parser("approve", help="approve pending patch and resume")
+    approve_p.add_argument("--session", required=True)
+    approve_p.set_defaults(func=_handle_approve)
+
+    reject_p = sub.add_parser("reject", help="reject and escalate to human")
+    reject_p.add_argument("--session", required=True)
+    reject_p.set_defaults(func=_handle_reject)
+
     args = parser.parse_args(argv)
     return args.func(args)
 
@@ -269,6 +281,43 @@ def _handle_explain(args: argparse.Namespace) -> int:
     print("")
     print("Terminal states: DONE_SUCCESS, ESCALATE_HUMAN, DONE_FAILURE")
     return 0
+
+
+def _handle_pending(args: argparse.Namespace) -> int:
+    """显示 pending human gate 的待确认信息（node/status/gate/patch 路径）。"""
+    data = json.loads(Path(args.session).read_text(encoding="utf-8"))
+    node = data.get("current_node", "?")
+    status = data.get("node_status", "?")
+    gate = data.get("pending_human_gate", False)
+    print(f"node={node} status={status} pending_human_gate={gate}")
+    if gate:
+        artifacts = data.get("artifacts_dir", "")
+        patch_path = Path(artifacts) / "patch_suggestion.json" if artifacts else None
+        if patch_path and patch_path.is_file():
+            print(f"patch: {patch_path}")
+    return 0
+
+
+def _handle_approve(args: argparse.Namespace) -> int:
+    """批准待确认补丁：清 pending_human_gate、标记 APPROVED，然后 resume 续跑。"""
+    p = Path(args.session)
+    data = json.loads(p.read_text(encoding="utf-8"))
+    data["pending_human_gate"] = False
+    data["node_status"] = "APPROVED"
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return _handle_resume(args)
+
+
+def _handle_reject(args: argparse.Namespace) -> int:
+    """拒绝待确认补丁：设终态 ESCALATE_HUMAN 并写回 session 文件。"""
+    p = Path(args.session)
+    data = json.loads(p.read_text(encoding="utf-8"))
+    data["pending_human_gate"] = False
+    data["terminal_state"] = RuntimeTerminalState.ESCALATE_HUMAN.value
+    data["transition_reason"] = "human rejected patch"
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    print("terminal_state=ESCALATE_HUMAN")
+    return 1
 
 
 # ---------------------------------------------------------------------------

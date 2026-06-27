@@ -742,21 +742,13 @@ def test_wait_analyzer_invokes_injected_analyzer_when_no_patch_file(tmp_path, mo
     from loop_controller.analyzer_protocol import LlmAnalyzer, AnalysisRequest, PatchSuggestion, FileChange
 
     class StubAnalyzer(LlmAnalyzer):
-        """测试用 analyzer：产出单个 FileChange 并写 patch_suggestion.json。"""
+        """测试用 analyzer：产出单个 FileChange（engine 负责落盘 patch_suggestion.json）。"""
         def analyze(self, request: AnalysisRequest) -> PatchSuggestion:
             analyzer_calls.append(request.session_id)
-            # 产出补丁并落盘，让后续 APPLY_PATCH 能读到
             change = FileChange(workspace_path="test.cpp", change_type="edit",
                                 old_marker="x", new_content="y")
-            suggestion = PatchSuggestion(target_files=[change], rationale="stub fix", confidence=0.5)
-            patch_data = [{
-                "workspace_path": "test.cpp", "change_type": "edit",
-                "old_marker": "x", "new_content": "y",
-            }]
-            (Path(tmp_path) / "patch_suggestion.json").write_text(
-                json.dumps(patch_data), encoding="utf-8",
-            )
-            return suggestion
+            # confidence 必须 >= 阈值(0.7) 才不会触发 LOW_CONFIDENCE gate
+            return PatchSuggestion(target_files=[change], rationale="stub fix", confidence=0.9)
 
     # mock node_apply_patch 让 APPLY_PATCH 成功
     from loop_contracts.failure_codes import FailureCode as FC

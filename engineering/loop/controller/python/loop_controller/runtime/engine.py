@@ -110,6 +110,10 @@ class LoopRuntime:
                 self._state.transition_reason = f"max_iterations({max_iterations}) exceeded"
                 break
             self._execute_current_node()
+            # pending_human_gate：等待人工决策，不设终态、不继续推进
+            if self._state.pending_human_gate:
+                self._persist_session()
+                return self._state
             if self._state.terminal_state != RuntimeTerminalState.NONE:
                 break
             self._transition()
@@ -662,6 +666,7 @@ class LoopRuntime:
             "current_node": self._state.current_node,
             "node_status": self._state.node_status,
             "transition_reason": self._state.transition_reason,
+            "pending_human_gate": self._state.pending_human_gate,
             "last_checkpoint_at": self._state.last_checkpoint_at,
         }
         session_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
