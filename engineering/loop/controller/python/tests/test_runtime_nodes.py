@@ -110,6 +110,11 @@ def test_deploy_success(monkeypatch):
         return DeployResult(success=True, mode=DeployMode.PUSH_SINGLE,
                             deployed_files=["/system/bin/foo"])
 
+    # mock AdbClient 构造（node_deploy 内部会构造 AdbClient）
+    class FakeAdbClient:
+        def __init__(self, *args, **kwargs):
+            pass
+    monkeypatch.setattr("loop_adb.client.AdbClient", FakeAdbClient)
     monkeypatch.setattr("loop_deploy.deployer.Deployer.deploy", fake_deployer_deploy)
 
     session = {
@@ -130,6 +135,10 @@ def test_deploy_failure(monkeypatch):
                             error="push failed",
                             error_code=DeployErrorCode.ADB_PUSH_FAILED)
 
+    class FakeAdbClient:
+        def __init__(self, *args, **kwargs):
+            pass
+    monkeypatch.setattr("loop_adb.client.AdbClient", FakeAdbClient)
     monkeypatch.setattr("loop_deploy.deployer.Deployer.deploy", fake_deployer_deploy)
 
     session = {
