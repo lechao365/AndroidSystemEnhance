@@ -526,8 +526,14 @@ class LoopRuntime:
                     self._state.node_status = "PATCH_READY"
                     self._checkpoint("analyzer produced patch", FailureCode.NONE)
                     return
+                # analyzer 无产出（target_files 为空）
+                import logging
+                logging.warning("analyzer returned empty target_files: confidence=%s rationale=%s",
+                                suggestion.confidence, suggestion.rationale[:100])
             except Exception as e:
                 # analyzer 异常不致命，降级到退人工
+                import logging
+                logging.warning("analyzer exception: %s: %s", type(e).__name__, e)
                 self._state.node_status = "ANALYZER_ERROR"
                 self._checkpoint(f"analyzer error: {e}", FailureCode.NONE)
         # analyzer 无产出或未注入 → 退人工

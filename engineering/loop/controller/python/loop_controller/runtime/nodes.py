@@ -224,26 +224,28 @@ def node_compile(session_dict: dict, workspace_root: str = "") -> dict:
 
     ws_root = _workspace_root(workspace_root)
 
-    # 在 workspace 根目录获取 git diff；workspace 非 git 仓库时从 session patch 提取
+    # 在 workspace 根目录获取 git diff；workspace 非 git 仓库或 diff 为空时从 session patch 提取
+    # 注意：apply 补丁后 working tree 可能恢复到 baseline 状态（git diff HEAD 为空），
+    # 但仍需编译被补丁修改的文件，所以必须 fallback 到 patch_applied.files
     diff_files: list[str] = []
+    git_prefix = os.environ.get("LE_PATCH_GIT_PREFIX", "")
     try:
         raw_files = get_diff_files("HEAD", cwd=ws_root)
         # ws_root 指向 LE_PATCH_GIT_ROOT 时，git diff 返回的路径相对于仓库根
         #（如 services/...），但 decider 期望 AOSP 根相对路径（vendor/lechao/services/...）
         # 需补 LE_PATCH_GIT_PREFIX 前缀
-        git_prefix = os.environ.get("LE_PATCH_GIT_PREFIX", "")
         if git_prefix and ws_root == os.environ.get("LE_PATCH_GIT_ROOT", ""):
             diff_files = [git_prefix + f if not f.startswith(git_prefix) else f for f in raw_files]
         else:
             diff_files = raw_files
     except RuntimeError:
-        # workspace 非 git 仓库：从 session attempts 的 patch 中提取 workspace_path
+        pass
+    # git diff 为空或失败 → 从 session attempts 的 patch 中提取
+    if not diff_files:
         for att in reversed(session_dict.get("attempts", [])):
             if isinstance(att, dict):
                 pa = att.get("patch_applied", {})
                 if pa.get("files"):
-                    # patch files 可能是 strip 后的路径（stash 模式），补上前缀
-                    git_prefix = os.environ.get("LE_PATCH_GIT_PREFIX", "")
                     raw_files = pa["files"]
                     if git_prefix:
                         diff_files = [git_prefix + f if not f.startswith(git_prefix) else f for f in raw_files]
