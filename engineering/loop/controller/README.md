@@ -105,8 +105,8 @@ INIT_SESSION -> RUN_VERIFY -> DECIDE_NEXT
 
 WAIT_ANALYZER_PATCH 节点通过 `ChainedAnalyzer` 编排三层降级分析器：
 
-1. **KnowledgeBaseAnalyzer**（confidence=0.98）：从 `patch_knowledge_base.json` 按 fingerprint 匹配历史成功补丁（Reflexion 模式）
-2. **ScriptedAnalyzer**（confidence=0.95）：确定性规则库，含 fault-verify stdout 污染、lciod HAL 字段反转/Daemon 公式/readEvent 排空等规则
+1. **KnowledgeBaseAnalyzer**（confidence=0.98）：从 `patch_knowledge_base.json` 按 fingerprint 匹配历史成功补丁（Reflexion 模式）。fingerprint 使用归一化算法消除动态数值差异：文件路径→`<path>`、十六进制地址→`<hex>`、整数→`<num>`，使同一故障的不同运行能匹配同一 KB 条目
+2. **ScriptedAnalyzer**（confidence=0.95）：确定性规则库，含 fault-verify stdout 污染、lciod HAL 字段反转/Daemon 公式/readEvent 排空、lcview HAL connect 故障等规则。规则支持两种匹配路径：直接文本匹配（failure_reason 含关键词）和 case_id 匹配（verify 用例的 command 是 grep|wc -l 时，failure_reason 只有计数）
 3. **OpencodeAnalyzer**（confidence=0.8）：通过 subprocess 调 `opencode run` 让 LLM 生成补丁
 
 配置：`config/analyzer.yaml`；知识库：`config/patch_knowledge_base.json`。DONE_SUCCESS 时自动归档成功补丁到知识库。

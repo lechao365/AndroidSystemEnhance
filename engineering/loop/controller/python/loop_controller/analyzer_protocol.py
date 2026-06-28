@@ -56,6 +56,7 @@ _FV_MAIN_C_PATH = "patchs/rpi5/others/usb-verify/src/cli/main.c"
 _LCIOD_HAL_PATH = "vendor/lechao/services/lechao_lciod/service.cpp"
 _LCIOD_DAEMON_PATH = "vendor/lechao/services/lechao_lciod/daemon.cpp"
 _LCVIEW_HAL_PATH = "vendor/lechao/services/lechao_lcview/hal/LcView.cpp"
+_LCVIEW_DAEMON_PATH = "vendor/lechao/services/lechao_lcview/daemon/lechao_lcview.cpp"
 
 
 def _rule_fv_stdout_pollution(case: dict) -> list[FileChange] | None:
@@ -151,25 +152,41 @@ def _rule_lciod_hal_readdrain_missing(case: dict) -> list[FileChange] | None:
 
 
 def _rule_lcview_hal_connect_fault(case: dict) -> list[FileChange] | None:
-    """LCVIEW HAL connect 故障：日志含 connect failed / cannot cast to ILcView。
+    """LCVIEW validate / HAL connect 故障：daemon logcat 含故障日志。
 
-    触发条件：failure_reason 含 "connect failed" 或 "cannot cast to ILcView"，
-    且涉及 lechao_lcview_hal 服务。
-    修复动作：删除注入的故障日志行。
+    两种触发路径：
+    1. **直接文本匹配**：failure_reason 含 "connect failed" / "cannot cast to ILcView"，
+       且涉及 lcview_hal。
+    2. **case_id 匹配**：case_id == "lcview_no_validate_errors" 且 output 非 0
+       （verify 用例的 command 是 grep|wc -l，failure_reason 只有计数）。
+
+    修复动作：删除注入的故障日志行（daemon main 入口的 FAULT-INJECTED 行）。
     confidence: 0.95（确定性规则）
     """
     reason = (case.get("failure_reason") or "").lower()
     command = (case.get("command") or "").lower()
-    # 必须涉及 lcview_hal
+    case_id = (case.get("id") or "").lower()
+
+    # 路径 2：case_id 匹配（verify 用例计数非 0 → 有故障日志）
+    if case_id == "lcview_no_validate_errors":
+        output = (case.get("output") or "").strip()
+        if output and output != "0":
+            return _lcview_fault_patch()
+
+    # 路径 1：直接文本匹配
     if "lechao_lcview_hal" not in command and "lcview" not in reason:
         return None
-    # 必须含 connect 故障特征
     if "connect failed" not in reason and "cannot cast to ilcview" not in reason:
         return None
+    return _lcview_fault_patch()
+
+
+def _lcview_fault_patch() -> list[FileChange]:
+    """构造 lcview daemon 故障日志删除补丁。"""
     return [FileChange(
-        workspace_path=_LCVIEW_HAL_PATH,
+        workspace_path=_LCVIEW_DAEMON_PATH,
         change_type="edit",
-        old_marker='    // FAULT-INJECTED: HAL connect 故障\n    ALOGE("LcView: connect failed: cannot cast to ILcView (fault injected)");\n',
+        old_marker='    // FAULT-INJECTED: HAL connect 故障\n    ALOGE("lechao_lcview: connect failed: cannot cast to ILcView (fault injected)");\n',
         new_content='',
     )]
 
@@ -291,21 +308,36 @@ def update_kb(kb_path: str, fingerprint: str, fingerprint_components: dict,
     save_kb(kb_path, entries, max_entries)
 
 
+def _normalize_reason(reason: str) -> str:
+    """归一化 failure_reason：消除动态数值差异，保留语义骨架。
+
+    规则（按顺序应用）：
+    1. 文件路径 (/a/b.c) → <path>
+    2. 十六进制地址 (0x7fff100) → <hex>
+    3. 整数计数 (count=12345 / got: 2) → <num>
+    4. 空白合并、首尾去空、转小写
+    """
+    reason = re.sub(r"/[\w/.-]+", "<path>", reason)
+    reason = re.sub(r"\b0x[0-9a-fA-F]+\b", "<hex>", reason)
+    reason = re.sub(r"(?<![<])\b\d+\b", "<num>", reason)
+    reason = re.sub(r"\s+", " ", reason).strip().lower()
+    return reason
+
+
 def _compute_fingerprint(request: AnalysisRequest, reason_length: int = 80) -> str:
     """计算失败指纹（sha256 前缀），保证同义失败归一为同一指纹。
 
     归一化规则：
     - 失败用例按 id 排序（顺序无关）。
     - failure_reason 截断到 reason_length 字符。
+    - 动态数值归一化：文件路径→<path>、十六进制地址→<hex>、整数→<num>。
     - 空白字符合并、首尾去空、转小写。
-    - 文件路径 (/a/b.c) 替换为 <path>，消除环境差异。
     """
     components = []
     for fc in sorted(request.failed_cases, key=lambda c: c.get("id", "")):
         case_id = fc.get("id", "")
         reason = (fc.get("failure_reason") or "")[:reason_length]
-        reason = re.sub(r"\s+", " ", reason).strip().lower()
-        reason = re.sub(r"/[\w/.-]+", "<path>", reason)
+        reason = _normalize_reason(reason)
         components.append(f"{case_id}:{reason}")
     raw = f"{request.target}|{request.suite}|{'|'.join(components)}"
     return "sha256:" + hashlib.sha256(raw.encode()).hexdigest()

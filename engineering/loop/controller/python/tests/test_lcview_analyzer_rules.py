@@ -15,7 +15,7 @@ def test_hal_connect_fault_match_connect_failed():
     result = _rule_lcview_hal_connect_fault(case)
     assert result is not None, "should match"
     assert len(result) == 1
-    assert "LcView.cpp" in result[0].workspace_path
+    assert "lechao_lcview.cpp" in result[0].workspace_path
 
 
 def test_hal_connect_fault_match_cannot_cast():
@@ -38,3 +38,21 @@ def test_hal_connect_fault_no_match_no_lcview():
     """不含 lcview 关键词的不命中。"""
     case = {"failure_reason": "connect failed somewhere", "command": "getprop init.svc.other"}
     assert _rule_lcview_hal_connect_fault(case) is None
+
+
+def test_hal_connect_fault_match_by_case_id():
+    """verify 用例 lcview_no_validate_errors 失败时（计数非 0）应命中。
+
+    场景：verify command 是 grep|wc -l，failure_reason 只有计数，
+    但 case_id 暗示了 validate 错误存在。
+    """
+    case = {
+        "id": "lcview_no_validate_errors",
+        "failure_reason": "expected output to contain '0', got: 1",
+        "command": "logcat -d -s lechao_lcview:* 2>/dev/null | grep -E 'fault injected|validate failed: bad magic' | wc -l",
+        "output": "1",
+    }
+    result = _rule_lcview_hal_connect_fault(case)
+    assert result is not None, "should match by case_id"
+    assert len(result) == 1
+    assert "lechao_lcview.cpp" in result[0].workspace_path

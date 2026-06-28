@@ -58,6 +58,28 @@ def test_fingerprint_order_independent():
     assert _compute_fingerprint(req1) == _compute_fingerprint(req2)
 
 
+def test_fingerprint_normalizes_dynamic_numbers():
+    """动态数值（如 logcat 计数 got: 1 / got: 2）应归一化为同一指纹。"""
+    req1 = AnalysisRequest(session_id="s1", attempt_index=1, target="lcview",
+        suite="features.lcview.common",
+        failed_cases=[{"id": "lcview_no_validate_errors",
+                       "failure_reason": "expected output to contain '0', got: 1"}])
+    req2 = AnalysisRequest(session_id="s1", attempt_index=1, target="lcview",
+        suite="features.lcview.common",
+        failed_cases=[{"id": "lcview_no_validate_errors",
+                       "failure_reason": "expected output to contain '0', got: 2"}])
+    assert _compute_fingerprint(req1) == _compute_fingerprint(req2)
+
+
+def test_fingerprint_normalizes_hex_and_counts():
+    """十六进制地址、大整数计数应归一化。"""
+    req1 = AnalysisRequest(session_id="s1", attempt_index=1, target="t", suite="s",
+        failed_cases=[{"id": "C1", "failure_reason": "mismatch at 0x7fff100 count=12345"}])
+    req2 = AnalysisRequest(session_id="s1", attempt_index=1, target="t", suite="s",
+        failed_cases=[{"id": "C1", "failure_reason": "mismatch at 0xabcd200 count=67890"}])
+    assert _compute_fingerprint(req1) == _compute_fingerprint(req2)
+
+
 # ---------------------------------------------------------------------------
 # KnowledgeBaseAnalyzer
 # ---------------------------------------------------------------------------
