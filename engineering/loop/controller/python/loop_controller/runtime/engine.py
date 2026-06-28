@@ -177,18 +177,24 @@ class LoopRuntime:
                 self._checkpoint("no patch file found", FailureCode.PATCH_REJECTED)
                 return
             # ISSUE-2：尝试创建独立 worktree 隔离补丁，失败降级到 stash 模式
+            # 注意：worktree 从 baseline commit 创建，不含当前 working tree 的修改。
+            # 当 analyzer 补丁的 old_marker 针对含故障的代码时，worktree（baseline）
+            # 中找不到匹配。因此默认禁用 worktree，用 stash 模式（直接 apply 到
+            # 当前 workspace，失败时 git stash apply 回滚）。
+            # 如需 worktree 隔离，设置 LE_WORKTREE_ISOLATION=1。
             worktree_handle = None
-            try:
-                from loop_controller.workspace_isolation import create_patch_worktree
-                # 优先用 LE_PATCH_GIT_ROOT（vendor/lechao 本地 git），支持 worktree 隔离；
-                # 回退到 AOSP_ROOT（兼容旧环境）
-                ws_root = os.environ.get("LE_PATCH_GIT_ROOT") or os.environ.get(
-                    "AOSP_ROOT", os.path.expanduser("~/workspace/aosp"))
-                worktree_handle = create_patch_worktree(
-                    ws_root, self._session.session_id, self._session.current_attempt,
-                )
-            except Exception:
-                worktree_handle = None
+            if os.environ.get("LE_WORKTREE_ISOLATION", "0") == "1":
+                try:
+                    from loop_controller.workspace_isolation import create_patch_worktree
+                    # 优先用 LE_PATCH_GIT_ROOT（vendor/lechao 本地 git），支持 worktree 隔离；
+                    # 回退到 AOSP_ROOT（兼容旧环境）
+                    ws_root = os.environ.get("LE_PATCH_GIT_ROOT") or os.environ.get(
+                        "AOSP_ROOT", os.path.expanduser("~/workspace/aosp"))
+                    worktree_handle = create_patch_worktree(
+                        ws_root, self._session.session_id, self._session.current_attempt,
+                    )
+                except Exception:
+                    worktree_handle = None
             result = _runtime_nodes.node_apply_patch(
                 patch_path, self._to_session_dict(), "",
                 worktree_handle=worktree_handle,

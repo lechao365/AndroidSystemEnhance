@@ -27,6 +27,11 @@ def _workspace_root(workspace_root: str = "") -> str:
     )
 
 
+def _aosp_root() -> str:
+    """返回 AOSP 根路径（编译必须在 AOSP 根执行，不能是 vendor/lechao 子仓库）。"""
+    return os.environ.get("AOSP_ROOT", os.path.expanduser("~/workspace/aosp"))
+
+
 def _parse_deploy_ctx(stdout: str) -> dict | None:
     """从 deploy CLI stdout 解析 DEPLOY_CTX JSON，返回 dict 或 None。"""
     for line in stdout.split("\n"):
@@ -115,8 +120,26 @@ def node_apply_patch(
             "error": f"rejected: {guard.rejected_files}",
         }
 
-    # 语法预检
-    syntax_errors = check_syntax(changes, ws_root)
+    # 语法预检（用 strip 后的 changes，因为 check_syntax 也用 ws_root 拼路径）
+    git_prefix = os.environ.get("LE_PATCH_GIT_PREFIX", "")
+    need_strip = bool(git_prefix and ws_root == os.environ.get("LE_PATCH_GIT_ROOT", ""))
+    apply_changes = changes
+    if need_strip:
+        apply_changes = []
+        for fc in changes:
+            if fc.workspace_path.startswith(git_prefix):
+                apply_changes.append(FileChange(
+                    workspace_path=fc.workspace_path[len(git_prefix):],
+                    change_type=fc.change_type,
+                    new_content=fc.new_content,
+                    old_marker=fc.old_marker,
+                    line_range=fc.line_range,
+                    diff=fc.diff,
+                ))
+            else:
+                apply_changes.append(fc)
+
+    syntax_errors = check_syntax(apply_changes, ws_root)
     if syntax_errors:
         return {
             "status": "SYNTAX_ERROR",
@@ -127,27 +150,6 @@ def node_apply_patch(
     # 应用目标路径：worktree 模式用 worktree_path，stash 模式用 workspace_root
     apply_root = worktree_handle.worktree_path if worktree_handle else ws_root
     stash_ref = ""
-
-    # worktree 模式下 workspace_path 含 LE_PATCH_GIT_ROOT 前缀（如 vendor/lechao/），
-    # 需 strip 到 git 仓库根的相对路径，否则 apply_file_changes 会拼出错误的多层路径。
-    # 白名单校验和语法预检仍用原始 changes（target-paths.yaml 用带前缀的路径）。
-    apply_changes = changes
-    if worktree_handle:
-        git_prefix = os.environ.get("LE_PATCH_GIT_PREFIX", "vendor/lechao/")
-        stripped = []
-        for fc in changes:
-            if fc.workspace_path.startswith(git_prefix):
-                stripped.append(FileChange(
-                    workspace_path=fc.workspace_path[len(git_prefix):],
-                    change_type=fc.change_type,
-                    new_content=fc.new_content,
-                    old_marker=fc.old_marker,
-                    line_range=fc.line_range,
-                    diff=fc.diff,
-                ))
-            else:
-                stripped.append(fc)
-        apply_changes = stripped
 
     # stash 备份仅在 break-glass 模式下使用（worktree 模式隔离已天然提供回滚能力）
     if not worktree_handle:
@@ -225,14 +227,28 @@ def node_compile(session_dict: dict, workspace_root: str = "") -> dict:
     # 在 workspace 根目录获取 git diff；workspace 非 git 仓库时从 session patch 提取
     diff_files: list[str] = []
     try:
-        diff_files = get_diff_files("HEAD", cwd=ws_root)
+        raw_files = get_diff_files("HEAD", cwd=ws_root)
+        # ws_root 指向 LE_PATCH_GIT_ROOT 时，git diff 返回的路径相对于仓库根
+        #（如 services/...），但 decider 期望 AOSP 根相对路径（vendor/lechao/services/...）
+        # 需补 LE_PATCH_GIT_PREFIX 前缀
+        git_prefix = os.environ.get("LE_PATCH_GIT_PREFIX", "")
+        if git_prefix and ws_root == os.environ.get("LE_PATCH_GIT_ROOT", ""):
+            diff_files = [git_prefix + f if not f.startswith(git_prefix) else f for f in raw_files]
+        else:
+            diff_files = raw_files
     except RuntimeError:
         # workspace 非 git 仓库：从 session attempts 的 patch 中提取 workspace_path
         for att in reversed(session_dict.get("attempts", [])):
             if isinstance(att, dict):
                 pa = att.get("patch_applied", {})
                 if pa.get("files"):
-                    diff_files = pa["files"]
+                    # patch files 可能是 strip 后的路径（stash 模式），补上前缀
+                    git_prefix = os.environ.get("LE_PATCH_GIT_PREFIX", "")
+                    raw_files = pa["files"]
+                    if git_prefix:
+                        diff_files = [git_prefix + f if not f.startswith(git_prefix) else f for f in raw_files]
+                    else:
+                        diff_files = raw_files
                     break
     if not diff_files:
         return {
@@ -263,7 +279,10 @@ def node_compile(session_dict: dict, workspace_root: str = "") -> dict:
             )
 
     try:
-        result = compile_plan(plan, ws_root)
+        # 编译必须在 AOSP 根执行（mmm 需要 build/envsetup.sh + lunch）
+        # ws_root 是 LE_PATCH_GIT_ROOT（vendor/lechao）时不能直接用于编译
+        aosp_ws = _aosp_root()
+        result = compile_plan(plan, aosp_ws)
     except Exception as e:
         return {
             "status": "COMPILE_FAILED",
@@ -299,11 +318,17 @@ def node_deploy(session_dict: dict, adb_endpoint: str = "") -> dict:
 
     # 构造 deploy plan：优先从 patch files 推断，回退到 git diff
     diff_files: list[str] = []
+    git_prefix = os.environ.get("LE_PATCH_GIT_PREFIX", "")
     for att in reversed(session_dict.get("attempts", [])):
         if isinstance(att, dict):
             pa = att.get("patch_applied", {})
             if pa.get("files"):
-                diff_files = pa["files"]
+                raw_files = pa["files"]
+                # patch files 可能是 strip 后的路径，补上前缀让 decider 匹配
+                if git_prefix:
+                    diff_files = [git_prefix + f if not f.startswith(git_prefix) else f for f in raw_files]
+                else:
+                    diff_files = raw_files
                 break
     if not diff_files:
         try:
