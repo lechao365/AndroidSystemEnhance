@@ -43,9 +43,9 @@ cases:
       collectors: [lcview_files, lcview_kmsg]
 
   - id: lcview_kernel_module_loaded
-    description: "[spec LV-KE-02] 内核模块已加载（dmesg 含 initialized ring=）"
-    command: "dmesg | grep 'kernel_lechao_lcview' | grep 'initialized (ring=' | head -1"
-    assert: {type: contains, value: "initialized (ring="}
+    description: "[spec LV-KE-02] 内核模块已加载初始化（sysfs /sys/module/lcview + class 节点存在；不依赖 dmesg 环形缓冲，避免设备长运行后早期 init 日志滚出导致 false positive）"
+    command: "test -d /sys/module/lcview && test -d /sys/class/lcview/vendor_lechao_lcview && echo MODULE_OK || echo MODULE_MISSING"
+    assert: {type: contains, value: "MODULE_OK"}
     severity: critical
     requires: [adb_shell_reachable]
     on_fail:
@@ -77,6 +77,42 @@ cases:
     requires: [lcview_daemon_service_state]
     on_fail:
       collectors: [lcview_logcat, lcview_pull_logs]
+
+  - id: lcview_no_readloop_abort
+    description: "[code] daemon logcat 无解析循环异常中断日志（read-loop fault N1；主动 restart daemon 使启动日志故障稳定重现，避免 deploy logcat -c 清缓冲导致假 PASS）"
+    command: "logcat -c 2>/dev/null; setprop ctl.restart lechao_lcview 2>/dev/null; sleep 5; logcat -d -s lechao_lcview:* 2>/dev/null | grep -c 'parse loop aborted: read-loop fault N1'"
+    assert: {type: equals, value: "0"}
+    severity: critical
+    requires: [lcview_daemon_service_state]
+    on_fail:
+      collectors: [lcview_logcat, lcview_pull_logs]
+
+  - id: lcview_no_fw_degraded
+    description: "[code] daemon logcat 无 filewriter degraded 异常日志（验证 OpencodeAnalyzer LLM 闭环；主动 restart daemon 使启动日志故障稳定重现，避免 deploy logcat -c 清缓冲导致假 PASS）"
+    command: "logcat -c 2>/dev/null; setprop ctl.restart lechao_lcview 2>/dev/null; sleep 5; logcat -d -s lechao_lcview:* 2>/dev/null | grep -c 'filewriter degraded'"
+    assert: {type: equals, value: "0"}
+    severity: critical
+    requires: [lcview_daemon_service_state]
+    on_fail:
+      collectors: [lcview_logcat, lcview_pull_logs]
+
+  - id: lcview_no_config_drift
+    description: "[code] daemon logcat 无 unrecoverable config drift 异常（N3 故障注入专属捕获 case，验证三层 analyzer 空产出 → ESCALATE_HUMAN）"
+    command: "logcat -d -s lechao_lcview:* 2>/dev/null | grep -c 'unrecoverable config drift'"
+    assert: {type: equals, value: "0"}
+    severity: critical
+    requires: [lcview_daemon_service_state]
+    on_fail:
+      collectors: [lcview_logcat, lcview_pull_logs]
+
+  - id: lcview_no_n6_fault_prop
+    description: "[code] boot 后无 N6 故障属性 lechao.fault.n6（N6 故障注入 init.rc 专属捕获 case，验证 DD_BOOT_REBOOT 链路；属性由 init 在 boot 时设置，持久可检测，不依赖 daemon）"
+    command: "getprop lechao.fault.n6"
+    assert: {type: equals, value: ""}
+    severity: critical
+    requires: [adb_shell_reachable]
+    on_fail:
+      collectors: [lcview_service_state, serial_recent]
 
   - id: lcview_schema_present
     description: "[code] schema 文件 /vendor/etc/lcview_events.json 存在 [LV-FW-01]"

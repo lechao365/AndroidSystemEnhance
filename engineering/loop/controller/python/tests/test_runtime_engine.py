@@ -673,14 +673,15 @@ def test_rollback_deploy_uses_adb_endpoint(tmp_path, monkeypatch):
     import sys
     from types import ModuleType
 
-    # 注入 fake module 使 monkeypatch.setattr 可解析 loop_adb.client
+    # 用 monkeypatch.setitem/setattr 注入 fake module，测试结束自动恢复 sys.modules，
+    # 避免残留假 loop_adb 模块污染后续 deploy 模块测试（test_adb_ops / test_deployer）
     if "loop_adb" not in sys.modules:
         loop_adb = ModuleType("loop_adb")
-        sys.modules["loop_adb"] = loop_adb
+        monkeypatch.setitem(sys.modules, "loop_adb", loop_adb)
     if "loop_adb.client" not in sys.modules:
         loop_adb_client = ModuleType("loop_adb.client")
-        sys.modules["loop_adb.client"] = loop_adb_client
-        sys.modules["loop_adb"].client = loop_adb_client
+        monkeypatch.setitem(sys.modules, "loop_adb.client", loop_adb_client)
+        monkeypatch.setattr(sys.modules["loop_adb"], "client", loop_adb_client, raising=False)
 
     from loop_controller.runtime.nodes import node_rollback_deploy
     from loop_contracts.failure_codes import FailureCode as FC
@@ -704,7 +705,7 @@ def test_rollback_deploy_uses_adb_endpoint(tmp_path, monkeypatch):
         def push(self, local, remote, **kw):
             return FakePushResult()
 
-    sys.modules["loop_adb.client"].AdbClient = FakeAdbClient
+    monkeypatch.setattr(sys.modules["loop_adb.client"], "AdbClient", FakeAdbClient, raising=False)
 
     result = node_rollback_deploy(
         session_dict={},

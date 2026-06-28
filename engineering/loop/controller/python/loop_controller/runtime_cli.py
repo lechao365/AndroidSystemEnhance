@@ -86,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
 
     approve_p = sub.add_parser("approve", help="approve pending patch and resume")
     approve_p.add_argument("--session", required=True)
+    approve_p.add_argument("--adb-endpoint", default="")
     approve_p.set_defaults(func=_handle_approve)
 
     reject_p = sub.add_parser("reject", help="reject and escalate to human")
@@ -201,7 +202,7 @@ def _handle_run(args: argparse.Namespace) -> int:
         analyzer, kb_path, conf_threshold = _build_analyzer()
         rt = LoopRuntime(
             session, _CASES_DIR, _DEVICE_PROFILE,
-            adb_endpoint=args.adb_endpoint,
+            adb_endpoint=getattr(args, "adb_endpoint", ""),
             initial_terminal_state=ts,
             serial_shell_provider=serial_sh,
             analyzer=analyzer,
@@ -232,7 +233,7 @@ def _handle_resume(args: argparse.Namespace) -> int:
         analyzer, kb_path, conf_threshold = _build_analyzer()
         rt = LoopRuntime(
             session, _CASES_DIR, _DEVICE_PROFILE,
-            adb_endpoint=args.adb_endpoint,
+            adb_endpoint=getattr(args, "adb_endpoint", ""),
             initial_terminal_state=ts,
             serial_shell_provider=serial_sh,
             analyzer=analyzer,
@@ -240,6 +241,14 @@ def _handle_resume(args: argparse.Namespace) -> int:
         rt._kb_path = kb_path
         rt._confidence_threshold = conf_threshold
         rt.resume()
+        # 传入人工 approve 标记：approve 后 resume 回到 APPLY_PATCH，需跳过 confidence gate 真正 apply
+        _raw = json.loads(Path(args.session).read_text(encoding="utf-8"))
+        if _raw.get("human_gate_approved"):
+            rt._state.human_gate_approved = True
+            # 清除 session 中的一次性 approve 标记，避免后续轮次误跳过 gate
+            _raw["human_gate_approved"] = False
+            Path(args.session).write_text(
+                json.dumps(_raw, indent=2, ensure_ascii=False), encoding="utf-8")
         state = rt.run()
         print(f"terminal_state={state.terminal_state.value}")
         if state.terminal_state == RuntimeTerminalState.DONE_SUCCESS:
@@ -304,6 +313,7 @@ def _handle_approve(args: argparse.Namespace) -> int:
     data = json.loads(p.read_text(encoding="utf-8"))
     data["pending_human_gate"] = False
     data["node_status"] = "APPROVED"
+    data["human_gate_approved"] = True
     p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     return _handle_resume(args)
 

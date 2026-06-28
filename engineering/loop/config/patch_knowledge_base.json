@@ -22,6 +22,28 @@
       "created_at": "2026-06-27T21:47:37+08:00",
       "hit_count": 0,
       "last_hit_at": ""
+    },
+    {
+      "fingerprint": "sha256:efede22c3ca66c8cedbdb36257e35ff82675340bb55e0aa832d383e27c1fc642",
+      "fingerprint_components": {},
+      "patch": [
+        {
+          "workspace_path": "vendor/lechao/services/lechao_lcview/daemon/lechao_lcview.cpp",
+          "change_type": "edit",
+          "old_marker": "    ALOGI(\"lechao_lcview: loaded %zu event schemas\", schema.eventCount());\n    ALOGE(\"lechao_lcview: filewriter degraded: schema field width mismatch n2\");  // FAULT-INJECTED-N5\n",
+          "new_content": "    ALOGI(\"lechao_lcview: loaded %zu event schemas\", schema.eventCount());\n",
+          "line_range": null,
+          "diff": ""
+        }
+      ],
+      "description": "自动归档 from lcview-20260628143533",
+      "confidence": 0.95,
+      "deploy_mode_hint": "",
+      "source_session": "lcview-20260628143533",
+      "source_attempt": 2,
+      "created_at": "2026-06-28T14:38:54+08:00",
+      "hit_count": 0,
+      "last_hit_at": ""
     }
   ]
 }

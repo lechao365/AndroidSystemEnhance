@@ -25,22 +25,22 @@ cases:
       collectors: [lcview_files]
 
   - id: ke02_module_init_log
-    description: "[spec LV-KE-02] 模块初始化日志 dmesg 含 'initialized (ring='"
-    command: "dmesg | grep 'kernel_lechao_lcview' | grep 'initialized (ring=' | head -1"
-    assert: {type: contains, value: "initialized (ring="}
+    description: "[spec LV-KE-02] 模块已初始化（sysfs /sys/module/lcview + class 节点存在；不依赖 dmesg 环形缓冲，避免长运行后 init 日志滚出导致整条依赖链 false positive）"
+    command: "test -d /sys/module/lcview && test -d /sys/class/lcview/vendor_lechao_lcview && echo MODULE_OK || echo MODULE_MISSING"
+    assert: {type: contains, value: "MODULE_OK"}
     severity: critical
     requires: [adb_shell_reachable]
     on_fail:
       collectors: [lcview_kmsg]
 
   - id: ke03_ring_size_default
-    description: "[spec LV-KE-03] 模块参数 ring_size_kb 默认 256KB（init 日志含 ring=256KB）"
-    command: "dmesg | grep 'kernel_lechao_lcview' | grep 'initialized (ring=' | grep -o 'ring=[0-9]*KB' | head -1"
-    assert: {type: regex, pattern: "ring=([0-9]+)KB"}
+    description: "[spec LV-KE-03] 模块参数 ring_size_kb 默认 256（读 sysfs 参数，不依赖 dmesg）"
+    command: "cat /sys/module/lcview/parameters/ring_size_kb 2>/dev/null"
+    assert: {type: regex, pattern: "^256$"}
     severity: warn
     requires: [ke02_module_init_log]
     on_fail:
-      collectors: [lcview_kmsg]
+      collectors: [lcview_files]
 
   - id: ke04_debug_param_present
     description: "[spec LV-KE-04] 模块参数 debug 存在（/sys/module/lcview/parameters/debug）"
@@ -71,13 +71,13 @@ cases:
       collectors: [lcview_kmsg, lcview_files]
 
   - id: ke15_ring_initialized_log
-    description: "[spec LV-KE-15] 环形缓冲区初始化日志（ring init 成功，含 ring=%uKB read_buf=%uB）"
-    command: "dmesg | grep 'kernel_lechao_lcview' | grep 'initialized ring=' | grep -o 'ring=[0-9]*KB read_buf=[0-9]*B' | head -1"
-    assert: {type: regex, pattern: "ring=[0-9]+KB read_buf=[0-9]+B"}
+    description: "[spec LV-KE-15] 环形缓冲区初始化成功（ring_size_kb 参数可读为正整数，作为 ring init 成功的 sysfs 代理；read_buf 未经 sysfs 暴露，原 dmesg 检查长运行后会因环形缓冲滚出 false positive）"
+    command: "cat /sys/module/lcview/parameters/ring_size_kb 2>/dev/null"
+    assert: {type: regex, pattern: "^[0-9]+$"}
     severity: warn
     requires: [ke02_module_init_log]
     on_fail:
-      collectors: [lcview_kmsg]
+      collectors: [lcview_files]
 
   - id: ke16_ring_no_init_error
     description: "[spec LV-KE-16] ring 初始化无失败日志（dmesg 不含 'failed to init ring buffer'）"

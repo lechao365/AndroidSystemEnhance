@@ -191,12 +191,84 @@ def _lcview_fault_patch() -> list[FileChange]:
     )]
 
 
+def _rule_lcview_parse_loop_break(case: dict) -> list[FileChange] | None:
+    """LCVIEW 解析循环异常中断故障（read-loop fault N1）。
+
+    两种触发路径：
+    1. **case_id 匹配**：case_id == "lcview_no_readloop_abort" 且 output 非 0
+       （专属 verify 用例 grep 'parse loop aborted'，failure_reason 只有计数）。
+    2. **文本匹配**：failure_reason 含 "parse loop aborted" / "read-loop fault n1"。
+
+    修复动作：删除注入的故障日志 + break 行（daemon 解析循环入口的 FAULT-INJECTED-N1 行）。
+    confidence: 0.95（确定性规则）
+    """
+    reason = (case.get("failure_reason") or "").lower()
+    case_id = (case.get("id") or "").lower()
+
+    # 路径 1：case_id 匹配（专属 verify 用例计数非 0 → 有故障中断日志）
+    if case_id == "lcview_no_readloop_abort":
+        output = (case.get("output") or "").strip()
+        if output and output != "0":
+            return _lcview_parse_loop_patch()
+
+    # 路径 2：直接文本匹配
+    if "parse loop aborted" in reason or "read-loop fault n1" in reason:
+        return _lcview_parse_loop_patch()
+    return None
+
+
+def _lcview_parse_loop_patch() -> list[FileChange]:
+    """构造 lcview daemon 解析循环 break 故障删除补丁。"""
+    return [FileChange(
+        workspace_path=_LCVIEW_DAEMON_PATH,
+        change_type="edit",
+        old_marker='    ALOGE("lechao_lcview: parse loop aborted: read-loop fault N1");  // FAULT-INJECTED-N1\n',
+        new_content='',
+    )]
+
+
+def _rule_lcview_rc_fault_prop(case: dict) -> list[FileChange] | None:
+    """LCVIEW init.rc 注入的故障属性（N6 DD_BOOT_REBOOT 链路验证）。
+
+    两种触发路径：
+    1. **case_id 匹配**：case_id == "lcview_no_n6_fault_prop" 且 output 非空
+       （专属 verify 用例 getprop lechao.fault.n6，boot 后非空表示 .rc 故障已生效）。
+    2. **文本匹配**：failure_reason 含 "lechao.fault.n6"。
+
+    修复动作：删除 daemon/lechao_lcview.rc 中注入的 setprop 故障行。
+    confidence: 0.95（确定性规则）；.rc 改动经 decider 自动走 DD_BOOT_REBOOT。
+    """
+    reason = (case.get("failure_reason") or "").lower()
+    case_id = (case.get("id") or "").lower()
+
+    if case_id == "lcview_no_n6_fault_prop":
+        output = (case.get("output") or "").strip()
+        if output:
+            return _lcview_rc_fault_patch()
+
+    if "lechao.fault.n6" in reason:
+        return _lcview_rc_fault_patch()
+    return None
+
+
+def _lcview_rc_fault_patch() -> list[FileChange]:
+    """构造 lcview daemon init.rc 故障属性删除补丁（DD_BOOT_REBOOT）。"""
+    return [FileChange(
+        workspace_path="vendor/lechao/services/lechao_lcview/daemon/lechao_lcview.rc",
+        change_type="edit",
+        old_marker="    setprop lechao.fault.n6 injected\n",
+        new_content="",
+    )]
+
+
 _RULES = [
     _rule_fv_stdout_pollution,
     _rule_lciod_hal_field_inversion,
     _rule_lciod_daemon_formula_error,
     _rule_lciod_hal_readdrain_missing,
     _rule_lcview_hal_connect_fault,
+    _rule_lcview_parse_loop_break,
+    _rule_lcview_rc_fault_prop,
 ]
 
 

@@ -161,7 +161,8 @@ class LoopRuntime:
             suggestion_meta = self._read_suggestion_meta()
             if suggestion_meta:
                 conf = suggestion_meta.get("confidence", 1.0)
-                if conf < self._confidence_threshold:
+                # 低置信触发人工 gate；但若已人工 approve（human_gate_approved）则跳过，继续 apply
+                if conf < self._confidence_threshold and not self._state.human_gate_approved:
                     self._state.node_status = "LOW_CONFIDENCE"
                     self._state.pending_human_gate = True
                     self._checkpoint(
@@ -169,6 +170,8 @@ class LoopRuntime:
                         FailureCode.NONE,
                     )
                     return
+            # 已 approve 或高置信：消费 approve 标记后真正落盘补丁（避免后续轮次误跳过 gate）
+            self._state.human_gate_approved = False
             patch_path = os.path.join(self._session.artifacts_dir, "patch_suggestion.json")
             if not os.path.isfile(patch_path):
                 self._state.node_status = "NO_PATCH_FILE"
@@ -557,6 +560,11 @@ class LoopRuntime:
         # _execute_decide_next; a RETRY routes to BUILD_ANALYSIS_REQUEST.
         if node == NodeKind.DECIDE_NEXT.value and self._state.node_status == "RETRY":
             return NodeKind.BUILD_ANALYSIS_REQUEST.value
+        # human gate 暂停在 APPLY_PATCH（补丁尚未真正 apply）：next_node 指回 APPLY_PATCH，
+        # 使 approve 后 resume 回到 APPLY_PATCH 重新执行并真正落盘补丁（修复：原先线性
+        # 指向 COMPILE_PATCH 会跳过补丁应用，导致 approve 续跑后补丁丢失 → DONE_FAILURE）。
+        if node == NodeKind.APPLY_PATCH.value and self._state.node_status == "LOW_CONFIDENCE":
+            return NodeKind.APPLY_PATCH.value
         if node == NodeKind.COMPILE_PATCH.value:
             if self._state.node_status.startswith("COMPILE_FAILED"):
                 return NodeKind.REVERT_PATCH.value

@@ -57,6 +57,7 @@ class RuntimeState:
     node_status: str = "PENDING"
     transition_reason: str = ""
     pending_human_gate: bool = False
+    human_gate_approved: bool = False
     interrupted: bool = False
     resume_token: str = ""
     last_checkpoint_at: str = ""
