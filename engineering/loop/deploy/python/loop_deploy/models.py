@@ -27,6 +27,12 @@ class DeployErrorCode(StrEnum):
     SERVICE_NOT_STARTED = "SERVICE_NOT_STARTED"
     ARTIFACT_NOT_FOUND = "ARTIFACT_NOT_FOUND"
     HEALTH_CHECK_FAILED = "HEALTH_CHECK_FAILED"
+    DISK_FULL = "DISK_FULL"
+    DISK_CHECK_FAILED = "DISK_CHECK_FAILED"
+    BACKUP_CORRUPT = "BACKUP_CORRUPT"
+    BACKUP_FAILED = "BACKUP_FAILED"
+    CRITICAL_SERVICE_DOWN = "CRITICAL_SERVICE_DOWN"
+    ADB_PULL_FAILED = "ADB_PULL_FAILED"
     UNKNOWN = "UNKNOWN"
 
 
@@ -77,3 +83,5 @@ class DeployResult:
     backup_path: str = ""
     backup_sha: str = ""
     deployed_files: list[str] = field(default_factory=list)
+    block_device: str = ""
+    warnings: list[str] = field(default_factory=list)

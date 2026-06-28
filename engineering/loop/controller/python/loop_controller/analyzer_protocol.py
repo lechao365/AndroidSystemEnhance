@@ -431,6 +431,13 @@ class KnowledgeBaseAnalyzer(LlmAnalyzer):
         fingerprint = self._compute_fingerprint(request)
         for entry in self._kb:
             if entry.fingerprint == fingerprint:
+                # 命中：更新 hit_count / last_hit_at 并写回 KB
+                entry.hit_count += 1
+                entry.last_hit_at = _time.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+                try:
+                    save_kb(self._kb_path, self._kb)
+                except Exception:
+                    pass  # KB 写回失败不影响命中返回
                 patches = [FileChange(**p) for p in entry.patch]
                 return PatchSuggestion(
                     target_files=patches,

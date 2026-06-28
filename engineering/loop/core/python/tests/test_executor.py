@@ -391,7 +391,8 @@ collectors:
     suite = load_suite(str(suite_yaml), [str(tmp_path)])
 
     class ContextTransport(FixtureTransport):
-        def describe_runtime_context(self):
+        def describe_runtime_context(self, artifacts_dir=None):
+            del artifacts_dir
             return {
                 "transcript_path": "/tmp/serial.log",
                 "serial_snippet": ["line1"],
@@ -641,6 +642,48 @@ collectors:
     )
     assert bundle.summary["overall"] == "FAIL"
     assert bundle.summary["failure_code"] == "LCVIEW_EVIDENCE_FAIL"
+
+
+def test_required_collector_run_raising_oserror_makes_suite_fail(tmp_path):
+    """required collector 的 run() 抛 OSError 逃逸到 executor 时，suite 必须 FAIL。
+
+    回归 P0-6：executor 降级分支未设 status（默认 "ok"），导致 required 判定
+    `cr.status != "ok"` 恒不成立，required collector 抛错被静默判 PASS。
+    本场景走 serial_context 模式，describe_runtime_context 抛 OSError 逃逸到
+    executor.py 的 `except OSError` 降级路径（区别于 adb_pull 的内部捕获路径）。
+    """
+    suite_yaml = """
+suite: t
+version: 1
+final_collectors: [serial_probe]
+cases:
+  - id: ok
+    command: ""
+    assert: {type: prompt_visible}
+collectors:
+  serial_probe:
+    mode: serial_context
+    required: true
+    failure_code: SERIAL_PROBE_FAIL
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+
+    class ContextOSErrorTransport(FixtureTransport):
+        def describe_runtime_context(self, artifacts_dir=None):
+            del artifacts_dir
+            raise OSError("serial context lost")
+
+    transport = ContextOSErrorTransport([{"t": 0.1, "text": "console:/ $"}])
+    transport.acquire_writer()
+    bundle = CaseExecutor(transport, AssertionEngine()).execute_suite(
+        suite, device_id="rp5", prompt_markers=["console:/ $"]
+    )
+    # case 本身 pass，但 required collector 抛错 → overall 必须 FAIL
+    assert bundle.cases[0].status == "pass"
+    assert bundle.evidence["t.serial_probe"].status != "ok"
+    assert bundle.summary["overall"] == "FAIL"
+    assert bundle.summary["failure_code"] == "SERIAL_PROBE_FAIL"
 
 
 def test_final_collector_runs_on_pass(tmp_path):

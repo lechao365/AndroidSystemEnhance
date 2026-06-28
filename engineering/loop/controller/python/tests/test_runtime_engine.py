@@ -208,7 +208,7 @@ def test_runtime_wires_apply_compile_deploy(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         "loop_controller.runtime.nodes.node_deploy",
-        lambda session_dict, adb_endpoint: {
+        lambda session_dict, adb_endpoint="", serial_shell_provider=None: {
             "status": "DEPLOYED", "failure_code": FC.NONE,
             "mode": "PUSH_SINGLE",
         },
@@ -698,7 +698,7 @@ def test_rollback_deploy_uses_adb_endpoint(tmp_path, monkeypatch):
         exit_code = 0
 
     class FakeAdbClient:
-        def __init__(self, endpoint=None, **kw):
+        def __init__(self, endpoint=None, device_serial=None, **kw):
             endpoint_used.append(endpoint)
         def connect(self, **kw):
             pass
@@ -1156,11 +1156,10 @@ def test_done_success_archives_to_kb(tmp_path):
         suite="features.lciod.end_to_end", max_attempts=3,
         current_attempt=1, artifacts_dir=str(artifacts),
         attempts=[{
-            "verify": {
-                "case_results": [{"id": "HA-03", "status": "fail"}],
-                "failed_count": 1,
-                "failed_cases": [{"id": "HA-03", "failure_reason": "field mismatch"}],
-            },
+            "attempt_index": 1,
+            "case_results": [{"id": "HA-03", "status": "fail"}],
+            "failed_count": 1,
+            "failed_cases": [{"id": "HA-03", "failure_reason": "field mismatch"}],
             "patch_applied": {"patch_hash": "abc"},
         }],
     )
@@ -1171,6 +1170,52 @@ def test_done_success_archives_to_kb(tmp_path):
     kb = json.loads(Path(kb_path).read_text())
     assert len(kb["entries"]) == 1
     assert kb["entries"][0]["source_session"] == "lciod-test"
+
+
+def test_archive_uses_last_failed_attempt_fingerprint_for_recall(tmp_path):
+    """回归 P0-1：DONE_SUCCESS 归档必须用"触发修复的那次失败" attempt 的
+    failed_cases 算指纹，才能被后续同类失败的 KnowledgeBaseAnalyzer 召回（Reflexion 闭环）。
+
+    真实 DONE_SUCCESS 形态：attempts = [失败(failed_cases 非空), 成功(failed_cases 空)]。
+    原 bug 用 latest（成功，failed_cases 空）算指纹，与查询指纹（失败）永不匹配。
+    """
+    from loop_controller.analyzer_protocol import AnalysisRequest, KnowledgeBaseAnalyzer
+
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    patch_data = [{"workspace_path": "foo.c", "change_type": "edit",
+                   "old_marker": "x", "new_content": "y"}]
+    (artifacts / "patch_suggestion.json").write_text(
+        json.dumps({"patches": patch_data, "confidence": 0.9}), encoding="utf-8")
+    kb_path = str(tmp_path / "kb.json")
+
+    failed_cases = [{"id": "HA-03",
+                     "failure_reason": "getStats field mismatch: read_bytes wrong"}]
+    session = LoopSession(
+        session_id="lciod-x", workflow_id="runtime", target="lciod",
+        suite="features.lciod.end_to_end", max_attempts=3,
+        current_attempt=2, artifacts_dir=str(artifacts),
+        attempts=[
+            {"attempt_index": 1, "failed_cases": failed_cases,
+             "case_results": [{"id": "HA-03", "status": "fail"}], "failed_count": 1,
+             "patch_applied": {"patch_hash": "abc"}},
+            {"attempt_index": 2, "failed_cases": [], "case_results": [], "failed_count": 0},
+        ],
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp", device_profile="dummy")
+    rt._kb_path = kb_path
+    rt._archive_to_knowledge_base()
+
+    # 用"失败那次"的 failed_cases + 同 target/suite 查询，必须召回归档补丁
+    analyzer = KnowledgeBaseAnalyzer(kb_path)
+    query = AnalysisRequest(
+        session_id="next", attempt_index=1, target="lciod",
+        suite="features.lciod.end_to_end", failed_cases=failed_cases,
+    )
+    suggestion = analyzer.analyze(query)
+    assert len(suggestion.target_files) == 1
+    assert suggestion.target_files[0].workspace_path == "foo.c"
+    assert suggestion.confidence == 0.98
 
 
 def test_archive_does_not_duplicate_same_fingerprint(tmp_path):
@@ -1184,7 +1229,8 @@ def test_archive_does_not_duplicate_same_fingerprint(tmp_path):
     session = LoopSession(
         session_id="s1", workflow_id="runtime", target="lciod", suite="s",
         max_attempts=3, current_attempt=1, artifacts_dir=str(artifacts),
-        attempts=[{"verify": {"failed_cases": [{"id": "C1", "failure_reason": "err"}]}}],
+        attempts=[{"attempt_index": 1, "failed_count": 1,
+                   "failed_cases": [{"id": "C1", "failure_reason": "err"}]}],
     )
     rt = LoopRuntime(session, cases_dir="/tmp", device_profile="dummy")
     rt._kb_path = kb_path

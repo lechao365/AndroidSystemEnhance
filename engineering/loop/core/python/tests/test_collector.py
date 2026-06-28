@@ -101,7 +101,8 @@ def test_collector_status_ok_when_all_succeed():
 def test_collector_serial_context_mode_returns_artifact_paths():
     """mode=serial_context 消费 transport.describe_runtime_context()"""
     class ContextTransport(FixtureTransport):
-        def describe_runtime_context(self):
+        def describe_runtime_context(self, artifacts_dir=None):
+            del artifacts_dir
             return {
                 "transcript_path": "/tmp/serial.log",
                 "serial_snippet": ["boot line", "reboot: Restarting system"],

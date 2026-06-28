@@ -32,6 +32,7 @@ def serial_rollback_dd(
     backup_path: str,
     block_device: str,
     remote_backup_dir: str = "/tmp",
+    expected_sha: str = "",
 ) -> RollbackResult:
     if serial_shell is None:
         return RollbackResult(success=False, reason="serial not available, cannot rollback")
@@ -61,6 +62,15 @@ def serial_rollback_dd(
     # ls 成功时返回值包含文件名；失败时返回空或不包含文件名
     if not check or backup.name not in check:
         return RollbackResult(success=False, reason=f"remote backup not found: {remote_backup}")
+    # dd 写入前校验备份完整性（防止损坏备份写坏设备）。
+    # fail-closed：仅在提供 expected_sha（部署时记录的基准）时强制校验——
+    # 取不到 remote sha 或与基准不符即拒绝 dd。未提供基准时无法校验，
+    # 记录后继续（拒绝回滚 = 设备失去软件自救手段，比尝试回滚更危险）。
+    if expected_sha and not verify_remote_backup_sha(serial_shell, remote_backup, expected_sha):
+        return RollbackResult(
+            success=False,
+            reason=f"remote backup sha verify failed (expected {expected_sha[:16]}), refuse dd",
+        )
     dd_cmd = f"dd if={remote_backup} of={block_device} bs=4M && sync"
     result = serial_shell(f"su 0 sh -c '{dd_cmd}'")
     if result and "dd:" not in result.lower() and "no such file" not in result.lower():

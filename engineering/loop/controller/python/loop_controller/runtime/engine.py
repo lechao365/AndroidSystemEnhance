@@ -61,6 +61,8 @@ class LoopRuntime:
         self._kb_path: str = ""
         # 置信度阈值（低于阈值的补丁触发人工 gate；runtime_cli 可覆盖）
         self._confidence_threshold: float = 0.7
+        # human-in-loop 触发场景（由 analyzer.yaml 的 human_gate.triggers 注入）
+        self._human_gate_triggers: list[str] = ["low_confidence", "kernel_patch", "dd_boot_reboot"]
 
     def resume(self) -> RuntimeState:
         # 幂等：已终态的 session 不恢复
@@ -230,6 +232,16 @@ class LoopRuntime:
                         self._session.attempts.append(latest)
                 else:
                     self._session.attempts.append({"patch_applied": pa})
+                # kernel_patch 触发：补丁涉及内核文件时需人工确认
+                risk = result.get("risk", {})
+                risk_level = risk.get("level", "") if isinstance(risk, dict) else ""
+                if (risk_level == "KERNEL"
+                        and not self._state.human_gate_approved
+                        and "kernel_patch" in self._human_gate_triggers):
+                    self._state.node_status = "KERNEL_PATCH_REVIEW"
+                    self._state.pending_human_gate = True
+                    self._checkpoint("kernel patch requires human review", FailureCode.NONE)
+                    return
             guard_req = self._build_guard_eval_request()
             guard_result = guard_chain(["patch_rejected", "patch_applied_successfully"], guard_req)
             matched_guards = []
@@ -269,7 +281,9 @@ class LoopRuntime:
                     self._state.node_status = "COMPILE_FAILED_REVERT"
             self._checkpoint(f"compile={result['status']}", fc)
         elif node == NodeKind.DEPLOY_PATCH.value:
-            result = _runtime_nodes.node_deploy(self._to_session_dict(), adb_endpoint=self._adb_endpoint)
+            result = _runtime_nodes.node_deploy(self._to_session_dict(),
+                                                adb_endpoint=self._adb_endpoint,
+                                                serial_shell_provider=self._serial_shell_provider)
             self._state.node_status = result["status"]
             fc = result.get("failure_code", FailureCode.NONE)
             if isinstance(fc, str):
@@ -293,6 +307,16 @@ class LoopRuntime:
                     "mode": result.get("mode", ""),
                     "error": result.get("error", ""),
                 }
+            # dd_boot_reboot 触发：dd 写设备前需人工确认（仅 deploy 成功路径）
+            deploy_mode = result.get("mode", "")
+            if (result["status"] == "DEPLOYED"
+                    and deploy_mode == "dd_boot_reboot"
+                    and not self._state.human_gate_approved
+                    and "dd_boot_reboot" in self._human_gate_triggers):
+                self._state.node_status = "DD_BOOT_REVIEW"
+                self._state.pending_human_gate = True
+                self._checkpoint("dd_boot_reboot requires human review", FailureCode.NONE)
+                return
             if result["status"] in ("DEPLOY_FAILED", "KERNEL_DEAD", "BOOT_TIMEOUT", "DEPLOY_TIMEOUT"):
                 guard_req = self._build_guard_eval_request()
                 guard_result = guard_chain(
@@ -460,16 +484,22 @@ class LoopRuntime:
                 return
             if not isinstance(patches, list) or not patches:
                 return
-            latest = self._session.attempts[-1] if self._session.attempts else {}
-            if isinstance(latest, dict):
-                failed_cases = latest.get("verify", {}).get("failed_cases", [])
-                if not failed_cases:
-                    case_results = latest.get("verify", {}).get("case_results", [])
-                    failed_cases = [c for c in case_results
-                                    if isinstance(c, dict)
-                                    and c.get("status") in ("fail", "error")]
-            else:
-                failed_cases = []
+            # P0-1：用"最近一次失败 attempt"（failed_cases 非空）的 failed_cases 算指纹，
+            # 与 KnowledgeBaseAnalyzer 查询侧的指纹来源（失败那次）保持一致，
+            # 否则归档指纹（成功那次=空）与查询指纹永不匹配，Reflexion 召回失效。
+            # 注意：attempt 为扁平结构（run_verify_stage 写入），failed_cases 在顶层。
+            failed_cases: list = []
+            for att in reversed(self._session.attempts):
+                if not isinstance(att, dict):
+                    continue
+                fc = att.get("failed_cases", [])
+                if not fc:
+                    # 兜底：从 case_results 提取 fail/error 用例
+                    fc = [c for c in att.get("case_results", [])
+                          if isinstance(c, dict) and c.get("status") in ("fail", "error")]
+                if fc:
+                    failed_cases = fc
+                    break
             req = AnalysisRequest(
                 session_id=self._session.session_id,
                 attempt_index=self._session.current_attempt,
@@ -489,7 +519,7 @@ class LoopRuntime:
             pass
 
     def _execute_build_analysis_request(self) -> None:
-        stages.analyze_request_stage(self._to_session_dict())
+        stages.analyze_request_stage(self._to_session_dict(), ctx=self._stage_ctx)
         self._state.node_status = "ANALYSIS_READY"
         self._checkpoint("analysis_request written", FailureCode.NONE)
 
@@ -505,7 +535,7 @@ class LoopRuntime:
             try:
                 from loop_controller.stages import analyze_request_stage
                 session_dict = self._to_session_dict()
-                req = analyze_request_stage(session_dict)
+                req = analyze_request_stage(session_dict, ctx=self._stage_ctx)
                 from loop_controller.analyzer_protocol import AnalysisRequest
                 import dataclasses
                 req_data = json.loads(Path(req).read_text(encoding="utf-8"))

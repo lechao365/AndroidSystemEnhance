@@ -156,7 +156,8 @@ cases:
     suite = load_suite(path, [str(tmp_path)])
 
     class TransportWithContext(FixtureTransport):
-        def describe_runtime_context(self):
+        def describe_runtime_context(self, artifacts_dir=None):
+            del artifacts_dir
             return {
                 "transcript_path": "/tmp/serial.log",
                 "serial_snippet": ["line1", "line2"],

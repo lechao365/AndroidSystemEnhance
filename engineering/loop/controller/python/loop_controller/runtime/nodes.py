@@ -50,6 +50,7 @@ _DEPLOY_ERROR_MAP: dict[str, tuple[str, FailureCode, bool]] = {
     "KERNEL_PANIC": ("KERNEL_DEAD", FailureCode.KERNEL_DEAD_NO_SHELL, True),
     "BOOT_COMPLETED_NOT_REACHED": ("BOOT_TIMEOUT", FailureCode.BOOT_TIMEOUT_ROLLBACK, True),
     "DD_WRITE_FAILED": ("BOOT_TIMEOUT", FailureCode.BOOT_TIMEOUT_ROLLBACK, True),
+    "CRITICAL_SERVICE_DOWN": ("BOOT_TIMEOUT", FailureCode.BOOT_TIMEOUT_ROLLBACK, True),
     "ADB_PUSH_FAILED": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, True),
     "SERVICE_NOT_STARTED": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, True),
     # --- 未写入设备，无需设备回滚 ---
@@ -60,6 +61,9 @@ _DEPLOY_ERROR_MAP: dict[str, tuple[str, FailureCode, bool]] = {
     "DEVICE_NOT_HEALTHY": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
     "ARTIFACT_NOT_FOUND": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
     "HEALTH_CHECK_FAILED": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
+    "DISK_FULL": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
+    "BACKUP_CORRUPT": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
+    "ADB_PULL_FAILED": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
 }
 
 
@@ -304,11 +308,13 @@ def node_compile(session_dict: dict, workspace_root: str = "") -> dict:
     }
 
 
-def node_deploy(session_dict: dict, adb_endpoint: str = "") -> dict:
+def node_deploy(session_dict: dict, adb_endpoint: str = "",
+                serial_shell_provider: "callable | None" = None) -> dict:
     """部署编译产物到设备。
 
     从 session 的 compile_result.artifacts 取编译产物，直接调 Deployer.deploy，
     deploy plan 从 patch_applied.files 推断（避免 git diff 在非 git workspace 失败）。
+    serial_shell_provider 用于 dd reboot 后的 panic 检测和 serial shell 可达性探测。
     返回 {status, failure_code, mode, backup_path, backup_sha, deployed_files, error}。
     """
     from loop_deploy.decider import decide
@@ -365,7 +371,7 @@ def node_deploy(session_dict: dict, adb_endpoint: str = "") -> dict:
 
     try:
         client = AdbClient(adb_endpoint, adb_endpoint)
-        deployer = Deployer(client)
+        deployer = Deployer(client, serial_shell_provider=serial_shell_provider)
         result = deployer.deploy(plan, artifacts)
     except Exception as e:
         return {
@@ -381,7 +387,8 @@ def node_deploy(session_dict: dict, adb_endpoint: str = "") -> dict:
         "deployed_files": result.deployed_files,
         "error": result.error,
         "error_code": result.error_code.value,
-        "block_device": plan.deploy_targets[0].block_device if plan.deploy_targets else "",
+        "block_device": getattr(result, "block_device", "") or (plan.deploy_targets[0].block_device if plan.deploy_targets else ""),
+        "warnings": getattr(result, "warnings", []),
     }
 
     if result.success:
@@ -424,6 +431,7 @@ def _build_deploy_result(status: str, fc: FailureCode, ctx: dict | None) -> dict
         "deployed_files": ctx.get("deployed_files", []),
         "block_device": ctx.get("block_device", ""),
         "error": ctx.get("error", ""),
+        "warnings": ctx.get("warnings", []),
     }
 
 
@@ -530,7 +538,13 @@ def node_rollback_deploy(
         backup_dir = Path(backup_path)
         try:
             from loop_adb.client import AdbClient
-            client = AdbClient(endpoint=adb_endpoint) if adb_endpoint else AdbClient()
+            if not adb_endpoint:
+                return {
+                    "status": "REVERT_FAILED",
+                    "failure_code": FailureCode.ROLLBACK_FAILED,
+                    "error": "no adb endpoint for rollback (refuse to connect to arbitrary device)",
+                }
+            client = AdbClient(adb_endpoint, adb_endpoint)
         except Exception as e:
             return {
                 "status": "REVERT_FAILED",
@@ -585,6 +599,7 @@ def node_rollback_deploy(
             serial_shell=serial_shell,
             backup_path=backup_path,
             block_device=block_device,
+            expected_sha=backup_sha,
         )
         if result.success:
             return {

@@ -92,4 +92,5 @@ class TerminationDecision:
     should_escalate: bool
 
 
+# Deprecated alias: 旧 controller 体系产物，保留向后兼容，新代码请用 LoopSession
 SessionState = LoopSession

@@ -96,7 +96,9 @@ class CaseExecutor:
                             artifacts_dir=artifacts_dir or None,
                         )
                     except OSError as exc:
-                        # collector 执行失败：降级为空证据并记录告警，不阻断 suite
+                        # collector 执行失败：降级为空证据并记录告警，不阻断 suite。
+                        # 必须显式标记 status="error"，否则默认 "ok" 会让 required
+                        # collector 失败被静默判 PASS（required 判定 status != "ok" 失效）。
                         warnings.append(f"collector '{cname}' failed: {exc}")
                         spec = suite.collectors[cname]
                         evidence[cname] = CollectorResult(
@@ -104,6 +106,8 @@ class CaseExecutor:
                             commands=spec.get("commands", []),
                             outputs=[],
                             hints=spec.get("hints", ""),
+                            status="error",
+                            error=str(exc),
                             required=bool(spec.get("required", False)),
                             failure_code=spec.get("failure_code", ""),
                         )
@@ -141,7 +145,7 @@ class CaseExecutor:
         if required_failures:
             overall = "FAIL"
             summary["overall"] = "FAIL"
-            summary["failure_code"] = required_failures[0].failure_code or "EVIDENCE_FAIL"
+            summary["failure_code"] = required_failures[0].failure_code or "EVIDENCE_FAIL"  # 对齐 loop_contracts.FailureCode.EVIDENCE_FAIL
 
         return EvidenceBundle(
             bundle_id=f"eb-{uuid4().hex[:8]}",

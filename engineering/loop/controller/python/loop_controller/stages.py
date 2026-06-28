@@ -31,7 +31,7 @@ class StageContext:
 
 
 # ---------------------------------------------------------------------------
-# 路径常量（与 control_cli 相同的解析逻辑）
+# 路径解析（延迟调用，不再缓存到模块级全局变量，消除多 session 并发污染）
 # ---------------------------------------------------------------------------
 def _resolve_loop_paths() -> tuple[str, str, str]:
     """返回 (cases_dir, device_profile, target_paths_yaml) 绝对路径。"""
@@ -52,7 +52,9 @@ def _resolve_loop_paths() -> tuple[str, str, str]:
         )
 
 
-_CASES_DIR, _DEVICE_PROFILE, _TARGET_PATHS_YAML = _resolve_loop_paths()
+def _get_default_paths() -> tuple[str, str, str]:
+    """延迟解析路径（仅在 ctx 和显式参数均未提供时调用）。"""
+    return _resolve_loop_paths()
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +130,9 @@ def _get_workspace_diff() -> str:
 
 def _load_target_paths(target: str, target_paths_yaml: str = "") -> list[str]:
     import yaml
-    config_path = Path(target_paths_yaml or _TARGET_PATHS_YAML)
+    if not target_paths_yaml:
+        _, _, target_paths_yaml = _get_default_paths()
+    config_path = Path(target_paths_yaml)
     if not config_path.exists():
         return []
     try:
@@ -157,13 +161,15 @@ def run_verify_stage(session_path: str, suite: str, adb_endpoint: str,
                      ctx: StageContext | None = None) -> tuple[dict, StageResult]:
     """执行一次验证，返回 (updated_session_dict, StageResult)。
 
-    参数优先级：显式 cases_dir/device_profile > ctx（若传入）> 模块级全局变量。
+    参数优先级：显式 cases_dir/device_profile > ctx（若传入）> 延迟解析默认路径。
     """
     if ctx is not None:
         cases_dir = cases_dir or ctx.cases_dir
         device_profile = device_profile or ctx.device_profile
-    _cases = cases_dir or _CASES_DIR
-    _profile = device_profile or _DEVICE_PROFILE
+    if not cases_dir or not device_profile:
+        default_cases, default_profile, _ = _get_default_paths()
+        cases_dir = cases_dir or default_cases
+        device_profile = device_profile or default_profile
     session_data = _load_session(session_path)
     # 与旧 control_cli 保持一致的空 session 回退语义
     if not session_data:
@@ -181,8 +187,8 @@ def run_verify_stage(session_path: str, suite: str, adb_endpoint: str,
     cmd = [
         sys.executable, "-m", "loop_core.cli", "run",
         "--suite", suite,
-        "--case-dirs", _cases,
-        "--device-profile", _profile,
+        "--case-dirs", cases_dir,
+        "--device-profile", device_profile,
         "--artifacts-dir", artifacts_dir,
     ]
     if adb_endpoint:
@@ -226,8 +232,10 @@ def run_verify_stage(session_path: str, suite: str, adb_endpoint: str,
     return session_data, StageResult(stage_name="RUN_VERIFY", status=status, failure_code=fc)
 
 
-def analyze_request_stage(session_data: dict) -> str:
+def analyze_request_stage(session_data: dict, *,
+                          ctx: StageContext | None = None) -> str:
     """从 session 最近一次 attempt 构造 AnalysisRequest，写 analysis_request.json，返回路径。"""
+    del ctx  # 当前函数体不使用路径变量，保留参数保持签名一致性
     artifacts_dir = session_data.get("artifacts_dir", "")
     attempts = session_data.get("attempts", [])
     last = attempts[-1] if attempts else {}
@@ -261,8 +269,10 @@ def analyze_request_stage(session_data: dict) -> str:
     return req_path
 
 
-def decide_stage(session_data: dict) -> dict[str, object]:
+def decide_stage(session_data: dict, *,
+                 ctx: StageContext | None = None) -> dict[str, object]:
     """判定下一步：返回 {decision, reason, should_escalate, failure_code}。"""
+    del ctx  # 当前函数体不使用路径变量，保留参数保持签名一致性
     status = session_data.get("status", "PENDING")
     current = session_data.get("current_attempt", 0)
     max_att = session_data.get("max_attempts", 5)

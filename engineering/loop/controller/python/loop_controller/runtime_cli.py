@@ -153,10 +153,10 @@ def _load_analyzer_config() -> dict:
         return {}
 
 
-def _build_analyzer() -> tuple["object", str, float]:
+def _build_analyzer() -> tuple["object", str, float, list[str]]:
     """构建三层降级 ChainedAnalyzer。
 
-    返回 (analyzer, kb_path, confidence_threshold)。
+    返回 (analyzer, kb_path, confidence_threshold, human_gate_triggers)。
     顺序：KnowledgeBaseAnalyzer → ScriptedAnalyzer → OpencodeAnalyzer。
     """
     from loop_controller.analyzer_protocol import (
@@ -169,6 +169,7 @@ def _build_analyzer() -> tuple["object", str, float]:
     kb_cfg = cfg.get("knowledge_base", {})
     oai_cfg = cfg.get("opencode", {})
     conf_cfg = cfg.get("confidence", {})
+    gate_cfg = cfg.get("human_gate", {})
     loop_config_dir = Path(__file__).resolve().parent.parent.parent.parent / "config"
     kb_rel = kb_cfg.get("path", "patch_knowledge_base.json")
     # 兼容配置中带 "config/" 前缀或裸文件名：统一取 basename 后拼到 loop/config 目录
@@ -188,7 +189,8 @@ def _build_analyzer() -> tuple["object", str, float]:
         ),
     ]
     threshold = conf_cfg.get("threshold", 0.7)
-    return ChainedAnalyzer(layers), kb_path, threshold
+    triggers = gate_cfg.get("triggers", ["low_confidence", "kernel_patch", "dd_boot_reboot"]) if gate_cfg.get("enabled", True) else []
+    return ChainedAnalyzer(layers), kb_path, threshold, triggers
 
 
 def _handle_run(args: argparse.Namespace) -> int:
@@ -199,7 +201,7 @@ def _handle_run(args: argparse.Namespace) -> int:
             print(f"terminal_state={ts.value}")
             return 0 if ts == RuntimeTerminalState.DONE_SUCCESS else 1
         serial_sh = _resolve_serial_shell()
-        analyzer, kb_path, conf_threshold = _build_analyzer()
+        analyzer, kb_path, conf_threshold, gate_triggers = _build_analyzer()
         rt = LoopRuntime(
             session, _CASES_DIR, _DEVICE_PROFILE,
             adb_endpoint=getattr(args, "adb_endpoint", ""),
@@ -209,6 +211,7 @@ def _handle_run(args: argparse.Namespace) -> int:
         )
         rt._kb_path = kb_path
         rt._confidence_threshold = conf_threshold
+        rt._human_gate_triggers = gate_triggers
         state = rt.run()
         print(f"terminal_state={state.terminal_state.value}")
         if state.terminal_state == RuntimeTerminalState.DONE_SUCCESS:
@@ -230,7 +233,7 @@ def _handle_resume(args: argparse.Namespace) -> int:
             print(f"terminal_state={ts.value}")
             return 0 if ts == RuntimeTerminalState.DONE_SUCCESS else 1
         serial_sh = _resolve_serial_shell()
-        analyzer, kb_path, conf_threshold = _build_analyzer()
+        analyzer, kb_path, conf_threshold, gate_triggers = _build_analyzer()
         rt = LoopRuntime(
             session, _CASES_DIR, _DEVICE_PROFILE,
             adb_endpoint=getattr(args, "adb_endpoint", ""),
@@ -240,6 +243,7 @@ def _handle_resume(args: argparse.Namespace) -> int:
         )
         rt._kb_path = kb_path
         rt._confidence_threshold = conf_threshold
+        rt._human_gate_triggers = gate_triggers
         rt.resume()
         # 传入人工 approve 标记：approve 后 resume 回到 APPLY_PATCH，需跳过 confidence gate 真正 apply
         _raw = json.loads(Path(args.session).read_text(encoding="utf-8"))
@@ -308,12 +312,18 @@ def _handle_pending(args: argparse.Namespace) -> int:
 
 
 def _handle_approve(args: argparse.Namespace) -> int:
-    """批准待确认补丁：清 pending_human_gate、标记 APPROVED，然后 resume 续跑。"""
+    """批准待确认补丁：清 pending_human_gate、标记 APPROVED，然后 resume 续跑。
+
+    P0-2：必须同时把 terminal_state 复位为 NONE。human gate 暂停时 session.json
+    可能同时落盘了 terminal_state=ESCALATE_HUMAN，若不清除，_handle_resume 的
+    幂等检查（ts != NONE → return）会让 approve 无法续跑（死锁）。
+    """
     p = Path(args.session)
     data = json.loads(p.read_text(encoding="utf-8"))
     data["pending_human_gate"] = False
     data["node_status"] = "APPROVED"
     data["human_gate_approved"] = True
+    data["terminal_state"] = RuntimeTerminalState.NONE.value
     p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     return _handle_resume(args)
 

@@ -254,16 +254,21 @@ class Rp5SerialTransport(BaseTransport):
         """设置 reboot cycle 边界标记，供 describe_runtime_context 统计 reboot_cycles。"""
         self._cycle_markers = list(markers)
 
-    def describe_runtime_context(self) -> dict:
+    def describe_runtime_context(self, artifacts_dir: str | None = None) -> dict:
         """汇总 host 运行时上下文（供 AI 分析 / 调试快照使用）。
 
         组合 ``session.status`` 与最近串口条目，输出 transcript 路径、缓冲
         统计与末尾串口片段；fetch_status 失败时返回带 warnings 的降级上下文。
 
+        Args:
+            artifacts_dir: collector artifact 落盘目录（可选，serial provider 当前不使用，
+                为与 AdbTransport 接口签名统一而保留）。
+
         Returns:
             含 transcript_path / recent_line_count / recent_buffer_limit /
             serial_snippet / reboot_cycles 的 dict
         """
+        del artifacts_dir  # serial provider 当前不消费此参数
         try:
             status = self.client.fetch_status()
         except OSError:
@@ -454,8 +459,7 @@ class Rp5SerialTransport(BaseTransport):
                         boot_duration_sec=round(time.monotonic() - boot_start, 3),
                     )
                 if any(
-                    line.strip() == "1" or line.strip().endswith("1")
-                    for line in chunk
+                    line.strip() == "1" for line in chunk
                 ):
                     return RebootResult(
                         status="pass",

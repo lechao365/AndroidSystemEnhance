@@ -39,7 +39,11 @@ def _compile_dd_boot() -> CompileResult:
         err = (result.stderr or result.stdout)[-500:]
         return CompileResult(success=False, error=f"mode 2 failed (exit {result.returncode}): {err}")
 
-    aosp_out = os.environ.get("ANDROID_PRODUCT_OUT", os.path.expanduser("~/workspace/aosp/out/target/product/rpi5"))
+    # 优先用 ANDROID_PRODUCT_OUT 环境变量，回退到 ENV_AOSP_WS（harness-paths.conf）
+    aosp_out = os.environ.get("ANDROID_PRODUCT_OUT")
+    if not aosp_out:
+        aosp_ws = os.environ.get("AOSP_ROOT", os.path.expanduser("~/workspace/aosp"))
+        aosp_out = os.path.join(aosp_ws, "out", "target", "product", "rpi5")
     boot_img = os.path.join(aosp_out, "boot.img")
     if not os.path.isfile(boot_img):
         return CompileResult(success=False, error=f"boot.img not found at {boot_img}")
@@ -65,7 +69,10 @@ def _compile_push_single(plan: DeployPlan, workspace_root: str) -> CompileResult
         return CompileResult(success=False, error=f"mmm failed (exit {result.returncode}): {err}")
 
     # 从 $OUT 目录查找编译产物，匹配 plan.deploy_targets 的 artifact_name
-    aosp_out = os.environ.get("ANDROID_PRODUCT_OUT", os.path.expanduser("~/workspace/aosp/out/target/product/rpi5"))
+    aosp_out = os.environ.get("ANDROID_PRODUCT_OUT")
+    if not aosp_out:
+        aosp_ws = os.environ.get("AOSP_ROOT", os.path.expanduser("~/workspace/aosp"))
+        aosp_out = os.path.join(aosp_ws, "out", "target", "product", "rpi5")
     artifacts = _find_artifacts_in_out(aosp_out, plan)
     return CompileResult(success=True, artifacts=artifacts, elapsed_seconds=elapsed)
 

@@ -48,12 +48,14 @@ def get_device_ip(host: str, port: int) -> int:
             # writer 被占用（le run 期间）：从 host buffer 捞最近的 ip 输出
             lines = c.capture_recent_lines(400)
 
-    # 反向扫描，找最后一条匹配的 inet 行
+    # 反向扫描，找最后一条匹配的 inet 行（排除 loopback 127.x 和 0.0.0.0）
     for line in reversed(lines):
-        m = re.search(r"inet (192\.168\.1\.[0-9]+)", line)
+        m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", line)
         if m:
-            print(m.group(1))
-            return 0
+            ip = m.group(1)
+            if not ip.startswith("127.") and ip != "0.0.0.0":
+                print(ip)
+                return 0
     print("NO_IP_FOUND", file=sys.stderr)
     return 1
 

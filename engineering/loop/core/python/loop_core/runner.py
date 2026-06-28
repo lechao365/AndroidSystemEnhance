@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-import inspect
 from datetime import datetime
 from uuid import uuid4
 
@@ -13,28 +12,6 @@ from loop_core.assertion_engine import AssertionEngine
 from loop_core.case_loader import CaseSuite
 from loop_core.executor import CaseExecutor
 from loop_core.models import EvidenceBundle
-
-
-def _call_describe(describe, artifacts_dir: str):
-    """兼容地调用 transport.describe_runtime_context。
-
-    旧 transport 签名为 describe_runtime_context(self)，新签名为
-    describe_runtime_context(self, artifacts_dir=None)。按参数数量自动适配。
-    """
-    try:
-        sig = inspect.signature(describe)
-        # 去掉 self 之后的可接收位置参数
-        params = [p for p in sig.parameters.values() if p.name != "self"]
-    except (TypeError, ValueError):
-        params = []
-    # 至少有一个可接收实参的参数（位置/关键字，不含 *args/**kwargs 单独情况）
-    accepts_arg = any(
-        p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY, p.VAR_POSITIONAL)
-        for p in params
-    )
-    if accepts_arg:
-        return describe(artifacts_dir)
-    return describe()
 
 
 class LoopRunner:
@@ -148,5 +125,5 @@ class LoopRunner:
         }
         describe = getattr(self.transport, "describe_runtime_context", None)
         if callable(describe):
-            bundle.serial_context = _call_describe(describe, self.artifacts_dir) or {}
+            bundle.serial_context = describe(self.artifacts_dir) or {}
             bundle.runtime_context = bundle.serial_context

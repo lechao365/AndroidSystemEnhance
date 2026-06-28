@@ -139,3 +139,37 @@ def test_kb_analyzer_corrupt_json_returns_empty_list(tmp_path):
     bad.write_text("not json", encoding="utf-8")
     analyzer = KnowledgeBaseAnalyzer(str(bad))
     assert analyzer._kb == []
+
+
+def test_hit_count_increments_on_match(tmp_path):
+    """KB 命中时 hit_count 递增并写回文件。"""
+    req = AnalysisRequest(
+        session_id="s", attempt_index=1, target="lciod",
+        suite="features.lciod.end_to_end",
+        failed_cases=[{"id": "HA-03", "failure_reason": "getStats field mismatch"}],
+    )
+    fp = _compute_fingerprint(req)
+    entry = {
+        "fingerprint": fp,
+        "patch": [{"workspace_path": "foo.c", "change_type": "edit",
+                    "old_marker": "x", "new_content": "y"}],
+        "description": "test",
+        "hit_count": 0,
+    }
+    kb_path = _make_kb_file(tmp_path, [entry])
+
+    # 第一次命中
+    analyzer1 = KnowledgeBaseAnalyzer(kb_path)
+    suggestion1 = analyzer1.analyze(req)
+    assert len(suggestion1.target_files) == 1
+
+    # 重新加载 KB，验证 hit_count 已递增
+    analyzer2 = KnowledgeBaseAnalyzer(kb_path)
+    assert analyzer2._kb[0].hit_count == 1
+    assert analyzer2._kb[0].last_hit_at != ""
+
+    # 第二次命中
+    suggestion2 = analyzer2.analyze(req)
+    assert len(suggestion2.target_files) == 1
+    analyzer3 = KnowledgeBaseAnalyzer(kb_path)
+    assert analyzer3._kb[0].hit_count == 2

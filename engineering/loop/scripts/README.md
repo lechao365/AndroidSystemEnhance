@@ -22,7 +22,7 @@
 
 | 脚本 | 作用 | 调用方式 |
 |------|------|---------|
-| [`le.sh`](./le.sh) | Loop Engineering CLI wrapper，支持 `run` / `control`（旧）/ `runtime`（新主入口） | `/le` 或 `bash engineering/loop/scripts/le.sh runtime init/run/resume/status/explain` |
+| [`le.sh`](./le.sh) | Loop Engineering CLI wrapper，支持 `run` / `runtime`（新主入口） | `/le` 或 `bash engineering/loop/scripts/le.sh runtime init/run/resume/status/explain` |
 | [`le_runs_cleanup.sh`](./le_runs_cleanup.sh) | runs/ 产物清理，保留最新 N 份 | `--keep N --dry-run` |
 | [`rp5_serial_helper.py`](./rp5_serial_helper.py) | 供 loop host case / workflow 使用的串口辅助工具（如 adb endpoint 发现） | 被 workflow import，非 CLI 直接入口 |
 | [`start_rp5_serial_host.bat`](./start_rp5_serial_host.bat) | Windows 前台启动 rp5-serial Host，独占物理串口 | CMD 中 `engineering\loop\scripts\start_rp5_serial_host.bat COM5 115200 9700` |
@@ -47,7 +47,6 @@ bash engineering/loop/scripts/le.sh run --suite ... --host 127.0.0.1 --port 9700
 |------|------|---------|
 | `le.sh runtime` | **Runtime CLI**（新主入口）：`init/run/resume/status/explain` | `le.sh runtime init --target ... --suite ... --artifacts-dir ...` |
 | `le.sh run` | LE 验证 CLI（fixture/live） | `le.sh run --suite ... --fixture/--host ...` |
-| `le.sh control` | 旧控制 CLI（break-glass / 调试） | `le.sh control init/run-verify/decide/...` |
 | `le_runs_cleanup.sh` | runs/ 产物清理 | `le_runs_cleanup.sh --keep 20 --dry-run` |
 | `start_rp5_serial_host.bat` | Windows Host 启动 | CMD: `start_rp5_serial_host.bat COM5 115200 9700` |
 | `rp5_serial_helper.py` | 串口辅助（内部调用） | 被 workflow import，非直接 CLI |

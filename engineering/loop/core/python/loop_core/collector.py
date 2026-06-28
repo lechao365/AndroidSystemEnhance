@@ -100,7 +100,7 @@ class Collector:
             )
         if mode == "serial_context":
             describe = getattr(self.transport, "describe_runtime_context", None)
-            context = describe() if callable(describe) else {}
+            context = describe(artifacts_dir) if callable(describe) else {}
             outputs = [{
                 "command": "serial_context",
                 "lines": context.get("serial_snippet", []),

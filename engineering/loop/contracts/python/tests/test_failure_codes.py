@@ -13,6 +13,11 @@ def test_verification_stuck_member_exists_with_value():
     assert FailureCode.VERIFICATION_STUCK == "VERIFICATION_STUCK"
 
 
+def test_evidence_fail_member_exists_with_value():
+    assert hasattr(FailureCode, "EVIDENCE_FAIL")
+    assert FailureCode.EVIDENCE_FAIL == "EVIDENCE_FAIL"
+
+
 def test_verification_members_are_str_enum_instances():
     assert isinstance(FailureCode.VERIFICATION_REGRESSION, FailureCode)
     assert isinstance(FailureCode.VERIFICATION_STUCK, FailureCode)
