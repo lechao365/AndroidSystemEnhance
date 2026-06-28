@@ -47,9 +47,9 @@ _H_EXIT_HOOKS=()        # EXIT 回调列表（业务脚本可注册 cleanup）
 
 # --- workspace 同步专用共享常量（sync/revert 脚本复用，保证 diff 基线一致）---
 # 排除规则：grep -E 模式（构建系统约定，不会因定制变更）
-HARNESS_EXCLUDE_RE='\.o$|\.ko$|\.cmd$|\.symvers$|^Image$|\.dtb$|\.dtbo$|\.prebuilt$|\.prev$|overlays\.prebuilt|overlays\.prev|\.prebuilt/|\.prev/'
+HARNESS_EXCLUDE_RE='\.o$|\.ko$|\.cmd$|\.symvers$|^Image$|\.dtb$|\.dtbo$|\.prebuilt$|\.prev$|overlays\.prebuilt|overlays\.prev|\.prebuilt/|\.prev/|/\.git/'
 # 排除规则：目录 basename
-HARNESS_EXCLUDE_DIR_RE='^(out|prebuilts)$'
+HARNESS_EXCLUDE_DIR_RE='^(out|prebuilts)$|^\.git$'
 
 # --- 颜色（仅 stdout 用，日志文件不含 ANSI）---------------------------------
 _H_RED='\033[0;31m'
