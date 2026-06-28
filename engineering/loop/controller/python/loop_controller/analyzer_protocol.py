@@ -55,6 +55,7 @@ class LlmAnalyzer(ABC):
 _FV_MAIN_C_PATH = "patchs/rpi5/others/usb-verify/src/cli/main.c"
 _LCIOD_HAL_PATH = "vendor/lechao/services/lechao_lciod/service.cpp"
 _LCIOD_DAEMON_PATH = "vendor/lechao/services/lechao_lciod/daemon.cpp"
+_LCVIEW_HAL_PATH = "vendor/lechao/services/lechao_lcview/hal/LcView.cpp"
 
 
 def _rule_fv_stdout_pollution(case: dict) -> list[FileChange] | None:
@@ -149,11 +150,36 @@ def _rule_lciod_hal_readdrain_missing(case: dict) -> list[FileChange] | None:
     )]
 
 
+def _rule_lcview_hal_connect_fault(case: dict) -> list[FileChange] | None:
+    """LCVIEW HAL connect 故障：日志含 connect failed / cannot cast to ILcView。
+
+    触发条件：failure_reason 含 "connect failed" 或 "cannot cast to ILcView"，
+    且涉及 lechao_lcview_hal 服务。
+    修复动作：删除注入的故障日志行。
+    confidence: 0.95（确定性规则）
+    """
+    reason = (case.get("failure_reason") or "").lower()
+    command = (case.get("command") or "").lower()
+    # 必须涉及 lcview_hal
+    if "lechao_lcview_hal" not in command and "lcview" not in reason:
+        return None
+    # 必须含 connect 故障特征
+    if "connect failed" not in reason and "cannot cast to ilcview" not in reason:
+        return None
+    return [FileChange(
+        workspace_path=_LCVIEW_HAL_PATH,
+        change_type="edit",
+        old_marker='    // FAULT-INJECTED: HAL connect 故障\n    ALOGE("LcView: connect failed: cannot cast to ILcView (fault injected)");\n',
+        new_content='',
+    )]
+
+
 _RULES = [
     _rule_fv_stdout_pollution,
     _rule_lciod_hal_field_inversion,
     _rule_lciod_daemon_formula_error,
     _rule_lciod_hal_readdrain_missing,
+    _rule_lcview_hal_connect_fault,
 ]
 
 
