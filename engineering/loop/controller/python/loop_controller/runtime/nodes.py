@@ -21,8 +21,8 @@ from loop_controller.stages import _load_target_paths, _build_env
 
 
 def _workspace_root(workspace_root: str = "") -> str:
-    """解析 workspace 根路径，缺省回退到 AOSP_ROOT 环境变量或默认路径。"""
-    return workspace_root or os.environ.get(
+    """解析 workspace 根路径，缺省回退到 LE_PATCH_GIT_ROOT → AOSP_ROOT。"""
+    return workspace_root or os.environ.get("LE_PATCH_GIT_ROOT") or os.environ.get(
         "AOSP_ROOT", os.path.expanduser("~/workspace/aosp")
     )
 
@@ -128,6 +128,27 @@ def node_apply_patch(
     apply_root = worktree_handle.worktree_path if worktree_handle else ws_root
     stash_ref = ""
 
+    # worktree 模式下 workspace_path 含 LE_PATCH_GIT_ROOT 前缀（如 vendor/lechao/），
+    # 需 strip 到 git 仓库根的相对路径，否则 apply_file_changes 会拼出错误的多层路径。
+    # 白名单校验和语法预检仍用原始 changes（target-paths.yaml 用带前缀的路径）。
+    apply_changes = changes
+    if worktree_handle:
+        git_prefix = os.environ.get("LE_PATCH_GIT_PREFIX", "vendor/lechao/")
+        stripped = []
+        for fc in changes:
+            if fc.workspace_path.startswith(git_prefix):
+                stripped.append(FileChange(
+                    workspace_path=fc.workspace_path[len(git_prefix):],
+                    change_type=fc.change_type,
+                    new_content=fc.new_content,
+                    old_marker=fc.old_marker,
+                    line_range=fc.line_range,
+                    diff=fc.diff,
+                ))
+            else:
+                stripped.append(fc)
+        apply_changes = stripped
+
     # stash 备份仅在 break-glass 模式下使用（worktree 模式隔离已天然提供回滚能力）
     if not worktree_handle:
         try:
@@ -142,8 +163,8 @@ def node_apply_patch(
         except (subprocess.SubprocessError, OSError):
             stash_ref = ""
 
-    # 落盘
-    result = apply_file_changes(changes, apply_root)
+    # 落盘（worktree 模式用 stripped changes，非 worktree 模式用原始 changes）
+    result = apply_file_changes(apply_changes, apply_root)
     if not result.success:
         # 失败回滚：stash 模式恢复快照；worktree 模式移除 worktree
         if worktree_handle:

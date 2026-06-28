@@ -180,7 +180,10 @@ class LoopRuntime:
             worktree_handle = None
             try:
                 from loop_controller.workspace_isolation import create_patch_worktree
-                ws_root = os.environ.get("AOSP_ROOT", os.path.expanduser("~/workspace/aosp"))
+                # 优先用 LE_PATCH_GIT_ROOT（vendor/lechao 本地 git），支持 worktree 隔离；
+                # 回退到 AOSP_ROOT（兼容旧环境）
+                ws_root = os.environ.get("LE_PATCH_GIT_ROOT") or os.environ.get(
+                    "AOSP_ROOT", os.path.expanduser("~/workspace/aosp"))
                 worktree_handle = create_patch_worktree(
                     ws_root, self._session.session_id, self._session.current_attempt,
                 )

@@ -11,6 +11,11 @@ source "$SCRIPT_DIR/../../harness/lib/shell/harness_bootstrap.sh"
 
 harness_init "le"
 
+# LE_PATCH_GIT_ROOT: loop runtime 补丁隔离的 git 仓库根（vendor/lechao 本地 git）
+export LE_PATCH_GIT_ROOT="${LE_PATCH_GIT_ROOT:-$(harness_env_path ENV_LE_PATCH_GIT_ROOT)}"
+# LE_PATCH_GIT_PREFIX: worktree 模式下 workspace_path 的前缀（需 strip 才能拼出 worktree 内路径）
+export LE_PATCH_GIT_PREFIX="${LE_PATCH_GIT_PREFIX:-vendor/lechao/}"
+
 export PYTHONPATH="$(harness_pythonpath)${PYTHONPATH:+:$PYTHONPATH}"
 
 # Runtime 子命令直接分发到 runtime_cli
