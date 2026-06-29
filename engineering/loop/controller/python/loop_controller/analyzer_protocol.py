@@ -26,6 +26,7 @@ class AnalysisRequest:
     hints: str = ""
     target: str = ""
     suite: str = ""
+    prior_attempts: list[dict] = field(default_factory=list)
 
 
 @dataclass

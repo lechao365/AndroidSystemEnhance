@@ -210,3 +210,19 @@ def test_lciod_rules_no_false_positive_on_unrelated_failure():
     assert _rule_lciod_hal_field_inversion(case) is None
     assert _rule_lciod_daemon_formula_error(case) is None
     assert _rule_lciod_hal_readdrain_missing(case) is None
+
+
+def test_analysis_request_prior_attempts_default_empty():
+    """G3: AnalysisRequest 新增 prior_attempts 字段，默认空列表。"""
+    req = AnalysisRequest(session_id="s", attempt_index=0)
+    assert req.prior_attempts == []
+
+
+def test_analysis_request_prior_attempts_accepts_list():
+    """G3: prior_attempts 接受列表值。"""
+    req = AnalysisRequest(
+        session_id="s", attempt_index=0,
+        prior_attempts=[{"attempt_index": 0, "patch_hash": "abc123"}],
+    )
+    assert len(req.prior_attempts) == 1
+    assert req.prior_attempts[0]["patch_hash"] == "abc123"
