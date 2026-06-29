@@ -232,6 +232,37 @@ def run_verify_stage(session_path: str, suite: str, adb_endpoint: str,
     return session_data, StageResult(stage_name="RUN_VERIFY", status=status, failure_code=fc)
 
 
+def _summarize_failure(attempt: dict) -> str:
+    """从 attempt 生成一行失败摘要（优先 compile_error 首行，其次 failed_case id，最后 failure_code）。"""
+    compile_error = (attempt.get("compile_result") or {}).get("error", "")
+    if compile_error:
+        return compile_error.splitlines()[0][:200]
+    failed_cases = attempt.get("failed_cases") or []
+    if failed_cases:
+        ids = [c.get("id", "?") for c in failed_cases[:5]]
+        return f"failed: {', '.join(ids)}"
+    fc = attempt.get("failure_code", "")
+    return fc or "unknown"
+
+
+def _build_prior_attempts(attempts: list[dict]) -> list[dict]:
+    """从 session attempts 投影精简轨迹（排除最后一轮=当前轮，跳过无补丁的纯 verify 轮）。"""
+    prior = []
+    for i, a in enumerate(attempts[:-1]):
+        patch_applied = a.get("patch_applied") or {}
+        if not patch_applied:
+            continue
+        prior.append({
+            "attempt_index": a.get("attempt_index", i),
+            "patch_hash": patch_applied.get("patch_hash", ""),
+            "failure_code": a.get("failure_code", ""),
+            "failed_count": a.get("failed_count", 0),
+            "patch_files": patch_applied.get("files", []),
+            "failure_summary": _summarize_failure(a),
+        })
+    return prior
+
+
 def analyze_request_stage(session_data: dict, *,
                           ctx: StageContext | None = None) -> str:
     """从 session 最近一次 attempt 构造 AnalysisRequest，写 analysis_request.json，返回路径。"""
@@ -260,6 +291,7 @@ def analyze_request_stage(session_data: dict, *,
         workspace_diff_so_far=_get_workspace_diff(),
         target=session_data.get("target", ""),
         suite=session_data.get("suite", ""),
+        prior_attempts=_build_prior_attempts(session_data.get("attempts", [])),
     )
     req_path = os.path.join(artifacts_dir, "analysis_request.json")
     Path(req_path).write_text(

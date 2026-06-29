@@ -277,3 +277,90 @@ def test_analyze_request_stage_no_evidence_file(tmp_path: Path):
     request = json.loads(Path(request_path).read_text(encoding="utf-8"))
     assert request["failed_cases"][0]["id"] == "x"
     assert request["collectors_output"] == {}
+
+
+def test_analyze_request_stage_injects_prior_attempts(tmp_path, monkeypatch):
+    """G3: analyze_request_stage 从 attempts 历史投影 prior_attempts。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    # 构造两轮历史：第 0 轮有补丁失败，第 1 轮是当前轮
+    session_data = {
+        "session_id": "s1",
+        "current_attempt": 1,
+        "artifacts_dir": str(artifacts),
+        "attempts": [
+            {
+                "attempt_index": 0,
+                "failed_cases": [{"id": "TC-01"}],
+                "failed_count": 1,
+                "failure_code": "COMPILE_FAILED",
+                "patch_applied": {
+                    "patch_hash": "abc123",
+                    "files": ["vendor/lechao/foo.c"],
+                },
+                "compile_result": {"error": "implicit declaration of function 'bar'"},
+            },
+            {
+                "attempt_index": 1,
+                "failed_cases": [{"id": "TC-02"}],
+                "failed_count": 1,
+                "failure_code": "RUN_FAILED",
+                "evidence_path": "",
+            },
+        ],
+        "target": "lciod",
+        "suite": "hal",
+    }
+    monkeypatch.setattr("loop_controller.stages._get_workspace_diff", lambda: "")
+    req_path = analyze_request_stage(session_data)
+    data = json.loads(open(req_path).read())
+    assert len(data["prior_attempts"]) == 1
+    pa = data["prior_attempts"][0]
+    assert pa["patch_hash"] == "abc123"
+    assert pa["failure_code"] == "COMPILE_FAILED"
+    assert pa["patch_files"] == ["vendor/lechao/foo.c"]
+    assert "bar" in pa["failure_summary"]
+
+
+def test_analyze_request_stage_skips_attempts_without_patch(tmp_path, monkeypatch):
+    """G3: 无 patch_applied 的 attempt（首轮纯 verify）不进 prior_attempts。"""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    session_data = {
+        "session_id": "s1",
+        "current_attempt": 2,
+        "artifacts_dir": str(artifacts),
+        "attempts": [
+            {
+                "attempt_index": 0,
+                "failed_cases": [{"id": "TC-01"}],
+                "failed_count": 1,
+                "failure_code": "RUN_FAILED",
+                # 无 patch_applied
+            },
+            {
+                "attempt_index": 1,
+                "failed_cases": [{"id": "TC-01"}],
+                "failed_count": 1,
+                "failure_code": "COMPILE_FAILED",
+                "patch_applied": {
+                    "patch_hash": "def456",
+                    "files": ["foo.c"],
+                },
+            },
+            {
+                "attempt_index": 2,
+                "failed_cases": [{"id": "TC-02"}],
+                "failed_count": 1,
+                "evidence_path": "",
+            },
+        ],
+        "target": "lciod",
+        "suite": "hal",
+    }
+    monkeypatch.setattr("loop_controller.stages._get_workspace_diff", lambda: "")
+    req_path = analyze_request_stage(session_data)
+    data = json.loads(open(req_path).read())
+    # 只有 1 条进轨迹（第 1 轮有 patch_applied，第 0 轮无）
+    assert len(data["prior_attempts"]) == 1
+    assert data["prior_attempts"][0]["patch_hash"] == "def456"
