@@ -296,3 +296,35 @@ def test_run_injects_chained_analyzer(tmp_path):
         args = MagicMock(session=str(session), adb_endpoint="")
         _handle_run(args)
     assert captured["analyzer"] is not None
+
+
+def test_status_output_includes_trace_summary(tmp_path, capsys):
+    """G5: le runtime status 输出含 trace_summary 段。"""
+    from loop_controller.runtime_cli import _handle_status
+
+    session_data = {
+        "session_id": "s1",
+        "workflow_id": "runtime",
+        "target": "lciod",
+        "suite": "hal",
+        "max_attempts": 5,
+        "current_attempt": 0,
+        "status": "PENDING",
+        "latest_failure_code": "NONE",
+        "attempts": [],
+        "artifacts_dir": str(tmp_path),
+        "wall_clock_limit": 0,
+    }
+    session_path = tmp_path / "session.json"
+    session_path.write_text(json.dumps(session_data), encoding="utf-8")
+
+    args = MagicMock()
+    args.session = str(session_path)
+    _handle_status(args)
+
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert "trace_summary" in output
+    assert output["trace_summary"]["node_count"] == 0
+    # wall_clock_limit 也应在输出中
+    assert output["wall_clock_limit"] == 0

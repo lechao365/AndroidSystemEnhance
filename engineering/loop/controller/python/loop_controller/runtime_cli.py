@@ -105,6 +105,9 @@ def main(argv: list[str] | None = None) -> int:
 # ---------------------------------------------------------------------------
 def _handle_init(args: argparse.Namespace) -> int:
     sid = f"{args.target}-{time.strftime('%Y%m%d%H%M%S')}"
+    cfg = _load_analyzer_config()
+    budget_cfg = cfg.get("budget", {})
+    wall_clock_limit = budget_cfg.get("wall_clock_seconds", 0)
     session = LoopSession(
         session_id=sid,
         workflow_id="runtime",
@@ -112,6 +115,7 @@ def _handle_init(args: argparse.Namespace) -> int:
         suite=args.suite,
         max_attempts=args.max_attempts,
         artifacts_dir=args.artifacts_dir,
+        wall_clock_limit=wall_clock_limit,
     )
     out_path = Path(args.artifacts_dir) / f"{sid}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -273,6 +277,10 @@ def _handle_status(args: argparse.Namespace) -> int:
     session, ts = _load_session(args.session)
     data = _session_to_dict(session)
     data["terminal_state"] = ts.value
+    # G5: trace 聚合
+    from loop_controller.runtime.checkpoint_store import CheckpointStore
+    ckpt_store = CheckpointStore(session.artifacts_dir, session.session_id)
+    data["trace_summary"] = ckpt_store.summary()
     print(json.dumps(data, indent=2, ensure_ascii=False))
     return 0
 
@@ -363,6 +371,7 @@ def _load_session(path_str: str) -> tuple[LoopSession, RuntimeTerminalState]:
         latest_failure_code=fc,
         attempts=data.get("attempts", []),
         artifacts_dir=data.get("artifacts_dir", ""),
+        wall_clock_limit=data.get("wall_clock_limit", 0),
     )
     ts_str = data.get("terminal_state", "NONE")
     try:
@@ -384,6 +393,7 @@ def _session_to_dict(session: LoopSession) -> dict:
         "latest_failure_code": session.latest_failure_code.value,
         "attempts": session.attempts,
         "artifacts_dir": session.artifacts_dir,
+        "wall_clock_limit": session.wall_clock_limit,
     }
 
 
