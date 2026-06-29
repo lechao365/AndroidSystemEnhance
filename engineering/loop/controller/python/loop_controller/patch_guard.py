@@ -21,15 +21,35 @@ _KERNEL_RISK_MARKERS = {
 
 
 def check_white_list(changes: list[FileChange], allowed_prefixes: list[str]) -> GuardResult:
+    """校验改动是否全部落在白名单前缀内。
+
+    P1-6：防路径穿越——先拒绝显式含 ``..`` 的路径，再用规范化后的绝对路径判前缀，
+    避免 ``device/brcm/rpi5/../../../etc/passwd`` 这类穿越攻击绕过 startswith。
+    """
     rejected: list[str] = []
     for fc in changes:
+        wp = fc.workspace_path
+        # 1. 显式拒绝含 .. 的穿越路径（无论是否落在白名单字面前缀内）
+        if ".." in Path(wp).parts:
+            rejected.append(wp)
+            continue
+        # 2. 规范化后判前缀：workspace_path 可能是相对路径，
+        #    用 posix 风格规范化（去掉多余分隔符，不解析 .. 已被上面拦截）
+        normalized = Path(wp).as_posix().rstrip("/") if wp else ""
         ok = False
         for prefix in allowed_prefixes:
-            if fc.workspace_path.startswith(prefix) or fc.workspace_path == prefix.rstrip("/"):
+            # 空 prefix 视为通配（向后兼容测试/调试场景的 [""] 白名单）。
+            # 注意 Path("").as_posix() == "."，须在规范化前判原始字符串。
+            if prefix == "" or prefix.strip("/") == "":
+                ok = True
+                break
+            norm_prefix = Path(prefix).as_posix().rstrip("/")
+            if (normalized == norm_prefix
+                    or normalized.startswith(norm_prefix + "/")):
                 ok = True
                 break
         if not ok:
-            rejected.append(fc.workspace_path)
+            rejected.append(wp)
     return GuardResult(
         allowed=len(rejected) == 0,
         rejected_files=rejected,

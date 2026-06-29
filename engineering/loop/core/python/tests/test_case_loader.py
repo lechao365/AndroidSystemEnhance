@@ -579,6 +579,40 @@ cases:
     assert case.assert_spec["value"] == "alpha_ok"
 
 
+def test_parameterized_preserves_int_value_without_placeholder(tmp_path):
+    """参数化展开时，assert.value 不含 ${item} 必须保留原值类型（int）。
+
+    回归 P1-2：原 _expand_parameterized_cases 对 assert.value 无条件 str()，
+    导致 exit_code_equals 的 value:0 变 "0"，与设备返回的 int 0 比较恒失败。
+    仅当含 ${item} 占位符时才做字符串替换。
+    """
+    from loop_core.case_loader import _expand_parameterized_cases
+
+    raw_cases = [{
+        "id": "rc", "foreach": "names",
+        "command": "echo ${item}",
+        "assert": {"type": "exit_code_equals", "value": 0},
+    }]
+    expanded = _expand_parameterized_cases(raw_cases, {"names": ["a", "b"]})
+    assert len(expanded) == 2
+    for c in expanded:
+        # value 不含 ${item} → 必须保留原 int 类型
+        assert c["assert"]["value"] == 0
+        assert not isinstance(c["assert"]["value"], str)
+
+
+def test_parameterized_substitutes_value_when_has_placeholder(tmp_path):
+    """assert.value 含 ${item} 时仍正常替换为字符串（不破坏既有行为）。"""
+    from loop_core.case_loader import _expand_parameterized_cases
+
+    raw_cases = [{
+        "id": "rc", "foreach": "names", "command": "echo ${item}",
+        "assert": {"type": "contains", "value": "${item}_ok"},
+    }]
+    expanded = _expand_parameterized_cases(raw_cases, {"names": ["alpha"]})
+    assert expanded[0]["assert"]["value"] == "alpha_ok"
+
+
 def test_parameterized_foreach_unknown_param_raises(tmp_path):
     """foreach 引用不存在的 parameter 时报错。"""
     path = _write(tmp_path, "t.yaml", """

@@ -39,6 +39,33 @@ def test_white_list_empty_prefixes_rejects_all():
     assert result.allowed is False
 
 
+def test_white_list_rejects_path_traversal():
+    """含 ../ 的路径穿越必须被拒绝，即便前缀字面匹配白名单。
+
+    回归 P1-6：原 startswith(prefix) 不防 ../，如白名单 device/brcm/rpi5/，
+    攻击路径 device/brcm/rpi5/../../../etc/passwd 会通过校验。
+    """
+    allowed = ["device/brcm/rpi5/"]
+    traversal = FileChange(
+        workspace_path="device/brcm/rpi5/../../../etc/passwd",
+        change_type="edit", old_marker="x", new_content="y",
+    )
+    result = check_white_list([traversal], allowed)
+    assert result.allowed is False
+    assert any("etc/passwd" in r for r in result.rejected_files)
+
+
+def test_white_list_rejects_absolute_escape():
+    """绝对路径逃逸白名单基线必须被拒绝。"""
+    allowed = ["vendor/lechao/services/lechao_lciod/"]
+    escape = FileChange(
+        workspace_path="/etc/passwd",
+        change_type="edit", old_marker="x", new_content="y",
+    )
+    result = check_white_list([escape], allowed)
+    assert result.allowed is False
+
+
 def test_white_list_prefix_exact_dir_match():
     allowed = ["vendor/lechao/services/lechao_lciod/"]
     changes = [FileChange(workspace_path="vendor/lechao/services/lechao_lciod")]

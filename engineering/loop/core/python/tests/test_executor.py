@@ -720,3 +720,69 @@ collectors:
     assert bundle.summary["overall"] == "PASS"
     assert transport.pulled is True
     assert "t.pull_logs" in bundle.evidence
+
+
+def test_exit_code_zero_passes_on_serial_transport(tmp_path):
+    """端到端：serial 平台命令退出码为 0 时 exit_code_zero 断言通过（P1-1）。
+
+    回归 P1-1：serial 平台原本不回填 exit_code，exit_code_zero/equals 恒失败。
+    修复后 send_line 注入 marker、capture_since 解析回填，断言可用。
+    """
+    from unittest.mock import MagicMock
+    from rp5_serial.transport import Rp5SerialTransport
+
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: rc_zero
+    command: "true"
+    assert: {type: exit_code_zero}
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+
+    # mock serial client：capture_recent_entries 返回非 list（走降级路径），
+    # capture_recent_lines/read_until_timeout 返回含退出码 marker 的输出
+    client = MagicMock()
+    client.capture_recent_lines.return_value = []
+    client.read_until_timeout.return_value = ["__LE_EXIT_CODE__=0", "console:/ $"]
+    client.acquire_writer.return_value = True
+
+    transport = Rp5SerialTransport(client)
+    transport.acquire_writer()
+    bundle = CaseExecutor(transport, AssertionEngine()).execute_suite(
+        suite, device_id="rp5", prompt_markers=["console:/ $"]
+    )
+    assert bundle.cases[0].status == "pass"
+    assert bundle.summary["overall"] == "PASS"
+
+
+def test_exit_code_nonzero_fails_on_serial_transport(tmp_path):
+    """端到端：serial 平台命令退出码非 0 时 exit_code_zero 断言失败（P1-1）。"""
+    from unittest.mock import MagicMock
+    from rp5_serial.transport import Rp5SerialTransport
+
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: rc_nonzero
+    command: "false"
+    assert: {type: exit_code_zero}
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+
+    client = MagicMock()
+    client.capture_recent_lines.return_value = []
+    client.read_until_timeout.return_value = ["__LE_EXIT_CODE__=1", "console:/ $"]
+    client.acquire_writer.return_value = True
+
+    transport = Rp5SerialTransport(client)
+    transport.acquire_writer()
+    bundle = CaseExecutor(transport, AssertionEngine()).execute_suite(
+        suite, device_id="rp5", prompt_markers=["console:/ $"]
+    )
+    assert bundle.cases[0].status == "fail"
+    assert bundle.summary["overall"] == "FAIL"

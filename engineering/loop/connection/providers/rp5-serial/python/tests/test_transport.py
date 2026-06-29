@@ -33,12 +33,24 @@ class TestRp5SerialTransport:
         transport.release()
         client.release.assert_called_once()
 
-    def test_send_line_delegates_to_client(self):
+    def test_send_line_injects_exit_code_marker(self):
+        """send_line 为普通命令注入退出码捕获 marker（P1-1）。"""
         client = self._make_mock_client()
         transport = Rp5SerialTransport(client)
         transport.acquire_writer()
         transport.send_line("uname -a")
-        client.send_line.assert_called_once_with("uname -a")
+        sent = client.send_line.call_args[0][0]
+        assert "uname -a" in sent
+        assert "__LE_EXIT_CODE__" in sent
+        assert "$?" in sent
+
+    def test_send_line_does_not_inject_marker_for_reboot(self):
+        """reboot 命令不注入 marker（设备重启不返回 marker，注入无意义）。"""
+        client = self._make_mock_client()
+        transport = Rp5SerialTransport(client)
+        transport.acquire_writer()
+        transport.send_line("reboot")
+        client.send_line.assert_called_once_with("reboot")
 
     def test_capture_window_returns_observed_lines(self):
         client = self._make_mock_client()
@@ -213,6 +225,53 @@ class TestRp5SerialTransportBoundaryApi:
         )
         texts = [line.text for line in capture.lines]
         assert texts == ["l4", "l5"]
+
+    def test_capture_since_extracts_exit_code_from_marker(self):
+        """capture_since 从输出末尾的 __LE_EXIT_CODE__=N 解析退出码并回填。
+
+        回归 P1-1：serial 平台原本不回填 exit_code（默认 None），导致
+        exit_code_zero/exit_code_equals 断言在串口主通道恒失败。
+        修复：send_line 注入退出码捕获 marker，capture_since 解析并剥离。
+        """
+        client = MagicMock()
+        client.capture_recent_lines.return_value = []
+        client.read_until_timeout.return_value = [
+            "result line", "__LE_EXIT_CODE__=0", "console:/ $",
+        ]
+        transport = Rp5SerialTransport(client)
+        capture = transport.capture_since(
+            transport.mark_output_boundary(), 5, 100,
+            prompt_markers=["console:/ $"],
+        )
+        assert capture.exit_code == 0
+        # marker 行必须从 lines 剥离（避免污染 contains/regex 断言）
+        texts = [line.text for line in capture.lines]
+        assert "__LE_EXIT_CODE__=0" not in texts
+        assert "result line" in texts
+
+    def test_capture_since_exit_code_nonzero(self):
+        """非零退出码也正确回填。"""
+        client = MagicMock()
+        client.capture_recent_lines.return_value = []
+        client.read_until_timeout.return_value = [
+            "error output", "__LE_EXIT_CODE__=127",
+        ]
+        transport = Rp5SerialTransport(client)
+        capture = transport.capture_since(
+            transport.mark_output_boundary(), 5, 100
+        )
+        assert capture.exit_code == 127
+
+    def test_capture_since_no_exit_code_marker_returns_none(self):
+        """无 marker 时 exit_code 保持 None（命令尚未返回或 reboot 类命令）。"""
+        client = MagicMock()
+        client.capture_recent_lines.return_value = []
+        client.read_until_timeout.return_value = ["just output", "console:/ $"]
+        transport = Rp5SerialTransport(client)
+        capture = transport.capture_since(
+            transport.mark_output_boundary(), 5, 100
+        )
+        assert capture.exit_code is None
 
 
 def test_transport_describe_runtime_context():

@@ -9,11 +9,12 @@ lciod:
   - vendor/lechao/services/lechao_lciod/
   - device/brcm/rpi5/sepolicy/lechao_lciod/
   - device/brcm/rpi5/lciod/
-  - patchs/rpi5/others/usb-verify/
 lcview:
   - vendor/lechao/services/lechao_lcview/
   - device/brcm/rpi5/sepolicy/lechao_lcview.te
   - device/brcm/rpi5/sepolicy/lechao_lcview_hal.te
+# system.boot: 启动相关改动覆盖面较广，白名单保留宽泛路径；
+# 路径穿越防护已由 patch_guard.check_white_list 保证（拒绝 ../ 与绝对路径逃逸）。
 system.boot:
   - device/brcm/rpi5/
   - vendor/brcm/

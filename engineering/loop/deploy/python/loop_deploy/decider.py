@@ -81,26 +81,20 @@ def decide(diff_files: list[str]) -> DeployPlan:
     if all_docs:
         return DeployPlan.skip(f"all changed files are docs: {diff_files}")
 
-    type_count = sum([has_kernel, has_te, has_cpp, has_cpp_lcview, has_rc, has_usb_verify])
-    if type_count >= 2:
-        return DeployPlan.flash_full(diff_files, f"mixed changes: {type_count} types")
-
-    if has_kernel:
-        return DeployPlan(
-            mode=DeployMode.DD_BOOT_REBOOT, changed_files=diff_files,
-            reason="kernel driver changes require boot.img rebuild",
-            build_targets=["mode_2"], deploy_targets=[_BOOT_TARGET],
-            requires_reboot=True, estimated_seconds=1800,
-        )
-    if has_rc:
-        return DeployPlan(
-            mode=DeployMode.DD_BOOT_REBOOT, changed_files=diff_files,
-            reason="init.rc changes require boot.img rebuild",
-            build_targets=["mode_2"], deploy_targets=[_BOOT_TARGET],
-            requires_reboot=True, estimated_seconds=1800,
-        )
+    # P1-3：按最高风险等级决策，而非"≥2 类型即 flash_full"。
+    # 风险等级：sepolicy(.te) 必须全量刷机 > kernel/.rc 需 dd boot > cpp/usb-verify 可 push。
+    # 混合时取最高风险，但仅当含不可 push 类型才升级（纯可 push 组合仍走 push）。
     if has_te:
         return DeployPlan.flash_full(diff_files, "sepolicy changes require full flash (vendor dd not verified)")
+    if has_kernel or has_rc:
+        reason = ("kernel driver changes require boot.img rebuild" if has_kernel
+                  else "init.rc changes require boot.img rebuild")
+        return DeployPlan(
+            mode=DeployMode.DD_BOOT_REBOOT, changed_files=diff_files,
+            reason=reason,
+            build_targets=["mode_2"], deploy_targets=[_BOOT_TARGET],
+            requires_reboot=True, estimated_seconds=1800,
+        )
 
     if has_cpp:
         return DeployPlan(

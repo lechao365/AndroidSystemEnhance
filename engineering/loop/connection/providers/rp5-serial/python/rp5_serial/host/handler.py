@@ -98,6 +98,9 @@ class ClientHandler:
         self._sub_id: int | None = None
         # 推送模式标志：置位后主循环同时消费 broker 队列
         self._streaming = False
+        # P1-4：本连接持有的 writer owner_id（acquire 成功时记录，
+        # _cleanup 时据此释放，避免 writer 泄漏）
+        self._writer_owner_id: str | None = None
 
     # ------------------------------------------------------------------
     # 主入口
@@ -198,10 +201,12 @@ class ClientHandler:
         if lease is None:
             self._send(make_error(WRITER_BUSY, "writer is held by another client"))
             return
+        self._writer_owner_id = owner_id  # 记录本连接持有的 writer
         self._send(make_ok(lease.to_dict()))
 
     def _op_writer_release(self, data: dict[str, Any]) -> None:
         self._state.release_writer()
+        self._writer_owner_id = None
         self._send(make_ok())
 
     def _op_input_send_line(self, data: dict[str, Any]) -> None:
@@ -287,6 +292,11 @@ class ClientHandler:
         return self._send({"op": "stream.data", "data": {"text": text}})
 
     def _cleanup(self) -> None:
+        # P1-4：本连接持有的 writer 必须随连接断开释放，否则 writer 永驻，
+        # 后续 acquire 恒失败（仅 TTL 过期或重启 host 才能恢复）。
+        if self._writer_owner_id is not None:
+            self._state.release_for_owner(self._writer_owner_id)
+            self._writer_owner_id = None
         if self._sub_id is not None:
             self._broker.unsubscribe(self._sub_id)
             self._state.dec_subscriber()

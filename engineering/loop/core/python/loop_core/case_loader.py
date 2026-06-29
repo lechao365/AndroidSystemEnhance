@@ -273,14 +273,17 @@ def _expand_parameterized_cases(raw_cases: list[dict], parameters: dict) -> list
                 )
             assert_spec = cloned.get("assert", {})
             if isinstance(assert_spec, dict):
+                # P1-2：仅当含 ${item} 占位符时才做字符串替换；
+                # 否则保留原值类型（如 exit_code_equals 的 int 0），避免无条件
+                # str() 导致 0(int)=="0"(str) 与设备返回值比较恒失败。
                 if assert_spec.get("value") is not None:
-                    assert_spec["value"] = str(assert_spec["value"]).replace(
-                        "${item}", item_str
-                    )
+                    raw_value = assert_spec["value"]
+                    if "${item}" in str(raw_value):
+                        assert_spec["value"] = str(raw_value).replace("${item}", item_str)
                 if assert_spec.get("pattern") is not None:
-                    assert_spec["pattern"] = str(assert_spec["pattern"]).replace(
-                        "${item}", item_str
-                    )
+                    raw_pattern = assert_spec["pattern"]
+                    if "${item}" in str(raw_pattern):
+                        assert_spec["pattern"] = str(raw_pattern).replace("${item}", item_str)
             expanded.append(cloned)
     return expanded
 

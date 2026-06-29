@@ -5,11 +5,17 @@
 """
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime, timedelta
 
 from loop_core.models import ObservedLine, RebootResult
 from loop_core.transport import BaseTransport, CommandCapture
+
+
+# 退出码捕获 marker：send_line 注入，capture_since 解析回填 exit_code（P1-1）
+_EXIT_CODE_MARKER = "__LE_EXIT_CODE__="
+_EXIT_CODE_RE = re.compile(r"__LE_EXIT_CODE__=(-?\d+)")
 
 
 class Rp5SerialTransport(BaseTransport):
@@ -45,6 +51,14 @@ class Rp5SerialTransport(BaseTransport):
         self.client.release()
 
     def send_line(self, text: str) -> None:
+        # P1-1：为命令注入退出码捕获 marker，capture_since 解析后回填 exit_code，
+        # 使 exit_code_zero/exit_code_equals 断言在 serial 平台可用。
+        # reboot 等特殊命令不注入（设备重启不会返回 marker，capture_since 找不到
+        # 时 exit_code 自然为 None，符合预期）。
+        if text.strip() and not text.strip().startswith("reboot"):
+            text = (
+                f"{text} ; printf '\\n{_EXIT_CODE_MARKER}%s\\n' \"$?\""
+            )
         self.client.send_line(text)
 
     # ------------------------------------------------------------------
@@ -88,6 +102,30 @@ class Rp5SerialTransport(BaseTransport):
             any(marker in line.text for marker in prompt_markers)
             for line in lines
         )
+
+    @staticmethod
+    def _extract_exit_code(
+        lines: list[ObservedLine],
+    ) -> tuple[list[ObservedLine], int | None]:
+        """从采集结果末尾解析退出码 marker（P1-1）。
+
+        send_line 注入 ``__LE_EXIT_CODE__=N`` 后，设备 shell 会输出该 marker 行。
+        本方法反向扫描找到最后一个 marker 行，解析出退出码，并将所有 marker 行
+        从结果中剥离（避免污染 contains/regex 等断言）。
+
+        Returns:
+            (剥离 marker 后的 lines, exit_code)；无 marker 时 exit_code 为 None。
+        """
+        exit_code: int | None = None
+        cleaned: list[ObservedLine] = []
+        for line in lines:
+            m = _EXIT_CODE_RE.search(line.text)
+            if m:
+                exit_code = int(m.group(1))
+                # 不把 marker 行加入 cleaned（剥离）
+                continue
+            cleaned.append(line)
+        return cleaned, exit_code
 
     # ------------------------------------------------------------------
     # 旧 API（兼容期）
@@ -330,8 +368,12 @@ class Rp5SerialTransport(BaseTransport):
             lines = self._apply_recent_limit(lines, recent_limit)
 
         markers = prompt_markers or []
+        # P1-1：解析退出码 marker 并剥离，使 serial 平台也能回填 exit_code
+        lines, exit_code = self._extract_exit_code(lines)
         prompt_visible = self._detect_prompt_visible(lines, markers)
-        return CommandCapture(lines=lines, prompt_visible=prompt_visible)
+        return CommandCapture(
+            lines=lines, prompt_visible=prompt_visible, exit_code=exit_code
+        )
 
     # ------------------------------------------------------------------
     # reboot API（live 模式）

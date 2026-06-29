@@ -27,6 +27,10 @@ MAX_LINE_BUFFER = 2000
 # transcript 文件名
 TRANSCRIPT_FILENAME = "rp5-serial-transcript.log"
 
+# WriterLease 默认 TTL（秒）：超时未释放的 lease 在下次 acquire 时被自动回收，
+# 防止 client 异常断开导致 writer 永驻（P1-4）
+LEASE_TTL_SEC = 300
+
 
 def now_iso() -> str:
     return datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -91,28 +95,60 @@ class RuntimeState:
 
     def acquire_writer(self, owner_type: str, owner_id: str) -> WriterLease | None:
         with self._lock:
+            # P1-4：回收超 TTL 的僵尸 lease（client 异常断开未释放时兜底）
             if self.active_writer is not None:
-                return None
+                if self._is_lease_expired(self.active_writer):
+                    self.active_writer = None
+                    if self.active_session:
+                        self.active_session.writer_owner = None
+                else:
+                    return None  # 仍被持有且未过期
             if self.active_session is None:
                 self.open_session(mode="interactive", owner_id=owner_id)
+            acquired = datetime.now(TZ)
+            expires = acquired + timedelta(seconds=LEASE_TTL_SEC)
             lease = WriterLease(
                 lease_id=f"l-{uuid4().hex[:8]}",
                 session_id=self.active_session.session_id,
                 owner_type=owner_type,
                 owner_id=owner_id,
-                acquired_at=now_iso(),
-                expires_at=now_iso(),
+                acquired_at=acquired.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                expires_at=expires.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 state="HELD",
             )
             self.active_writer = lease
             self.active_session.writer_owner = owner_id
             return lease
 
+    @staticmethod
+    def _is_lease_expired(lease: WriterLease) -> bool:
+        """判断 lease 是否超过 TTL。解析失败时按未过期处理（保守，避免误回收）。"""
+        try:
+            expires_dt = datetime.strptime(lease.expires_at, "%Y-%m-%dT%H:%M:%S%z")
+        except ValueError:
+            return False
+        return datetime.now(TZ) > expires_dt
+
     def release_writer(self) -> None:
         with self._lock:
             self.active_writer = None
             if self.active_session:
                 self.active_session.writer_owner = None
+
+    def release_for_owner(self, owner_id: str) -> bool:
+        """仅当当前 writer 的 owner_id 匹配时释放（client 断开时安全清理）。
+
+        P1-4：handler._cleanup 调用此方法释放本连接持有的 writer，
+        避免误释放其他 client 的 writer。返回是否实际释放。
+        """
+        with self._lock:
+            if (self.active_writer is not None
+                    and self.active_writer.owner_id == owner_id):
+                self.active_writer = None
+                if self.active_session:
+                    self.active_session.writer_owner = None
+                return True
+            return False
 
     def send_line(self, text: str) -> None:
         """向串口写入一行（自动追加 \\n）。
