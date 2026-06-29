@@ -78,6 +78,7 @@ PYTHONPATH="engineering/loop/core/python:engineering/loop/connection/providers/r
 INIT_SESSION -> RUN_VERIFY -> DECIDE_NEXT
   ├─ DONE_SUCCESS                          (全 PASS)
   ├─ ESCALATE_HUMAN                        (FAIL>=max / 重复失败 / 重复补丁 / kernel dead / ...)
+  ├─ DONE_FAILURE                          (系统异常终止)
   └─ BUILD_ANALYSIS_REQUEST -> WAIT_ANALYZER_PATCH
                                 -> APPLY_PATCH -> COMPILE_PATCH -> DEPLOY_PATCH -> RUN_VERIFY (回环重验)
                                 -> REVERT_PATCH -> DECIDE_NEXT                              (编译/部署失败回滚后重判)
