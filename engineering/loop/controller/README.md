@@ -76,30 +76,42 @@ PYTHONPATH="engineering/loop/core/python:engineering/loop/connection/providers/r
 
 ```text
 INIT_SESSION -> RUN_VERIFY -> DECIDE_NEXT
-  -> DONE_SUCCESS (全 PASS)
-  -> BUILD_ANALYSIS_REQUEST -> WAIT_ANALYZER_PATCH -> ESCALATE_HUMAN (需 AI 产出补丁)
-  -> ESCALATE_HUMAN (FAIL >= max_attempts / 重复失败 / 重复补丁)
+  ├─ DONE_SUCCESS                          (全 PASS)
+  ├─ ESCALATE_HUMAN                        (FAIL>=max / 重复失败 / 重复补丁 / kernel dead / ...)
+  └─ BUILD_ANALYSIS_REQUEST -> WAIT_ANALYZER_PATCH
+                                -> APPLY_PATCH -> COMPILE_PATCH -> DEPLOY_PATCH -> RUN_VERIFY (回环重验)
+                                -> REVERT_PATCH -> DECIDE_NEXT                              (编译/部署失败回滚后重判)
 ```
 
-### Guard 清单
+线性转移（`engine._LINEAR_NEXT`，无分支条件）：
+`INIT_SESSION→RUN_VERIFY`、`RUN_VERIFY→DECIDE_NEXT`、
+`BUILD_ANALYSIS_REQUEST→WAIT_ANALYZER_PATCH`、`WAIT_ANALYZER_PATCH→APPLY_PATCH`、
+`APPLY_PATCH→COMPILE_PATCH`、`DEPLOY_PATCH→RUN_VERIFY`、`REVERT_PATCH→DECIDE_NEXT`。
+
+> `APPLY_PATCH` 节点内可能因 low_confidence / kernel_patch / dd_boot_reboot 触发 human gate（`pending_human_gate=True`，不设终态，等 `le runtime approve/reject`）。
+
+### Guard 清单（16 个）
+
+> 数量源于 `guards.py` 的 `_GUARD_REGISTRY`，`engine.py` 在 DECIDE_NEXT/APPLY/DEPLOY/REVERT 各节点按序调用对应 guard 子链。
 
 | Guard | 类型 | 触发终态/跳转 |
 |---|---|---|
 | `all_cases_passed` | success | DONE_SUCCESS |
+| `attempts_below_limit` | retry | BUILD_ANALYSIS_REQUEST |
+| `progress_converging` | convergence | 严格下降→BUILD_ANALYSIS_REQUEST；持平/上升→ESCALATE_HUMAN |
+| `attempt_limit_reached` | terminal | ESCALATE_HUMAN |
+| `repeated_failure_code` | terminal | ESCALATE_HUMAN |
 | `duplicate_patch_hash` | terminal | ESCALATE_HUMAN |
-| `kernel_dead_no_shell` | terminal | ESCALATE_HUMAN |
 | `patch_rejected` | terminal | ESCALATE_HUMAN |
+| `kernel_dead_no_shell` | terminal | ESCALATE_HUMAN |
 | `session_state_corrupted` | terminal | ESCALATE_HUMAN |
 | `transport_unrecoverable` | terminal | ESCALATE_HUMAN |
 | `rollback_failed` | terminal | ESCALATE_HUMAN |
-| `boot_timeout_no_recovery` | terminal | ESCALATE_HUMAN |
-| `progress_converging` | convergence | 严格下降→RETRY / 持平/上升→ESCALATE_HUMAN |
-| `repeated_failure_code` | terminal | ESCALATE_HUMAN |
-| `attempt_limit_reached` | terminal | ESCALATE_HUMAN |
-| `attempts_below_limit` | retry | BUILD_ANALYSIS_REQUEST |
-| `compile_failed_but_recoverable` | retry | REVERT_PATCH |
-| `deploy_failed_but_recoverable` | retry | DECIDE_NEXT |
+| `boot_timeout_no_recovery` | terminal | ESCALATE_HUMAN（已尝试回滚仍 boot timeout） |
 | `patch_applied_successfully` | transition | COMPILE_PATCH |
+| `compile_failed_but_recoverable` | revert | REVERT_PATCH |
+| `deploy_failed_but_recoverable` | revert | REVERT_PATCH |
+| `boot_timeout_kernel_panic` | revert | REVERT_PATCH |
 
 ### Analyzer 架构（三层降级）
 

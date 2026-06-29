@@ -19,13 +19,13 @@ class AdbOps:
         return False
 
     def wait_oneshot_started(self, service_name: str, timeout: float = 15.0) -> bool:
-        """等待 oneshot 服务启动过：getprop 曾出现 running，或 logcat 有启动日志。
+        """等待 oneshot 服务启动过：logcat 出现启动日志。
 
-        oneshot 服务 restart 后立即退出变 stopped，无法用
-        wait_service_running 判定。改为：
-        1) 先 setprop ctl.start 触发启动；
-        2) 轮询 logcat -d 是否出现服务的启动日志（logcat 默认保留最近 buffer）。
-        判定标志：出现服务名相关启动行即视为部署成功（进程已加载新二进制）。
+        oneshot 服务被 deployer 用 `setprop ctl.restart` 触发后立即退出变
+        stopped，无法用 wait_service_running 判定。本方法改为轮询 logcat
+        -d 是否出现服务的启动日志（logcat 默认保留最近 buffer）。
+        判定标志：出现服务名相关启动行（start/loaded）即视为部署成功
+        （进程已加载新二进制）。
         """
         marker = service_name
         deadline = time.time() + timeout

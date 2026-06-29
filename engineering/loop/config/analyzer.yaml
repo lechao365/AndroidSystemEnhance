@@ -10,9 +10,11 @@ knowledge_base:
   fingerprint_reason_length: 80
 
 confidence:
-  threshold: 0.7
-  rule_match: 0.95
-  kb_match: 0.98
+  threshold: 0.7        # < threshold 的补丁触发 human gate（pending/approve/reject）
+  rule_match: 0.95      # ScriptedAnalyzer 命中
+  kb_match: 0.98        # KnowledgeBaseAnalyzer 命中（Reflexion 召回）
+  # opencode（LLM）confidence 固定 0.8，硬编码在 OpencodeAnalyzer——
+  # 低于 threshold(0.7) 的补丁必触发 human gate，故不暴露为可配置项
 
 human_gate:
   enabled: true
