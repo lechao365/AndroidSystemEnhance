@@ -22,3 +22,6 @@ human_gate:
     - low_confidence
     - kernel_patch
     - dd_boot_reboot
+
+budget:
+  wall_clock_seconds: 3600   # session 总耗时上限（秒），0=不限制；超时触发 DONE_FAILURE
