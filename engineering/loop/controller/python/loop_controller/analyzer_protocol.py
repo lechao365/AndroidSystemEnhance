@@ -503,9 +503,24 @@ class OpencodeAnalyzer(LlmAnalyzer):
             "",
             f"Target: {request.target}",
             f"Suite: {request.suite}",
-            "",
-            "## 失败用例",
         ]
+        # G3: 注入历史尝试轨迹（prior_attempts 非空时渲染）
+        if request.prior_attempts:
+            lines.extend(["", "## 历史尝试（请避免重复方向）"])
+            for pa in request.prior_attempts:
+                idx = pa.get("attempt_index", "?")
+                files = ", ".join(pa.get("patch_files", [])) or "(未知)"
+                fc = pa.get("failure_code", "unknown")
+                summary = pa.get("failure_summary", "")
+                lines.extend([
+                    "",
+                    f"### 尝试 #{idx}",
+                    f"- 补丁文件: {files}",
+                    f"- 失败码: {fc}",
+                    f"- 失败摘要: {summary}",
+                ])
+            lines.append("- 请勿重复上述已失败的修复方向。")
+        lines.extend(["", "## 失败用例"])
         for fc in request.failed_cases:
             lines.append(f"- {fc.get('id', '?')}: {fc.get('failure_reason', '?')}")
             lines.append(f"  command: {fc.get('command', '?')}")

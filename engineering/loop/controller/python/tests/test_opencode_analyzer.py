@@ -119,3 +119,36 @@ def test_opencode_invoke_cmd_uses_separator(tmp_path):
     sep_idx = cmd.index("--")
     assert cmd[sep_idx - 1] == req_file or req_file in cmd[sep_idx - 2:sep_idx]
     assert prompt in cmd[sep_idx + 1:]
+
+
+def test_opencode_prompt_includes_history_when_prior_attempts_exist(tmp_path):
+    """G3: prior_attempts 非空时 prompt 含'历史尝试'段落。"""
+    analyzer = OpencodeAnalyzer(workspace_root=str(tmp_path))
+    req = AnalysisRequest(
+        session_id="s", attempt_index=2, target="lciod",
+        failed_cases=[{"id": "TC-02", "failure_reason": "still failing"}],
+        prior_attempts=[
+            {
+                "attempt_index": 0,
+                "patch_hash": "abc123",
+                "failure_code": "COMPILE_FAILED",
+                "failed_count": 2,
+                "patch_files": ["vendor/lechao/foo.c", "vendor/lechao/bar.h"],
+                "failure_summary": "implicit declaration of function 'bar'",
+            },
+        ],
+    )
+    prompt = analyzer._build_prompt(req)
+    assert "历史尝试" in prompt
+    assert "abc123" not in prompt  # hash 本身不应直接渲染（太长无意义）
+    assert "foo.c" in prompt
+    assert "COMPILE_FAILED" in prompt
+    assert "implicit declaration" in prompt
+
+
+def test_opencode_prompt_no_history_section_when_empty(tmp_path):
+    """G3: prior_attempts 为空时不渲染历史段落。"""
+    analyzer = OpencodeAnalyzer(workspace_root=str(tmp_path))
+    req = AnalysisRequest(session_id="s", attempt_index=1, target="lciod")
+    prompt = analyzer._build_prompt(req)
+    assert "历史尝试" not in prompt
