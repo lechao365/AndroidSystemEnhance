@@ -66,6 +66,9 @@ class LoopRuntime:
         self._confidence_threshold: float = 0.7
         # human-in-loop 触发场景（由 analyzer.yaml 的 human_gate.triggers 注入）
         self._human_gate_triggers: list[str] = ["low_confidence", "kernel_patch", "dd_boot_reboot"]
+        # G5: 节点耗时测量 + wall_clock 预算闸
+        self._session_start: float = 0.0
+        self._last_node_duration_ms: int = 0
 
     def resume(self) -> RuntimeState:
         # 幂等：已终态的 session 不恢复
@@ -107,6 +110,7 @@ class LoopRuntime:
         return self._state
 
     def run(self, max_iterations: int = 100) -> RuntimeState:
+        self._session_start = time.perf_counter()
         iterations = 0
         while self._state.terminal_state == RuntimeTerminalState.NONE:
             iterations += 1
@@ -114,13 +118,30 @@ class LoopRuntime:
                 self._state.terminal_state = RuntimeTerminalState.DONE_FAILURE
                 self._state.transition_reason = f"max_iterations({max_iterations}) exceeded"
                 break
+            t_start = time.perf_counter()
             self._execute_current_node()
+            elapsed = time.perf_counter() - t_start
+            self._last_node_duration_ms = int(elapsed * 1000)
             # pending_human_gate：等待人工决策，不设终态、不继续推进
             if self._state.pending_human_gate:
                 self._persist_session()
                 return self._state
             if self._state.terminal_state != RuntimeTerminalState.NONE:
                 break
+            # G5: wall_clock 预算闸
+            if self._session.wall_clock_limit > 0:
+                wall = time.perf_counter() - self._session_start
+                if wall > self._session.wall_clock_limit:
+                    self._state.terminal_state = RuntimeTerminalState.DONE_FAILURE
+                    self._state.transition_reason = (
+                        f"wall_clock budget exceeded: {wall:.0f}s > "
+                        f"{self._session.wall_clock_limit}s"
+                    )
+                    self._checkpoint(
+                        "wall_clock budget exceeded",
+                        FailureCode.WALL_CLOCK_BUDGET_EXCEEDED,
+                    )
+                    break
             self._transition()
         self._persist_session()
         return self._state
@@ -612,8 +633,12 @@ class LoopRuntime:
             return NodeKind.REVERT_PATCH.value
         return _LINEAR_NEXT.get(node, "")
 
-    def _checkpoint(self, reason: str, failure_code: FailureCode, matched_guards: list[str] | None = None) -> None:
+    def _checkpoint(self, reason: str, failure_code: FailureCode,
+                    matched_guards: list[str] | None = None,
+                    duration_ms: int | None = None) -> None:
         next_node = self._compute_next_node()
+        if duration_ms is None:
+            duration_ms = getattr(self, "_last_node_duration_ms", 0)
         cp = CheckpointRecord(
             checkpoint_id=f"cp-{uuid.uuid4().hex[:12]}",
             session_id=self._session.session_id,
@@ -625,6 +650,7 @@ class LoopRuntime:
             matched_guards=matched_guards or [],
             next_node=next_node,
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%S+08:00"),
+            duration_ms=duration_ms,
         )
         self._store.save(cp)
         self._state.last_checkpoint_at = cp.timestamp

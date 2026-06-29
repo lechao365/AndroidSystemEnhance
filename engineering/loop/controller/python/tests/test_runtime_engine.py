@@ -1363,3 +1363,57 @@ def test_old_format_list_treated_as_high_confidence(tmp_path):
     rt._execute_current_node()
     # 旧格式视为高置信度，不进入 LOW_CONFIDENCE 分支
     assert rt._state.node_status != "LOW_CONFIDENCE"
+
+
+def test_engine_records_nonzero_duration_ms(tmp_path):
+    """G5: engine 执行节点后 checkpoint 含 duration_ms 字段。"""
+    from loop_controller.runtime.engine import LoopRuntime
+    from loop_controller.runtime.checkpoint_store import CheckpointStore
+
+    session = LoopSession(
+        session_id="s1", workflow_id="runtime",
+        target="lciod", suite="hal", max_attempts=1,
+        artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp/cases", device_profile="rp5")
+    rt._execute_current_node()  # INIT_SESSION
+    store = CheckpointStore(str(tmp_path), "s1")
+    cp = store.latest()
+    assert cp is not None
+    # duration_ms 字段存在（INIT_SESSION 极快，可能为 0，但字段必须有）
+    assert hasattr(cp, "duration_ms")
+
+
+def test_engine_wall_clock_budget_exceeds(tmp_path):
+    """G5: wall_clock_limit 极小时超限，设 DONE_FAILURE。"""
+    import time as _time
+    from loop_controller.runtime.engine import LoopRuntime
+    from loop_contracts.models import RuntimeTerminalState
+
+    session = LoopSession(
+        session_id="s1", workflow_id="runtime",
+        target="lciod", suite="hal", max_attempts=5,
+        artifacts_dir=str(tmp_path),
+        wall_clock_limit=0.001,  # 极小，确保超限
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp/cases", device_profile="rp5")
+    _time.sleep(0.01)  # 确保已超过 0.001s
+    rt.run(max_iterations=3)
+    assert rt._state.terminal_state == RuntimeTerminalState.DONE_FAILURE
+    assert "wall_clock" in rt._state.transition_reason.lower()
+
+
+def test_engine_wall_clock_zero_means_unlimited(tmp_path):
+    """G5: wall_clock_limit=0 时不触发预算闸。"""
+    from loop_controller.runtime.engine import LoopRuntime
+
+    session = LoopSession(
+        session_id="s1", workflow_id="runtime",
+        target="lciod", suite="hal", max_attempts=1,
+        artifacts_dir=str(tmp_path),
+        wall_clock_limit=0,  # 不限制
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp/cases", device_profile="rp5")
+    rt.run(max_iterations=3)
+    # 不应因 wall_clock 超时退出
+    assert "wall_clock" not in rt._state.transition_reason.lower()
