@@ -213,3 +213,59 @@ def test_from_line_reads_duration_ms(tmp_path):
     records = store.all()
     assert len(records) == 1
     assert records[0].duration_ms == 1234
+
+
+def test_summary_empty_returns_zero(tmp_path):
+    """G5: 无 checkpoint 时 summary 返回零值。"""
+    from loop_controller.runtime.checkpoint_store import CheckpointStore
+    store = CheckpointStore(str(tmp_path), "s1")
+    s = store.summary()
+    assert s["node_count"] == 0
+    assert s["total_duration_ms"] == 0
+    assert s["nodes"] == []
+
+
+def test_summary_aggregates_duration_and_nodes(tmp_path):
+    """G5: summary 正确聚合 total_duration_ms + nodes 列表。"""
+    import json
+    from loop_controller.runtime.checkpoint_store import CheckpointStore
+
+    store = CheckpointStore(str(tmp_path), "s1")
+    records = [
+        {
+            "checkpoint_id": "cp-1", "session_id": "s1", "attempt_index": 0,
+            "current_node": "INIT_SESSION", "input_summary": {},
+            "output_summary": {"reason": "init"}, "failure_code": "NONE",
+            "matched_guards": [], "next_node": "RUN_VERIFY",
+            "timestamp": "2026-01-01T00:00:00+08:00", "duration_ms": 100,
+        },
+        {
+            "checkpoint_id": "cp-2", "session_id": "s1", "attempt_index": 0,
+            "current_node": "RUN_VERIFY", "input_summary": {},
+            "output_summary": {"reason": "verify PASS"}, "failure_code": "NONE",
+            "matched_guards": [], "next_node": "DECIDE_NEXT",
+            "timestamp": "2026-01-01T00:00:10+08:00", "duration_ms": 5000,
+        },
+    ]
+    (tmp_path / "runtime_checkpoints.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+    )
+    s = store.summary()
+    assert s["node_count"] == 2
+    assert s["total_duration_ms"] == 5100
+    assert len(s["nodes"]) == 2
+    assert s["nodes"][0]["node"] == "INIT_SESSION"
+    assert s["nodes"][0]["duration_ms"] == 100
+    assert s["nodes"][1]["node"] == "RUN_VERIFY"
+    assert s["nodes"][1]["duration_ms"] == 5000
+
+
+def test_format_duration_human_readable():
+    """G5: _format_duration 毫秒→人类可读。"""
+    from loop_controller.runtime.checkpoint_store import _format_duration
+    assert _format_duration(0) == "0ms"
+    assert _format_duration(500) == "500ms"
+    assert _format_duration(1000) == "1.0s"
+    assert _format_duration(30000) == "30s"
+    assert _format_duration(90000) == "1m 30s"
+    assert _format_duration(3600000) == "1h 0m"

@@ -12,6 +12,23 @@ _logger = logging.getLogger("loop_runtime_checkpoint")
 _CHECKPOINT_FILENAME = "runtime_checkpoints.jsonl"
 
 
+def _format_duration(ms: int) -> str:
+    """毫秒 → 人类可读（如 '2m 30s' / '1h 5m'）。"""
+    if ms < 1000:
+        return f"{ms}ms"
+    s = ms / 1000
+    if s < 10:
+        return f"{s:.1f}s"
+    if s < 60:
+        return f"{int(s)}s"
+    total_s = int(s)
+    m, sec = divmod(total_s, 60)
+    if m < 60:
+        return f"{m}m {sec}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m}m"
+
+
 class CheckpointStore:
     def __init__(self, artifacts_dir: str, session_id: str) -> None:
         self._path = Path(artifacts_dir) / _CHECKPOINT_FILENAME
@@ -74,3 +91,27 @@ class CheckpointStore:
             timestamp=data["timestamp"],
             duration_ms=data.get("duration_ms", 0),
         )
+
+    def summary(self) -> dict:
+        """聚合当前 session 的 checkpoint 流水为 trace 摘要。"""
+        records = self.all()
+        if not records:
+            return {"node_count": 0, "total_duration_ms": 0, "nodes": []}
+
+        total_ms = sum(r.duration_ms for r in records)
+        return {
+            "node_count": len(records),
+            "total_duration_ms": total_ms,
+            "total_duration_human": _format_duration(total_ms),
+            "nodes": [
+                {
+                    "node": r.current_node,
+                    "attempt": r.attempt_index,
+                    "duration_ms": r.duration_ms,
+                    "failure_code": r.failure_code.value if r.failure_code else "",
+                    "reason": r.output_summary.get("reason", ""),
+                    "timestamp": r.timestamp,
+                }
+                for r in records
+            ],
+        }
