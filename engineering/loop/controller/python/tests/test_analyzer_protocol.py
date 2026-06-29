@@ -226,3 +226,28 @@ def test_analysis_request_prior_attempts_accepts_list():
     )
     assert len(req.prior_attempts) == 1
     assert req.prior_attempts[0]["patch_hash"] == "abc123"
+
+
+def test_analysis_request_deserialize_old_json_without_prior_attempts():
+    """G3: 旧 checkpoint JSON（无 prior_attempts 键）能正常反序列化。"""
+    import json
+    from loop_controller.analyzer_protocol import AnalysisRequest
+
+    old_json = json.dumps({
+        "session_id": "s",
+        "attempt_index": 1,
+        "failed_cases": [{"id": "TC-01"}],
+        "evidence_bundle_path": "/tmp/eb.json",
+        "collectors_output": {},
+        "workspace_diff_so_far": "",
+        "hints": "",
+        "target": "lciod",
+        "suite": "hal",
+    })
+    data = json.loads(old_json)
+    request = AnalysisRequest(**{
+        k: v for k, v in data.items()
+        if k in AnalysisRequest.__dataclass_fields__
+    })
+    assert request.prior_attempts == []
+    assert request.target == "lciod"
