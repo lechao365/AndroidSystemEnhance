@@ -1,3 +1,4 @@
+import logging
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -5,6 +6,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from rp5_serial.shared.models import Session, StatusResponse, WriterLease
+
+_logger = logging.getLogger("rp5_serial_host")
 
 try:
     from harness_path_util import ensure_dir
@@ -93,7 +96,8 @@ class RuntimeState:
             self.active_session.state = "ENDED"
             self.active_session = None
 
-    def acquire_writer(self, owner_type: str, owner_id: str) -> WriterLease | None:
+    def acquire_writer(self, owner_type: str, owner_id: str,
+                       mode: str = "interactive") -> WriterLease | None:
         with self._lock:
             # P1-4：回收超 TTL 的僵尸 lease（client 异常断开未释放时兜底）
             if self.active_writer is not None:
@@ -104,7 +108,8 @@ class RuntimeState:
                 else:
                     return None  # 仍被持有且未过期
             if self.active_session is None:
-                self.open_session(mode="interactive", owner_id=owner_id)
+                # P2-10：mode 由调用方指定（默认 interactive，automation workflow 可传 automation）
+                self.open_session(mode=mode, owner_id=owner_id)
             acquired = datetime.now(TZ)
             expires = acquired + timedelta(seconds=LEASE_TTL_SEC)
             lease = WriterLease(
@@ -185,9 +190,9 @@ class RuntimeState:
             try:
                 with Path(self.transcript_path).open("a", encoding="utf-8") as fp:
                     fp.write(f"{entry['ts']} {text}\n")
-            except OSError:
-                # transcript 落盘失败不阻断串口读取
-                pass
+            except OSError as e:
+                # P2-3：transcript 落盘失败不阻断串口读取，但需记录诊断
+                _logger.warning("transcript 落盘失败: %s", e)
         return entry
 
     def recent_entries(self, limit: int) -> list[dict]:

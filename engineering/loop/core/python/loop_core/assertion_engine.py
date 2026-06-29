@@ -155,6 +155,9 @@ class AssertionEngine:
                 if idx < len(current):
                     current = current[idx]
                 else:
+                    # P2-2：数组越界。not_exists 应判通过（路径确实不存在）。
+                    if op == "not_exists":
+                        return AssertionResult(passed=True)
                     return AssertionResult(passed=False, reason=f"path '{path}' array index {idx} out of range (len={len(current)})")
             else:
                 if op == "not_exists":
@@ -165,6 +168,21 @@ class AssertionEngine:
             return AssertionResult(passed=True)
         if op == "not_exists":
             return AssertionResult(passed=False, reason=f"path '{path}' exists but expected not_exists, value={current!r}")
+
+        # P2-2：bool 不走数值分支（避免 float(True)=1.0 与数字 1 误判相等）。
+        # bool 转为字符串 "true"/"false" 后走字符串比较。
+        if isinstance(current, bool):
+            actual_str = "true" if current else "false"
+            exp_str = str(expected)
+            if op == "eq":
+                ok = actual_str == exp_str
+            elif op == "ne":
+                ok = actual_str != exp_str
+            else:
+                return AssertionResult(passed=False, reason=f"cannot compare bool '{current!r}' with op '{op}'")
+            if ok:
+                return AssertionResult(passed=True)
+            return AssertionResult(passed=False, reason=f"json_field '{path}' {op} {expected} failed, actual={current}")
 
         try:
             actual_num = float(current)
@@ -181,8 +199,9 @@ class AssertionEngine:
                 return AssertionResult(passed=True)
             return AssertionResult(passed=False, reason=f"json_field '{path}' {op} {expected} failed, actual={current}")
         except (ValueError, TypeError):
-            actual_str = str(current).lower()
-            exp_str = str(expected).lower()
+            # P2-2：字符串比较区分大小写（原 .lower() 导致 OK eq ok 误判通过）
+            actual_str = str(current)
+            exp_str = str(expected)
             if op == "eq":
                 ok = actual_str == exp_str
             elif op == "ne":

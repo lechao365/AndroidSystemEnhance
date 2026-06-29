@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import uuid
@@ -20,6 +21,8 @@ from loop_controller.runtime.guards import guard_chain
 import loop_controller.stages as stages
 from loop_controller.stages import StageContext
 from loop_controller.runtime import nodes as _runtime_nodes
+
+_logger = logging.getLogger("loop_runtime_engine")
 
 # Linear transitions: node -> next node (no branch condition required).
 _LINEAR_NEXT: dict[str, str] = {
@@ -453,8 +456,9 @@ class LoopRuntime:
                         created=wt_dict.get("created", False),
                     )
                     remove_patch_worktree(handle)
-        except Exception:
-            pass
+        except Exception as e:
+            # P2-3：worktree 清理失败不阻断流程，但需记录诊断（资源泄漏可追溯）
+            _logger.warning("patch worktree 清理失败: %s", e)
 
     def _archive_to_knowledge_base(self) -> None:
         """DONE_SUCCESS 时把最后一次成功补丁归档到知识库（Reflexion 模式）。
@@ -515,8 +519,9 @@ class LoopRuntime:
                 source_session=self._session.session_id,
                 source_attempt=self._session.current_attempt,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            # P2-3：归档失败不阻断主闭环，但必须留下诊断痕迹（CXX-004 故障静默）
+            _logger.warning("KB 归档失败（session=%s）: %s", self._session.session_id, e)
 
     def _execute_build_analysis_request(self) -> None:
         stages.analyze_request_stage(self._to_session_dict(), ctx=self._stage_ctx)

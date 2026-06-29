@@ -86,3 +86,23 @@ def test_fresh_lease_has_real_expiry():
     lease = state.acquire_writer(owner_type="human", owner_id="A")
     assert lease is not None
     assert lease.expires_at > lease.acquired_at
+
+
+def test_acquire_writer_creates_session_with_explicit_mode():
+    """P2-10：acquire_writer 隐式创建 session 时尊重调用方指定的 mode。
+
+    回归 P2-10：原硬编码 mode="interactive"，automation workflow 无法
+    获得正确 session 语义。修复后默认 interactive，可显式指定 automation。
+    """
+    state = RuntimeState(device_id="rp5")
+    lease = state.acquire_writer(owner_type="workflow", owner_id="auto",
+                                 mode="automation")
+    assert lease is not None
+    assert state.active_session.mode == "automation"
+
+
+def test_acquire_writer_default_mode_is_interactive():
+    """不传 mode 时保持原默认 interactive（向后兼容）。"""
+    state = RuntimeState(device_id="rp5")
+    state.acquire_writer(owner_type="human", owner_id="cli")
+    assert state.active_session.mode == "interactive"

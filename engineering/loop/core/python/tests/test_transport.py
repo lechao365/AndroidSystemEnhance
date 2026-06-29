@@ -188,3 +188,27 @@ def test_fixture_transport_reboot_and_wait_detects_panic():
     )
     assert result.status == "fail"
     assert "panic_detected" in result.failure_reason
+
+
+def test_base_transport_new_api_only_subclass_can_instantiate():
+    """P2-8：只实现新 API（acquire/release/send_line）的子类能实例化，
+    不被旧 API（capture_window/wait_for_pattern）abstractmethod 拦截。
+
+    回归 P2-8：原 capture_window/wait_for_pattern 是 abstractmethod，
+    新 provider 必须实现无用的旧 API 才能实例化。
+    """
+    from loop_core.transport import BaseTransport
+
+    class NewApiOnlyTransport(BaseTransport):
+        def acquire_writer(self): return True
+        def release(self): pass
+        def send_line(self, text): pass
+
+    # 能实例化即说明旧 API 不再是 abstractmethod
+    t = NewApiOnlyTransport()
+    assert isinstance(t, BaseTransport)
+    # 旧 API 调用时返回 NotImplementedError（而非 ABC 拦截）
+    with pytest.raises(NotImplementedError):
+        t.capture_window(1.0, 10)
+    with pytest.raises(NotImplementedError):
+        t.wait_for_pattern(["x"], 1.0, 10)

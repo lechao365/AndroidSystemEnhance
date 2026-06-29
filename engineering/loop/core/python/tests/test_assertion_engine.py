@@ -223,3 +223,31 @@ class TestContainsAny:
         result = engine.evaluate({"type": "contains_any", "values": []}, ctx)
         assert result.passed is False
         assert "empty" in result.reason
+
+
+class TestJsonFieldEdgeCases:
+    """P2-2：json_field 三个边界缺陷回归。"""
+
+    def test_json_field_not_exists_on_array_oob_returns_true(self, engine):
+        """数组越界的 not_exists 应判通过（路径确实不存在）。"""
+        ctx = AssertionContext(output='{"a": [1, 2]}')
+        r = engine.evaluate({"type": "json_field", "path": "a.5", "op": "not_exists"}, ctx)
+        assert r.passed is True
+
+    def test_json_field_bool_not_equal_to_number(self, engine):
+        """bool true 不应等价于数字 1（float(True)=1.0 导致误判）。"""
+        ctx = AssertionContext(output='{"flag": true}')
+        r = engine.evaluate({"type": "json_field", "path": "flag", "op": "eq", "value": 1}, ctx)
+        assert r.passed is False
+
+    def test_json_field_string_eq_is_case_sensitive(self, engine):
+        """字符串 eq 区分大小写（OK 不等于 ok）。"""
+        ctx = AssertionContext(output='{"s": "OK"}')
+        r = engine.evaluate({"type": "json_field", "path": "s", "op": "eq", "value": "ok"}, ctx)
+        assert r.passed is False
+
+    def test_json_field_string_ne_is_case_sensitive(self, engine):
+        """字符串 ne 区分大小写（OK 不等于 ok，所以 ne 通过）。"""
+        ctx = AssertionContext(output='{"s": "OK"}')
+        r = engine.evaluate({"type": "json_field", "path": "s", "op": "ne", "value": "ok"}, ctx)
+        assert r.passed is True

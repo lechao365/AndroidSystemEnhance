@@ -1253,6 +1253,41 @@ def test_archive_silent_failure_on_missing_patch(tmp_path):
     assert not Path(kb_path).exists()
 
 
+def test_archive_failure_is_logged_not_silenced(tmp_path, monkeypatch, caplog):
+    """P2-3：KB 归档失败时必须记录 warning，而非静默吞掉（CXX-004 故障静默）。
+
+    回归 P2-3：原 `except Exception: pass` 使归档失败完全无诊断痕迹，
+    导致 Reflexion 闭环静默失效且无法排查。
+    """
+    import logging
+    from loop_controller import analyzer_protocol as ap_mod
+
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    patch_data = [{"workspace_path": "foo.c", "old_marker": "x", "new_content": "y"}]
+    (artifacts / "patch_suggestion.json").write_text(
+        json.dumps({"patches": patch_data, "confidence": 0.9}), encoding="utf-8")
+    session = LoopSession(
+        session_id="s1", workflow_id="runtime", target="lciod", suite="s",
+        max_attempts=3, current_attempt=1, artifacts_dir=str(artifacts),
+        attempts=[{"attempt_index": 1, "failed_count": 1,
+                   "failed_cases": [{"id": "C1", "failure_reason": "err"}]}],
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp", device_profile="dummy")
+    rt._kb_path = str(tmp_path / "kb.json")
+
+    # 让 update_kb 抛异常
+    def boom(*a, **kw):
+        raise OSError("disk full")
+    monkeypatch.setattr(ap_mod, "update_kb", boom)
+
+    with caplog.at_level(logging.WARNING, logger="loop_runtime_engine"):
+        rt._archive_to_knowledge_base()  # 不应抛异常
+    # 必须留下诊断 warning
+    assert any("归档" in r.message or "archive" in r.message.lower()
+               or "kb" in r.message.lower() for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # Task 8: confidence 阈值检查 + patch_suggestion.json 新旧格式兼容
 # ---------------------------------------------------------------------------

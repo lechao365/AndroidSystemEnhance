@@ -163,6 +163,27 @@ def test_transport_reboot_and_wait_fails_when_boot_completed_not_ready():
     assert result.failure_reason == "boot_completed_not_ready"
 
 
+def test_transport_reboot_fail_stage_is_adb_online_not_l2():
+    """P2-4：失败路径 stage_reached 应诚实标注 adb_online，而非 l2_init_ready。
+
+    回归 P2-4：adb 未做 L1/L2 boot marker 检测，wait_for_device 成功只代表
+    adb 上线，不等于 L2 init_ready。原标注 l2_init_ready 名不副实。
+    """
+    client = FakeClient()
+    client.queue_shell(AdbShellResult(
+        argv=[], output_lines=[], command_exit_code=0,
+        raw_stdout="__LE_EXIT_CODE__=0\n", stderr="",
+    ))
+    transport = AdbTransport(
+        endpoint="192.168.1.55:5555",
+        device_serial="192.168.1.55:5555",
+        client=client,
+    )
+    result = transport.reboot_and_wait(boot_markers=["x"], panic_markers=["y"])
+    assert result.status == "fail"
+    assert result.stage_reached == "adb_online"
+
+
 def test_transport_describe_runtime_context_includes_recent_commands():
     transport, client = _make_transport()
     client.queue_shell(AdbShellResult(

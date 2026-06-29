@@ -168,7 +168,9 @@ class AdbTransport(BaseTransport):
             status="fail",
             transcript_lines=["adb reboot", "wait-for-device"],
             failure_reason="boot_completed_not_ready",
-            stage_reached="l2_init_ready",
+            # P2-4：adb 未做 L1/L2 boot marker 检测，wait_for_device 成功只代表
+            # adb 上线，不冒充 l2_init_ready
+            stage_reached="adb_online",
             boot_duration_sec=round(time.monotonic() - start, 3),
         )
 

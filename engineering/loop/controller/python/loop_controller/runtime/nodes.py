@@ -62,7 +62,9 @@ _DEPLOY_ERROR_MAP: dict[str, tuple[str, FailureCode, bool]] = {
     "ARTIFACT_NOT_FOUND": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
     "HEALTH_CHECK_FAILED": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
     "DISK_FULL": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
+    "DISK_CHECK_FAILED": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
     "BACKUP_CORRUPT": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
+    "BACKUP_FAILED": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
     "ADB_PULL_FAILED": ("DEPLOY_FAILED", FailureCode.DEPLOY_FATAL, False),
 }
 

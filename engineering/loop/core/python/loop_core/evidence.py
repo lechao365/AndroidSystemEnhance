@@ -93,6 +93,10 @@ def render_evidence_summary(bundle: EvidenceBundle) -> str:
         tp = bundle.serial_context.get("transcript_path", "")
         if tp:
             lines.append(f"transcript: {tp}")
+        # P2-5：渲染 recent_line_count（串口缓冲行数诊断信息）
+        rlc = bundle.serial_context.get("recent_line_count")
+        if rlc is not None:
+            lines.append(f"recent line count: {rlc}")
         rc = bundle.serial_context.get("reboot_cycles", 0)
         lines.append(f"reboot cycles: {rc}")
         snippet = bundle.serial_context.get("serial_snippet", [])

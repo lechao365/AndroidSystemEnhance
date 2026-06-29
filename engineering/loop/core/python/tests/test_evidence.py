@@ -114,6 +114,32 @@ def test_summary_renders_transcript_and_reboot_cycles(tmp_path):
     assert "line1" in text
 
 
+def test_summary_renders_recent_line_count(tmp_path):
+    """P2-5：summary.txt 应渲染 serial_context.recent_line_count。
+
+    回归 P2-5：原渲染漏 recent_line_count，丢失串口缓冲行数诊断信息。
+    """
+    bundle = EvidenceBundle(
+        bundle_id="eb-1",
+        device_id="rp5",
+        suite="boot-success",
+        timestamp="2026-06-20T12:00:00+08:00",
+        summary={"total": 1, "passed": 0, "failed": 1, "skipped": 0, "overall": "FAIL"},
+        cases=[],
+        evidence={},
+        serial_context={
+            "transcript_path": "/tmp/serial.log",
+            "recent_line_count": 1234,
+            "reboot_cycles": 0,
+            "serial_snippet": [],
+        },
+    )
+    paths = write_evidence_bundle(bundle, str(tmp_path))
+    text = Path(paths["summary_txt"]).read_text(encoding="utf-8")
+    assert "recent line count" in text
+    assert "1234" in text
+
+
 def test_summary_renders_runtime_context(tmp_path):
     bundle = EvidenceBundle(
         bundle_id="eb-1",

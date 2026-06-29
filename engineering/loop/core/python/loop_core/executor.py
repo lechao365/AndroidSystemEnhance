@@ -69,8 +69,9 @@ class CaseExecutor:
                 boot_markers=boot_markers, panic_markers=panic_markers,
             )
             results[case.fqn] = result
-            # 收集需要执行的 collector（critical fail 才触发）
-            if result.status == "fail" and case.severity == "critical":
+            # 收集需要执行的 collector（critical fail/error 才触发）。
+            # P2-7：error 状态（执行异常）也需触发 on_fail collectors 采集诊断证据。
+            if result.status in ("fail", "error") and case.severity == "critical":
                 for cname in case.on_fail.get("collectors", []):
                     triggered_collectors.add(cname)
 
@@ -237,7 +238,12 @@ class CaseExecutor:
                 assertion={"type": "action", "action": case.action},
                 duration_sec=duration,
                 failure_reason=reason,
-                triggered_collectors=case.on_fail.get("collectors", []) if reboot_result.status != "pass" else [],
+                # P2-7：triggered_collectors 只在 critical 用例 + reboot 失败时填
+                triggered_collectors=(
+                    case.on_fail.get("collectors", [])
+                    if (reboot_result.status != "pass" and case.severity == "critical")
+                    else []
+                ),
                 tags=case.tags,
             )
 
@@ -331,7 +337,13 @@ class CaseExecutor:
             assertion=case.assert_spec,
             duration_sec=duration,
             failure_reason=result.reason,
-            triggered_collectors=case.on_fail.get("collectors", []),
+            # P2-7：triggered_collectors 字段只反映实际触发的（critical），
+            # warn 用例虽 fail 但不触发采集，字段应为空。
+            triggered_collectors=(
+                case.on_fail.get("collectors", [])
+                if case.severity == "critical"
+                else []
+            ),
             tags=case.tags,
         )
 

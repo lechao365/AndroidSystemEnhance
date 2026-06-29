@@ -304,3 +304,27 @@ def test_revert_workspace_falls_back_to_stash_without_handle(monkeypatch):
     )
     result = node_revert_workspace(session)
     assert result["status"] == "REVERTED"
+
+
+# ---------------------------------------------------------------------------
+# P2-6：deploy 错误码映射完整性守护
+# ---------------------------------------------------------------------------
+
+
+def test_deploy_error_map_covers_all_error_codes():
+    """P2-6：所有非 NONE/UNKNOWN 的 DeployErrorCode 都必须在 _DEPLOY_ERROR_MAP 中有映射。
+
+    防止新增错误码后遗漏映射，导致 deploy 失败时 runtime 无法正确路由
+    guard/revert（落入 UNKNOWN 兜底，丢失精确错误信息）。
+    """
+    from loop_deploy.models import DeployErrorCode
+    from loop_controller.runtime.nodes import _DEPLOY_ERROR_MAP
+
+    # 需要映射的码：除 NONE/UNKNOWN 外的所有错误码
+    required = {
+        code.value for code in DeployErrorCode
+        if code not in (DeployErrorCode.NONE, DeployErrorCode.UNKNOWN)
+    }
+    mapped = set(_DEPLOY_ERROR_MAP.keys())
+    missing = required - mapped
+    assert not missing, f"DeployErrorCode 未映射到 _DEPLOY_ERROR_MAP: {missing}"

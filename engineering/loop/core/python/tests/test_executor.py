@@ -686,6 +686,81 @@ collectors:
     assert bundle.summary["failure_code"] == "SERIAL_PROBE_FAIL"
 
 
+def test_on_fail_collectors_triggered_on_error_status(tmp_path):
+    """P2-7：critical 用例 status=error（执行异常）也触发 on_fail collectors。
+
+    回归 P2-7：原仅 status=='fail' 触发 on_fail collectors，error 用例
+    （执行异常）丢失诊断证据。
+    """
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: boom_case
+    command: "run_boom"
+    assert: {type: contains, value: "ok"}
+    severity: critical
+    on_fail:
+      collectors: [diag]
+collectors:
+  diag:
+    commands: ["echo diag"]
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+
+    class ErrorCaseTransport(FixtureTransport):
+        def send_line(self, text: str) -> None:
+            if text == "run_boom":
+                raise OSError("command channel lost")
+            super().send_line(text)
+
+    transport = ErrorCaseTransport([{"t": 0.1, "text": "diag output"}])
+    transport.acquire_writer()
+    bundle = CaseExecutor(transport, AssertionEngine()).execute_suite(
+        suite, device_id="rp5", prompt_markers=[]
+    )
+    # 用例 status=error（执行异常）
+    assert bundle.cases[0].status == "error"
+    # error 也应触发 on_fail collector，采集诊断证据
+    assert "t.diag" in bundle.evidence
+
+
+def test_warn_fail_triggered_collectors_field_is_empty(tmp_path):
+    """P2-7：warn 用例 fail 时 triggered_collectors 字段为空（实际不触发采集）。
+
+    回归 P2-7：原 triggered_collectors 字段对所有 fail 都填 on_fail.collectors，
+    但 warn 用例实际不触发采集，造成"声称触发"与"实际采集"不一致。
+    """
+    suite_yaml = """
+suite: t
+version: 1
+cases:
+  - id: warn_fail
+    command: "true"
+    assert: {type: contains, value: "no_match"}
+    severity: warn
+    on_fail:
+      collectors: [diag]
+collectors:
+  diag:
+    commands: ["echo diag"]
+"""
+    path = _write(tmp_path, "t.yaml", suite_yaml)
+    suite = load_suite(path, [str(tmp_path)])
+
+    transport = _make_transport([{"t": 0.5, "text": "some output"}])
+    transport.acquire_writer()
+    bundle = CaseExecutor(transport, AssertionEngine()).execute_suite(
+        suite, device_id="rp5", prompt_markers=[]
+    )
+    assert bundle.cases[0].status == "fail"
+    # warn 用例 triggered_collectors 字段应为空（未真正触发）
+    assert bundle.cases[0].triggered_collectors == []
+    # warn 用例不应触发 collector 采集
+    assert "t.diag" not in bundle.evidence
+
+
 def test_final_collector_runs_on_pass(tmp_path):
     suite_yaml = """
 suite: t

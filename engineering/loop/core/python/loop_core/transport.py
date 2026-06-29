@@ -57,18 +57,26 @@ class BaseTransport(ABC):
         """发送一行文本。必须先 acquire_writer。"""
 
     # ------------------------------------------------------------------
-    # 旧采集 API（兼容期保留，Task 3 迁移后移除）
+    # 旧采集 API（兼容期保留，P2-8：降级为默认实现，不再强制子类实现）
     # ------------------------------------------------------------------
+    # executor 实际使用新 API（mark_output_boundary / capture_since）。
+    # 旧 API 仅 FixtureTransport / Rp5SerialTransport 等已实现者保留；
+    # 新 provider 无需实现无用的旧 API 即可实例化。调用未实现的旧 API 时
+    # 抛 NotImplementedError（与新 API 的默认行为一致）。
 
-    @abstractmethod
     def capture_window(self, timeout_sec: float, recent_limit: int) -> list[ObservedLine]:
         """在 timeout_sec 时长内采集输出，返回 ObservedLine 列表。"""
+        raise NotImplementedError(
+            "capture_window not implemented; provider uses new API (capture_since)"
+        )
 
-    @abstractmethod
     def wait_for_pattern(
         self, patterns: list[str], timeout_sec: float, recent_limit: int
     ) -> ObservedLine | None:
         """等待 patterns 中任一模式出现。命中返回 ObservedLine，超时返回 None。"""
+        raise NotImplementedError(
+            "wait_for_pattern not implemented; provider uses new API (capture_since)"
+        )
 
     # ------------------------------------------------------------------
     # 新采集 API（边界游标化）

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -14,6 +15,8 @@ from pathlib import Path
 from loop_contracts.failure_codes import FailureCode
 from loop_contracts.models import LoopSession, RuntimeTerminalState
 from loop_controller.runtime.engine import LoopRuntime
+
+_logger = logging.getLogger("loop_runtime_cli")
 
 
 # ---------------------------------------------------------------------------
@@ -401,8 +404,9 @@ def _persist_failure(session_path_str: str, e: Exception) -> None:
             sp = Path(artifacts) / "session.json"
             if sp != p:
                 sp.write_text(updated, encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as e:
+        # P2-3：session.json 同步失败不阻断 CLI，但需记录诊断
+        _logger.warning("session.json 同步失败: %s", e)
 
 
 if __name__ == "__main__":

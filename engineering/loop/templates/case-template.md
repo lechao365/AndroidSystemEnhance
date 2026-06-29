@@ -66,6 +66,28 @@ final_collectors:  # 可选：suite 级，suite 结束后执行的收集器列�
 
 **`contains_any`**：校验输出包含列表中任一项。适用于枚举类状态校验。例：`assert: {type: contains_any, values: ["running", "stopped"]}`
 
+### 断言的通道依赖（P2-11）
+
+`exit_code_zero` / `exit_code_equals` 依赖命令退出码，各传输通道的可用性：
+
+| 通道 | 退出码来源 | 可用性 |
+|------|-----------|--------|
+| `adb`（host → adb shell） | adb shell 命令返回值 | ✅ 原生支持 |
+| `host`（run_on: host） | 本地进程 returncode | ✅ 原生支持 |
+| `serial`（串口交互流） | send_line 注入 `__LE_EXIT_CODE__=N` marker，capture_since 解析回填 | ✅ 已支持（P1-1） |
+
+> 注意：`reboot` action 不返回退出码（设备重启不回 marker），其上不应使用 `exit_code_*` 断言，用 `prompt_visible` 或后续 case 验证 boot_completed。
+
+### fixture 与 live 的 reboot L3 判定差异（P2-11）
+
+`action: reboot` 的 L3（boot_completed）判定在两通道下实现不同，同一用例可能出现 fixture PASS / live FAIL（反之亦然），属预期行为：
+
+- **fixture 回放**：扫描 fixture 行找 `"1"` 或 prompt marker，命中即 L3 pass。
+- **live（serial）**：发 `getprop sys.boot_completed`，响应含 `"1"` 才 L3 pass（更严格）。
+- **live（adb）**：`wait-for-device` + `getprop sys.boot_completed==1`，失败标 `stage_reached=adb_online`（P2-4）。
+
+设计用例时优先用 fixture 验证逻辑、用 live 验证真实启动时序。
+
 ## 3. coverage 要求
 
 生成用例时必须覆盖以下维度（视模块功能而定）：
