@@ -78,3 +78,39 @@ def test_checkpoint_record_round_trip():
     assert restored["matched_guards"] == ["attempts_below_limit"]
     assert restored["input_summary"] == {"suite": "hal.yaml"}
     assert restored["output_summary"] == {"decision": "RETRY"}
+
+
+def test_checkpoint_record_duration_ms_default_zero():
+    """G5: CheckpointRecord 新增 duration_ms 字段，默认 0。"""
+    cp = CheckpointRecord(
+        checkpoint_id="cp-test",
+        session_id="s1",
+        attempt_index=0,
+        current_node="INIT_SESSION",
+        input_summary={},
+        output_summary={},
+        failure_code=FailureCode.NONE,
+        matched_guards=[],
+        next_node="RUN_VERIFY",
+        timestamp="2026-01-01T00:00:00+08:00",
+    )
+    assert cp.duration_ms == 0
+
+
+def test_checkpoint_record_to_dict_includes_duration_ms():
+    """G5: to_dict() 输出含 duration_ms。"""
+    cp = CheckpointRecord(
+        checkpoint_id="cp-test",
+        session_id="s1",
+        attempt_index=0,
+        current_node="INIT_SESSION",
+        input_summary={},
+        output_summary={},
+        failure_code=FailureCode.NONE,
+        matched_guards=[],
+        next_node="RUN_VERIFY",
+        timestamp="2026-01-01T00:00:00+08:00",
+        duration_ms=500,
+    )
+    d = cp.to_dict()
+    assert d["duration_ms"] == 500

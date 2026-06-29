@@ -48,6 +48,7 @@ class LoopSession:
     latest_failure_code: FailureCode = FailureCode.NONE
     attempts: list[dict] = field(default_factory=list)
     artifacts_dir: str = ""
+    wall_clock_limit: int = 0
 
 
 @dataclass
@@ -76,6 +77,7 @@ class CheckpointRecord:
     matched_guards: list[str]
     next_node: str
     timestamp: str
+    duration_ms: int = 0
 
     def to_dict(self) -> dict[str, object]:
         data = asdict(self)

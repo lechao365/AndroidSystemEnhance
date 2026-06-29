@@ -41,3 +41,16 @@ def test_termination_decision_flags_retry_and_escalation():
     )
     assert decision.should_escalate is True
     assert decision.can_retry is False
+
+
+def test_loop_session_wall_clock_limit_default_zero():
+    """G5: LoopSession 新增 wall_clock_limit 字段，默认 0（不限制）。"""
+    from loop_contracts.models import LoopSession
+    session = LoopSession(
+        session_id="s1",
+        workflow_id="runtime",
+        target="lciod",
+        suite="hal",
+        max_attempts=5,
+    )
+    assert session.wall_clock_limit == 0
