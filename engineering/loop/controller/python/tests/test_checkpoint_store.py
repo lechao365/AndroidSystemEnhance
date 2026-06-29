@@ -160,3 +160,56 @@ def test_latest_returns_none_when_all_lines_corrupt(tmp_path: Path):
     store = CheckpointStore(str(tmp_path), "sess-001")
     assert store.latest() is None
     assert store.all() == []
+
+
+def test_from_line_handles_missing_duration_ms(tmp_path):
+    """G5: 旧 JSONL 行（无 duration_ms）反序列化时填默认 0。"""
+    import json
+    from loop_controller.runtime.checkpoint_store import CheckpointStore
+
+    store = CheckpointStore(str(tmp_path), "s1")
+    old_record = {
+        "checkpoint_id": "cp-old",
+        "session_id": "s1",
+        "attempt_index": 0,
+        "current_node": "INIT_SESSION",
+        "input_summary": {},
+        "output_summary": {"reason": "init"},
+        "failure_code": "NONE",
+        "matched_guards": [],
+        "next_node": "RUN_VERIFY",
+        "timestamp": "2026-01-01T00:00:00+08:00",
+    }
+    (tmp_path / "runtime_checkpoints.jsonl").write_text(
+        json.dumps(old_record) + "\n", encoding="utf-8"
+    )
+    records = store.all()
+    assert len(records) == 1
+    assert records[0].duration_ms == 0
+
+
+def test_from_line_reads_duration_ms(tmp_path):
+    """G5: 新 JSONL 行（含 duration_ms）反序列化正确读取。"""
+    import json
+    from loop_controller.runtime.checkpoint_store import CheckpointStore
+
+    store = CheckpointStore(str(tmp_path), "s1")
+    new_record = {
+        "checkpoint_id": "cp-new",
+        "session_id": "s1",
+        "attempt_index": 0,
+        "current_node": "RUN_VERIFY",
+        "input_summary": {},
+        "output_summary": {"reason": "verify"},
+        "failure_code": "NONE",
+        "matched_guards": [],
+        "next_node": "DECIDE_NEXT",
+        "timestamp": "2026-01-01T00:00:01+08:00",
+        "duration_ms": 1234,
+    }
+    (tmp_path / "runtime_checkpoints.jsonl").write_text(
+        json.dumps(new_record) + "\n", encoding="utf-8"
+    )
+    records = store.all()
+    assert len(records) == 1
+    assert records[0].duration_ms == 1234

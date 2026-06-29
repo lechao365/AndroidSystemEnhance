@@ -72,4 +72,5 @@ class CheckpointStore:
             matched_guards=data.get("matched_guards", []),
             next_node=data["next_node"],
             timestamp=data["timestamp"],
+            duration_ms=data.get("duration_ms", 0),
         )
