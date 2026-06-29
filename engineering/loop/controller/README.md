@@ -132,7 +132,7 @@ WAIT_ANALYZER_PATCH 节点通过 `ChainedAnalyzer` 编排三层降级分析器�
 
 - `DONE_SUCCESS`：全 PASS，自动结束。
 - `ESCALATE_HUMAN`：达到人工门槛（FAIL>=max / 重复失败 / 重复补丁 / kernel dead / patch rejected / transport 不可恢复 / rollback 失败）。
-- `DONE_FAILURE`：系统异常终止。
+- `DONE_FAILURE`：系统异常终止（含 wall_clock 预算超时）。
 
 ### Checkpoint
 

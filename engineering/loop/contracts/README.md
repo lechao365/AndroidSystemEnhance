@@ -23,7 +23,7 @@
 | 子目录/文件 | 职责 | 关键入口 |
 |------------|------|---------|
 | `python/loop_contracts/models.py` | 六 dataclass：`StageResult`、`AttemptState`、`LoopSession`、`RuntimeState`、`CheckpointRecord`、`TerminationDecision`；`RuntimeTerminalState` StrEnum；`SessionState`（= `LoopSession` 的 deprecated alias，保留向后兼容） | 被 controller import |
-| `python/loop_contracts/failure_codes.py` | `FailureCode` StrEnum（17 项）：NONE / RUN_FAILED / EVIDENCE_FAIL / EVIDENCE_INSUFFICIENT / REPEATED_FAILURE / REGRESSION_DETECTED / DEPLOY_FATAL / SESSION_STATE_ERROR / COMPILE_FAILED / PATCH_REJECTED / BOOT_TIMEOUT_ROLLBACK / DUPLICATE_PATCH / KERNEL_DEAD_NO_SHELL / TRANSPORT_UNRECOVERABLE / ROLLBACK_FAILED / VERIFICATION_REGRESSION / VERIFICATION_STUCK | 被 policy 引用 |
+| `python/loop_contracts/failure_codes.py` | `FailureCode` StrEnum（18 项）：NONE / RUN_FAILED / EVIDENCE_FAIL / EVIDENCE_INSUFFICIENT / REPEATED_FAILURE / REGRESSION_DETECTED / DEPLOY_FATAL / SESSION_STATE_ERROR / COMPILE_FAILED / PATCH_REJECTED / BOOT_TIMEOUT_ROLLBACK / DUPLICATE_PATCH / KERNEL_DEAD_NO_SHELL / TRANSPORT_UNRECOVERABLE / ROLLBACK_FAILED / VERIFICATION_REGRESSION / VERIFICATION_STUCK / WALL_CLOCK_BUDGET_EXCEEDED | 被 policy 引用 |
 | `python/loop_contracts/__init__.py` | 导出九符号（AttemptState / CheckpointRecord / FailureCode / LoopSession / RuntimeState / RuntimeTerminalState / SessionState / StageResult / TerminationDecision） | import 入口 |
 | `python/tests/test_models.py` / `test_failure_codes.py` / `test_runtime_models.py` | 数据模型 / 失败码 / runtime 模型单元测试 | pytest |
 

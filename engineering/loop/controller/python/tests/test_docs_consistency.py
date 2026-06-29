@@ -27,11 +27,11 @@ def _read(relative_path: str) -> str:
 # ---------- contracts/README.md 守护 ----------
 
 def test_failure_code_count_matches_readme() -> None:
-    """守护点 1: FailureCode 成员数 = 17，README 必须含 '17 项'。"""
+    """守护点 1: FailureCode 成员数 = 18，README 必须含 '18 项'。"""
     count = len(list(FailureCode))
-    assert count == 17, f"FailureCode 成员数变了: {count}，请同步改此测试和 README"
+    assert count == 18, f"FailureCode 成员数变了: {count}，请同步改此测试和 README"
     text = _read("engineering/loop/contracts/README.md")
-    assert "17 项" in text, "contracts/README.md 缺少 '17 项'，请同步更新"
+    assert "18 项" in text, "contracts/README.md 缺少 '18 项'，请同步更新"
 
 
 def test_failure_code_names_in_readme() -> None:
@@ -84,3 +84,11 @@ def test_nodekind_names_in_readme() -> None:
     text = _read("engineering/loop/controller/README.md")
     missing = [name for name in NodeKind.__members__ if name not in text]
     assert not missing, f"controller/README.md 缺少这些 NodeKind 名: {missing}"
+
+
+def test_wall_clock_budget_exceeded_in_readme() -> None:
+    """守护点 9: WALL_CLOCK_BUDGET_EXCEEDED 出现在 contracts/README.md 中。"""
+    text = _read("engineering/loop/contracts/README.md")
+    assert "WALL_CLOCK_BUDGET_EXCEEDED" in text, (
+        "contracts/README.md 缺少 WALL_CLOCK_BUDGET_EXCEEDED，请同步更新"
+    )
