@@ -328,3 +328,60 @@ def test_status_output_includes_trace_summary(tmp_path, capsys):
     assert output["trace_summary"]["node_count"] == 0
     # wall_clock_limit 也应在输出中
     assert output["wall_clock_limit"] == 0
+
+
+def test_status_outputs_metrics(tmp_path, capsys):
+    """G9: le runtime status 输出含 metrics 段。"""
+    from loop_controller.runtime_cli import _handle_status
+
+    metrics_dict = {
+        "success": True, "terminal_state": "DONE_SUCCESS",
+        "attempt_count": 2, "wall_clock_used_ms": 5000,
+        "wall_clock_budget_ms": 3600000,
+        "analyzer_layer_hits": {"KnowledgeBaseAnalyzer": 1},
+        "analyzer_first_hit_layer": "KnowledgeBaseAnalyzer",
+        "failure_code_distribution": {"RUN_FAILED": 1, "NONE": 2},
+        "human_gate_triggered": False, "human_gate_count": 0,
+        "kb_hit": True,
+    }
+    session_data = {
+        "session_id": "s1", "workflow_id": "runtime",
+        "target": "lciod", "suite": "hal",
+        "max_attempts": 5, "current_attempt": 2,
+        "status": "DONE", "latest_failure_code": "NONE",
+        "attempts": [], "artifacts_dir": str(tmp_path),
+        "wall_clock_limit": 3600,
+        "terminal_state": "DONE_SUCCESS",
+        "metrics": metrics_dict,
+    }
+    session_path = tmp_path / "session.json"
+    session_path.write_text(json.dumps(session_data), encoding="utf-8")
+
+    args = MagicMock()
+    args.session = str(session_path)
+    _handle_status(args)
+
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert "metrics" in output
+    assert output["metrics"]["success"] is True
+    assert output["metrics"]["attempt_count"] == 2
+
+
+def test_load_session_handles_missing_metrics(tmp_path):
+    """G9: 旧 session.json 无 metrics 段时 _load_session 不报错。"""
+    from loop_controller.runtime_cli import _load_session
+
+    session_data = {
+        "session_id": "s1", "workflow_id": "runtime",
+        "target": "lciod", "suite": "hal",
+        "max_attempts": 5, "current_attempt": 0,
+        "status": "PENDING", "latest_failure_code": "NONE",
+        "attempts": [], "artifacts_dir": str(tmp_path),
+        "wall_clock_limit": 0,
+    }
+    session_path = tmp_path / "session.json"
+    session_path.write_text(json.dumps(session_data), encoding="utf-8")
+
+    session, ts = _load_session(str(session_path))
+    assert session.metrics is None

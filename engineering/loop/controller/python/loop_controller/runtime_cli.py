@@ -372,6 +372,7 @@ def _load_session(path_str: str) -> tuple[LoopSession, RuntimeTerminalState]:
         attempts=data.get("attempts", []),
         artifacts_dir=data.get("artifacts_dir", ""),
         wall_clock_limit=data.get("wall_clock_limit", 0),
+        metrics=_dict_to_metrics(data.get("metrics")),
     )
     ts_str = data.get("terminal_state", "NONE")
     try:
@@ -379,6 +380,22 @@ def _load_session(path_str: str) -> tuple[LoopSession, RuntimeTerminalState]:
     except ValueError:
         ts = RuntimeTerminalState.NONE
     return session, ts
+
+
+def _metrics_to_dict(metrics) -> dict | None:
+    """G9: SessionMetrics → dict；None → None。"""
+    if metrics is None:
+        return None
+    from dataclasses import asdict
+    return asdict(metrics)
+
+
+def _dict_to_metrics(data):
+    """G9: dict → SessionMetrics；None/缺失 → None。"""
+    if not data:
+        return None
+    from loop_contracts.models import SessionMetrics
+    return SessionMetrics(**data)
 
 
 def _session_to_dict(session: LoopSession) -> dict:
@@ -394,6 +411,7 @@ def _session_to_dict(session: LoopSession) -> dict:
         "attempts": session.attempts,
         "artifacts_dir": session.artifacts_dir,
         "wall_clock_limit": session.wall_clock_limit,
+        "metrics": _metrics_to_dict(session.metrics),
     }
 
 

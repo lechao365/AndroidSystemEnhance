@@ -806,6 +806,10 @@ class LoopRuntime:
             "pending_human_gate": self._state.pending_human_gate,
             "last_checkpoint_at": self._state.last_checkpoint_at,
         }
+        # G9: metrics 段（仅终态时非 None）
+        if self._session.metrics is not None:
+            from dataclasses import asdict
+            data["metrics"] = asdict(self._session.metrics)
         session_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def _to_session_dict(self) -> dict:

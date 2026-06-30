@@ -1586,3 +1586,26 @@ def test_resume_rebuilds_fc_dist_from_checkpoints(tmp_path):
     assert rt._fc_dist.get("RUN_FAILED") == 1
     assert rt._fc_dist.get("COMPILE_FAILED") == 1
     assert rt._fc_dist.get("NONE") == 1
+
+
+def test_persist_session_writes_metrics(tmp_path):
+    """G9: _persist_session 把 metrics 写入 session.json。"""
+    import json
+    from pathlib import Path
+    from loop_controller.runtime.engine import LoopRuntime
+    from loop_contracts.models import SessionMetrics, RuntimeTerminalState
+
+    session = LoopSession(
+        session_id="s1", workflow_id="runtime",
+        target="lciod", suite="hal", max_attempts=1,
+        artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp/cases", device_profile="rp5")
+    rt._state.terminal_state = RuntimeTerminalState.DONE_SUCCESS
+    session.metrics = SessionMetrics(success=True, attempt_count=1)
+    rt._persist_session()
+
+    data = json.loads(Path(tmp_path / "session.json").read_text())
+    assert "metrics" in data
+    assert data["metrics"]["success"] is True
+    assert data["metrics"]["attempt_count"] == 1
