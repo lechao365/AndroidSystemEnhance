@@ -1417,3 +1417,94 @@ def test_engine_wall_clock_zero_means_unlimited(tmp_path):
     rt.run(max_iterations=3)
     # 不应因 wall_clock 超时退出
     assert "wall_clock" not in rt._state.transition_reason.lower()
+
+
+def test_engine_init_has_metrics_counters(tmp_path):
+    """G9: engine __init__ 后存在埋点计数器实例变量。"""
+    from loop_controller.runtime.engine import LoopRuntime
+
+    session = LoopSession(
+        session_id="s1", workflow_id="runtime",
+        target="lciod", suite="hal", max_attempts=1,
+        artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp/cases", device_profile="rp5")
+    assert hasattr(rt, "_layer_hits") and rt._layer_hits == {}
+    assert hasattr(rt, "_first_hit_layer") and rt._first_hit_layer == ""
+    assert hasattr(rt, "_hg_count") and rt._hg_count == 0
+    assert hasattr(rt, "_fc_dist") and rt._fc_dist == {}
+    assert hasattr(rt, "_kb_hit") and rt._kb_hit is False
+
+
+def test_engine_analyzer_layer_hit_counted(tmp_path):
+    """G9: analyzer 产出补丁时 _layer_hits 累积 + _first_hit_layer 记录。"""
+    from loop_controller.runtime.engine import LoopRuntime
+    from loop_controller.analyzer_protocol import (
+        ChainedAnalyzer, FileChange, LlmAnalyzer, PatchSuggestion,
+    )
+
+    class KnowledgeBaseAnalyzer(LlmAnalyzer):
+        def analyze(self, request):
+            return PatchSuggestion(
+                target_files=[FileChange(workspace_path="a.c")],
+                confidence=0.98,
+            )
+
+    chain = ChainedAnalyzer([KnowledgeBaseAnalyzer()])
+    session = LoopSession(
+        session_id="s1", workflow_id="runtime",
+        target="lciod", suite="hal", max_attempts=1,
+        artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp/cases", device_profile="rp5",
+                     analyzer=chain)
+    rt._state.current_node = "WAIT_ANALYZER_PATCH"
+    rt._execute_wait_analyzer_patch()
+    assert rt._layer_hits.get("KnowledgeBaseAnalyzer") == 1
+    assert rt._first_hit_layer == "KnowledgeBaseAnalyzer"
+    assert rt._kb_hit is True
+
+
+def test_engine_analyzer_unknown_layer_when_not_chained(tmp_path):
+    """G9: 单层 analyzer（非 ChainedAnalyzer）matched_layer 为空 → 兜底 'unknown'。"""
+    from loop_controller.runtime.engine import LoopRuntime
+    from loop_controller.analyzer_protocol import (
+        FileChange, LlmAnalyzer, PatchSuggestion,
+    )
+
+    class SoloAnalyzer(LlmAnalyzer):
+        def analyze(self, request):
+            return PatchSuggestion(
+                target_files=[FileChange(workspace_path="a.c")],
+                confidence=0.9,
+            )
+
+    session = LoopSession(
+        session_id="s1", workflow_id="runtime",
+        target="lciod", suite="hal", max_attempts=1,
+        artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp/cases", device_profile="rp5",
+                     analyzer=SoloAnalyzer())
+    rt._state.current_node = "WAIT_ANALYZER_PATCH"
+    rt._execute_wait_analyzer_patch()
+    assert rt._layer_hits.get("unknown") == 1
+    assert rt._first_hit_layer == "unknown"
+    assert rt._kb_hit is False  # unknown 不是 KnowledgeBaseAnalyzer
+
+
+def test_engine_human_gate_counter_increments(tmp_path):
+    """G9: _set_human_gate 调用后 _hg_count 递增。"""
+    from loop_controller.runtime.engine import LoopRuntime
+
+    session = LoopSession(
+        session_id="s1", workflow_id="runtime",
+        target="lciod", suite="hal", max_attempts=1,
+        artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp/cases", device_profile="rp5")
+    rt._set_human_gate()
+    assert rt._state.pending_human_gate is True
+    assert rt._hg_count == 1
+    rt._set_human_gate()
+    assert rt._hg_count == 2

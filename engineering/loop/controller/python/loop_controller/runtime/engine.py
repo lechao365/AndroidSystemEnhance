@@ -69,6 +69,12 @@ class LoopRuntime:
         # G5: 节点耗时测量 + wall_clock 预算闸
         self._session_start: float = 0.0
         self._last_node_duration_ms: int = 0
+        # G9: 指标埋点计数器（随 engine 生命周期，终态时快照）
+        self._layer_hits: dict[str, int] = {}
+        self._first_hit_layer: str = ""
+        self._hg_count: int = 0
+        self._fc_dist: dict[str, int] = {}
+        self._kb_hit: bool = False
 
     def resume(self) -> RuntimeState:
         # 幂等：已终态的 session 不恢复
@@ -190,7 +196,7 @@ class LoopRuntime:
                 # 低置信触发人工 gate；但若已人工 approve（human_gate_approved）则跳过，继续 apply
                 if conf < self._confidence_threshold and not self._state.human_gate_approved:
                     self._state.node_status = "LOW_CONFIDENCE"
-                    self._state.pending_human_gate = True
+                    self._set_human_gate()
                     self._checkpoint(
                         f"confidence {conf} below threshold {self._confidence_threshold}",
                         FailureCode.NONE,
@@ -202,7 +208,7 @@ class LoopRuntime:
             if not os.path.isfile(patch_path):
                 self._state.node_status = "NO_PATCH_FILE"
                 self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
-                self._state.pending_human_gate = True
+                self._set_human_gate()
                 self._checkpoint("no patch file found", FailureCode.PATCH_REJECTED)
                 return
             # ISSUE-2：尝试创建独立 worktree 隔离补丁，失败降级到 stash 模式
@@ -263,7 +269,7 @@ class LoopRuntime:
                         and not self._state.human_gate_approved
                         and "kernel_patch" in self._human_gate_triggers):
                     self._state.node_status = "KERNEL_PATCH_REVIEW"
-                    self._state.pending_human_gate = True
+                    self._set_human_gate()
                     self._checkpoint("kernel patch requires human review", FailureCode.NONE)
                     return
             guard_req = self._build_guard_eval_request()
@@ -274,7 +280,7 @@ class LoopRuntime:
                 next_nk = NodeKind(guard_result.next_node)
                 if next_nk == NodeKind.ESCALATE_HUMAN:
                     self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
-                    self._state.pending_human_gate = True
+                    self._set_human_gate()
             self._checkpoint(f"apply_patch={result['status']}", fc, matched_guards=matched_guards)
         elif node == NodeKind.COMPILE_PATCH.value:
             # ISSUE-1：若补丁应用在独立 worktree，compile 必须在 worktree 内执行
@@ -338,7 +344,7 @@ class LoopRuntime:
                     and not self._state.human_gate_approved
                     and "dd_boot_reboot" in self._human_gate_triggers):
                 self._state.node_status = "DD_BOOT_REVIEW"
-                self._state.pending_human_gate = True
+                self._set_human_gate()
                 self._checkpoint("dd_boot_reboot requires human review", FailureCode.NONE)
                 return
             if result["status"] in ("DEPLOY_FAILED", "KERNEL_DEAD", "BOOT_TIMEOUT", "DEPLOY_TIMEOUT"):
@@ -350,7 +356,7 @@ class LoopRuntime:
                     next_nk = NodeKind(guard_result.next_node)
                     if next_nk == NodeKind.ESCALATE_HUMAN:
                         self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
-                        self._state.pending_human_gate = True
+                        self._set_human_gate()
                     elif next_nk == NodeKind.REVERT_PATCH:
                         # 只有实际写入设备的错误才做设备回滚；未写入的直接走源码回滚
                         if result.get("needs_rollback", False):
@@ -375,7 +381,7 @@ class LoopRuntime:
                     self._state.node_status = d_result["status"]
                     self._session.latest_failure_code = d_result.get("failure_code", FailureCode.ROLLBACK_FAILED)
                     self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
-                    self._state.pending_human_gate = True
+                    self._set_human_gate()
                     self._checkpoint(f"revert_device=failed:{d_result['status']}", self._session.latest_failure_code)
                     return
             # Phase 2: 源码回滚（git stash apply）
@@ -388,7 +394,7 @@ class LoopRuntime:
             if ws_result["status"] != "REVERTED":
                 # 源码回滚失败 → 立即退人工
                 self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
-                self._state.pending_human_gate = True
+                self._set_human_gate()
             self._checkpoint(f"revert={ws_result['status']}", fc)
 
     def _execute_run_verify(self) -> None:
@@ -439,7 +445,7 @@ class LoopRuntime:
             next_nk = NodeKind(guard_result.next_node)
             if next_nk == NodeKind.ESCALATE_HUMAN:
                 self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
-                self._state.pending_human_gate = True
+                self._set_human_gate()
             elif next_nk == NodeKind.DONE_SUCCESS:
                 self._state.terminal_state = RuntimeTerminalState.DONE_SUCCESS
                 # ISSUE-3：DONE_SUCCESS 时把成功补丁归档到知识库（Reflexion 模式）
@@ -571,6 +577,13 @@ class LoopRuntime:
                 })
                 suggestion = self._analyzer.analyze(request)
                 if suggestion.target_files:
+                    # G9: 累积 analyzer 层级命中
+                    layer = suggestion.matched_layer or "unknown"
+                    self._layer_hits[layer] = self._layer_hits.get(layer, 0) + 1
+                    if not self._first_hit_layer:
+                        self._first_hit_layer = layer
+                    if layer == "KnowledgeBaseAnalyzer":
+                        self._kb_hit = True
                     # 落盘为 patch_suggestion.json（新格式：带 confidence/rationale 元数据）
                     import dataclasses
                     patch_data = {
@@ -597,9 +610,14 @@ class LoopRuntime:
                 self._checkpoint(f"analyzer error: {e}", FailureCode.NONE)
         # analyzer 无产出或未注入 → 退人工
         self._state.node_status = "WAITING_PATCH"
-        self._state.pending_human_gate = True
+        self._set_human_gate()
         self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
         self._checkpoint("waiting for analyzer patch", FailureCode.NONE)
+
+    def _set_human_gate(self) -> None:
+        """G9: 统一 human gate 触发入口，同时计数。"""
+        self._state.pending_human_gate = True
+        self._hg_count += 1
 
     # -- transition & checkpoint -------------------------------------------
 
