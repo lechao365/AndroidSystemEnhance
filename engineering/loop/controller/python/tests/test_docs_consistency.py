@@ -42,11 +42,11 @@ def test_failure_code_names_in_readme() -> None:
 
 
 def test_contracts_all_count_matches_readme() -> None:
-    """守护点 3: contracts __all__ 长度 = 9，README 必须含 '九符号'。"""
+    """守护点 3: contracts __all__ 长度 = 10，README 必须含 '十符号'。"""
     count = len(_contracts_all)
-    assert count == 9, f"contracts __all__ 长度变了: {count}，请同步改此测试和 README"
+    assert count == 10, f"contracts __all__ 长度变了: {count}，请同步改此测试和 README"
     text = _read("engineering/loop/contracts/README.md")
-    assert "九符号" in text or "9" in text, "contracts/README.md 缺少导出符号数量说明"
+    assert "十符号" in text or "10" in text, "contracts/README.md 缺少导出符号数量说明"
 
 
 def test_contracts_all_names_in_readme() -> None:
@@ -57,9 +57,9 @@ def test_contracts_all_names_in_readme() -> None:
 
 
 def test_contracts_dataclass_count_matches_readme() -> None:
-    """守护点 5: dataclass 数 = 6，README 必须含 '六 dataclass'。"""
+    """守护点 5: dataclass 数 = 7，README 必须含 '七 dataclass'。"""
     text = _read("engineering/loop/contracts/README.md")
-    assert "六 dataclass" in text or "6" in text, "contracts/README.md 缺少 dataclass 数量说明"
+    assert "七 dataclass" in text or "7" in text, "contracts/README.md 缺少 dataclass 数量说明"
 
 
 # ---------- controller/README.md 守护 ----------
@@ -92,3 +92,16 @@ def test_wall_clock_budget_exceeded_in_readme() -> None:
     assert "WALL_CLOCK_BUDGET_EXCEEDED" in text, (
         "contracts/README.md 缺少 WALL_CLOCK_BUDGET_EXCEEDED，请同步更新"
     )
+
+
+def test_session_metrics_in_contracts_readme() -> None:
+    """守护点 10: SessionMetrics 出现在 contracts/README.md 中。"""
+    text = _read("engineering/loop/contracts/README.md")
+    assert "SessionMetrics" in text, (
+        "contracts/README.md 缺少 SessionMetrics，请同步更新"
+    )
+
+
+def test_session_metrics_in_contracts_all() -> None:
+    """守护点 11: SessionMetrics 在 contracts __all__ 中。"""
+    assert "SessionMetrics" in _contracts_all

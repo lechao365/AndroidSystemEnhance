@@ -24,7 +24,7 @@
 | 子目录/文件 | 职责 | 关键入口 |
 |------------|------|---------|
 | `python/loop_controller/runtime/` | **状态图 runtime 引擎**（types / guards / checkpoint_store / engine / nodes） | `LoopRuntime.run()` / `resume()` |
-| `python/loop_controller/runtime_cli.py` | **runtime CLI**：`le runtime {init,run,resume,status,explain}`（唯一入口） | `le.sh runtime` |
+| `python/loop_controller/runtime_cli.py` | **runtime CLI**：`le runtime {init,run,resume,status,explain,stats}`（唯一入口） | `le.sh runtime` |
 | `python/loop_controller/stages.py` | 可复用阶段 handler（run_verify / analyze_request / decide 纯函数）+ 通用 helpers | 被 runtime engine 调用 |
 | `python/loop_controller/patch_applier.py` | `apply_file_changes`：将 `FileChange[]` 写入 workspace | 被 runtime nodes 调用 |
 | `python/loop_controller/patch_guard.py` | `check_white_list` / `detect_risk` / `check_syntax` | 被 runtime nodes 调用 |
@@ -59,6 +59,9 @@ le runtime reject --session <session.json>
 
 # 解释 runtime 状态机
 le runtime explain
+
+# G9: 跨 session 聚合指标（成功率/耗时/analyzer 层级分布）
+le runtime stats [--artifacts-dir <dir>]
 ```
 
 > v1 的 `le control {init,run-verify,decide,...}` 子命令已彻底删除，全部能力由 runtime engine 自动驱动状态机承接。

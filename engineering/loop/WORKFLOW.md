@@ -33,7 +33,7 @@ AI 接管设备验收：执行用例 → 输出证据 → AI 分析 → 修复�
                              → 生成 patch.json → le runtime resume 续跑
 ```
 
-主入口：`le runtime {init,run,resume,status,explain,pending,approve,reject}`（详见 `controller/README.md`）。
+主入口：`le runtime {init,run,resume,status,explain,pending,approve,reject,stats}`（详见 `controller/README.md`）。
 runtime engine 状态机、guard 清单、checkpoint 持久化等细节见 `docs/specs/2026-06-26-loop-runtime-rearchitecture-design.md`。
 
 ### escalate 触发条件（由 runtime guard 判定）
@@ -291,7 +291,7 @@ shell 不可达时，AI/人工应优先分析 `serial_context`；shell 可达时
 
 1. **gen-cases 已实现（校验器）**：`le gen-cases --validate <file>` 复用 load_suite 做 schema/断言/命名/依赖校验
 2. **deploy 已实现**：`le deploy` 支持 push_single/dd_boot_reboot + 四阶段防护网
-3. **runtime engine 已实现**：`le runtime {init,run,resume,status,explain,pending,approve,reject}` 由状态图引擎自动驱动 verify → decide → analyze → patch → compile → deploy 全闭环
+3. **runtime engine 已实现**：`le runtime {init,run,resume,status,explain,pending,approve,reject,stats}` 由状态图引擎自动驱动 verify → decide → analyze → patch → compile → deploy 全闭环
 4. **FLASH_FULL 需人工刷机**：sepolicy/.te 大改动仍需人工物理重刷（serial 无 shell 时软件无法自救）
 5. **参数化用例已实现**：case_loader `_expand_parameterized_cases` 支持 `parameters` 字段展开（test_case_loader 已覆盖）
 
@@ -360,6 +360,9 @@ le runtime approve --session <session.json>
 
 # human-in-loop 门：拒绝补丁，设 ESCALATE_HUMAN 终态交人工
 le runtime reject --session <session.json>
+
+# G9: 跨 session 聚合指标（成功率/耗时/analyzer 层级分布）
+le runtime stats [--artifacts-dir <dir>]
 ```
 
 runtime engine 状态机、guard 清单、checkpoint 持久化、terminal state 的细节见

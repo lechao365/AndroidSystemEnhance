@@ -22,9 +22,9 @@
 
 | 子目录/文件 | 职责 | 关键入口 |
 |------------|------|---------|
-| `python/loop_contracts/models.py` | 六 dataclass：`StageResult`、`AttemptState`、`LoopSession`、`RuntimeState`、`CheckpointRecord`、`TerminationDecision`；`RuntimeTerminalState` StrEnum；`SessionState`（= `LoopSession` 的 deprecated alias，保留向后兼容） | 被 controller import |
+| `python/loop_contracts/models.py` | 七 dataclass：`StageResult`、`AttemptState`、`LoopSession`、`RuntimeState`、`CheckpointRecord`、`TerminationDecision`、`SessionMetrics`；`RuntimeTerminalState` StrEnum；`SessionState`（= `LoopSession` 的 deprecated alias，保留向后兼容）。`SessionMetrics` 为 G9 评测基线新增的终态指标快照（success / attempt_count / wall_clock_used_ms / analyzer_layer_hits / failure_code_distribution 等 11 字段），挂于 `LoopSession.metrics`（默认 None，终态时填充）。 | 被 controller import |
 | `python/loop_contracts/failure_codes.py` | `FailureCode` StrEnum（18 项）：NONE / RUN_FAILED / EVIDENCE_FAIL / EVIDENCE_INSUFFICIENT / REPEATED_FAILURE / REGRESSION_DETECTED / DEPLOY_FATAL / SESSION_STATE_ERROR / COMPILE_FAILED / PATCH_REJECTED / BOOT_TIMEOUT_ROLLBACK / DUPLICATE_PATCH / KERNEL_DEAD_NO_SHELL / TRANSPORT_UNRECOVERABLE / ROLLBACK_FAILED / VERIFICATION_REGRESSION / VERIFICATION_STUCK / WALL_CLOCK_BUDGET_EXCEEDED | 被 policy 引用 |
-| `python/loop_contracts/__init__.py` | 导出九符号（AttemptState / CheckpointRecord / FailureCode / LoopSession / RuntimeState / RuntimeTerminalState / SessionState / StageResult / TerminationDecision） | import 入口 |
+| `python/loop_contracts/__init__.py` | 导出十符号（AttemptState / CheckpointRecord / FailureCode / LoopSession / RuntimeState / RuntimeTerminalState / SessionMetrics / SessionState / StageResult / TerminationDecision） | import 入口 |
 | `python/tests/test_models.py` / `test_failure_codes.py` / `test_runtime_models.py` | 数据模型 / 失败码 / runtime 模型单元测试 | pytest |
 
 ## 使用方式
