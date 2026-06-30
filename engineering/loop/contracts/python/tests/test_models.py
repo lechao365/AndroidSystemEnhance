@@ -99,3 +99,10 @@ def test_loop_session_metrics_defaults_none():
         session_id="s1", workflow_id="w", target="t", suite="su", max_attempts=5,
     )
     assert s.metrics is None
+
+
+def test_session_metrics_importable_from_package():
+    """SessionMetrics 必须能从 loop_contracts 顶层导入。"""
+    import loop_contracts
+    assert hasattr(loop_contracts, "SessionMetrics")
+    assert "SessionMetrics" in loop_contracts.__all__
