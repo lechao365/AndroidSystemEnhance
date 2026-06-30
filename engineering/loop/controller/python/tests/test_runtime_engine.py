@@ -1508,3 +1508,21 @@ def test_engine_human_gate_counter_increments(tmp_path):
     assert rt._hg_count == 1
     rt._set_human_gate()
     assert rt._hg_count == 2
+
+
+def test_engine_checkpoint_accumulates_failure_code_dist(tmp_path):
+    """G9: _checkpoint 调用后 _fc_dist 按 failure_code 累积。"""
+    from loop_controller.runtime.engine import LoopRuntime
+    from loop_contracts.failure_codes import FailureCode
+
+    session = LoopSession(
+        session_id="s1", workflow_id="runtime",
+        target="lciod", suite="hal", max_attempts=1,
+        artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp/cases", device_profile="rp5")
+    rt._checkpoint("step1", FailureCode.NONE)
+    rt._checkpoint("step2", FailureCode.RUN_FAILED)
+    rt._checkpoint("step3", FailureCode.RUN_FAILED)
+    assert rt._fc_dist.get("NONE") == 1
+    assert rt._fc_dist.get("RUN_FAILED") == 2

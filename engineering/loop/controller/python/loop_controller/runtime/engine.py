@@ -672,6 +672,9 @@ class LoopRuntime:
         )
         self._store.save(cp)
         self._state.last_checkpoint_at = cp.timestamp
+        # G9: 累积 failure_code 分布
+        code = failure_code.value if failure_code else "NONE"
+        self._fc_dist[code] = self._fc_dist.get(code, 0) + 1
 
     def _build_guard_eval_request(self):
         from loop_controller.runtime.types import GuardEvalRequest
