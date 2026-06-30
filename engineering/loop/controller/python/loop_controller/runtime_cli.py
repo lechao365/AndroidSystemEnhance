@@ -96,6 +96,10 @@ def main(argv: list[str] | None = None) -> int:
     reject_p.add_argument("--session", required=True)
     reject_p.set_defaults(func=_handle_reject)
 
+    stats_p = sub.add_parser("stats", help="aggregate metrics across sessions")
+    stats_p.add_argument("--artifacts-dir", default="")
+    stats_p.set_defaults(func=_handle_stats)
+
     args = parser.parse_args(argv)
     return args.func(args)
 
@@ -412,6 +416,114 @@ def _session_to_dict(session: LoopSession) -> dict:
         "artifacts_dir": session.artifacts_dir,
         "wall_clock_limit": session.wall_clock_limit,
         "metrics": _metrics_to_dict(session.metrics),
+    }
+
+
+def _handle_stats(args: argparse.Namespace) -> int:
+    """G9: 跨 session 聚合指标，输出 JSON。"""
+    artifacts_dir = args.artifacts_dir or _resolve_default_artifacts_dir()
+    sessions = _scan_session_metrics(artifacts_dir)
+    if not sessions:
+        print(json.dumps({"total": 0, "summary": "no terminated sessions found"},
+                         indent=2, ensure_ascii=False))
+        return 0
+    aggregated = _aggregate_metrics(sessions)
+    print(json.dumps(aggregated, indent=2, ensure_ascii=False))
+    return 0
+
+
+def _resolve_default_artifacts_dir() -> str:
+    """默认 artifacts 目录：analyzer.yaml 所在的 ../artifacts。"""
+    return str(Path(__file__).resolve().parent.parent.parent.parent / "artifacts")
+
+
+def _scan_session_metrics(artifacts_dir: str) -> list[dict]:
+    """遍历 artifacts/<session_id>/session.json，返回含 metrics 段的 session 列表。"""
+    result: list[dict] = []
+    base = Path(artifacts_dir)
+    if not base.is_dir():
+        return result
+    for session_dir in sorted(base.iterdir()):
+        if not session_dir.is_dir():
+            continue
+        sf = session_dir / "session.json"
+        if not sf.is_file():
+            continue
+        try:
+            data = json.loads(sf.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict) and data.get("metrics"):
+            result.append(data)
+    return result
+
+
+def _aggregate_metrics(sessions: list[dict]) -> dict:
+    """聚合多个 session 的 metrics 段。"""
+    total = len(sessions)
+    metrics_list = [s["metrics"] for s in sessions]
+    success_count = sum(1 for m in metrics_list if m.get("success"))
+    wall_list = sorted(m.get("wall_clock_used_ms", 0) for m in metrics_list)
+    attempt_list = [m.get("attempt_count", 0) for m in metrics_list]
+    first_fix = sum(
+        1 for m in metrics_list
+        if m.get("success") and m.get("attempt_count") == 1
+        and m.get("analyzer_first_hit_layer")
+    )
+    layer_hits_total: dict[str, int] = {}
+    first_hit_dist: dict[str, int] = {}
+    fc_dist_total: dict[str, int] = {}
+    for m in metrics_list:
+        for k, v in m.get("analyzer_layer_hits", {}).items():
+            layer_hits_total[k] = layer_hits_total.get(k, 0) + v
+        fhl = m.get("analyzer_first_hit_layer", "")
+        if fhl:
+            first_hit_dist[fhl] = first_hit_dist.get(fhl, 0) + 1
+        for k, v in m.get("failure_code_distribution", {}).items():
+            fc_dist_total[k] = fc_dist_total.get(k, 0) + v
+    n = len(wall_list)
+    if n == 0:
+        median = 0
+    elif n % 2 == 1:
+        median = wall_list[n // 2]
+    else:
+        median = (wall_list[n // 2 - 1] + wall_list[n // 2]) // 2
+    by_target: dict[str, dict] = {}
+    by_suite: dict[str, dict] = {}
+    for s in sessions:
+        for dim, store in (("target", by_target), ("suite", by_suite)):
+            key = s.get(dim, "unknown")
+            if key not in store:
+                store[key] = {"total": 0, "success": 0}
+            store[key]["total"] += 1
+            if s["metrics"].get("success"):
+                store[key]["success"] += 1
+    for store in (by_target, by_suite):
+        for v in store.values():
+            v["success_rate"] = round(v["success"] / v["total"], 2) if v["total"] else 0.0
+    return {
+        "total_sessions": total,
+        "success_count": success_count,
+        "failure_count": total - success_count,
+        "success_rate": round(success_count / total, 2) if total else 0.0,
+        "avg_wall_clock_ms": int(sum(wall_list) / len(wall_list)) if wall_list else 0,
+        "median_wall_clock_ms": median,
+        "avg_attempt_count": round(sum(attempt_list) / len(attempt_list), 1) if attempt_list else 0,
+        "first_fix_success_rate": round(first_fix / total, 2) if total else 0.0,
+        "analyzer_layer_hits_total": layer_hits_total,
+        "analyzer_first_hit_layer_distribution": first_hit_dist,
+        "failure_code_distribution_total": fc_dist_total,
+        "kb_hit_rate": round(
+            sum(1 for m in metrics_list if m.get("kb_hit")) / total, 2
+        ) if total else 0.0,
+        "human_gate_triggered_rate": round(
+            sum(1 for m in metrics_list if m.get("human_gate_triggered")) / total, 2
+        ) if total else 0.0,
+        "avg_human_gate_count": round(
+            sum(m.get("human_gate_count", 0) for m in metrics_list) / total, 2
+        ) if total else 0.0,
+        "by_target": by_target,
+        "by_suite": by_suite,
     }
 
 

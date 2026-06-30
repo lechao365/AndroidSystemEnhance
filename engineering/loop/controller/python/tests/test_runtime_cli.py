@@ -385,3 +385,122 @@ def test_load_session_handles_missing_metrics(tmp_path):
 
     session, ts = _load_session(str(session_path))
     assert session.metrics is None
+
+
+def _make_session_json(path, metrics=None, target="lciod", suite="hal",
+                      terminal="DONE_SUCCESS", attempt_count=1,
+                      wall_used=10000):
+    """辅助：构造一个 session.json 文件。"""
+    data = {
+        "session_id": path.stem, "workflow_id": "runtime",
+        "target": target, "suite": suite,
+        "max_attempts": 5, "current_attempt": attempt_count,
+        "status": terminal, "latest_failure_code": "NONE",
+        "attempts": [], "artifacts_dir": str(path.parent),
+        "wall_clock_limit": 3600,
+        "terminal_state": terminal,
+    }
+    if metrics is not None:
+        data["metrics"] = metrics
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_stats_command_no_sessions(tmp_path, capsys):
+    """G9: 空目录输出 total=0。"""
+    from loop_controller.runtime_cli import _handle_stats
+    args = MagicMock()
+    args.artifacts_dir = str(tmp_path)
+    rc = _handle_stats(args)
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert output["total"] == 0
+    assert rc == 0
+
+
+def test_stats_command_aggregates(tmp_path, capsys):
+    """G9: 聚合 3 个 session（2 成功 1 失败），验证 success_rate。"""
+    from loop_controller.runtime_cli import _handle_stats
+    for i, (success, target) in enumerate([
+        (True, "lciod"), (True, "lcview"), (False, "kernel"),
+    ]):
+        sd = tmp_path / f"session-{i}"
+        sd.mkdir()
+        terminal = "DONE_SUCCESS" if success else "DONE_FAILURE"
+        metrics = {
+            "success": success, "terminal_state": terminal,
+            "attempt_count": 1 if success else 3,
+            "wall_clock_used_ms": 10000 + i * 1000,
+            "wall_clock_budget_ms": 3600000,
+            "analyzer_layer_hits": {"KnowledgeBaseAnalyzer": 1} if success else {},
+            "analyzer_first_hit_layer": "KnowledgeBaseAnalyzer" if success else "",
+            "failure_code_distribution": {"RUN_FAILED": 2},
+            "human_gate_triggered": False, "human_gate_count": 0,
+            "kb_hit": success,
+        }
+        _make_session_json(sd / "session.json", metrics=metrics,
+                           target=target, terminal=terminal,
+                           attempt_count=1 if success else 3)
+    args = MagicMock()
+    args.artifacts_dir = str(tmp_path)
+    _handle_stats(args)
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert out["total_sessions"] == 3
+    assert out["success_count"] == 2
+    assert abs(out["success_rate"] - 0.67) < 0.01
+    assert "lciod" in out["by_target"]
+    assert "kernel" in out["by_target"]
+    assert out["by_target"]["kernel"]["success"] == 0
+
+
+def test_stats_command_skips_no_metrics(tmp_path, capsys):
+    """G9: 无 metrics 段的 session 被跳过。"""
+    from loop_controller.runtime_cli import _handle_stats
+    sd = tmp_path / "session-1"
+    sd.mkdir()
+    _make_session_json(sd / "session.json", metrics=None)
+    args = MagicMock()
+    args.artifacts_dir = str(tmp_path)
+    _handle_stats(args)
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert out.get("total_sessions", 0) == 0 or out.get("total", 0) == 0
+
+
+def test_stats_command_skips_corrupted(tmp_path, capsys):
+    """G9: 损坏 json 被跳过，不崩溃。"""
+    from loop_controller.runtime_cli import _handle_stats
+    sd = tmp_path / "session-broken"
+    sd.mkdir()
+    (sd / "session.json").write_text("{ not valid json", encoding="utf-8")
+    args = MagicMock()
+    args.artifacts_dir = str(tmp_path)
+    rc = _handle_stats(args)
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert out["total"] == 0
+    assert rc == 0
+
+
+def test_stats_command_median_wall_clock(tmp_path, capsys):
+    """G9: 偶数 session 取中位数（中间两数均值）。"""
+    from loop_controller.runtime_cli import _handle_stats
+    for i, ms in enumerate([10000, 20000, 30000, 40000]):
+        sd = tmp_path / f"session-{i}"
+        sd.mkdir()
+        metrics = {
+            "success": True, "terminal_state": "DONE_SUCCESS",
+            "attempt_count": 1, "wall_clock_used_ms": ms,
+            "wall_clock_budget_ms": 3600000,
+            "analyzer_layer_hits": {}, "analyzer_first_hit_layer": "",
+            "failure_code_distribution": {},
+            "human_gate_triggered": False, "human_gate_count": 0,
+            "kb_hit": False,
+        }
+        _make_session_json(sd / "session.json", metrics=metrics, terminal="DONE_SUCCESS")
+    args = MagicMock()
+    args.artifacts_dir = str(tmp_path)
+    _handle_stats(args)
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert out["median_wall_clock_ms"] == 25000
