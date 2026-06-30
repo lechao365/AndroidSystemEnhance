@@ -80,6 +80,9 @@ class LoopRuntime:
         # 幂等：已终态的 session 不恢复
         if self._state.terminal_state != RuntimeTerminalState.NONE:
             return self._state
+        # G9: 重置 wall_clock 起点 + 重建 failure_code 分布
+        self._session_start = time.perf_counter()
+        self._rebuild_fc_dist_from_checkpoints()
         cp = self._store.latest()
         if not cp:
             return self._state
@@ -772,6 +775,13 @@ class LoopRuntime:
             human_gate_count=self._hg_count,
             kb_hit=self._kb_hit,
         )
+
+    def _rebuild_fc_dist_from_checkpoints(self) -> None:
+        """G9: 从当前 session 的全部 checkpoint 重建 failure_code 分布。"""
+        records = self._store.all()
+        for r in records:
+            code = r.failure_code.value if r.failure_code else "NONE"
+            self._fc_dist[code] = self._fc_dist.get(code, 0) + 1
 
     def _persist_session(self) -> None:
         session_path = Path(self._session.artifacts_dir) / "session.json"

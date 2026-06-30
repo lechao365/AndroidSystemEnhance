@@ -1564,3 +1564,25 @@ def test_run_computes_session_metrics_failure(tmp_path):
     assert session.metrics is not None
     assert session.metrics.success is False
     assert session.metrics.terminal_state == RuntimeTerminalState.DONE_FAILURE.value
+
+
+def test_resume_rebuilds_fc_dist_from_checkpoints(tmp_path):
+    """G9: resume() 后 _fc_dist 从 checkpoint 记录重建。"""
+    from loop_controller.runtime.engine import LoopRuntime
+    from loop_contracts.failure_codes import FailureCode
+
+    session = LoopSession(
+        session_id="s1", workflow_id="runtime",
+        target="lciod", suite="hal", max_attempts=5,
+        artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp/cases", device_profile="rp5")
+    rt._checkpoint("step1", FailureCode.RUN_FAILED)
+    rt._checkpoint("step2", FailureCode.COMPILE_FAILED)
+    rt._checkpoint("step3", FailureCode.NONE)
+    rt._fc_dist = {}
+    assert rt._fc_dist == {}
+    rt._rebuild_fc_dist_from_checkpoints()
+    assert rt._fc_dist.get("RUN_FAILED") == 1
+    assert rt._fc_dist.get("COMPILE_FAILED") == 1
+    assert rt._fc_dist.get("NONE") == 1
