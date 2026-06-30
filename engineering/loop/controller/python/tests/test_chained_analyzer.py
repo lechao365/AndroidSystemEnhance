@@ -60,3 +60,41 @@ def test_chained_skips_layer_that_raises():
     req = AnalysisRequest(session_id="s", attempt_index=1)
     result = chain.analyze(req)
     assert len(result.target_files) == 1
+
+
+def test_patch_suggestion_has_matched_layer_field():
+    """G9: PatchSuggestion 必须有 matched_layer 字段，默认空串。"""
+    from dataclasses import fields
+    names = {f.name for f in fields(PatchSuggestion)}
+    assert "matched_layer" in names, "PatchSuggestion 缺少 matched_layer 字段"
+    ps = PatchSuggestion()
+    assert ps.matched_layer == ""
+
+
+def test_chained_fills_matched_layer_kb():
+    """G9: KB 层命中时 matched_layer 填类名。"""
+    p = [FileChange(workspace_path="a.c")]
+    chain = ChainedAnalyzer([_StubAnalyzer(patches=p, name="KnowledgeBaseAnalyzer")])
+    req = AnalysisRequest(session_id="s", attempt_index=1)
+    result = chain.analyze(req)
+    assert result.matched_layer == "_StubAnalyzer"
+
+
+def test_chained_fills_matched_layer_second_layer():
+    """G9: 第二层命中时 matched_layer 填第二层类名。"""
+    p = [FileChange(workspace_path="a.c")]
+    chain = ChainedAnalyzer([
+        _StubAnalyzer(patches=[], name="empty"),
+        _StubAnalyzer(patches=p, name="hit"),
+    ])
+    req = AnalysisRequest(session_id="s", attempt_index=1)
+    result = chain.analyze(req)
+    assert result.matched_layer == "_StubAnalyzer"
+
+
+def test_chained_no_match_leaves_matched_layer_empty():
+    """G9: 三层均空时 matched_layer 保持空串。"""
+    chain = ChainedAnalyzer([_StubAnalyzer(patches=[])])
+    req = AnalysisRequest(session_id="s", attempt_index=1)
+    result = chain.analyze(req)
+    assert result.matched_layer == ""

@@ -45,6 +45,7 @@ class PatchSuggestion:
     rationale: str = ""
     confidence: float = 0.0
     deploy_mode_hint: str = ""
+    matched_layer: str = ""
 
 
 class LlmAnalyzer(ABC):
@@ -671,6 +672,7 @@ class ChainedAnalyzer(LlmAnalyzer):
             except Exception:
                 continue
             if suggestion.target_files:
+                suggestion.matched_layer = type(layer).__name__
                 suggestion.rationale = f"[{type(layer).__name__}] {suggestion.rationale}"
                 return suggestion
         return PatchSuggestion(
