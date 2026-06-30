@@ -149,6 +149,8 @@ class LoopRuntime:
                     )
                     break
             self._transition()
+        # G9: 终态聚合指标（human gate 提前返回处不算终态，不聚合）
+        self._session.metrics = self._compute_session_metrics()
         self._persist_session()
         return self._state
 
@@ -751,6 +753,25 @@ class LoopRuntime:
             if fc and fc != "NONE":
                 codes.append(fc)
         return codes
+
+    def _compute_session_metrics(self) -> "SessionMetrics":
+        """G9: 终态时把实例变量 + wall_clock 快照为 SessionMetrics。"""
+        from loop_contracts.models import SessionMetrics
+        wall_used_ms = int((time.perf_counter() - self._session_start) * 1000)
+        wall_budget_ms = (self._session.wall_clock_limit or 0) * 1000
+        return SessionMetrics(
+            success=self._state.terminal_state == RuntimeTerminalState.DONE_SUCCESS,
+            terminal_state=self._state.terminal_state.value,
+            attempt_count=self._session.current_attempt,
+            wall_clock_used_ms=wall_used_ms,
+            wall_clock_budget_ms=wall_budget_ms,
+            analyzer_layer_hits=dict(self._layer_hits),
+            analyzer_first_hit_layer=self._first_hit_layer,
+            failure_code_distribution=dict(self._fc_dist),
+            human_gate_triggered=self._hg_count > 0,
+            human_gate_count=self._hg_count,
+            kb_hit=self._kb_hit,
+        )
 
     def _persist_session(self) -> None:
         session_path = Path(self._session.artifacts_dir) / "session.json"

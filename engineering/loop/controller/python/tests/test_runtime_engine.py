@@ -1526,3 +1526,41 @@ def test_engine_checkpoint_accumulates_failure_code_dist(tmp_path):
     rt._checkpoint("step3", FailureCode.RUN_FAILED)
     assert rt._fc_dist.get("NONE") == 1
     assert rt._fc_dist.get("RUN_FAILED") == 2
+
+
+def test_run_computes_session_metrics_success(tmp_path):
+    """G9: run() 完成后 session.metrics 非 None，字段正确。"""
+    from loop_controller.runtime.engine import LoopRuntime
+    from loop_contracts.models import RuntimeTerminalState
+
+    session = LoopSession(
+        session_id="s1", workflow_id="runtime",
+        target="lciod", suite="hal", max_attempts=1,
+        artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp/cases", device_profile="rp5")
+    rt.run(max_iterations=1)
+    assert session.metrics is not None
+    assert session.metrics.terminal_state in (
+        RuntimeTerminalState.DONE_SUCCESS.value,
+        RuntimeTerminalState.DONE_FAILURE.value,
+    )
+    assert session.metrics.wall_clock_used_ms >= 0
+    assert isinstance(session.metrics.failure_code_distribution, dict)
+
+
+def test_run_computes_session_metrics_failure(tmp_path):
+    """G9: max_iterations 超限 DONE_FAILURE 时 metrics.success=False。"""
+    from loop_controller.runtime.engine import LoopRuntime
+    from loop_contracts.models import RuntimeTerminalState
+
+    session = LoopSession(
+        session_id="s1", workflow_id="runtime",
+        target="lciod", suite="hal", max_attempts=5,
+        artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, cases_dir="/tmp/cases", device_profile="rp5")
+    rt.run(max_iterations=1)
+    assert session.metrics is not None
+    assert session.metrics.success is False
+    assert session.metrics.terminal_state == RuntimeTerminalState.DONE_FAILURE.value
