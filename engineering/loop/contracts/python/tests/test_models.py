@@ -1,5 +1,14 @@
+from dataclasses import fields
+
 from loop_contracts.failure_codes import FailureCode
-from loop_contracts.models import AttemptState, SessionState, StageResult, TerminationDecision
+from loop_contracts.models import (
+    AttemptState,
+    LoopSession,
+    SessionMetrics,
+    SessionState,
+    StageResult,
+    TerminationDecision,
+)
 
 
 def test_stage_result_defaults():
@@ -45,7 +54,6 @@ def test_termination_decision_flags_retry_and_escalation():
 
 def test_loop_session_wall_clock_limit_default_zero():
     """G5: LoopSession 新增 wall_clock_limit 字段，默认 0（不限制）。"""
-    from loop_contracts.models import LoopSession
     session = LoopSession(
         session_id="s1",
         workflow_id="runtime",
@@ -54,3 +62,40 @@ def test_loop_session_wall_clock_limit_default_zero():
         max_attempts=5,
     )
     assert session.wall_clock_limit == 0
+
+
+def test_session_metrics_fields():
+    """SessionMetrics 必须含 11 个字段。"""
+    names = {f.name for f in fields(SessionMetrics)}
+    expected = {
+        "success", "terminal_state", "attempt_count",
+        "wall_clock_used_ms", "wall_clock_budget_ms",
+        "analyzer_layer_hits", "analyzer_first_hit_layer",
+        "failure_code_distribution", "human_gate_triggered",
+        "human_gate_count", "kb_hit",
+    }
+    assert names == expected, f"SessionMetrics 字段不匹配: {names ^ expected}"
+
+
+def test_session_metrics_defaults():
+    """SessionMetrics 默认值。"""
+    m = SessionMetrics()
+    assert m.success is False
+    assert m.terminal_state == "NONE"
+    assert m.attempt_count == 0
+    assert m.wall_clock_used_ms == 0
+    assert m.wall_clock_budget_ms == 0
+    assert m.analyzer_layer_hits == {}
+    assert m.analyzer_first_hit_layer == ""
+    assert m.failure_code_distribution == {}
+    assert m.human_gate_triggered is False
+    assert m.human_gate_count == 0
+    assert m.kb_hit is False
+
+
+def test_loop_session_metrics_defaults_none():
+    """LoopSession.metrics 默认 None（未终态）。"""
+    s = LoopSession(
+        session_id="s1", workflow_id="w", target="t", suite="su", max_attempts=5,
+    )
+    assert s.metrics is None

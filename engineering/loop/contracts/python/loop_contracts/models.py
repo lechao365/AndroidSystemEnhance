@@ -49,6 +49,7 @@ class LoopSession:
     attempts: list[dict] = field(default_factory=list)
     artifacts_dir: str = ""
     wall_clock_limit: int = 0
+    metrics: SessionMetrics | None = None
 
 
 @dataclass
@@ -92,6 +93,22 @@ class TerminationDecision:
     reason_summary: str
     can_retry: bool
     should_escalate: bool
+
+
+@dataclass
+class SessionMetrics:
+    """Session 终态指标快照（run() 退出时计算，落盘到 session.json）。"""
+    success: bool = False
+    terminal_state: str = "NONE"
+    attempt_count: int = 0
+    wall_clock_used_ms: int = 0
+    wall_clock_budget_ms: int = 0
+    analyzer_layer_hits: dict[str, int] = field(default_factory=dict)
+    analyzer_first_hit_layer: str = ""
+    failure_code_distribution: dict[str, int] = field(default_factory=dict)
+    human_gate_triggered: bool = False
+    human_gate_count: int = 0
+    kb_hit: bool = False
 
 
 # Deprecated alias: 旧 controller 体系产物，保留向后兼容，新代码请用 LoopSession
