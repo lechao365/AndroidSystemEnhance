@@ -1658,3 +1658,46 @@ def test_select_best_candidate_passthrough_when_single_candidate(tmp_path, monke
     assert not (tmp_path / "patch_candidates").is_dir()
     # patch_suggestion.json 仍在（原有文件不变）
     assert (tmp_path / "patch_suggestion.json").is_file()
+
+
+def test_wait_analyzer_writes_multiple_candidates(tmp_path, monkeypatch):
+    """G2: candidates>1 时 WAIT_ANALYZER_PATCH 调 analyze_n，写 patch_candidates/ 目录。"""
+    import json
+    from pathlib import Path
+    from loop_controller.runtime.engine import LoopRuntime
+    from loop_controller.analyzer_protocol import LlmAnalyzer, AnalysisRequest, PatchSuggestion, FileChange
+    from loop_contracts.models import LoopSession
+
+    class MultiAnalyzer(LlmAnalyzer):
+        def analyze(self, request):
+            return PatchSuggestion(target_files=[FileChange(workspace_path="a.c")])
+
+    # 写入 evidence_bundle.json
+    eb = {"overall": "FAIL", "entries": [{"case_id": "c1", "status": "fail", "failure_reason": "boom"}]}
+    (tmp_path / "evidence_bundle.json").write_text(json.dumps(eb), encoding="utf-8")
+
+    session = LoopSession(
+        session_id="sess-g2-multi", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=5, artifacts_dir=str(tmp_path),
+        candidates_per_attempt=3,
+    )
+    rt = LoopRuntime(session, "cases", "profile.json", analyzer=MultiAnalyzer())
+    rt._state.current_node = "WAIT_ANALYZER_PATCH"
+
+    # mock analyze_request_stage
+    req_path = tmp_path / "analysis_request.json"
+    req_path.write_text(json.dumps({
+        "session_id": "sess-g2-multi", "attempt_index": 1,
+        "failed_cases": [{"id": "c1", "status": "fail", "failure_reason": "boom"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        "loop_controller.stages.analyze_request_stage",
+        lambda *a, **kw: str(req_path),
+    )
+
+    rt._execute_wait_analyzer_patch()
+
+    cands_dir = tmp_path / "patch_candidates"
+    assert cands_dir.is_dir()
+    cand_files = list(cands_dir.glob("c*_patch_suggestion.json"))
+    assert len(cand_files) >= 1

@@ -583,6 +583,45 @@ class LoopRuntime:
                     k: v for k, v in req_data.items()
                     if k in AnalysisRequest.__dataclass_fields__
                 })
+                # G2: candidates>1 时调 analyze_n，写 patch_candidates/ 目录
+                N = self._session.candidates_per_attempt
+                if N > 1:
+                    suggestions = self._analyzer.analyze_n(request, N)
+                    if not suggestions:
+                        self._state.node_status = "ANALYZER_EMPTY"
+                        self._set_human_gate()
+                        self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
+                        self._checkpoint("analyzer_n produced no candidates", FailureCode.NONE)
+                        return
+                    cands_dir = Path(self._session.artifacts_dir) / "patch_candidates"
+                    cands_dir.mkdir(parents=True, exist_ok=True)
+                    for idx, sug in enumerate(suggestions):
+                        sug.candidate_id = f"c{idx}"
+                        sug.candidate_index = idx
+                        cand_data = {
+                            "patches": [dataclasses.asdict(fc) for fc in sug.target_files],
+                            "confidence": sug.confidence,
+                            "rationale": sug.rationale,
+                            "candidate_id": sug.candidate_id,
+                            "candidate_index": sug.candidate_index,
+                            "matched_layer": sug.matched_layer,
+                        }
+                        (cands_dir / f"{sug.candidate_id}_patch_suggestion.json").write_text(
+                            json.dumps(cand_data, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                    # G9 埋点：首候选层级
+                    first = suggestions[0]
+                    layer = first.matched_layer or "unknown"
+                    self._layer_hits[layer] = self._layer_hits.get(layer, 0) + 1
+                    if not self._first_hit_layer:
+                        self._first_hit_layer = layer
+                    if layer == "KnowledgeBaseAnalyzer":
+                        self._kb_hit = True
+                    self._state.node_status = "CANDIDATES_READY"
+                    self._checkpoint(f"analyzer_n produced {len(suggestions)} candidates", FailureCode.NONE)
+                    return
+                # candidates == 1：原有单候选逻辑
                 suggestion = self._analyzer.analyze(request)
                 if suggestion.target_files:
                     # G9: 累积 analyzer 层级命中
