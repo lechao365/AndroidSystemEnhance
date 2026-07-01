@@ -7,9 +7,10 @@ source "$SCRIPT_DIR/../lib/shell/harness_bootstrap.sh"
 harness_init "validate_baseline_status"
 
 REPO_ROOT="$(harness_repo_root)"
+HARNESS_DIR="$(harness_path HARNESS_DIR)"
 BASELINE="${BASELINE:-$REPO_ROOT/engineering/harness/config/baseline-status.yaml}"
 
-TMPDIR="${TMPDIR:-${HARNESS_DIR}/tmp}"
+TMPDIR="${TMPDIR:-/tmp/opencode}"
 mkdir -p "$TMPDIR"
 WARN_COUNT=0
 SCAN_COUNT=0

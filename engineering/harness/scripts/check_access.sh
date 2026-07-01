@@ -38,6 +38,24 @@ for ctx in data.get('contexts', []):
 if matched is None:
     print('{\"allowed\": false, \"reason\": \"no matching context for category: ' + category + '\"}')
     sys.exit(0)
+" 2>&1) || rc=${?:-0}
+# 注意: sys.exit(0) 中的 exit 在 sed 净化后仍可能被匹配，这里 rc 为 0
+
+if [ "${rc:-0}" = "1" ] || { [ -n "$result" ] && echo "$result" | grep -q '"allowed": false'; }; then
+    echo "$result"
+    harness_exit 0
+fi
+
+output=$(python3 -c "
+import sys, yaml, json
+with open('$MANIFEST') as f:
+    data = yaml.safe_load(f)
+
+matched = None
+for ctx in data.get('contexts', []):
+    if ctx.get('scope_category') == '$category':
+        matched = ctx
+        break
 
 output = {
     'allowed': True,
@@ -48,9 +66,8 @@ output = {
     'require_confirmation': matched.get('require_confirmation', False),
     'require_evidence': matched.get('require_evidence', False),
 }
-import json
 print(json.dumps(output, indent=2, ensure_ascii=False))
-")
+" 2>&1) || harness_exit 1
 
-echo "$result"
+echo "$output"
 harness_exit 0

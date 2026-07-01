@@ -110,7 +110,7 @@ items = []
 if isinstance(data, list):
     items = data
 elif isinstance(data, dict):
-    for key in ('rules', 'routes', 'items', 'mappings'):
+    for key in ('rules', 'routes', 'items', 'mappings', 'baselines'):
         v = data.get(key)
         if isinstance(v, list):
             items = v

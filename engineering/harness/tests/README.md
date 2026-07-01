@@ -22,11 +22,16 @@
 
 | 文件/目录 | 作用 | 关键入口 |
 |----------|------|---------|
+| [`run_all_tests.sh`](./run_all_tests.sh) | 全量测试聚合运行器，按序执行所有 `test_*.sh`，输出 PASS/FAIL 汇总 | `bash run_all_tests.sh` |
 | [`test_harness_observability.sh`](./test_harness_observability.sh) | observability 公共库单元测试（`step_begin`/`step_end`/`harness_init` 等） | `bash test_harness_observability.sh` |
+| [`test_harness_path_util.sh`](./test_harness_path_util.sh) | 路径工具对称性测试（shell/python/bat 三端一致性、环境覆盖、缺失 key） | `bash test_harness_path_util.sh` |
+| [`test_check_access.sh`](./test_check_access.sh) | 准入查询 CLI 测试（已知 category 返回正确 access、未知 category 拒绝） | `bash test_check_access.sh` |
+| [`test_baseline_workflow.sh`](./test_baseline_workflow.sh) | 基线晋升测试（valid/invalid status/缺失字段校验器拒绝） | `bash test_baseline_workflow.sh` |
+| [`test_validators.sh`](./test_validators.sh) | 校验器自测（manifest 校验器拒绝非法 access、config 校验器拒绝非法 priority、全量校验不 crash） | `bash test_validators.sh` |
 | [`test_le_runs_cleanup.sh`](./test_le_runs_cleanup.sh) | `le_runs_cleanup.sh` 清理契约测试（跨边界测试 loop 脚本，验证 harness observability 依赖） | `bash test_le_runs_cleanup.sh` |
 | [`test_revert_code_from_patchs.sh`](./test_revert_code_from_patchs.sh) | `revert_code_from_patchs.sh` workflow 契约测试（non-repo-extra / upstream-missing / verify-matrix 三场景） | `bash test_revert_code_from_patchs.sh` |
 | [`test_sync_code_to_patchs.sh`](./test_sync_code_to_patchs.sh) | `sync_code_to_patchs.sh` workflow 契约测试 | `bash test_sync_code_to_patchs.sh` |
-| [`fixtures/`](./fixtures) | 测试夹具目录（observability/basic、lc-revert-code-from-patchs/*、lc-sync-code-to-patchs/*） | 各测试脚本通过 `FIXTURE*` 变量引用 |
+| [`fixtures/`](./fixtures) | 测试夹具目录 | 各测试脚本通过 `FIXTURE*` 变量引用 |
 
 ## 使用方式
 
@@ -36,6 +41,9 @@ bash engineering/harness/tests/test_harness_observability.sh
 
 # 运行全部（依次执行）
 for t in engineering/harness/tests/test_*.sh; do bash "$t" || break; done
+
+# 全量测试聚合运行器
+bash engineering/harness/tests/run_all_tests.sh
 ```
 
 ## 测试回归矩阵

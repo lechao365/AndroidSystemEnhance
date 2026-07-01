@@ -155,7 +155,7 @@ for f in "${TARGETS[@]}"; do
         # ---- 2.3 裸 exit 校验（公共库豁免）---
         if ! is_lib_self "$bn"; then
             # skeleton 中去掉 harness_exit 后检查是否还有裸 exit
-            sk_exit=$(printf '%s' "$skeleton" | sed -E 's/harness_exit//g')
+            sk_exit=$(printf '%s' "$skeleton" | sed -E 's/harness_exit//g; s/sys\.exit//g; s/--exit-code//g')
             if printf '%s' "$sk_exit" | LC_ALL=C grep -qE '\bexit\b'; then
                 report_warn "$f:$lineno" "出现裸 exit（应使用 harness_exit，违反 RID-OBS-001 MUST8）"
             fi

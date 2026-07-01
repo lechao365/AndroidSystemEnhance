@@ -24,10 +24,15 @@
 
 | 脚本 | 作用 | 调用方式 |
 |------|------|---------|
+| [`check_access.sh`](./check_access.sh) | Access 准入查询 CLI：给定路径+分类，输出 manifest 匹配的 access 级别/规则/workflow | `bash engineering/harness/scripts/check_access.sh --path <path> --category <category>` |
 | [`mk_rpi5_full_image.sh`](./mk_rpi5_full_image.sh) | RPi5 AOSP 一键编译打包脚本（`-mode` 选构建范围） | `bash engineering/harness/scripts/mk_rpi5_full_image.sh` |
+| [`run_all_validations.sh`](./run_all_validations.sh) | 全量校验聚合入口，顺序执行所有 validator | `bash engineering/harness/scripts/run_all_validations.sh` |
+| [`validate_baseline_status.sh`](./validate_baseline_status.sh) | Baseline 状态校验（三阶段字段完整性、ID 格式、promoted 证据） | `bash engineering/harness/scripts/validate_baseline_status.sh` |
 | [`validate_harness_docs.sh`](./validate_harness_docs.sh) | 文档 / 契约层静态校验（README 链接、文件清单、PlantUML 闭合、WORKFLOW front matter） | `bash engineering/harness/scripts/validate_harness_docs.sh` |
 | [`validate_harness_scripts.sh`](./validate_harness_scripts.sh) | bash 脚本合规校验（bootstrap source、`harness_init`、裸 `exit` / `/tmp/` / 私有符号） | `bash engineering/harness/scripts/validate_harness_scripts.sh` |
 | [`validate_harness_config.sh`](./validate_harness_config.sh) | 配置层校验（YAML 可解析性、字段合法性、命名规范） | `bash engineering/harness/scripts/validate_harness_config.sh` |
+| [`validate_manifest.sh`](./validate_manifest.sh) | Manifest.yaml 校验（context ID 唯一、access 值域、scope_category 合法性） | `bash engineering/harness/scripts/validate_manifest.sh` |
+| [`validate_workflow_contracts.sh`](./validate_workflow_contracts.sh) | 工作流契约校验（front matter stages/TODO/退出码章节完整性） | `bash engineering/harness/scripts/validate_workflow_contracts.sh` |
 | [`apply_preset_bugs.sh`](./apply_preset_bugs.sh) | 向 workspace 注入预设 bug，验证 AI 闭环修复能力（`--bug N` 选 bug，`--revert` 回滚） | `bash engineering/harness/scripts/apply_preset_bugs.sh --bug 1,2,3` |
 | [`start-opencode-server.sh`](./start-opencode-server.sh) | 在 WSL2 内以 systemd user service 托管 `opencode web`，复用 `~/.config/opencode/server.env`，并在 Windows 宿主上自动配置 `tailscale serve`，输出手机可访问的 HTTPS WebUI URL | `bash engineering/harness/scripts/start-opencode-server.sh` |
 

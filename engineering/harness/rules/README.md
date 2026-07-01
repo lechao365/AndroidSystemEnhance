@@ -23,6 +23,7 @@
 
 | 规则 ID | 文件 | 约束内容 | 触发时机 |
 |---------|------|---------|---------|
+| — | [manifest.yaml](./manifest.yaml) | 声明式索引 + Access 五级控制：context + rules + access 三位一体 | 进入任何任务前查询 |
 | `SRC-001` / `SRC-002` / `SRC-003` / `SRC-004` | [source-code-modify.md](./source-code-modify.md) | `SRC-001` workspace 是唯一编译真相源；`SRC-002` patchs 单向受控归档（仅 lc-sync-code-to-patchs）；`SRC-003` patchs/others 可独立维护；`SRC-004` 未证据化 baseline 不得宣称为恢复真相源 | 改动 `~/workspace/` 下任何源码前 |
 | `DOC-001` | [doc-paths.md](./doc-paths.md) | 文档分层与归档路径：覆盖 superpowers 默认的 `docs/superpowers/`，统一到 `docs/specs/` 与 `docs/plans/` | 使用 brainstorming / writing-plans skill 时 |
 | `DOC-002` | [plantuml.md](./plantuml.md) | PlantUML 编写约束：禁止空图块、禁止 UML 块内花括号占位符、必须显式闭合、条件块内禁止 fork、活动图颜色新语法 | 编写任何 PlantUML 图表前 |
