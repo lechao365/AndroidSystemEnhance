@@ -3,6 +3,7 @@ from dataclasses import fields
 from loop_contracts.failure_codes import FailureCode
 from loop_contracts.models import (
     AttemptState,
+    CheckpointRecord,
     LoopSession,
     SessionMetrics,
     SessionState,
@@ -65,7 +66,7 @@ def test_loop_session_wall_clock_limit_default_zero():
 
 
 def test_session_metrics_fields():
-    """SessionMetrics 必须含 11 个字段。"""
+    """SessionMetrics 必须含 14 个字段（G9 11 + G2 3）。"""
     names = {f.name for f in fields(SessionMetrics)}
     expected = {
         "success", "terminal_state", "attempt_count",
@@ -73,6 +74,8 @@ def test_session_metrics_fields():
         "analyzer_layer_hits", "analyzer_first_hit_layer",
         "failure_code_distribution", "human_gate_triggered",
         "human_gate_count", "kb_hit",
+        "candidates_per_attempt_avg", "candidate_compile_pass_rate",
+        "candidate_selected_layer_dist",
     }
     assert names == expected, f"SessionMetrics 字段不匹配: {names ^ expected}"
 
@@ -106,3 +109,52 @@ def test_session_metrics_importable_from_package():
     import loop_contracts
     assert hasattr(loop_contracts, "SessionMetrics")
     assert "SessionMetrics" in loop_contracts.__all__
+
+
+def test_loop_session_has_candidates_per_attempt() -> None:
+    """G2: LoopSession 必须有 candidates_per_attempt 字段，默认 1。"""
+    s = LoopSession(
+        session_id="s1", workflow_id="w", target="t", suite="s", max_attempts=5,
+    )
+    assert s.candidates_per_attempt == 1
+    s2 = LoopSession(
+        session_id="s2", workflow_id="w", target="t", suite="s", max_attempts=5,
+        candidates_per_attempt=3,
+    )
+    assert s2.candidates_per_attempt == 3
+
+
+def test_checkpoint_record_has_candidate_id() -> None:
+    """G2: CheckpointRecord 必须有 candidate_id 字段，默认空串。"""
+    cp = CheckpointRecord(
+        checkpoint_id="cp-1", session_id="s1", attempt_index=0,
+        current_node="APPLY_PATCH", input_summary={}, output_summary={},
+        failure_code=FailureCode.NONE, matched_guards=[],
+        next_node="COMPILE_PATCH", timestamp="2026-07-01T00:00:00+08:00",
+    )
+    assert cp.candidate_id == ""
+    cp2 = CheckpointRecord(
+        checkpoint_id="cp-2", session_id="s1", attempt_index=0,
+        current_node="SELECT_BEST_CANDIDATE", input_summary={}, output_summary={},
+        failure_code=FailureCode.NONE, matched_guards=[],
+        next_node="APPLY_PATCH", timestamp="2026-07-01T00:00:00+08:00",
+        candidate_id="c1",
+    )
+    assert cp2.candidate_id == "c1"
+
+
+def test_session_metrics_has_g2_fields() -> None:
+    """G2: SessionMetrics 必须有 3 个 G2 指标字段。"""
+    m = SessionMetrics()
+    assert m.candidates_per_attempt_avg == 0.0
+    assert m.candidate_compile_pass_rate == 0.0
+    assert m.candidate_selected_layer_dist == {}
+
+    m2 = SessionMetrics(
+        candidates_per_attempt_avg=2.5,
+        candidate_compile_pass_rate=0.67,
+        candidate_selected_layer_dist={"KnowledgeBaseAnalyzer": 2, "OpencodeAnalyzer": 1},
+    )
+    assert m2.candidates_per_attempt_avg == 2.5
+    assert m2.candidate_compile_pass_rate == 0.67
+    assert m2.candidate_selected_layer_dist["KnowledgeBaseAnalyzer"] == 2

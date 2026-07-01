@@ -50,6 +50,7 @@ class LoopSession:
     artifacts_dir: str = ""
     wall_clock_limit: int = 0
     metrics: SessionMetrics | None = None
+    candidates_per_attempt: int = 1
 
 
 @dataclass
@@ -79,6 +80,7 @@ class CheckpointRecord:
     next_node: str
     timestamp: str
     duration_ms: int = 0
+    candidate_id: str = ""
 
     def to_dict(self) -> dict[str, object]:
         data = asdict(self)
@@ -109,6 +111,9 @@ class SessionMetrics:
     human_gate_triggered: bool = False
     human_gate_count: int = 0
     kb_hit: bool = False
+    candidates_per_attempt_avg: float = 0.0
+    candidate_compile_pass_rate: float = 0.0
+    candidate_selected_layer_dist: dict[str, int] = field(default_factory=dict)
 
 
 # Deprecated alias: 旧 controller 体系产物，保留向后兼容，新代码请用 LoopSession
