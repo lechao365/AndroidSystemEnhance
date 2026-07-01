@@ -5,6 +5,7 @@ from loop_controller.runtime.engine import LoopRuntime
 from loop_controller.runtime.checkpoint_store import CheckpointStore
 from loop_controller.runtime.types import NodeKind
 from loop_contracts.models import LoopSession, RuntimeTerminalState
+from loop_contracts.failure_codes import FailureCode
 
 
 def _write_bundle(tmp_path: Path, overall: str, failed: int) -> None:
@@ -1775,3 +1776,33 @@ def test_session_metrics_has_g2_fields_in_persisted_session(tmp_path, monkeypatc
     assert "metrics" in data
     assert data["metrics"]["candidates_per_attempt_avg"] == 3.0
     assert data["candidates_per_attempt"] == 3
+
+
+def test_checkpoint_records_candidate_id(tmp_path, monkeypatch):
+    """G2: CheckpointRecord 序列化包含 candidate_id 字段。"""
+    import json
+    from pathlib import Path
+    from loop_controller.runtime.engine import LoopRuntime
+    from loop_contracts.models import LoopSession, RuntimeTerminalState
+
+    # mock subprocess
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+        return R()
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+
+    session = LoopSession(
+        session_id="sess-g2-cid", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=1, artifacts_dir=str(tmp_path),
+    )
+    rt = LoopRuntime(session, "cases", "profile.json")
+    rt._state.current_node = "SELECT_BEST_CANDIDATE"
+    rt._checkpoint("test candidate checkpoint", FailureCode.NONE, candidate_id="c0")
+
+    ckpt_path = tmp_path / "runtime_checkpoints.jsonl"
+    assert ckpt_path.is_file()
+    lines = ckpt_path.read_text().strip().split("\n")
+    last_cp = json.loads(lines[-1])
+    assert "candidate_id" in last_cp
+    assert last_cp["candidate_id"] == "c0"

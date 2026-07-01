@@ -732,7 +732,8 @@ class LoopRuntime:
 
     def _checkpoint(self, reason: str, failure_code: FailureCode,
                     matched_guards: list[str] | None = None,
-                    duration_ms: int | None = None) -> None:
+                    duration_ms: int | None = None,
+                    candidate_id: str = "") -> None:
         next_node = self._compute_next_node()
         if duration_ms is None:
             duration_ms = getattr(self, "_last_node_duration_ms", 0)
@@ -748,6 +749,7 @@ class LoopRuntime:
             next_node=next_node,
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%S+08:00"),
             duration_ms=duration_ms,
+            candidate_id=candidate_id,
         )
         self._store.save(cp)
         self._state.last_checkpoint_at = cp.timestamp
