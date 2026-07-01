@@ -55,6 +55,18 @@ class LlmAnalyzer(ABC):
     def analyze(self, request: AnalysisRequest) -> PatchSuggestion:
         ...
 
+    def analyze_n(self, request: AnalysisRequest, n: int) -> list[PatchSuggestion]:
+        """G2: 默认实现循环调 analyze。子类可重写以提供差异化候选。
+
+        空产出（target_files 为空）不收集。
+        """
+        results: list[PatchSuggestion] = []
+        for _ in range(n):
+            sug = self.analyze(request)
+            if sug.target_files:
+                results.append(sug)
+        return results
+
 
 _FV_MAIN_C_PATH = "patchs/rpi5/others/usb-verify/src/cli/main.c"
 _LCIOD_HAL_PATH = "vendor/lechao/services/lechao_lciod/service.cpp"
@@ -662,6 +674,10 @@ class ChainedAnalyzer(LlmAnalyzer):
     - 某层抛异常则跳过，继续下一层（容错）。
     - 全部为空时返回空补丁，rationale 标注"三层 analyzer 均无产出"。
     - 命中层的 rationale 前缀追加该层类名，便于审计来源。
+
+    G2:
+    - analyze()：单候选短路（向后兼容 candidates=1）
+    - analyze_n()：收集所有层非空产出，不短路
     """
 
     def __init__(self, layers: list[LlmAnalyzer]):
@@ -681,3 +697,28 @@ class ChainedAnalyzer(LlmAnalyzer):
             target_files=[], confidence=0.0,
             rationale="三层 analyzer 均无产出",
         )
+
+    def analyze_n(self, request: AnalysisRequest, n: int) -> list[PatchSuggestion]:
+        """G2: 收集所有层非空产出，不短路。
+
+        确定性层（非 OpencodeAnalyzer）只产 1 个；
+        OpencodeAnalyzer 产 remaining 个（温度采样）。
+        候选数上限 n，不足时优雅降级。
+        """
+        candidates: list[PatchSuggestion] = []
+        for layer in self._layers:
+            remaining = n - len(candidates)
+            if remaining <= 0:
+                break
+            try:
+                is_llm = "OpencodeAnalyzer" in type(layer).__name__
+                layer_n = remaining if is_llm else 1
+                sugs = layer.analyze_n(request, layer_n)
+                for sug in sugs:
+                    if sug.target_files and len(candidates) < n:
+                        sug.matched_layer = type(layer).__name__
+                        sug.rationale = f"[{type(layer).__name__}] {sug.rationale}"
+                        candidates.append(sug)
+            except Exception:
+                continue
+        return candidates

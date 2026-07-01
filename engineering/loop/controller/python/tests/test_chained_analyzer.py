@@ -114,3 +114,96 @@ def test_patch_suggestion_has_candidate_fields() -> None:
     sug2 = PatchSuggestion()
     assert sug2.candidate_id == ""
     assert sug2.candidate_index == 0
+
+
+def test_llm_analyzer_analyze_n_default() -> None:
+    """G2: LlmAnalyzer.analyze_n 默认实现循环调 analyze。"""
+    from loop_controller.analyzer_protocol import LlmAnalyzer, AnalysisRequest, PatchSuggestion, FileChange
+
+    class FixedAnalyzer(LlmAnalyzer):
+        def analyze(self, request):
+            return PatchSuggestion(target_files=[FileChange(workspace_path="a.c")])
+
+    a = FixedAnalyzer()
+    req = AnalysisRequest(session_id="s1", attempt_index=0)
+    results = a.analyze_n(req, 3)
+    assert len(results) == 3
+    assert all(r.target_files for r in results)
+
+
+def test_llm_analyzer_analyze_n_empty() -> None:
+    """G2: analyze_n 遇到空产出不收集。"""
+    from loop_controller.analyzer_protocol import LlmAnalyzer, AnalysisRequest, PatchSuggestion
+
+    class EmptyAnalyzer(LlmAnalyzer):
+        def analyze(self, request):
+            return PatchSuggestion(target_files=[])
+
+    a = EmptyAnalyzer()
+    req = AnalysisRequest(session_id="s1", attempt_index=0)
+    results = a.analyze_n(req, 3)
+    assert len(results) == 0
+
+
+def test_chained_analyzer_analyze_n_collects_all_layers() -> None:
+    """G2: ChainedAnalyzer.analyze_n 收集所有层非空产出，不短路。"""
+    from loop_controller.analyzer_protocol import (
+        ChainedAnalyzer, LlmAnalyzer, AnalysisRequest, PatchSuggestion, FileChange,
+    )
+
+    class LayerA(LlmAnalyzer):
+        def analyze(self, request):
+            return PatchSuggestion(target_files=[FileChange(workspace_path="a.c")], confidence=0.9)
+
+    class LayerB(LlmAnalyzer):
+        def analyze(self, request):
+            return PatchSuggestion(target_files=[FileChange(workspace_path="b.c")], confidence=0.8)
+
+    chained = ChainedAnalyzer([LayerA(), LayerB()])
+    req = AnalysisRequest(session_id="s1", attempt_index=0)
+    results = chained.analyze_n(req, 3)
+    assert len(results) == 2
+    assert results[0].matched_layer == "LayerA"
+    assert results[1].matched_layer == "LayerB"
+    assert "[LayerA]" in results[0].rationale
+
+
+def test_chained_analyzer_analyze_n_caps_at_n() -> None:
+    """G2: ChainedAnalyzer.analyze_n 不超过 N 个候选。"""
+    from loop_controller.analyzer_protocol import (
+        ChainedAnalyzer, LlmAnalyzer, AnalysisRequest, PatchSuggestion, FileChange,
+    )
+
+    class LayerA(LlmAnalyzer):
+        def analyze(self, request):
+            return PatchSuggestion(target_files=[FileChange(workspace_path="a.c")])
+
+    class LayerB(LlmAnalyzer):
+        def analyze(self, request):
+            return PatchSuggestion(target_files=[FileChange(workspace_path="b.c")])
+
+    chained = ChainedAnalyzer([LayerA(), LayerB()])
+    req = AnalysisRequest(session_id="s1", attempt_index=0)
+    results = chained.analyze_n(req, 1)
+    assert len(results) == 1
+
+
+def test_chained_analyzer_analyze_n_skips_empty_layers() -> None:
+    """G2: 空产出的层被跳过，不影响其他层。"""
+    from loop_controller.analyzer_protocol import (
+        ChainedAnalyzer, LlmAnalyzer, AnalysisRequest, PatchSuggestion, FileChange,
+    )
+
+    class EmptyLayer(LlmAnalyzer):
+        def analyze(self, request):
+            return PatchSuggestion(target_files=[])
+
+    class GoodLayer(LlmAnalyzer):
+        def analyze(self, request):
+            return PatchSuggestion(target_files=[FileChange(workspace_path="a.c")])
+
+    chained = ChainedAnalyzer([EmptyLayer(), GoodLayer()])
+    req = AnalysisRequest(session_id="s1", attempt_index=0)
+    results = chained.analyze_n(req, 3)
+    assert len(results) == 1
+    assert results[0].matched_layer == "GoodLayer"
