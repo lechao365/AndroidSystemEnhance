@@ -47,3 +47,19 @@ lcview 模块改动后必须通过单元测试编译验证：`make lechao_lcview
 2. **`.gitignore` 排除的文件无需考虑删除问题**——它们不会被提交到 git server，不影响仓库状态。
    - 判断依据：`git check-ignore <file>` 返回 0（被忽略）则无需确认。
 3. **禁止以"清理"为由批量删除**——即使看似无用，也必须逐个确认。
+
+## Manifest 准入查询
+进入任何任务前，先查询 `engineering/harness/rules/manifest.yaml` 确认：
+- 当前路径匹配的 context
+- 对应 access 级别（direct_edit / require_workflow / require_plan / require_confirmation / require_evidence）
+- 必经 workflow（如有）
+- 是否需 plan / confirmation / evidence
+
+也可通过 `bash engineering/harness/scripts/check_access.sh --path <path> --category <category>` 快速查询。
+
+## Baseline 使用指引
+在执行 `lc-revert-code-from-patchs` 回退操作前，必须先查 `engineering/harness/config/baseline-status.yaml`：
+- 确认目标 baseline 状态为 `promoted`（证据完整）
+- 检查 `build_result` / `package_result` / `board_verify` 均为 PASS
+- 确认 `approved_by` 和 `approved_at` 已填
+- 未完成证据化晋升的 baseline 不得作为恢复真相源
