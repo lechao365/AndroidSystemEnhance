@@ -1609,3 +1609,18 @@ def test_persist_session_writes_metrics(tmp_path):
     assert "metrics" in data
     assert data["metrics"]["success"] is True
     assert data["metrics"]["attempt_count"] == 1
+
+
+def test_select_best_candidate_node_exists() -> None:
+    """G2: NodeKind 必须包含 SELECT_BEST_CANDIDATE。"""
+    from loop_controller.runtime.types import NodeKind
+    assert hasattr(NodeKind, "SELECT_BEST_CANDIDATE")
+    assert NodeKind.SELECT_BEST_CANDIDATE.value == "SELECT_BEST_CANDIDATE"
+
+
+def test_linear_next_routes_through_select_best_candidate() -> None:
+    """G2: WAIT_ANALYZER_PATCH → SELECT_BEST_CANDIDATE → APPLY_PATCH。"""
+    from loop_controller.runtime.engine import _LINEAR_NEXT
+    from loop_controller.runtime.types import NodeKind
+    assert _LINEAR_NEXT[NodeKind.WAIT_ANALYZER_PATCH.value] == NodeKind.SELECT_BEST_CANDIDATE.value
+    assert _LINEAR_NEXT[NodeKind.SELECT_BEST_CANDIDATE.value] == NodeKind.APPLY_PATCH.value
