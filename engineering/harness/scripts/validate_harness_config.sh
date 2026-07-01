@@ -50,6 +50,7 @@ step_begin "YAML 映射文件校验"
 YAML_TARGETS=(
     "scope-mapping.yaml"
     "doc-sync-mapping.yaml"
+    "baseline-status.yaml"
 )
 
 YAML_FOUND_COUNT=0
@@ -162,6 +163,31 @@ for e in errs:
             [ -z "$l" ] && continue
             report_warn "$ypath" "$l"
         done <<< "$field_err"
+    fi
+    # 对 baseline-status.yaml 做额外字段校验
+    if [ "$yname" = "baseline-status.yaml" ]; then
+        bs_err=$(python3 -c "
+import sys, yaml
+with open('$ypath') as f:
+    data = yaml.safe_load(f)
+errs = []
+baselines = data.get('baselines', []) if isinstance(data, dict) else []
+VALID_STATUSES = {'archive', 'candidate', 'promoted'}
+for i, bl in enumerate(baselines):
+    s = bl.get('status', '')
+    if s not in VALID_STATUSES:
+        errs.append(f'baselines[{i}] status 非法: {s}')
+    if s == 'promoted' and not bl.get('approved_by'):
+        errs.append(f'baselines[{i}] promoted 缺少 approved_by')
+for e in errs:
+    print(e)
+" 2>&1) || true
+        if [ -n "$bs_err" ]; then
+            while IFS= read -r l; do
+                [ -z "$l" ] && continue
+                report_warn "$ypath" "$l"
+            done <<< "$bs_err"
+        fi
     fi
 done
 
