@@ -458,7 +458,7 @@ harness_collect_metrics() {
     cpu=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{print $2}' | cut -d. -f1)
     mem=$(free -m 2>/dev/null | awk '/Mem:/ {print $3}')
     disk=$(df -h / 2>/dev/null | tail -1 | awk '{print $5}')
-    _h_log_raw "cpu=${cpu:-0} mem=${mem:-0}MB disk=${disk:-0}"
+    _h_log_file_write "METRICS" "性能指标" "cpu=${cpu:-0}" "mem=${mem:-0}MB" "disk=${disk:-0}"
 }
 
 harness_start_metrics_watch() {
@@ -484,7 +484,7 @@ harness_stop_metrics_watch() {
 _h_assert_fail() {
     local msg="$1"
     printf "ASSERT FAIL: %s\n" "$msg" >&2
-    _h_log_raw "level=ASSERT_FAIL msg=$msg"
+    _h_log_file_write "ASSERT_FAIL" "$msg"
     exit 1
 }
 
@@ -513,7 +513,7 @@ harness_assert_exit_code() {
 # ============================================================================
 harness_trace() {
     [ "${HARNESS_TRACE:-0}" = "1" ] || return 0
-    _h_log_raw "level=TRACE msg=$*"
+    _h_log_file_write "TRACE" "$*"
 }
 
 # ============================================================================

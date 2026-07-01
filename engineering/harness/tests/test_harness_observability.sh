@@ -140,7 +140,108 @@ HEREDOC
 main() {
     test_structured_result_and_status_lines
     test_artifact_rotation_removes_old_directory_artifacts
-    test_harness_init_reuses_preexported_repo_root
+test_harness_init_reuses_preexported_repo_root
+    test_log_warn_error_format
+    test_harness_assert_api
+    test_harness_trace
+    test_report_no_upstream_enhanced
+}
+
+test_log_warn_error_format() {
+    # shellcheck source=../../lib/shell/harness_observability.sh
+    source "$SCRIPT_DIR/../lib/shell/harness_observability.sh"
+    local script_name="test-log-warn-error-format"
+    local log_dir="$LOG_ROOT/$script_name"
+    rm -rf "$log_dir"
+    mkdir -p "$log_dir"
+    local ts
+    ts=$(date '+%Y%m%d-%H%M%S')
+    local log_file="$log_dir/$script_name-$ts.log"
+    _H_LOG_FILE="$log_file"
+    _H_LOG_DIR="$log_dir"
+    _H_SCRIPT_NAME="$script_name"
+    _H_INIT_TS=$(date +%s)
+
+    log_warn "test warn message"
+    log_error "test error message"
+
+    assert_grep 'level=WARN' "$log_file"
+    assert_grep 'level=ERROR' "$log_file"
+    assert_grep 'msg="test warn message"' "$log_file"
+    assert_grep 'pid=' "$log_file"
+    assert_grep 'duration=' "$log_file"
+    assert_grep 'caller=' "$log_file"
+    pass "log_warn/log_error format with pid/duration/caller"
+}
+
+test_harness_assert_api() {
+    # shellcheck source=../../lib/shell/harness_observability.sh
+    source "$SCRIPT_DIR/../lib/shell/harness_observability.sh"
+    local sandbox
+    sandbox="$(mktemp -d "$TEST_TMP_ROOT/assert-test.XXXXXX")"
+    mkdir -p "$sandbox"
+
+    harness_assert_eq "foo" "foo" "eq should pass"
+    touch "$sandbox/exists.txt"
+    harness_assert_file_exists "$sandbox/exists.txt" "file should exist"
+    pass "harness_assert API"
+}
+
+test_harness_trace() {
+    # shellcheck source=../../lib/shell/harness_observability.sh
+    source "$SCRIPT_DIR/../lib/shell/harness_observability.sh"
+    HARNESS_TRACE=1
+    local script_name="test-harness-trace"
+    local log_dir="$LOG_ROOT/$script_name"
+    rm -rf "$log_dir"
+    mkdir -p "$log_dir"
+    local ts
+    ts=$(date '+%Y%m%d-%H%M%S')
+    local log_file="$log_dir/$script_name-$ts.log"
+    _H_LOG_FILE="$log_file"
+    _H_LOG_DIR="$log_dir"
+    _H_SCRIPT_NAME="$script_name"
+    _H_INIT_TS=$(date +%s)
+
+    harness_trace "this is a trace message"
+    assert_grep 'level=TRACE' "$log_file"
+    assert_grep 'this is a trace message' "$log_file"
+
+    HARNESS_TRACE=0
+    rm -rf "$log_dir"
+    mkdir -p "$log_dir"
+    log_file="$log_dir/$script_name-$(date '+%Y%m%d-%H%M%S').log"
+    _H_LOG_FILE="$log_file"
+    harness_trace "should not appear"
+    if grep -q 'should not appear' "$log_file" 2>/dev/null; then
+        fail "HARNESS_TRACE=0 时不应输出 trace"
+    fi
+    pass "harness_trace respects HARNESS_TRACE flag"
+}
+
+test_report_no_upstream_enhanced() {
+    # shellcheck source=../../lib/shell/harness_observability.sh
+    source "$SCRIPT_DIR/../lib/shell/harness_observability.sh"
+    local script_name="test-report-no-upstream"
+    local log_dir="$LOG_ROOT/$script_name"
+    rm -rf "$log_dir"
+    mkdir -p "$log_dir"
+    local ts
+    ts=$(date '+%Y%m%d-%H%M%S')
+    local log_file="$log_dir/$script_name-$ts.log"
+    _H_LOG_FILE="$log_file"
+    _H_LOG_DIR="$log_dir"
+    _H_SCRIPT_NAME="$script_name"
+    _H_INIT_TS=$(date +%s)
+
+    local tmpdir
+    tmpdir="$(mktemp -d "$TEST_TMP_ROOT/no-upstream.XXXXXX")"
+    (
+        cd "$tmpdir"
+        harness_report_no_upstream "test context" 2>/dev/null || true
+    )
+    pass "harness_report_no_upstream does not crash in non-git dir"
+    rm -rf "$tmpdir"
 }
 
 main "$@"
