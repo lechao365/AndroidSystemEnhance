@@ -1,9 +1,12 @@
 """ChainedAnalyzer 单元测试：三层降级编排（KB→规则→opencode）。"""
+import json
+
 from loop_controller.analyzer_protocol import (
     AnalysisRequest,
     ChainedAnalyzer,
     FileChange,
     LlmAnalyzer,
+    OpencodeAnalyzer,
     PatchSuggestion,
 )
 
@@ -207,3 +210,43 @@ def test_chained_analyzer_analyze_n_skips_empty_layers() -> None:
     results = chained.analyze_n(req, 3)
     assert len(results) == 1
     assert results[0].matched_layer == "GoodLayer"
+
+
+def test_opencode_analyzer_analyze_n_returns_multiple(monkeypatch) -> None:
+    """G2: OpencodeAnalyzer.analyze_n(n>1) 返回多个候选。"""
+    from loop_controller.analyzer_protocol import OpencodeAnalyzer, AnalysisRequest
+
+    call_count = {"n": 0}
+
+    def fake_invoke(self, prompt, req_file):
+        call_count["n"] += 1
+        idx = call_count["n"] - 1
+        text = f'[{{"workspace_path": "a{idx}.c", "change_type": "edit", "new_content": "// fix {idx}"}}]'
+        events = [{"type": "text", "part": {"text": text}}]
+        return "\n".join(json.dumps(e) for e in events)
+
+    monkeypatch.setattr(OpencodeAnalyzer, "_invoke_opencode", fake_invoke)
+
+    a = OpencodeAnalyzer(workspace_root="/tmp/ws")
+    req = AnalysisRequest(session_id="s1", attempt_index=0)
+    results = a.analyze_n(req, 2)
+    assert len(results) == 2
+    assert results[0].candidate_index == 0
+    assert results[1].candidate_index == 1
+
+
+def test_opencode_analyzer_analyze_n_dedup_by_hash(monkeypatch) -> None:
+    """G2: 相同 patch_hash 的候选去重。"""
+    from loop_controller.analyzer_protocol import OpencodeAnalyzer, AnalysisRequest
+
+    def fake_invoke(self, prompt, req_file):
+        text = '[{"workspace_path": "a.c", "change_type": "edit", "new_content": "// fix"}]'
+        events = [{"type": "text", "part": {"text": text}}]
+        return "\n".join(json.dumps(e) for e in events)
+
+    monkeypatch.setattr(OpencodeAnalyzer, "_invoke_opencode", fake_invoke)
+
+    a = OpencodeAnalyzer(workspace_root="/tmp/ws")
+    req = AnalysisRequest(session_id="s1", attempt_index=0)
+    results = a.analyze_n(req, 3)
+    assert len(results) == 1

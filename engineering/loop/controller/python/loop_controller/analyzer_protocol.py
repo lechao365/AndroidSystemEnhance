@@ -512,13 +512,49 @@ class OpencodeAnalyzer(LlmAnalyzer):
                 rationale="opencode analyzer 失败",
             )
 
-    def _build_prompt(self, request: AnalysisRequest) -> str:
+    def analyze_n(self, request: AnalysisRequest, n: int) -> list[PatchSuggestion]:
+        """G2: n=1 走原 analyze；n>1 循环调用，去重并设置 candidate_index。"""
+        import hashlib
+        from dataclasses import asdict
+        if n <= 1:
+            sug = self.analyze(request)
+            return [sug] if sug.target_files else []
+        results: list[PatchSuggestion] = []
+        seen_hashes: set[str] = set()
+        for i in range(n):
+            try:
+                prompt = self._build_prompt(request, candidate_index=i)
+                req_file = self._write_request_file(request)
+                result = self._invoke_opencode(prompt, req_file)
+                sug = self._parse_suggestion(result)
+                if not sug.target_files:
+                    continue
+                patch_hash = hashlib.sha256(
+                    json.dumps([asdict(fc) for fc in sug.target_files], sort_keys=True).encode()
+                ).hexdigest()[:16]
+                if patch_hash in seen_hashes:
+                    continue
+                seen_hashes.add(patch_hash)
+                sug.candidate_index = i
+                results.append(sug)
+            except Exception:
+                continue
+        return results
+
+    def _build_prompt(self, request: AnalysisRequest, candidate_index: int = -1) -> str:
         lines = [
             "你是代码修复助手。以下测试用例失败了，请分析根因并生成修复补丁。",
             "",
             f"Target: {request.target}",
             f"Suite: {request.suite}",
         ]
+        if candidate_index >= 0:
+            lines.extend([
+                "",
+                f"--- 候选变体 {candidate_index} ---",
+                f"请提供一个与之前不同的修复方向（候选编号 {candidate_index}）。",
+                "如果之前的候选从角度 A 修复，请尝试角度 B。",
+            ])
         # G3: 注入历史尝试轨迹（prior_attempts 非空时渲染）
         if request.prior_attempts:
             lines.extend(["", "## 历史尝试（请避免重复方向）"])
