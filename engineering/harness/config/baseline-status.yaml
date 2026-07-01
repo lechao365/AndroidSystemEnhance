@@ -28,3 +28,17 @@ baselines:
     approved_by: lechao
     approved_at: "2026-06-24T07:36:24+08:00"
     summary: wifi.conf psk 从 default 改为真实密码（HUAWEI-BE7P AP 调试用）
+
+  - baseline_id: BL-20260626-01
+    status: archive
+    source_branch: rpi5-dev
+    source_commit: deadbeef
+    sync_manifest: "（待同步）"
+
+  - baseline_id: BL-20260627-01
+    status: candidate
+    source_branch: rpi5-dev
+    source_commit: cafebabe
+    sync_manifest: "engineering/output/log/sync_code_to_patchs/artifacts/20260627-000000-manifest.yaml"
+    build_result: PASS
+    package_result: FAIL

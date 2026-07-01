@@ -18,3 +18,5 @@
 # board_verify:                      # 刷机上板功能验证结果 PASS / 附验证摘要
 # approved_by:                       # 批准人
 # approved_at:                       # 批准完成时间戳（如 2026-06-20T12:34:56+08:00）
+# revert_count: 0                     # 被回退次数（0 = 从未回退）
+# rollback_to: BL-YYYYMMDD-NN         # 回退目标 baseline（仅 revert 操作填充）
