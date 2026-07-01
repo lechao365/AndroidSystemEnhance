@@ -194,6 +194,8 @@ class LoopRuntime:
             self._execute_build_analysis_request()
         elif node == NodeKind.WAIT_ANALYZER_PATCH.value:
             self._execute_wait_analyzer_patch()
+        elif node == NodeKind.SELECT_BEST_CANDIDATE.value:
+            self._execute_select_best_candidate()
         elif node == NodeKind.APPLY_PATCH.value:
             # confidence 阈值检查：低于阈值的补丁触发人工 gate，不自动 apply
             suggestion_meta = self._read_suggestion_meta()
@@ -619,6 +621,38 @@ class LoopRuntime:
         self._set_human_gate()
         self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
         self._checkpoint("waiting for analyzer patch", FailureCode.NONE)
+
+    def _execute_select_best_candidate(self) -> None:
+        """G2: best-of-N 候选评估。candidates=1 时透传。"""
+        N = self._session.candidates_per_attempt
+        if N <= 1:
+            self._state.node_status = "CANDIDATE_SELECTED"
+            self._checkpoint("single candidate passthrough", FailureCode.NONE)
+            return
+        # candidates > 1：完整评估逻辑在 Task 9 实现
+        # 当前骨架：假设 patch_candidates/ 已存在，直接选第一个
+        from pathlib import Path
+        import json
+        cands_dir = Path(self._session.artifacts_dir) / "patch_candidates"
+        if not cands_dir.is_dir():
+            self._state.node_status = "NO_CANDIDATES"
+            self._set_human_gate()
+            self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
+            self._checkpoint("no patch_candidates dir", FailureCode.NONE)
+            return
+        cand_files = sorted(cands_dir.glob("c*_patch_suggestion.json"))
+        if not cand_files:
+            self._state.node_status = "NO_CANDIDATES"
+            self._set_human_gate()
+            self._state.terminal_state = RuntimeTerminalState.ESCALATE_HUMAN
+            self._checkpoint("no candidate files", FailureCode.NONE)
+            return
+        # 骨架：直接选第一个候选写入 patch_suggestion.json
+        first_cand = json.loads(cand_files[0].read_text(encoding="utf-8"))
+        patch_path = Path(self._session.artifacts_dir) / "patch_suggestion.json"
+        patch_path.write_text(json.dumps(first_cand, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._state.node_status = "CANDIDATE_SELECTED"
+        self._checkpoint(f"selected {first_cand.get('candidate_id', 'c0')} (stub)", FailureCode.NONE)
 
     def _set_human_gate(self) -> None:
         """G9: 统一 human gate 触发入口，同时计数。"""

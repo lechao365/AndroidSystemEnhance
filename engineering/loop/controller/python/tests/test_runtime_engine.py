@@ -1624,3 +1624,37 @@ def test_linear_next_routes_through_select_best_candidate() -> None:
     from loop_controller.runtime.types import NodeKind
     assert _LINEAR_NEXT[NodeKind.WAIT_ANALYZER_PATCH.value] == NodeKind.SELECT_BEST_CANDIDATE.value
     assert _LINEAR_NEXT[NodeKind.SELECT_BEST_CANDIDATE.value] == NodeKind.APPLY_PATCH.value
+
+
+def test_select_best_candidate_passthrough_when_single_candidate(tmp_path, monkeypatch):
+    """G2: candidates=1 时 SELECT_BEST_CANDIDATE 是透传（patch_suggestion.json 已存在则直接放行）。"""
+    import json
+    from pathlib import Path
+    from loop_controller.runtime.engine import LoopRuntime
+    from loop_contracts.models import LoopSession, RuntimeTerminalState
+
+    # 写入 evidence_bundle.json
+    eb = {"overall": "FAIL", "entries": [{"case_id": "c1", "status": "fail", "failure_reason": "boom"}]}
+    (tmp_path / "evidence_bundle.json").write_text(json.dumps(eb), encoding="utf-8")
+
+    # 写入 patch_suggestion.json（模拟 WAIT_ANALYZER_PATCH 已产出单候选）
+    patch_data = {
+        "patches": [{"workspace_path": "a.c", "change_type": "edit", "new_content": "// fix"}],
+        "confidence": 0.95,
+        "rationale": "test",
+    }
+    (tmp_path / "patch_suggestion.json").write_text(json.dumps(patch_data), encoding="utf-8")
+
+    session = LoopSession(
+        session_id="sess-g2-1", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=5, artifacts_dir=str(tmp_path),
+        candidates_per_attempt=1,
+    )
+    rt = LoopRuntime(session, "cases", "profile.json")
+    rt._state.current_node = "SELECT_BEST_CANDIDATE"
+    rt._state.node_status = "PATCH_READY"
+    rt._execute_select_best_candidate()
+    # candidates=1 → 透传，不生成 patch_candidates/ 目录
+    assert not (tmp_path / "patch_candidates").is_dir()
+    # patch_suggestion.json 仍在（原有文件不变）
+    assert (tmp_path / "patch_suggestion.json").is_file()
