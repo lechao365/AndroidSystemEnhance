@@ -61,6 +61,7 @@
 | 查 patchs→文档分发规则 | [config/doc-sync-mapping.yaml](./config/doc-sync-mapping.yaml) |
 | 查 RPI5 编译命令参考 | [reference/build-reference.md](./reference/build-reference.md) |
 | 做 harness 静态校验 | [scripts/validate_harness_docs.sh](./scripts/validate_harness_docs.sh) |
+| 查 harness 整体优化方向和路线图 | [reference/harness-optimization-blueprint.md](./reference/harness-optimization-blueprint.md) |
 
 ## 使用方式
 
