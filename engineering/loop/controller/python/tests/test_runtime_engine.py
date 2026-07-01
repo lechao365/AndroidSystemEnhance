@@ -1740,3 +1740,38 @@ def test_select_best_candidate_from_multiple(tmp_path, monkeypatch):
     winner = json.loads((tmp_path / "patch_suggestion.json").read_text())
     assert winner["confidence"] == 0.95
     assert winner["candidate_id"] == "c0"
+
+
+def test_session_metrics_has_g2_fields_in_persisted_session(tmp_path, monkeypatch):
+    """G2: session.json 落盘后 metrics 包含 3 个 G2 字段。"""
+    import json
+    from pathlib import Path
+    from loop_controller.runtime.engine import LoopRuntime
+    from loop_contracts.models import LoopSession, SessionMetrics, RuntimeTerminalState
+
+    # mock subprocess
+    def fake_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+        return R()
+    monkeypatch.setattr("loop_controller.stages.subprocess.run", fake_run)
+
+    session = LoopSession(
+        session_id="sess-g2-metrics", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=1, artifacts_dir=str(tmp_path),
+        candidates_per_attempt=3,
+    )
+    rt = LoopRuntime(session, "cases", "profile.json")
+    rt._state.terminal_state = RuntimeTerminalState.DONE_SUCCESS
+    session.metrics = SessionMetrics(
+        success=True, attempt_count=1,
+        candidates_per_attempt_avg=3.0,
+        candidate_compile_pass_rate=0.67,
+        candidate_selected_layer_dist={"ScriptedAnalyzer": 2},
+    )
+    rt._persist_session()
+
+    data = json.loads((tmp_path / "session.json").read_text())
+    assert "metrics" in data
+    assert data["metrics"]["candidates_per_attempt_avg"] == 3.0
+    assert data["candidates_per_attempt"] == 3

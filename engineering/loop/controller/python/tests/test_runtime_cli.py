@@ -504,3 +504,34 @@ def test_stats_command_median_wall_clock(tmp_path, capsys):
     captured = capsys.readouterr()
     out = json.loads(captured.out)
     assert out["median_wall_clock_ms"] == 25000
+
+
+def test_init_with_candidates_flag(tmp_path):
+    """G2: le runtime init --candidates N 存入 session.candidates_per_attempt。"""
+    import json
+    from loop_controller.runtime_cli import main
+
+    artifacts = tmp_path / "artifacts"
+    ret = main([
+        "init", "--target", "test", "--suite", "s.yaml",
+        "--max-attempts", "5", "--artifacts-dir", str(artifacts),
+        "--candidates", "3",
+    ])
+    assert ret == 0
+    session_data = json.loads((artifacts / "session.json").read_text())
+    assert session_data["candidates_per_attempt"] == 3
+
+
+def test_init_default_candidates_is_1(tmp_path):
+    """G2: 不传 --candidates 时默认 1（单线性）。"""
+    import json
+    from loop_controller.runtime_cli import main
+
+    artifacts = tmp_path / "artifacts"
+    ret = main([
+        "init", "--target", "test", "--suite", "s.yaml",
+        "--max-attempts", "5", "--artifacts-dir", str(artifacts),
+    ])
+    assert ret == 0
+    session_data = json.loads((artifacts / "session.json").read_text())
+    assert session_data["candidates_per_attempt"] == 1

@@ -64,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     init_p.add_argument("--suite", required=True)
     init_p.add_argument("--max-attempts", type=int, default=5)
     init_p.add_argument("--artifacts-dir", required=True)
+    init_p.add_argument("--candidates", type=int, default=0, help="best-of-N 候选数（0=从 analyzer.yaml 读）")
     init_p.set_defaults(func=_handle_init)
 
     run_p = sub.add_parser("run", help="execute full auto-loop")
@@ -112,6 +113,9 @@ def _handle_init(args: argparse.Namespace) -> int:
     cfg = _load_analyzer_config()
     budget_cfg = cfg.get("budget", {})
     wall_clock_limit = budget_cfg.get("wall_clock_seconds", 0)
+    # G2: candidates 优先取 CLI 参数，回退到 analyzer.yaml
+    candidates_cfg = cfg.get("candidates", 1)
+    candidates = args.candidates if args.candidates > 0 else candidates_cfg
     session = LoopSession(
         session_id=sid,
         workflow_id="runtime",
@@ -120,6 +124,7 @@ def _handle_init(args: argparse.Namespace) -> int:
         max_attempts=args.max_attempts,
         artifacts_dir=args.artifacts_dir,
         wall_clock_limit=wall_clock_limit,
+        candidates_per_attempt=candidates,
     )
     out_path = Path(args.artifacts_dir) / f"{sid}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -135,6 +140,7 @@ def _handle_init(args: argparse.Namespace) -> int:
     print(f"session_id={sid}")
     print(f"artifacts_dir={args.artifacts_dir}")
     print(f"session_path={out_path}")
+    print(f"candidates_per_attempt={candidates}")
     return 0
 
 
@@ -376,6 +382,7 @@ def _load_session(path_str: str) -> tuple[LoopSession, RuntimeTerminalState]:
         attempts=data.get("attempts", []),
         artifacts_dir=data.get("artifacts_dir", ""),
         wall_clock_limit=data.get("wall_clock_limit", 0),
+        candidates_per_attempt=data.get("candidates_per_attempt", 1),
         metrics=_dict_to_metrics(data.get("metrics")),
     )
     ts_str = data.get("terminal_state", "NONE")
@@ -415,6 +422,7 @@ def _session_to_dict(session: LoopSession) -> dict:
         "attempts": session.attempts,
         "artifacts_dir": session.artifacts_dir,
         "wall_clock_limit": session.wall_clock_limit,
+        "candidates_per_attempt": session.candidates_per_attempt,
         "metrics": _metrics_to_dict(session.metrics),
     }
 

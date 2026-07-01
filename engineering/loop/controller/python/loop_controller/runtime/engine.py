@@ -832,10 +832,22 @@ class LoopRuntime:
         return codes
 
     def _compute_session_metrics(self) -> "SessionMetrics":
-        """G9: 终态时把实例变量 + wall_clock 快照为 SessionMetrics。"""
+        """G9+G2: 终态时把实例变量 + wall_clock 快照为 SessionMetrics。"""
         from loop_contracts.models import SessionMetrics
         wall_used_ms = int((time.perf_counter() - self._session_start) * 1000)
         wall_budget_ms = (self._session.wall_clock_limit or 0) * 1000
+        # G2: 从 attempts 计算候选评估指标
+        total_cands = 0
+        compile_passed = 0
+        attempt_count = 0
+        for att in self._session.attempts:
+            if not isinstance(att, dict):
+                continue
+            cand_eval = att.get("candidate_eval")
+            if cand_eval:
+                attempt_count += 1
+                total_cands += cand_eval.get("total", 0)
+                compile_passed += cand_eval.get("compile_passed", 0)
         return SessionMetrics(
             success=self._state.terminal_state == RuntimeTerminalState.DONE_SUCCESS,
             terminal_state=self._state.terminal_state.value,
@@ -848,6 +860,10 @@ class LoopRuntime:
             human_gate_triggered=self._hg_count > 0,
             human_gate_count=self._hg_count,
             kb_hit=self._kb_hit,
+            # G2 指标
+            candidates_per_attempt_avg=(total_cands / attempt_count) if attempt_count > 0 else 0.0,
+            candidate_compile_pass_rate=(compile_passed / total_cands) if total_cands > 0 else 0.0,
+            candidate_selected_layer_dist={},
         )
 
     def _rebuild_fc_dist_from_checkpoints(self) -> None:
@@ -879,6 +895,8 @@ class LoopRuntime:
             "transition_reason": self._state.transition_reason,
             "pending_human_gate": self._state.pending_human_gate,
             "last_checkpoint_at": self._state.last_checkpoint_at,
+            "wall_clock_limit": self._session.wall_clock_limit,
+            "candidates_per_attempt": self._session.candidates_per_attempt,
         }
         # G9: metrics 段（仅终态时非 None）
         if self._session.metrics is not None:
