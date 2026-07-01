@@ -71,13 +71,11 @@ _h_ts_iso() {
 # 用法: _h_log_file_write <level> <msg> [extra_kv...]
 _h_log_file_write() {
     local level="$1" msg="$2"; shift 2
-    # 转义 msg 中的双引号，避免破坏结构化键值格式
     local esc_msg="${msg//\"/\\\"}"
     local line="ts=$(_h_ts_iso) level=$level step=${_H_STEP_CURRENT}/? script=${_H_SCRIPT_NAME} msg=\"${esc_msg}\""
-    # 追加额外键值（如 failed_cmd=/lineno=/exit=/stack=）
+    line+=" pid=$$ duration=$(($(date +%s) - _H_INIT_TS)) caller=${FUNCNAME[2]:--}"
     local kv
     for kv in "$@"; do
-        # 转义 value 部分的双引号
         local esc_kv_v="${kv#*=}"
         esc_kv_v="${esc_kv_v//\"/\\\"}"
         line+=" ${kv%%=*}=\"${esc_kv_v}\""
@@ -94,6 +92,7 @@ harness_init() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --with-errexit) errexit=true; shift ;;
+            --validate-paths) validate_paths=true; shift ;;
             --) shift; break ;;
             *) break ;;
         esac
@@ -102,6 +101,13 @@ harness_init() {
     _H_ERREXIT="$errexit"
     _H_INIT_TS=$(date +%s)
     _H_TS=$(date '+%Y%m%d-%H%M%S')
+
+    if [ "${validate_paths:-false}" = true ]; then
+        local result
+        result=$(harness_validate_paths 2>&1) || {
+            log_warn "路径校验: $result"
+        }
+    fi
 
     if [ -n "${REPO_ROOT:-}" ] && [ -f "$REPO_ROOT/AGENTS.md" ]; then
         REPO_ROOT="$(cd "$REPO_ROOT" && pwd)"
@@ -164,6 +170,7 @@ _h_rotate_logs() {
 # EXIT trap 收尾（先执行业务 hooks，再汇总、轮转）
 _h_finalize() {
     local exit_code=$?
+    harness_stop_metrics_watch
     # 执行业务脚本注册的 EXIT 回调（cleanup 等）
     local hook
     for hook in "${_H_EXIT_HOOKS[@]}"; do
@@ -442,6 +449,74 @@ _h_rotate_artifacts() {
 }
 
 # ============================================================================
+# 运行时性能指标采集
+# ============================================================================
+_H_METRICS_PID=""
+
+harness_collect_metrics() {
+    local cpu mem disk
+    cpu=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{print $2}' | cut -d. -f1)
+    mem=$(free -m 2>/dev/null | awk '/Mem:/ {print $3}')
+    disk=$(df -h / 2>/dev/null | tail -1 | awk '{print $5}')
+    _h_log_raw "cpu=${cpu:-0} mem=${mem:-0}MB disk=${disk:-0}"
+}
+
+harness_start_metrics_watch() {
+    local interval="${1:-60}"
+    _H_METRICS_PID=""
+    (
+        while true; do
+            harness_collect_metrics
+            sleep "$interval"
+        done
+    ) &
+    _H_METRICS_PID=$!
+}
+
+harness_stop_metrics_watch() {
+    [ -n "$_H_METRICS_PID" ] && kill "$_H_METRICS_PID" 2>/dev/null || true
+    _H_METRICS_PID=""
+}
+
+# ============================================================================
+# 内置断言 API（测试脚本使用）
+# ============================================================================
+_h_assert_fail() {
+    local msg="$1"
+    printf "ASSERT FAIL: %s\n" "$msg" >&2
+    _h_log_raw "level=ASSERT_FAIL msg=$msg"
+    exit 1
+}
+
+harness_assert_eq() {
+    local actual="$1" expected="$2" msg="${3:-}"
+    [ "$actual" = "$expected" ] || _h_assert_fail "${msg:+(}${msg}) expected=$expected actual=$actual"
+}
+
+harness_assert_file_exists() {
+    local path="$1" msg="${2:-}"
+    [ -f "$path" ] || _h_assert_fail "${msg:+(}${msg}) file not found: $path"
+}
+
+harness_assert_grep() {
+    local pattern="$1" file="$2" msg="${3:-}"
+    grep -q "$pattern" "$file" || _h_assert_fail "${msg:+(}${msg}) pattern not found in $file: $pattern"
+}
+
+harness_assert_exit_code() {
+    local expected="$1" actual="$?" msg="${2:-}"
+    [ "$actual" -eq "$expected" ] || _h_assert_fail "${msg:+(}${msg}) expected exit $expected, got $actual"
+}
+
+# ============================================================================
+# Trace 日志级别（仅在 HARNESS_TRACE=1 时输出）
+# ============================================================================
+harness_trace() {
+    [ "${HARNESS_TRACE:-0}" = "1" ] || return 0
+    _h_log_raw "level=TRACE msg=$*"
+}
+
+# ============================================================================
 # harness_exit
 # ============================================================================
 harness_exit() {
@@ -523,4 +598,11 @@ harness_report_no_upstream() {
     branch=$(harness_git_current_branch)
     log_error "${ctx} 无法确定 upstream base（分支: ${branch:-detached}）"
     log_error "请设置 upstream: git branch --set-upstream-to=origin/${branch:-<branch>}"
+    log_info "诊断信息:"
+    local remote_out
+    remote_out=$(git remote -v 2>/dev/null || echo "  (无 remote)")
+    while IFS= read -r l; do log_info "  $l"; done <<< "$remote_out"
+    local branch_out
+    branch_out=$(git branch -vv 2>/dev/null || echo "  (无分支信息)")
+    while IFS= read -r l; do log_info "  $l"; done <<< "$branch_out"
 }

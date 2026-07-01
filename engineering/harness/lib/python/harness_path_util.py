@@ -126,3 +126,31 @@ def ensure_dir(key: str) -> Path:
     d = path(key)
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) >= 3 and sys.argv[1] == "--resolve":
+        key = sys.argv[2]
+        try:
+            print(path(key))
+        except KeyError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+    elif len(sys.argv) >= 2 and sys.argv[1] == "--validate":
+        missing = []
+        for k in ["LOG_DIR", "ARTIFACTS_DIR", "TEST_SANDBOX_DIR"]:
+            try:
+                p = path(k)
+                if not p.is_dir():
+                    missing.append(k)
+            except KeyError:
+                missing.append(k)
+        if missing:
+            print(f"MISSING:{','.join(missing)}")
+            sys.exit(1)
+        else:
+            print("ALL_EXIST")
+    else:
+        print("Usage: python harness_path_util.py --resolve <KEY>", file=sys.stderr)
+        sys.exit(2)

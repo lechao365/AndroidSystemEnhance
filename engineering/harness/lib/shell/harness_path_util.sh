@@ -133,3 +133,31 @@ harness_pythonpath() {
     done
     printf '%s' "$result"
 }
+
+# ============================================================================
+# harness_validate_paths — 检查 paths.conf 中所有 KEY 指向的目录是否存在
+# ============================================================================
+harness_validate_paths() {
+    local missing=()
+    local keys=("LOG_DIR" "ARTIFACTS_DIR" "TEST_SANDBOX_DIR" "OUTPUT_DIR" "HOST_LOG_DIR" "RUNS_DIR")
+    local key val
+    for key in "${keys[@]}"; do
+        val=$(harness_path "$key" 2>/dev/null) || continue
+        [ -d "$val" ] || missing+=("$key")
+    done
+    if [ ${#missing[@]} -eq 0 ]; then
+        echo "ALL_EXIST"
+        return 0
+    else
+        echo "MISSING:${missing[*]}"
+        return 1
+    fi
+}
+
+# ============================================================================
+# harness_reload_paths — 运行时重新加载 paths.conf
+# ============================================================================
+harness_reload_paths() {
+    _H_PATH_CONF=()
+    _h_path_load_conf "$_H_PATH_CONF_FILE"
+}
