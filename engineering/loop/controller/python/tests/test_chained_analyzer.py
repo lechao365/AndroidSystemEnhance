@@ -98,3 +98,19 @@ def test_chained_no_match_leaves_matched_layer_empty():
     req = AnalysisRequest(session_id="s", attempt_index=1)
     result = chain.analyze(req)
     assert result.matched_layer == ""
+
+
+def test_patch_suggestion_has_candidate_fields() -> None:
+    """G2: PatchSuggestion 必须有 candidate_id 和 candidate_index 字段。"""
+    from loop_controller.analyzer_protocol import PatchSuggestion, FileChange
+
+    sug = PatchSuggestion(
+        target_files=[FileChange(workspace_path="a.c")],
+        candidate_id="c0",
+        candidate_index=0,
+    )
+    assert sug.candidate_id == "c0"
+    assert sug.candidate_index == 0
+    sug2 = PatchSuggestion()
+    assert sug2.candidate_id == ""
+    assert sug2.candidate_index == 0

@@ -46,6 +46,8 @@ class PatchSuggestion:
     confidence: float = 0.0
     deploy_mode_hint: str = ""
     matched_layer: str = ""
+    candidate_id: str = ""
+    candidate_index: int = 0
 
 
 class LlmAnalyzer(ABC):
