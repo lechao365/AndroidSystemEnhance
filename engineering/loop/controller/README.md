@@ -36,8 +36,8 @@
 ### Runtime CLI（唯一主入口）
 
 ```bash
-# 初始化 session
-le runtime init --target lciod --suite <suite.yaml> --max-attempts 5 --artifacts-dir <dir>
+# 初始化 session（G2: --candidates N 开启 best-of-N，默认 1=单线性）
+le runtime init --target lciod --suite <suite.yaml> --max-attempts 5 --artifacts-dir <dir> [--candidates 3]
 
 # 全自动闭环（verify → decide → analyze → patch → compile → deploy → rerun）
 le runtime run --session <session.json>
@@ -83,14 +83,17 @@ INIT_SESSION -> RUN_VERIFY -> DECIDE_NEXT
   ├─ ESCALATE_HUMAN                        (FAIL>=max / 重复失败 / 重复补丁 / kernel dead / ...)
   ├─ DONE_FAILURE                          (系统异常终止)
   └─ BUILD_ANALYSIS_REQUEST -> WAIT_ANALYZER_PATCH
-                                -> APPLY_PATCH -> COMPILE_PATCH -> DEPLOY_PATCH -> RUN_VERIFY (回环重验)
-                                -> REVERT_PATCH -> DECIDE_NEXT                              (编译/部署失败回滚后重判)
+                                -> SELECT_BEST_CANDIDATE -> APPLY_PATCH -> COMPILE_PATCH -> DEPLOY_PATCH -> RUN_VERIFY (回环重验)
+                                -> REVERT_PATCH -> DECIDE_NEXT                              (编译/部署失败回滚后重判；G2 全候选 compile 失败也走此路)
 ```
 
 线性转移（`engine._LINEAR_NEXT`，无分支条件）：
 `INIT_SESSION→RUN_VERIFY`、`RUN_VERIFY→DECIDE_NEXT`、
-`BUILD_ANALYSIS_REQUEST→WAIT_ANALYZER_PATCH`、`WAIT_ANALYZER_PATCH→APPLY_PATCH`、
-`APPLY_PATCH→COMPILE_PATCH`、`DEPLOY_PATCH→RUN_VERIFY`、`REVERT_PATCH→DECIDE_NEXT`。
+`BUILD_ANALYSIS_REQUEST→WAIT_ANALYZER_PATCH`、`WAIT_ANALYZER_PATCH→SELECT_BEST_CANDIDATE`、
+`SELECT_BEST_CANDIDATE→APPLY_PATCH`、`APPLY_PATCH→COMPILE_PATCH`、
+`DEPLOY_PATCH→RUN_VERIFY`、`REVERT_PATCH→DECIDE_NEXT`。
+
+> G2 best-of-N：`SELECT_BEST_CANDIDATE` 在 `candidates_per_attempt>1` 时进行候选评估（当前简化版按 confidence 选最优）；`candidates=1` 时透传。`--candidates N` CLI 参数或 `analyzer.yaml: candidates` 配置控制。
 
 > `APPLY_PATCH` 节点内可能因 low_confidence / kernel_patch / dd_boot_reboot 触发 human gate（`pending_human_gate=True`，不设终态，等 `le runtime approve/reject`）。
 

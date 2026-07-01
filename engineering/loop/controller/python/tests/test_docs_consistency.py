@@ -105,3 +105,26 @@ def test_session_metrics_in_contracts_readme() -> None:
 def test_session_metrics_in_contracts_all() -> None:
     """守护点 11: SessionMetrics 在 contracts __all__ 中。"""
     assert "SessionMetrics" in _contracts_all
+
+
+def test_select_best_candidate_in_nodekind() -> None:
+    """守护点 12: NodeKind 包含 SELECT_BEST_CANDIDATE 且出现在 controller README 中。"""
+    assert hasattr(NodeKind, "SELECT_BEST_CANDIDATE"), (
+        "NodeKind 缺少 SELECT_BEST_CANDIDATE，请同步 G2 分支探索实现"
+    )
+    text = _read("engineering/loop/controller/README.md")
+    assert "SELECT_BEST_CANDIDATE" in text, (
+        "controller/README.md 缺少 SELECT_BEST_CANDIDATE，请同步更新状态机说明"
+    )
+
+
+def test_candidates_per_attempt_in_loop_session() -> None:
+    """守护点 13: LoopSession 有 candidates_per_attempt 字段且出现在 contracts README 中。"""
+    from loop_contracts.models import LoopSession
+    assert "candidates_per_attempt" in LoopSession.__dataclass_fields__, (
+        "LoopSession 缺少 candidates_per_attempt 字段"
+    )
+    text = _read("engineering/loop/contracts/README.md")
+    assert "candidates_per_attempt" in text or "best-of-N" in text, (
+        "contracts/README.md 缺少 candidates_per_attempt 或 best-of-N 说明"
+    )
