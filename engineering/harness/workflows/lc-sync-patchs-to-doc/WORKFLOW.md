@@ -1,6 +1,11 @@
 ---
 name: lc-sync-patchs-to-doc
 description: patchs/rpi5 变动后生成报告，按模板规范将代码 diff 精准转换为文档更新（方案先行，确认后落盘）。
+stages:
+  - research: "AI 分析 workspace diff/上下文"
+  - plan: "AI 生成实施计划，经用户确认"
+  - code: "执行具体操作"
+  - review: "验证结果并提交"
 ---
 
 # lc-sync-patchs-to-doc
@@ -228,3 +233,17 @@ manifest.yaml 条目示例：
 ## 不涉及的文档
 
 `patchs/rpi5/README.md` 文件映射表的更新仍走 lc-sync-code-to-patchs 末尾提示，不纳入本流程。
+
+## 退出码
+| 退出码 | 含义 | 下一步 |
+|--------|------|--------|
+| 0 | 成功 | 正常继续 |
+| 1 | 脚本逻辑错误 | 检查日志 |
+| 3 | 环境缺失 | 安装依赖后重试 |
+
+## TODO 跟踪
+- [ ] Step 1: 分析问题
+- [ ] Step 2: 生成 plan
+- [ ] Step 3: 用户确认
+- [ ] Step 4: 执行
+- [ ] Step 5: 验证

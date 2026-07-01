@@ -1,6 +1,11 @@
 ---
 name: lc-quick-fix-issue
 description: 根据自由文本检视意见自动分析→定位→诊断→修复→测试→零确认提交推送的一键工作流。
+stages:
+  - research: "AI 分析 workspace diff/上下文"
+  - plan: "AI 生成实施计划，经用户确认"
+  - code: "执行具体操作"
+  - review: "验证结果并提交"
 ---
 
 # lc-quick-fix-issue
@@ -228,3 +233,17 @@ bash engineering/harness/workflows/lc-git-push-to-server/commit_and_push.sh \
 | 工作流 | 关系 |
 |--------|------|
 | `lc-git-push-to-server` | Stage 7 直接调用 `commit_and_push.sh`，跳过确认门 |
+
+## 退出码
+| 退出码 | 含义 | 下一步 |
+|--------|------|--------|
+| 0 | 成功 | 正常继续 |
+| 1 | 脚本逻辑错误 | 检查日志 |
+| 3 | 环境缺失 | 安装依赖后重试 |
+
+## TODO 跟踪
+- [ ] Step 1: 分析问题
+- [ ] Step 2: 生成 plan
+- [ ] Step 3: 用户确认
+- [ ] Step 4: 执行
+- [ ] Step 5: 验证

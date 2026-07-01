@@ -1,6 +1,11 @@
 ---
 name: lc-revert-code-from-patchs
 description: 仅以 promoted baseline 为真相源，把 workspace 偏离部分拉回一致（计划生成 → AI 逐条确认 → 执行 → 落盘校验）。
+stages:
+  - research: "AI 分析 workspace diff/上下文"
+  - plan: "AI 生成实施计划，经用户确认"
+  - code: "执行具体操作"
+  - review: "验证结果并提交"
 ---
 
 # lc-revert-code-from-patchs
@@ -188,3 +193,17 @@ AI 汇报各类执行数量 + 校验结果。若校验失败，列出 RESIDUAL/N
 - 不处理 `patchs/others/`（仅 kernel/aosp，`SRC-003`）
 - 不做反向 patch（用 `git checkout` 更可靠）
 - 不做多平台（仅 rpi5，未来扩展另立）
+
+## 退出码
+| 退出码 | 含义 | 下一步 |
+|--------|------|--------|
+| 0 | 成功 | 正常继续 |
+| 1 | 脚本逻辑错误 | 检查日志 |
+| 3 | 环境缺失 | 安装依赖后重试 |
+
+## TODO 跟踪
+- [ ] Step 1: 分析问题
+- [ ] Step 2: 生成 plan
+- [ ] Step 3: 用户确认
+- [ ] Step 4: 执行
+- [ ] Step 5: 验证

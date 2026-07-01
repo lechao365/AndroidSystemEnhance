@@ -1,6 +1,11 @@
 ---
 name: lc-sync-code-to-patchs
 description: workspace 源码改动归档到 patchs/rpi5，并自动更新 README 文件映射表。
+stages:
+  - research: "AI 分析 workspace diff/上下文"
+  - plan: "AI 生成实施计划，经用户确认"
+  - code: "执行具体操作"
+  - review: "验证结果并提交"
 ---
 
 # lc-sync-code-to-patchs
@@ -21,6 +26,20 @@ workspace 删除的文件，patchs 同步删除（默认全量镜像，含删除
 - 已完成"验证通过"全流程（编译→打包→上板，见 `SRC-001`/source-code-modify.md）
 - `patchs/`（除 `others/`）未被手动改动（`SRC-002`）
 - 所有参与的 git 仓库（kernel、有改动的 AOSP repo 项目）已配置 upstream（`@{upstream}` 或 `branch.<name>.remote/merge`），否则脚本报错退出 3
+
+## 退出码
+| 退出码 | 含义 | 下一步 |
+|--------|------|--------|
+| 0 | 成功 | 正常继续 |
+| 1 | 脚本逻辑错误 | 检查日志 |
+| 3 | 环境缺失 | 安装依赖后重试 |
+
+## TODO 跟踪
+- [ ] Step 1: 分析问题
+- [ ] Step 2: 生成 plan
+- [ ] Step 3: 用户确认
+- [ ] Step 4: 执行
+- [ ] Step 5: 验证
 
 ## Inputs（输入）
 

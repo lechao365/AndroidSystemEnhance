@@ -1,6 +1,11 @@
 ---
 name: lc-git-push-to-server
 description: 收集 diff → AI 生成中文 type commit message → 单次确认（支持多轮编辑）→ 提交并推送到 origin。支持 working tree 干净时仅推送已有本地 commit。
+stages:
+  - research: "AI 分析 workspace diff/上下文"
+  - plan: "AI 生成实施计划，经用户确认"
+  - code: "执行具体操作"
+  - review: "验证结果并提交"
 ---
 
 # lc-git-push-to-server
@@ -227,3 +232,17 @@ bash engineering/harness/workflows/lc-git-push-to-server/commit_and_push.sh \
 - 不做 `--amend`（与"禁止 force push"冲突）
 - 不做 force push（防止历史覆盖）
 - 不做 PR 创建（仅负责 commit + push）
+
+## 退出码
+| 退出码 | 含义 | 下一步 |
+|--------|------|--------|
+| 0 | 成功 | 正常继续 |
+| 1 | 脚本逻辑错误 | 检查日志 |
+| 3 | 环境缺失 | 安装依赖后重试 |
+
+## TODO 跟踪
+- [ ] Step 1: 分析问题
+- [ ] Step 2: 生成 plan
+- [ ] Step 3: 用户确认
+- [ ] Step 4: 执行
+- [ ] Step 5: 验证
