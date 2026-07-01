@@ -134,3 +134,48 @@ def test_remove_patch_worktree_does_not_raise_on_bad_handle(tmp_path: Path):
     )
     ok = remove_patch_worktree(handle)
     assert ok is False
+
+
+def test_create_patch_worktree_with_candidate_id(tmp_path: Path):
+    """G2: create_patch_worktree 支持 candidate_id 参数，命名包含候选维度。"""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    subprocess.run(["git", "init"], cwd=str(ws), capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(ws), capture_output=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=str(ws), capture_output=True)
+    (ws / "README").write_text("init")
+    subprocess.run(["git", "add", "."], cwd=str(ws), capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(ws), capture_output=True)
+
+    handle = create_patch_worktree(
+        str(ws), "sess-001", 1, candidate_id="c0",
+        worktree_parent=str(tmp_path / "wt"),
+    )
+    assert "c0" in handle.worktree_path
+    assert "c0" in handle.branch
+    assert handle.created
+
+    from loop_controller.workspace_isolation import remove_patch_worktree
+    remove_patch_worktree(handle)
+
+
+def test_create_patch_worktree_without_candidate_id_backward_compat(tmp_path: Path):
+    """G2: candidate_id 为空时退化为现有命名（向后兼容）。"""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    subprocess.run(["git", "init"], cwd=str(ws), capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(ws), capture_output=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=str(ws), capture_output=True)
+    (ws / "README").write_text("init")
+    subprocess.run(["git", "add", "."], cwd=str(ws), capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(ws), capture_output=True)
+
+    handle = create_patch_worktree(
+        str(ws), "sess-002", 2,
+        worktree_parent=str(tmp_path / "wt"),
+    )
+    assert handle.worktree_path.endswith("sess-002_2")
+    assert handle.branch.endswith("sess-002/2")
+
+    from loop_controller.workspace_isolation import remove_patch_worktree
+    remove_patch_worktree(handle)

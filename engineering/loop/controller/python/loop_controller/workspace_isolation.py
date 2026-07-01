@@ -50,11 +50,13 @@ def create_patch_worktree(
     session_id: str,
     attempt_index: int,
     worktree_parent: str = "",
+    candidate_id: str = "",
 ) -> WorktreeHandle:
-    """为单次 attempt 创建独立 worktree，分支名 loop/<session_id>/<attempt_index>。
+    """为单次 attempt（或候选）创建独立 worktree。
 
+    分支名 loop/<session_id>/<attempt_index>[/<candidate_id>]。
+    candidate_id 为空时退化为现有命名（向后兼容）。
     幂等：若 worktree 已存在则直接返回现有 handle（created=False）。
-    非法入参（非 git 目录）抛 RuntimeError。
     """
     if not _is_git_repo(workspace_root):
         raise RuntimeError(
@@ -64,8 +66,10 @@ def create_patch_worktree(
     parent = Path(worktree_parent) if worktree_parent else (
         Path(workspace_root).parent / _DEFAULT_WORKTREE_PARENT_DIRNAME
     )
-    wt_path = parent / f"{session_id}_{attempt_index}"
-    branch = f"loop/{session_id}/{attempt_index}"
+    name_suffix = f"_{candidate_id}" if candidate_id else ""
+    branch_suffix = f"/{candidate_id}" if candidate_id else ""
+    wt_path = parent / f"{session_id}_{attempt_index}{name_suffix}"
+    branch = f"loop/{session_id}/{attempt_index}{branch_suffix}"
 
     if str(wt_path) in _worktree_list_paths(workspace_root):
         return WorktreeHandle(
