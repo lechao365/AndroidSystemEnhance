@@ -1701,3 +1701,42 @@ def test_wait_analyzer_writes_multiple_candidates(tmp_path, monkeypatch):
     assert cands_dir.is_dir()
     cand_files = list(cands_dir.glob("c*_patch_suggestion.json"))
     assert len(cand_files) >= 1
+
+
+def test_select_best_candidate_from_multiple(tmp_path, monkeypatch):
+    """G2: SELECT_BEST_CANDIDATE 从多个候选中选最优（按 confidence）。"""
+    import json
+    from pathlib import Path
+    from loop_controller.runtime.engine import LoopRuntime
+    from loop_contracts.models import LoopSession
+
+    # 创建 patch_candidates/ 目录，放入 2 个候选
+    cands_dir = tmp_path / "patch_candidates"
+    cands_dir.mkdir(parents=True)
+    c0 = {
+        "patches": [{"workspace_path": "a.c", "change_type": "edit", "new_content": "// fix 0"}],
+        "confidence": 0.95, "rationale": "c0", "candidate_id": "c0", "candidate_index": 0,
+        "matched_layer": "ScriptedAnalyzer",
+    }
+    c1 = {
+        "patches": [{"workspace_path": "b.c", "change_type": "edit", "new_content": "// fix 1"}],
+        "confidence": 0.8, "rationale": "c1", "candidate_id": "c1", "candidate_index": 1,
+        "matched_layer": "OpencodeAnalyzer",
+    }
+    (cands_dir / "c0_patch_suggestion.json").write_text(json.dumps(c0), encoding="utf-8")
+    (cands_dir / "c1_patch_suggestion.json").write_text(json.dumps(c1), encoding="utf-8")
+
+    session = LoopSession(
+        session_id="sess-g2-select", workflow_id="runtime", target="test",
+        suite="test.yaml", max_attempts=5, artifacts_dir=str(tmp_path),
+        candidates_per_attempt=2,
+    )
+    rt = LoopRuntime(session, "cases", "profile.json")
+    rt._state.current_node = "SELECT_BEST_CANDIDATE"
+    rt._state.node_status = "CANDIDATES_READY"
+    rt._execute_select_best_candidate()
+
+    # 选 c0（confidence 更高）写入 patch_suggestion.json
+    winner = json.loads((tmp_path / "patch_suggestion.json").read_text())
+    assert winner["confidence"] == 0.95
+    assert winner["candidate_id"] == "c0"
