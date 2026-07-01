@@ -38,7 +38,20 @@ bash engineering/harness/tests/test_harness_observability.sh
 for t in engineering/harness/tests/test_*.sh; do bash "$t" || break; done
 ```
 
-## 关联资源
+## 测试回归矩阵
+
+| 测试脚本 | 测试对象 | 测试点数 | 夹具依赖 | 状态 |
+|---------|---------|---------|---------|------|
+| `test_harness_observability.sh` | observability 公共库 | 6 | fixtures/observability/ | ✅ |
+| `test_harness_path_util.sh` | 路径工具 | 5 | — | ✅ |
+| `test_check_access.sh` | 准入查询 CLI | 2 | — | ✅ |
+| `test_sync_code_to_patchs.sh` | sync workflow | 3 | fixtures/lc-sync-code-to-patchs/ | ✅ |
+| `test_revert_code_from_patchs.sh` | revert workflow | 2 | fixtures/lc-revert-code-from-patchs/ | ✅ |
+| `test_baseline_workflow.sh` | 基线晋升 | 3 | — | ✅ |
+| `test_validators.sh` | 校验器自测 | 3 | — | ✅ |
+| `test_le_runs_cleanup.sh` | 跨边界清理 | 7 | — | ✅ |
+
+> 新增测试或夹具后同步更新本矩阵。测试点数按 `test_*` 函数数量计。
 
 | 类型 | 路径 | 说明 |
 |------|------|------|
