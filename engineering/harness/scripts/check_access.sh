@@ -22,50 +22,43 @@ done
 MANIFEST="$(harness_path HARNESS_DIR)/rules/manifest.yaml"
 [ ! -f "$MANIFEST" ] && { echo "ERROR: manifest.yaml 不存在: $MANIFEST" >&2; harness_exit 3; }
 
-result=$(python3 -c "
-import sys, yaml
-with open('$MANIFEST') as f:
-    data = yaml.safe_load(f)
-
-category = '$category'
-
-matched = None
-for ctx in data.get('contexts', []):
-    if ctx.get('scope_category') == category:
-        matched = ctx
-        break
-
-if matched is None:
-    print('{\"allowed\": false, \"reason\": \"no matching context for category: ' + category + '\"}')
-    sys.exit(0)
-" 2>&1) || rc=${?:-0}
-# 注意: sys.exit(0) 中的 exit 在 sed 净化后仍可能被匹配，这里 rc 为 0
-
-if [ "${rc:-0}" = "1" ] || { [ -n "$result" ] && echo "$result" | grep -q '"allowed": false'; }; then
-    echo "$result"
-    harness_exit 0
-fi
-
 output=$(python3 -c "
 import sys, yaml, json
+from fnmatch import fnmatch
+
 with open('$MANIFEST') as f:
     data = yaml.safe_load(f)
 
+target_path = '$path'
+target_category = '$category'
+
+# phase 1: scope_category + match 双匹配
 matched = None
 for ctx in data.get('contexts', []):
-    if ctx.get('scope_category') == '$category':
+    if ctx.get('scope_category') == target_category and fnmatch(target_path, ctx.get('match', '*')):
         matched = ctx
         break
 
-output = {
-    'allowed': True,
-    'access': matched.get('access', 'unknown'),
-    'rules': matched.get('rules', []),
-    'workflow': matched.get('workflow', []),
-    'require_plan': matched.get('require_plan', False),
-    'require_confirmation': matched.get('require_confirmation', False),
-    'require_evidence': matched.get('require_evidence', False),
-}
+# phase 2: fallback 到仅 scope_category 匹配（保留降级兼容）
+if matched is None:
+    for ctx in data.get('contexts', []):
+        if ctx.get('scope_category') == target_category:
+            matched = ctx
+            break
+
+if matched is None:
+    output = {'allowed': False, 'reason': 'no matching context for category: ' + target_category}
+else:
+    output = {
+        'allowed': True,
+        'access': matched.get('access', 'unknown'),
+        'rules': matched.get('rules', []),
+        'workflow': matched.get('workflow', []),
+        'require_plan': matched.get('require_plan', False),
+        'require_confirmation': matched.get('require_confirmation', False),
+        'require_evidence': matched.get('require_evidence', False),
+    }
+
 print(json.dumps(output, indent=2, ensure_ascii=False))
 " 2>&1) || harness_exit 1
 

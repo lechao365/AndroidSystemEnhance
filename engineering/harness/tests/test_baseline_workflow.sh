@@ -6,7 +6,21 @@ source "$SCRIPT_DIR/../lib/shell/harness_path_util.sh"
 REPO_ROOT="$(harness_repo_root)"
 VALIDATOR="$REPO_ROOT/engineering/harness/scripts/validate_baseline_status.sh"
 
-fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+TEST_FAIL_COUNT=0
+
+record_fail() {
+    TEST_FAIL_COUNT=$((TEST_FAIL_COUNT + 1))
+    printf 'FAIL: %s\n' "$1" >&2
+}
+
+finalize_tests() {
+    if [ "$TEST_FAIL_COUNT" -gt 0 ]; then
+        printf 'TESTS-FAILED: %d test(s) failed\n' "$TEST_FAIL_COUNT" >&2
+        exit 1
+    fi
+    printf 'PASS: %s\n' "$(basename "$0")"
+}
+
 pass() { printf 'PASS: %s\n' "$1"; }
 
 TMP_SANDBOX="$(mktemp -d /tmp/opencode/test-baseline.XXXXXX)"
@@ -46,7 +60,7 @@ EOF
     REPO_ROOT="$TMP_SANDBOX" \
     BASELINE="$TMP_SANDBOX/engineering/harness/config/baseline-status.yaml" \
     bash "$VALIDATOR" >/dev/null 2>&1 || rc=$?
-    [ "$rc" -ne 0 ] || fail "缺失 baseline_id 应被拒绝"
+    [ "$rc" -ne 0 ] || record_fail "缺失 baseline_id 应被拒绝"
     pass "missing baseline_id rejected"
 }
 
@@ -62,7 +76,7 @@ EOF
     REPO_ROOT="$TMP_SANDBOX" \
     BASELINE="$TMP_SANDBOX/engineering/harness/config/baseline-status.yaml" \
     bash "$VALIDATOR" >/dev/null 2>&1 || rc=$?
-    [ "$rc" -ne 0 ] || fail "非法 status 应被拒绝"
+    [ "$rc" -ne 0 ] || record_fail "非法 status 应被拒绝"
     pass "invalid status rejected"
 }
 
@@ -70,7 +84,7 @@ main() {
     test_validator_passes_on_valid_baseline
     test_missing_baseline_id_rejected
     test_invalid_status_rejected
-    printf 'PASS: test_baseline_workflow.sh\n'
+    finalize_tests
     rm -rf "$TMP_SANDBOX"
 }
 

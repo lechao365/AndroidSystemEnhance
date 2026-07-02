@@ -10,36 +10,42 @@ LOG_ROOT="$(harness_path LOG_DIR)"
 TEST_TMP_ROOT="$(harness_path TEST_SANDBOX_DIR)/harness-observability-tests"
 mkdir -p "$TEST_TMP_ROOT"
 
-fail() {
+TEST_FAIL_COUNT=0
+
+record_fail() {
+    TEST_FAIL_COUNT=$((TEST_FAIL_COUNT + 1))
     printf 'FAIL: %s\n' "$1" >&2
-    exit 1
 }
 
-pass() {
-    printf 'PASS: %s\n' "$1"
+finalize_tests() {
+    if [ "$TEST_FAIL_COUNT" -gt 0 ]; then
+        printf 'TESTS-FAILED: %d test(s) failed\n' "$TEST_FAIL_COUNT" >&2
+        exit 1
+    fi
+    printf 'PASS: %s\n' "$(basename "$0")"
 }
 
 assert_file_exists() {
     local path="$1"
-    [ -f "$path" ] || fail "missing file: $path"
+    [ -f "$path" ] || record_fail "missing file: $path"
 }
 
 assert_dir_exists() {
     local path="$1"
-    [ -d "$path" ] || fail "missing dir: $path"
+    [ -d "$path" ] || record_fail "missing dir: $path"
 }
 
 assert_grep() {
     local pattern="$1"
     local path="$2"
-    grep -Eq "$pattern" "$path" || fail "pattern not found: $pattern in $path"
+    grep -Eq "$pattern" "$path" || record_fail "pattern not found: $pattern in $path"
 }
 
 assert_not_grep() {
     local pattern="$1"
     local path="$2"
     if grep -Eq "$pattern" "$path"; then
-        fail "unexpected pattern found: $pattern in $path"
+        record_fail "unexpected pattern found: $pattern in $path"
     fi
 }
 
@@ -61,6 +67,10 @@ test_structured_result_and_status_lines() {
     assert_grep '^status=OK label="kernel/new/foo.c"$' "$latest_log"
     assert_grep '^status=MISS label="kernel/missing/bar.c" msg="expected missing"$' "$latest_log"
     pass "structured result/status lines"
+}
+
+pass() {
+    printf 'PASS: %s\n' "$1"
 }
 
 test_artifact_rotation_removes_old_directory_artifacts() {
@@ -140,11 +150,12 @@ HEREDOC
 main() {
     test_structured_result_and_status_lines
     test_artifact_rotation_removes_old_directory_artifacts
-test_harness_init_reuses_preexported_repo_root
+    test_harness_init_reuses_preexported_repo_root
     test_log_warn_error_format
     test_harness_assert_api
     test_harness_trace
     test_report_no_upstream_enhanced
+    finalize_tests
 }
 
 test_log_warn_error_format() {
@@ -214,7 +225,7 @@ test_harness_trace() {
     _H_LOG_FILE="$log_file"
     harness_trace "should not appear"
     if grep -q 'should not appear' "$log_file" 2>/dev/null; then
-        fail "HARNESS_TRACE=0 时不应输出 trace"
+        record_fail "HARNESS_TRACE=0 时不应输出 trace"
     fi
     pass "harness_trace respects HARNESS_TRACE flag"
 }

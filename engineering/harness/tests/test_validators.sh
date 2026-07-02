@@ -6,7 +6,21 @@ source "$SCRIPT_DIR/../lib/shell/harness_path_util.sh"
 REPO_ROOT="$(harness_repo_root)"
 SCRIPTS_DIR="$REPO_ROOT/engineering/harness/scripts"
 
-fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+TEST_FAIL_COUNT=0
+
+record_fail() {
+    TEST_FAIL_COUNT=$((TEST_FAIL_COUNT + 1))
+    printf 'FAIL: %s\n' "$1" >&2
+}
+
+finalize_tests() {
+    if [ "$TEST_FAIL_COUNT" -gt 0 ]; then
+        printf 'TESTS-FAILED: %d test(s) failed\n' "$TEST_FAIL_COUNT" >&2
+        exit 1
+    fi
+    printf 'PASS: %s\n' "$(basename "$0")"
+}
+
 pass() { printf 'PASS: %s\n' "$1"; }
 
 TMP_SANDBOX="$(mktemp -d "/tmp/opencode/test-validators.XXXXXX")"
@@ -153,7 +167,7 @@ main() {
     test_manifest_validator_rejects_invalid_access
     test_config_validator_rejects_invalid_priority
     test_all_validations_runs_without_crash
-    printf 'PASS: test_validators.sh\n'
+    finalize_tests
     rm -rf "$TMP_SANDBOX"
 }
 

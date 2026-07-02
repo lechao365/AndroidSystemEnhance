@@ -10,30 +10,40 @@ FIXTURE_ROOT="$REPO_ROOT/engineering/harness/tests/fixtures/lc-sync-code-to-patc
 TMP_ROOT="$(harness_path TEST_SANDBOX_DIR)/test-lc-sync-code-to-patchs"
 PATCH_ROOT="$TMP_ROOT/repo/patchs/rpi5"
 
-fail() {
+TEST_FAIL_COUNT=0
+
+record_fail() {
+    TEST_FAIL_COUNT=$((TEST_FAIL_COUNT + 1))
     printf 'FAIL: %s\n' "$1" >&2
-    exit 1
+}
+
+finalize_tests() {
+    if [ "$TEST_FAIL_COUNT" -gt 0 ]; then
+        printf 'TESTS-FAILED: %d test(s) failed\n' "$TEST_FAIL_COUNT" >&2
+        exit 1
+    fi
+    printf 'PASS: %s\n' "$(basename "$0")"
 }
 
 assert_file_exists() {
     local path="$1"
-    [ -f "$path" ] || fail "expected file exists: $path"
+    [ -f "$path" ] || record_fail "expected file exists: $path"
 }
 
 assert_file_not_exists() {
     local path="$1"
-    [ ! -e "$path" ] || fail "expected path absent: $path"
+    [ ! -e "$path" ] || record_fail "expected path absent: $path"
 }
 
 assert_contains() {
     local path="$1" needle="$2"
-    grep -Fq "$needle" "$path" || fail "expected '$needle' in $path"
+    grep -Fq "$needle" "$path" || record_fail "expected '$needle' in $path"
 }
 
 assert_not_contains() {
     local path="$1" needle="$2"
     if grep -Fq "$needle" "$path"; then
-        fail "did not expect '$needle' in $path"
+        record_fail "did not expect '$needle' in $path"
     fi
 }
 
@@ -151,7 +161,7 @@ main() {
     case_kernel_tracked_deletion_records_manifest
     case_kernel_modified_and_new_sync
     case_aosp_non_repo_copy_and_prune
-    printf 'PASS: test_sync_code_to_patchs\n'
+    finalize_tests
 }
 
 main "$@"
