@@ -140,7 +140,21 @@ main() {
         harness_exit 0
     fi
 
-    if [ "$status" = "stale" ]; then
+    if [ "$status" = "attached" ]; then
+        log_info "检测到 attached 状态，重建 overlay (reason: ${reason})"
+        step_begin "调用 lc-inject.sh 重建整个 overlay"
+        local inject_output
+        inject_output=$(bash "$SCRIPT_DIR/lc-inject.sh" "$repo_id" 2>&1)
+        local inject_rc=$?
+        if [ "$inject_rc" -ne 0 ]; then
+            log_error "调用 lc-inject.sh 重建 overlay 失败"
+            step_end 1
+            harness_exit 1
+        fi
+        log_info "overlay 已通过 lc-inject.sh 重建"
+        step_end 0
+
+    elif [ "$status" = "stale" ]; then
         log_info "检测到 stale 状态，重建 overlay (reason: ${reason})"
         step_begin "重建 overlay"
 

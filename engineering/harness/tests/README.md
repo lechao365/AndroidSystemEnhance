@@ -29,7 +29,7 @@
 | [`test_baseline_workflow.sh`](./test_baseline_workflow.sh) | 基线晋升测试（valid/invalid status/缺失字段校验器拒绝） | `bash test_baseline_workflow.sh` |
 | [`test_validators.sh`](./test_validators.sh) | 校验器自测（manifest 校验器拒绝非法 access、config 校验器拒绝非法 priority、全量校验不 crash） | `bash test_validators.sh` |
 | [`test_le_runs_cleanup.sh`](./test_le_runs_cleanup.sh) | `le_runs_cleanup.sh` 清理契约测试（跨边界测试 loop 脚本，验证 harness observability 依赖） | `bash test_le_runs_cleanup.sh` |
-| [`test_lcharness_layer_map.sh`](./test_lcharness_layer_map.sh) | `LcHarness` 层次映射测试（非法 layer/kind 拒绝、最小合法映射通过） | `bash test_lcharness_layer_map.sh` |
+| [`test_lcharness_control_plane.sh`](./test_lcharness_control_plane.sh) | LcHarness 控制面测试（registry/attach/inject/validate/reconcile/detach） | `bash test_lcharness_control_plane.sh` |
 | [`test_revert_code_from_patchs.sh`](./test_revert_code_from_patchs.sh) | `revert_code_from_patchs.sh` workflow 契约测试（non-repo-extra / upstream-missing / verify-matrix 三场景） | `bash test_revert_code_from_patchs.sh` |
 | [`test_sync_code_to_patchs.sh`](./test_sync_code_to_patchs.sh) | `sync_code_to_patchs.sh` workflow 契约测试 | `bash test_sync_code_to_patchs.sh` |
 | [`fixtures/`](./fixtures) | 测试夹具目录 | 各测试脚本通过 `FIXTURE*` 变量引用 |
@@ -60,6 +60,7 @@ bash engineering/harness/tests/run_all_tests.sh
 | `test_validators.sh` | 校验器自测 | 3 | — | ✅ |
 | `test_le_runs_cleanup.sh` | 跨边界清理 | 7 | — | ✅ |
 | `test_lcharness_layer_map.sh` | `LcHarness` 层次映射校验器 | 3 | — | ✅ |
+| `test_lcharness_control_plane.sh` | control-plane 脚本集 | 22 | — | ✅ |
 
 > 新增测试或夹具后同步更新本矩阵。测试点数按 `test_*` 函数数量计。
 
