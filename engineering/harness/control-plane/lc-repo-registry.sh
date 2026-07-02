@@ -35,7 +35,7 @@ REGISTRY_DIR="${HOME}/.local/share/lcharness"
 REGISTRY_FILE="${REGISTRY_DIR}/registry.yaml"
 LOCK_FILE="${REGISTRY_DIR}/registry.yaml.lock"
 
-VALID_STATES=("attached" "detached" "broken" "archived")
+VALID_STATES=("attached" "injected" "detached" "broken" "archived")
 
 # ============================================================================
 # 工具函数
@@ -72,6 +72,10 @@ ensure_registry_dir() {
 acquire_lock() {
     local lock_file="$LOCK_FILE"
     local timeout=5
+
+    # 确保 lock 文件所在目录存在
+    ensure_registry_dir
+
     if command -v flock >/dev/null 2>&1; then
         exec 200>"$lock_file"
         flock -w "$timeout" 200 || {
@@ -169,7 +173,7 @@ try:
         errors.append("repos 必须是列表")
 
     # 每个 entry 校验
-    valid_states = {"attached", "detached", "broken", "archived"}
+    valid_states = {"attached", "injected", "detached", "broken", "archived"}
     if isinstance(repos, list):
         for idx, entry in enumerate(repos):
             if not isinstance(entry, dict):
