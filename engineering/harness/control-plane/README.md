@@ -22,7 +22,8 @@
 | [`lc-attach.sh`](./lc-attach.sh) | attach + inject + validate 一键闭环入口 | `bash lc-attach.sh <repo-path> --profile <name>` |
 | [`lc-status.sh`](./lc-status.sh) | 状态查询 + 健康检查 | `bash lc-status.sh [repo-id]` |
 | [`lc-inject.sh`](./lc-inject.sh) | Overlay 注入（创建目录结构 + 标记文件） | `bash lc-inject.sh <repo-id>` |
-| [`lc-reconcile.sh`](./lc-reconcile.sh) | Stale/Broken 修复 | `bash lc-reconcile.sh <repo-id>` |
+| [`lc-validate.sh`](./lc-validate.sh) | Overlay 状态验证（healthy/stale/broken/detached/attached） | `bash lc-validate.sh <repo-id>` |
+| [`lc-reconcile.sh`](./lc-reconcile.sh) | Stale/Broken/Attached 修复 | `bash lc-reconcile.sh <repo-id>` |
 | [`lc-detach.sh`](./lc-detach.sh) | 解注入 + registry 清理 | `bash lc-detach.sh <repo-id>` |
 
 ## 状态模型
