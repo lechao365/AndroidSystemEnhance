@@ -7,6 +7,7 @@
 
 - **是什么**：AI 驱动的设备验收闭环——用例驱动 + EvidenceBundle + opencode AI 分析修复
 - **职责边界**：承载 loop engineering 专属能力（cases / connection / core / scripts / controller / workflows / contracts）；不承载公共 harness 基础设施（在 `../harness/`）
+- **未来映射**：在独立 `LcHarness` 架构中，`loop engineering` 作为 solution pack 存在，不进入 core。
 - **上下游依赖**：依赖 `engineering/harness/`（规则/路径/observability）；被 `.opencode/commands/le.md` 通过 `@WORKFLOW.md` 消费
 
 ## 大纲

@@ -31,6 +31,7 @@
 | [`validate_harness_docs.sh`](./validate_harness_docs.sh) | 文档 / 契约层静态校验（README 链接、文件清单、PlantUML 闭合、WORKFLOW front matter） | `bash engineering/harness/scripts/validate_harness_docs.sh` |
 | [`validate_harness_scripts.sh`](./validate_harness_scripts.sh) | bash 脚本合规校验（bootstrap source、`harness_init`、裸 `exit` / `/tmp/` / 私有符号） | `bash engineering/harness/scripts/validate_harness_scripts.sh` |
 | [`validate_harness_config.sh`](./validate_harness_config.sh) | 配置层校验（YAML 可解析性、字段合法性、命名规范） | `bash engineering/harness/scripts/validate_harness_config.sh` |
+| [`validate_lcharness_layer_map.sh`](./validate_lcharness_layer_map.sh) | `LcHarness` Phase 1 层次映射校验（layer/kind/pack_type/path 唯一性与存在性） | `bash engineering/harness/scripts/validate_lcharness_layer_map.sh` |
 | [`validate_manifest.sh`](./validate_manifest.sh) | Manifest.yaml 校验（context ID 唯一、access 值域、scope_category 合法性） | `bash engineering/harness/scripts/validate_manifest.sh` |
 | [`validate_workflow_contracts.sh`](./validate_workflow_contracts.sh) | 工作流契约校验（front matter stages/TODO/退出码章节完整性） | `bash engineering/harness/scripts/validate_workflow_contracts.sh` |
 | [`apply_preset_bugs.sh`](./apply_preset_bugs.sh) | 向 workspace 注入预设 bug，验证 AI 闭环修复能力（`--bug N` 选 bug，`--revert` 回滚） | `bash engineering/harness/scripts/apply_preset_bugs.sh --bug 1,2,3` |

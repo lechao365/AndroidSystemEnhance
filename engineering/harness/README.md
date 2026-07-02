@@ -62,6 +62,7 @@
 | 查 RPI5 编译命令参考 | [reference/build-reference.md](./reference/build-reference.md) |
 | 做 harness 静态校验 | [scripts/validate_harness_docs.sh](./scripts/validate_harness_docs.sh) |
 | 查 harness 整体优化方向和路线图 | [reference/harness-optimization-blueprint.md](./reference/harness-optimization-blueprint.md) |
+| 查 `LcHarness` 目标架构与当前映射 | [reference/lcharness-architecture.md](./reference/lcharness-architecture.md) |
 
 ## 使用方式
 
@@ -91,6 +92,8 @@ harness 无统一可执行入口，各子目录有独立入口。常见入口：
 | 关联 workflow | [workflows/lc-sync-patchs-to-doc/](./workflows/lc-sync-patchs-to-doc/) | patchs diff → 技术文档同步 |
 | 关联配置 | [config/scope-mapping.yaml](./config/scope-mapping.yaml) | commit scope 判定 |
 | 关联配置 | [config/harness-paths.conf](./config/harness-paths.conf) | 工程路径单一事实源 |
+| 设计文档 | [docs/specs/2026-07-02-lcharness-framework-design.md](../../docs/specs/2026-07-02-lcharness-framework-design.md) | `LcHarness` 总体设计基线 |
+| 参考文档 | [reference/lcharness-architecture.md](./reference/lcharness-architecture.md) | 当前工程映射到 `LcHarness` 的架构参考 |
 
 ---
 

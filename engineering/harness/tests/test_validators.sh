@@ -69,6 +69,9 @@ EOF
 
 test_all_validations_runs_without_crash() {
     setup_sandbox
+    # 复制新增校验器
+    cp "$SCRIPTS_DIR/validate_lcharness_layer_map.sh" \
+       "$TMP_SANDBOX/engineering/harness/scripts/"
     cat > "$TMP_SANDBOX/engineering/harness/rules/manifest.yaml" <<'EOF'
 version: 1
 contexts:
@@ -106,6 +109,16 @@ baselines:
     board_verify: PASS
     approved_by: test
     approved_at: "2026-06-01T00:00:00+08:00"
+EOF
+    cat > "$TMP_SANDBOX/engineering/harness/config/lcharness-layer-map.yaml" <<'EOF'
+version: 1
+entries:
+  - path: engineering/harness/config/
+    kind: directory
+    layer: core
+    component: config-machine-layer
+    target: lcharness/core/config
+    rationale: test
 EOF
     cat > "$TMP_SANDBOX/engineering/harness/workflows/test-workflow/WORKFLOW.md" <<'EOF'
 ---

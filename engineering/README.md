@@ -41,6 +41,7 @@
 | 关联规则 | [`harness/rules/source-code-modify.md`](./harness/rules/source-code-modify.md) | 改 `~/workspace/` 源码前加载 |
 | 关联规则 | [`harness/rules/path-management.md`](./harness/rules/path-management.md) | 脚本路径引用约束（PATH-001） |
 | 关联配置 | [`harness/config/harness-paths.conf`](./harness/config/harness-paths.conf) | 工程路径 KEY 单一事实源 |
+| 参考文档 | [`harness/reference/lcharness-architecture.md`](./harness/reference/lcharness-architecture.md) | 当前 `engineering/` 映射到未来 `LcHarness` 的架构参考 |
 
 ---
 
@@ -82,3 +83,5 @@
 - `engineering/README.md`（本文件）
 - `engineering/harness/README.md`
 - `engineering/loop/README.md`
+
+> 面向未来独立 `LcHarness` 架构：当前 `engineering/harness/` 视为 core 候选基础设施层，`engineering/loop/` 视为 solution pack 候选层；具体映射见 `harness/reference/lcharness-architecture.md`。

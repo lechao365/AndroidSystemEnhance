@@ -34,3 +34,4 @@
 
 > 本目录文件均被 `AGENTS.md` 声明为强制加载规则，改动会直接影响 AI 在对应场景的行为。
 > 规则优先级遵循 [../README.md#控制总纲](../README.md#控制总纲)：用户指令 > 控制总纲 > `rules/*.md` > `workflows/*/WORKFLOW.md` > README。
+> `config/lcharness-layer-map.yaml` 是 Phase 1 `LcHarness` 架构映射契约，属于上层参考而非强制规则，被 `reference/lcharness-architecture.md`、`docs/specs/2026-07-02-lcharness-framework-design.md` 及 Phase 1 实施计划引用。

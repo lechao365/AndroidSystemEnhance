@@ -31,6 +31,7 @@
 | [`doc-sync-mapping.yaml`](./doc-sync-mapping.yaml) | patchs → 技术文档的精准分发规则：按路径 glob 匹配分发到 `01-*` / `02-*` 文档目录 | `../workflows/lc-sync-patchs-to-doc/` |
 | [`baseline-status.yaml`](./baseline-status.yaml) | baseline 状态登记表：记录每次同步归档的 archive / candidate / promoted 状态 | [`../README.md#控制总纲`](../README.md#控制总纲)、`../rules/source-code-modify.md` |
 | [`baseline-evidence-template.yaml`](./baseline-evidence-template.yaml) | baseline 证据模板：晋升为 promoted baseline 前必须填写的证据字段 | `../rules/source-code-modify.md`、`../workflows/lc-revert-code-from-patchs/` |
+| [`lcharness-layer-map.yaml`](./lcharness-layer-map.yaml) | `LcHarness` Phase 1 层次映射：当前目录/入口到 `core / pack / profile / adapter / control-plane` 的机器可读映射 | `Phase 1` 计划、`validate_lcharness_layer_map.sh`、`validate_harness_config.sh` |
 
 ### 其他配置
 
@@ -83,6 +84,19 @@
 | `TEST_SANDBOX_DIR` | 测试沙箱 |
 
 > 路径 KEY 详细语义与脚本引用约束见 [`../rules/path-management.md`](../rules/path-management.md)（PATH-001）。
+
+### lcharness-layer-map.yaml
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `version` | 整数 | 配置版本号 |
+| `entries[].path` | 字符串 | 当前仓中的目录/文件/虚拟对象标识 |
+| `entries[].kind` | 枚举 | `directory` / `file` / `virtual` |
+| `entries[].layer` | 枚举 | `core` / `pack` / `profile` / `adapter` / `control-plane` |
+| `entries[].component` | 字符串 | 稳定组件名 |
+| `entries[].target` | 字符串 | 未来 `LcHarness` 中的目标位置 |
+| `entries[].rationale` | 字符串 | 为什么归属该层 |
+| `entries[].pack_type` | 枚举，可选 | 当 `layer=pack` 时使用：`platform` / `domain` / `solution` |
 
 ## 任务准入矩阵
 
