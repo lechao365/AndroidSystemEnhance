@@ -22,7 +22,13 @@ source "$SCRIPT_DIR/../lib/shell/harness_bootstrap.sh"
 
 harness_init "validate_harness_config"
 
-HARNESS_DIR="$(harness_path HARNESS_DIR)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+if [ -z "$REPO_ROOT" ] || [ ! -f "$REPO_ROOT/AGENTS.md" ]; then
+    REPO_ROOT="$(harness_repo_root)"
+fi
+
+HARNESS_DIR="$REPO_ROOT/engineering/harness"
 CONFIG_DIR="$HARNESS_DIR/config"
 
 WARN_COUNT=0
@@ -192,34 +198,10 @@ for e in errs:
     fi
 
     if [ "$yname" = "lcharness-layer-map.yaml" ]; then
-        lm_err=$(python3 -c "
-import yaml
-with open('$ypath', 'r', encoding='utf-8') as f:
-    data = yaml.safe_load(f) or {}
-errs = []
-allowed_layers = {'core', 'pack', 'profile', 'adapter', 'control-plane'}
-allowed_kinds = {'directory', 'file', 'virtual'}
-entries = data.get('entries', [])
-if not isinstance(entries, list) or not entries:
-    errs.append('entries 必须是非空数组')
-for i, item in enumerate(entries if isinstance(entries, list) else []):
-    if not isinstance(item, dict):
-        errs.append(f'entries[{i}] 非对象')
-        continue
-    if item.get('layer') not in allowed_layers:
-        errs.append(f'entries[{i}] layer 非法: {item.get(\"layer\")}')
-    if item.get('kind') not in allowed_kinds:
-        errs.append(f'entries[{i}] kind 非法: {item.get(\"kind\")}')
-    if not item.get('path'):
-        errs.append(f'entries[{i}] path 为空')
-for e in errs:
-    print(e)
-" 2>&1) || true
-        if [ -n "$lm_err" ]; then
-            while IFS= read -r l; do
-                [ -z "$l" ] && continue
-                report_warn "$ypath" "$l"
-            done <<< "$lm_err"
+        if [ ! -x "$SCRIPT_DIR/validate_lcharness_layer_map.sh" ]; then
+            report_warn "$ypath" "validate_lcharness_layer_map.sh 不存在，跳过层次映射强校验"
+        else
+            bash "$SCRIPT_DIR/validate_lcharness_layer_map.sh" "$ypath" "$REPO_ROOT" || report_warn "$ypath" "层次映射强校验失败"
         fi
     fi
 done

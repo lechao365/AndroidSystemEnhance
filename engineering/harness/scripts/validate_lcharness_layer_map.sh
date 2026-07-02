@@ -84,6 +84,8 @@ for idx, entry in enumerate(entries):
     if layer == "pack":
         if pack_type not in allowed_pack_types:
             errs.append(f"entries[{idx}].pack_type 非法: {pack_type!r}")
+        elif not pack_type:
+            errs.append(f"entries[{idx}] layer=pack 时 pack_type 必填")
     elif pack_type is not None:
         errs.append(f"entries[{idx}] 仅 layer=pack 时允许 pack_type")
 
