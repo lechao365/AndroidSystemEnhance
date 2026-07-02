@@ -13,6 +13,7 @@ VALIDATORS=(
     "validate_baseline_status.sh"
     "validate_workflow_contracts.sh"
     "validate_manifest.sh"
+    "validate_lcharness_layer_map.sh"
 )
 
 FAIL_COUNT=0

@@ -7,7 +7,21 @@ VALIDATOR="$REPO_ROOT/engineering/harness/scripts/validate_lcharness_layer_map.s
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+TEST_FAIL_COUNT=0
+
+record_fail() {
+    TEST_FAIL_COUNT=$((TEST_FAIL_COUNT + 1))
+    printf 'FAIL: %s\n' "$1" >&2
+}
+
+finalize_tests() {
+    if [ "$TEST_FAIL_COUNT" -gt 0 ]; then
+        printf 'TESTS-FAILED: %d test(s) failed\n' "$TEST_FAIL_COUNT" >&2
+        exit 1
+    fi
+    printf 'PASS: %s\n' "$(basename "$0")"
+}
+
 pass() { printf 'PASS: %s\n' "$1"; }
 
 write_invalid_map() {
@@ -37,21 +51,23 @@ YAML
 }
 
 test_validator_exists() {
-    [ -x "$VALIDATOR" ] || fail "validator 不存在或不可执行"
+    [ -x "$VALIDATOR" ] || record_fail "validator 不存在或不可执行"
+    # 校验基础环境：python3 可用
+    command -v python3 >/dev/null 2>&1 || record_fail "python3 不存在，validator 无法运行"
     pass "validator exists"
 }
 
 test_invalid_map_rejected() {
     write_invalid_map
     if bash "$VALIDATOR" "$TMP_DIR/invalid.yaml" "$REPO_ROOT" >/dev/null 2>&1; then
-        fail "invalid map 应被拒绝"
+        record_fail "invalid map 应被拒绝"
     fi
     pass "invalid map rejected"
 }
 
 test_valid_map_accepted() {
     write_valid_map
-    bash "$VALIDATOR" "$TMP_DIR/valid.yaml" "$REPO_ROOT" >/dev/null 2>&1 || fail "valid map 应通过"
+    bash "$VALIDATOR" "$TMP_DIR/valid.yaml" "$REPO_ROOT" >/dev/null 2>&1 || record_fail "valid map 应通过"
     pass "valid map accepted"
 }
 
@@ -59,7 +75,7 @@ main() {
     test_validator_exists
     test_invalid_map_rejected
     test_valid_map_accepted
-    printf 'PASS: test_lcharness_layer_map.sh\n'
+    finalize_tests
 }
 
 main "$@"
