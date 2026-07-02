@@ -85,3 +85,10 @@ entries:
     component: first-profile-seed
     target: lcharness/profiles/android-system-enhance
     rationale: current repository context becomes the first target profile rather than core behavior
+
+  - path: engineering/harness/control-plane/
+    kind: directory
+    layer: control-plane
+    component: central-control-plane
+    target: lcharness/control-plane
+    rationale: central control plane for repo registry, attach/inject/validate/detach/reconcile lifecycle

@@ -34,6 +34,7 @@
 | [reference/](./reference/) | 参考文档承载层（命令模板、操作指南等非约束性参考） | [reference/README.md](./reference/README.md) |
 | [workflows/](./workflows/) | 多步闭环工作流，每个子目录 = 一个完整流程（脚本 + WORKFLOW.md） | [workflows/README.md](./workflows/README.md) |
 | [tests/](./tests/) | harness 自测脚本与 fixtures（observability / workflow 测试） | — |
+| [control-plane/](./control-plane/) | LcHarness 中央控制面：Repo Registry + 生命周期管理 | [control-plane/README.md](./control-plane/README.md) |
 
 > 子目录自身的细节见其 `README.md`，本表只给一句话索引。
 
@@ -63,6 +64,7 @@
 | 做 harness 静态校验 | [scripts/validate_harness_docs.sh](./scripts/validate_harness_docs.sh) |
 | 查 harness 整体优化方向和路线图 | [reference/harness-optimization-blueprint.md](./reference/harness-optimization-blueprint.md) |
 | 查 `LcHarness` 目标架构与当前映射 | [reference/lcharness-architecture.md](./reference/lcharness-architecture.md) |
+| 注册 repo 到 LcHarness 控制面 | [control-plane/README.md](./control-plane/README.md) |
 
 ## 使用方式
 
