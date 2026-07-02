@@ -63,3 +63,13 @@ lcview 模块改动后必须通过单元测试编译验证：`make lechao_lcview
 - 检查 `build_result` / `package_result` / `board_verify` 均为 PASS
 - 确认 `approved_by` 和 `approved_at` 已填
 - 未完成证据化晋升的 baseline 不得作为恢复真相源
+
+## LcHarness 控制面快捷命令
+
+```bash
+alias lc-attach='bash engineering/harness/control-plane/lc-attach.sh'
+alias lc-status='bash engineering/harness/control-plane/lc-status.sh'
+alias lc-detach='bash engineering/harness/control-plane/lc-detach.sh'
+alias lc-validate='bash engineering/harness/control-plane/lc-validate.sh'
+alias lc-reconcile='bash engineering/harness/control-plane/lc-reconcile.sh'
+```
