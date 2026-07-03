@@ -61,7 +61,7 @@ bash engineering/harness/tests/run_all_tests.sh
 | `test_validators.sh` | 校验器自测 | 3 | — | ✅ |
 | `test_le_runs_cleanup.sh` | 跨边界清理 | 7 | — | ✅ |
 | `test_lcharness_layer_map.sh` | `LcHarness` 层次映射校验器 | 3 | — | ✅ |
-| `test_lcharness_control_plane.sh` | control-plane 脚本集 | 22 | — | ✅ |
+| `test_lcharness_control_plane.sh` | control-plane 脚本集 | 23 | — | ✅ |
 
 > 新增测试或夹具后同步更新本矩阵。测试点数按 `test_*` 函数数量计。
 

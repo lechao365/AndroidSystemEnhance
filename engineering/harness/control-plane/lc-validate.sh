@@ -62,6 +62,21 @@ emit_status() {
     echo "REASON=${reason}"
 }
 
+# 将验证结果写入 registry 的 health 字段，并同步 state
+update_health_tracking() {
+    local repo_id="$1"
+    local result="$2"
+    local now
+    now=$(date '+%Y-%m-%dT%H:%M:%S%z')
+
+    bash "$SCRIPT_DIR/lc-repo-registry.sh" update "$repo_id" health.last_check "$now" 2>/dev/null || true
+    bash "$SCRIPT_DIR/lc-repo-registry.sh" update "$repo_id" health.result "$result" 2>/dev/null || true
+
+    if [ "$result" = "healthy" ] || [ "$result" = "stale" ] || [ "$result" = "broken" ]; then
+        bash "$SCRIPT_DIR/lc-repo-registry.sh" update "$repo_id" state "$result" 2>/dev/null || true
+    fi
+}
+
 # ============================================================================
 # 核心状态判定
 # ============================================================================
@@ -78,62 +93,52 @@ determine_state() {
         harness_exit 1
     fi
 
-    # 解析字段
-    local overlay_root profile_name state attached_at
+    # 解析 registry 字段
+    local overlay_root profile_name
     overlay_root=$(echo "$repo_info" | grep -E '^overlay_root=' | sed 's/^overlay_root=//')
     profile_name=$(echo "$repo_info" | grep -E '^profile=' | sed 's/^profile=//')
-    state=$(echo "$repo_info" | grep -E '^state=' | sed 's/^state=//')
-    attached_at=$(echo "$repo_info" | grep -E '^attached_at=' | sed 's/^attached_at=//')
 
-    # Step 2: 检查 overlay 目录是否存在
-    if [ ! -d "$overlay_root" ]; then
-        emit_status "attached" "overlay directory missing: ${overlay_root}"
-        harness_exit 1
-    fi
-
-    # Step 3: 检查标记文件
+    # Step 2-8: 状态判定（使用变量收集，单出口更新 health）
+    local _status="" _reason="" _exit_code=1
     local marker_file="${overlay_root}/.lcharness-overlay"
-    if [ ! -f "$marker_file" ]; then
-        emit_status "broken" "marker file missing: ${marker_file}"
-        harness_exit 1
+
+    if [ ! -d "$overlay_root" ]; then
+        _status="attached"
+        _reason="overlay directory missing: ${overlay_root}"
+    elif [ ! -f "$marker_file" ]; then
+        _status="broken"
+        _reason="marker file missing: ${marker_file}"
+    elif ! python3 -c "import json; json.load(open('${marker_file}'))" 2>/dev/null; then
+        _status="broken"
+        _reason="marker file unreadable: ${marker_file}"
+    else
+        local marker_repo_id marker_profile marker_version
+        marker_repo_id=$(json_get_field "$marker_file" "repo_id")
+        marker_profile=$(json_get_field "$marker_file" "profile")
+        marker_version=$(json_get_field "$marker_file" "version")
+
+        if [ "$marker_repo_id" != "$repo_id" ]; then
+            _status="broken"
+            _reason="marker repo_id mismatch: expected ${repo_id}, got ${marker_repo_id}"
+        elif [ "$marker_profile" != "$profile_name" ]; then
+            _status="stale"
+            _reason="profile changed: expected ${profile_name}, got ${marker_profile}"
+        elif [ "$marker_version" != "1" ]; then
+            _status="stale"
+            _reason="overlay version changed: expected 1, got ${marker_version}"
+        elif [ ! -d "${overlay_root}/capabilities" ]; then
+            _status="broken"
+            _reason="capabilities dir missing: ${overlay_root}/capabilities"
+        else
+            _status="healthy"
+            _reason=""
+            _exit_code=0
+        fi
     fi
 
-    # Step 4: 验证标记文件 JSON 可解析
-    if ! python3 -c "import json; json.load(open('${marker_file}'))" 2>/dev/null; then
-        emit_status "broken" "marker file unreadable: ${marker_file}"
-        harness_exit 1
-    fi
-
-    # Step 5: 验证标记文件字段一致性
-    local marker_repo_id marker_profile marker_version
-    marker_repo_id=$(json_get_field "$marker_file" "repo_id")
-    marker_profile=$(json_get_field "$marker_file" "profile")
-    marker_version=$(json_get_field "$marker_file" "version")
-
-    if [ "$marker_repo_id" != "$repo_id" ]; then
-        emit_status "broken" "marker repo_id mismatch: expected ${repo_id}, got ${marker_repo_id}"
-        harness_exit 1
-    fi
-
-    if [ "$marker_profile" != "$profile_name" ]; then
-        emit_status "stale" "profile changed: expected ${profile_name}, got ${marker_profile}"
-        harness_exit 1
-    fi
-
-    if [ "$marker_version" != "1" ]; then
-        emit_status "stale" "overlay version changed: expected 1, got ${marker_version}"
-        harness_exit 1
-    fi
-
-    # Step 6: 检查 capabilities/ 目录
-    if [ ! -d "${overlay_root}/capabilities" ]; then
-        emit_status "broken" "capabilities dir missing: ${overlay_root}/capabilities"
-        harness_exit 1
-    fi
-
-    # 全部通过
-    emit_status "healthy" ""
-    harness_exit 0
+    update_health_tracking "$repo_id" "$_status"
+    emit_status "$_status" "$_reason"
+    harness_exit "$_exit_code"
 }
 
 # ============================================================================

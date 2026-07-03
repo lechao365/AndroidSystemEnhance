@@ -577,6 +577,33 @@ test_detach_not_registered() {
     pass "detach_not_registered"
 }
 
+test_detach_cancelled() {
+    setup_clean
+
+    local repo_id
+    repo_id=$(_reg_add "$TMP_REPO" "detach-profile")
+    [ -n "$repo_id" ] || { fail "add 失败"; return; }
+
+    bash "$CONTROL_PLANE/lc-inject.sh" "$repo_id" 2>/dev/null || { fail "inject 应成功"; return; }
+
+    local overlay_root
+    overlay_root=$(_reg_get_field "$repo_id" "overlay_root")
+
+    # detach 但回答 "n" 取消
+    local detach_output
+    detach_output=$(echo "n" | bash "$CONTROL_PLANE/lc-detach.sh" "$repo_id" 2>&1)
+    local rc=$?
+    [ "$rc" -eq 0 ] || { fail "detach 取消应返回 0 (cancelled), rc=$rc"; return; }
+
+    # overlay 目录应仍然存在
+    [ -d "$overlay_root" ] || { fail "取消 detach 后 overlay 目录应仍然存在"; return; }
+
+    # registry 条目应仍然存在
+    bash "$CONTROL_PLANE/lc-repo-registry.sh" exists "$repo_id" 2>/dev/null || { fail "取消 detach 后 registry 条目应仍然存在"; return; }
+
+    pass "detach_cancelled"
+}
+
 # ============================================================================
 # 主入口
 # ============================================================================
@@ -622,6 +649,7 @@ main() {
 
     echo "=== Detach Tests ==="
     test_detach_cleans_overlay
+    test_detach_cancelled
     test_detach_not_registered
 
     if [ "$TEST_FAIL_COUNT" -gt 0 ]; then
@@ -629,7 +657,7 @@ main() {
         exit 1
     fi
 
-    printf 'PASS: test_lcharness_control_plane.sh (22 tests)\n'
+    printf 'PASS: test_lcharness_control_plane.sh (23 tests)\n'
 }
 
 main "$@"

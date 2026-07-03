@@ -35,7 +35,7 @@ REGISTRY_DIR="${HOME}/.local/share/lcharness"
 REGISTRY_FILE="${REGISTRY_DIR}/registry.yaml"
 LOCK_FILE="${REGISTRY_DIR}/registry.yaml.lock"
 
-VALID_STATES=("attached" "injected" "detached" "broken" "archived")
+VALID_STATES=("attached" "injected" "healthy" "stale" "broken")
 
 # ============================================================================
 # 工具函数
@@ -57,7 +57,11 @@ now_iso() {
 # 计算 path 的短 MD5(id=md5sum(path)[:12])
 compute_id() {
     local path="$1"
-    python3 -c "import hashlib; print(hashlib.md5('${path}'.encode('utf-8')).hexdigest()[:12])"
+    printf '%s' "$path" | python3 -c "
+import hashlib, sys
+path = sys.stdin.read()
+print(hashlib.md5(path.encode('utf-8')).hexdigest()[:12])
+"
 }
 
 # 确保 registry 所在目录存在
@@ -173,7 +177,7 @@ try:
         errors.append("repos 必须是列表")
 
     # 每个 entry 校验
-    valid_states = {"attached", "injected", "detached", "broken", "archived"}
+    valid_states = {"attached", "injected", "healthy", "stale", "broken"}
     if isinstance(repos, list):
         for idx, entry in enumerate(repos):
             if not isinstance(entry, dict):
@@ -253,6 +257,16 @@ cmd_add() {
     # 解析绝对路径
     repo_path="$(realpath -m "$repo_path" 2>/dev/null || realpath "$repo_path" 2>/dev/null || echo "$repo_path")"
 
+    # 验证路径可读
+    if [ ! -d "$repo_path" ]; then
+        log_error "路径不是目录或不存在: $repo_path"
+        harness_exit 1
+    fi
+    if [ ! -r "$repo_path" ]; then
+        log_error "路径不可读: $repo_path"
+        harness_exit 1
+    fi
+
     # 获取锁
     acquire_lock || harness_exit 1
 
@@ -300,7 +314,7 @@ entry = {
     'id': '${repo_id}',
     'path': '${repo_path}',
     'profile': '${profile_name}',
-    'overlay_root': '${overlay_root}/',
+    'overlay_root': '${overlay_root}',
     'state': 'attached',
     'attached_at': '${now}',
     'last_reconcile': '',
