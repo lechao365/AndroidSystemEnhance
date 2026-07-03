@@ -5,11 +5,7 @@
 .opencode/bun.lock
 
 
-# 工程产物目录（本地产物，不归档）
-engineering/output/*
-!engineering/output/README.md
-
-# 根级 output 防御（工程产物统一在 engineering/output/）
+# 根级 output 防御
 /output/
 
 # Python 缓存（本地产物）
