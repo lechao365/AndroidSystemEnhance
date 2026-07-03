@@ -1,7 +1,0 @@
-diff --git a/drivers/foo.c b/drivers/foo.c
-index 1111111..2222222 100644
---- a/drivers/foo.c
-+++ b/drivers/foo.c
-@@ -1 +1 @@
--old line
-+new line
