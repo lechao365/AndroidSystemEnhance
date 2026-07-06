@@ -15,10 +15,6 @@
 改动 LcHarness 仓下任何 bash 脚本（含 workflows/、scripts/ 等）前，必须先加载 [/mnt/d/Code/Github/LcHarness/core/rules/script-observability.md](/mnt/d/Code/Github/LcHarness/core/rules/script-observability.md)。
 该规则强制要求：source 公共库、接入文件日志、结构化 step、错误现场捕获、统一退出码、中间产物归档。
 
-## 文档归档路径
-所有设计规格和实施计划保存到 `docs/specs/` 和 `docs/plans/`，禁止使用 `docs/superpowers/`。
-详细规则详见 [/mnt/d/Code/Github/LcHarness/core/rules/doc-paths.md](/mnt/d/Code/Github/LcHarness/core/rules/doc-paths.md)。
-
 ## 路径管理
 LcHarness 仓下所有脚本（shell / python / bat）禁止硬编码工程内路径，统一通过 `/mnt/d/Code/Github/LcHarness/core/config/harness-paths.conf`（单一事实源）+ 三方路径工具获取。
 改动任何脚本的路径引用前，必须先加载 [/mnt/d/Code/Github/LcHarness/core/rules/path-management.md](/mnt/d/Code/Github/LcHarness/core/rules/path-management.md)（PATH-001）。
