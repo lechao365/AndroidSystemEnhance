@@ -1,0 +1,93 @@
+version: 1 
+
+# 文档目录清单（业务文档实际目录，位于 docs/ 下）：
+#   00-环境准备/ — 环境搭建、构建、刷机（静态文档，不随 code 变动，已并入 harness/reference）
+#   docs/01-打点增强/ — LcView 内核态/HAL/Daemon（来源：**/LcView/**、**/lcview*）
+#   docs/02-IO增强/   — LcIod 内核态/HAL/Service + USB 工具（来源：**/LcIod/**、**/lciod*、others/usb-*）
+# 注意：route 命中后，若目标目录尚未创建，由调用方跳过并 log_warn。
+
+# code → 技术文档分发规则（机器层）
+# 匹配语义：按 priority 降序遍历，首条命中即归属（等价 md 的"自上而下首条命中即归属"）
+# mode 字段：
+#   fixed       = 固定分发，目标目录即映射 docs
+#   ai-diff     = 需 AI 读 diff 正文后从 docs 候选集合中选定（可多份）
+#   ai-pending  = 兜底，AI 读 diff 后判断，无法判断标注"归属待定"
+routes:
+  # —— 固定映射（精确命中即分发）——
+  - match: "**/LcView/**"
+    docs: ["docs/01-打点增强"]
+    mode: fixed
+    priority: 100
+  - match: "**/lcview*"
+    docs: ["docs/01-打点增强"]
+    mode: fixed
+    priority: 95
+  - match: "**/LcIod/**"
+    docs: ["docs/02-IO增强"]
+    mode: fixed
+    priority: 90
+  - match: "**/lciod*"
+    docs: ["docs/02-IO增强"]
+    mode: fixed
+    priority: 85
+  - match: "others/usb-verify/**"
+    docs: ["docs/02-IO增强"]
+    mode: fixed
+    priority: 80
+  - match: "kernel/modified/drivers/usb/**"
+    docs: ["docs/02-IO增强"]
+    mode: fixed
+    priority: 78
+
+  # —— 通用配置类（AI 读 diff 分发，docs 为候选集合）——
+  - match: "aosp/modified/device/brcm/rpi5/device.mk.diff"
+    docs: ["docs/01-打点增强", "docs/02-IO增强"]
+    mode: ai-diff
+    priority: 50
+    note: "读 diff：含 lciod→02，含 lcview→01，两者都有→两边都更新"
+  - match: "aosp/modified/device/brcm/rpi5/manifest.xml.diff"
+    docs: ["docs/01-打点增强", "docs/02-IO增强"]
+    mode: ai-diff
+    priority: 50
+    note: "按声明的 hal/service 名称分发"
+  - match: "aosp/modified/device/brcm/rpi5/*sepolicy*"
+    docs: ["docs/01-打点增强", "docs/02-IO增强"]
+    mode: ai-diff
+    priority: 50
+    note: "按 .te 策略对象名称（lciod_*/lcview_*）分发"
+  - match: "aosp/modified/device/brcm/rpi5/BoardConfig.mk.diff"
+    docs: ["docs/01-打点增强", "docs/02-IO增强"]
+    mode: ai-diff
+    priority: 50
+    note: "按涉及的模块配置分发"
+  - match: "**/Android.bp"
+    docs: ["docs/01-打点增强", "docs/02-IO增强"]
+    mode: ai-diff
+    priority: 40
+    note: "按新增的模块名（LcView/LcIod）分发"
+  - match: "**/Makefile"
+    docs: ["docs/01-打点增强", "docs/02-IO增强"]
+    mode: ai-diff
+    priority: 40
+    note: "按新增的模块名（LcView/LcIod）分发"
+  - match: "**/Kconfig"
+    docs: ["docs/01-打点增强", "docs/02-IO增强"]
+    mode: ai-diff
+    priority: 40
+    note: "按新增的模块名（LcView/LcIod）分发"
+  - match: "**/Kbuild"
+    docs: ["docs/01-打点增强", "docs/02-IO增强"]
+    mode: ai-diff
+    priority: 40
+    note: "按新增的模块名（LcView/LcIod）分发"
+
+  # —— 兜底 ——
+  - match: "**"
+    docs: []
+    mode: ai-pending
+    priority: 0
+
+# 兜底规则：
+# - 未命中任何 route 的改动：AI 读取 diff 内容后自行判断归属
+# - 无法判断时标注"归属待定"，由用户指定
+# - 跨特性改动分发到所有相关文档目录

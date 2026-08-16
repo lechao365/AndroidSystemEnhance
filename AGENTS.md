@@ -1,31 +1,47 @@
 # AndroidSystemEnhance 项目约束
 
 ## 源码改动优先级
-**改动 `~/workspace/` 下任何源码前，必须先加载** [/mnt/d/Code/Github/LcHarness/core/rules/source-code-modify.md](/mnt/d/Code/Github/LcHarness/core/rules/source-code-modify.md)（含验证流程、归档纪律、禁止行为）。
-`~/workspace/` 是编译源码树（唯一参与编译），`patchs/` 是单向归档目录，改动必须从源头开始。
+**改动 `~/workspace/` 下任何源码前，必须先加载** [harness/rules/source-code-modify.md](harness/rules/source-code-modify.md)（含验证流程、归档纪律、禁止行为）。
+`~/workspace/` 是编译源码树（唯一参与编译），`code/` 是单向归档目录，改动必须从源头开始。
+
+## Harness 工作流命令
+
+| 命令 | 用途 |
+|------|------|
+| `/lc-harness-sync-code-to-patchs` | workspace 已验证改动归档到 `code/rpi5/`（含删除对齐 + manifest 重生成 + README 映射表更新） |
+| `/lc-harness-revert-code-from-patchs` | 以 promoted baseline 为真相源，把 workspace 拉回一致（计划→逐条确认→执行→落盘校验） |
+| `/lc-harness-sync-patchs-to-doc` | code 变动生成报告，按映射规则精准同步设计文档（方案先行，确认后落盘） |
+
+harness 能力全部内聚在 `harness/` 目录（不依赖 LcHarness），使用说明见 [harness/README.md](harness/README.md)。
+
+## 路径配置
+`harness/config/paths.conf` 是路径单一事实源：`PATCHS_DIR` / `KERNEL_WS` / `AOSP_WS`。
+`KERNEL_WS` / `AOSP_WS` 支持环境变量覆盖（`export KERNEL_WS=... AOSP_WS=...`）。
+脚本路径引用一律通过 `harness/lib/paths.py` 读取，禁止硬编码工程内路径。
 
 ## 并行策略
 优先使用子 agent 并行处理独立任务，提升效率并减少主会话上下文污染。
-具体策略详见 [/mnt/d/Code/Github/LcHarness/core/rules/parallel-strategy.md](/mnt/d/Code/Github/LcHarness/core/rules/parallel-strategy.md)。
 
 ## PlantUML 画图约束
-所有 PlantUML 图表编写前，必须参考 [/mnt/d/Code/Github/LcHarness/core/rules/plantuml.md](/mnt/d/Code/Github/LcHarness/core/rules/plantuml.md) 中的规则，防止渲染失败。
+所有 PlantUML 图表编写前，必须参考 [harness/rules/plantuml.md](harness/rules/plantuml.md) 中的规则，防止渲染失败（`DOC-002`）。
 
-## 脚本维测规则（observability）
-改动 LcHarness 仓下任何 bash 脚本（含 workflows/、scripts/ 等）前，必须先加载 [/mnt/d/Code/Github/LcHarness/core/rules/script-observability.md](/mnt/d/Code/Github/LcHarness/core/rules/script-observability.md)。
-该规则强制要求：source 公共库、接入文件日志、结构化 step、错误现场捕获、统一退出码、中间产物归档。
+## RPI5 环境与开发参考文档
+涉及 RPI5 环境搭建、编译、部署、调试、远程访问时，必须先加载 `harness/reference/` 下对应文档（索引见 [harness/reference/README.md](harness/reference/README.md)）：
 
-## 路径管理
-LcHarness 仓下所有脚本（shell / python / bat）禁止硬编码工程内路径，统一通过 `/mnt/d/Code/Github/LcHarness/core/config/harness-paths.conf`（单一事实源）+ 三方路径工具获取。
-改动任何脚本的路径引用前，必须先加载 [/mnt/d/Code/Github/LcHarness/core/rules/path-management.md](/mnt/d/Code/Github/LcHarness/core/rules/path-management.md)（PATH-001）。
-目录调整时仅修改 `paths.conf`，无需改动脚本。
+| 场景 | 必须加载的 reference |
+|------|---------------------|
+| 涉及 RPI5 AOSP/内核编译、源码获取、ccache、打包 | [build-reference.md](harness/reference/build-reference.md) |
+| 涉及 WSL2 / 宿主环境搭建、AOSP 编译前准备 | [env-setup-reference.md](harness/reference/env-setup-reference.md) |
+| 涉及镜像写入 SD 卡、首次上电、ADB/串口入口 | [flash-deploy-reference.md](harness/reference/flash-deploy-reference.md) |
+| 涉及模块级修改、增量编译、镜像推送、内核替换、回退 | [incremental-dev-reference.md](harness/reference/incremental-dev-reference.md) |
+| 涉及日志抓取、串口调试、WSL 映射 USB 设备 | [debug-tools-reference.md](harness/reference/debug-tools-reference.md) |
+| 涉及跨网络远程访问 opencode WebUI（Tailscale + Serve） | [remote-access-reference.md](harness/reference/remote-access-reference.md) |
 
-## RPI5 编译参考
-涉及 RPI5 AOSP/内核编译时，必须先加载 [/mnt/d/Code/Github/LcHarness/profiles/android-system-enhance/reference/build-reference.md](/mnt/d/Code/Github/LcHarness/profiles/android-system-enhance/reference/build-reference.md)。
-该规则记录了本项目正确的编译命令与约束，防止 LLM 使用错误参数。
+这些文档记录了正确的命令与硬性约束（规则 ID + 违反后果），防止 LLM 使用错误参数或重复踩坑。
+人类开发者使用的 VS Code / OpenGrok 源码阅读环境搭建见 [docs/development-tools.md](docs/development-tools.md)。
 
 ## C++/内核编码规范
-改动 lcview 及内核/用户态协议栈（HAL / Daemon / 内核打点模块）的 C/C++ 源码前，必须先加载 [/mnt/d/Code/Github/LcHarness/core/rules/cxx-coding-rules.md](/mnt/d/Code/Github/LcHarness/core/rules/cxx-coding-rules.md)。
+改动 lcview 及内核/用户态协议栈（HAL / Daemon / 内核打点模块）的 C/C++ 源码前，必须先加载 [harness/rules/cxx-coding-rules.md](harness/rules/cxx-coding-rules.md)。
 该规则将 P0 检视修复中暴露的 4 类 bug（字节序、资源生命周期、输入防御、故障静默）提炼为 CXX-001~004 硬规则。
 
 ## 测试防护
@@ -40,29 +56,9 @@ lcview 模块改动后必须通过单元测试编译验证：`make lechao_lcview
    - 判断依据：`git check-ignore <file>` 返回 0（被忽略）则无需确认。
 3. **禁止以"清理"为由批量删除**——即使看似无用，也必须逐个确认。
 
-## Manifest 准入查询
-进入任何任务前，先查询 `/mnt/d/Code/Github/LcHarness/core/rules/manifest.yaml` 确认：
-- 当前路径匹配的 context
-- 对应 access 级别（direct_edit / require_workflow / require_plan / require_confirmation / require_evidence）
-- 必经 workflow（如有）
-- 是否需 plan / confirmation / evidence
-
-也可通过 `bash /mnt/d/Code/Github/LcHarness/core/scripts/check_access.sh --path <path> --category <category>` 快速查询。
-
 ## Baseline 使用指引
-在执行 `lc-revert-code-from-patchs` 回退操作前，必须先查 [/mnt/d/Code/Github/LcHarness/profiles/android-system-enhance/config/baseline-status.yaml](/mnt/d/Code/Github/LcHarness/profiles/android-system-enhance/config/baseline-status.yaml)：
+在执行 `/lc-harness-revert-code-from-patchs` 回退操作前，必须先查 [harness/config/baseline-status.yaml](harness/config/baseline-status.yaml)：
 - 确认目标 baseline 状态为 `promoted`（证据完整）
 - 检查 `build_result` / `package_result` / `board_verify` 均为 PASS
 - 确认 `approved_by` 和 `approved_at` 已填
 - 未完成证据化晋升的 baseline 不得作为恢复真相源
-
-## LcHarness 控制面快捷命令
-
-```bash
-alias lc-attach='python3 /mnt/d/Code/Github/LcHarness/core/control-plane/lc_attach.py'
-alias lc-inject='python3 /mnt/d/Code/Github/LcHarness/core/control-plane/lc_inject.py'
-alias lc-status='python3 /mnt/d/Code/Github/LcHarness/core/control-plane/lc_status.py'
-alias lc-detach='python3 /mnt/d/Code/Github/LcHarness/core/control-plane/lc_detach.py'
-alias lc-validate='python3 /mnt/d/Code/Github/LcHarness/core/control-plane/lc_validate.py'
-alias lc-reconcile='python3 /mnt/d/Code/Github/LcHarness/core/control-plane/lc_reconcile.py'
-```

@@ -1,0 +1,44 @@
+# Baseline 状态登记表
+# 登记 patch 资产在晋升链 archive → candidate baseline → promoted baseline 上的当前状态。
+# 状态语义见 ../README.md#控制总纲（状态模型与证据要求），证据字段定义见 baseline-evidence-template.yaml
+# status 取值: archive → candidate → promoted（不可回退）
+# 仅 promoted 行的 approved_by / approved_at 必填
+# sync_manifest 路径相对于项目根；新归档产物位于 harness/log/lc_harness_sync_code_to_patchs/artifacts/
+# （下方历史记录指向迁移前 LcHarness output/log/ 下的产物，属历史事实，保留）
+
+baselines:
+  - baseline_id: BL-20260622-01
+    status: promoted
+    description: rpi5-dev 分支首个 promoted 基线（编译/打包/上板验证全 PASS）
+    source_branch: rpi5-dev
+    source_commit: a1b2c3d4
+    sync_manifest: output/log/lc_harness_sync_code_to_patchs/artifacts/20260622-213209-manifest.yaml
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    evidence:
+      build_result: PASS
+      package_result: PASS
+      board_verify: PASS
+      sync_manifest: output/log/lc_harness_sync_code_to_patchs/artifacts/20260622-213209-manifest.yaml
+    approved_by: lechao
+    approved_at: "2026-06-22T21:32:09+08:00"
+
+  - baseline_id: BL-20260624-01
+    status: promoted
+    description: wifi.conf psk 从 default 改为真实密码（HUAWEI-BE7P AP 调试用）
+    source_branch: android-15.0
+    source_commit: f8de5aa
+    sync_manifest: output/log/lc_harness_sync_code_to_patchs/artifacts/20260624-073624-manifest.yaml
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    evidence:
+      build_result: PASS
+      package_result: PASS
+      board_verify: PASS
+      sync_manifest: output/log/lc_harness_sync_code_to_patchs/artifacts/20260624-073624-manifest.yaml
+    approved_by: lechao
+    approved_at: "2026-06-24T07:36:24+08:00"
+    summary: wifi.conf psk 从 default 改为真实密码（HUAWEI-BE7P AP 调试用）
+
