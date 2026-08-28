@@ -1,0 +1,174 @@
+# 验收用例资产层（ws_acceptance.py --case 引用）。
+# 背景：CDP 批次正文禁引号，含空格/引号的验收命令无法在批次内书写；
+#       此类用例在此集中维护，批次经 --case <标签> 引用，验收判据不再人眼搬运。
+# 结构：cases: { <标签>: <验收文本> }，验收文本可为任意标签组合（值内可用引号）。
+cases:
+  # lcview 存活综合用例：HAL/Daemon 服务 + 持续心跳日志 + boot 完成
+  # 注意1：不用 file:/data/vendor/lechao_lcview —— 目录 0750 system:system，
+  #       adb shell（shell 用户）无权列目录，file: 判据必然假红。
+  # 注意2：log 判据必须选"持续性日志"（心跳），不能用"启动即打一次"的
+  #       注册/加载日志——非 reboot 场景下启动日志已被 logcat 5000 行
+  #       缓冲区滚出，判据必然假红（reboot 场景 + --log-since 才可靠）。
+  # 注意3：心跳带 overrun/dropped/readErr 字段（CXX-004），命中即证明
+  #       HAL 读取链路健康 + 故障可见性字段在输出。
+  # 注意4：overrun/dropped/readErr 用 logfield 断言 0（锚点末行按字段取值比较）——
+  #       log: 子串匹配会命中 5000 行缓冲内的开机初期零值心跳，故障累计后
+  #       仍 PASS（假绿），logfield 取锚点最后一行真实累计值
+  # 注意5：守恒判据（conserve，hostcmd）取 daemon 心跳（heartbeat, loop= 含
+  #       total_records/overrun/jsonl_records 三数）末行，校验
+  #       total - overrun - jsonl（在途差值）不超界且不为负——丢记录/重复落盘
+  #       回归自动化判红，替代人工核算
+  lcview-liveness: 'svc:lechao_lcview_hal svc:lechao_lcview log:"LcView: alive beat=" log:"heartbeat, loop=" logfield:"LcView: alive beat=|overrun|=|0" logfield:"LcView: alive beat=|dropped|=|0" logfield:"LcView: alive beat=|readErr|=|0" hostcmd:"cases/lcview_check.sh --mode conserve" boot'
+
+  # L1 被动数据管道主用例（原 cases/lcview_pipeline.yaml 收敛于此，critical 项）：
+  # 事件落盘 → JSONL 合法 → schema 匹配。hostcmd 在 workspace-verify
+  # 目录执行，相对路径以其为根（不硬编码绝对路径）。
+  # 注：fresh/ts 已移入 lcview-trigger probe 之后——事件驱动模型下 USB 常驻
+  # 无活动不产生新事件，静止态跑 fresh/ts 永不能过（曾实测 fresh 超窗 29069s）
+  lcview-pipeline: 'hostcmd:"cases/lcview_check.sh --mode files" hostcmd:"cases/lcview_check.sh --mode valid_json" hostcmd:"cases/lcview_check.sh --mode schema"'
+
+  # L1 两条 warn 项另立（no_invalid 非阻断 + ts 全历史卫生检查），勿混主用例致假 fail。
+  # 注：ts 无 baseline 时判全历史——校准回拨前未来记录（PIT-5）在此暴露，
+  # 属卫生检查而非链路判据（trigger 的 ts 以 baseline 限定只判新记录）
+  lcview-pipeline-warn: 'hostcmd:"cases/lcview_check.sh --mode invalid" hostcmd:"cases/lcview_check.sh --mode ts --skew 600"'
+
+  # L2 触发型全链路（原 cases/lcview_trigger.yaml 收敛于此，requires 拓扑保序）：
+  # adb root（显式，写 authorized 需 root，不依赖 baseline 内部 root 的隐式顺序）
+  # → baseline → authorize_off → disconnect 增量 → authorize_on → probe 增量+vid/pid
+  # → fresh/ts（probe 产生新事件后跑，时间敏感判据须设备时钟可信——
+  # ws_acceptance 检测到 ts/fresh 自动 clock_sync 校准；ts 以 --baseline 限定
+  # 只判基线后的新记录，全历史卫生检查在 lcview-pipeline-warn）；
+  # USB 设备路径与 vid/pid 可 env 覆盖（LCVIEW_USB_DEV / LCVIEW_USB_VID /
+  # LCVIEW_USB_PID / LCVIEW_USB_EVENT_DISCONNECT / LCVIEW_USB_EVENT_PROBE），
+  # hostcmd 在 host 侧展开（adb shell 命令也经 hostcmd 保证 host env 生效）；
+  # authorized 切换经 grep 断言 cat 输出值（echo 成功但值未变即假绿——cmd 判据
+  # 只看 exit code 兜不住，写失败/写被忽略须判红）
+  lcview-trigger: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && adb root >/dev/null 2>&1 && sleep 2 && python3 ws_adb_connect.py ensure >/dev/null" hostcmd:"cases/lcview_check.sh --mode baseline" hostcmd:"adb shell \"echo 0 > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized\" | grep -q \"^0$\"" hostcmd:"sleep 3 && cases/lcview_check.sh --mode delta --event ${LCVIEW_USB_EVENT_DISCONNECT:-9}" hostcmd:"adb shell \"echo 1 > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized\" | grep -q \"^1$\"" hostcmd:"sleep 5 && cases/lcview_check.sh --mode delta --event ${LCVIEW_USB_EVENT_PROBE:-8} --vid ${LCVIEW_USB_VID:-1256} --pid ${LCVIEW_USB_PID:-25344}" hostcmd:"cases/lcview_check.sh --mode fresh --window 600" hostcmd:"cases/lcview_check.sh --mode ts --skew 600 --baseline /tmp/lcview_baseline.json"'
+
+  # L2 传输触发（事件 4/5 覆盖）：照 trigger 写法——baseline → 真实 USB 动作
+  # → delta 断言对应事件增量。
+  # 事件 4/5（usb_transport_start/end）：经 adb shell 对 U 盘块设备 dd 读写数 MB
+  # 产生真实传输（dd 是设备侧资源，hostcmd 直接写 /dev/block 会静默失败）；
+  #   LCVIEW_BLOCK_DEV（读）/ LCVIEW_BLOCK_DEV_WRITE（写，默认分区防破坏分区表）
+  #   可 env 覆盖（上板先查 /dev/block 下 U 盘节点）；dd 失败即判红——
+  #   不再 || true 吞失败（触发手段不可用须暴露，delta 兜底是双保险非替代）。
+  # 注：usb_reset（事件 7）曾用 USBDEVFS_RESET（usbreset）实测——复位成功但
+  #   打点在 USBD 设备栈路径（vendor_lechao_usbd-stats.c），xhci host 模式
+  #   不经过，无 id 7 打点（副作用 rate_degraded 出现），归入暂无触发手段。
+  lcview-transfer: 'hostcmd:"cases/lcview_check.sh --mode baseline" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 4" hostcmd:"adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE:-/dev/block/sda1} bs=1M count=1\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 5"'
+
+  # lciod 存活综合用例：HAL/Daemon 服务 + 监控线程持续日志 + boot 完成。
+  # 注意：log 判据选监控线程统计日志（"monitor: minor="，每 10s 打印），
+  # 不用启动注册日志（非 reboot 场景已被 logcat 5000 行缓冲滚出，假红）。
+  # 注：HAL 无 lcview 式心跳字段（overrun 等），logfield 断言不适用；
+  #     HAL 死亡由 init 自动重启（rc 非 oneshot），svc 判据兜底。
+  lciod-liveness: 'svc:lechao_lciod_hal svc:lechao_lciod log:"monitor: minor=" boot'
+
+  # L1 数据管道主用例：lciod_probe（GET_STATS ioctl 取数工具，
+  # /system/bin）→ host 侧字段齐全性/数值合法性/abi_version 校验。
+  # 防假绿：零设备判红（probe 空输出 exit 0，host 判红）、缺字段判红
+  # （26 字段齐全 = getStats 字段映射完整性回归点）、vendor/product
+  # 为空判红、abi_version != 2 判红（镜像副本与内核真相源漂移）。
+  lciod-pipeline: 'hostcmd:"cases/lciod_check.sh --mode stats"'
+
+  # L2 传输触发全链路：baseline --reset（probe --reset 归零内核计数后
+  # 写基线，delta 断言简化为绝对值判定）→ dd 读 → delta read_bytes/
+  # read_cmds 严格增 → dd 写 → delta write_bytes/write_cmds 严格增。
+  # dd 失败即判红（2>/dev/null 仅压 dd 进度条噪声，exit code 透传）；
+  # 计数未增判红（触发未生效不得假绿）。块设备 env 覆盖同 lcview-transfer
+  # （LCVIEW_BLOCK_DEV / LCVIEW_BLOCK_DEV_WRITE）。
+  lciod-trigger: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && adb root >/dev/null 2>&1 && sleep 2 && python3 ws_adb_connect.py ensure >/dev/null" hostcmd:"cases/lciod_check.sh --mode baseline --reset" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode delta --expect read_bytes read_cmds" hostcmd:"adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE:-/dev/block/sda1} bs=1M count=1\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode delta --expect write_bytes write_cmds"'
+
+
+  # 事件覆盖登记（驱动级覆盖盘点，2026-08-27 修订）：
+  # - 已覆盖（真实触发 + delta 断言）: 4(transfer-start,lcview-transfer) 5(transfer-end,lcview-transfer)
+  #   8(probe,lcview-trigger) 9(disconnect,lcview-trigger)
+  # - 已观察待确定性触发: 13(usb_rate_degraded)——usbreset 副作用中实测出现
+  #   （host xhci 模式打点可达），但触发具随机性（速率波动），无确定性注入手段
+  # - 暂无触发手段（打点在 USBD 设备栈或 LcIod 侧而 xhci-host 不经过，需 BOT
+  #   协议级注入或 usbd 设备角色，无 RPi5 单机手段，显式归因不计入已覆盖）:
+  #   6(usb_transport_error,USBD 栈错误路径) 7(usb_reset,USBD 栈复位路径,
+  #   USBDEVFS_RESET 实测无打点) 10(usb_stall,USBD 栈 STALL) 11(usb_timeout,
+  #   LcIod 侧传输超时) 12(usb_data_corrupt,LcIod 侧数据损坏)
+  # - 预留未用: 1(usb_connect) 2(gpio_irq) 3(sensor_data)
+  # - LcIod 维度补充（2026-08-27，lciod 防护栏落地）：USBD 栈传输观测不再
+  #   仅依赖 lcview 事件落盘——lciod-pipeline/trigger 经内核 GET_STATS 计数
+  #   （read_bytes/write_cmds 等）直接观测 USBD 栈行为，与上述事件维度互补；
+  #   事件 6/7/10/11/12 的 lcview 打点归因不变（usbd 路径无事件 id 打点），
+  #   后续若 usbd 侧补打点可经 lciod-trigger 的 usbreset/dd 场景复测转正
+
+# 模块资产层（workspace-verify 编译/推送执行源，不再现场推导/硬编码）。
+# 结构：modules: { <模块>: { targets: <编译目标>, test_targets: <测试目标>, push: <推送映射> } }
+# targets 实读对应 Android.bp 的 Soong 模块（可部署产品模块）；push 分区有别：
+# 无 vendor 落 /system，vendor: true 落 /vendor。
+modules:
+  lcview:
+    # 实读 Android.bp 的 4 个可部署 Soong 模块：
+    #   daemon/Android.bp: lechao_lcview（cc_binary，无 vendor）
+    #   hal/Android.bp:    lechao_lcview_hal（cc_binary，vendor: true）
+    #   hal/Android.bp:    vendor.lechao.lcview.ILcView-vintf（prebuilt_etc）
+    #   config/Android.bp: vendor.lechao.lcview-config（prebuilt_etc）
+    targets:
+      - lechao_lcview
+      - lechao_lcview_hal
+      - vendor.lechao.lcview.ILcView-vintf
+      - vendor.lechao.lcview-config
+    # 测试 target（AGENTS.md 强制两个 test target，tests/Android.bp 定义）
+    test_targets:
+      - lechao_lcview_unit_test
+      - lechao_lcview_hal_test
+    # 推送映射：daemon 无 vendor 落 /system，HAL 有 vendor 落 /vendor（bin + init 各一处）
+    # vendor.lechao.lcview-V2-ndk（AIDL NDK 后端库）：hal(daemon) 双依赖，
+    # system 与 vendor lib64 各推一份——不登记必 crash loop（linker CANNOT
+    # LINK，2026-08-28 实拍：reboot 后服务起不来靠手工补推）
+    push:
+      - module: lechao_lcview
+        dst:
+          - /system/bin/lechao_lcview
+          - /system/etc/init/lechao_lcview.rc
+      - module: lechao_lcview_hal
+        dst:
+          - /vendor/bin/lechao_lcview_hal
+          - /vendor/etc/init/lechao_lcview_hal.rc
+      - module: vendor.lechao.lcview.ILcView-vintf
+        dst:
+          - /vendor/etc/vintf/manifest/vendor.lechao.lcview.ILcView-service.xml
+      - module: vendor.lechao.lcview-config
+        dst:
+          - /vendor/etc/lcview_events.json
+      - module: vendor.lechao.lcview-V2-ndk
+        dst:
+          - /system/lib64/vendor.lechao.lcview-V2-ndk.so
+          - /vendor/lib64/vendor.lechao.lcview-V2-ndk.so
+  lciod:
+    # 实读 Android.bp 的 4 个可部署 Soong 模块：
+    #   daemon/Android.bp: lechao_lciod（cc_binary，无 vendor）
+    #   hal/Android.bp:    lechao_lciod_hal（cc_binary，vendor: true）
+    #   hal/Android.bp:    vendor.lechao.lciod.IIoHal-vintf（prebuilt_etc）
+    #   tools/Android.bp:  lciod_probe（cc_binary，无 vendor，验证取数工具）
+    targets:
+      - lechao_lciod
+      - lechao_lciod_hal
+      - vendor.lechao.lciod.IIoHal-vintf
+      - lciod_probe
+    # 测试 target（AGENTS.md 强制四个 test target 含 lcview 两个，
+    # tests/Android.bp 定义）
+    test_targets:
+      - lechao_lciod_unit_test
+      - lechao_lciod_hal_test
+    # 推送映射：daemon/probe 无 vendor 落 /system，HAL 有 vendor 落 /vendor（bin + init 各一处）
+    push:
+      - module: lechao_lciod
+        dst:
+          - /system/bin/lechao_lciod
+          - /system/etc/init/lechao_lciod.rc
+      - module: lciod_probe
+        dst:
+          - /system/bin/lciod_probe
+      - module: lechao_lciod_hal
+        dst:
+          - /vendor/bin/lechao_lciod_hal
+          - /vendor/etc/init/lechao_lciod_hal.rc
+      - module: vendor.lechao.lciod.IIoHal-vintf
+        dst:
+          - /vendor/etc/vintf/manifest/vendor.lechao.lciod.IIoHal-service.xml

@@ -1,0 +1,78 @@
+// ============================================================
+// tests/Android.bp — lechao_lcview 用户态单元测试
+// 所属模块：LcView 事件日志系统 — 测试
+//
+// 运行方式：
+//   atest lechao_lcview_unit_test -- --host     # daemon 纯逻辑测试（秒级）
+//   atest lechao_lcview_hal_test                # HAL 测试（需 device）
+// ============================================================
+
+// filegroup lechao_lcview_daemon_sources 声明在 daemon/Android.bp 中
+
+cc_test {
+    name: "lechao_lcview_unit_test",
+    cflags: ["-Wall", "-Werror"],
+    // 注：host_supported 不启用。daemon 源码依赖 bionic/Android 日志，
+    // 无法在 host glibc 编译。运行方式：atest lechao_lcview_unit_test
+    host_supported: false,
+    // 覆盖率插桩：NATIVE_COVERAGE=true 编译启用，上板跑后 pull gcda 用
+    // gcov 出每文件行覆盖（度量不设门禁）
+    native_coverage: true,
+    srcs: [
+        "SchemaParser_test.cpp",
+        "FileWriter_test.cpp",
+        "record_codec_test.cpp",
+        "DaemonLoop_test.cpp",
+        ":lechao_lcview_daemon_sources",
+    ],
+    include_dirs: [
+        "vendor/lechao/services/lechao_lcview/include",
+        "vendor/lechao/services/lechao_lcview/daemon",
+        "vendor/lechao/services/include",
+    ],
+    static_libs: [
+        "libgmock",
+    ],
+    shared_libs: [
+        "libbase",
+        "libjsoncpp",
+        "liblog",
+        "libbinder_ndk",
+        "vendor.lechao.lcview-V2-ndk",
+    ],
+    test_suites: ["general-tests"],
+}
+
+// ============================================================
+// HAL 测试（仅 device）：依赖 AIDL BnLcView 运行时
+// ============================================================
+cc_test {
+    name: "lechao_lcview_hal_test",
+    cflags: ["-Wall", "-Werror"],
+    host_supported: false,
+    native_coverage: true,
+    srcs: [
+        "LcView_test.cpp",
+        "DeviceReader_test.cpp",
+        ":lechao_lcview_hal_sources",
+    ],
+    local_include_dirs: [
+        ".",
+    ],
+    include_dirs: [
+        "vendor/lechao/services/lechao_lcview/include",
+        "vendor/lechao/services/lechao_lcview/hal",
+        "vendor/lechao/services/include",
+    ],
+    header_libs: ["vendor_lechao_log_headers"],
+    static_libs: [
+        "libgmock",
+    ],
+    shared_libs: [
+        "libbase",
+        "liblog",
+        "libbinder_ndk",
+        "vendor.lechao.lcview-V2-ndk",
+    ],
+    test_suites: ["device-tests"],
+}

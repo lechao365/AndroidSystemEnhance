@@ -101,12 +101,11 @@ std::string FileWriter::makeDateStr()
 // 生成规范化的日志文件路径
 // 格式：{logDir}/{event_id}_{event_name}_{YYYYMMDD}_p{seq}.jsonl
 // 示例：/data/vendor/lechao_lcview/logs/4_usb_transport_start_20260606_p0.jsonl
+// seq 由调用方显式传入（openFile/checkRotation 各自维护），
+// 避免"文件名用旧 seq、FileState 却存 0"的不一致（CXX-002）
 std::string FileWriter::makeFilename(const EventSchema& schema,
-                                      const std::string& date)
+                                      const std::string& date, int seq)
 {
-    auto it = mFiles.find(schema.id);
-    int seq = (it != mFiles.end()) ? it->second.seq : 0;
-
     std::ostringstream oss;
     oss << mCfg.logDir << "/" << schema.id << "_" << schema.name
         << "_" << date << "_p" << seq << ".jsonl";
@@ -114,21 +113,27 @@ std::string FileWriter::makeFilename(const EventSchema& schema,
 }
 
 // 打开或创建某个 event_id 对应的日志文件
-// 如果文件已存在且有内容，恢复 currentSize 以便后续轮转判断
+// CXX-002: 文件已存在时必须 fstat 恢复 currentSize（从持久层恢复状态），
+// 否则 daemon 重启后追加模式打开旧文件，已有内容不计入大小，
+// 单文件可超限近一倍，轮转约束失效
 void FileWriter::openFile(uint16_t eventId, const EventSchema& schema)
 {
-    // 如果该 event 已有打开的文件，先关闭
+    // 如果该 event 已有打开的文件，先关闭；seq 延续旧值保持文件名连续
+    int seq = 0;
     auto it = mFiles.find(eventId);
-    if (it != mFiles.end() && it->second.stream.is_open())
-        it->second.stream.close();
+    if (it != mFiles.end()) {
+        if (it->second.stream.is_open())
+            it->second.stream.close();
+        seq = it->second.seq;
+    }
 
     std::string date = makeDateStr();
     FileState fs;
     fs.eventId = eventId;
     fs.eventName = schema.name;
-    fs.currentFilename = makeFilename(schema, date);
+    fs.currentFilename = makeFilename(schema, date, seq);
     fs.currentDate = date;
-    fs.seq = 0;
+    fs.seq = seq;
     fs.currentSize = 0;
     // 以追加模式打开，文件不存在时自动创建
     fs.stream.open(fs.currentFilename, std::ios::app);
@@ -137,7 +142,13 @@ void FileWriter::openFile(uint16_t eventId, const EventSchema& schema)
         return;
     }
 
-    LC_ALOGD("FileWriter: opened file: %s", fs.currentFilename.c_str());
+    // 追加模式下文件可能已有内容：stat 恢复 currentSize，兑现轮转约束
+    struct stat st;
+    if (stat(fs.currentFilename.c_str(), &st) == 0)
+        fs.currentSize = static_cast<size_t>(st.st_size);
+
+    LC_ALOGD("FileWriter: opened file: %s (restored size=%zu)",
+             fs.currentFilename.c_str(), fs.currentSize);
 
     mFiles[eventId] = std::move(fs);
 }
@@ -298,8 +309,27 @@ void FileWriter::writeRecord(const EventSchema& schema,
 
     it->second.stream << line;
     if (it->second.stream.fail()) {
-        ALOGE("FileWriter: write failed for event %u", schema.id);
-        return;
+        ALOGE("FileWriter: write failed for event %u, attempting recovery",
+              schema.id);
+        /* CXX-002: failbit 粘滞不清除会让该事件流从此永久失败，
+         * 后续每条都 DROP（磁盘满恢复后也无法自愈的错误吞噬）。
+         * 恢复路径：清错误状态 → 重开流 → 重试一次 */
+        it->second.stream.clear();
+        it->second.stream.close();
+        it->second.stream.open(it->second.currentFilename, std::ios::app);
+        if (!it->second.stream.is_open()) {
+            ALOGE("FileWriter: recovery reopen failed for event %u, DROPPING",
+                  schema.id);
+            return;
+        }
+        it->second.stream << line;
+        if (it->second.stream.fail()) {
+            ALOGE("FileWriter: retry write failed for event %u, DROPPING",
+                  schema.id);
+            it->second.stream.clear();
+            return;
+        }
+        ALOGI("FileWriter: recovered stream for event %u", schema.id);
     }
 
     // 每次写入后立即 flush，防止进程崩溃导致数据丢失
@@ -308,7 +338,8 @@ void FileWriter::writeRecord(const EventSchema& schema,
 }
 
 // 写入非法记录到 invalid_records.log
-// 记录原因和大小，供事后调试分析
+// 记录原因、大小和原始字节（hex 截断），供事后离线重解析定位协议缺陷
+// CXX-003: reason 含 " / \ 时必须转义，否则输出行非合法 JSONL
 void FileWriter::writeInvalid(const uint8_t* data, size_t len,
                                const std::string& reason)
 {
@@ -316,8 +347,21 @@ void FileWriter::writeInvalid(const uint8_t* data, size_t len,
         ALOGE("FileWriter: writeInvalid: stream not open, DROPPING reason=%s", reason.c_str());
         return;
     }
-    mInvalidStream << "{\"reason\":\"" << reason
-                   << "\",\"size\":" << len << "}\n";
+    // 原始数据 hex 落盘上限：足够定位协议问题，又不至于在损坏风暴下写爆磁盘
+    static constexpr size_t kMaxDumpBytes = 256;
+
+    mInvalidStream << "{\"reason\":\"";
+    for (char c : reason) {
+        if (c == '"' || c == '\\')
+            mInvalidStream << '\\';
+        mInvalidStream << c;
+    }
+    mInvalidStream << "\",\"size\":" << len << ",\"data\":\"";
+    size_t dump = len < kMaxDumpBytes ? len : kMaxDumpBytes;
+    for (size_t i = 0; i < dump; i++)
+        mInvalidStream << std::hex << std::setfill('0') << std::setw(2)
+                       << (unsigned)data[i];
+    mInvalidStream << std::dec << "\"}\n";
     mInvalidStream.flush();
 }
 
@@ -359,11 +403,17 @@ void FileWriter::checkRotation()
             stubSchema.name = fs.eventName;
 
             fs.currentDate = today;
-            fs.currentFilename = makeFilename(stubSchema, today);
+            fs.currentFilename = makeFilename(stubSchema, today, fs.seq);
             fs.currentSize = 0;
             fs.stream.open(fs.currentFilename, std::ios::app);
             if (!fs.stream.is_open())
                 ALOGE("FileWriter: cannot open %s", fs.currentFilename.c_str());
+            else {
+                // 追加模式打开旧轮转文件时同样恢复大小（与 openFile 一致）
+                struct stat st;
+                if (stat(fs.currentFilename.c_str(), &st) == 0)
+                    fs.currentSize = static_cast<size_t>(st.st_size);
+            }
         }
     }
 }
@@ -427,6 +477,10 @@ void FileWriter::enforceRetention()
                 break;
             }
         }
+        // invalid_records.log 正被 mInvalidStream 持有：unlink 后 fd 会继续写
+        // 已删除 inode，空间泄漏直至进程退出（CXX-002 资源生命周期）
+        if (f.path == mInvalidFilename)
+            isOpen = true;
         if (isOpen)
             continue;
         if (unlink(f.path.c_str()) == 0) {

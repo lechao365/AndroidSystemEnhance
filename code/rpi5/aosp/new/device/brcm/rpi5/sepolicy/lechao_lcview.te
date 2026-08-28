@@ -37,3 +37,8 @@ allow lechao_lcview lechao_lcview_data_file:file { create_file_perms };
 # daemon 启动时加载 schema，热重载时重新读取
 allow lechao_lcview vendor_file:dir search;
 allow lechao_lcview vendor_file:file r_file_perms;
+
+# 允许 daemon 向 logd 写日志（ALOGI/ALOGE 走 /dev/socket/logd 的 unix_dgram_socket）
+# system 域默认不继承 logd 写权限，缺失时全部日志被 avc denied 静默丢弃，
+# HAL 断连/schema 失败/写盘失败均无日志现场（对照 hal.te 同款规则）
+allow lechao_lcview logd:unix_dgram_socket write;

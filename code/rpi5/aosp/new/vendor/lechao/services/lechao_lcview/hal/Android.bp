@@ -21,14 +21,26 @@ cc_binary {
     header_libs: ["vendor.lechao.lcview_headers", "vendor_lechao_log_headers"],
     init_rc: ["lechao_lcview_hal.rc"],
     srcs: [
-        "LcView.cpp",
+        // main 文件单独列出（不进 filegroup）：filegroup 同时被
+        // tests/cc_test 复用，含 main() 会与 gtest 主函数链接冲突
+        ":lechao_lcview_hal_sources",
         "main_lcview_hal.cpp",
     ],
     shared_libs: [
         "libbase",
         "libbinder_ndk",
         "liblog",
-        "vendor.lechao.lcview-V1-ndk",
+        "vendor.lechao.lcview-V2-ndk",
+    ],
+}
+
+// filegroup lechao_lcview_hal_sources — 供 tests/Android.bp 的 cc_test 复用 HAL 源码
+// （不含 main_lcview_hal.cpp，避免与 gtest 主函数冲突）
+filegroup {
+    name: "lechao_lcview_hal_sources",
+    srcs: [
+        "LcView.cpp",
+        "DeviceReader.cpp",
     ],
 }
 

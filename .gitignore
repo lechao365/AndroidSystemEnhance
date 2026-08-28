@@ -8,6 +8,9 @@
 # 根级 output 防御
 /output/
 
+# CI 运行时产物（不入库）
+/data/ci/
+
 # harness 运行时产物（plan/verify/构建报告等，不入库）
 /harness/log/
 

@@ -53,7 +53,7 @@ make bootimage systemimage vendorimage -j$(nproc)
 - `config.txt` 添加 `enable_uart=1` + `dtoverlay=uart0-pi5`
 - `BoardConfig.mk` 将 `console=ttyAMA10` 改为 `console=ttyAMA0`
 
-> 源码改动必须从 `~/workspace/` 源头开始（SRC-001 纪律），验证后经 `lc-harness-sync-code-to-patchs` 归档。**禁止直接改 `code/`**。
+> 源码改动源头为 `code/`（dev 分支，SRC-001 纪律），经 workspace-verify 同步 workspace 编译验证。**禁止反向归档（`sync-workspace-to-code` 已 deprecated）**。
 
 修改后重新编译并刷写：
 

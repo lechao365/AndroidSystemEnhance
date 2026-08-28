@@ -24,6 +24,10 @@ interface ILcView {
      * 返回的字节数组格式：4 字节 total_len + 二进制记录流（多条拼接）。
      * 每条记录含 lcview_record_hdr + 变长字段。
      * 这种方式避免了每次只读一条记录的高频 IPC 开销。
+     *
+     * 边界不变量：返回值始终是完整 record 的整数倍（每条 record 含
+     * 4 字节小端序 total_len 前缀 + record 数据）。HAL 不会在 batch
+     * 末尾拆分一条 record，调用方可直接按前缀解析，无需跨 batch 拼接。
      */
     byte[] getBatch();
 
@@ -33,4 +37,12 @@ interface ILcView {
      * 溢出计数递增。此值可用于评估日志缓冲区大小是否合理。
      */
     int getOverrunCount();
+
+    /**
+     * 查询内核 ring buffer 自驱动初始化以来累计产生的记录总数
+     * （含被 overrun 覆盖的记录）。供 daemon 侧守恒校验：
+     * total_records 应约等于 overrun + 用户态已落盘条数，
+     * 丢记录/重复写类回归可被检出（配合心跳日志判据）。
+     */
+    long getTotalRecords();
 }

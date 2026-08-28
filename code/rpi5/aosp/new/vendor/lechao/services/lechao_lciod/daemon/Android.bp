@@ -9,12 +9,22 @@
 // 依赖: system.lechao.lciod-ndk — system 侧 AIDL 桩代码
 //       vendor.lechao.lciod-V1-ndk — vendor 侧 AIDL 桩代码
 // ============================================================
+// filegroup: daemon 生产源码（不含 main，供 lechao_lciod_unit_test 编入测试；
+// 与 lcview lechao_lcview_daemon_sources 模式对齐）
+filegroup {
+    name: "lechao_lciod_daemon_sources",
+    srcs: [
+        "service.cpp",
+        "hal_client.cpp",
+    ],
+}
+
 cc_binary {
     name: "lechao_lciod",
     owner: "lechao",
     srcs: [
-        "service.cpp",
-        "hal_client.cpp",
+        "main_lciod.cpp",               // 进程入口（独立文件，避免与 gtest main 冲突）
+        ":lechao_lciod_daemon_sources",
     ],
     shared_libs: [
         "libbase",               // Android 基础库（LOG/strings等）

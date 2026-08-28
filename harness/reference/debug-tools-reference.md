@@ -80,7 +80,7 @@ BOARD_KERNEL_CMDLINE := console=ttyAMA0,115200 no_console_suspend root=/dev/ram0
 
 > 为什么改两处：`dtoverlay=uart0-pi5` 在硬件层启用 RP1 UART0 并绑定 GPIO14/15；`console=ttyAMA0` 告诉内核把启动日志输出到 RP1 UART0（40-pin）。**只改一处都无法在串口看到日志**。
 >
-> 此改动已归档：`code/rpi5/aosp/modified/device/brcm/rpi5/BoardConfig.mk.diff`，源码改动须从 `~/workspace/` 源头开始（SRC-001）。
+> 此改动已归档：`code/rpi5/aosp/modified/device/brcm/rpi5/BoardConfig.mk.diff`，源码改动须从 `code/`（dev 分支）源头开始，`~/workspace/` 为编译缓存镜像（code → workspace 单向同步，SRC-001）。
 
 重新编译刷写：
 

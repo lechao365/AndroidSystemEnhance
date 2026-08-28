@@ -1,0 +1,14 @@
+// ============================================================
+// tools/Android.bp — lcview 工具编译配置
+// usbreset: USBDEVFS_RESET 触发工具（lcview 事件 7 覆盖用）
+// ============================================================
+
+cc_binary {
+    name: "usbreset",
+    cflags: ["-Wall", "-Werror"],
+    srcs: ["usbreset.c"],
+    vendor: false,
+    // 部署到 /system/bin（shell/system 域可执行，root 可 open 设备节点）
+    install_in_root: false,
+    relative_install_path: "",
+}

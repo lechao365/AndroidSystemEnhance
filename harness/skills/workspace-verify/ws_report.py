@@ -1,0 +1,152 @@
+"""verify 收据落盘：封装 cdp_receipt，按 verify 阶段汇总写 data/verify/。
+
+用法（无子命令）：
+  模式 A（apply 拉起，随批次）:
+    ws_report.py --batch-file <cdp> [--target <12hex起点HEAD>] \
+        --result pass|fail|skip --build ... --board ... \
+        --acceptance "<逐项结果>" --elapsed <秒> --summary "<一句话>" \
+        [--body <正文文件>（CDP 原文+失败现场，必传见 SKILL）]
+  模式 B（独立触发）:
+    ws_report.py --target <12hex|dev|main> [--prefix manual|revert] \
+        --result ... （同上；batch_id = <prefix>-<10位时间戳>）
+"""
+import argparse
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+# 本文件位于 harness/skills/workspace-verify/，parents[1] = harness/skills
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "lib" / "python"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
+from cdp_parse import (SOFT_ERRORS, batch_id_from_text, parse_batch,  # noqa: E402
+                       validate_batch)
+from cdp_receipt import Receipt, append_trend, write_receipt  # noqa: E402
+from paths import env_path  # noqa: E402
+
+
+_HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def _resolve_target(target: str):
+    """把 --target 解析为 12hex commit，返回 (resolved, err)。
+
+    dev/main 等描述经 git rev-parse 换算；promote 门禁以 verified_commit 比对
+    HEAD^，解析失败不得写空串蒙混（比对不等空串恒失败），err 非 None 时
+    调用方必须拒绝写收据（照模式 A 校验失败同款返 2）。
+    """
+    if not target or _HEX12_RE.match(target):
+        return target, None
+    try:
+        r = subprocess.run(["git", "rev-parse", "--short=12", target],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return "", f"无法解析 --target {target!r}（git 执行失败: {e}）"
+    if r.returncode != 0:
+        return "", f"无法解析 --target {target!r}（git rev-parse 退出 {r.returncode}）"
+    return r.stdout.strip(), None
+
+
+def _sanitize(text: str) -> str:
+    """简单脱敏：workspace 绝对路径 → <KEY> 占位符，家目录绝对路径 → ~。
+
+    workspace 路径先于家目录正则替换（其本身含 /home/<user>/，若先脱家目录
+    会破坏原始路径导致占位符失效）。
+    """
+    for key in ("KERNEL_WS", "AOSP_WS"):
+        val = env_path(key)
+        if val:
+            text = re.sub(re.escape(val), f"<{key}>", text)
+    text = re.sub(r"/home/[A-Za-z0-9_.-]+", "~", text)
+    text = re.sub(r"[A-Za-z]:\\+Users\\+[A-Za-z0-9_.-]+", "~", text)
+    return text
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="verify 收据落盘")
+    ap.add_argument("--batch-file", help="CDP 批次文件（模式 A）")
+    ap.add_argument("--target", help="验证目标：12hex commit（模式 B 亦可用 dev/main 描述）")
+    ap.add_argument("--prefix", choices=["manual", "revert"], default="manual",
+                    help="模式 B 的 batch_id 前缀（revert 恢复验证用 revert）")
+    ap.add_argument("--result", choices=["pass", "fail", "skip", "revert"], required=True)
+    ap.add_argument("--build", choices=["pass", "fail", "skip"], default="skip")
+    ap.add_argument("--board", choices=["pass", "fail", "skip"], default="skip")
+    ap.add_argument("--acceptance", default="")
+    ap.add_argument("--elapsed", type=int, default=0)
+    ap.add_argument("--summary", default="")
+    ap.add_argument("--body", help="正文文件路径（CDP 原文/失败现场），经脱敏写入")
+    args = ap.parse_args(argv)
+
+    if not args.batch_file and not args.target:
+        print("error: 模式 A（--batch-file）与模式 B（--target）必选其一", file=sys.stderr)
+        return 2
+
+    if args.batch_file:
+        if not args.body:
+            print("error: 模式 A 必须传 --body（CDP 原文+失败现场）", file=sys.stderr)
+            return 2
+        if not Path(args.body).is_file():
+            print(f"error: --body 文件不存在: {args.body}", file=sys.stderr)
+            return 2
+        text = Path(args.batch_file).read_text(encoding="utf-8")
+        code, errs = validate_batch(text, role="apply")
+        if code != 0:
+            # apply 角色下 SOFT_ERRORS（如验收规则违规 17）降级为 WARN 不阻断，
+            # 与 cdp_parse.main 的降级语义一致（硬失败会卡死首个 -sv）
+            softened = code in SOFT_ERRORS
+            for e in errs:
+                level = "warn" if softened else "error"
+                print(f"{level}: 批次校验失败: {e}", file=sys.stderr)
+            if not softened:
+                return 2
+        b = parse_batch(text)
+        if b.mode == "sv" and not args.acceptance:
+            # -sv 批次必须带验收逐项证据，否则 promote 时 baseline 证据链有洞
+            print("error: 模式 A -sv 批次必须传 --acceptance（步骤 5 逐项验收结果），"
+                  "否则 baseline 证据链有洞", file=sys.stderr)
+            return 2
+        batch_id = batch_id_from_text(text)
+        batch_base = b.base
+        verify_mode = "board" if b.mode == "sv" else "none"
+        # verified_commit = 验证起点 HEAD（= 该批 commit 的 parent）；
+        # apply 链路中 HEAD 未动（编辑未提交），故等于 base；显式 --target 优先
+        # （模式 A 同走 _resolve_target：非 12hex 描述须换算，失败拒写）
+        verified, terr = _resolve_target(args.target or b.base)
+        if terr:
+            print(f"error: {terr}", file=sys.stderr)
+            return 2
+    else:
+        batch_id = f"{args.prefix}-{time.strftime('%y%m%d%H%M')}"
+        batch_base = args.target or ""
+        # 模式 B：--board skip（如 revert 恢复验证未上板）时 verify_mode 取 none
+        verify_mode = "board" if args.board != "skip" else "none"
+        # dev/main 等描述须解析为 12hex，否则 promote 门禁比 HEAD^ 恒失败
+        verified, terr = _resolve_target(args.target or "")
+        if terr:
+            print(f"error: {terr}", file=sys.stderr)
+            return 2
+
+    body = ""
+    if args.body and Path(args.body).is_file():
+        body = _sanitize(Path(args.body).read_text(encoding="utf-8"))
+
+    r = Receipt(batch_id=batch_id, batch_base=batch_base,
+                verified_commit=verified,
+                verify_mode=verify_mode, result=args.result,
+                build=args.build, push_board=args.board,
+                acceptance=args.acceptance, elapsed_s=args.elapsed,
+                summary=args.summary)
+    path = write_receipt(r, body or args.summary)
+    append_trend(time.strftime("%Y-%m-%d %H:%M:%S"), batch_id, args.result,
+                 f"build={args.build} board={args.board} "
+                 f"acc={args.acceptance.splitlines()[0][:40] if args.acceptance else '-'}",
+                 args.summary[:40])
+    print(f"receipt: {path}")
+    print(f"batch_id: {batch_id}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

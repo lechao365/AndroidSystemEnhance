@@ -1,0 +1,332 @@
+"""验收标签解析与自动执行（含 CLI）。
+
+标签语法（推荐格式）：svc:<svc> / log:<kw> / prop:<k>=<v> / file:<path> /
+cmd:"<含空格的 shell>" 或 cmd:<无空格> / hostcmd:"<host 侧 shell>"（在
+workspace-verify 目录执行，payload 相对路径以其为根，如
+hostcmd:"cases/lcview_check.sh --mode files"）/ boot（裸词）；其余内容视为
+自由文本（status='ai'，由 verify AI 现场判定）。
+overall 语义（三态）：任一自动项 fail 即 fail；无 fail 但含未判定项（ai）则 ai；
+全 pass 且无 ai 才 pass（未判定不算成功）。
+
+CLI:
+  ws_acceptance.py run <--acceptance "<验收文本>" | --case <标签> | --batch-file <cdp>> \
+      [--ensure-boot] [--wait-ready] [--log-since <MM-DD HH:MM:SS.mmm>]
+    → 验收文本三选一（互斥，全缺返 2）；--case 从 harness/config/verify-cases.yaml
+      cases 段取标签（含空格/引号命令在此书写）；--batch-file 经 cdp_parse 解析批次
+      取验收文本。内部 ensure_connected，逐项执行，输出 JSON；exit 0 通过 /
+      1 设备不可达或 fail / 2 参数错误（验收来源缺失/互斥、--case 标签不存在、
+      --log-since 格式非法、--wait-ready 且含 log: 却无 --log-since、或 overall=ai 未判定）
+"""
+import argparse
+import json
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+import yaml
+
+import ws_adb_connect as ac  # noqa: E402（ensure 连接/就绪/时钟/救援，编排层复用）
+
+# 复用 CDP 解析（与 ws_report.py 同款路径注入）：parse_batch 取批次验收文本
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "lib" / "python"))
+from cdp_parse import parse_batch  # noqa: E402
+
+# harness/config/verify-cases.yaml：--case 标签源（资产层，批次内禁引号用例集中维护）
+_CASES_PATH = Path(__file__).resolve().parents[2] / "config" / "verify-cases.yaml"
+
+# hostcmd 在 workspace-verify 目录执行：payload 相对路径（如 cases/lcview_check.sh）
+# 以该目录为根，无需在用例资产中硬编码绝对路径
+_VERIFY_ROOT = Path(__file__).resolve().parent
+
+# log 支持引号包裹（含空格关键字，如 log:"LcView HAL: registered"）；
+# cmd/hostcmd 支持引号包裹（含空格）；引号内支持反斜杠转义（\"），否则
+# 含转义引号的命令（如 adb shell \"echo ...\"）会在转义处截断成坏标签；
+# logfield 取 logcat 含锚点的最后一行按字段名提取数值比较（锚点|字段|比较符|数值），
+# 防 log: 子串匹配命中历史零值心跳的假绿；boot 为裸词；其余标签不含空格
+_TAG_RE = re.compile(
+    r'(?:svc|log|prop|file|hostcmd):(?:"(?:\\.|[^"\\])*"|\S+)'
+    r'|logfield:(?:"(?:\\.|[^"\\])*"|\S+)'
+    r'|cmd:(?:"(?:\\.|[^"\\])*"|\S+)|\bboot\b')
+# --log-since 时间窗起点格式：MM-DD 或 YYYY-MM-DD 的 HH:MM:SS.mmm
+_SINCE_RE = re.compile(r"^(?:\d{4}-)?\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$")
+
+
+def parse_acceptance(text):
+    """提取标签列表；无任何标签则整段视为单条自由文本。
+
+    标签外残文本不得静默丢弃（曾致 lcview-trigger 的 USB 开关命令整体消失）：
+    残余非空即抛 ValueError，由 main 捕获返 2。
+    """
+    text = text or ""
+    tags = _TAG_RE.findall(text)
+    if not tags and text.strip():
+        return [text.strip()]
+    residual = _TAG_RE.sub("", text)
+    if residual.strip():
+        raise ValueError(
+            f"验收文本存在未识别残余（标签外内容会被静默丢弃）: {residual.strip()!r}")
+    return tags
+
+
+def split_tag(tag):
+    if tag == "boot":
+        return "boot", ""
+    if ":" in tag:
+        kind, payload = tag.split(":", 1)
+        if kind in ("cmd", "log", "hostcmd", "logfield") and payload.startswith('"') and payload.endswith('"'):
+            payload = payload[1:-1]
+            payload = payload.replace('\\"', '"')  # 反转义：\" → "
+        return kind, payload
+    return "text", tag
+
+
+def resolve_acceptance(args, cases_path=_CASES_PATH):
+    """解析验收文本来源（--acceptance / --case / --batch-file 三选一）。
+
+    返回 (acceptance, err)：err 非 None 时 acceptance 为 None（err 为错误消息）。
+    --batch-file 经 cdp_parse.parse_batch 取批次验收文本（-s 批次验收为「无」则拒绝）；
+    --case 从 verify-cases.yaml cases 段取标签对应验收文本（值内可用引号）。
+    """
+    sources = [s for s in (args.acceptance, args.case, args.batch_file) if s]
+    if len(sources) > 1:
+        return None, "--acceptance / --case / --batch-file 互斥，只能选其一"
+    if not sources:
+        return None, "必传其一：--acceptance 验收文本 / --case 用例标签 / --batch-file 批次文件"
+    if args.batch_file:
+        try:
+            text = Path(args.batch_file).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            return None, f"批次文件不可读或非 UTF-8: {e}"
+        b = parse_batch(text)
+        if not b.acceptance or b.acceptance == "无":
+            return None, "--batch-file 批次验收为空或「无」（-s 批次无验收，须用 -sv 批次）"
+        return b.acceptance, None
+    if args.case:
+        try:
+            data = yaml.safe_load(Path(cases_path).read_text(encoding="utf-8")) or {}
+            cases = data.get("cases") or {}
+        except (OSError, yaml.YAMLError) as e:
+            return None, f"verify-cases.yaml 读取失败: {e}"
+        if args.case not in cases:
+            opts = ", ".join(sorted(cases)) or "无"
+            return None, (f"用例标签 {args.case!r} 不存在于 verify-cases.yaml cases 段"
+                          f"（可选: {opts}）")
+        return cases[args.case], None
+    return args.acceptance, None
+
+
+def _exec_annotate(detail, code):
+    """code==-1（adb 执行超时）时在 detail 标注，与正常命令失败（exit>0）区分。"""
+    return f"{detail}（adb 执行超时）" if code == -1 else detail
+
+
+def execute_tag(tag, adb_exec, adb_logcat):
+    """adb_exec(cmd)->(body, exit_code)；adb_logcat()->str。返回 (status, detail)。
+
+    status: pass | fail | ai（自由文本由 AI 判定）；exit_code=-1 表示 adb 超时。
+    """
+    kind, payload = split_tag(tag)
+    if kind == "svc":
+        # payload 经 shlex.quote 防注入（svc 名含空格/特殊字符时安全落入 getprop 参数）
+        body, code = adb_exec(f"getprop init.svc.{shlex.quote(payload)}")
+        return ("pass" if code == 0 and body.strip() == "running" else "fail",
+                _exec_annotate(f"init.svc.{payload}={body.strip()!r} exit={code}", code))
+    if kind == "log":
+        out = adb_logcat()
+        hit = payload in out
+        return ("pass" if hit else "fail",
+                f"logcat {'命中' if hit else '未命中'} 关键字 {payload!r}（取回 {len(out)} 字符）")
+    if kind == "logfield":
+        # 锚点|字段名|比较符|数值：取 logcat 含锚点的最后一行按字段名提取
+        # 数值比较——log: 子串匹配会命中历史零值心跳（5000 行缓冲），
+        # 故障累计后仍 PASS 的假绿由此防
+        parts = payload.split("|")
+        if len(parts) != 4:
+            return "fail", f"logfield 语法错误（须 锚点|字段|比较符|数值）: {payload!r}"
+        anchor, field, op, expect_s = [p.strip() for p in parts]
+        out = adb_logcat()
+        lines = [ln for ln in out.splitlines() if anchor in ln]
+        if not lines:
+            return "fail", f"logfield: logcat 未命中锚点 {anchor!r}"
+        last = lines[-1]
+        m = re.search(rf"{re.escape(field)}=(-?\d+)", last)
+        if not m:
+            return "fail", f"logfield: 锚点末行无字段 {field}（{last[:120]}）"
+        actual = int(m.group(1))
+        try:
+            expect = int(expect_s)
+        except ValueError:
+            return "fail", f"logfield: 期望值非数字 {expect_s!r}"
+        ok = {"=": actual == expect, "!=": actual != expect,
+              ">": actual > expect, "<": actual < expect,
+              ">=": actual >= expect, "<=": actual <= expect}.get(op, None)
+        if ok is None:
+            return "fail", f"logfield: 未知比较符 {op!r}（须 = != > < >= <=）"
+        return ("pass" if ok else "fail",
+                f"logfield {field}={actual} {op} {expect}（锚点末行: {last[:120]}）")
+    if kind == "prop":
+        k, _, v = payload.partition("=")
+        body, code = adb_exec(f"getprop {shlex.quote(k)}")
+        # code 必须为 0 且取值相等才 pass（超时 -1 或命令失败即使输出恰好相等也判 fail）
+        return ("pass" if code == 0 and body.strip() == v else "fail",
+                _exec_annotate(f"{k}={body.strip()!r} 期望={v}", code))
+    if kind == "file":
+        body, code = adb_exec(f"ls -la {shlex.quote(payload)}")
+        return ("pass" if code == 0 else "fail",
+                _exec_annotate(body.strip()[:200], code))
+    if kind == "cmd":
+        # cmd 分支按设计是 shell 串（引号/管道语义需保留），不包裹
+        body, code = adb_exec(payload)
+        return ("pass" if code == 0 else "fail",
+                _exec_annotate(body.strip()[:200], code))
+    if kind == "hostcmd":
+        # host 侧执行（不经 adb）：payload 为 shell 串，cwd 落在 workspace-verify，
+        # 相对路径（如 cases/lcview_check.sh）以其为根，用例资产不再硬编码绝对路径
+        try:
+            r = subprocess.run(payload, shell=True, capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               cwd=str(_VERIFY_ROOT), timeout=180)
+            body = (r.stdout + r.stderr).strip()
+            return ("pass" if r.returncode == 0 else "fail",
+                    _exec_annotate(body[:200], r.returncode))
+        except subprocess.TimeoutExpired:
+            return "fail", "hostcmd 执行超时"
+        except OSError as e:
+            return "fail", f"hostcmd 执行失败: {e}"
+    if kind == "boot":
+        body, code = adb_exec("getprop sys.boot_completed")
+        return ("pass" if code == 0 and body.strip() == "1" else "fail",
+                _exec_annotate(f"sys.boot_completed={body.strip()!r}", code))
+    # 自由文本：交 AI 判定
+    return "ai", payload
+
+
+def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False):
+    """执行全部条目，返回 (overall, items)。overall ∈ pass|fail|ai。
+
+    ensure_boot=True 且标签无 boot 时自动追加（兑现 workspace-verify SKILL L20：
+    模式 B 设备存活是恢复的最低判据）。
+    """
+    items = []
+    tags = parse_acceptance(acceptance_text)
+    if ensure_boot and "boot" not in tags:
+        tags = tags + ["boot"]
+    for tag in tags:
+        status, detail = execute_tag(tag, adb_exec, adb_logcat)
+        items.append({"tag": tag, "status": status, "detail": detail})
+    auto = [i for i in items if i["status"] in ("pass", "fail")]
+    if any(i["status"] == "fail" for i in auto):
+        return "fail", items
+    if any(i["status"] == "ai" for i in items):
+        return "ai", items
+    return "pass", items
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="验收执行器")
+    sub = ap.add_subparsers(dest="action", required=True)
+    p = sub.add_parser("run")
+    p.add_argument("--acceptance", default=None, help="验收文本（含标签）")
+    p.add_argument("--case", default=None,
+                   help="验收用例标签（从 harness/config/verify-cases.yaml cases 段取，"
+                        "含空格/引号命令在此书写）")
+    p.add_argument("--batch-file", default=None,
+                   help="CDP 批次文件（经 cdp_parse 解析取验收文本，-sv 批次用）")
+    p.add_argument("--ensure-boot", action="store_true",
+                   help="验收无 boot 标签时自动追加 boot（模式 B 默认）")
+    p.add_argument("--wait-ready", action="store_true",
+                   help="连接后轮询 sys.boot_completed 就绪（步骤 4 有 reboot 时必传）")
+    p.add_argument("--log-since", default=None,
+                   help="logcat 时间窗起点（MM-DD HH:MM:SS.mmm），代 -t 行数避免命中旧日志")
+    args = ap.parse_args(argv)
+
+    acceptance, err = resolve_acceptance(args)
+    if err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
+    try:
+        parse_acceptance(acceptance)
+    except ValueError as e:
+        # 标签外残文本静默丢弃的防护：含残余（如被转义引号截断的命令）直接拒
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    if args.log_since and not _SINCE_RE.match(args.log_since):
+        # 非法时间窗起点会让 adb 静默返空 → 假 fail；格式不符直接拒
+        print(f"error: --log-since 须为 MM-DD 或 YYYY-MM-DD 的 HH:MM:SS.mmm: "
+              f"{args.log_since!r}", file=sys.stderr)
+        return 2
+    if args.wait_ready and not args.log_since:
+        # 假绿精确条件强制拦截：reboot 后 log 窗口若含旧日志会命中上轮关键字
+        tags = parse_acceptance(acceptance)
+        if any(t.startswith("log:") for t in tags):
+            print("error: --wait-ready 且验收含 log: 标签时必须传 --log-since"
+                  "（log 窗口须从 reboot 时刻起，否则命中旧日志假绿）",
+                  file=sys.stderr)
+            return 2
+
+    ep = ac.ensure_connected()
+    if not ep:
+        # 编排层接线 rescue（激活第三级通道）：mDNS/静态失败后以
+        # rescue_enabled=True 重试一次——重启 adbd 有副作用，仅此失败路径触发；
+        # 失败现场由 ensure_connected 内部 [rescue] 打印
+        ep = ac.ensure_connected(rescue_enabled=True)
+    if not ep:
+        print(json.dumps({"overall": "fail", "error": "设备不可达",
+                          "items": []}, ensure_ascii=False))
+        return 1
+    if args.wait_ready and not ac.ensure_ready():
+        print(json.dumps({"overall": "fail",
+                          "error": "设备未就绪（sys.boot_completed 超时，按不可达处理）",
+                          "items": []}, ensure_ascii=False))
+        return 1
+    # 时钟校准触发条件：--wait-ready（reboot 场景）或验收含 ts/fresh 判据
+    # （时间敏感判据须设备时钟可信，否则 skew 大必判红——曾因只挂 wait_ready
+    #  门禁，无 reboot 的 fresh/ts 用例从不校准时钟而恒红）
+    need_clock = args.wait_ready or any(
+        "--mode fresh" in p or "--mode ts" in p
+        for _, p in (split_tag(t) for t in parse_acceptance(acceptance)))
+    if need_clock:
+        # 就绪后校准设备时钟：偏差超阈值自动 root 修正（PIT-5 复发防护，
+        # 避免 ts/fresh 等时间敏感验收因时钟漂移误判）
+        ok, detail = ac.clock_sync(endpoint=ep)
+        if not ok:
+            print(json.dumps({"overall": "fail",
+                              "error": f"设备时钟修正失败: {detail}",
+                              "items": []}, ensure_ascii=False))
+            return 1
+
+    def adb_exec(cmd):
+        try:
+            r = subprocess.run(ac.build_exec_cmd(cmd), capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               timeout=60)
+            return ac.parse_exec_output(r.stdout)
+        except subprocess.TimeoutExpired:
+            return "", -1
+
+    def adb_logcat():
+        try:
+            r = subprocess.run(ac.build_logcat_cmd(None, 5000,
+                                                   since=args.log_since),
+                               capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=60)
+            return r.stdout
+        except subprocess.TimeoutExpired:
+            return ""
+
+    overall, items = run_acceptance(acceptance, adb_exec, adb_logcat,
+                                    ensure_boot=args.ensure_boot)
+    print(json.dumps({"overall": overall, "items": items}, ensure_ascii=False,
+                     indent=2))
+    if overall == "fail":
+        return 1
+    if overall == "ai":
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

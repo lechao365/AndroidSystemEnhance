@@ -30,6 +30,17 @@ static int64_t nowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(d).count();
 }
 
+/*
+ * RetryIntervalMs — 指数退避重连间隔（声明见 hal_client.h）
+ * 500ms × 2^min(retryCount, 4)，封顶 5s；负数 clamp 到 0 防移位 UB
+ */
+int64_t IoHalClient::RetryIntervalMs(int retryCount) {
+    int r = retryCount < 0 ? 0 : retryCount;
+    int64_t interval = kRetryIntervalBaseMs * (1LL << std::min(r, 4));
+    if (interval > kRetryIntervalMaxMs) interval = kRetryIntervalMaxMs;
+    return interval;
+}
+
 IoHalClient::IoHalClient() : connected_(false), lastRetryMs_(0), retryCount_(0) {
     connect();
 }
@@ -96,8 +107,7 @@ void IoHalClient::onHalDied(void *cookie) {
 std::shared_ptr<IIoHal> IoHalClient::get() {
     std::lock_guard<std::mutex> lock(mtx_);
     if (!connected_) {
-        int64_t interval = kRetryIntervalBaseMs * (1LL << std::min(retryCount_, 4));
-        if (interval > kRetryIntervalMaxMs) interval = kRetryIntervalMaxMs;
+        int64_t interval = RetryIntervalMs(retryCount_);
         int64_t elapsed = nowMs() - lastRetryMs_;
         if (elapsed >= interval) {
             lastRetryMs_ = nowMs();

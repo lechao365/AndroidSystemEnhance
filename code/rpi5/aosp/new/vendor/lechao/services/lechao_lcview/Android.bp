@@ -26,6 +26,21 @@ aidl_interface {
     owner: "lechao",
     stability: "vintf",
     vendor_available: true,
+    versions_with_info: [
+        {
+            version: "1",
+            imports: [],
+        },
+        {
+            version: "2",
+            imports: [],
+        },
+    ],
+    // 版本 2 已冻结（追加 getTotalRecords，向后兼容）：接口稳定，
+    // current 与版本 2 一致；后续追加方法需再 update-api + freeze-api 升版本。
+    // 注：不得用旧式 versions 属性，update-api 会迁移为 versions_with_info
+    // 并按冻结处理（追加方法即报 "can not be marked frozen: true"）。
+    frozen: true,
     srcs: ["vendor/lechao/lcview/ILcView.aidl"],
     backend: {
         ndk: {

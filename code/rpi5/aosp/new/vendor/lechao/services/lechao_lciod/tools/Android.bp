@@ -1,0 +1,15 @@
+// ============================================================
+// tools/Android.bp — lciod 工具编译配置
+// lciod_probe: 内核 usbd 统计取数工具（上板验证用例取数入口）
+// ============================================================
+
+cc_binary {
+    name: "lciod_probe",
+    cflags: ["-Wall", "-Werror"],
+    srcs: ["lciod_probe.c"],
+    vendor: false,
+    // 部署到 /system/bin（shell 域可执行；abi 头镜像自 hal/ 目录）
+    include_dirs: [
+        "vendor/lechao/services/lechao_lciod/hal",
+    ],
+}

@@ -10,7 +10,7 @@ Android 系统增强项目：为树莓派等平台提供**内核 + AOSP 系统�
 |------|------|------|
 | [`code/`](code/) | 系统增强代码归档（主导） | 对应 `~/workspace/` 编译源码树的精确镜像，平台目录见下表 |
 | [`docs/`](docs/) | 技术文档（辅助，给人看） | 01-打点增强、02-IO增强、开发工具等 |
-| [`harness/`](harness/) | 开发机制 | 路径配置、归档/回退/文档同步 workflow、规则、参考文档 |
+| [`harness/`](harness/) | 开发机制 | 路径配置、归档/同步/文档同步 workflow、规则、参考文档 |
 
 ### 平台与特性
 
@@ -24,8 +24,8 @@ Android 系统增强项目：为树莓派等平台提供**内核 + AOSP 系统�
 源码调试在 `~/workspace/` 编译树进行，验证通过后归档到 `code/`：
 
 1. **改源码**：在 `~/workspace/`（kernel / aosp）修改，编译、打包、上板验证
-2. **归档**：`/lc-harness-sync-code-to-patchs` 将 workspace 已验证改动镜像到 `code/rpi5/`
-3. **回退**：验证 NG 且无法修复时，`/lc-harness-revert-code-from-patchs` 以 promoted baseline 为真相源把 workspace 拉回一致
+2. **归档**：`/sync-workspace-to-code` 将 workspace 已验证改动镜像到 `code/rpi5/`
+3. **同步**：验证 NG 且无法修复时，`/sync-code-to-workspace` 以 promoted baseline 为真相源把 workspace 拉回一致
 
 > 机制详见 [`harness/README.md`](harness/README.md)，源码改动纪律见 [`harness/rules/source-code-modify.md`](harness/rules/source-code-modify.md)。
 

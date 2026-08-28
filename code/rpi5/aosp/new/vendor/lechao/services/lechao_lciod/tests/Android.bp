@@ -1,0 +1,77 @@
+// ============================================================
+// tests/Android.bp — lechao_lciod 用户态单元测试
+// 所属模块：LcIod IO 健康监控 — 测试
+//
+// 运行方式：
+//   atest lechao_lciod_unit_test    # daemon/common 纯逻辑测试
+//   atest lechao_lciod_hal_test     # HAL 测试（需 device，真实 /dev 节点）
+// filegroup 声明在 daemon/Android.bp 与 hal/Android.bp（main 不入组）
+// ============================================================
+
+cc_test {
+    name: "lechao_lciod_unit_test",
+    cflags: ["-Wall", "-Werror"],
+    // 注：host_supported 不启用。daemon 源码依赖 bionic/Android 日志与
+    // binder_ndk，无法在 host glibc 编译（与 lcview unit_test 一致）。
+    host_supported: false,
+    // 覆盖率插桩：NATIVE_COVERAGE=true 编译启用，上板跑后 pull gcda 用
+    // gcov 出每文件行覆盖（度量不设门禁，对齐 lcview）
+    native_coverage: true,
+    srcs: [
+        "MinorUtils_test.cpp",
+        "Service_test.cpp",
+        "HalClient_test.cpp",
+        ":lechao_lciod_daemon_sources",
+    ],
+    include_dirs: [
+        "vendor/lechao/services/lechao_lciod/common",
+        "vendor/lechao/services/lechao_lciod/daemon",
+        "vendor/lechao/services/include",
+    ],
+    static_libs: [
+        "libgmock",
+        "lechao_lciod_common",
+    ],
+    shared_libs: [
+        "libbase",
+        "liblog",
+        "libbinder_ndk",
+        "system.lechao.lciod-ndk",
+        "vendor.lechao.lciod-V1-ndk",
+    ],
+    header_libs: ["vendor_lechao_log_headers"],
+    test_suites: ["general-tests"],
+}
+
+// ============================================================
+// HAL 测试（仅 device）：依赖真实 /dev/vendor_lechao_usbd* 节点
+// 与 AIDL BnIoHal 运行时
+// ============================================================
+cc_test {
+    name: "lechao_lciod_hal_test",
+    cflags: ["-Wall", "-Werror"],
+    host_supported: false,
+    native_coverage: true,
+    srcs: [
+        "DeviceIo_test.cpp",
+        "HalService_test.cpp",
+        ":lechao_lciod_hal_sources",
+    ],
+    include_dirs: [
+        "vendor/lechao/services/lechao_lciod/common",
+        "vendor/lechao/services/lechao_lciod/hal",
+        "vendor/lechao/services/include",
+    ],
+    static_libs: [
+        "libgmock",
+        "lechao_lciod_common",
+    ],
+    shared_libs: [
+        "libbase",
+        "liblog",
+        "libbinder_ndk",
+        "vendor.lechao.lciod-V1-ndk",
+    ],
+    header_libs: ["vendor_lechao_log_headers"],
+    test_suites: ["device-tests"],
+}

@@ -55,8 +55,8 @@ public:
     void enforceRetention();
 
 private:
-    // 根据 event schema 和日期生成文件名
-    std::string makeFilename(const EventSchema& schema, const std::string& date);
+    // 根据 event schema、日期和轮转序号生成文件名
+    std::string makeFilename(const EventSchema& schema, const std::string& date, int seq);
     // 获取当前日期的 YYYYMMDD 字符串
     std::string makeDateStr();
     // 打开/创建某个 event_id 对应的日志文件

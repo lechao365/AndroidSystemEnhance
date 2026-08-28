@@ -1,16 +1,25 @@
 # AndroidSystemEnhance 项目约束
 
+## 会话语言
+所有会话一律使用中文答复（含任务报告、方案说明、代码注释、提交信息等）；代码标识符、路径、命令等按原文保留。
+
 ## 源码改动优先级
-**改动 `~/workspace/` 下任何源码前，必须先加载** [harness/rules/source-code-modify.md](harness/rules/source-code-modify.md)（含验证流程、归档纪律、禁止行为）。
-`~/workspace/` 是编译源码树（唯一参与编译），`code/` 是单向归档目录，改动必须从源头开始。
+**改动 `code/`（dev 分支）源码前，必须先加载** [harness/rules/source-code-modify.md](harness/rules/source-code-modify.md)（含验证流程、归档纪律、禁止行为）。
+`code/`（dev 分支）是唯一改动源头，`~/workspace/` 是编译缓存镜像（code → workspace 单向同步），改动必须从源头开始。
 
 ## Harness 工作流命令
 
 | 命令 | 用途 |
 |------|------|
-| `/lc-harness-sync-code-to-patchs` | workspace 已验证改动归档到 `code/rpi5/`（含删除对齐 + manifest 重生成 + README 映射表更新） |
-| `/lc-harness-revert-code-from-patchs` | 以 promoted baseline 为真相源，把 workspace 拉回一致（计划→逐条确认→执行→落盘校验） |
-| `/lc-harness-sync-patchs-to-doc` | code 变动生成报告，按映射规则精准同步设计文档（方案先行，确认后落盘） |
+| `/sync-workspace-to-code` | workspace 已验证改动归档到 `code/rpi5/`（含删除对齐 + manifest 重生成 + README 映射表更新）（DEPRECATED） |
+| `/sync-code-to-workspace` | 以 promoted baseline 为真相源，把 workspace 拉回一致（计划→逐条确认→执行→落盘校验） |
+| `/sync-code-to-doc` | code 变动生成报告，按映射规则精准同步设计文档（方案先行，确认后落盘） |
+| `/cross-device-emit` | emit 侧生成 CDP 批次（远端强 LLM 分析后产批，输出纯文本，仅 emit 设备） |
+| `/cross-device-apply` | 解析 CDP 批次编辑 code/dev，-sv 拉起验证后推送（仅 apply 设备） |
+| `/workspace-verify` | code→workspace 同步、增量编译、上板验证并写 data/verify 收据（仅 apply 设备） |
+| `/git-works-push` | dev 分支 commit + push（收据随批入库，仅 apply 设备） |
+| `/sync-modify-to-main-base` | dev 验证 OK 后 promote 到 main 生成基线（三段式证据链，仅 apply 设备） |
+| `/revert-modify-from-main-base` | dev 持续 NG 人工回退到 main 基线并恢复设备（仅 apply 设备） |
 
 harness 能力全部内聚在 `harness/` 目录（不依赖 LcHarness），使用说明见 [harness/README.md](harness/README.md)。
 
@@ -45,20 +54,13 @@ harness 能力全部内聚在 `harness/` 目录（不依赖 LcHarness），使�
 该规则将 P0 检视修复中暴露的 4 类 bug（字节序、资源生命周期、输入防御、故障静默）提炼为 CXX-001~004 硬规则。
 
 ## 测试防护
-lcview 模块改动后必须通过单元测试编译验证：`make lechao_lcview_unit_test lechao_lcview_hal_test -j$(nproc)` 无编译错误。
-测试源码见 `~/workspace/aosp/vendor/lechao/services/lechao_lcview/tests/`。
-
-## 文件删除规则
-1. **任何文件删除操作（无论是否被 git 跟踪）都必须逐个向用户确认，禁止自行删除。**
-   - 包括但不限于：临时产物（evidence_bundle.json / summary.txt 等）、测试输出、中间文件、日志、缓存。
-   - 操作前必须列出待删文件清单，等用户显式确认（`y` / 同意 / 删吧）后才执行。
-2. **`.gitignore` 排除的文件无需考虑删除问题**——它们不会被提交到 git server，不影响仓库状态。
-   - 判断依据：`git check-ignore <file>` 返回 0（被忽略）则无需确认。
-3. **禁止以"清理"为由批量删除**——即使看似无用，也必须逐个确认。
+lcview / lciod 模块改动后必须通过单元测试编译验证：`make lechao_lcview_unit_test lechao_lcview_hal_test lechao_lciod_unit_test lechao_lciod_hal_test -j$(nproc)` 无编译错误。
+测试源码见 `~/workspace/aosp/vendor/lechao/services/lechao_lcview/tests/` 与 `~/workspace/aosp/vendor/lechao/services/lechao_lciod/tests/`。
 
 ## Baseline 使用指引
-在执行 `/lc-harness-revert-code-from-patchs` 回退操作前，必须先查 [harness/config/baseline-status.yaml](harness/config/baseline-status.yaml)：
+在将 code 基线用作灾难恢复真相源（`/sync-code-to-workspace` 交互模式）前，必须先查 [harness/config/baseline-status.yaml](harness/config/baseline-status.yaml)（`--auto` 日常同步不受此限）：
+- 新流程（cross-device）：candidate 由 `/sync-modify-to-main-base --prepare` 依据最新 verify 收据自动登记（登记门禁：收据 result 属 pass 或 skip 且 HEAD^ 等于 verified_commit），人工评审通过后 promote 到 main
 - 确认目标 baseline 状态为 `promoted`（证据完整）
-- 检查 `build_result` / `package_result` / `board_verify` 均为 PASS
+- 检查 `build_result` / `package_result` / `board_verify`：PASS/SKIP 均合法，FAIL 须人工复核
 - 确认 `approved_by` 和 `approved_at` 已填
 - 未完成证据化晋升的 baseline 不得作为恢复真相源

@@ -9,6 +9,7 @@
 #ifndef _LECHAO_LCIOD_HAL_CLIENT_H
 #define _LECHAO_LCIOD_HAL_CLIENT_H
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
 
@@ -25,6 +26,14 @@ class IoHalClient {
 public:
     IoHalClient();
     ~IoHalClient();
+
+    /*
+     * RetryIntervalMs — 重连退避间隔（静态纯函数，供单测）
+     * 公式: 500ms × 2^min(retryCount, 4)，封顶 5s（CXX-002 边界防御：
+     * retryCount < 0 时按 0 处理，避免负数移位的未定义行为）
+     */
+    static int64_t RetryIntervalMs(int retryCount);
+
     std::shared_ptr<aidl::vendor::lechao::lciod::IIoHal> get();
 private:
     /* DeathCookie 同时携带 self 和 recipient，便于 unlink 回调释放资源 */

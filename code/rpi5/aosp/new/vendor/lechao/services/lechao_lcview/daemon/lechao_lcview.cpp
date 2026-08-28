@@ -17,6 +17,7 @@
 
 #include "SchemaParser.h"
 #include "FileWriter.h"
+#include "batch_parser.h"
 #include "../include/lcview_events.h"
 #include <aidl/vendor/lechao/lcview/ILcView.h>
 #include <android/binder_manager.h>
@@ -29,9 +30,14 @@
 #include "lechao_log.h"
 
 using aidl::vendor::lechao::lcview::ILcView;
+using namespace vendor::lechao::lcview;
 
 // 全局运行标志，被信号处理器置 false 以触发优雅退出
 static std::atomic<bool> gRunning(true);
+
+// 构建标识：每次上板验证批次唯一，启动/心跳日志携带，
+// 供板端 grep 精确确认"新二进制已在运行"（防假验证）
+#define LCVIEW_BUILD_TAG "LCVIEW-VERIFY-20260826-01"
 
 // 信号处理函数：收到 SIGINT/SIGTERM 时设置退出标志，
 // 使主循环自然结束，确保当前批次日志不丢失
@@ -45,7 +51,7 @@ int main(int argc, char* argv[])
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 
-    ALOGI("lechao_lcview: starting");
+    ALOGI("lechao_lcview: starting, build=%s", LCVIEW_BUILD_TAG);
 
     SchemaParser schema;
     // 默认 schema 路径：vendor 分区的配置文件
@@ -57,14 +63,10 @@ int main(int argc, char* argv[])
     // v3.4 优化: schema 加载失败时重试 30 次（最多 15 秒），
     //   因为 schema 文件所在的 vendor 分区可能在 HAL 之后才挂载完成。
     //   替代旧版本直接 FATAL 退出的策略，提高启动可靠性。
-    int schemaRetry = 0;
-    while (!schema.loadFromFile(schemaPath) && schemaRetry < 30) {
-        ALOGW("lechao_lcview: schema not ready, retrying... (%d/30)", ++schemaRetry);
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    }
-    if (!schema.eventCount()) {
-        ALOGE("lechao_lcview: failed to load schema from %s after %d retries",
-              schemaPath.c_str(), schemaRetry);
+    //   （重试逻辑抽入 batch_parser 可测函数）
+    const bool schemaOk = loadSchemaWithRetry(schema, schemaPath, 30);
+    if (!schemaOk) {
+        ALOGE("lechao_lcview: failed to load schema from %s", schemaPath.c_str());
         return 1;
     }
     ALOGI("lechao_lcview: loaded %zu event schemas", schema.eventCount());
@@ -99,18 +101,12 @@ int main(int argc, char* argv[])
     };
 
     const std::string serviceName = "vendor.lechao.lcview.ILcView/default";
-    int retryCount = 0;
-    std::shared_ptr<ILcView> hal;
-    // 等待 HAL 服务就绪，最多重试 100 次（约 10 秒）。
-    // 为什么需要等待：HAL 和 daemon 的 init .rc 都有 oneshot 属性，
-    // 无法保证 HAL 先于 daemon 启动，所以 daemon 必须优雅重试。
-    while (!(hal = bind_hal(serviceName)) && retryCount < 1200) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        retryCount++;
-    }
+    // 等待 HAL 服务就绪，最多重试 1200 次（100ms 间隔，约 2 分钟）。
+    // 为什么需要等待：HAL 与 daemon 的启动顺序无保证，daemon 必须优雅重试。
+    // （等待循环抽入 batch_parser 可测函数）
+    auto hal = waitForHal(bind_hal, serviceName, 1200);
     if (!hal) {
-        ALOGE("lechao_lcview: cannot connect to HAL after %d retries",
-              retryCount);
+        ALOGE("lechao_lcview: cannot connect to HAL after retries");
         return 1;
     }
 
@@ -118,10 +114,22 @@ int main(int argc, char* argv[])
 
     // 主循环：不断从 HAL 拉取批次数据、解析、写入文件
     int loopCount = 0;
+    // JSONL 落盘累计条数（守恒校验基准：内核 total_records ≈ overrun + 落盘条数）
+    long long jsonlRecords = 0;
     while (gRunning) {
         loopCount++;
-        if (loopCount % 30 == 0)
-            ALOGI("lechao_lcview: heartbeat, loop=%d", loopCount);
+        if (loopCount % 30 == 0) {
+            // CXX-004: 周期查询内核 ring buffer 溢出计数并打进心跳，
+            // 日志丢失（内核写满覆盖）对上层可见，不再静默
+            int32_t overrun = 0;
+            int64_t totalRecords = 0;
+            hal->getOverrunCount(&overrun);
+            hal->getTotalRecords(&totalRecords);
+            ALOGI("lechao_lcview: heartbeat, loop=%d, kernel overrun=%d, "
+                  "total_records=%lld, jsonl_records=%lld",
+                  loopCount, overrun, static_cast<long long>(totalRecords),
+                  jsonlRecords);
+        }
 
         std::vector<uint8_t> batch;
         LC_ALOGD("getBatch: calling...");
@@ -133,80 +141,40 @@ int main(int argc, char* argv[])
 
         // Binder 通信失败处理：
         // 可能是 HAL 重启或服务管理器暂时不可用，
-        // 等待 1 秒后尝试重新绑定
+        // 等待 1 秒后尝试重新绑定（重绑抽入 batch_parser 可测函数）
         if (!status.isOk()) {
             ALOGE("lechao_lcview: getBatch() binder error: %s",
                   status.getDescription().c_str());
             std::this_thread::sleep_for(std::chrono::seconds(1));
-            hal = bind_hal(serviceName);
+            hal = rebindAfterError(bind_hal, serviceName);
             if (!hal) {
-                ALOGE("lechao_lcview: lost HAL connection");
-                break;
+                /* CXX-004: return 0 伪装正常完成是故障静默——
+                 * rc 非 oneshot，exit(1) 让 init 自动重启拉起采集链路 */
+                ALOGE("lechao_lcview: lost HAL connection, exiting for init restart");
+                exit(1);
             }
             continue;
         }
 
         // v3.4 优化: getBatch() 已改为阻塞式（HAL 内部 condition_variable 等待），
-        // 空批次对应 HAL 超时（1s 无数据），直接继续循环无需额外 sleep。
-        if (batch.empty()) {
-            LC_ALOGD("getBatch: empty, continue");
-            continue;
+        // 空批次对应 HAL 超时（1s 无数据），直接落入轮转检查后继续循环。
+        if (!batch.empty()) {
+            ALOGI("lechao_lcview: batch received: %zu bytes (build=%s)",
+                  batch.size(), LCVIEW_BUILD_TAG);
+
+            // 解析批次数据：批次 = 4 字节长度前缀 + 二进制记录
+            // （解析逻辑抽入 batch_parser 可测函数）
+            BatchParseResult parsed = parseBatch(schema, writer, batch);
+            jsonlRecords += parsed.validCnt;
+            ALOGI("lechao_lcview: batch parsed: %u valid, %u invalid (build=%s)",
+                  parsed.validCnt, parsed.invalidCnt, LCVIEW_BUILD_TAG);
+        } else {
+            LC_ALOGD("getBatch: empty batch");
         }
 
-        ALOGI("lechao_lcview: batch received: %zu bytes", batch.size());
-
-        // 解析批次数据：批次 = 4 字节长度前缀 + 二进制记录
-        // 批量数据格式：[len(4B) | record_data(len-4B)] 的序列
-        size_t offset = 0;
-        while (offset + 4 <= batch.size()) {
-            // 读取本条记录的总长度（含自身 4 字节）
-            uint32_t total_len;
-            memcpy(&total_len, batch.data() + offset, 4);
-
-            // 长度校验：最小长度和边界检查
-            if (total_len < 4 || offset + total_len > batch.size()) {
-                writer.writeInvalid(batch.data() + offset,
-                                      batch.size() - offset, "bad length");
-                ALOGE("lechao_lcview: parse: bad length at offset=%zu, total_len=%u", offset, total_len);
-                break;
-            }
-
-            const uint8_t* recordStart = batch.data() + offset + 4;
-            size_t recordDataLen = total_len - 4;
-
-            // 记录必须至少包含固定头的大小
-            if (recordDataLen < sizeof(struct lcview_record_hdr)) {
-                ALOGE("lechao_lcview: parse: record too small (%zu < %zu)", recordDataLen, sizeof(struct lcview_record_hdr));
-                writer.writeInvalid(recordStart, recordDataLen,
-                                      "record too small");
-                offset += total_len;
-                continue;
-            }
-
-            // 使用 SchemaParser 校验记录的魔法数字、event_id、字段数、
-            // 字段类型和总长度是否完整合法
-            std::string errMsg;
-            if (schema.validate(recordStart, recordDataLen, errMsg)) {
-                const struct lcview_record_hdr* hdr =
-                    reinterpret_cast<const struct lcview_record_hdr*>(recordStart);
-                const uint8_t* fields = recordStart + sizeof(struct lcview_record_hdr);
-                const EventSchema* es = schema.find(hdr->event_id);
-                if (es) {
-                    LC_ALOGD("parse: event_id=%u valid, writing", hdr->event_id);
-                    size_t fieldsLen = recordDataLen - sizeof(struct lcview_record_hdr);
-                    writer.writeRecord(*es, hdr, fields, fieldsLen);
-                }
-            } else {
-                writer.writeInvalid(recordStart, recordDataLen, errMsg);
-                ALOGE("lechao_lcview: parse: validate failed: %s", errMsg.c_str());
-            }
-
-            offset += total_len;
-        }
-
-        // 检查是否需要文件轮转（按日期或文件大小）
+        // 每轮统一执行轮转与容量检查（含空批次轮次）：
+        // 跨天后的首个空批次也要触发按日轮转，避免新数据落进旧日期文件
         writer.checkRotation();
-        // 清理超出总容量限制的最旧日志文件
         writer.enforceRetention();
     }
 

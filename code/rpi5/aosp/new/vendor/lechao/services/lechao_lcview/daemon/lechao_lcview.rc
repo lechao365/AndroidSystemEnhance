@@ -15,16 +15,14 @@ on post-fs-data
 #   /system/bin/lechao_lcview — 可执行文件路径（system 分区）
 #   class main — 随 main 类服务一同启动
 #   user/group system — 以 system 身份运行，有限文件系统权限
-#   oneshot — 退出后不自动重启（主循环退出即进程终了）
-# 为什么用 oneshot 而非默认重启：
-#   daemon 主循环因 HAL 连接丢失等不可恢复错误而退出时，
-#   持续重启会造成日志风暴（logcat log 暴涨），
-#   手动恢复更合理。
+#   非 oneshot（CXX-004）: HAL 永久失联等致命错误走 exit(1)，
+#   init 默认策略自动重启拉起采集链路；init 自带重启限速，
+#   不会造成日志风暴。oneshot 会让 exit(1) 后进程永久消失，
+#   故障被无限期掩盖。
 service lechao_lcview /system/bin/lechao_lcview
     class main
     user system
     group system
-    oneshot
 
 # sys.boot_completed=1 触发启动：
 # 等待系统完全启动后再启动日志采集服务，

@@ -82,12 +82,27 @@ bool SchemaParser::parseJson(const std::string& jsonContent)
         return false;
     }
 
-    int newVersion = root.get("version", 0).asInt();
-    const Json::Value& events = root["events"];
-    if (!events.isArray()) {
-        LOG(ERROR) << "SchemaParser: 'events' is not an array";
+    /* CXX-003: root 必须为 object（strictRoot 已放开，此处显式校验），
+     * 根为数组时 root["events"] 行为未定义 */
+    if (!root.isObject()) {
+        LOG(ERROR) << "SchemaParser: root is not an object";
         return false;
     }
+
+    /* CXX-003: 所有字段 isMember + isXxx 双重前置校验。
+     * jsoncpp 在 -fno-exceptions 下字段缺失/类型不匹配直接 abort，
+     * schema 配置属不可信外部输入，禁止假设字段存在且类型正确。
+     * version 例外：仅为元数据，缺失/类型错时缺省 0 不阻断解析
+     * （与 SchemaParser_test.MissingVersion_DefaultsToZero 契约一致） */
+    int newVersion = 0;
+    if (root.isMember("version") && root["version"].isInt())
+        newVersion = root["version"].asInt();
+
+    if (!root.isMember("events") || !root["events"].isArray()) {
+        LOG(ERROR) << "SchemaParser: 'events' missing or not an array";
+        return false;
+    }
+    const Json::Value& events = root["events"];
 
     /* 原子提交：先全部解析到局部 map，全部成功后再 swap 到成员变量。
      * 任意一步失败都直接返回，mSchemaMap 保持完整旧状态。 */
@@ -95,19 +110,59 @@ bool SchemaParser::parseJson(const std::string& jsonContent)
 
     for (const auto& ev : events) {
         EventSchema schema;
-        schema.id = ev["id"].asUInt();
-        schema.name = ev["name"].asString();
-        schema.desc = ev.get("desc", "").asString();
 
-        const Json::Value& fields = ev["fields"];
-        if (!fields.isArray()) {
-            LOG(ERROR) << "SchemaParser: event " << schema.id << " has no fields";
+        if (!ev.isMember("id") || !ev["id"].isUInt()) {
+            LOG(ERROR) << "SchemaParser: event 'id' missing or not a uint";
             return false;
         }
+        uint32_t rawId = ev["id"].asUInt();
+        /* EventSchema.id 为 uint16_t：超范围赋值会静默截断，
+         * 可能与其他 id 冲突产生脏 schema（CXX-003 边界校验） */
+        if (rawId > 0xFFFF) {
+            LOG(ERROR) << "SchemaParser: event id " << rawId
+                       << " exceeds uint16_t range";
+            return false;
+        }
+        schema.id = static_cast<uint16_t>(rawId);
+
+        if (!ev.isMember("name") || !ev["name"].isString()) {
+            LOG(ERROR) << "SchemaParser: event " << schema.id
+                       << " 'name' missing or not a string";
+            return false;
+        }
+        schema.name = ev["name"].asString();
+
+        if (ev.isMember("desc")) {
+            if (!ev["desc"].isString()) {
+                LOG(ERROR) << "SchemaParser: event " << schema.id
+                           << " 'desc' is not a string";
+                return false;
+            }
+            schema.desc = ev["desc"].asString();
+        }
+
+        if (!ev.isMember("fields") || !ev["fields"].isArray()) {
+            LOG(ERROR) << "SchemaParser: event " << schema.id
+                       << " has no fields array";
+            return false;
+        }
+        const Json::Value& fields = ev["fields"];
 
         for (const auto& f : fields) {
             FieldDef fd;
+            if (!f.isMember("name") || !f["name"].isString()) {
+                LOG(ERROR) << "SchemaParser: event " << schema.id
+                           << " field 'name' missing or not a string";
+                return false;
+            }
             fd.name = f["name"].asString();
+
+            if (!f.isMember("type") || !f["type"].isString()) {
+                LOG(ERROR) << "SchemaParser: event " << schema.id
+                           << " field '" << fd.name
+                           << "' type missing or not a string";
+                return false;
+            }
             fd.type = parseFieldType(f["type"].asString());
             if (fd.type == FieldType::UNKNOWN) {
                 LOG(ERROR) << "SchemaParser: unknown type '"
@@ -116,6 +171,16 @@ bool SchemaParser::parseJson(const std::string& jsonContent)
                 return false;
             }
             schema.fields.push_back(fd);
+        }
+
+        /* 重复 id 不阻断解析（后者覆盖前者，与
+         * SchemaParser_test.DuplicateId_OverwritesWithWarning 契约一致），
+         * 但必须 WARNING 让配置错误可见（CXX-004 故障可见性精神） */
+        auto dup = newMap.find(schema.id);
+        if (dup != newMap.end()) {
+            LOG(WARNING) << "SchemaParser: duplicate event id " << schema.id
+                         << " (" << schema.name << ") overwrites previous '"
+                         << dup->second.name << "'";
         }
 
         LC_LOGD("SchemaParser: parsed event id=" << schema.id << " name=" << schema.name << " fields=" << schema.fields.size());

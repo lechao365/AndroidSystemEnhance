@@ -6,7 +6,7 @@
 ## 定位
 - **是什么**：Raspberry Pi 5 平台 AOSP + Linux kernel 定制改动的归档镜像（`~/workspace/` 编译源码树的精确镜像）
 - **职责边界**：归档层，非编译树（编译在 `~/workspace/`）
-- **上下游依赖**：由 `lc-harness-sync-code-to-patchs` 从 workspace 写入，被 `lc-harness-revert-code-from-patchs` 读回 workspace、被 `lc-harness-sync-patchs-to-doc` 读为文档源
+- **上下游依赖**：由 `sync-workspace-to-code` 从 workspace 写入，被 `sync-code-to-workspace` 读回 workspace、被 `sync-code-to-doc` 读为文档源
 
 ## 大纲
 
@@ -16,7 +16,7 @@
 | [大纲](#大纲) | 本 README 章节索引 | 判断需要读哪些段 |
 | [目录说明](#目录说明) | 顶层目录清单与职责 | 了解结构时 |
 | [特性概览](#特性概览) | 内核态 / 用户态特性索引 | 了解改动范围时 |
-| [使用方式](#使用方式) | 归档 / 回退 / 手动回写部署 | 实际操作时 🔖 |
+| [使用方式](#使用方式) | 归档 / 同步 / 手动回写部署 | 实际操作时 🔖 |
 | [文件映射表](#文件映射表) | 五张表（自动维护，请勿手编） | 查找具体文件时 🔖 |
 | [关联资源](#关联资源) | workflow、规则、配置链接 | 深入理解时 |
 
@@ -24,10 +24,10 @@
 
 | 子目录/文件 | 职责 | 关键入口/被谁引用 |
 |------------|------|------------------|
-| `kernel/` | ← `~/workspace/rpi5-kernel-build/common/`，modified diff + new 全新文件 | 被 `lc-harness-revert-code-from-patchs` 读回 |
-| `aosp/` | ← `~/workspace/aosp/`，modified diff + new 全新文件 | 被 `lc-harness-revert-code-from-patchs` 读回 |
+| `kernel/` | ← `~/workspace/rpi5-kernel-build/common/`，modified diff + new 全新文件 | 被 `sync-code-to-workspace` 读回 |
+| `aosp/` | ← `~/workspace/aosp/`，modified diff + new 全新文件 | 被 `sync-code-to-workspace` 读回 |
 | `others/` | 树莓派5专用工具，直接 Git 维护，不同步 | 独立编译运行 |
-| `manifest.yaml` | 文件清单元数据，由 lc-harness-sync-code-to-patchs 维护 | 被 revert/sync workflow 读取 |
+| `manifest.yaml` | 文件清单元数据，由 sync-workspace-to-code 维护 | 被 sync 工作流读取 |
 
 ### 特性概览
 
@@ -54,11 +54,11 @@
 
 ### 归档（workspace → code）
 
-`/lc-harness-sync-code-to-patchs` 命令自动镜像 workspace 改动 + 更新 manifest + 更新本 README 文件映射表。
+`/sync-workspace-to-code` 命令自动镜像 workspace 改动 + 更新 manifest + 更新本 README 文件映射表。
 
-### 回退（code → workspace）
+### 同步（code → workspace）
 
-`/lc-harness-revert-code-from-patchs` 命令，详见 [`../../harness/skills/lc-harness-revert-code-from-patchs/SKILL.md`](../../harness/skills/lc-harness-revert-code-from-patchs/SKILL.md)。
+`/sync-code-to-workspace` 命令，详见 [`../../harness/skills/sync-code-to-workspace/SKILL.md`](../../harness/skills/sync-code-to-workspace/SKILL.md)。
 
 ### 手动回写部署（code → 新环境）
 
@@ -111,7 +111,7 @@ fastboot reboot
 # 验证进程
 sleep 30
 adb shell ps -A | grep lechao
-# 期望：lechao_lciod_hal, lechao_lciod, lechao.lcview-service, lechao_lcview
+# 期望：lechao_lciod_hal, lechao_lciod, lechao_lcview_hal, lechao_lcview
 
 # 验证 VINTF
 adb shell service list | grep lechao
@@ -123,7 +123,7 @@ adb shell ls -l /dev/vendor_lechao_lcview /dev/vendor_lechao_usbd*
 
 ## 文件映射表
 
-> 以下映射表由 `lc-harness-sync-code-to-patchs` 自动维护，请勿手动编辑。
+> 以下映射表由 `sync-workspace-to-code` 自动维护，请勿手动编辑。
 
 ### kernel/modified/
 
@@ -196,8 +196,8 @@ adb shell ls -l /dev/vendor_lechao_lcview /dev/vendor_lechao_usbd*
 
 | 类型 | 路径 | 说明 |
 |------|------|------|
-| 关联 workflow | [`../../harness/skills/lc-harness-sync-code-to-patchs/`](../../harness/skills/lc-harness-sync-code-to-patchs/) | 归档（workspace → code） |
-| 关联 workflow | [`../../harness/skills/lc-harness-revert-code-from-patchs/`](../../harness/skills/lc-harness-revert-code-from-patchs/) | 回退（code → workspace） |
-| 关联 workflow | [`../../harness/skills/lc-harness-sync-patchs-to-doc/`](../../harness/skills/lc-harness-sync-patchs-to-doc/) | 文档同步 |
-| 关联规则 | [`../../harness/rules/source-code-modify.md`](../../harness/rules/source-code-modify.md) | workspace 是源头，code 是归档 |
+| 关联 workflow | [`../../harness/skills/sync-workspace-to-code/`](../../harness/skills/sync-workspace-to-code/) | 归档（workspace → code）（DEPRECATED） |
+| 关联 workflow | [`../../harness/skills/sync-code-to-workspace/`](../../harness/skills/sync-code-to-workspace/) | 同步（code → workspace） |
+| 关联 workflow | [`../../harness/skills/sync-code-to-doc/`](../../harness/skills/sync-code-to-doc/) | 文档同步 |
+| 关联规则 | [`../../harness/rules/source-code-modify.md`](../../harness/rules/source-code-modify.md) | code/dev 是源头，workspace 是编译缓存（单向同步） |
 | 关联配置 | [`../../harness/config/paths.conf`](../../harness/config/paths.conf) | 路径单一事实源（PATCHS_DIR 指向本目录） |

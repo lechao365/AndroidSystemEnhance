@@ -13,14 +13,12 @@
 #   interface aidl ... — 显式声明实现 vendor.lechao.lcview.ILcView
 #                        AIDL 接口，这是 Treble 架构要求。
 #                        此声明使 init 自动管理 service_manager 注册。
-#   oneshot — 退出后不重启（确保不会在 init 中产生重启循环）
-# 为什么 oneshot 而不是默认重启：
-#   如果内核驱动设备节点不存在或打开失败，HAL 进程快速退出，
-#   持续重启不会解决问题，反而造成资源浪费。
-#   日志会指示 daemon 重试连接，等驱动准备好后再手动启动更合理。
+#   非 oneshot（CXX-004）: readerLoop 致命错误走 exit(1)，init 默认
+#   策略自动重启拉起 HAL；init 自带重启限速防循环风暴。设备节点
+#   未就绪场景由 HAL 内部 5s 重试覆盖（openDevice），oneshot 会让
+#   HAL 永久消失且 daemon 侧无法感知根因。
 service lechao_lcview_hal /vendor/bin/lechao_lcview_hal
     class hal
     user system
     group system
     interface aidl vendor.lechao.lcview.ILcView/default
-    oneshot

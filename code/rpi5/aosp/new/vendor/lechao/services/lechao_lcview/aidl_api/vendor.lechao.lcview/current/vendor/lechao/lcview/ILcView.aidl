@@ -21,4 +21,5 @@ package vendor.lechao.lcview;
 interface ILcView {
   byte[] getBatch();
   int getOverrunCount();
+  long getTotalRecords();
 }

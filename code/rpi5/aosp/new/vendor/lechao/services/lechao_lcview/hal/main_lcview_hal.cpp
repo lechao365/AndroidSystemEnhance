@@ -22,19 +22,25 @@
 
 using namespace vendor::lechao::lcview;
 
+// 构建标识：与 daemon 侧同值，启动日志携带供板端 grep 确认新二进制在跑
+#define LCVIEW_BUILD_TAG "LCVIEW-VERIFY-20260826-01"
+
 int main(int argc, char* argv[])
 {
     android::base::InitLogging(argv, android::base::LogdLogger(android::base::SYSTEM));
     LOG(INFO) << "LcView HAL: starting, loglevel="
-              << (::lechao::debugVerbose() ? "debug" : "production");
+              << (::lechao::debugVerbose() ? "debug" : "production")
+              << ", build=" << LCVIEW_BUILD_TAG;
     android::base::SetDefaultTag("lechao_lcview_hal");
 
     // 设置 Binder 线程池最大线程数为 4
     ABinderProcess_setThreadPoolMaxThreadCount(4);
 
     // 创建 LcView 服务实例（SharedRefBase 管理生命周期）
-    // 构造函数会自动打开内核设备并启动后台读取线程
-    auto lcview = ndk::SharedRefBase::make<LcView>();
+    // 注入生产设备读取器；构造不启动线程，注册成功后再 start()，
+    // 消除"readerLoop 致命退出早于服务注册"的竞态窗口（CXX-004 配套）
+    auto lcview = ndk::SharedRefBase::make<LcView>(
+        std::make_unique<EpollDeviceReader>());
 
     // 注册服务到 ServiceManager（名称与 AIDL 定义一致）
     // daemon 端使用 AServiceManager_checkService 查找此名称
@@ -47,6 +53,8 @@ int main(int argc, char* argv[])
     }
 
     LOG(INFO) << "LcView HAL: registered " << name;
+    // 服务注册成功后启动内核读取线程
+    lcview->start();
     // 加入 Binder 线程池，等待远程 IPC 调用
     // 此调用会阻塞当前线程直到进程退出
     ABinderProcess_joinThreadPool();

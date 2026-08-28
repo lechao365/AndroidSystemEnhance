@@ -32,6 +32,7 @@
  */
 
 #include "lcview_internal.h"
+#include "lcview_ring_logic.h"
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
@@ -55,15 +56,13 @@ extern int lcview_debug;
  * @return 当前可以安全写入的字节数（不含预留的 1 字节）
  *
  * Must be called with ring->lock held.
+ *
+ * 纯索引算法抽至 lcview_ring_logic.c（内核与 host 单测共用，见
+ * lcview_ring_logic.h），此处为薄包装。
  */
 static uint32_t ring_avail_write(struct lcview_ring *ring)
 {
-    uint32_t used;
-    if (ring->write_pos >= ring->read_pos)
-        used = ring->write_pos - ring->read_pos;
-    else
-        used = ring->size - ring->read_pos + ring->write_pos;
-    return ring->size - used - 1;
+    return ring_avail_write_core(ring->size, ring->write_pos, ring->read_pos);
 }
 
 /*
@@ -79,13 +78,7 @@ static uint32_t ring_avail_write(struct lcview_ring *ring)
 static void ring_memcpy_out(struct lcview_ring *ring, uint8_t *dst,
                             uint32_t pos, uint32_t len)
 {
-    if (pos + len <= ring->size) {
-        memcpy(dst, ring->buf + pos, len);
-    } else {
-        uint32_t part1 = ring->size - pos;
-        memcpy(dst, ring->buf + pos, part1);
-        memcpy(dst + part1, ring->buf, len - part1);
-    }
+    ring_memcpy_out_core(ring->buf, ring->size, dst, pos, len);
 }
 
 /*
@@ -96,13 +89,7 @@ static void ring_memcpy_out(struct lcview_ring *ring, uint8_t *dst,
 static void ring_memcpy_in(struct lcview_ring *ring, uint32_t pos,
                            const uint8_t *src, uint32_t len)
 {
-    if (pos + len <= ring->size) {
-        memcpy(ring->buf + pos, src, len);
-    } else {
-        uint32_t part1 = ring->size - pos;
-        memcpy(ring->buf + pos, src, part1);
-        memcpy(ring->buf, src + part1, len - part1);
-    }
+    ring_memcpy_in_core(ring->buf, ring->size, pos, src, len);
 }
 
 /*
@@ -193,36 +180,27 @@ void lcview_ring_destroy(struct lcview_ring *ring)
  * 防御性编程：如果读取的长度前缀异常（0 或 > ring->size），
  * 则使用默认长度（前缀 + 记录头大小）跳过损坏的记录。
  * pr_warn_ratelimited 避免 dmesg 被重复警告刷屏。
+ *
+ * 纯索引算法抽至 lcview_ring_logic.c（见 lcview_ring_logic.h），
+ * 此处为薄包装：core 返回 2（损坏）时打警告，正常/损坏均推进计数。
  */
 static void ring_evict_one(struct lcview_ring *ring)
 {
-    uint32_t old_len;
+    uint32_t skipped_len = 0;
+    int rc = ring_evict_one_core(ring->buf, ring->size, &ring->read_pos,
+                                 ring->write_pos,
+                                 LCVIEW_LEN_PREFIX_SIZE +
+                                     sizeof(struct lcview_record_hdr),
+                                 &skipped_len);
 
-    if (ring->read_pos == ring->write_pos)
+    if (rc == 0)
         return;
 
-    /* 读取长度前缀，处理跨尾部换行 */
-    if (ring->read_pos + LCVIEW_LEN_PREFIX_SIZE <= ring->size) {
-        memcpy(&old_len, ring->buf + ring->read_pos, LCVIEW_LEN_PREFIX_SIZE);
-    } else {
-        uint32_t part1 = ring->size - ring->read_pos;
-        memcpy(&old_len, ring->buf + ring->read_pos, part1);
-        memcpy(((uint8_t *)&old_len) + part1, ring->buf,
-               LCVIEW_LEN_PREFIX_SIZE - part1);
-    }
-
-    /*
-     * 防御性处理：如果记录长度异常（数据损坏），
-     * 使用保守的默认长度（仅记录头大小）跳过，避免推进过多
-     * 导致永久性数据错乱
-     */
-    if (old_len == 0 || old_len > ring->size) {
+    if (rc == 2) {
         pr_warn_ratelimited(PREFIX "corrupted record length %u, using default\n",
-                            old_len);
-        old_len = LCVIEW_LEN_PREFIX_SIZE + sizeof(struct lcview_record_hdr);
+                            skipped_len);
     }
 
-    ring->read_pos = (ring->read_pos + old_len) % ring->size;
     atomic_inc(&ring->overrun_cnt);
     pr_debug(PREFIX "overrun #%d (evicted record at pos=%u)\n",
              atomic_read(&ring->overrun_cnt), ring->read_pos);

@@ -1,6 +1,6 @@
 """git_workspace_util - workspace 扫描共享工具
 
-统一 sync/revert 脚本的排除正则，避免规则发散。
+统一 sync 脚本的排除正则，避免规则发散。
 
 设计说明：迁移自 LcHarness 同源模块（config/git_workspace_util.py），
 功能保持不变，仅清理 LcHarness 规则引用。
@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import re
 
-# 统一排除正则（sync + revert 并集）
+# 统一排除正则（sync 脚本共享）
 _DEFAULT_EXCLUDE_RE = (
     r'\.o$|\.ko$|\.cmd$|\.d$|\.mod\.c$|\.symvers$|^Image$|'
     r'\.dtb$|\.dtbo$|\.prebuilt$|\.prev$|overlays\.prebuilt|overlays\.prev|'

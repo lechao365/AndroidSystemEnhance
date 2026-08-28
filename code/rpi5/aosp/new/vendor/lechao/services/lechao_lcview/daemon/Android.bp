@@ -12,7 +12,7 @@
 //   libbinder_ndk — NDK Binder 通信框架
 //   libjsoncpp — JSON 解析引擎（解析 schema 配置文件）
 //   liblog — 输出 logcat 日志
-//   vendor.lechao.lcview-V1-ndk — AIDL NDK 后端生成的 C++ 代码
+//   vendor.lechao.lcview-V2-ndk — AIDL NDK 后端生成的 C++ 代码（最新冻结版本）
 // ============================================================
 
 cc_binary {
@@ -21,15 +21,27 @@ cc_binary {
     header_libs: ["vendor.lechao.lcview_headers", "vendor_lechao_log_headers"],
     init_rc: ["lechao_lcview.rc"],
     srcs: [
+        // main 文件单独列出（不进 filegroup）：filegroup 同时被
+        // tests/cc_test 复用，含 main() 会与 gtest 主函数链接冲突
+        ":lechao_lcview_daemon_sources",
         "lechao_lcview.cpp",
-        "SchemaParser.cpp",
-        "FileWriter.cpp",
     ],
     shared_libs: [
         "libbase",
         "libbinder_ndk",
         "libjsoncpp",
         "liblog",
-        "vendor.lechao.lcview-V1-ndk",
+        "vendor.lechao.lcview-V2-ndk",
+    ],
+}
+
+// filegroup lechao_lcview_daemon_sources — 供 tests/Android.bp 的 cc_test 复用 daemon 源码
+// （不含 lechao_lcview.cpp 主入口，避免与 gtest 主函数冲突）
+filegroup {
+    name: "lechao_lcview_daemon_sources",
+    srcs: [
+        "SchemaParser.cpp",
+        "FileWriter.cpp",
+        "batch_parser.cpp",
     ],
 }

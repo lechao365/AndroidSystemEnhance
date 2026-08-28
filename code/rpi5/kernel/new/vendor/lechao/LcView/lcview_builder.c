@@ -165,11 +165,16 @@ int lcview_builder_add_int32(struct lcview_builder *b, int32_t val)
 /*
  * 添加字符串类型字段
  *
- * 编码格式：type(1B) + len(2B, uint16_t big-endian) + data(len B)
+ * 编码格式：type(1B) + len(2B, uint16_t 小端) + data(len B)
  * 为什么字符串用独立的编码而非统一定长字段？
  * 因为字符串长度可变，需要在序列化数据中记录长度以便解析。
  * 使用 2 字节 (uint16_t) 作为长度前缀，最大支持 65535 字节字符串，
  * 对日志场景完全够用。
+ *
+ * 字节序契约（CXX-001）：len 以主机序裸 memcpy 写入，当前 ARM64
+ * 小端与 record 头、用户态解析端（SchemaParser/FileWriter 同为裸
+ * memcpy）三方自洽，线材格式事实为小端。若未来引入显式字节序
+ * 转换，必须内核与用户态同步改造，禁止单侧修改。
  *
  * 即使 val 为 NULL，也写入一条空字符串（len=0），
  * 这样解析器不会混淆"字段不存在"和"字段为空字符串"。

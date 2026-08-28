@@ -8,6 +8,16 @@
 //   vendor.lechao.lciod.IIoHal-vintf (VINTF 声明) → 注册到设备 manifest
 // ============================================================
 
+// filegroup: HAL 生产源码（不含 main，供 lechao_lciod_hal_test 编入测试；
+// 与 lcview lechao_lcview_hal_sources 模式对齐）
+filegroup {
+    name: "lechao_lciod_hal_sources",
+    srcs: [
+        "hal_service.cpp",   // HAL 服务主逻辑，实现 IIoHal AIDL 接口
+        "device_io.cpp",     // 设备 IO 操作封装（open/ioctl/read）
+    ],
+}
+
 // lechao_lciod_hal: Vendor HAL 可执行文件
 // vendor: true 表示安装到 vendor 分区
 // 链接 vendor.lechao.lciod-V1-ndk 以获得 AIDL 接口的 NDK 桩代码
@@ -16,8 +26,8 @@ cc_binary {
     owner: "lechao",
     vendor: true,
     srcs: [
-        "hal_service.cpp",   // HAL 服务主逻辑，实现 IIoHal AIDL 接口
-        "device_io.cpp",     // 设备 IO 操作封装（open/ioctl/read）
+        "main_lciod_hal.cpp",        // 进程入口（独立文件，避免与 gtest main 冲突）
+        ":lechao_lciod_hal_sources",
     ],
     shared_libs: [
         "libbase",             // Android 基础库
