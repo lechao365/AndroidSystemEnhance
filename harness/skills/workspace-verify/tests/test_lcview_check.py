@@ -1,4 +1,6 @@
 import argparse
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -20,6 +22,14 @@ def _args(**kw):
     a.vid = kw.get("vid", None)
     a.pid = kw.get("pid", None)
     a.baseline = kw.get("baseline", str(Path(tempfile.gettempdir()) / "lcview_baseline_test.json"))
+    a.in_flight = kw.get("in_flight", 16)
+    a.conserve_sample_s = kw.get("conserve_sample_s", 5)
+    a.conserve_load_mb = kw.get("conserve_load_mb", 0)
+    a.load_mb = kw.get("load_mb", 64)
+    a.block_dev = kw.get("block_dev", "/dev/block/sda")
+    a.perf_timeout = kw.get("perf_timeout", 60)
+    a.perf_sample_ms = kw.get("perf_sample_ms", 100)
+    a.dd_timeout = kw.get("dd_timeout", 300)
     return a
 
 
@@ -27,11 +37,15 @@ class FakeAdb:
     """伪 adb：files 为 {remote: content}，各子命令可注入 rc 模拟失败/超时。
 
     shell ls 输出文件基名；pull 按 remote 取内容写本地文件；stat 返回注入
-    stdout 与 rc；date 返回注入 stdout 与 rc。
+    stdout 与 rc；date 返回注入 stdout 与 rc；logcat/dd/pidof/cat 同款注入。
     """
 
     def __init__(self, files=None, ls_rc=0, pull_rc=0, stat_rc=0, stat_out="",
-                 date_rc=0, date_out=""):
+                 date_rc=0, date_out="", logcat_rc=0, logcat_out="",
+                 dd_rc=0, dd_out="", pidof_rc=0, pidof_out="",
+                 proc_rc=0, proc_out="", stats_rc=0, stats_out="",
+                 sysfs_rc=0, sysfs_out="", sysfs_seq=None,
+                 wc_rc=0, wc_out="", wc_seq=None):
         self.files = dict(files or {})
         self.ls_rc = ls_rc
         self.pull_rc = pull_rc
@@ -39,18 +53,52 @@ class FakeAdb:
         self.stat_out = stat_out
         self.date_rc = date_rc
         self.date_out = date_out
+        self.logcat_rc = logcat_rc
+        self.logcat_out = logcat_out
+        self.dd_rc = dd_rc
+        self.dd_out = dd_out
+        self.pidof_rc = pidof_rc
+        self.pidof_out = pidof_out
+        self.proc_rc = proc_rc
+        self.proc_out = proc_out
+        self.stats_rc = stats_rc
+        self.stats_out = stats_out
+        self.sysfs_rc = sysfs_rc
+        self.sysfs_out = sysfs_out
+        self.sysfs_seq = list(sysfs_seq or [])
+        self.wc_rc = wc_rc
+        self.wc_out = wc_out
+        self.wc_seq = list(wc_seq or [])
         self.calls = []
 
     def __call__(self, args, timeout=60):
         self.calls.append(args)
+        if args[0] == "logcat":
+            return (self.logcat_out, self.logcat_rc)
         if args[0] == "shell":
             cmd = args[1]
             if cmd.startswith("ls "):
                 return (" ".join(Path(r).name for r in self.files), self.ls_rc)
-            if "stat" in cmd:
+            if cmd.startswith("stat "):
                 return (self.stat_out, self.stat_rc)
-            if "date" in cmd:
+            if cmd.startswith("date "):
                 return (self.date_out, self.date_rc)
+            if cmd.startswith("dd if="):
+                return (self.dd_out, self.dd_rc)
+            if cmd.startswith("pidof "):
+                return (self.pidof_out, self.pidof_rc)
+            if cmd.startswith("cat /proc/"):
+                return (self.proc_out, self.proc_rc)
+            if cmd.startswith("lcview_stats"):
+                return (self.stats_out, self.stats_rc)
+            if cmd.startswith("cat /sys/class/"):
+                if self.sysfs_seq:
+                    return self.sysfs_seq.pop(0)
+                return (self.sysfs_out, self.sysfs_rc)
+            if cmd.startswith("wc -l "):
+                if self.wc_seq:
+                    return self.wc_seq.pop(0)
+                return (self.wc_out, self.wc_rc)
             return ("", 0)
         if args[0] == "pull":
             remote, local = args[1], args[2]
@@ -494,6 +542,211 @@ class TestModeDelta(unittest.TestCase):
             fake = FakeAdb(files={f"{LOGS_DIR}/a.jsonl": "{}"}, ls_rc=-1)
             with mock.patch.object(lc, "adb", fake):
                 rc = lc.mode_delta(tmp, _args(baseline=str(base)))
+        self.assertEqual(rc, -1)
+
+
+def _sysfs(total=0, overrun=0, ring=0):
+    return (f"total_records={total} overrun={overrun} ring_usage_bytes={ring} "
+            f"ring_size_bytes=262144")
+
+
+def _wc(lines):
+    return f"{lines} total\n"
+
+
+class TestModeConserve(unittest.TestCase):
+    # conserve v4：两段式采样（静止确认段 2 拍 + 负载采样段 2 拍，共 3 拍）。
+    # 静止确认段增量归零 → 起点无积压；负载段比较内核产生增量
+    # （Δtotal-Δoverrun）vs 磁盘 JSONL 落盘增量，负向（落盘>产生）在
+    # 起点无积压时为真异常判红，仅追赶期（起点有积压）放行。
+    def _run(self, sysfs_seq, wc_seq, **kw):
+        fake = FakeAdb(sysfs_seq=sysfs_seq, wc_seq=wc_seq,
+                       dd_rc=kw.get("dd_rc", 0))
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(lc, "adb", fake):
+                with mock.patch.object(lc.time, "sleep"):
+                    return lc.mode_conserve(tmp, _args(**kw))
+
+    def test_conserve_static_no_data_red(self):
+        # 静止且无自造负载：静止确认通过，但负载窗口 produced==0 →
+        # 无数据可校验守恒须判红（防假绿，零记录守卫）
+        self.assertEqual(
+            self._run([(_sysfs(total=90), 0), (_sysfs(total=90), 0),
+                       (_sysfs(total=90), 0)],
+                      [(_wc(90), 0), (_wc(90), 0), (_wc(90), 0)]), 1)
+
+    def test_conserve_produced_equals_landed_ok(self):
+        # 静止确认通过（前两拍无增量）+ 负载窗口产生 10（total 100→110，
+        # overrun 不变）且落盘 10（90→100）→ 在途 0，守恒
+        self.assertEqual(
+            self._run([(_sysfs(total=100), 0), (_sysfs(total=100), 0),
+                       (_sysfs(total=110), 0)],
+                      [(_wc(90), 0), (_wc(90), 0), (_wc(100), 0)]), 0)
+
+    def test_conserve_produced_less_overrun_ok(self):
+        # 产生含被驱逐（overrun 增 5）：产生增量 = Δtotal - Δoverrun
+        self.assertEqual(
+            self._run([(_sysfs(total=100, overrun=2), 0),
+                       (_sysfs(total=100, overrun=2), 0),
+                       (_sysfs(total=115, overrun=7), 0)],
+                      [(_wc(90), 0), (_wc(90), 0), (_wc(98), 0)]), 0)
+
+    def test_conserve_backlog_fails(self):
+        # 产生 30 但落盘 0 → 积压判红（真丢记录/消费停滞场景）
+        self.assertEqual(
+            self._run([(_sysfs(total=100), 0), (_sysfs(total=100), 0),
+                       (_sysfs(total=130), 0)],
+                      [(_wc(90), 0), (_wc(90), 0), (_wc(90), 0)]), 1)
+
+    def test_conserve_duplicate_landing_fails(self):
+        # 静止确认通过（起点无积压）但负载窗口落盘 30 > 产生 10 →
+        # 重复落盘/计数异常判红（恢复负向判红，dropped 不能替代）
+        self.assertEqual(
+            self._run([(_sysfs(total=100), 0), (_sysfs(total=100), 0),
+                       (_sysfs(total=110), 0)],
+                      [(_wc(90), 0), (_wc(90), 0), (_wc(120), 0)]), 1)
+
+    def test_conserve_negative_release_with_backlog_ok(self):
+        # 静止确认段有增量（起点有积压，追赶期）→ 负载窗口落盘 40 > 产生 5
+        # 为补落盘，负向放行（不判红）
+        self.assertEqual(
+            self._run([(_sysfs(total=100), 0), (_sysfs(total=110), 0),
+                       (_sysfs(total=115), 0)],
+                      [(_wc(90), 0), (_wc(90), 0), (_wc(130), 0)]), 0)
+
+    def test_conserve_daemon_restart_immune(self):
+        # daemon 重启免疫：磁盘 JSONL 行数持久（wc 不归零），静止确认 +
+        # 负载窗口产生 10 落盘 10 即守恒——不再依赖 daemon 进程内
+        # jsonl_records（重启归零曾致误判）
+        self.assertEqual(
+            self._run([(_sysfs(total=100), 0), (_sysfs(total=100), 0),
+                       (_sysfs(total=110), 0)],
+                      [(_wc(1535), 0), (_wc(1535), 0), (_wc(1545), 0)]), 0)
+
+    def test_conserve_load_dd_fail_red(self):
+        # --conserve-load-mb 时自造负载 dd 执行失败 → 判红（触发手段不可用
+        # 不得蒙混，与 delta 的 dd 失败判红同源）
+        self.assertEqual(
+            self._run([(_sysfs(total=90), 0), (_sysfs(total=90), 0)],
+                      [(_wc(90), 0), (_wc(90), 0)],
+                      conserve_load_mb=4, dd_rc=1), 1)
+
+    def test_conserve_sysfs_fail_red(self):
+        # 首拍 sysfs 读失败（cat 超时）→ 判红（无可判数据不蒙混）
+        self.assertEqual(self._run([("", -1)], [(_wc(0), 0)]), 1)
+
+    def test_conserve_wc_fail_red(self):
+        # 次拍 wc 失败 → 判红
+        self.assertEqual(
+            self._run([(_sysfs(total=90), 0), (_sysfs(total=90), 0),
+                       (_sysfs(total=90), 0)],
+                      [(_wc(0), 0), (_wc(0), 0), ("", -1)]), 1)
+
+
+class TestModePerf(unittest.TestCase):
+    def _run(self, fake, totals, jsonls, monotonic=None, **kw):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(lc, "adb", fake):
+                with mock.patch.object(lc, "kernel_total",
+                                       side_effect=totals):
+                    with mock.patch.object(lc, "jsonl_line_count",
+                                           side_effect=jsonls):
+                        with mock.patch.object(lc.time, "sleep"):
+                            if monotonic:
+                                with mock.patch.object(lc.time, "monotonic",
+                                                       side_effect=monotonic):
+                                    return lc.mode_perf(tmp, _args(**kw))
+                            return lc.mode_perf(tmp, _args(**kw))
+
+    def test_perf_full_pipeline_ok(self):
+        # dd 前直读内核 total=100/jsonl=90；dd 后直读 total=1321/jsonl=1311
+        # （jsonl 增量 1221 >= total 增量 1221，drain 首轮即达标）→ rc 0
+        fake = FakeAdb(dd_rc=0,
+                       pidof_out="1234\n", pidof_rc=0,
+                       proc_out="Name:\tlechao_lcview\nVmHWM:\t    5516 kB\n",
+                       proc_rc=0)
+        rc = self._run(fake, totals=[100, 1321, 1321], jsonls=[90, 1311, 1311],
+                       monotonic=[100.0, 103.7, 103.7, 104.1])
+        self.assertEqual(rc, 0)
+        # 内部经 adb 执行：dd 一次 + pidof/cat 各一次（直读走 mock，不经 adb）
+        self.assertTrue(any(c[1].startswith("dd if=") for c in fake.calls))
+        self.assertTrue(any(c[1].startswith("pidof ") for c in fake.calls))
+        self.assertTrue(any(c[1].startswith("cat /proc/") for c in fake.calls))
+
+    def test_perf_metrics_json_emitted(self):
+        fake = FakeAdb(dd_rc=0,
+                       pidof_out="1234\n", pidof_rc=0,
+                       proc_out="VmHWM:\t    5516 kB\n", proc_rc=0)
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(lc, "adb", fake):
+                with mock.patch.object(lc, "kernel_total",
+                                       side_effect=[100, 1321, 1321]):
+                    with mock.patch.object(lc, "jsonl_line_count",
+                                           side_effect=[90, 1311, 1311]):
+                        with mock.patch.object(lc.time, "sleep"):
+                            with contextlib.redirect_stdout(out):
+                                rc = lc.mode_perf(tmp, _args())
+        self.assertEqual(rc, 0)
+        line = [ln for ln in out.getvalue().splitlines()
+                if ln.startswith("METRICS ")]
+        self.assertEqual(len(line), 1)
+        metrics = json.loads(line[0][len("METRICS "):])
+        self.assertEqual(metrics["load_mb"], 64)
+        self.assertIn("throughput_evs", metrics)
+        self.assertIn("drain_ms_per_event", metrics)
+        self.assertEqual(metrics["daemon_rss_kb"], 5516)
+        self.assertEqual(metrics["total_delta"], 1221)
+        self.assertEqual(metrics["jsonl_delta"], 1221)
+
+    def test_perf_kernel_unreadable_fails(self):
+        # 内核计数直读失败（lcview_stats 未部署/失败）→ 判红（指标不全）
+        fake = FakeAdb(dd_rc=0)
+        rc = self._run(fake, totals=[None], jsonls=[90])
+        self.assertEqual(rc, 1)
+
+    def test_perf_jsonl_unreadable_fails(self):
+        # JSONL 行数直读失败（wc 超时）→ 判红
+        fake = FakeAdb(dd_rc=0)
+        rc = self._run(fake, totals=[100], jsonls=[None])
+        self.assertEqual(rc, 1)
+
+    def test_perf_dd_failure_fails(self):
+        fake = FakeAdb(dd_rc=1)
+        rc = self._run(fake, totals=[100], jsonls=[90])
+        self.assertEqual(rc, 1)
+
+    def test_perf_kernel_lag_waits_for_update(self):
+        # dd 后首轮直读仍为 dd 前旧值（内核计数尚未反映）→ 不得把 0>=0
+        # 误判达标，须等内核计数出现增量后再判 jsonl 达标
+        fake = FakeAdb(dd_rc=0,
+                       pidof_out="1234\n", pidof_rc=0,
+                       proc_out="VmHWM:\t    5516 kB\n", proc_rc=0)
+        rc = self._run(fake,
+                       totals=[100, 100, 1321, 1321],
+                       jsonls=[90, 90, 1311, 1311],
+                       monotonic=[100.0, 103.7, 103.7, 103.8, 104.1])
+        self.assertEqual(rc, 0)
+
+    def test_perf_drain_timeout_fails(self):
+        # 直读 jsonl 增量始终 < total 增量 → drain 轮询超时判红
+        fake = FakeAdb(dd_rc=0)
+        rc = self._run(fake,
+                       totals=[200, 300, 300],   # total 增量 100
+                       jsonls=[95, 100, 100],    # jsonl 增量 5 < 100，永不达标
+                       monotonic=[0.0, 1.0, 1.0, 2.0, 3.0],
+                       perf_timeout=1)
+        self.assertEqual(rc, 1)
+
+    def test_perf_rss_unavailable_fails(self):
+        # RSS 指标不全不能当完整基线 → 判红
+        fake = FakeAdb(dd_rc=0, pidof_rc=1, pidof_out="")
+        rc = self._run(fake, totals=[100, 1321, 1321], jsonls=[90, 1311, 1311])
+        self.assertEqual(rc, 1)
+
+    def test_perf_timeout_propagates_minus1(self):
+        fake = FakeAdb(dd_rc=-1)
+        rc = self._run(fake, totals=[100], jsonls=[90])
         self.assertEqual(rc, -1)
 
 

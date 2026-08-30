@@ -15,15 +15,15 @@ harness/
 │   ├── git_workspace_util.py   # workspace 扫描排除正则（sync 脚本共享）
 │   ├── baseline-status.yaml    # baseline 状态登记表
 │   ├── baseline-evidence-template.yaml
+│   ├── known-issues-template.md    # 已知问题登记模板（头字段集与 cdp_issue._FIELDS 一致）
 │   └── doc-sync-mapping.yaml   # code→文档映射规则
 ├── skills/
-│   ├── sync-workspace-to-code/      # workspace→code 归档（DEPRECATED）
-│   ├── sync-code-to-workspace/      # code→workspace 同步（需 promoted baseline）
+│   ├── sync-code-to-workspace/      # code→workspace 同步（dev/main HEAD 真相源）
 │   ├── sync-code-to-doc/             # code→文档同步
 │   ├── cross-device/                 # 跨设备批次（emit 生成 / apply 执行）
 │   ├── workspace-verify/             # code→workspace 同步 + 增量编译 + 上板验证 + verify 收据
 │   ├── git-works-push/               # dev 分支 commit + push（收据随批入库）
-│   ├── sync-modify-to-main-base/     # dev 验证 OK 后 promote 到 main（三段式证据链）
+│   ├── publish-main-base/          # 一键基线发布编排器（自检→loop 验证→文档→promote）
 │   └── revert-modify-from-main-base/ # dev 持续 NG 人工回退到 main 基线
 ├── rules/
 │   ├── source-code-modify.md   # SRC-001~004：源码改动优先级/归档纪律
@@ -39,26 +39,25 @@ harness/
 
 ## 快速使用
 
-九个工作流命令（opencode 原生命令，见 `.opencode/command/`；`/sync-workspace-to-code` 已 deprecated）：
+八个工作流命令（opencode 原生命令，见 `.opencode/command/`）：
 
 | 命令 | 用途 |
 |------|------|
-| `/sync-workspace-to-code` | workspace 已验证改动归档到 `code/rpi5/`（含删除对齐 + manifest 重生成）（DEPRECATED） |
-| `/sync-code-to-workspace` | 以 promoted baseline 为真相源，把 workspace 拉回一致（计划→逐条确认→执行→校验） |
+| `/sync-code-to-workspace` | 以 code 仓 dev/main HEAD 为真相源，把 workspace 拉回一致（计划→逐条确认→执行→校验） |
 | `/sync-code-to-doc` | code 变动生成报告，按映射规则同步设计文档 |
 | `/cross-device-emit` | emit 侧生成 CDP 批次（远端强 LLM 分析后产批，输出纯文本，仅 emit 设备） |
 | `/cross-device-apply` | 解析 CDP 批次编辑 code/dev，-sv 拉起验证后推送（仅 apply 设备） |
-| `/workspace-verify` | code→workspace 同步、增量编译、上板验证并写 data/verify 收据（仅 apply 设备） |
+| `/workspace-verify` | code→workspace 同步、增量编译、上板验证并写 data/verify-results 收据（仅 apply 设备） |
 | `/git-works-push` | dev 分支 commit + push（收据随批入库，仅 apply 设备） |
-| `/sync-modify-to-main-base` | dev 验证 OK 后 promote 到 main 生成基线（三段式证据链，仅 apply 设备） |
+| `/publish-main-base` | 一键基线发布：harness 自检 → loop 上板验证 → 修复收敛 → 文档同步 → candidate 登记 → promote 到 main（无法修复则禁止 promote，仅 apply 设备） |
 | `/revert-modify-from-main-base` | dev 持续 NG 人工回退到 main 基线并恢复设备（仅 apply 设备） |
 
 也可直接运行脚本：
 
 ```bash
-python3 harness/skills/sync-workspace-to-code/sync_workspace_to_code.py --check-only
 python3 harness/skills/sync-code-to-workspace/sync_code_to_workspace.py --check-only
 python3 harness/skills/sync-code-to-doc/sync_code_to_doc.py --check-only
+python3 harness/lib/check_skill_refs.py    # harness/skills 引用完整性检查（改动 skill 前必跑）
 ./harness/scripts/mk_rpi5_full_image.sh -h
 ```
 
@@ -81,13 +80,13 @@ export AOSP_WS=~/workspace/aosp
 
 patch 资产沿晋升链单向流转：`archive → candidate baseline → promoted baseline`
 （rollback 经 revert-candidate 回 candidate）。
-新流程（cross-device）中 candidate 由 `sync-modify-to-main-base --prepare` 依据最新 verify 收据自动登记（登记门禁：收据 result 属 pass 或 skip 且 HEAD^ 等于 verified_commit），archive 阶段仅旧流程历史。
+新流程（cross-device）中 candidate 由 `publish-main-base --prepare` 依据最新 verify 收据自动登记（登记门禁：收据 result 属 pass 或 skip 且 HEAD^ 等于 verified_commit），archive 阶段仅旧流程历史。
 
 | 状态 | 含义 | 最少证据 |
 |------|------|---------|
 | `archive` | 已归档（sync 后） | baseline_id / source_branch / source_commit / sync_manifest |
 | `candidate` | workspace-verify 通过 | archive 证据 + build_result / package_result / board_verify（实读 verify 收据，不伪造 PASS） |
-| `promoted` | 人工评审批准（board_verify 已在 candidate 落盘；可作 sync-code-to-workspace 真相源） | candidate 证据 + approved_by / approved_at |
+| `promoted` | 人工评审批准（board_verify 已在 candidate 落盘） | candidate 证据 + approved_by / approved_at |
 
 登记在 `harness/config/baseline-status.yaml`，证据字段模板见 `harness/config/baseline-evidence-template.yaml`。
 
@@ -99,5 +98,5 @@ patch 资产沿晋升链单向流转：`archive → candidate baseline → promo
 4. **operator**：执行人/批准人 → `approved_by`
 5. **timestamp**：验证完成时间 → `approved_at`
 
-> 编译通过 ≠ 验证通过。未上板验证前禁止 promote。只有 `promoted` 基线才能作为
-> `sync-code-to-workspace` 的恢复真相源（`SRC-004`）。
+> 编译通过 ≠ 验证通过。未上板验证前禁止 promote。`sync-code-to-workspace` 的恢复真相源
+> 为 code 仓 dev/main HEAD（`SRC-004`），不要求 promoted baseline。

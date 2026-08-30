@@ -6,7 +6,7 @@
 ## 定位
 - **是什么**：Raspberry Pi 5 平台 AOSP + Linux kernel 定制改动的归档镜像（`~/workspace/` 编译源码树的精确镜像）
 - **职责边界**：归档层，非编译树（编译在 `~/workspace/`）
-- **上下游依赖**：由 `sync-workspace-to-code` 从 workspace 写入，被 `sync-code-to-workspace` 读回 workspace、被 `sync-code-to-doc` 读为文档源
+- **上下游依赖**：作为 code 仓归档层（dev 分支为改动源头），被 `sync-code-to-workspace` 同步到 workspace、被 `sync-code-to-doc` 读为文档源
 
 ## 大纲
 
@@ -27,7 +27,7 @@
 | `kernel/` | ← `~/workspace/rpi5-kernel-build/common/`，modified diff + new 全新文件 | 被 `sync-code-to-workspace` 读回 |
 | `aosp/` | ← `~/workspace/aosp/`，modified diff + new 全新文件 | 被 `sync-code-to-workspace` 读回 |
 | `others/` | 树莓派5专用工具，直接 Git 维护，不同步 | 独立编译运行 |
-| `manifest.yaml` | 文件清单元数据，由 sync-workspace-to-code 维护 | 被 sync 工作流读取 |
+| `manifest.yaml` | 文件清单元数据，由 gen_manifest.py 维护 | 被 sync 工作流读取 |
 
 ### 特性概览
 
@@ -52,9 +52,11 @@
 
 本目录无可执行入口，作为归档承载层。
 
-### 归档（workspace → code）
+### 归档（code 为源头）
 
-`/sync-workspace-to-code` 命令自动镜像 workspace 改动 + 更新 manifest + 更新本 README 文件映射表。
+code/dev 为改动源头（经 cross-device-apply 或人工编辑），涉及 code/rpi5 时运行
+`harness/skills/cross-device/lib/python/gen_manifest.py` 重生成 manifest.yaml；
+本 README 文件映射表由 AI 基于 manifest 维护。
 
 ### 同步（code → workspace）
 
@@ -111,11 +113,11 @@ fastboot reboot
 # 验证进程
 sleep 30
 adb shell ps -A | grep lechao
-# 期望：lechao_lciod_hal, lechao_lciod, lechao_lcview_hal, lechao_lcview
+# 期望：lechao_lciod_hal, lechao_lciod, lechao_lcview（lcview HAL 已退役，直读内核）
 
 # 验证 VINTF
 adb shell service list | grep lechao
-# 期望：vendor.lechao.lciod.IIoHal, system.lechao.lciod.IIoService, vendor.lechao.lcview.ILcView
+# 期望：vendor.lechao.lciod.IIoHal, system.lechao.lciod.IIoService（lcview 直读内核无 binder 服务）
 
 # 验证设备节点
 adb shell ls -l /dev/vendor_lechao_lcview /dev/vendor_lechao_usbd*
@@ -123,7 +125,7 @@ adb shell ls -l /dev/vendor_lechao_lcview /dev/vendor_lechao_usbd*
 
 ## 文件映射表
 
-> 以下映射表由 `sync-workspace-to-code` 自动维护，请勿手动编辑。
+> 以下映射表由 AI 基于 manifest.yaml 维护，请勿手动编辑。
 
 ### kernel/modified/
 
@@ -176,13 +178,12 @@ adb shell ls -l /dev/vendor_lechao_lcview /dev/vendor_lechao_usbd*
 | `device/brcm/rpi5/scripts/rpi5-wifi-connect.sh` | 开机自动连接 WiFi 脚本（读 wifi.conf → wpa_cli 连接 → 静态 IP 维持） |
 | `device/brcm/rpi5/sepolicy/lechao_lciod.te` | lciod 系统服务 SELinux 策略 |
 | `device/brcm/rpi5/sepolicy/lechao_lciod_hal.te` | lciod HAL SELinux 策略 |
-| `device/brcm/rpi5/sepolicy/lechao_lcview.te` | lcview 系统服务 SELinux 策略 |
-| `device/brcm/rpi5/sepolicy/lechao_lcview_hal.te` | lcview HAL SELinux 策略 |
+| `device/brcm/rpi5/sepolicy/lechao_lcview.te` | lcview 系统服务 SELinux 策略（含直读设备节点类型 lechao_lcview_hal_device，HAL 退役后并入） |
 | `device/brcm/rpi5/sepolicy/rpi5_wifi_connect.te` | WiFi 连接脚本独立 SELinux 域（init_daemon_domain + 完整 allow 规则：shell_exec/vfat/binder/netlink/capability/logd，支持 enforcing 模式） |
 | `vendor/lechao/Android.bp` | Soong 命名空间声明 |
 | `vendor/lechao/services/include/` | 共享头文件（lechao_log.h） |
 | `vendor/lechao/services/lechao_lciod/` | IO 监控 HAL + System Service + common 公共工具库（minor 编号解析、ioctl 接口重构、HAL getStats 字段映射、Daemon getAverageRate 派生计算、HAL readEvent 排空策略） |
-| `vendor/lechao/services/lechao_lcview/` | 打点框架 HAL + Daemon |
+| `vendor/lechao/services/lechao_lcview/` | 打点框架 Daemon（直读内核，HAL 已退役） |
 
 ### others/
 
@@ -196,7 +197,6 @@ adb shell ls -l /dev/vendor_lechao_lcview /dev/vendor_lechao_usbd*
 
 | 类型 | 路径 | 说明 |
 |------|------|------|
-| 关联 workflow | [`../../harness/skills/sync-workspace-to-code/`](../../harness/skills/sync-workspace-to-code/) | 归档（workspace → code）（DEPRECATED） |
 | 关联 workflow | [`../../harness/skills/sync-code-to-workspace/`](../../harness/skills/sync-code-to-workspace/) | 同步（code → workspace） |
 | 关联 workflow | [`../../harness/skills/sync-code-to-doc/`](../../harness/skills/sync-code-to-doc/) | 文档同步 |
 | 关联规则 | [`../../harness/rules/source-code-modify.md`](../../harness/rules/source-code-modify.md) | code/dev 是源头，workspace 是编译缓存（单向同步） |

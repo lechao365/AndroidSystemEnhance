@@ -7,13 +7,13 @@
 #   2. archive 阶段仅需 baseline_id / source_branch / source_commit / sync_manifest
 #   3. candidate baseline 阶段需在 archive 基础上补齐 build_result / package_result
 #   4. 任一字段缺失 → 状态不可前进，禁止作为 sync-code-to-workspace 真相源
-#   5. 新流程：candidate 由 sync-modify-to-main-base --prepare 依据最新 verify 收据自动登记，archive 阶段仅旧流程历史
+#   5. 新流程：candidate 由 publish-main-base --prepare 依据最新 verify 收据自动登记，archive 阶段仅旧流程历史
 
 # 模板（复制填写）:
 # baseline_id: BL-YYYYMMDD-NN       # 基线唯一标识（与 baseline-status.yaml 主键一致）
 # source_branch:                     # 同步时 workspace 的分支（如 rpi5-dev）
 # source_commit:                     # 同步时 workspace 的 commit
-# sync_manifest:                     # 旧流程为同步计划产物路径；新流程（cross-device）为 data/verify 收据路径
+# sync_manifest:                     # 旧流程为同步计划产物路径；新流程（cross-device）为 data/verify-results 收据路径
 # build_result:                      # 增量编译结果 PASS / 附日志路径
 # package_result:                    # 打包镜像结果 PASS / 附产物路径
 # board_verify:                      # 刷机上板功能验证结果 PASS / 附验证摘要

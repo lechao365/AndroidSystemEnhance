@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cdp_paths import project_root  # noqa: E402
-from cdp_receipt import read_latest_receipt, read_trend_last  # noqa: E402
+from cdp_receipt import read_latest_receipt  # noqa: E402
 
 
 def _git(root, *args):
@@ -39,9 +39,11 @@ def precheck(root=None, do_pull=True):
     if head != origin:
         return False, "本地 HEAD != origin/dev", ""
     # 上批已推送判定（sha 统一 short=12 比较，防 40 位 vs 12 位恒不等）
-    latest = read_latest_receipt(root / "data" / "verify")
-    trend = read_trend_last(root / "data" / "verify")
-    if latest and trend and latest.verified_commit:
+    # 只依赖详情收据（latest），不依赖 trend.md——trend 是展示性文件，缺失/损坏
+    # 不得让"上批已推送"闸门静默失效（严格生产者）；verified_commit 缺失（旧收据）
+    # 时无法判定，保持放行兼容。
+    latest = read_latest_receipt(root / "data" / "verify-results")
+    if latest and latest.verified_commit:
         r = _git(root, "merge-base", "--is-ancestor",
                  latest.verified_commit, "origin/dev")
         origin_head12 = _git(root, "rev-parse", "--short=12",

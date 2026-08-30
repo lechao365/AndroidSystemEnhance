@@ -36,7 +36,9 @@ stages:
 2. 上下文组装（指引强 LLM）：
    - git diff main..dev（全量；聚焦时可看上批 batch_base..dev）
    - 涉及文件在 code/ 下的全量内容（modified 看 .diff、new 看全量）
-   - 最新 data/verify 收据（失败现场摘录）
+   - 最新 data/verify-results 收据（失败现场摘录 + timings 字段：链路耗时打点，
+     定位耗时瓶颈——如 verify_build 占比过高、重试轮数多、edit 耗时异常，
+     复盘/下批据此给针对性修复方向）
    - 相关 docs/ 章节
 3. 产批：-s/-sv + base + 意图/验收/方向，总字符 450~500 为目标区间（硬上限 500）；
    不足 450 说明描述不清或应合并后续批次（backlog 见底时允许低于 450）；每批 6-7 个变更点；
@@ -56,6 +58,12 @@ stages:
   「A 失败才走 B」等流程编排）：apply 只按方向清单逐条编辑与验证，不执行
   批次内暗含的决策树；阶段路线由 apply/workspace-verify 的既有流程决定，
   批次只陈述目标与验收，路线歧义交 apply 现场判定
+- 一轮只交付一个 cdp_parse 返 exit 0 的批次：precheck 后立即产批并跑
+  selfcheck，直至 exit 0 方可作为唯一交付物；严禁交付 exit 非 0 的草稿
+  批次或附带多个候选批次（apply 只认 cdp_parse 验证通过的最终文本）
+- 人工确认须在交付批次之前提出：确认内容（含批次意图/范围/验收口径
+  调整）在产批文本交付前完成对话确认，交付后不再追加确认类交互
+  （交付即视为确认通过，后续只走 apply 执行链路）
 ## 环路串行
 - apply 执行 → 结果落地 → emit 复盘 → 产批 → 交付严格串行：批次锚定
   base 与行号，apply 一执行 origin/dev 即变，提前产批必被 exit 18 拒

@@ -13,6 +13,10 @@
 #include <unordered_map>
 #include <cstdint>
 
+namespace Json {
+class Value;  // jsoncpp 前置声明，避免头文件引入依赖
+}
+
 // 字段类型枚举，值与 lcview_events.h 中的 LCVIEW_TYPE_* 宏一致。
 // UNKNOWN 用于解析时遇到未知类型字符串的兜底值。
 enum class FieldType {
@@ -51,9 +55,6 @@ class SchemaParser {
 public:
     // 从文件加载 schema，失败返回 false
     bool loadFromFile(const std::string& path);
-    // 热重载 schema：先备份当前 schema，加载新版本失败时自动回滚。
-    // 设计目的是支持运行时更新配置而不重启 daemon。
-    bool reload(const std::string& path);
 
     // 按 event_id 查找 schema，未找到返回 nullptr
     const EventSchema* find(uint16_t eventId) const;
@@ -69,6 +70,12 @@ public:
 private:
     // 解析 JSON 字符串内容到 mSchemaMap
     bool parseJson(const std::string& jsonContent);
+    // 解析单个 event 定义（含 fields 数组），失败返回 false 并填充错误日志
+    bool parseEventDef(const Json::Value& ev, EventSchema* out);
+    // 逐字段校验（拆分自 validate，行为不变）：TLV 解码 + 类型匹配 + 越界
+    // 拦截；成功时 consumed 返回已消费字节数（供总长度校验）
+    bool validateFields(const EventSchema& schema, const uint8_t* data,
+                        size_t len, size_t& consumed, std::string& errMsg) const;
 
     // 使用哈希表以 O(1) 复杂度按 event_id 查找 schema
     std::unordered_map<uint16_t, EventSchema> mSchemaMap;

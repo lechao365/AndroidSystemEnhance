@@ -1,0 +1,15 @@
+// ============================================================
+// include/Android.bp — lechao_lcview 共享头文件库
+// 所属模块：LcView 事件日志系统
+// 设计目的：导出 lcview_events.h（与内核共用的记录格式头）给
+//   daemon 与 tests 使用。
+//   架构演进：原定义于根 Android.bp（与 aidl_interface 同文件），
+//   HAL 退役、根 Android.bp 删除后迁入本目录独立定义。
+//   vendor: true → 安装在 vendor 分区。
+// ============================================================
+
+cc_library_headers {
+    name: "vendor.lechao.lcview_headers",
+    vendor: true,
+    export_include_dirs: ["."],
+}

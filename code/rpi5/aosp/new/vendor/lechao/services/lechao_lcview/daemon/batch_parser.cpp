@@ -3,6 +3,8 @@
 // 所属模块：LcView 事件日志系统 — Daemon 层
 // 实现见 batch_parser.h；逻辑从 lechao_lcview.cpp main() 原样迁移，
 // 不改变运行时行为（parseBatch 即 main 循环的批次解析段）。
+// 架构演进：daemon 直读内核后取消 HAL 绑定（waitForHal/
+// rebindAfterError/HalBinder/ILcView 移除）。
 // ============================================================
 
 #define LOG_TAG "lechao_lcview"
@@ -79,7 +81,7 @@ BatchParseResult vendor::lechao::lcview::parseBatch(
         offset += total_len;
     }
 
-    // 批次尾部残留（<4B 读不出长度前缀）：HAL 拼包 bug 现场必须
+    // 批次尾部残留（<4B 读不出长度前缀）：直读路径拼包 bug 现场必须
     // 落盘 invalid，禁止静默丢弃（CXX-004 故障可见性）
     if (offset != batch.size()) {
         writer.writeInvalid(batch.data() + offset,
@@ -104,21 +106,9 @@ bool vendor::lechao::lcview::loadSchemaWithRetry(
     return schema.eventCount() > 0;
 }
 
-std::shared_ptr<ILcView> vendor::lechao::lcview::waitForHal(
-    const HalBinder& bind, const std::string& serviceName, int maxRetries,
-    std::chrono::milliseconds interval)
+bool vendor::lechao::lcview::shouldFlushBatch(
+    size_t buffered, bool timedOut, bool ageExpired, size_t bufferCapacity)
 {
-    int retryCount = 0;
-    std::shared_ptr<ILcView> hal;
-    while (!(hal = bind(serviceName)) && retryCount < maxRetries) {
-        std::this_thread::sleep_for(interval);
-        retryCount++;
-    }
-    return hal;
-}
-
-std::shared_ptr<ILcView> vendor::lechao::lcview::rebindAfterError(
-    const HalBinder& bind, const std::string& serviceName)
-{
-    return bind(serviceName);
+    if (buffered == 0) return false;  // 空批不 flush（避免空批次写放大）
+    return buffered >= bufferCapacity || timedOut || ageExpired;
 }

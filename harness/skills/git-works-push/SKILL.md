@@ -17,7 +17,7 @@ stages:
 - cross-device-apply 编辑完成后（verify 收据已落盘）
 - 人工单独提交 dev 改动
 ## Preconditions（前置条件）
-- 当前分支 dev；工作树有改动（normal 模式）；收据文件 data/verify/ 已就位（随批入库）
+- 当前分支 dev；工作树有改动（normal 模式）；收据文件 data/verify-results/ 已就位（随批入库）
 ## Human confirmation gates（人工确认门）
 - 零确认
 ## Outputs / artifacts（输出/产物）
@@ -29,10 +29,16 @@ stages:
 ---
 ## 工作流
 1. 收集 diff：git status --porcelain + git diff HEAD --stat
-   （大 diff 降级：>50 文件或 >5000 行时每文件只取前 20 行，仅用于生成 message）
-2. AI 生成中文 commit message（docs/commit-message-format.md，六种 type）
+   （大 diff 降级判定：`git diff HEAD --stat | wc -l` > 50，或
+    `git diff HEAD --numstat | awk '{s+=$1+$2} END{print s}'` > 5000；
+     降级时逐文件取样 `git diff HEAD -- <file> | head -20`，仅用于生成 message）
+   若改动涉及 `harness/skills/` 或 `.opencode/command/`：先跑
+   `python3 harness/lib/check_skill_refs.py` 防悬空引用（2026-08-30 工具化），
+   有 `[MISS]` 输出须先修复再进入提交，不得带悬空引用入库
+2. AI 生成中文 commit message（harness/skills/git-works-push/docs/commit-message-format.md，六种 type）
 3. 预览确认链路（可选）：bash harness/skills/git-works-push/git_works_push.sh --dry-run
 4. 执行：bash harness/skills/git-works-push/git_works_push.sh --message-file <临时文件>
-5. 核对：git ls-remote origin dev == 本地 HEAD（不等于则报错转人工）
+   （测试/注入 mock 登记表可加 --baseline-status <file>，默认 config/baseline-status.yaml）
+5. 核对：git ls-remote origin dev == 本地 HEAD（脚本已重试 3 次，仍不等于则报错转人工）
 ## 退出码
 0 成功 / 1 守卫失败 / 2 push 失败（commit 保留）/ 3 参数错误 / 4 无改动

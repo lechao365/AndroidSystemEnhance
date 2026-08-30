@@ -13,7 +13,7 @@ stages:
 
 将 `~/workspace/` 中偏离 `code/rpi5/` 基线的部分**拉回一致**，用于在 workspace 改坏后回到上次归档的可工作状态。
 
-**核心语义**：`code/rpi5/` 是 workspace 定制改动的**已知良好基线**（真相源）。本工作流是 `sync-workspace-to-code` 的逆操作：sync-workspace-to-code 是 workspace→code 归档，sync-code-to-workspace 是 code→workspace 同步。
+**核心语义**：`code/rpi5/` 是 workspace 定制改动的**已知良好基线**（真相源）。本工作流实现 code → workspace 单向同步，把 workspace 拉回与 code 仓 dev/main HEAD 一致。
 
 > **与 source-code-modify.md 的关系**：本工作流是该规则"workspace 是源头"原则的**受控例外**——当 workspace 处于不可用的坏状态时，允许反向把 code 状态写回 workspace。不改变日常归档流程，仅作灾难恢复。
 
@@ -24,7 +24,7 @@ stages:
 
 ## Preconditions（前置条件）
 
-1. **真相源资格**：以 code 仓 dev/main HEAD 为恢复真相源（交互模式与 --auto 一致放宽，不再强制 promoted baseline；证据字段模板见 `harness/config/baseline-evidence-template.yaml`，状态登记在 `harness/config/baseline-status.yaml`；恢复真相源约束由 `SRC-004` 在规则层表达）。
+1. **真相源资格**：以 code 仓 dev/main HEAD 为恢复真相源（交互模式与 `--auto` 一致，**不再要求 promoted baseline**——dev 为日常改动处，主干为基线；同步后经 workspace-verify 上板验证产生证据，字段模板见 `harness/config/baseline-evidence-template.yaml`，状态登记在 `harness/config/baseline-status.yaml`）。
 2. 操作对象仅限 `~/workspace/`（kernel + aosp），**不动 `code/`**
 3. 执行前建议 `git stash`/commit 保存当前坏状态现场（脚本不自动备份，便于事后定位根因）
 4. **不自动 `git add`/`git commit`**：执行后 working tree 处于同步后状态，由用户决定是否提交（便于 `git diff` 复查）
@@ -88,7 +88,7 @@ stages:
 
 - `SRC-001`：workspace 是日常源码真相源（本 workflow 是受控例外）
 - `SRC-002`：code 单向受控归档（本 workflow 不写 code，只读 code 基线）
-- `SRC-004`：未证据化 promoted baseline 不得作为恢复真相源（**强制前置**）
+- `SRC-004`：code（dev/main HEAD）为恢复真相源；未验证的 dev 改动不得宣称为基线
 
 ---
 
@@ -168,10 +168,13 @@ AI 汇报各类执行数量 + 校验结果。若校验失败，列出 RESIDUAL/N
 | `checkout` | MODIFIED-DIVERGED | 拉回 code | `git checkout $BASE -- $f && git apply code.diff` |
 | `checkout-only` | MODIFIED-DIVERGED | 移除定制 | `git checkout $BASE -- $f` |
 | `restore` | NEW-MISMATCH | 从 code 补回 | `cp code/new/... workspace` |
-| `sync` | EXTRA-MODIFIED / EXTRA-NEW-TRACKED | 恢复 upstream | `git checkout $BASE -- $f` |
-| `sync` | EXTRA-NEW-UNTRACKED | 删除 | `rm -f $f` |
+| `sync` | EXTRA-MODIFIED | 恢复 upstream | `git checkout $BASE -- $f` |
+| `sync` | EXTRA-NEW-TRACKED | 删除（清 index+工作树） | `git rm -f $f` |
+| `sync` / `delete` | EXTRA-NEW-UNTRACKED | 删除 | `rm -f $f` |
 | `skip` | 任意 | 不动 | — |
 | `stash-hint` | EXTRA | 提示用户手动 stash | —（不执行） |
+
+> `checkout-only` 与 `stash-hint` 是 **AI 可编辑动作**（脚本生成层不产出，用户在逐条确认阶段可把 `checkout` 改为 `checkout-only`、把 `sync` 改为 `stash-hint`）。
 
 ## plan 文件格式（TSV）
 
@@ -215,9 +218,9 @@ AI 汇报各类执行数量 + 校验结果。若校验失败，列出 RESIDUAL/N
 ## 退出码
 | 退出码 | 含义 | 下一步 |
 |--------|------|--------|
-| 0 | 成功 | 正常继续 |
-| 1 | 脚本逻辑错误 | 检查日志 |
-| 3 | 环境缺失 | 安装依赖后重试 |
+| 0 | 成功（含 `--auto` plan 为空；`--check-only` 扫描正常） | 正常继续 |
+| 1 | 脚本逻辑错误 / apply 失败 / 校验有 RESIDUAL 或 NEW-DIFF | 检查日志 |
+| 3 | 环境缺失 / 扫描失败（含 `--check-only` 扫描失败） | 修复环境后重试 |
 | 4 | 无需同步（plan 为空） | 正常，无需操作 |
 
 ## TODO 跟踪

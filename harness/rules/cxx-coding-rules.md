@@ -284,8 +284,8 @@ android::status_t LechaoLcview::getBatch(Batch* out) {
 
 - `readerLoop`、`workLoop`、监听线程（socket/epoll 循环）。
 - HAL/Daemon 任何后台线程的生命周期管理。
-- init 启动的服务（`service lcview_daemon /system/bin/lcview_daemon`）的异常退出策略。
-- 外部接口 `getBatch`、`getStats` 等在后台线程死亡时的返回值约定。
+- init 启动的服务（`service lechao_lcview /vendor/bin/lechao_lcview`）的异常退出策略。
+- 外部接口（daemon 直读内核的 `read`/`ioctl` 返回值，HAL 退役后 `getBatch` 已移除）在后台线程失败时的返回值约定。
 
 ---
 

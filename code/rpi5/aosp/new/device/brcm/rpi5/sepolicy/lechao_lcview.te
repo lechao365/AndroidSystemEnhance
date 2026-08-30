@@ -1,28 +1,22 @@
 # lechao_lcview —— 乐超自定义显示的系统服务守护进程
-#   系统级守护进程（/system/bin），管理显示控制逻辑
-#   与 lcview_hal（vendor 端）通过 vndbinder 通信，自身同时管理数据文件
+#   vendor 端守护进程（/vendor/bin），直读内核设备节点采集并落盘事件日志
+#   架构演进（HAL 退役后）：daemon 直读内核设备节点 /dev/vendor_lechao_lcview
+#   （原经 vndbinder 调 lcview_hal 的链路已取消，HAL 相关 binder/service
+#   规则随 HAL 退役一并移除）
 
 # 声明 lechao_lcview 为 SELinux domain
 type lechao_lcview, domain;
-# 声明 lcview 可执行文件的标签（file_contexts 匹配 /system/bin/lechao_lcview）
-type lechao_lcview_exec, exec_type, file_type;
+# 声明 lcview 可执行文件的标签（file_contexts 匹配 /vendor/bin/lechao_lcview）
+type lechao_lcview_exec, exec_type, vendor_file_type, file_type;
 # 声明 lcview 数据文件的类型 —— 用于存储运行时产生的显示配置、状态等数据
 #   data_file_type 表示这是一类数据文件，确保存放在 /data/vendor/ 下
 type lechao_lcview_data_file, file_type, data_file_type;
+# 内核设备节点类型（原定义于 lechao_lcview_hal.te，HAL 退役后并入本域；
+# file_contexts 匹配 /dev/vendor_lechao_lcview，daemon 直读使用）
+type lechao_lcview_hal_device, dev_type, file_type;
 
 # init 启动守护进程 —— init 执行 lchao_lcview_exec → domain transition
 init_daemon_domain(lechao_lcview)
-
-# 标记为 HAL 客户端域 —— 允许它使用 HAL 客户端相关权限
-typeattribute lechao_lcview halclientdomain;
-# 允许使用 vendor binder —— 与 vendor 端的 lcview_hal 跨 partition 通信
-vndbinder_use(lechao_lcview)
-# 允许通过 Binder 调用 lcview_hal —— lcview → lcview_hal 的 RPC
-binder_call(lechao_lcview, lechao_lcview_hal)
-# 允许在 service_manager 中查找 lcview_hal 服务
-#   启动时调用 IServiceManager::getService("vendor.lechao.lcview.ILcView/default")
-allow lechao_lcview lechao_lcview_hal_service:service_manager find;
-allow lechao_lcview servicemanager:binder { call };
 
 # 允许 lcview 在 /data/vendor/lechao_lcview/ 下创建目录
 #   create_dir_perms 包含 create_dir_perms = { create setattr link unlink ioctl read write
@@ -42,3 +36,10 @@ allow lechao_lcview vendor_file:file r_file_perms;
 # system 域默认不继承 logd 写权限，缺失时全部日志被 avc denied 静默丢弃，
 # HAL 断连/schema 失败/写盘失败均无日志现场（对照 hal.te 同款规则）
 allow lechao_lcview logd:unix_dgram_socket write;
+
+# 允许 daemon 直读内核设备节点 /dev/vendor_lechao_lcview（HAL 停用后）
+#   ioctl 是核心：read/ioctl 取环形缓冲批量记录（LCVIEW_GET/READ_RING），
+#   open/read/write/getattr 为基础设备操作（对照 hal.te 同款规则）
+allow lechao_lcview lechao_lcview_hal_device:chr_file { open read write ioctl getattr };
+# 允许 daemon 搜索 /dev 目录 —— 打开 /dev/vendor_lechao_lcview 之前需要遍历 /dev
+allow lechao_lcview device:dir { search read };

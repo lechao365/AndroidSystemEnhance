@@ -12,21 +12,21 @@ on post-fs-data
     mkdir /data/vendor/lechao_lcview 0750 system system
 
 # 服务声明：lechao_lcview
-#   /system/bin/lechao_lcview — 可执行文件路径（system 分区）
+#   /vendor/bin/lechao_lcview — 可执行文件路径（vendor 分区）
 #   class main — 随 main 类服务一同启动
 #   user/group system — 以 system 身份运行，有限文件系统权限
-#   非 oneshot（CXX-004）: HAL 永久失联等致命错误走 exit(1)，
+#   非 oneshot（CXX-004）: 设备打开/读错误等致命错误走 exit(1)，
 #   init 默认策略自动重启拉起采集链路；init 自带重启限速，
 #   不会造成日志风暴。oneshot 会让 exit(1) 后进程永久消失，
 #   故障被无限期掩盖。
-service lechao_lcview /system/bin/lechao_lcview
+service lechao_lcview /vendor/bin/lechao_lcview
     class main
     user system
     group system
 
 # sys.boot_completed=1 触发启动：
 # 等待系统完全启动后再启动日志采集服务，
-# 确保 HAL 服务和依赖的 framework 均已就绪。
+# 确保依赖的分区/服务均已就绪。
 # 这是 daemon 不依赖其他服务的轻量级启动控制方式。
 on property:sys.boot_completed=1
     start lechao_lcview

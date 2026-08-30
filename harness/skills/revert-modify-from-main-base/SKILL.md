@@ -28,7 +28,7 @@ code→workspace 同步回 main 并跑一次恢复验证确保开发板可启动
 - force push 失败（exit 2）转人工；恢复验证失败说明 main 基线本身异常，
   人工介入（不得再次自动 revert）
 ## Related policy IDs（关联规则 ID）
-- SRC-004（promoted/main 为恢复真相源）
+- SRC-004（code dev/main 为恢复真相源）
 ---
 ## 工作流
 1. 预览：bash harness/skills/revert-modify-from-main-base/revert_modify_from_main_base.sh

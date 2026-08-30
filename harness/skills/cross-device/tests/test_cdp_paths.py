@@ -10,7 +10,7 @@ import cdp_paths
 
 class TestCdpPaths(unittest.TestCase):
     def setUp(self):
-        # 全部用例走临时根，避免在真实仓库 mkdir data/verify 弄脏工作树
+        # 全部用例走临时根，避免在真实仓库 mkdir data/verify-results 弄脏工作树
         self._tmp = tempfile.TemporaryDirectory()
         self._old = os.environ.get("CDP_PROJECT_ROOT")
         os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
@@ -22,12 +22,21 @@ class TestCdpPaths(unittest.TestCase):
             os.environ["CDP_PROJECT_ROOT"] = self._old
         self._tmp.cleanup()
 
-    def test_data_verify_dir_env_override(self):
-        self.assertEqual(str(cdp_paths.data_verify_dir()),
-                         os.path.join(self._tmp.name, "data", "verify"))
+    def test_data_verify_results_dir_env_override(self):
+        self.assertEqual(str(cdp_paths.data_verify_results_dir()),
+                         os.path.join(self._tmp.name, "data", "verify-results"))
 
     def test_receipt_dir_mkdir(self):
-        d = cdp_paths.data_verify_dir()
+        d = cdp_paths.data_verify_results_dir()
+        self.assertTrue(d.is_dir())
+
+    def test_log_apply_dir_env_override(self):
+        self.assertEqual(str(cdp_paths.log_apply_dir()),
+                         os.path.join(self._tmp.name, "harness", "log",
+                                      "cross-device-apply"))
+
+    def test_log_apply_dir_mkdir(self):
+        d = cdp_paths.log_apply_dir()
         self.assertTrue(d.is_dir())
 
     def test_cdp_parse_script_path_resolution(self):

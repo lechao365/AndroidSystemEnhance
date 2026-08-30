@@ -22,12 +22,12 @@ index 9692b33..503c891 100644
 +#   注意 lciod_hal 在 vendor 分区，lciod 在 system 分区 —— 跨 partition 通信必须通过 vndbinder
 +/system/bin/lechao_lciod                       u:object_r:lechao_lciod_exec:s0
 +
-+# ===== lechao_lcview - 自定义显示 HAL 层（vendor 分区） =====
-+#  HAL 可执行文件 /vendor/bin/lechao_lcview_hal
-+#  标签 lechao_lcview_hal_exec，vendor 分区文件
-+/vendor/bin/lechao_lcview_hal                    u:object_r:lechao_lcview_hal_exec:s0
++# ===== lechao_lcview - 自定义显示系统（vendor 分区） =====
++#  daemon 直读内核后 HAL 退役：/vendor/bin/lechao_lcview_hal 的
++#  lechao_lcview_hal_exec 条目已删（二进制退役）
 +#  显示设备节点 /dev/vendor_lechao_lcview（单实例，固定名称）
-+#  标签 lechao_lcview_hal_device → lcview_hal 域有权控制此设备
++#  标签 lechao_lcview_hal_device（类型定义已并入 lechao_lcview.te），
++#  daemon 直读该节点，保留标签
 +/dev/vendor_lechao_lcview                    u:object_r:lechao_lcview_hal_device:s0
 +
 +# ===== rpi5_wifi_connect - 开机自动连接 WiFi 脚本（system 分区） =====
@@ -36,9 +36,9 @@ index 9692b33..503c891 100644
 +#  init.rpi5.wifi.rc 中 seclabel 为 u:r:rpi5_wifi_connect:s0，以独立域运行
 +/system/bin/rpi5_wifi_connect                    u:object_r:rpi5_wifi_connect_exec:s0
 +
-+# ===== lechao_lcview - 自定义显示系统服务（system 分区） =====
-+#  system 端守护进程 /system/bin/lechao_lcview
-+/system/bin/lechao_lcview                    u:object_r:lechao_lcview_exec:s0
++# ===== lechao_lcview - 自定义显示系统服务（vendor 分区） =====
++#  vendor 端守护进程 /vendor/bin/lechao_lcview
++/vendor/bin/lechao_lcview                    u:object_r:lechao_lcview_exec:s0
 +#  lcview 的数据文件目录 /data/vendor/lechao_lcview/
 +#  (/.*)? 表示递归匹配目录下的所有文件
 +#  标签 lechao_lcview_data_file → lcview 域可以在此目录下创建/读写文件

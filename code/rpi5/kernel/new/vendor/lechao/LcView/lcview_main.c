@@ -57,6 +57,26 @@ static struct class *lcview_class;
 static struct device *lcview_device;
 
 /*
+ * sysfs 只读统计导出（/sys/class/lcview/vendor_lechao_lcview/lcview_stats）
+ * 供 host 侧 perf 直读内核 total_records——设备节点有单打开限制
+ * （device_opened cmpxchg，HAL 常驻占用），并发 ioctl 直读返回 EBUSY；
+ * 只读 sysfs 文件不参与单打开语义，cat 即得实时计数（100ms 采样粒度，
+ * 替代 28s 心跳周期观测）。
+ */
+static ssize_t lcview_stats_show(struct device *dev,
+                                 struct device_attribute *attr, char *buf)
+{
+    struct lcview_stats st;
+    lcview_ring_get_stats(&lcview_ring, &st);
+    return scnprintf(buf, PAGE_SIZE,
+                     "total_records=%u overrun=%u ring_usage_bytes=%u "
+                     "ring_size_bytes=%u\n",
+                     st.total_records, st.overrun_cnt,
+                     st.ring_usage_bytes, st.ring_size_bytes);
+}
+static DEVICE_ATTR_RO(lcview_stats);
+
+/*
  * 全局环形缓冲区实例
  * 声明在 lcview_internal.h 中 extern，lcview_ring.c 未持有 extern 声明，
  * 仅有本文件定义实体，其他模块通过 lcview_ring_write/lcview_ring_read 访问
@@ -350,10 +370,19 @@ static int __init lcview_init(void)
         goto err_class;
     }
 
+    /* 第五步：创建 sysfs 只读统计文件（cat 直读内核计数，见 lcview_stats_show） */
+    ret = device_create_file(lcview_device, &dev_attr_lcview_stats);
+    if (ret) {
+        pr_err(PREFIX "failed to create sysfs stats file\n");
+        goto err_device_file;
+    }
+
     pr_info(PREFIX "initialized (ring=%uKB, major=%d)\n",
             ring_size_kb, major_number);
     return 0;
 
+err_device_file:
+    device_destroy(lcview_class, MKDEV(major_number, 0));
 err_class:
     class_destroy(lcview_class);
 err_chrdev:
@@ -363,4 +392,15 @@ err_ring:
     return ret;
 }
 
+static void __exit lcview_exit(void)
+{
+    device_remove_file(lcview_device, &dev_attr_lcview_stats);
+    device_destroy(lcview_class, MKDEV(major_number, 0));
+    class_destroy(lcview_class);
+    unregister_chrdev(major_number, DEVICE_NAME);
+    lcview_ring_destroy(&lcview_ring);
+    pr_info(PREFIX "unloaded\n");
+}
+
 module_init(lcview_init);
+module_exit(lcview_exit);

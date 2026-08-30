@@ -3,22 +3,55 @@
 #       此类用例在此集中维护，批次经 --case <标签> 引用，验收判据不再人眼搬运。
 # 结构：cases: { <标签>: <验收文本> }，验收文本可为任意标签组合（值内可用引号）。
 cases:
-  # lcview 存活综合用例：HAL/Daemon 服务 + 持续心跳日志 + boot 完成
+  # lcview 存活综合用例：daemon 直读内核（HAL 停用）+ 持续心跳日志 + boot 完成
   # 注意1：不用 file:/data/vendor/lechao_lcview —— 目录 0750 system:system，
   #       adb shell（shell 用户）无权列目录，file: 判据必然假红。
   # 注意2：log 判据必须选"持续性日志"（心跳），不能用"启动即打一次"的
   #       注册/加载日志——非 reboot 场景下启动日志已被 logcat 5000 行
   #       缓冲区滚出，判据必然假红（reboot 场景 + --log-since 才可靠）。
   # 注意3：心跳带 overrun/dropped/readErr 字段（CXX-004），命中即证明
-  #       HAL 读取链路健康 + 故障可见性字段在输出。
+  #       直读链路健康 + 故障可见性字段在输出。HAL 停用后三字段由
+  #       daemon 心跳补齐（原取 HAL alive beat 锚点，已随停用失效）。
   # 注意4：overrun/dropped/readErr 用 logfield 断言 0（锚点末行按字段取值比较）——
   #       log: 子串匹配会命中 5000 行缓冲内的开机初期零值心跳，故障累计后
   #       仍 PASS（假绿），logfield 取锚点最后一行真实累计值
-  # 注意5：守恒判据（conserve，hostcmd）取 daemon 心跳（heartbeat, loop= 含
-  #       total_records/overrun/jsonl_records 三数）末行，校验
-  #       total - overrun - jsonl（在途差值）不超界且不为负——丢记录/重复落盘
-  #       回归自动化判红，替代人工核算
-  lcview-liveness: 'svc:lechao_lcview_hal svc:lechao_lcview log:"LcView: alive beat=" log:"heartbeat, loop=" logfield:"LcView: alive beat=|overrun|=|0" logfield:"LcView: alive beat=|dropped|=|0" logfield:"LcView: alive beat=|readErr|=|0" hostcmd:"cases/lcview_check.sh --mode conserve" boot'
+  # 注意5：守恒判据（conserve v4，hostcmd）两段式采样：静止确认段两拍直读
+  #       （间隔 --conserve-sample-s 默认 5s）增量归零 → 窗口起点无积压，
+  #       然后负载采样段自造负载（--conserve-load-mb）后两拍采样：
+  #       produced = Δtotal - Δoverrun（sysfs 直读，内核累计，daemon 重启不归零），
+  #       landed = ΔJSONL 行数（wc -l 磁盘持久），in_flight = produced - landed。
+  #       超 --in-flight（默认 16）判红；负向（in_flight < -limit）在起点无积压
+  #       时为重复落盘/计数异常判红，仅追赶期（起点有积压）放行；
+  #       负载窗口 produced==0 判红（自造负载下应有数据可校验）。
+  #       ——v1 曾取心跳三数（total-overrun-jsonl）在 daemon 重启时误报；
+  #       v2 改 ring+HAL buffered 不比较产生 vs 落盘；v3 用直读双端增量但负向
+  #       被当追赶期整体放行（重复落盘/计数异常不可检测）；v4 恢复负向判红
+  #       （dropped 计丢弃不计重复，不能替代）+ 静止确认段保证判红可信。
+  # 注意6：conserve 已迁至 lcview-transfer（静止确认 + 自造负载采样两段式）——
+  #       liveness 为静止态用例组不跑 conserve（无自造负载时 produced==0 判红，
+  #       属防假绿设计而非用例缺陷）；有负载时才可校验守恒。
+  lcview-liveness: 'svc:lechao_lcview log:"heartbeat, loop=" logfield:"heartbeat, loop=|overrun|=|0" logfield:"heartbeat, loop=|dropped|=|0" logfield:"heartbeat, loop=|readErr|=|0" boot'
+
+  # 性能采集（脚本化统一负载，只报数不设门禁）：dd 读块设备 64MB（与性能基线
+  # 负载一致，消除 4MB 用例负载失真）→ 事件吞吐 / 平均落盘延迟 / daemon RSS，
+  # METRICS JSON 行供 ws_report --metrics 结构化存档（跨批可 diff）。
+  # 直读采样：内核 total_records 经 sysfs 只读节点
+  # （/sys/class/lcview/vendor_lechao_lcview/lcview_stats，lcview_main.c 导出；
+  #  设备节点有单打开限制 HAL 常驻，ioctl 直读返 EBUSY）+ JSONL 行数经 wc -l
+  # 按 100ms 采样——不依赖心跳（心跳每 30 loop 约 28s 才更新，远粗于 2.5s 的
+  # dd 负载窗，曾致 drain 恒为一个心跳周期、延迟随负载机械失真）。
+  # dd 读负载有 IO 副作用，不并入 liveness，按需触发或随批次方向单独跑。
+  lcview-perf: 'hostcmd:"cases/lcview_check.sh --mode perf --load-mb 64"'
+
+  # 重启恢复用例（补齐"无重启恢复用例"空洞）：kill daemon 进程 →
+  # init 自动拉起 + 心跳恢复（kill 后出现新心跳行）；额外断言 dd 触发的
+  # 新事件落盘（delta --event 4）与轮转 seq 递增（重启后 FileWriter
+  # 从目录续接 seq，写更高 _p{seq}，不重复写 _p0）。kill 有副作用（服务重启，
+  # init 自动恢复），单独用例不并入 liveness。
+  # 注：lcview-recover-hal 随 HAL 停用移除（HAL rc 改名 .disabled，设备无
+  # HAL 进程可 kill，用例语义失效；lcview_recover.sh 现仅支持 daemon 分支，
+  # hal 分支已删除）
+  lcview-recover-daemon: 'hostcmd:"cases/lcview_recover.sh daemon"'
 
   # L1 被动数据管道主用例（原 cases/lcview_pipeline.yaml 收敛于此，critical 项）：
   # 事件落盘 → JSONL 合法 → schema 匹配。hostcmd 在 workspace-verify
@@ -52,10 +85,15 @@ cases:
   #   LCVIEW_BLOCK_DEV（读）/ LCVIEW_BLOCK_DEV_WRITE（写，默认分区防破坏分区表）
   #   可 env 覆盖（上板先查 /dev/block 下 U 盘节点）；dd 失败即判红——
   #   不再 || true 吞失败（触发手段不可用须暴露，delta 兜底是双保险非替代）。
+  # conserve 置于读 dd 之后（静止确认 + 自造负载两段式）：先两拍增量归零
+  # 确认窗口起点无积压（前序外部 dd 事件已排干），再自造负载
+  # （--conserve-load-mb 4）采样——起点无积压则负向（落盘>产生）为真异常判红，
+  # 重复落盘/计数异常可检测；外部 dd 事件几秒内全部落盘，静止确认段先排干，
+  # 自带负载保证负载窗口 produced>0，守恒有数据可校验。
   # 注：usb_reset（事件 7）曾用 USBDEVFS_RESET（usbreset）实测——复位成功但
   #   打点在 USBD 设备栈路径（vendor_lechao_usbd-stats.c），xhci host 模式
   #   不经过，无 id 7 打点（副作用 rate_degraded 出现），归入暂无触发手段。
-  lcview-transfer: 'hostcmd:"cases/lcview_check.sh --mode baseline" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 4" hostcmd:"adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE:-/dev/block/sda1} bs=1M count=1\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 5"'
+  lcview-transfer: 'hostcmd:"cases/lcview_check.sh --mode baseline" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"cases/lcview_check.sh --mode conserve --conserve-load-mb 4" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 4" hostcmd:"adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE:-/dev/block/sda1} bs=1M count=1\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 5"'
 
   # lciod 存活综合用例：HAL/Daemon 服务 + 监控线程持续日志 + boot 完成。
   # 注意：log 判据选监控线程统计日志（"monitor: minor="，每 10s 打印），
@@ -103,43 +141,48 @@ cases:
 # 无 vendor 落 /system，vendor: true 落 /vendor。
 modules:
   lcview:
-    # 实读 Android.bp 的 4 个可部署 Soong 模块：
-    #   daemon/Android.bp: lechao_lcview（cc_binary，无 vendor）
-    #   hal/Android.bp:    lechao_lcview_hal（cc_binary，vendor: true）
-    #   hal/Android.bp:    vendor.lechao.lcview.ILcView-vintf（prebuilt_etc）
+    # 实读 Android.bp 的 Soong 模块：
+    #   daemon/Android.bp: lechao_lcview（cc_binary，vendor: true，直读内核）
     #   config/Android.bp: vendor.lechao.lcview-config（prebuilt_etc）
+    # HAL 已退役（CDP 0cc5eb08831b 停用、本批清理）：lechao_lcview_hal /
+    # vendor.lechao.lcview.ILcView-vintf / vendor.lechao.lcview-V2-ndk /
+    # ILcView 全部删除，不登记。
     targets:
       - lechao_lcview
-      - lechao_lcview_hal
-      - vendor.lechao.lcview.ILcView-vintf
       - vendor.lechao.lcview-config
     # 测试 target（AGENTS.md 强制两个 test target，tests/Android.bp 定义）
     test_targets:
       - lechao_lcview_unit_test
-      - lechao_lcview_hal_test
-    # 推送映射：daemon 无 vendor 落 /system，HAL 有 vendor 落 /vendor（bin + init 各一处）
-    # vendor.lechao.lcview-V2-ndk（AIDL NDK 后端库）：hal(daemon) 双依赖，
-    # system 与 vendor lib64 各推一份——不登记必 crash loop（linker CANNOT
-    # LINK，2026-08-28 实拍：reboot 后服务起不来靠手工补推）
+    # 测试源码目录（相对 AOSP 根，ws_upload_tests 推送前校验二进制新鲜度：
+    # 源码任一文件比二进制新即陈旧判红，防推旧二进制报绿）
+    test_src: vendor/lechao/services/lechao_lcview
+    # 需 root 执行的测试（adbd 切 root 后跑，跑完恢复 shell）：
+    # lcview test target 均不需 root（unit_test 的 chmod 权限用例
+    # 反而必须 shell 用户跑——root 无视 0500 权限会导致用例假过）
+    test_targets_run_as_root: []
+    # 推送映射：daemon 落 /vendor（bin + init）；runtime 依赖
+    # libjsoncpp.so 必须同推（旧镜像 vendor 分区缺该库，linker
+    # CANNOT LINK 实拍，2026-08-29 补推才起）；sepolicy 产物
+    # vendor_file_contexts（含 /vendor/bin/lechao_lcview → lechao_lcview_exec
+    # 标签）与 precompiled_sepolicy（含 lechao_lcview 域设备访问规则）同样
+    # 手工推的产物——清刷必炸（与 V2-ndk 漏推同源），须登记。
     push:
       - module: lechao_lcview
         dst:
-          - /system/bin/lechao_lcview
-          - /system/etc/init/lechao_lcview.rc
-      - module: lechao_lcview_hal
-        dst:
-          - /vendor/bin/lechao_lcview_hal
-          - /vendor/etc/init/lechao_lcview_hal.rc
-      - module: vendor.lechao.lcview.ILcView-vintf
-        dst:
-          - /vendor/etc/vintf/manifest/vendor.lechao.lcview.ILcView-service.xml
+          - /vendor/bin/lechao_lcview
+          - /vendor/etc/init/lechao_lcview.rc
       - module: vendor.lechao.lcview-config
         dst:
           - /vendor/etc/lcview_events.json
-      - module: vendor.lechao.lcview-V2-ndk
+      - module: libjsoncpp
         dst:
-          - /system/lib64/vendor.lechao.lcview-V2-ndk.so
-          - /vendor/lib64/vendor.lechao.lcview-V2-ndk.so
+          - /vendor/lib64/libjsoncpp.so
+      - module: vendor_file_contexts
+        dst:
+          - /vendor/etc/selinux/vendor_file_contexts
+      - module: precompiled_sepolicy
+        dst:
+          - /vendor/etc/selinux/precompiled_sepolicy
   lciod:
     # 实读 Android.bp 的 4 个可部署 Soong 模块：
     #   daemon/Android.bp: lechao_lciod（cc_binary，无 vendor）
@@ -155,6 +198,14 @@ modules:
     # tests/Android.bp 定义）
     test_targets:
       - lechao_lciod_unit_test
+      - lechao_lciod_hal_test
+    # 测试源码目录（相对 AOSP 根，推送前新鲜度校验同 lcview）
+    test_src: vendor/lechao/services/lechao_lciod
+    # 需 root 执行的测试：lciod_hal_test 的真实设备分支要 open
+    # /dev/vendor_lechao_usbd0（crw-rw---- system system），shell 用户无
+    # system 组权限 → open EACCES → 真设备 ioctl 用例假红（2026-08-28
+    # 设备真跑实测）；root 下 28/28 通过
+    test_targets_run_as_root:
       - lechao_lciod_hal_test
     # 推送映射：daemon/probe 无 vendor 落 /system，HAL 有 vendor 落 /vendor（bin + init 各一处）
     push:

@@ -390,3 +390,85 @@ TEST_F(SchemaParserValidateTest, StringFieldLen_BigEndian_Rejected) {
     // 大端序 5 = 0x0500，le 读取后变 1280，远超 record 末尾 → exceeds record
     EXPECT_FALSE(sp_.validate(rec.data(), rec.size(), err));
 }
+
+// ============================================================
+// validateFields 直测（方向 3）：拆分后的字段级校验直接验证越界拦截
+// ============================================================
+
+class SchemaParserValidateFieldsTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        ASSERT_TRUE(sp_.parseJson(kValidJson));  // id=4: STRING + INT64
+        schema_ = sp_.find(4);
+        ASSERT_NE(schema_, nullptr);
+    }
+    SchemaParser sp_;
+    const EventSchema* schema_ = nullptr;
+};
+
+TEST_F(SchemaParserValidateFieldsTest, ValidFields_ReturnsConsumed) {
+    auto rec = buildValidRecord();
+    size_t consumed = 0;
+    std::string err;
+    EXPECT_TRUE(sp_.validateFields(*schema_, rec.data(), rec.size(), consumed, err));
+    EXPECT_EQ(consumed, rec.size());
+}
+
+TEST_F(SchemaParserValidateFieldsTest, FieldBytesMissing_ReturnsEof) {
+    // 字段区只有 1 字节 type（连 2B 长度前缀都不够）→ 读长度时 EOF
+    std::vector<uint8_t> rec(sizeof(lcview_record_hdr) + 1, 0);
+    auto* hdr = reinterpret_cast<lcview_record_hdr*>(rec.data());
+    hdr->magic = LCVIEW_MAGIC;
+    hdr->event_id = 4;
+    hdr->field_count = 2;
+    rec[sizeof(lcview_record_hdr)] = LCVIEW_TYPE_STRING;
+
+    size_t consumed = 0;
+    std::string err;
+    EXPECT_FALSE(sp_.validateFields(*schema_, rec.data(), rec.size(), consumed, err));
+    EXPECT_NE(err.find("EOF"), std::string::npos);
+}
+
+TEST_F(SchemaParserValidateFieldsTest, StringDataExceeds_ReturnsError) {
+    // STRING 长度前缀声明 100 但实际无数据 → 数据越界拦截
+    std::vector<uint8_t> rec(sizeof(lcview_record_hdr) + 3, 0);
+    auto* hdr = reinterpret_cast<lcview_record_hdr*>(rec.data());
+    hdr->magic = LCVIEW_MAGIC;
+    hdr->event_id = 4;
+    hdr->field_count = 2;
+    uint8_t* p = rec.data() + sizeof(lcview_record_hdr);
+    p[0] = LCVIEW_TYPE_STRING;
+    uint16_t big_le = htole16(100);
+    memcpy(p + 1, &big_le, 2);
+
+    size_t consumed = 0;
+    std::string err;
+    EXPECT_FALSE(sp_.validateFields(*schema_, rec.data(), rec.size(), consumed, err));
+    EXPECT_NE(err.find("exceeds record"), std::string::npos);
+}
+
+TEST_F(SchemaParserValidateFieldsTest, UnknownFieldType_ReturnsError) {
+    // 未知类型标识（99）→ 解码器 kUnknown 拦截
+    std::vector<uint8_t> rec(sizeof(lcview_record_hdr) + 1, 0);
+    auto* hdr = reinterpret_cast<lcview_record_hdr*>(rec.data());
+    hdr->magic = LCVIEW_MAGIC;
+    hdr->event_id = 4;
+    hdr->field_count = 2;
+    rec[sizeof(lcview_record_hdr)] = 99;
+
+    size_t consumed = 0;
+    std::string err;
+    EXPECT_FALSE(sp_.validateFields(*schema_, rec.data(), rec.size(), consumed, err));
+    EXPECT_NE(err.find("unknown field type"), std::string::npos);
+}
+
+TEST_F(SchemaParserValidateFieldsTest, TypeMismatch_ReturnsError) {
+    // 首字段 schema 期望 STRING，实际 INT64 → 类型不匹配拦截
+    auto rec = buildValidRecord();
+    rec[sizeof(lcview_record_hdr)] = LCVIEW_TYPE_INT64;
+
+    size_t consumed = 0;
+    std::string err;
+    EXPECT_FALSE(sp_.validateFields(*schema_, rec.data(), rec.size(), consumed, err));
+    EXPECT_NE(err.find("type mismatch"), std::string::npos);
+}

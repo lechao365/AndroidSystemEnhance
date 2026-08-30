@@ -13,12 +13,15 @@
 #define LOG_TAG "lechao_lcview"
 
 #include "FileWriter.h"
+#include "record_codec.h"
 #include "../include/lcview_events.h"
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <dirent.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <sstream>
 #include <iomanip>
 #include <cerrno>
@@ -26,6 +29,12 @@
 #include <log/log.h>
 #include <android-base/file.h>
 #include "lechao_log.h"
+
+// record_codec 解码器符号（定义于 vendor::lechao::lcview 命名空间，
+// 本文件类定义不在该命名空间内，逐符号引入避免全量 using 的歧义风险）
+using vendor::lechao::lcview::DecodedField;
+using vendor::lechao::lcview::FieldDecodeResult;
+using vendor::lechao::lcview::decodeRecordField;
 
 // 递归创建目录：
 // Android 上 mkdir 不自动创建父目录，所以需要逐级创建。
@@ -112,22 +121,62 @@ std::string FileWriter::makeFilename(const EventSchema& schema,
     return oss.str();
 }
 
+// 扫描日志目录：该 event+date 已存在的最大轮转序号 +1（重启后 seq 续接）。
+// CXX-002 语义延续：daemon 重启后 mFiles 为空，seq 归 0 会重复写 _p0 追加
+// 旧文件、轮转文件名混乱（恢复用例断言"轮转 seq 递增"的基础）。
+// 匹配 {id}_{name}_{date}_p<seq>.jsonl，取 max(seq)+1；无匹配返 0。
+// NOTE: readdir 返回的 d_name 为纯文件名（不含目录路径），故 prefix 只做
+// 文件名前缀匹配（曾误拼 mCfg.logDir + "/" 前缀，compare 恒不匹配、
+// 恒返 0——真机 daemon 重启后重复写 _p0 的根因，C++ 单测未在设备跑没暴露）
+int FileWriter::nextSeqFor(const EventSchema& schema, const std::string& date)
+{
+    std::string prefix = std::to_string(schema.id) + "_" + schema.name
+                         + "_" + date + "_p";
+    int maxSeq = -1;
+    DIR* dir = opendir(mCfg.logDir.c_str());
+    if (!dir)
+        return 0;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        std::string name(entry->d_name);
+        if (name.compare(0, prefix.size(), prefix) != 0)
+            continue;
+        // 尾部须为 "<seq>.jsonl"
+        const std::string suffix = ".jsonl";
+        if (name.size() <= prefix.size() + suffix.size())
+            continue;
+        if (name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0)
+            continue;
+        std::string num = name.substr(prefix.size(),
+                                      name.size() - prefix.size() - suffix.size());
+        char* end = nullptr;
+        long v = strtol(num.c_str(), &end, 10);
+        if (end && *end == '\0' && v >= 0)
+            maxSeq = std::max(maxSeq, static_cast<int>(v));
+    }
+    closedir(dir);
+    return maxSeq + 1;
+}
+
 // 打开或创建某个 event_id 对应的日志文件
 // CXX-002: 文件已存在时必须 fstat 恢复 currentSize（从持久层恢复状态），
 // 否则 daemon 重启后追加模式打开旧文件，已有内容不计入大小，
 // 单文件可超限近一倍，轮转约束失效
 void FileWriter::openFile(uint16_t eventId, const EventSchema& schema)
 {
-    // 如果该 event 已有打开的文件，先关闭；seq 延续旧值保持文件名连续
+    std::string date = makeDateStr();
+    // 如果该 event 已有打开的文件，先关闭；seq 延续旧值保持文件名连续；
+    // 重启（mFiles 空）则从目录扫描续接 seq（nextSeqFor）
     int seq = 0;
     auto it = mFiles.find(eventId);
     if (it != mFiles.end()) {
         if (it->second.stream.is_open())
             it->second.stream.close();
         seq = it->second.seq;
+    } else {
+        seq = nextSeqFor(schema, date);
     }
 
-    std::string date = makeDateStr();
     FileState fs;
     fs.eventId = eventId;
     fs.eventName = schema.name;
@@ -153,17 +202,6 @@ void FileWriter::openFile(uint16_t eventId, const EventSchema& schema)
     mFiles[eventId] = std::move(fs);
 }
 
-// 关闭某个 event_id 对应的日志文件并从 mFiles 中移除
-void FileWriter::closeFile(uint16_t eventId)
-{
-    auto it = mFiles.find(eventId);
-    if (it != mFiles.end()) {
-        if (it->second.stream.is_open())
-            it->second.stream.close();
-        mFiles.erase(it);
-    }
-}
-
 // JSON 字符串转义：对 " 和 \ 字符进行转义处理
 // 为什么手动实现而非用 JSON 库：formatJsonLine 需要最高性能，
 // 减少 JSON 库的字符串处理开销
@@ -176,6 +214,48 @@ static void jsonEscapeString(std::ostringstream& oss, const std::string& s)
         oss << c;
     }
     oss << "\"";
+}
+
+// 将单个解码字段值追加到 JSON 输出流（拆分自 formatJsonLine，行为不变）
+// INT32/INT64/FLOAT 数值直出、STRING 转义、BINARY hex 输出、未知类型 null
+static void appendFieldValue(std::ostringstream& oss, const DecodedField& df)
+{
+    switch (df.type) {
+    case LCVIEW_TYPE_INT32: {
+        int32_t val;
+        memcpy(&val, df.value, 4);
+        oss << val;
+        break;
+    }
+    case LCVIEW_TYPE_INT64: {
+        int64_t val;
+        memcpy(&val, df.value, 8);
+        oss << val;
+        break;
+    }
+    case LCVIEW_TYPE_FLOAT: {
+        float val;
+        memcpy(&val, df.value, 4);
+        oss << val;
+        break;
+    }
+    case LCVIEW_TYPE_STRING: {
+        std::string s(reinterpret_cast<const char*>(df.value), df.valueLen);
+        jsonEscapeString(oss, s);
+        break;
+    }
+    case LCVIEW_TYPE_BINARY: {
+        oss << "\"";
+        for (size_t j = 0; j < df.valueLen; j++)
+            oss << std::hex << std::setfill('0')
+                << std::setw(2) << (unsigned)df.value[j];
+        oss << "\"" << std::dec;
+        break;
+    }
+    default:
+        oss << "null";
+        break;
+    }
 }
 
 // 将二进制记录格式化为 JSONL 一行
@@ -205,79 +285,106 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
     const uint8_t* ptr = fields;
     const uint8_t* const end = fields + fieldsLen;
 
-#define LCVIEW_NEED(n) do { \
-    if ((size_t)(end - ptr) < (size_t)(n)) { \
-        ALOGE("FileWriter: formatJsonLine: out-of-bounds at field %zu (need %zu, remain %zd)", \
-              i, (size_t)(n), (ssize_t)(end - ptr)); \
-        return std::string(); \
-    } \
-} while (0)
-
+    // 字段推进统一走 record_codec::decodeRecordField（与
+    // SchemaParser::validate 共用同一 TLV 解码器；原此处手写
+    // LCVIEW_NEED 宏 + switch 的越界/推进逻辑已收敛到解码器）
     for (size_t i = 0; i < schema.fields.size(); i++) {
         if (i > 0) oss << ",";
 
-        LCVIEW_NEED(1);
-        uint8_t type = *ptr;
-        ptr++;
+        if (ptr >= end) {
+            ALOGE("FileWriter: formatJsonLine: out-of-bounds at field %zu (need 1, remain %zd)",
+                  i, (ssize_t)(end - ptr));
+            mDrops.formatOob++;
+            return std::string();
+        }
 
-        switch (type) {
-        case LCVIEW_TYPE_INT32: {
-            LCVIEW_NEED(4);
-            int32_t val;
-            memcpy(&val, ptr, 4);
-            oss << val;
-            ptr += 4;
-            break;
+        DecodedField df;
+        FieldDecodeResult r = decodeRecordField(&ptr, end, &df);
+        if (r == FieldDecodeResult::kTruncated) {
+            // 越界：与 LCVIEW_NEED 失败同语义，记 formatOob 丢弃
+            ALOGE("FileWriter: formatJsonLine: truncated at field %zu",
+                  i);
+            mDrops.formatOob++;
+            return std::string();
         }
-        case LCVIEW_TYPE_INT64: {
-            LCVIEW_NEED(8);
-            int64_t val;
-            memcpy(&val, ptr, 8);
-            oss << val;
-            ptr += 8;
-            break;
-        }
-        case LCVIEW_TYPE_FLOAT: {
-            LCVIEW_NEED(4);
-            float val;
-            memcpy(&val, ptr, 4);
-            oss << val;
-            ptr += 4;
-            break;
-        }
-        case LCVIEW_TYPE_STRING: {
-            LCVIEW_NEED(2);
-            uint16_t len;
-            memcpy(&len, ptr, 2);
-            ptr += 2;
-            LCVIEW_NEED(len);
-            std::string s(reinterpret_cast<const char*>(ptr), len);
-            ptr += len;
-            jsonEscapeString(oss, s);
-            break;
-        }
-        case LCVIEW_TYPE_BINARY: {
-            LCVIEW_NEED(2);
-            uint16_t len;
-            memcpy(&len, ptr, 2);
-            ptr += 2;
-            LCVIEW_NEED(len);
-            oss << "\"";
-            for (uint16_t j = 0; j < len; j++)
-                oss << std::hex << std::setfill('0')
-                    << std::setw(2) << (unsigned)ptr[j];
-            ptr += len;
-            oss << "\"" << std::dec;
-            break;
-        }
-        default:
-            oss << "null";
-            break;
-        }
+        // kUnknown：未知类型输出 null 继续（与历史 default 语义一致，
+        // 解码器已推进 1 字节 type）；kOk 正常解码，两者 df.type 均已填充
+        appendFieldValue(oss, df);
     }
-#undef LCVIEW_NEED
     oss << "]}\n";
     return oss.str();
+}
+
+// 写路径耗时累计（微秒；供心跳输出平均微秒/条）
+void FileWriter::recordWriteTiming(std::chrono::steady_clock::time_point start)
+{
+    mTimings.writeCount++;
+    mTimings.writeTotalUs += static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start).count());
+}
+
+// 回退文件到指定偏移：flush 失败后首写可能部分落盘，重试前须截断掉残留的
+// 半行，否则磁盘留"半行+整行"坏行（app 重开并重写整行只追加不清残留）。
+// 仅尽力而为——文件不可打开/非普通文件（如 /dev/full）时静默忽略，成败由
+// 后续重写决定（CXX-004 故障可恢复：不留坏行）
+static void rollbackFileTo(const std::string& path, size_t offset)
+{
+    int fd = open(path.c_str(), O_WRONLY | O_CLOEXEC);
+    if (fd < 0)
+        return;
+    if (ftruncate(fd, static_cast<off_t>(offset)) != 0)
+        ALOGE("FileWriter: rollback truncate %s to %zu failed: %s",
+              path.c_str(), offset, strerror(errno));
+    close(fd);
+}
+
+// 写盘 + flush + 失败恢复（拆分自 writeRecord，行为不变）。
+// 返回是否成功：失败路径已累计 DROP 计数（reopenFailed/retryFailed）
+// 与写耗时，调用方须直接返回
+bool FileWriter::writeLineFlush(FileState& fs, const std::string& line)
+{
+    auto tWriteStart = std::chrono::steady_clock::now();
+    // 写前记录偏移（fs.currentSize 为上次成功后落盘字节数，即本行写入起点）：
+    // 首次 flush 部分落盘后失败时，重试前须先回退到该偏移再重写，否则磁盘
+    // 留半行加整行的坏行（app 重开并重写整行只追加不清残留）
+    const size_t writeBase = fs.currentSize;
+    // 写 + 立即 flush：flush 失败才算真失败——ofstream 缓冲未满时 << 只在
+    // 内存缓冲不落盘、不设 failbit，只查 << 会漏掉磁盘写失败（RetryWriteFails
+    // 设备真跑暴露：/dev/full 写入 60B 缓冲未满 fail()==0，flush 才置位）
+    fs.stream << line;
+    fs.stream.flush();
+    if (fs.stream.fail()) {
+        ALOGE("FileWriter: write failed for event %u, attempting recovery",
+              fs.eventId);
+        /* CXX-002: failbit 粘滞不清除会让该事件流从此永久失败，
+         * 后续每条都 DROP（磁盘满恢复后也无法自愈的错误吞噬）。
+         * 恢复路径：清错误状态 → 回退首写残留 → 重开流 → 重试一次 */
+        fs.stream.clear();
+        fs.stream.close();
+        rollbackFileTo(fs.currentFilename, writeBase);
+        fs.stream.open(fs.currentFilename, std::ios::app);
+        if (!fs.stream.is_open()) {
+            ALOGE("FileWriter: recovery reopen failed for event %u, DROPPING",
+                  fs.eventId);
+            mDrops.reopenFailed++;
+            recordWriteTiming(tWriteStart);
+            return false;
+        }
+        fs.stream << line;
+        fs.stream.flush();
+        if (fs.stream.fail()) {
+            ALOGE("FileWriter: retry write failed for event %u, DROPPING",
+                  fs.eventId);
+            mDrops.retryFailed++;
+            fs.stream.clear();
+            recordWriteTiming(tWriteStart);
+            return false;
+        }
+        ALOGI("FileWriter: recovered stream for event %u", fs.eventId);
+    }
+    recordWriteTiming(tWriteStart);
+    return true;
 }
 
 // 写入一条合法记录到对应事件的文件中
@@ -294,46 +401,35 @@ void FileWriter::writeRecord(const EventSchema& schema,
         it = mFiles.find(schema.id);
         if (it == mFiles.end() || !it->second.stream.is_open()) {
             ALOGE("FileWriter: writeRecord: cannot open file for event %u, DROPPING", schema.id);
+            mDrops.openFailed++;
             return;
         }
     }
 
+    // 写路径耗时统计（方向 3）：formatJsonLine 与写盘分开累计，
+    // 心跳输出平均微秒/条，作为微优化可判定指标
+    auto tFormatStart = std::chrono::steady_clock::now();
     std::string line = formatJsonLine(schema, hdr, fields, fieldsLen);
+    mTimings.formatCount++;
+    mTimings.formatTotalUs += static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - tFormatStart).count());
 
     if (line.empty()) {
         ALOGE("FileWriter: writeRecord: formatJsonLine returned empty for event %u, DROPPING", schema.id);
+        mDrops.formatEmpty++;
         return;
     }
 
     LC_ALOGD("lechao_lcview: write %u %s", schema.id, line.c_str());
 
-    it->second.stream << line;
-    if (it->second.stream.fail()) {
-        ALOGE("FileWriter: write failed for event %u, attempting recovery",
-              schema.id);
-        /* CXX-002: failbit 粘滞不清除会让该事件流从此永久失败，
-         * 后续每条都 DROP（磁盘满恢复后也无法自愈的错误吞噬）。
-         * 恢复路径：清错误状态 → 重开流 → 重试一次 */
-        it->second.stream.clear();
-        it->second.stream.close();
-        it->second.stream.open(it->second.currentFilename, std::ios::app);
-        if (!it->second.stream.is_open()) {
-            ALOGE("FileWriter: recovery reopen failed for event %u, DROPPING",
-                  schema.id);
-            return;
-        }
-        it->second.stream << line;
-        if (it->second.stream.fail()) {
-            ALOGE("FileWriter: retry write failed for event %u, DROPPING",
-                  schema.id);
-            it->second.stream.clear();
-            return;
-        }
-        ALOGI("FileWriter: recovered stream for event %u", schema.id);
-    }
+    // 写盘 + flush + 失败恢复（CXX-002，含写耗时累计）
+    if (!writeLineFlush(it->second, line))
+        return;
 
-    // 每次写入后立即 flush，防止进程崩溃导致数据丢失
-    it->second.stream.flush();
+    // 方向 4：写入计数累计，供 enforceRetention 按写入阈值降频扫描
+    mWritesSinceRetention++;
+
     it->second.currentSize += line.size();
 }
 
@@ -345,6 +441,7 @@ void FileWriter::writeInvalid(const uint8_t* data, size_t len,
 {
     if (!mInvalidStream.is_open()) {
         ALOGE("FileWriter: writeInvalid: stream not open, DROPPING reason=%s", reason.c_str());
+        mDrops.invalidNotOpen++;
         return;
     }
     // 原始数据 hex 落盘上限：足够定位协议问题，又不至于在损坏风暴下写爆磁盘
@@ -418,26 +515,16 @@ void FileWriter::checkRotation()
     }
 }
 
-// 容量限制清理：删除最旧的日志文件直到总大小 <= maxTotalSizeMb
-// 策略：扫描日志目录下的所有 .jsonl 和 .log 文件，
-// 按 mtime 从小到大（最旧优先）排序，逐个删除直到满足容量限制。
-// 为什么选择 LRU（最旧）而非 LRF（最大）：
-//   日志文件按日期命名，最旧的文件分析价值最低。
-void FileWriter::enforceRetention()
+// 扫描段：遍历日志目录，收集全部 .jsonl/.log 文件的 (路径, mtime, size)
+// （拆分自 enforceRetention，行为不变）
+std::vector<FileWriter::LogFile> FileWriter::scanLogFiles()
 {
-    size_t maxBytes = mCfg.maxTotalSizeMb * 1024 * 1024;
-
-    struct LogFile {
-        std::string path;
-        time_t mtime;
-        off_t size;
-    };
     std::vector<LogFile> files;
 
     DIR* dir = opendir(mCfg.logDir.c_str());
     if (!dir) {
         ALOGE("FileWriter: enforceRetention: opendir(%s) failed: %s", mCfg.logDir.c_str(), strerror(errno));
-        return;
+        return files;
     }
 
     // 遍历日志目录，收集所有 .jsonl 和 .log 文件
@@ -451,9 +538,19 @@ void FileWriter::enforceRetention()
         std::string fullPath = mCfg.logDir + "/" + name;
         struct stat st;
         if (stat(fullPath.c_str(), &st) == 0)
-            files.push_back({fullPath, st.st_mtime, st.st_size});
+            files.push_back({fullPath, st.st_mtime,
+                             static_cast<std::int64_t>(st.st_size)});
     }
     closedir(dir);
+    return files;
+}
+
+// 淘汰段：按 mtime 升序（最旧优先）删除文件直至总大小 <= maxTotalSizeMb；
+// 跳过当前正在写入/被 invalid 流持有的文件（拆分自 enforceRetention，
+// 行为不变）
+void FileWriter::evictOldFiles(std::vector<LogFile>& files)
+{
+    size_t maxBytes = mCfg.maxTotalSizeMb * 1024 * 1024;
 
     // 按修改时间升序排列（最旧的在前）
     std::sort(files.begin(), files.end(),
@@ -464,7 +561,7 @@ void FileWriter::enforceRetention()
     // 计算当前总大小
     size_t totalSize = 0;
     for (const auto& f : files)
-        totalSize += f.size;
+        totalSize += static_cast<size_t>(f.size);
 
     // 从最旧文件开始删除，直到总大小 <= maxBytes
     // 跳过当前正在写入的文件，避免删除后 writeRecord 写入失败
@@ -484,10 +581,32 @@ void FileWriter::enforceRetention()
         if (isOpen)
             continue;
         if (unlink(f.path.c_str()) == 0) {
-            totalSize -= f.size;
+            totalSize -= static_cast<size_t>(f.size);
             ALOGI("FileWriter: deleted old log %s", f.path.c_str());
         } else {
             ALOGE("FileWriter: enforceRetention: unlink(%s) failed: %s", f.path.c_str(), strerror(errno));
         }
     }
+}
+
+// 容量限制清理：删除最旧的日志文件直到总大小 <= maxTotalSizeMb
+// 策略：扫描日志目录下的所有 .jsonl 和 .log 文件，
+// 按 mtime 从小到大（最旧优先）排序，逐个删除直到满足容量限制。
+// 为什么选择 LRU（最旧）而非 LRF（最大）：
+//   日志文件按日期命名，最旧的文件分析价值最低。
+void FileWriter::enforceRetention()
+{
+    // 方向 4 降频：每轮主循环全目录 opendir+stat 成本高（空批也扫），
+    // 改为按写入计数触发——未达阈值直接跳过，避免无数据时反复扫描。
+    // retentionScanEveryWrites == 0 表示关闭降频（每次调用都扫描，
+    // 单测显式调用 enforceRetention 断言扫描行为的场景使用）
+    if (mCfg.retentionScanEveryWrites > 0 &&
+        mWritesSinceRetention < mCfg.retentionScanEveryWrites) {
+        return;
+    }
+    mWritesSinceRetention = 0;
+
+    // 扫描 → 淘汰 两段（行为不变）
+    std::vector<LogFile> files = scanLogFiles();
+    evictOldFiles(files);
 }

@@ -55,7 +55,7 @@ rm -f "$BODYF"
 RCPT=$(echo "$WS_OUT" | sed -n 's/^receipt: //p')
 [ -n "$RCPT" ] || { echo "error: ws_report 未输出收据路径" >&2; exit 1; }
 # 收据随 dev 提交推送（trend.md 由 ws_report append_trend 写入，须一并入提交，否则脏树使下次预检必败）
-git add "$RCPT" data/verify/trend.md
+git add "$RCPT" data/verify-results/trend.md
 if git diff --cached --quiet; then
   echo "warn: 无收据变更，跳过提交"
 else

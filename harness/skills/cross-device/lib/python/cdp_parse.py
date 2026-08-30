@@ -94,9 +94,17 @@ def validate_batch(text: str, role: str = "emit"):
     lines = norm.splitlines()
     if not MODE_RE.match(lines[0]):
         return EXIT_STRUCT, [f"首行必须为 -s/-sv base:<12hex>，实际: {lines[0]!r}"]
-    for ln in lines[1:]:
-        if not TAG_RE.match(ln):
+    seen_tags: dict[str, int] = {}
+    for i, ln in enumerate(lines[1:], start=2):
+        t = TAG_RE.match(ln)
+        if not t:
             return EXIT_STRUCT, [f"未知行（须为 意图/验收/方向: 前缀）: {ln!r}"]
+        if t.group(1) in seen_tags:
+            return EXIT_STRUCT, [
+                f"重复标签 {t.group(1)}（行 {seen_tags[t.group(1)]} 与行 {i}），"
+                "三标签各占一段且不得重复",
+            ]
+        seen_tags[t.group(1)] = i
 
     b = parse_batch(norm)
     if not (b.intent and b.acceptance and b.direction):

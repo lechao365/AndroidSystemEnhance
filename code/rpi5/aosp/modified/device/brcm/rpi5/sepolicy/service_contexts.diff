@@ -2,7 +2,7 @@ diff --git a/sepolicy/service_contexts b/sepolicy/service_contexts
 index 9d6f3bf..5a79510 100644
 --- a/sepolicy/service_contexts
 +++ b/sepolicy/service_contexts
-@@ -1,12 +1,29 @@
+@@ -1,12 +1,23 @@
 -# Camera
 +# ===== 系统内置 HAL 服务条目（rpi5 设备必需） =====
  android.hardware.camera.provider.ICameraProvider/external/0   u:object_r:hal_camera_service:s0
@@ -33,9 +33,3 @@ index 9d6f3bf..5a79510 100644
 +#  为什么 vendor 前缀：这是 vendor 分区的服务，注册到 vendor_service_manager
 +#  跨 partition 通信：system 端 lciod 查找 vendor 端服务，必须通过 vndbinder 连接
 +vendor.lechao.lciod.IIoHal/default                  u:object_r:lechao_lciod_hal_service:s0
-+
-+# ===== lechao_lcview_hal - 自定义显示 HAL 服务（vendor 端） =====
-+#  服务名：vendor.lechao.lcview.ILcView/default
-+#  标签：lechao_lcview_hal_service（定义在 lechao_lcview_hal.te 中）
-+#  用途：lcview(system) 通过此服务名在 vendor_service_manager 中查找显示 HAL
-+vendor.lechao.lcview.ILcView/default              u:object_r:lechao_lcview_hal_service:s0

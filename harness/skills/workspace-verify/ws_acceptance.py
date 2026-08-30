@@ -23,6 +23,8 @@ import re
 import shlex
 import subprocess
 import sys
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -51,6 +53,53 @@ _TAG_RE = re.compile(
     r'|cmd:(?:"(?:\\.|[^"\\])*"|\S+)|\bboot\b')
 # --log-since 时间窗起点格式：MM-DD 或 YYYY-MM-DD 的 HH:MM:SS.mmm
 _SINCE_RE = re.compile(r"^(?:\d{4}-)?\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$")
+
+
+def _parse_since_epoch(since):
+    """--log-since 文本 → 本地时区 epoch 秒（float，含毫秒小数）。
+
+    支持 MM-DD（无年，按当前年补全）与 YYYY-MM-DD 两种前缀；
+    解析失败抛 ValueError（调用方转错误消息返 2/1）。
+    """
+    if since[4] != "-":  # "MM-DD ..."（无年）补当前年
+        since = f"{datetime.now().year}-{since}"
+    dt = datetime.strptime(since, "%Y-%m-%d %H:%M:%S.%f")
+    local = dt.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return local.timestamp()
+
+
+def convert_since_to_device(local_since, device_cmd):
+    """把本地 --log-since 按设备时钟/时区换算为设备侧时间窗文本。
+
+    --log-since 在本地（CST）书写，而设备时钟/时区常为 UTC（PIT-5 同源，
+    已复发三次靠人工换算绕过）：本地时刻直接传 logcat 会落在设备"未来"，
+    判据取回 0 字符恒红。换算 = 本地时刻 epoch + (设备 epoch - 本地 epoch)，
+    再按设备时区（date +%z）格式化，保证时间窗落在设备真实时间域。
+    device_cmd(cmd) -> (stdout, exit_code)。返回 (device_since, err)；
+    err 非 None 时 device_since 为 None。
+    """
+    try:
+        local_epoch = _parse_since_epoch(local_since)
+    except ValueError:
+        return None, f"--log-since 解析失败: {local_since!r}"
+    now_epoch = time.time()
+    out, rc = device_cmd("date +%s")
+    if rc != 0 or not out.strip().isdigit():
+        return None, "无法读取设备时钟（date +%s）"
+    device_epoch = int(out.strip())
+    out, rc = device_cmd("date +%z")
+    if rc != 0:
+        return None, "无法读取设备时区（date +%z）"
+    m = re.match(r"([+-])(\d{2})(\d{2})", out.strip())
+    if not m:
+        return None, f"设备时区格式非法 {out.strip()!r}"
+    sign = 1 if m.group(1) == "+" else -1
+    offset = sign * (int(m.group(2)) * 3600 + int(m.group(3)) * 60)
+    tz = timezone(timedelta(seconds=offset))
+    device_since = local_epoch + (device_epoch - now_epoch)
+    dt = datetime.fromtimestamp(device_since, tz=tz)
+    fmt = "%Y-%m-%d %H:%M:%S.%f" if local_since[4] == "-" else "%m-%d %H:%M:%S.%f"
+    return dt.strftime(fmt)[:-3], None
 
 
 def parse_acceptance(text):
@@ -259,11 +308,13 @@ def main(argv=None):
               f"{args.log_since!r}", file=sys.stderr)
         return 2
     if args.wait_ready and not args.log_since:
-        # 假绿精确条件强制拦截：reboot 后 log 窗口若含旧日志会命中上轮关键字
+        # 假绿精确条件强制拦截：reboot 后 log 窗口若含旧日志会命中上轮关键字。
+        # log: 子串与 logfield: 锚点末行累计值同源风险（logfield 同样可能
+        # 取到 reboot 前的旧累计行），须一并拦截。
         tags = parse_acceptance(acceptance)
-        if any(t.startswith("log:") for t in tags):
-            print("error: --wait-ready 且验收含 log: 标签时必须传 --log-since"
-                  "（log 窗口须从 reboot 时刻起，否则命中旧日志假绿）",
+        if any(t.startswith(("log:", "logfield:")) for t in tags):
+            print("error: --wait-ready 且验收含 log:/logfield: 标签时必须传 "
+                  "--log-since（log 窗口须从 reboot 时刻起，否则命中旧日志假绿）",
                   file=sys.stderr)
             return 2
 
@@ -307,10 +358,23 @@ def main(argv=None):
         except subprocess.TimeoutExpired:
             return "", -1
 
+    # --log-since 由本地（CST）书写而设备时钟/时区多为 UTC：直接传会让
+    # logcat 时间窗落在设备"未来"取回 0 字符判红（PIT-5 同源，复发三次），
+    # 按设备时钟/时区换算后再用；换算失败按设备不可达处理（判据不可信）
+    device_since = args.log_since
+    if args.log_since:
+        device_since, err = convert_since_to_device(args.log_since, adb_exec)
+        if err:
+            print(json.dumps({"overall": "fail", "error": err, "items": []},
+                             ensure_ascii=False))
+            return 1
+        print(f"NOTE: --log-since 本地 {args.log_since} → 设备 {device_since}"
+              f"（按设备时钟/时区换算）")
+
     def adb_logcat():
         try:
             r = subprocess.run(ac.build_logcat_cmd(None, 5000,
-                                                   since=args.log_since),
+                                                   since=device_since),
                                capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=60)
             return r.stdout

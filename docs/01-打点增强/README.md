@@ -1,14 +1,13 @@
 # LcView 日志打点系统
 
-基于 Schema ID 的结构化日志打点框架，替代传统 `printk` 字符串日志，实现带宽友好、类型安全、可查询的结构化采集。覆盖内核态 Builder API 打点、环形缓冲区传输、用户态 HAL 批量采集、Daemon 校验落盘全链路。
+基于 Schema ID 的结构化日志打点框架，替代传统 `printk` 字符串日志，实现带宽友好、类型安全、可查询的结构化采集。覆盖内核态 Builder API 打点、环形缓冲区传输、用户态 Daemon 直读采集（epoll 攒包）、校验落盘全链路。
 
 ## 文档索引
 
 | 编号 | 名称 | 层级 | 说明 |
 |------|------|------|------|
 | 01.01 | [内核态增强](./01.01-内核态增强-lcview-kernel.md) | 内核态 | Builder API + 环形缓冲区 + 字符设备 + ioctl |
-| 01.02 | [HAL 增强](./01.02-HAL增强-lcview-hal.md) | 用户态 (vendor) | epoll 批量读取 + AIDL Pull 接口 + 双缓冲队列 |
-| 01.03 | [Daemon 增强](./01.03-Daemon增强-lcview-daemon.md) | 用户态 (system) | Schema 校验 + JSONL 分文件落盘 + 文件滚动 |
+| 01.02 | [Daemon 增强](./01.02-Daemon增强-lcview-daemon.md) | 用户态 (vendor) | Schema 校验 + JSONL 分文件落盘 + 文件滚动 |
 
 > **阅读建议**：先读本 README 建立全局视角，再按层级深入子文档。每个子文档均采用 4+1 视图（用例/逻辑/过程/开发/部署）组织。
 
@@ -33,15 +32,8 @@ package "内核空间" {
 }
 
 package "vendor 域" {
-    component "lechao_lcview_hal" as HAL {
-        component "readerLoop\nepoll + 64KB 批量读" as Reader
-        component "BatchQueue\n双缓冲队列(max=4)" as Queue
-        component "AIDL Server\ngetBatch() [Pull]" as AIDL
-    }
-}
-
-package "system 域" {
     component "lechao_lcview (Daemon)" as Daemon {
+        component "DeviceReader\nepoll 直读" as Reader
         component "SchemaParser\n逐字段校验" as Validator
         component "FileWriter\nJSONL + 滚动 + LRU" as Writer
     }
@@ -53,10 +45,8 @@ database "/data/vendor/lechao_lcview/logs/\n{id}_{name}_{date}_p{seq}.jsonl" as 
 Callers --> Builder : EXPORT_SYMBOL
 Builder --> Ring : commit
 Ring --> CharDev
-CharDev --> Reader : read/poll/ioctl
-Reader --> Queue : flush
-Queue --> AIDL : condition_variable
-AIDL --> Validator : vndbinder getBatch()
+CharDev --> Reader : open/read/poll/ioctl
+Reader --> Validator : 攒包 flush
 Validator --> Writer
 Writer --> Storage
 Schema ..> Validator : 字段名/类型定义
@@ -69,7 +59,7 @@ Schema ..> Builder : event_id 分配
 三层共享的 **Schema ID + TLV 二进制格式** 是唯一的跨层契约，也是整个系统的核心抽象：
 
 - **内核层**只传 `event_id`（2B）+ 字段值（TLV 编码），不传字段名
-- **HAL 层**不理解格式，纯二进制搬运
+- **Daemon 直读层**直接 open/epoll 读取内核字符设备，攒批后逐条校验
 - **Daemon 层**用 JSON Schema 将 `event_id` 映射回字段名，逐字段校验后输出
 
 ```plantuml
@@ -96,10 +86,10 @@ end note
 | 原则 | 说明 |
 |------|------|
 | Schema ID 驱动 | 传输只传 ID + 值，字段名由 JSON Schema 定义，带宽友好 |
-| Pull 模式健壮 | Daemon 通过 `getBatch()` 无状态拉取，无回调生命周期管理 |
+| 直读模式 | Daemon 直读内核字符设备，无 Binder 生命周期、无回调管理 |
 | 按事件 ID 分文件 | 不同 `event_id` 写入独立 JSONL 文件，云端一对一建表 |
 | 各层独立重试 | 启动顺序差异由重试机制吸收，不依赖严苛的启动先后 |
-| HAL 不解析 | HAL 只做二进制搬运，校验职责全部在 Daemon |
+| Daemon 单一解析 | 校验职责集中在 Daemon 一处 |
 
 ## 过程视图
 
@@ -112,9 +102,7 @@ skinparam maxMessageSize 120
 participant "内核调用方" as Caller
 participant "Builder" as B
 participant "Ring Buffer\n(256KB)" as R
-participant "HAL\nreaderLoop" as H
-participant "HAL\nBatchQueue" as Q
-participant "Daemon\n主循环" as D
+participant "Daemon\nDeviceReader\n(epoll直读)" as D
 participant "Daemon\nSchemaParser" as V
 participant "Daemon\nFileWriter" as W
 
@@ -122,12 +110,9 @@ Caller -> B : start(id, level) → add_*() → commit()
 B -> R : ring_write(TLV 记录)
 note right of R: 环满时批量驱逐最旧\natomic_inc(overrun_cnt)
 
-R -> H : epoll_wait 就绪
-H -> R : read(fd, 64KB)
-note right of H: 累积到 64KB\n或超时 1s\n或首字节滞留 >500ms\n→ flush 入队
-
-H -> Q : emplace_back(batch)
-Q -> D : getBatch() [vndbinder]\ncondition_variable 唤醒
+R -> D : epoll_wait 就绪
+D -> R : read(fd, 64KB)
+D -> D : 攒包 flush\n(64KB|1s 超时|500ms 滞留)
 
 loop 逐条记录
     D -> V : validate(record)
@@ -150,12 +135,12 @@ D -> W : checkRotation() + enforceRetention()
 | 指标 | 设计值 | 保障机制 |
 |------|--------|---------|
 | 单条记录传输开销 | ~50B（4 字段）vs ~80B printk | Schema ID 驱动，不传字段名 |
-| 高频场景延迟 | 毫秒级 | HAL 64KB 累积满即 flush |
+| 高频场景延迟 | 毫秒级 | Daemon 64KB 攒包满即 flush |
 | 低频场景延迟上限 | ≤ 1s | epoll 超时 + ageExpired 500ms 强制投递 |
 | 数据完整性 | 每条逐字段校验 | Daemon SchemaParser 防御内核数据损坏 |
-| 崩溃恢复 | 无状态恢复 | Pull 模式，Daemon 重启即调 `getBatch()` 继续 |
+| 崩溃恢复 | 无状态恢复 | 重启后重新 open 设备节点续读 |
 | 磁盘占用 | ≤ 500MB | LRU 淘汰最旧文件 + 50MB 单文件滚动 |
-| 背压 | 队列满丢弃最旧 | HAL 双缓冲队列 max=4，不阻塞 readerLoop |
+| 背压 | 溢出驱逐 | 内核环形缓冲溢出驱逐（overrun 计数），daemon 读空即等 |
 
 > 并发模型（spinlock / condition_variable / 单线程）、上下文安全（GFP_ATOMIC / read_buf 中转）、重试策略等实现细节详见各子文档的"过程视图"章节。
 
@@ -168,15 +153,15 @@ D -> W : checkRotation() + enforceRetention()
 ```plantuml
 @startuml
 package "内核构建线" {
-    rectangle "code/rpi5/kernel/new/\nvendor/lechao/LcView/\n---\nlcview_events.h (共享)\nlcview_internal.h\nlcview_builder.c\nlcview_ring.c\nlcview_main.c\nKconfig / Makefile" as KSRC
+    rectangle "code/rpi5/kernel/new/\nvendor/lechao/LcView/\n---\nlcview_events.h (共享)\nlcview_internal.h\nlcview_builder.c\nlcview_ring.c\nlcview_ring_logic.c\nlcview_main.c\nKconfig / Makefile" as KSRC
 }
 
 package "AOSP 构建线" {
-    rectangle "code/rpi5/aosp/new/\nvendor/lechao/services/lechao_lcview/\n---\ninclude/lcview_events.h (共享副本)\nvendor/lechao/lcview/ILcView.aidl\nhal/ (HAL 实现)\ndaemon/ (Daemon 实现)\nconfig/lcview_events.json (Schema)" as ASRC
+    rectangle "code/rpi5/aosp/new/\nvendor/lechao/services/lechao_lcview/\n---\ninclude/lcview_events.h (共享副本)\ndaemon/ (直读实现: DeviceReader/batch_parser/record_codec)\nconfig/lcview_events.json (Schema)" as ASRC
 }
 
 package "SELinux 策略" {
-    rectangle "code/rpi5/aosp/new/\ndevice/brcm/rpi5/sepolicy/\n---\nlechao_lcview.te\nlechao_lcview_hal.te" as SEPOL
+    rectangle "code/rpi5/aosp/new/\ndevice/brcm/rpi5/sepolicy/\n---\nlechao_lcview.te" as SEPOL
 }
 
 rectangle "lcview_events.h\n(跨层共享契约)\nevent_id / 类型编码 / record_hdr" as SHARED
@@ -191,9 +176,7 @@ SHARED ..> ASRC
 | 构建线 | 构建系统 | 产物 |
 |--------|---------|------|
 | 内核模块 | Kconfig + Makefile (`CONFIG_LCVIEW=y`) | built-in 到 vmlinux，`device_initcall` 启动 |
-| HAL 进程 | Soong `cc_binary` (`vendor: true`) | `/vendor/bin/lechao_lcview_hal` |
-| Daemon 进程 | Soong `cc_binary` | `/system/bin/lechao_lcview` |
-| AIDL 接口 | Soong `aidl_interface` (`@VintfStability`) | VINTF 稳定的 NDK 后端 |
+| Daemon 进程 | Soong `cc_binary` (`vendor: true`) | `/vendor/bin/lechao_lcview` |
 | Schema 配置 | Soong `prebuilt_etc` | `/vendor/etc/lcview_events.json` |
 
 > Kconfig/Makefile 详情、Android.bp 配置、device.mk `PRODUCT_PACKAGES` 清单详见各子文档的"开发视图"章节。
@@ -211,13 +194,8 @@ node "内核空间" {
 }
 
 node "vendor 分区" {
-    component "lechao_lcview_hal\n(class hal, oneshot)" as HALP
-    component "VINTF Manifest\nILcView-service.xml" as VINTF
+    component "lechao_lcview\n(class main)\nboot_completed 触发" as DAEMONP
     component "lcview_events.json" as SCHEMA
-}
-
-node "system 分区" {
-    component "lechao_lcview\n(class main, oneshot)\nboot_completed 触发" as DAEMONP
 }
 
 node "/data/vendor/lechao_lcview/" {
@@ -225,27 +203,23 @@ node "/data/vendor/lechao_lcview/" {
     database "uploaded/\n(二期预留)" as UPLOADED
 }
 
-KDRV --> HALP : char device\nopen/read/poll/ioctl
-HALP --> DAEMONP : vndbinder\ngetBatch() / getOverrunCount()
+KDRV --> DAEMONP : char device\nopen/read/poll/ioctl
 SCHEMA --> DAEMONP : loadFromFile()
-VINTF --> HALP : 服务声明
 DAEMONP --> LOGS : JSONL 写入
 @enduml
 ```
 
 ### 安全域隔离
 
-三个 SELinux 域，两次跨域通信，权限最小化：
+两个 SELinux 域，一次跨域通信，权限最小化：
 
 | 域 | 运行身份 | 核心权限 | 不需要的权限 |
 |---|---|---|---|
 | 内核空间 | kernel | — | — |
-| `lechao_lcview_hal` (vendor 域) | `system:system` | 读字符设备 + 注册 AIDL 服务 + 写 logd | 不写文件、不解析数据 |
-| `lechao_lcview` (system 域) | `system:system` | vndbinder 调用 + 读写数据目录 + 写 logd | 不读字符设备、不注册服务 |
+| `lechao_lcview` (vendor 域) | `system:system` | 读字符设备 + 读写数据目录 + 写 logd | 不注册任何 binder 服务 |
 
 **跨域通信**：
-1. **内核 → HAL**：字符设备 `/dev/vendor_lechao_lcview`（`lechao_lcview_hal_device` 类型）
-2. **HAL → Daemon**：vndbinder AIDL `vendor.lechao.lcview.ILcView/default`（`lechao_lcview_hal_service` 类型）
+1. **内核 → Daemon**：字符设备 `/dev/vendor_lechao_lcview`（`lechao_lcview_hal_device` 类型）
 
 > 各域的完整 `.te` 策略、`file_contexts`、`service_contexts` 规则详见各子文档的"部署视图"章节。
 
@@ -257,23 +231,12 @@ DAEMONP --> LOGS : JSONL 写入
 @startuml
 participant "init" as I
 participant "内核\n(device_initcall)" as K
-participant "HAL\n(vendor 域)" as H
-participant "Daemon\n(system 域)" as D
+participant "Daemon\n(vendor 域)" as D
 
 == boot 阶段 ==
 I -> K : vmlinux 启动
 K -> K : device_initcall\n创建 /dev/vendor_lechao_lcview
 I -> I : post-fs-data\nmkdir /data/vendor/lechao_lcview
-
-I -> H : class hal 启动
-activate H
-H -> K : open() — 失败 (节点可能未就绪)
-K --> H : -1 (ENOENT)
-
-H -> H : 内层重试 10×200ms\n外层循环 5s 间隔
-H -> K : open() — 成功
-K --> H : fd >= 0
-H -> H : epoll_create1 + GET_STATS\n进入 readerLoop 主循环
 
 == boot_completed 阶段 ==
 I -> I : sys.boot_completed=1
@@ -285,17 +248,17 @@ D -> D : loadFromFile()\n失败 (vendor 分区可能未就绪)
 D -> D : schema 重试 30×500ms\n最多等待 15s
 D -> D : schema 加载成功
 
-D -> H : checkService(ILcView/default)\n失败 (HAL 可能未注册)
-D -> D : HAL 重试 1200×100ms\n最多等待 120s
-D -> H : checkService — 成功
-H --> D : AIBinder*
+D -> K : open() — 失败 (节点可能未就绪)
+K --> D : -1 (ENOENT)
+D -> D : 设备重试 1200×100ms\n最多等待 120s
+D -> K : open() — 成功
+K --> D : fd >= 0
 
-D -> H : getBatch() [vndbinder]
+D -> K : read() 直读攒包
 activate D #LightBlue
-D -> D : 主循环：校验 → 落盘\n紧循环调用 getBatch()
+D -> D : 主循环：直读 → 校验 → 落盘
 
 deactivate D
-deactivate H
 @enduml
 ```
 
@@ -305,16 +268,16 @@ deactivate H
 
 | 决策 | 架构动机 | 详细展开 |
 |------|---------|---------|
-| **Schema ID 驱动** | 传输体积最小化（~50B vs ~80B printk），新增事件仅改 Schema | [01.01](./01.01-内核态增强-lcview-kernel.md) §关键设计 · [01.03](./01.03-Daemon增强-lcview-daemon.md) §逻辑视图 |
-| **Pull 模式** | 无回调生命周期、无 DeathRecipient、崩溃重启即恢复 | [01.02](./01.02-HAL增强-lcview-hal.md) §关键设计 · [01.03](./01.03-Daemon增强-lcview-daemon.md) §关键设计 |
-| **批量传输** | HAL 64KB 累积 + 阻塞式 getBatch，减少 syscall 和 Binder IPC 频率 | [01.02](./01.02-HAL增强-lcview-hal.md) §过程视图 |
-| **各层独立重试** | 启动顺序解耦：内核节点延迟创建、vendor 分区延迟挂载、HAL 延迟注册均可容忍 | [01.02](./01.02-HAL增强-lcview-hal.md) §关键设计 · [01.03](./01.03-Daemon增强-lcview-daemon.md) §关键设计 |
-| **HAL 不解析** | HAL 编译不依赖 libjsoncpp，体积更轻量；校验集中在 Daemon 一处 | [01.02](./01.02-HAL增强-lcview-hal.md) §关键设计 · [01.03](./01.03-Daemon增强-lcview-daemon.md) §关键设计 |
-| **立即 flush** | 每条记录写后即 flush，防崩溃丢数据，牺牲少量性能换可靠性 | [01.03](./01.03-Daemon增强-lcview-daemon.md) §关键设计 |
+| **Schema ID 驱动** | 传输体积最小化（~50B vs ~80B printk），新增事件仅改 Schema | [01.01](./01.01-内核态增强-lcview-kernel.md) §关键设计 · [01.02](./01.02-Daemon增强-lcview-daemon.md) §逻辑视图 |
+| **直读模式** | 无回调、无 Binder 生命周期、无 DeathRecipient、崩溃重启即恢复 | [01.01](./01.01-内核态增强-lcview-kernel.md) §关键设计 · [01.02](./01.02-Daemon增强-lcview-daemon.md) §关键设计 |
+| **攒包批量** | Daemon 64KB 攒包 + 1s epoll 超时 + 500ms 滞留窗，减少 syscall 频率 | [01.02](./01.02-Daemon增强-lcview-daemon.md) §过程视图 |
+| **各层独立重试** | 启动顺序解耦：内核节点延迟创建、vendor 分区延迟挂载均可容忍 | [01.02](./01.02-Daemon增强-lcview-daemon.md) §关键设计 |
+| **校验集中 Daemon** | 校验集中在 Daemon 一处 | [01.02](./01.02-Daemon增强-lcview-daemon.md) §关键设计 |
+| **立即 flush** | 每条记录写后即 flush，防崩溃丢数据，牺牲少量性能换可靠性 | [01.02](./01.02-Daemon增强-lcview-daemon.md) §关键设计 |
 
 ## 相关资源
 
 - **内核源码**：[`code/rpi5/kernel/new/vendor/lechao/LcView/`](../../code/rpi5/kernel/new/vendor/lechao/LcView/) — Builder API + 环形缓冲区 + 字符设备
-- **用户态源码**：[`code/rpi5/aosp/new/vendor/lechao/services/lechao_lcview/`](../../code/rpi5/aosp/new/vendor/lechao/services/lechao_lcview/) — HAL + Daemon + AIDL + Schema 配置
-- **SELinux 策略**：[`code/rpi5/aosp/new/device/brcm/rpi5/sepolicy/`](../../code/rpi5/aosp/new/device/brcm/rpi5/sepolicy/) — `lechao_lcview.te` + `lechao_lcview_hal.te`
+- **用户态源码**：[`code/rpi5/aosp/new/vendor/lechao/services/lechao_lcview/`](../../code/rpi5/aosp/new/vendor/lechao/services/lechao_lcview/) — Daemon（直读）+ Schema 配置
+- **SELinux 策略**：[`code/rpi5/aosp/new/device/brcm/rpi5/sepolicy/`](../../code/rpi5/aosp/new/device/brcm/rpi5/sepolicy/) — `lechao_lcview.te`
 - **上传器 Spec**：二期独立进程 `lcview_uploader` 设计（待补充）

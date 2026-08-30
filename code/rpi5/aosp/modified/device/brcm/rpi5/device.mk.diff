@@ -10,7 +10,7 @@ index 8de7b0f..9afc8eb 100644
      $(DEVICE_PATH)/ramdisk/ueventd.rpi5.rc:$(TARGET_COPY_OUT_VENDOR)/etc/ueventd.rc
  
  # Seccomp
-@@ -166,8 +167,46 @@ PRODUCT_COPY_FILES += \
+@@ -166,8 +167,42 @@ PRODUCT_COPY_FILES += \
      $(DEVICE_PATH)/seccomp_policy/mediacodec.policy:$(TARGET_COPY_OUT_VENDOR)/etc/seccomp_policy/mediacodec.policy \
      $(DEVICE_PATH)/seccomp_policy/mediaswcodec.policy:$(TARGET_COPY_OUT_VENDOR)/etc/seccomp_policy/mediaswcodec.policy
  
@@ -37,18 +37,14 @@ index 8de7b0f..9afc8eb 100644
 +    vendor.lechao.lciod.IIoHal-vintf
 +
 +# lechao_lcview —— 乐超自定义显示服务的系统守护进程
-+#   功能：管理 LCView 显示设备的生命周期与数据流，通过 Binder 与 HAL 通信
++#   功能：直读内核驱动节点（/dev/vendor_lechao_lcview），采集并落盘事件日志
 +#   为什么需要：RPi5 上需要自定义的显示控制（初始化、数据传输、刷新控制）
-+# lechao_lcview_hal —— LCView 的 HAL 实现
-+#   功能：直接操作内核驱动节点（/dev/vendor_lechao_lcview），控制显示硬件
-+#   为什么需要 HAL 层：同上，隔离内核细节，lciod 服务不直接接触驱动
-+# vendor.lechao.lcview.ILcView-vintf —— LCView HAL 的 VINTF 接口定义模块
-+# vendor.lechao.lcview-config —— LCView 配置文件包（包含硬件参数、分辨率和时序配置）
++# vendor.lechao.lcview-config —— LCView 配置文件包（包含事件 schema 定义）
 +# lechao lcview service
++# 注：lechao_lcview_hal / vendor.lechao.lcview.ILcView-vintf 已随 HAL 退役
++# 移除（daemon 直读内核后无 HAL，CDP 0cc5eb08831b 停用、本批清理）
 +PRODUCT_PACKAGES += \
 +    lechao_lcview \
-+    lechao_lcview_hal \
-+    vendor.lechao.lcview.ILcView-vintf \
 +    vendor.lechao.lcview-config
 +
 +# rpi5 WiFi 自动连接脚本
@@ -58,7 +54,7 @@ index 8de7b0f..9afc8eb 100644
  
  # Storage
  $(call inherit-product, $(SRC_TARGET_DIR)/product/emulated_storage.mk)
-@@ -194,6 +233,8 @@ PRODUCT_COPY_FILES += \
+@@ -194,6 +229,8 @@ PRODUCT_COPY_FILES += \
      frameworks/native/data/etc/android.hardware.usb.host.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.usb.host.xml \
      frameworks/native/data/etc/android.software.midi.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.software.midi.xml
  
@@ -67,7 +63,7 @@ index 8de7b0f..9afc8eb 100644
  # Virtualization
  $(call inherit-product, packages/modules/Virtualization/apex/product_packages.mk)
  
-@@ -207,3 +248,16 @@ PRODUCT_PACKAGES += \
+@@ -207,3 +244,16 @@ PRODUCT_PACKAGES += \
  
  PRODUCT_COPY_FILES += \
      frameworks/native/data/etc/android.hardware.wifi.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.wifi.xml

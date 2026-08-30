@@ -2,21 +2,27 @@
 // daemon/Android.bp — lechao_lcview daemon（守护进程）编译配置
 // 所属模块：LcView 事件日志系统
 // 设计目的：编译生成一个 Android 用户态守护进程 lechao_lcview。
-//   此进程运行在 system 分区，负责：
-//   1) 通过 AIDL 连接 HAL 服务拉取批量日志
+//   此进程运行在 vendor 分区（vendor: true），负责：
+//   1) 经 DeviceReader（EpollDeviceReader）直读内核字符设备
+//      /dev/vendor_lechao_lcview（open/epoll/read/ioctl）
 //   2) 使用 SchemaParser 校验和解析二进制记录
 //   3) 使用 FileWriter 将日志写入 JSONL 文件
 //
+// 架构演进：DeviceReader 由 HAL 层迁入 daemon（daemon 直读内核，
+// HAL 停用），不再经 AIDL getBatch 拉取，libbinder_ndk 与
+// vendor.lechao.lcview-V2-ndk 依赖随之移除。
+//
 // 依赖说明：
 //   vendor.lechao.lcview_headers — 共享头文件 (lcview_events.h)
-//   libbinder_ndk — NDK Binder 通信框架
+//     （定义于 ../include/Android.bp，原根 Android.bp 随 aidl_interface
+//     删除后迁入 include 目录）
 //   libjsoncpp — JSON 解析引擎（解析 schema 配置文件）
 //   liblog — 输出 logcat 日志
-//   vendor.lechao.lcview-V2-ndk — AIDL NDK 后端生成的 C++ 代码（最新冻结版本）
 // ============================================================
 
 cc_binary {
     name: "lechao_lcview",
+    vendor: true,
     cflags: ["-Wall", "-Werror"],
     header_libs: ["vendor.lechao.lcview_headers", "vendor_lechao_log_headers"],
     init_rc: ["lechao_lcview.rc"],
@@ -24,14 +30,13 @@ cc_binary {
         // main 文件单独列出（不进 filegroup）：filegroup 同时被
         // tests/cc_test 复用，含 main() 会与 gtest 主函数链接冲突
         ":lechao_lcview_daemon_sources",
+        ":lechao_lcview_device_sources",
         "lechao_lcview.cpp",
     ],
     shared_libs: [
         "libbase",
-        "libbinder_ndk",
         "libjsoncpp",
         "liblog",
-        "vendor.lechao.lcview-V2-ndk",
     ],
 }
 
@@ -43,5 +48,16 @@ filegroup {
         "SchemaParser.cpp",
         "FileWriter.cpp",
         "batch_parser.cpp",
+        "record_codec.cpp",
+    ],
+}
+
+// filegroup lechao_lcview_device_sources — DeviceReader（直读内核组件）独立
+// filegroup：daemon 与 hal（回滚保留态）两侧均需引用；跨目录经 filegroup
+// 名称引用（Soong srcs 禁 ".." 路径，PIT-2 同款机制）
+filegroup {
+    name: "lechao_lcview_device_sources",
+    srcs: [
+        "DeviceReader.cpp",
     ],
 }

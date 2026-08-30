@@ -68,6 +68,15 @@ class TestParse(unittest.TestCase):
         code, _ = cp.validate_batch(text, role="emit")
         self.assertEqual(code, 11)
 
+    def test_duplicate_tag_rejected(self):
+        # 三标签各占一段且不得重复：重复标签 → 11（emit/apply 均 blocking，结构错误）
+        text = "-sv base:1a2b3c4d5e6f\n意图: x\n验收: svc:a\n验收: svc:b\n方向: y\n"
+        code, errs = cp.validate_batch(text, role="emit")
+        self.assertEqual(code, 11)
+        self.assertTrue(any("重复标签" in e for e in errs), errs)
+        code, _ = cp.validate_batch(text, role="apply")
+        self.assertEqual(code, 11, "重复标签不入 SOFT_ERRORS，apply 角色同样 blocking")
+
     def test_missing_tags(self):
         text = "-sv base:1a2b3c4d5e6f\n意图: 只有意图\n"
         code, _ = cp.validate_batch(text, role="emit")

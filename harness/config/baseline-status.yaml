@@ -4,8 +4,8 @@
 # 状态语义见 ../README.md#控制总纲（状态模型与证据要求），证据字段定义见 baseline-evidence-template.yaml
 # status 取值: archive → candidate → promoted（rollback 经 revert-candidate 回 candidate）
 # 仅 promoted 行的 approved_by / approved_at 必填
-# sync_manifest 路径相对于项目根；新归档产物位于 harness/log/sync_workspace_to_code/artifacts/；
-# 新流程（cross-device）sync_manifest 填 data/verify 收据路径
+# sync_manifest 路径相对于项目根；
+# 新流程（cross-device）sync_manifest 填 data/verify-results 收据路径
 # （下方历史记录指向迁移前 LcHarness output/log/ 下的产物，属历史事实，保留）
 
 baselines:
@@ -46,7 +46,7 @@ baselines:
   status: promoted
   source_branch: dev
   source_commit: 526b5623b274
-  sync_manifest: data/verify/20260828-111825-fdc2e9820a41.md
+  sync_manifest: data/verify-results/20260828-111825-fdc2e9820a41.md
   build_result: PASS
   package_result: PASS
   board_verify: PASS
@@ -54,6 +54,21 @@ baselines:
     build_result: PASS
     package_result: PASS
     board_verify: PASS
-    sync_manifest: data/verify/20260828-111825-fdc2e9820a41.md
+    sync_manifest: data/verify-results/20260828-111825-fdc2e9820a41.md
   approved_by: lechao
   approved_at: '2026-08-28T11:39:01+08:00'
+- baseline_id: BL-20260830-01
+  status: promoted
+  source_branch: dev
+  source_commit: aac3745ca218
+  sync_manifest: data/verify-results/20260830-203409-manual-2608302034.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260830-203409-manual-2608302034.md
+  approved_by: lechao
+  approved_at: '2026-08-30T20:56:56+08:00'

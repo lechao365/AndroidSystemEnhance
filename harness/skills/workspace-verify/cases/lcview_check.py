@@ -17,9 +17,15 @@
 #   baseline   — 记录当前各文件行数与全局最新 ts 到 --baseline（供 delta）
 #   delta      — 对比基线，统计新增记录；--event 限定事件 id；
 #                --vid/--pid 校验 usb_probe 字段匹配
-#   conserve   — 守恒判据：取 daemon 心跳末行三数 (total_records/overrun/
-#                jsonl_records)，校验在途差值不超界且不为负（防丢记录/重复落盘
-#                回归，替代人工核算）
+#   conserve   — 守恒判据：窗口内内核产生 ≈ 磁盘 JSONL 落盘（两拍直读采样，
+#                在途差值 = 产生增量 - 落盘增量，不超界且不为负——防丢记录/
+#                重复落盘回归，替代人工核算；磁盘行数不受 daemon 重启影响）
+#   perf       — 性能采集（脚本化统一负载）：dd 读块设备 --load-mb MB（默认 64，
+#                与性能基线负载一致）→ 三指标：事件吞吐（内核 total_records 直读
+#                增量 / dd 实测耗时）、平均落盘延迟（jsonl 达标 drain 时间 /
+#                jsonl 行数增量，100ms 直读采样，不含任何人工 sleep 且不受心跳
+#                周期绑架）、daemon RSS（/proc VmHWM 峰值）。
+#                只报数不设门禁，供跨批基线对照。
 #
 # 退出码：0 校验通过 / 1 校验失败 / 2 设备不可达或参数错误
 # ============================================================
@@ -433,47 +439,284 @@ def mode_delta(tmp, args):
 
 
 def mode_conserve(tmp, args):
-    """守恒判据：内核 total_records ≈ overrun + jsonl 落盘条数（AIDL 注释同源）。
+    """守恒判据：窗口内内核产生 ≈ 磁盘 JSONL 落盘（AIDL 注释同源）。
 
-    守恒式 = 内核累计产生 total_records；其中 overrun 已被驱逐（未落盘）、
-    jsonl_records 已落盘；其余为在途（内核 ring 未读 + HAL 缓冲/队列 +
-    daemon 处理中）。稳定态在途有界（实测 dd 64MB 后仅 3 条）：
-    - 在途 < 0：jsonl 落盘超过内核产生 → 重复落盘/计数异常，判红
-    - 在途 > --in-flight：内核产生未落盘积压 → HAL/daemon 消费停滞，判红
-    取 daemon 心跳（heartbeat, loop= 持续性日志，锚点末行取最新累计值，
-    与 logfield 同语义——避免 log: 子串命中开机初期零值心跳的假绿）。
+    守恒式 = 内核累计产生 total_records（overrun 被驱逐未落盘）≈ 磁盘 JSONL
+    落盘行数。v4（恢复负向判红，两段式采样）：
+    v2 只查 ring 与 HAL buffered 两处积压——docstring 却仍写守恒，且 FileWriter
+    六条 DROP 全静默时两处皆空反判绿（重构首要风险正是丢记录）；
+    v3 改回比较"产生 vs 落盘"，但负向（落盘>产生）被当追赶期整体放行——
+    重复落盘/计数异常从此不可检测（心跳 dropped 计丢弃不计重复，不能替代）；
+    零记录守卫亦放宽为 produced==0 且 landed==0（静止态有负载时形同虚设）。
+    v4 两段式采样：
+    - 静止确认段：两拍直读（间隔 --conserve-sample-s）增量归零即确认窗口
+      起点无积压（外部负载已排干）；增量非零则起点有积压（追赶期）
+    - 负载采样段：--conserve-load-mb 触发 dd 读块设备自造负载后两拍采样，
+      produced = Δtotal - Δoverrun（内核产生增量，去被驱逐）
+      landed   = ΔJSONL 行数（wc -l，磁盘持久计数）
+      in_flight = produced - landed
+    - produced == 0：负载窗口无事件产生 → 判红（防假绿，与 valid_json/
+      schema 零记录判红先例一致；自造负载下应产生 > 0）
+    - in_flight > --in-flight：产生未落盘积压 → 判红
+    - in_flight < -(--in-flight)：起点无积压（静止确认通过）时落盘超过产生
+      即重复落盘/计数异常 → 判红；仅起点有积压（追赶期，landed 含窗口前
+      产生的补落盘）才放行
+    磁盘行数不受 daemon 重启（jsonl_records 进程内归零）影响，窗口增量亦不受
+    跨 boot 历史影响；DROP 分类计数（心跳 drop_* 字段）供判红后定位丢在哪条。
     """
-    limit = args.in_flight or 512
-    out, rc = adb(["logcat", "-d", "-t", "5000"])
-    if rc == -1:
-        return -1  # adb 超时透传
-    pat = re.compile(
-        r"heartbeat, loop=\d+, kernel overrun=(\d+), "
-        r"total_records=(\d+), jsonl_records=(\d+)")
-    hit = None
-    for line in out.splitlines():
-        m = pat.search(line)
-        if m:
-            hit = m  # 锚点末行 = 最新一次心跳
-    if hit is None:
-        print("ERROR: 未找到 daemon 心跳（heartbeat, loop= 含守恒三数），"
-              "无法判守恒")
+    limit = args.in_flight or 16
+    interval = args.conserve_sample_s or 5
+    s1 = kernel_stats()
+    if s1 is None:
+        print(f"ERROR: 无法直读内核计数（cat {STATS_SYSFS} 失败，"
+              f"内核未带 sysfs 导出？）")
         return 1
-    overrun = int(hit.group(1))
-    total = int(hit.group(2))
-    jsonl = int(hit.group(3))
-    in_flight = total - overrun - jsonl
-    print(f"心跳末行: total_records={total} overrun={overrun} "
-          f"jsonl_records={jsonl} 在途差值={in_flight}（上限 {limit}）")
-    if in_flight < 0:
-        print(f"ERROR: 在途差值 {in_flight} < 0（jsonl 落盘 {jsonl} 超过内核产生 "
-              f"{total}-{overrun}，存在重复落盘/计数异常）")
+    l1 = jsonl_line_count()
+    if l1 is None:
+        print("ERROR: 无法直读 JSONL 行数（wc -l 失败）")
         return 1
+    time.sleep(interval)
+    s2 = kernel_stats()
+    if s2 is None:
+        print(f"ERROR: 无法直读内核计数（cat {STATS_SYSFS} 失败）")
+        return 1
+    l2 = jsonl_line_count()
+    if l2 is None:
+        print("ERROR: 无法直读 JSONL 行数（wc -l 失败）")
+        return 1
+    # 静止确认段：前段两拍增量归零 → 窗口起点无积压（外部负载已排干）；
+    # 增量非零 → 起点有积压（追赶期），负向判红须放行（landed 含补落盘）
+    rest_produced = (s2[0] - s1[0]) - (s2[1] - s1[1])
+    rest_landed = l2 - l1
+    at_rest = rest_produced == 0 and rest_landed == 0
+    print(f"静止确认: 前段增量 产生={rest_produced} 落盘={rest_landed} "
+          f"（{'起点无积压' if at_rest else '起点有积压(追赶期)'}）")
+    # 负载采样段：自造短负载（--conserve-load-mb > 0）——外部 dd 时序不可控
+    # （事件几秒内全部落盘，两拍采样窗口可能错过），自带负载保证窗口内
+    # produced>0，守恒有数据可校验；默认 0 保持纯只读（跟随外部负载场景）
+    if args.conserve_load_mb:
+        dev = args.block_dev or "/dev/block/sda"
+        _, rc = adb(["shell",
+                     f"dd if={dev} of=/dev/null bs=1M count={args.conserve_load_mb} 2>/dev/null"],
+                    timeout=args.dd_timeout or 120)
+        if rc == -1:
+            return -1  # adb 超时透传
+        if rc != 0:
+            print(f"ERROR: conserve 负载 dd 执行失败 rc={rc}（块设备 {dev} 不可读？）")
+            return 1
+    time.sleep(interval)
+    s3 = kernel_stats()
+    if s3 is None:
+        print(f"ERROR: 无法直读内核计数（cat {STATS_SYSFS} 失败）")
+        return 1
+    l3 = jsonl_line_count()
+    if l3 is None:
+        print("ERROR: 无法直读 JSONL 行数（wc -l 失败）")
+        return 1
+    produced = (s3[0] - s2[0]) - (s3[1] - s2[1])
+    landed = l3 - l2
+    in_flight = produced - landed
+    print(f"负载窗口 {interval}s: 内核产生增量={produced}，落盘增量={landed}，"
+          f"在途差值={in_flight}（上限 {limit}）")
+    if produced == 0:
+        # 负载窗口无事件产生须判红：自造负载下应产生 > 0，无数据可校验
+        # 守恒，与"守恒成立"区分（同 valid_json / schema 零记录判红先例）
+        print("ERROR: 负载窗口内无事件产生（内核 total_records 无增量，"
+              "自造负载未生效？），守恒无从校验")
+        return 1
+    if in_flight < -limit:
+        if at_rest:
+            # 起点无积压仍落盘超过产生 → 真异常：重复落盘/计数异常（心跳
+            # dropped 计丢弃不计重复，不能替代本判据）
+            print(f"ERROR: 在途差值 {in_flight} < -{limit}（起点无积压仍落盘 "
+                  f"{landed} 超过产生 {produced}，存在重复落盘/计数异常）")
+            return 1
+        # 追赶期放行：窗口起点有积压使落盘增量 > 产生增量合法（高吞吐后的
+        # drain 追赶期，landed 含窗口前产生的补落盘）
+        print(f"NOTE: 负向在途 {in_flight} 属追赶期（起点有积压，落盘 {landed} "
+              f"> 产生 {produced} 为补落盘），放行")
     if in_flight > limit:
-        print(f"ERROR: 在途差值 {in_flight} 超界 {limit}（内核产生未落盘积压，"
+        print(f"ERROR: 在途差值 {in_flight} 超界 {limit}（产生未落盘积压，"
               f"HAL/daemon 消费可能停滞）")
         return 1
-    print(f"OK: 守恒成立（在途差值 {in_flight} 在界内）")
+    print(f"OK: 守恒成立（负载窗口内产生 {produced} ≈ 落盘 {landed}）")
+    return 0
+
+
+def kernel_stats():
+    """直读内核三计数 (total_records, overrun, ring_usage_bytes)；失败返回 None。
+
+    与 kernel_total 同源（STATS_SYSFS 只读导出，单次 cat 全量解析，减少
+    adb 往返）：conserve 窗口采样需 total 与 overrun 配对，perf 只取 total。
+    """
+    out, rc = adb(["shell", f"cat {STATS_SYSFS}"])
+    if rc == -1:
+        return None
+    vals = {}
+    for line in out.splitlines():
+        for key in ("total_records", "overrun", "ring_usage_bytes"):
+            m = re.search(key + r"=(\d+)", line)
+            if m and key not in vals:
+                vals[key] = int(m.group(1))
+    if len(vals) == 3:
+        return (vals["total_records"], vals["overrun"], vals["ring_usage_bytes"])
+    return None
+
+
+def daemon_rss_kb():
+    """daemon 进程峰值 RSS（/proc/<pid>/status VmHWM，kB）；失败返回 -1。
+
+    RSS 取自进程峰值（VmHWM），与基线口径一致（内存增长回归探测）；
+    pidof 定位失败或 /proc 读取失败返回 -1，由调用方判红（指标不全
+    不能当完整基线）。
+    """
+    out, rc = adb(["shell", "pidof lechao_lcview"])
+    if rc == -1:
+        return -1  # adb 超时透传
+    if rc != 0 or not out.strip():
+        print("ERROR: 无法定位 daemon 进程（pidof lechao_lcview 失败）")
+        return -1
+    pid = out.strip().split()[0]
+    out, rc = adb(["shell", f"cat /proc/{pid}/status"])
+    if rc != 0:
+        print("ERROR: 无法读取 daemon /proc/<pid>/status")
+        return -1
+    for line in out.splitlines():
+        if line.startswith("VmHWM:"):
+            parts = line.split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                return int(parts[1])
+    print("ERROR: /proc/<pid>/status 无 VmHWM 字段")
+    return -1
+
+
+# 内核 total_records 直读节点：sysfs 只读导出（lcview_main.c lcview_stats_show）。
+# 设备节点 /dev/vendor_lechao_lcview 有单打开限制（HAL 常驻占用，并发 open 返
+# EBUSY），ioctl 直读不可行；sysfs 文件 cat 即得实时计数，不参与单打开语义。
+STATS_SYSFS = "/sys/class/lcview/vendor_lechao_lcview/lcview_stats"
+
+
+def kernel_total():
+    """直读内核 total_records（cat sysfs 只读节点）；失败返回 None。
+
+    直读替代心跳观测：心跳每 30 loop 约 28s 才更新，远粗于 2.5s 的 dd 负载窗，
+    drain 被心跳周期绑架（实测 30.5s 恰为一个心跳周期）；sysfs cat 实时、
+    无该粒度偏差。adb 超时或解析失败返回 None（调用方判红，不静默通过）。
+    """
+    s = kernel_stats()
+    return s[0] if s else None
+
+
+def jsonl_line_count():
+    """直读 logs 目录全部 .jsonl 总行数（wc -l，设备侧计数，不传输内容）。
+
+    wc -l 在设备侧统计（只回传文件名+数字），避免每 100ms 全量 pull 的传输
+    开销；adb 超时返回 None（调用方判红）。
+    """
+    out, rc = adb(["shell", f"wc -l {LOGS_DIR}/*.jsonl 2>/dev/null"])
+    if rc == -1:
+        return None  # adb 超时透传
+    total = 0
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == "total":
+            try:
+                return int(parts[0])
+            except ValueError:
+                return None
+        if len(parts) == 2 and parts[0].isdigit():
+            total += int(parts[0])
+    return total
+
+
+def mode_perf(tmp, args):
+    """性能采集（固定负载，脚本化，只报数不设门禁）。
+
+    统一负载 dd 读块设备 --load-mb MB（默认 64，与性能基线 dd 64MB 一致，
+    消除自动化用例 4MB 与基线 64MB 负载不一的对照失真）：
+    - 事件吞吐 = 内核 total_records 直读增量 / dd 实测耗时（events/s）
+    - 平均落盘延迟 = jsonl 达标 drain 时间 / jsonl_records 增量（ms/event）：
+      drain 时间从 dd 完成时刻起算，按 --perf-sample-ms（默认 100ms）直读
+      JSONL 行数与内核计数，直至 jsonl 落盘达标（jsonl 增量 >= total 增量），
+      不含任何人工 sleep，也不受心跳 28s 周期绑架（原心跳观测致延迟随负载
+      翻倍而机械减半、drain 恒为一个心跳周期）
+    - daemon RSS = /proc VmHWM 峰值（kB）
+    输出 human 可读行 + METRICS JSON 行（供上层结构化存档，跨批可 diff）。
+    """
+    load_mb = args.load_mb or 64
+    dev = args.block_dev or "/dev/block/sda"
+    sample_s = (args.perf_sample_ms or 100) / 1000.0
+
+    total0 = kernel_total()
+    if total0 is None:
+        print(f"ERROR: 无法直读内核计数（cat {STATS_SYSFS} 失败，"
+              f"内核未带 sysfs 导出？）")
+        return 1
+    jsonl0 = jsonl_line_count()
+    if jsonl0 is None:
+        print("ERROR: 无法直读 JSONL 行数（wc -l 失败）")
+        return 1
+
+    # dd 计时（host 侧单调钟，不含任何人工 sleep）
+    t0 = time.monotonic()
+    _, rc = adb(["shell",
+                 f"dd if={dev} of=/dev/null bs=1M count={load_mb} 2>/dev/null"],
+                timeout=args.dd_timeout or 300)
+    dd_s = time.monotonic() - t0
+    if rc == -1:
+        return -1  # adb 超时透传
+    if rc != 0:
+        print(f"ERROR: dd 负载执行失败 rc={rc}（块设备 {dev} 不可读？）")
+        return 1
+
+    # drain 计时起点 = dd 完成时刻；直读按 100ms 采样——先等内核计数出现增量
+    # （dd 产生事件已计入），再等 jsonl 落盘达标（与心跳观测 28s 粒度解耦）
+    drain_t0 = time.monotonic()
+    total, jsonl = total0, jsonl0
+    seen_total = False
+    while True:
+        t = kernel_total()
+        if t is not None:
+            total = t
+        j = jsonl_line_count()
+        if j is not None:
+            jsonl = j
+        if total - total0 > 0:
+            seen_total = True
+        if seen_total and jsonl - jsonl0 >= total - total0:
+            break  # 内核计数已反映 dd 事件且 jsonl 落盘达标
+        if time.monotonic() - drain_t0 > (args.perf_timeout or 60):
+            print("ERROR: 内核计数未出现增量或 jsonl 落盘未达标（drain 超时，"
+                  "daemon 消费停滞？）")
+            return 1
+        time.sleep(sample_s)
+    drain_s = time.monotonic() - drain_t0
+
+    total_delta = total - total0
+    jsonl_delta = jsonl - jsonl0
+    if total_delta <= 0 or jsonl_delta <= 0:
+        print("ERROR: 无事件增量（dd 未产生传输事件，块设备未就绪？）")
+        return 1
+    throughput = total_delta / dd_s
+    latency_ms = drain_s / jsonl_delta * 1000
+
+    rss_kb = daemon_rss_kb()
+    if rss_kb < 0:
+        return 1  # RSS 指标不全不能当完整基线（内部已打印原因）
+
+    metrics = {
+        "load_mb": load_mb,
+        "dd_s": round(dd_s, 3),
+        "throughput_evs": round(throughput, 1),
+        "drain_ms_per_event": round(latency_ms, 3),
+        "daemon_rss_kb": rss_kb,
+        "total_delta": total_delta,
+        "jsonl_delta": jsonl_delta,
+    }
+    print(f"性能采集（负载 {load_mb}MB，dd {dd_s:.3f}s）: "
+          f"事件吞吐={throughput:.1f} events/s，平均落盘延迟={latency_ms:.3f} "
+          f"ms/event，daemon RSS={rss_kb} kB（drain {drain_s:.3f}s）")
+    print("METRICS " + json.dumps(metrics, ensure_ascii=False))
     return 0
 
 
@@ -487,6 +730,7 @@ MODES = {
     "baseline": mode_baseline,
     "delta": mode_delta,
     "conserve": mode_conserve,
+    "perf": mode_perf,
 }
 
 
@@ -506,8 +750,27 @@ def main(argv=None):
                     help="delta 模式校验 usb_probe pid")
     ap.add_argument("--baseline", default=BASELINE_DEFAULT,
                     help="baseline/delta 模式基线文件路径")
-    ap.add_argument("--in-flight", type=int, default=512,
-                    help="conserve 模式在途差值上限（条），默认 512")
+    ap.add_argument("--in-flight", type=int, default=16,
+                    help="conserve 模式在途差值上限（条），默认 16——按实测收紧"
+                         "（dd 64MB 后峰值 3、静止 0，留 5 倍余量；原 512 稀释"
+                         "灵敏度约百倍）")
+    ap.add_argument("--conserve-sample-s", type=int, default=5,
+                    help="conserve 模式两拍直读采样间隔（秒），默认 5（窗口内"
+                         "比较产生 vs 落盘增量，免疫 daemon 重启）")
+    ap.add_argument("--conserve-load-mb", type=int, default=0,
+                    help="conserve 模式窗口内主动触发 dd 读负载（MB），默认 0=不触发"
+                         "（纯只读）；>0 时 s1 采样后 dd 读 --block-dev 保证窗口内"
+                         "有事件产生，供守恒校验（外部 dd 时序不可控场景）")
+    ap.add_argument("--load-mb", type=int, default=64,
+                    help="perf 模式 dd 读负载（MB），默认 64（与性能基线一致）")
+    ap.add_argument("--block-dev", default="/dev/block/sda",
+                    help="perf 模式 dd 读块设备路径")
+    ap.add_argument("--perf-timeout", type=int, default=60,
+                    help="perf 模式 jsonl 落盘 drain 轮询超时（秒）")
+    ap.add_argument("--perf-sample-ms", type=int, default=100,
+                    help="perf 模式直读采样间隔（毫秒），默认 100（不受心跳周期绑架）")
+    ap.add_argument("--dd-timeout", type=int, default=300,
+                    help="perf 模式 dd 执行 adb 超时（秒）")
     args = ap.parse_args(argv)
     # 记录 --baseline 是否显式传（ts 模式只在显式时做基线限定）
     args.baseline_explicit = "--baseline" in (argv if argv is not None

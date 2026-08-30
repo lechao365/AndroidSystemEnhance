@@ -1,7 +1,8 @@
 // DaemonLoop_test.cpp — daemon 主循环抽取函数分支覆盖
 // 拦截：S7（故障可见性）——parseBatch 坏长度/过小/validate 失败写 invalid、
-//       trailing 残留写 invalid；loadSchemaWithRetry 重试；waitForHal 等待与
-//       rebindAfterError 重绑（此前 main 逻辑不在测试编译内，覆盖分母隐性抬高）
+//       trailing 残留写 invalid；loadSchemaWithRetry 重试。
+// 架构演进：daemon 直读内核后取消 HAL 绑定（waitForHal/rebindAfterError/
+// FakeHal 移除），原相关测试随之删除。
 
 #include <gtest/gtest.h>
 
@@ -22,28 +23,8 @@
 #undef private
 #undef protected
 #include "../include/lcview_events.h"
-#include <aidl/vendor/lechao/lcview/BnLcView.h>
 
 using namespace vendor::lechao::lcview;
-using aidl::vendor::lechao::lcview::ILcView;
-
-// 最小 FakeHal：满足 BnLcView 纯虚，供 waitForHal/rebindAfterError 注入
-class FakeHal : public aidl::vendor::lechao::lcview::BnLcView {
-public:
-    ndk::ScopedAStatus getBatch(std::vector<uint8_t>* /*out*/) override {
-        return ndk::ScopedAStatus::ok();
-    }
-    ndk::ScopedAStatus getOverrunCount(int32_t* /*out*/) override {
-        return ndk::ScopedAStatus::ok();
-    }
-    ndk::ScopedAStatus getTotalRecords(int64_t* /*out*/) override {
-        return ndk::ScopedAStatus::ok();
-    }
-};
-
-std::shared_ptr<ILcView> fakeHal() {
-    return ndk::SharedRefBase::make<FakeHal>();
-}
 
 namespace {
 
@@ -104,8 +85,8 @@ std::vector<uint8_t> makeBatch(const std::vector<uint8_t>& record,
 class DaemonLoopTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        char tmpl[] = "/data/local/tmp/lcview_daemon_XXXXXX";
-        char* tmp = mkdtemp(tmpl);
+        std::string tmpl = "/data/local/tmp/lcview_daemon_XXXXXX";
+        char* tmp = mkdtemp(tmpl.data());
         ASSERT_NE(tmp, nullptr);
         mTmp = tmp;
         mCfg.logDir = mTmp;
@@ -213,28 +194,30 @@ TEST(DaemonLoopHelperTest, SchemaLoadRetry_SuccessOnFirstTry) {
     }
 }
 
-TEST(DaemonLoopHelperTest, WaitForHal_RetriesUntilBound) {
-    int calls = 0;
-    auto bind = [&calls](const std::string&) -> std::shared_ptr<ILcView> {
-        calls++;
-        return calls >= 3 ? fakeHal() : nullptr;
-    };
-    auto hal = waitForHal(bind, "test", 10, std::chrono::milliseconds(1));
-    EXPECT_TRUE(hal);
-    EXPECT_EQ(calls, 3);
+// ============================================================
+// flush 触发语义（原 hal_test LcViewReaderLoopTest 分支 4/5 有效逻辑
+// 并入 daemon）：空批不 flush（避免写放大）；满缓冲 flush；
+// timeout/滞留窗 flush；有数据后 timeout 触发 flush
+// ============================================================
+
+TEST(DaemonLoopHelperTest, Flush_EmptyBuffer_NeverFlushes) {
+    // 空批 + timeout/age 均不 flush（hal_test: TimeoutNoData 语义）
+    EXPECT_FALSE(shouldFlushBatch(0, /*timedOut=*/true, /*ageExpired=*/false, 64 * 1024));
+    EXPECT_FALSE(shouldFlushBatch(0, /*timedOut=*/false, /*ageExpired=*/true, 64 * 1024));
+    EXPECT_FALSE(shouldFlushBatch(0, /*timedOut=*/true, /*ageExpired=*/true, 64 * 1024));
 }
 
-TEST(DaemonLoopHelperTest, WaitForHal_ExhaustsRetries) {
-    auto bind = [](const std::string&) -> std::shared_ptr<ILcView> {
-        return nullptr;
-    };
-    auto hal = waitForHal(bind, "test", 3, std::chrono::milliseconds(1));
-    EXPECT_FALSE(hal);
+TEST(DaemonLoopHelperTest, Flush_BufferFull_TriggersFlush) {
+    // 满缓冲 → flush（hal_test: BufferFull_TriggersFlush 语义）
+    EXPECT_TRUE(shouldFlushBatch(64 * 1024, /*timedOut=*/false, /*ageExpired=*/false, 64 * 1024));
+    EXPECT_TRUE(shouldFlushBatch(64 * 1024 + 1, false, false, 64 * 1024));
+    // 未满但不为零 + 无触发条件 → 不 flush（继续攒包）
+    EXPECT_FALSE(shouldFlushBatch(100, false, false, 64 * 1024));
 }
 
-TEST(DaemonLoopHelperTest, RebindAfterError_ReturnsNewHal) {
-    auto bind = [](const std::string&) -> std::shared_ptr<ILcView> {
-        return fakeHal();
-    };
-    EXPECT_TRUE(!!rebindAfterError(bind, "test"));
+TEST(DaemonLoopHelperTest, Flush_TimeoutOrAge_TriggersFlush) {
+    // 有数据 + epoll 超时 → flush（hal_test: NormalRead_BatchQueued 语义）
+    EXPECT_TRUE(shouldFlushBatch(100, /*timedOut=*/true, /*ageExpired=*/false, 64 * 1024));
+    // 有数据 + 500ms 滞留窗到期 → flush
+    EXPECT_TRUE(shouldFlushBatch(100, /*timedOut=*/false, /*ageExpired=*/true, 64 * 1024));
 }

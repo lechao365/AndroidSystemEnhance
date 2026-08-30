@@ -11,14 +11,13 @@
 
 | 命令 | 用途 |
 |------|------|
-| `/sync-workspace-to-code` | workspace 已验证改动归档到 `code/rpi5/`（含删除对齐 + manifest 重生成 + README 映射表更新）（DEPRECATED） |
-| `/sync-code-to-workspace` | 以 promoted baseline 为真相源，把 workspace 拉回一致（计划→逐条确认→执行→落盘校验） |
+| `/sync-code-to-workspace` | 以 code 仓 dev/main HEAD 为真相源，把 workspace 拉回一致（计划→逐条确认→执行→落盘校验） |
 | `/sync-code-to-doc` | code 变动生成报告，按映射规则精准同步设计文档（方案先行，确认后落盘） |
 | `/cross-device-emit` | emit 侧生成 CDP 批次（远端强 LLM 分析后产批，输出纯文本，仅 emit 设备） |
 | `/cross-device-apply` | 解析 CDP 批次编辑 code/dev，-sv 拉起验证后推送（仅 apply 设备） |
-| `/workspace-verify` | code→workspace 同步、增量编译、上板验证并写 data/verify 收据（仅 apply 设备） |
+| `/workspace-verify` | code→workspace 同步、增量编译、上板验证并写 data/verify-results 收据（仅 apply 设备） |
 | `/git-works-push` | dev 分支 commit + push（收据随批入库，仅 apply 设备） |
-| `/sync-modify-to-main-base` | dev 验证 OK 后 promote 到 main 生成基线（三段式证据链，仅 apply 设备） |
+| `/publish-main-base` | 一键基线发布：harness 自检 → loop 上板验证 → 修复收敛 → 文档同步 → candidate 登记 → promote 到 main（无法修复则禁止 promote，仅 apply 设备） |
 | `/revert-modify-from-main-base` | dev 持续 NG 人工回退到 main 基线并恢复设备（仅 apply 设备） |
 
 harness 能力全部内聚在 `harness/` 目录（不依赖 LcHarness），使用说明见 [harness/README.md](harness/README.md)。
@@ -54,13 +53,19 @@ harness 能力全部内聚在 `harness/` 目录（不依赖 LcHarness），使�
 该规则将 P0 检视修复中暴露的 4 类 bug（字节序、资源生命周期、输入防御、故障静默）提炼为 CXX-001~004 硬规则。
 
 ## 测试防护
-lcview / lciod 模块改动后必须通过单元测试编译验证：`make lechao_lcview_unit_test lechao_lcview_hal_test lechao_lciod_unit_test lechao_lciod_hal_test -j$(nproc)` 无编译错误。
+lcview / lciod 模块改动后必须通过单元测试编译验证 **且设备真跑**：
+- 编译：`make lechao_lcview_unit_test lechao_lcview_hal_test lechao_lciod_unit_test lechao_lciod_hal_test -j$(nproc)` 无编译错误。
+- 设备执行（制度化，覆盖 lcview/lciod 全部 unit_test 与 hal_test）：
+  `python3 harness/skills/workspace-verify/ws_upload_tests.py`（从 verify-cases.yaml
+  modules 段读 test_targets，nativetest push 到设备运行 gtest 并汇总）。
+  仅编译不执行不达标——C++ 单测长期只编译不执行是 nextSeqFor 真 bug 未被发现的
+  根因（2026-08-28 本批起强制设备真跑）。
 测试源码见 `~/workspace/aosp/vendor/lechao/services/lechao_lcview/tests/` 与 `~/workspace/aosp/vendor/lechao/services/lechao_lciod/tests/`。
 
 ## Baseline 使用指引
-在将 code 基线用作灾难恢复真相源（`/sync-code-to-workspace` 交互模式）前，必须先查 [harness/config/baseline-status.yaml](harness/config/baseline-status.yaml)（`--auto` 日常同步不受此限）：
-- 新流程（cross-device）：candidate 由 `/sync-modify-to-main-base --prepare` 依据最新 verify 收据自动登记（登记门禁：收据 result 属 pass 或 skip 且 HEAD^ 等于 verified_commit），人工评审通过后 promote 到 main
+`/sync-code-to-workspace` 的恢复真相源为 code 仓 dev/main HEAD（`SRC-004` 已放宽，不再强制 promoted baseline；`--auto` 日常同步不受限）。仅当**选择以某个 promoted baseline 为参考**核对证据时，先查 [harness/config/baseline-status.yaml](harness/config/baseline-status.yaml)：
+- 新流程（cross-device）：candidate 由 `/publish-main-base --prepare` 依据最新 verify 收据自动登记（登记门禁：收据 result 属 pass 或 skip 且 HEAD^ 等于 verified_commit），人工评审通过后 promote 到 main
 - 确认目标 baseline 状态为 `promoted`（证据完整）
 - 检查 `build_result` / `package_result` / `board_verify`：PASS/SKIP 均合法，FAIL 须人工复核
 - 确认 `approved_by` 和 `approved_at` 已填
-- 未完成证据化晋升的 baseline 不得作为恢复真相源
+- 未完成证据化晋升的 baseline 不得宣称为基线

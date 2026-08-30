@@ -397,8 +397,10 @@ if [ "$DO_BOOT" = true ] || [ "$DO_SYSTEM" = true ] || [ "$DO_VENDOR" = true ]; 
 
     # 编译 lcview 单元测试（编译期防护，确保测试代码无语法错误）
     # 注：运行测试需刷机后 adb shell 执行，当前仅做编译校验。
+    #     hal_test 已随 HAL 退役删除（tests/Android.bp 仅剩 unit_test，
+    #     引用已删除模块会 make 失败），此处只编译 unit_test。
     step_begin "编译 lcview 单元测试（编译期防护）"
-    if ! make lechao_lcview_unit_test lechao_lcview_hal_test -j${BUILD_JOBS}; then
+    if ! make lechao_lcview_unit_test -j${BUILD_JOBS}; then
         log_error "lcview 单元测试编译失败（退出码 4 = 测试编译失败）"
         harness_exit 4
     fi

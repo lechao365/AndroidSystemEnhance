@@ -1,4 +1,4 @@
-"""verify 收据落盘：封装 cdp_receipt，按 verify 阶段汇总写 data/verify/。
+"""verify 收据落盘：封装 cdp_receipt，按 verify 阶段汇总写 data/verify-results/。
 
 用法（无子命令）：
   模式 A（apply 拉起，随批次）:
@@ -6,11 +6,18 @@
         --result pass|fail|skip --build ... --board ... \
         --acceptance "<逐项结果>" --elapsed <秒> --summary "<一句话>" \
         [--body <正文文件>（CDP 原文+失败现场，必传见 SKILL）]
-  模式 B（独立触发）:
+   模式 B（独立触发）:
     ws_report.py --target <12hex|dev|main> [--prefix manual|revert] \
         --result ... （同上；batch_id = <prefix>-<10位时间戳>）
+  三指标结构化存档：--metrics "<JSON 对象>"（如性能采集的
+  {"throughput_evs":328,"drain_ms_per_event":6.4,"daemon_rss_kb":5516}），
+  写入收据 metrics 字段 + trend 行尾追加，供跨批 diff；缺省不写。
+  链路耗时打点：--timings-file <cdp_timing.py start/mark 原始打点文件>，经
+  compute_segments 计算段耗时写入收据 timings 字段供 emit 定位耗时瓶颈；
+  缺失/非法仅 warn 不阻断（诊断数据非验收证据）。
 """
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -76,8 +83,54 @@ def main(argv=None):
     ap.add_argument("--acceptance", default="")
     ap.add_argument("--elapsed", type=int, default=0)
     ap.add_argument("--summary", default="")
+    ap.add_argument("--metrics", default="",
+                    help="三指标结构化 JSON 对象（写入收据 metrics 字段与 trend 行尾）")
+    ap.add_argument("--timings-file", default="",
+                    help="链路耗时打点文件路径（cdp_timing.py finish 产物；写入收据 "
+                         "timings 字段供 emit 定位耗时瓶颈；缺失/非法仅 warn 不阻断）")
     ap.add_argument("--body", help="正文文件路径（CDP 原文/失败现场），经脱敏写入")
     args = ap.parse_args(argv)
+
+    if args.metrics:
+        # 校验为合法 JSON 对象并规范化（排序键便于 diff），非法直接拒写
+        try:
+            m = json.loads(args.metrics)
+            if not isinstance(m, dict):
+                raise ValueError("非 JSON 对象")
+            args.metrics = json.dumps(m, ensure_ascii=False, sort_keys=True)
+        except (ValueError, json.JSONDecodeError) as e:
+            print(f"error: --metrics 须为合法 JSON 对象: {e}", file=sys.stderr)
+            return 2
+
+    if args.timings_file:
+        # 读链路耗时打点（cdp_timing.py 采集），兼容两种结构：
+        #   - 原始 start/mark 结构（有 marks）→ compute_segments 计算段耗时
+        #   - finish 归档结构（有 segments）→ 直接用（AI 先 finish 再落收据也 OK）
+        # 诊断数据缺失/非法仅 warn 降级（timings 置空），不阻断 push 主流程——
+        # 区别于 --acceptance 的返 2 拒写（那是 promote 证据链，缺了有洞）
+        try:
+            from cdp_timing import compute_segments
+            t = json.loads(Path(args.timings_file).read_text(encoding="utf-8"))
+            if not isinstance(t, dict):
+                raise ValueError("非 JSON 对象")
+            if isinstance(t.get("segments"), list) and t["segments"]:
+                segments = t["segments"]
+            elif isinstance(t.get("marks"), list):
+                segments = compute_segments(t)
+            else:
+                raise ValueError("缺 segments/marks（非 cdp_timing 打点结构）")
+            out = {
+                "batch_id": t.get("batch_id", ""),
+                "wall_start": t.get("start_wall") or t.get("wall_start"),
+                "wall_end": t.get("wall_end") or time.time(),
+                "segments": segments,
+            }
+            args.timings = json.dumps(out, ensure_ascii=False, sort_keys=True)
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            print(f"warn: --timings-file 读取失败，timings 置空: {e}", file=sys.stderr)
+            args.timings = ""
+    else:
+        args.timings = ""
 
     if not args.batch_file and not args.target:
         print("error: 模式 A（--batch-file）与模式 B（--target）必选其一", file=sys.stderr)
@@ -137,12 +190,13 @@ def main(argv=None):
                 verify_mode=verify_mode, result=args.result,
                 build=args.build, push_board=args.board,
                 acceptance=args.acceptance, elapsed_s=args.elapsed,
-                summary=args.summary)
+                summary=args.summary, metrics=args.metrics,
+                timings=args.timings)
     path = write_receipt(r, body or args.summary)
     append_trend(time.strftime("%Y-%m-%d %H:%M:%S"), batch_id, args.result,
                  f"build={args.build} board={args.board} "
                  f"acc={args.acceptance.splitlines()[0][:40] if args.acceptance else '-'}",
-                 args.summary[:40])
+                 args.summary[:40], args.metrics)
     print(f"receipt: {path}")
     print(f"batch_id: {batch_id}")
     return 0

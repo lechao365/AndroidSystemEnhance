@@ -22,10 +22,20 @@ routes:
     docs: ["docs/01-打点增强"]
     mode: fixed
     priority: 95
+  - match: "**/lechao_lcview*"
+    docs: ["docs/01-打点增强"]
+    mode: fixed
+    priority: 93
+    note: "aosp vendor 侧 lechao_lcview（daemon/hal 目录 + sepolicy .te 文件）——段名 lechao_lcview 不命中 **/lcview*"
   - match: "**/LcIod/**"
     docs: ["docs/02-IO增强"]
     mode: fixed
     priority: 90
+  - match: "**/lechao_lciod*"
+    docs: ["docs/02-IO增强"]
+    mode: fixed
+    priority: 88
+    note: "aosp vendor 侧 lechao_lciod（daemon/hal 目录 + sepolicy .te 文件）——段名 lechao_lciod 不命中 **/lciod*"
   - match: "**/lciod*"
     docs: ["docs/02-IO增强"]
     mode: fixed

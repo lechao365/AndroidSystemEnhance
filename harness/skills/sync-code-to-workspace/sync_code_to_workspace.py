@@ -124,14 +124,6 @@ def _git_check(*args: str, cwd: str | Path = ".", timeout: int = 300) -> bool:
     return _git_run(list(args), cwd, timeout).returncode == 0
 
 
-def _git_output(*args: str, cwd: str | Path = ".", timeout: int = 300) -> str:
-    """git stdout；失败时 log_error 记录 stderr（仍返回 stdout，可能为空）。"""
-    r = _git_run(list(args), cwd, timeout)
-    if r.returncode != 0:
-        log_error(f"git {' '.join(args)} 失败: {r.stderr.strip()}")
-    return r.stdout
-
-
 def _find_upstream_base(cwd: str | Path = ".") -> str | None:
     ups_ref = _git_lines("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}", cwd=cwd)
     if not ups_ref:
@@ -231,12 +223,18 @@ def _scan_kernel_modified(out: str) -> tuple[int, int]:
         log_warn("kernel: 无法确定 upstream base（无 upstream 或 detached HEAD）")
         return (0, 1)
     g_match = 0
+    errors = 0
     for dfile in sorted(modified_dir.rglob("*.diff")):
         rel = str(dfile.relative_to(modified_dir).as_posix())
         rel = rel.rsplit(".diff", 1)[0]
         tmp = _tmp_file(".diff")
+        r = _git_run(["diff", base, "--", rel], cwd=_kernel_ws())
+        if r.returncode != 0:
+            log_error(f"kernel: git diff 失败: {rel} ({r.stderr.strip()})")
+            errors += 1
+            continue
         with open(tmp, "w", encoding="utf-8") as f:
-            f.write(_git_output("diff", base, "--", rel, cwd=_kernel_ws()))
+            f.write(r.stdout)
         if os.path.getsize(tmp) == 0:
             with open(out, "a", encoding="utf-8") as f:
                 f.write(f"+\tMODIFIED-DIVERGED\tkernel\t{rel}\tcheckout\tworkspace 已恢复 upstream，缺失 code 定制\n")
@@ -245,7 +243,7 @@ def _scan_kernel_modified(out: str) -> tuple[int, int]:
         else:
             with open(out, "a", encoding="utf-8") as f:
                 f.write(f"+\tMODIFIED-DIVERGED\tkernel\t{rel}\tcheckout\tworkspace diff 与 code 不一致\n")
-    return (g_match, 0)
+    return (g_match, errors)
 
 
 def _scan_kernel_new(out: str) -> tuple[int, int]:
@@ -329,7 +327,8 @@ def _scan_aosp_modified(out: str) -> tuple[int, int]:
         return (0, 0)
     proj_list = Path(_aosp_ws()) / ".repo" / "project.list"
     if not proj_list.is_file():
-        return (0, 0)
+        log_error(f"aosp: .repo/project.list 不存在: {proj_list}，无法扫描 aosp modified")
+        return (0, 1)
     g_match = 0
     errors = 0
     projects = [l.strip() for l in proj_list.read_text(encoding="utf-8").splitlines() if l.strip()]
@@ -349,8 +348,13 @@ def _scan_aosp_modified(out: str) -> tuple[int, int]:
             rel = str(dfile.relative_to(proj_dir).as_posix())
             rel = rel.rsplit(".diff", 1)[0]
             tmp = _tmp_file(".diff")
+            r = _git_run(["diff", base, "--", rel], cwd=proj_ws)
+            if r.returncode != 0:
+                log_error(f"aosp:{proj}: git diff 失败: {rel} ({r.stderr.strip()})")
+                errors += 1
+                continue
             with open(tmp, "w", encoding="utf-8") as f:
-                f.write(_git_output("diff", base, "--", rel, cwd=proj_ws))
+                f.write(r.stdout)
             if os.path.getsize(tmp) == 0:
                 with open(out, "a", encoding="utf-8") as f:
                     f.write(f"+\tMODIFIED-DIVERGED\taosp:{proj}\t{rel}\tcheckout\tworkspace 已恢复 upstream，缺失 code 定制\n")
@@ -369,7 +373,8 @@ def _scan_aosp_new(out: str) -> tuple[int, int]:
         return (0, 0)
     proj_list = Path(_aosp_ws()) / ".repo" / "project.list"
     if not proj_list.is_file():
-        return (0, 0)
+        log_error(f"aosp: .repo/project.list 不存在: {proj_list}，无法扫描 aosp new")
+        return (0, 1)
     g_match = 0
     projects = [l.strip() for l in proj_list.read_text(encoding="utf-8").splitlines() if l.strip()]
 
@@ -422,7 +427,8 @@ def _scan_extra_aosp(out: str) -> tuple[int, int]:
     """扫描 aosp 未归档改动。返回 (match_count, error_count)。"""
     proj_list = Path(_aosp_ws()) / ".repo" / "project.list"
     if not proj_list.is_file():
-        return (0, 0)
+        log_error(f"aosp: .repo/project.list 不存在: {proj_list}，无法扫描 aosp extra")
+        return (0, 1)
     projects = [l.strip() for l in proj_list.read_text(encoding="utf-8").splitlines() if l.strip()]
 
     errors = 0
@@ -454,10 +460,10 @@ def _scan_extra_aosp(out: str) -> tuple[int, int]:
                     of.write(f"+\tEXTRA-MODIFIED\taosp:{proj}\t{f}\tsync\t未归档的 upstream 文件改动\n")
             elif _git_check("ls-files", "--error-unmatch", f, cwd=proj_ws):
                 with open(out, "a", encoding="utf-8") as of:
-                    of.write(f"+\tEXTRA-NEW-TRACKED\taosp:{proj}\t{f}\tsync\t未归档 tracked 新文件\n")
+                    of.write(f"+\tEXTRA-NEW-TRACKED\taosp:{proj}\t{f}\tdelete\t未归档 tracked 新文件（code 已删，删除对齐）\n")
             else:
                 with open(out, "a", encoding="utf-8") as of:
-                    of.write(f"+\tEXTRA-NEW-UNTRACKED\taosp:{proj}\t{f}\tsync\t未归档 untracked 新文件\n")
+                    of.write(f"+\tEXTRA-NEW-UNTRACKED\taosp:{proj}\t{f}\tdelete\t未归档 untracked 新文件（code 已删，删除对齐）\n")
 
     _scan_extra_aosp_non_repo(out)
     return (0, errors)
@@ -518,7 +524,7 @@ def _gen_plan(out: str) -> int:
         f.write("# 格式: <标记>\\t<类别>\\t<项目>\\t<相对路径>\\t<动作>\\t<差异摘要>\n")
         f.write("# 标记: + = 选中执行, - = 不执行\n")
         f.write("# 类别: MODIFIED-DIVERGED | NEW-MISMATCH | EXTRA-MODIFIED | EXTRA-NEW-TRACKED | EXTRA-NEW-UNTRACKED\n")
-        f.write("# 动作: checkout | checkout-only | restore | sync | skip | stash-hint\n")
+        f.write("# 动作: checkout | checkout-only | restore | sync | delete | skip | stash-hint\n")
         f.write("\n")
 
     kernel_ok = bool(_kernel_ws()) and (Path(_kernel_ws()) / ".git").is_dir()
@@ -561,21 +567,30 @@ def _gen_plan(out: str) -> int:
     return 0
 
 
-def _gen_plan_silent(out: str):
+def _gen_plan_silent(out: str) -> int:
+    """静默生成 plan，返回扫描错误计数（供 verify 判定；>0 表示校验结果不可信）。"""
     with open(out, "w", encoding="utf-8"):
         pass
 
     kernel_ok = bool(_kernel_ws()) and (Path(_kernel_ws()) / ".git").is_dir()
     aosp_ok = bool(_aosp_ws()) and (Path(_aosp_ws()) / ".repo").is_dir()
 
+    scan_rc = 0
     if kernel_ok:
-        _scan_kernel_modified(out)
-        _scan_kernel_new(out)
-        _scan_extra_kernel(out)
+        _, e = _scan_kernel_modified(out)
+        scan_rc += e
+        _, e = _scan_kernel_new(out)
+        scan_rc += e
+        _, e = _scan_extra_kernel(out)
+        scan_rc += e
     if aosp_ok:
-        _scan_aosp_modified(out)
-        _scan_aosp_new(out)
-        _scan_extra_aosp(out)
+        _, e = _scan_aosp_modified(out)
+        scan_rc += e
+        _, e = _scan_aosp_new(out)
+        scan_rc += e
+        _, e = _scan_extra_aosp(out)
+        scan_rc += e
+    return scan_rc
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -660,7 +675,7 @@ def _do_sync_extra(proj: str, rel: str, category: str) -> bool:
     ws = _resolve_proj_cwd(proj)
     if not ws:
         return False
-    if category in ("EXTRA-MODIFIED", "EXTRA-NEW-TRACKED"):
+    if category == "EXTRA-MODIFIED":
         base = _find_upstream_base(cwd=ws)
         if not base:
             log_error(f"{proj}: 无法确定 upstream base")
@@ -670,13 +685,24 @@ def _do_sync_extra(proj: str, rel: str, category: str) -> bool:
             log_error(f"checkout 失败: {rel} ({r.stderr.strip()})")
             return False
         return True
-    elif category == "EXTRA-NEW-UNTRACKED":
+    elif category == "EXTRA-NEW-TRACKED":
+        # tracked 新文件须同时清理 index 与工作树。不能走 `git checkout base -- f`：
+        # base 中不存在该 pathspec 时 git 会报 "did not match" 而失败。
+        r = _git_run(["rm", "-f", "--", rel], cwd=ws)
+        if r.returncode != 0:
+            log_error(f"git rm 失败: {rel} ({r.stderr.strip()})")
+            return False
+        return True
+    elif category in ("EXTRA-NEW-UNTRACKED", "EXTRA-DELETE"):
         target = _resolve_workspace_target(proj, rel)
         if not target:
-            log_error(f"无法解析路径: {proj}/{rel}") 
+            log_error(f"无法解析路径: {proj}/{rel}")
             return False
         try:
-            os.unlink(target)
+            if os.path.isdir(target):
+                shutil.rmtree(target)
+            else:
+                os.unlink(target)
         except OSError as e:
             log_error(f"rm 失败: {target} ({e})")
             return False
@@ -719,6 +745,7 @@ def _apply_plan(plan: str) -> bool:
             continue
         parts = line.split("\t", 5)
         if len(parts) < 6:
+            log_warn(f"plan 行格式异常，跳过: {line[:80]}")
             continue
         mark, category, proj, rel, action, summary = parts
         rc = True
@@ -734,6 +761,9 @@ def _apply_plan(plan: str) -> bool:
         elif action == "sync":
             log_info(f"  [SYNC] {category} {proj}:{rel}")
             rc = _do_sync_extra(proj, rel, category)
+        elif action == "delete":
+            log_info(f"  [DELETE] {proj}:{rel}")
+            rc = _do_sync_extra(proj, rel, "EXTRA-DELETE")
         elif action in ("skip", "stash-hint"):
             continue
         else:
@@ -759,7 +789,10 @@ def _apply_plan(plan: str) -> bool:
 def _verify_after_apply(orig_plan: str) -> bool:
     log_info("落盘校验（全量重跑）")
     new_plan = _tmp_file("verify-plan.tsv")
-    _gen_plan_silent(new_plan)
+    scan_rc = _gen_plan_silent(new_plan)
+    if scan_rc:
+        log_error(f"落盘校验扫描失败（{scan_rc} 个错误），校验结果不可信，判定失败")
+        return False
 
     orig_lines = Path(orig_plan).read_text(encoding="utf-8").splitlines()
     new_lines = Path(new_plan).read_text(encoding="utf-8").splitlines() if os.path.isfile(new_plan) else []
@@ -934,6 +967,9 @@ def main():
         step_begin("阶段 1: 生成同步计划")
         rc = _gen_plan(plan_file)
         step_end(rc == 0)
+        if rc != 0:
+            log_error("check-only: 扫描失败，无法生成差异预览")
+            harness_exit(3)
         log_info(f"plan 归档: {plan_file}")
         print()
         log_info("差异预览")

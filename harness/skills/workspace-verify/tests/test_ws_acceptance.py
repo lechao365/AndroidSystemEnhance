@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -149,6 +150,13 @@ class TestParseAcceptance(unittest.TestCase):
     def test_wait_ready_log_without_since_rejected(self):
         # 假绿精确条件：--wait-ready 且含 log: 标签却无 --log-since → 返 2
         rc = wa.main(["run", "--acceptance", "log:KEYWORD", "--wait-ready"])
+        self.assertEqual(rc, 2)
+
+    def test_wait_ready_logfield_without_since_rejected(self):
+        # 假绿精确条件：--wait-ready 且含 logfield: 标签却无 --log-since → 返 2
+        # （logfield 取锚点末行累计值，reboot 后同样可能命中旧日志，须一并拦截）
+        rc = wa.main(["run", "--acceptance",
+                      'logfield:"heartbeat, loop=|overrun|=|0"', "--wait-ready"])
         self.assertEqual(rc, 2)
 
     def test_log_since_invalid_format_rejected(self):
@@ -387,18 +395,18 @@ class TestResolveAcceptance(unittest.TestCase):
         self.assertIn("my-case", err)
 
     def test_inbuilt_lcview_liveness_present(self):
-        # 资产层内建 lcview-liveness 可解析（HAL/Daemon 服务 + 心跳 + logfield
-        # 字段断言 0（overrun/dropped/readErr，防子串命中历史零值心跳假绿）
-        # + boot 判据）
+        # 资产层内建 lcview-liveness 可解析（daemon 直读内核 + 持续心跳 +
+        # logfield 字段断言 0（overrun/dropped/readErr，防子串命中历史零值
+        # 心跳假绿）+ boot 判据；HAL 已退役，svc 只留 lechao_lcview，
+        # conserve 已迁至 lcview-transfer 不在本用例）
         acc, err = wa.resolve_acceptance(self._args(case="lcview-liveness"))
         self.assertIsNone(err)
-        self.assertEqual(acc,
-                         'svc:lechao_lcview_hal svc:lechao_lcview '
-                         'log:"LcView: alive beat=" log:"heartbeat, loop=" '
-                         'logfield:"LcView: alive beat=|overrun|=|0" '
-                         'logfield:"LcView: alive beat=|dropped|=|0" '
-                         'logfield:"LcView: alive beat=|readErr|=|0" '
-                         'hostcmd:"cases/lcview_check.sh --mode conserve" boot')
+        self.assertEqual(
+            acc,
+            'svc:lechao_lcview log:"heartbeat, loop=" '
+            'logfield:"heartbeat, loop=|overrun|=|0" '
+            'logfield:"heartbeat, loop=|dropped|=|0" '
+            'logfield:"heartbeat, loop=|readErr|=|0" boot')
         # log: 子串断言 0 已弃用（5000 行缓冲命中开机初期零值心跳假绿）
         self.assertNotIn('log:"overrun=0"', acc)
 
@@ -473,6 +481,70 @@ class TestResolveAcceptance(unittest.TestCase):
             wa.parse_acceptance('hostcmd:"adb shell \\"echo x\\"" 残余尾巴')
         with self.assertRaises(ValueError):
             wa.parse_acceptance("boot 设备能正常播放音频")
+
+
+class TestConvertSince(unittest.TestCase):
+    def _dev(self, epoch, tz="+0000"):
+        def dev(cmd):
+            if cmd == "date +%z":
+                return (tz, 0)
+            return (f"{int(epoch)}", 0)
+        return dev
+
+    def test_cst_to_utc_device_converted(self):
+        # 设备 UTC（+0000）、epoch 与本地一致：本地 CST 时刻须换算为设备 UTC
+        # 表示（时区差 8h，PIT-5 复发场景——直接传本地时刻会落在设备未来）
+        local_since = "08-28 11:16:00.000"
+        local_epoch = wa._parse_since_epoch(local_since)
+        with mock.patch.object(wa.time, "time", return_value=local_epoch):
+            since, err = wa.convert_since_to_device(local_since,
+                                                    self._dev(local_epoch))
+        self.assertIsNone(err)
+        expect = (datetime.fromtimestamp(local_epoch, tz=timezone.utc)
+                  .strftime("%m-%d %H:%M:%S.%f")[:-3])
+        self.assertEqual(since, expect)
+        self.assertNotEqual(since, local_since)
+
+    def test_device_clock_behind_local(self):
+        # PIT-5：设备时钟落后本地 1h → 换算后时间窗相应提前 1h
+        local_since = "2026-08-28 11:16:00.000"
+        local_epoch = wa._parse_since_epoch(local_since)
+        device_epoch = local_epoch - 3600
+        with mock.patch.object(wa.time, "time", return_value=local_epoch):
+            since, err = wa.convert_since_to_device(local_since,
+                                                    self._dev(device_epoch))
+        self.assertIsNone(err)
+        expect = (datetime.fromtimestamp(device_epoch, tz=timezone.utc)
+                  .strftime("%Y-%m-%d %H:%M:%S.%f")[:-3])
+        self.assertEqual(since, expect)
+
+    def test_device_clock_unreadable(self):
+        def dev(cmd):
+            return ("", 1)
+        with mock.patch.object(wa.time, "time", return_value=0.0):
+            since, err = wa.convert_since_to_device("08-28 11:16:00.000", dev)
+        self.assertIsNone(since)
+        self.assertIn("设备时钟", err)
+
+    def test_device_tz_illegal(self):
+        def dev(cmd):
+            if cmd == "date +%z":
+                return ("CST", 0)
+            return ("100", 0)
+        with mock.patch.object(wa.time, "time", return_value=0.0):
+            since, err = wa.convert_since_to_device("08-28 11:16:00.000", dev)
+        self.assertIsNone(since)
+        self.assertIn("时区", err)
+
+    def test_year_prefixed_kept_in_output(self):
+        # 有年格式输出保留年份前缀（reboot 跨年场景窗起点明确）
+        local_since = "2026-08-28 11:16:00.000"
+        local_epoch = wa._parse_since_epoch(local_since)
+        with mock.patch.object(wa.time, "time", return_value=local_epoch):
+            since, err = wa.convert_since_to_device(local_since,
+                                                    self._dev(local_epoch))
+        self.assertIsNone(err)
+        self.assertTrue(since.startswith("2026-08-28 "))
 
 
 if __name__ == "__main__":

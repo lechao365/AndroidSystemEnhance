@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -22,7 +23,7 @@ class TestWsReport(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
-        self._dir = Path(self._tmp.name) / "data" / "verify"
+        self._dir = Path(self._tmp.name) / "data" / "verify-results"
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -128,6 +129,130 @@ class TestWsReport(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("必须传 --acceptance", err.getvalue())
         self.assertFalse(self._dir.exists())
+
+    def test_mode_a_metrics_structured_saved(self):
+        # 方向 2：--metrics JSON 结构化写入收据头 metrics 字段 + trend 行尾
+        # （跨批可 diff，不散在正文）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 性能采集\n")
+        metrics = ('{"load_mb": 64, "throughput_evs": 328.0, '
+                   '"drain_ms_per_event": 6.4, "daemon_rss_kb": 5516}')
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "pass", "--build", "pass",
+                                 "--board", "pass", "--summary", "性能基线",
+                                 "--metrics", metrics])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        self.assertEqual(len(details), 1)
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- metrics: {", content)
+        self.assertIn('"throughput_evs": 328.0', content)
+        trend = (self._dir / "trend.md").read_text(encoding="utf-8")
+        self.assertIn('| {"daemon_rss_kb": 5516', trend)
+        self.assertIn('"throughput_evs": 328.0', trend)
+
+    def test_mode_a_metrics_normalized_sorted_keys(self):
+        # metrics 规范化：排序键输出（同批不同序的 diff 稳定）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--metrics", '{"b": 2, "a": 1}'])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn('- metrics: {"a": 1, "b": 2}', content)
+
+    def test_mode_a_metrics_invalid_json_rejected(self):
+        # --metrics 非合法 JSON 对象 → exit 2，不落盘
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        err = io.StringIO()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            with contextlib.redirect_stderr(err):
+                rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                     "--result", "skip", "--build", "skip",
+                                     "--board", "skip", "--summary", "s",
+                                     "--metrics", "{broken"])
+        self.assertEqual(rc, 2)
+        self.assertIn("--metrics 须为合法 JSON 对象", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_mode_a_timings_file_written(self):
+        # --timings-file（cdp_timing start/mark 原始结构）→ 收据 timings 字段含
+        # 段耗时（ws_report 内部经 compute_segments 计算，不等同原 marks）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        timings = json.dumps({
+            "batch_id": "abc123def456",
+            "start_wall": 1000.0,
+            "marks": [{"name": "precheck", "wall": 1001.5},
+                      {"name": "edit", "wall": 1005.0}],
+        })
+        tfile = self._write(timings, ".json")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--timings-file", tfile])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- timings: {", content)
+        self.assertIn('"name": "precheck"', content)
+        self.assertIn('"elapsed_s": 1.5', content)
+
+    def test_mode_a_timings_file_finished_struct(self):
+        # --timings-file 传 finish 归档结构（含 segments，无 marks）→ 直接用
+        # segments 写入收据（AI 先 finish 再落收据也 OK）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        timings = json.dumps({
+            "batch_id": "abc123def456",
+            "start_wall": 1000.0,
+            "wall_end": 1005.0,
+            "marks": [{"name": "precheck", "wall": 1001.0}],
+            "segments": [{"name": "precheck", "elapsed_s": 1.0},
+                         {"name": "finish", "elapsed_s": 4.0}],
+        })
+        tfile = self._write(timings, ".json")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--timings-file", tfile])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn('"elapsed_s": 1.0', content)
+
+    def test_mode_a_timings_file_missing_warns_not_block(self):
+        # --timings-file 缺失/非法：warn 降级（timings 置空），收据仍落盘不阻断
+        # （诊断数据非验收证据，区别于 --acceptance 的返 2）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        err = io.StringIO()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            with contextlib.redirect_stderr(err):
+                rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                     "--result", "skip", "--build", "skip",
+                                     "--board", "skip", "--summary", "s",
+                                     "--timings-file", "/nonexistent/timings.json"])
+        self.assertEqual(rc, 0)
+        self.assertIn("warn: --timings-file 读取失败", err.getvalue())
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        self.assertEqual(len(details), 1)
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- timings: ", content)
 
     def test_mode_b_board_skip_verify_mode_none(self):
         # 模式 B：--board skip（revert 恢复验证未上板）→ verify_mode=none

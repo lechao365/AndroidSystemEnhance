@@ -4,7 +4,12 @@
 //
 // 运行方式：
 //   atest lechao_lcview_unit_test -- --host     # daemon 纯逻辑测试（秒级）
-//   atest lechao_lcview_hal_test                # HAL 测试（需 device）
+//
+// 架构演进：DeviceReader 由 hal 迁入 daemon——DeviceReader_test 随迁
+// 入 unit_test（daemon 直读内核组件）；hal_test 随 HAL 退役删除，
+// 仍有效逻辑（open 重试/读错误退出/flush 触发语义）已并入：
+// DeviceReader_test 覆盖 open/read 生产路径，DaemonLoop_test 覆盖
+// flush 判定（shouldFlushBatch）。
 // ============================================================
 
 // filegroup lechao_lcview_daemon_sources 声明在 daemon/Android.bp 中
@@ -23,10 +28,12 @@ cc_test {
         "FileWriter_test.cpp",
         "record_codec_test.cpp",
         "DaemonLoop_test.cpp",
+        "DeviceReader_test.cpp",
         ":lechao_lcview_daemon_sources",
+        ":lechao_lcview_device_sources",
     ],
+    header_libs: ["vendor.lechao.lcview_headers"],
     include_dirs: [
-        "vendor/lechao/services/lechao_lcview/include",
         "vendor/lechao/services/lechao_lcview/daemon",
         "vendor/lechao/services/include",
     ],
@@ -37,42 +44,6 @@ cc_test {
         "libbase",
         "libjsoncpp",
         "liblog",
-        "libbinder_ndk",
-        "vendor.lechao.lcview-V2-ndk",
     ],
     test_suites: ["general-tests"],
-}
-
-// ============================================================
-// HAL 测试（仅 device）：依赖 AIDL BnLcView 运行时
-// ============================================================
-cc_test {
-    name: "lechao_lcview_hal_test",
-    cflags: ["-Wall", "-Werror"],
-    host_supported: false,
-    native_coverage: true,
-    srcs: [
-        "LcView_test.cpp",
-        "DeviceReader_test.cpp",
-        ":lechao_lcview_hal_sources",
-    ],
-    local_include_dirs: [
-        ".",
-    ],
-    include_dirs: [
-        "vendor/lechao/services/lechao_lcview/include",
-        "vendor/lechao/services/lechao_lcview/hal",
-        "vendor/lechao/services/include",
-    ],
-    header_libs: ["vendor_lechao_log_headers"],
-    static_libs: [
-        "libgmock",
-    ],
-    shared_libs: [
-        "libbase",
-        "liblog",
-        "libbinder_ndk",
-        "vendor.lechao.lcview-V2-ndk",
-    ],
-    test_suites: ["device-tests"],
 }
