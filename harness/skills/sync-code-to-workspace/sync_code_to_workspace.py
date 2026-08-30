@@ -58,7 +58,7 @@ def _aosp_ws() -> str:
 @lru_cache(maxsize=None)
 def _artifacts_dir() -> Path:
     """同步脚本 artifacts 目录: harness/log/<script>/artifacts/。"""
-    d = core_log_dir() / "sync_code_to_workspace" / "artifacts"
+    d = core_log_dir() / "sync-code-to-workspace" / "artifacts"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

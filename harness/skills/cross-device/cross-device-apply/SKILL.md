@@ -26,7 +26,7 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
 - code/ 编辑结果 + 重生成 manifest.yaml + data/verify-results 收据（随批 commit 推送）
 - 收据 header `timings` 字段：链路耗时打点（precheck/edit/verify 内部/push 各段，
   cdp_timing.py 采集，供 emit 定位耗时瓶颈；缺失仅 warn 不阻断）
-- harness/log/cross-device-apply/ 运行日志（gitignore）
+- harness/log/cross-device/ 运行日志（gitignore）
 ## Failure / recovery（失败/恢复）
 - 编辑失败：AI 自愈（上限 3 次，仅批次编辑环节--验证轮次重试归 loop-engineering
   的 patience/total 计数，不在此列）；超限标 fail 继续，收据 fail
@@ -36,13 +36,13 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
 - CDP-001、SRC-001/002（修订后）
 ---
 ## 工作流
-1. 接收批次：用户粘贴 → AI 存临时文件 harness/log/cross-device-apply/batch-<ts>.cdp
+1. 接收批次：用户粘贴 → AI 存临时文件 harness/log/cross-device/batch-<ts>.cdp
    批次临时文件必须用 heredoc 写入且定界符加单引号以禁用展开（cat > <文件> <<'EOF' ... EOF）；
    禁止 echo 类写法（引号被吞、多行压成一行致批次结构损坏，收据 batch_base 空）
 2. 门禁：git branch --show-current 须为 dev、git status --porcelain 须为空，否则停止
 2b. 耗时打点 start（可选，失败不阻断主流程）：
     python3 harness/skills/cross-device/lib/python/cdp_timing.py start --batch-file <批次文件>
-    （batch_id 从批次文件内部解析；打点文件 harness/log/cross-device-apply/
+    （batch_id 从批次文件内部解析；打点文件 harness/log/cross-device/
     timings-<batch_id>.json，供后续各步骤 mark）
 3. precheck（含 base 拒批）：
    python3 harness/skills/cross-device/lib/python/cdp_parse.py --role apply --expect-base "$(git rev-parse --short=12 HEAD)" <批次文件>
@@ -73,7 +73,7 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
    - 收据落盘是进步骤 6 的前提：ws_report 返 2（如 -sv 缺 --acceptance、
      --log-since 非法等参数错误）即收据未落盘，必须补参重试，禁止无收据进步骤 6
    - -s → 写 skip 收据：
-     python3 harness/skills/workspace-verify/ws_report.py --batch-file <批次文件> --result skip --build skip --board skip --summary "<意图首句>（-s 无需上板）" --body <批次文件> [--timings-file harness/log/cross-device-apply/timings-<batch_id>.json]
+     python3 harness/skills/workspace-verify/ws_report.py --batch-file <批次文件> --result skip --build skip --board skip --summary "<意图首句>（-s 无需上板）" --body <批次文件> [--timings-file harness/log/cross-device/timings-<batch_id>.json]
     verify 无论 pass/fail，收据落盘后必须执行下一步骤（git-works-push）
 6. 显式执行 /git-works-push（收据+代码统一 commit push）
    完成后打点收尾（可选）：cdp_timing.py mark --batch <batch_id> --name push

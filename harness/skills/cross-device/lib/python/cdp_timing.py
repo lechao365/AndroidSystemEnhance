@@ -10,7 +10,7 @@
     cdp_timing.py mark --name <阶段名>        # 记录一个时间戳
     cdp_timing.py finish [--file <path>]      # 计算相邻段耗时并落盘
 退出码: 0 正常 / 2 参数错误 / 3 未 start 即 mark/finish
-打点文件: <project_root>/harness/log/cross-device-apply/timings-<batch_id>.json
+打点文件: <project_root>/harness/log/cross-device/timings-<batch_id>.json
 （gitignore 工作态；ws_report --timings-file 读原始打点文件经 compute_segments
 计算段耗时并入收据 timings 字段——finish 仅归档/人工查看，不依赖其先跑）
 """

@@ -33,12 +33,12 @@ def data_known_issues_dir() -> Path:
 
 
 def log_apply_dir() -> Path:
-    """cross-device-apply 工作态目录（会 mkdir）：批次临时文件、链路耗时打点文件。
+    """cross-device 工作态目录（会 mkdir）：批次临时文件、链路耗时打点文件。
 
     gitignore 工作态（不入库）；打点文件 timings-<batch_id>.json 由 cdp_timing.py
     start 创建、finish 落盘，最终数据经 ws_report --timings-file 并入收据持久化。
     """
-    d = project_root() / "harness" / "log" / "cross-device-apply"
+    d = project_root() / "harness" / "log" / "cross-device"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
