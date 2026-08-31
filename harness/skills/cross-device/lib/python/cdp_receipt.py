@@ -13,7 +13,9 @@ from cdp_paths import data_verify_results_dir
 _DETAIL_KEEP = 20
 _TREND_KEEP = 50
 # 多行模式：^$ 锚定每一行（缺 MULTILINE 会导致 from_text 全默认值）
-_FIELD_RE = re.compile(r"^- (\w+): (.+)$", re.MULTILINE)
+# 值用 (.*) 允许空值（如 build/push_board 空值显式解析为空串，baseline_register
+# 据此记 FAIL 不记 SKIP；与 cdp_issue._FIELD_RE 同款）
+_FIELD_RE = re.compile(r"^- (\w+): (.*)$", re.MULTILINE)
 
 _FIELDS = [
     "schema_version", "batch_id", "batch_base", "verified_commit",

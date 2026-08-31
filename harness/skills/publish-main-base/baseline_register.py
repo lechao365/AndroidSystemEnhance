@@ -17,6 +17,7 @@ CONFIG = Path(__file__).resolve().parents[2] / "config" / "baseline-status.yaml"
 # 仿 ws_report.py：引入 cross-device 共享收据模块，candidate 实读真实 verify 收据
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "lib" / "python"))
 from cdp_receipt import read_receipt  # noqa: E402
+from cdp_issue import issue_files, read_issue, validate_issue  # noqa: E402
 
 
 def load():
@@ -51,12 +52,46 @@ def next_id(data, today):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="baseline candidate/promoted 登记")
-    ap.add_argument("action", choices=["add-candidate", "promote", "revert-candidate"])
+    ap.add_argument("action",
+                    choices=["add-candidate", "promote", "revert-candidate",
+                             "check-issues"])
     ap.add_argument("--baseline-id")
     ap.add_argument("--source-commit")
     ap.add_argument("--receipt-path")
     ap.add_argument("--approved-by")
+    ap.add_argument("--task")
     args = ap.parse_args(argv)
+
+    # check-issues：known-issues 门禁（publish_main_base.sh 委托；不读写登记 yaml）
+    if args.action == "check-issues":
+        if not args.task:
+            print("error: check-issues 必须传 --task（门禁按任务过滤）", file=sys.stderr)
+            return 1
+        # 先判畸形登记：validate_issue 有红即拒（文件名/头字段/枚举/index 一致性全局把关，
+        # 防 index 按空格切分错位等畸形记录污染门禁判定）
+        for p in issue_files():
+            errs = validate_issue(p)
+            if errs:
+                for e in errs:
+                    print(f"{p.name}: {e}", file=sys.stderr)
+                print("error: known-issues 畸形登记，拒绝（先修复登记再发布基线）",
+                      file=sys.stderr)
+                return 1
+        # 再判目标任务未解决阻塞：origin=introduced 或 blocking 且 status!=fixed 即拒
+        bad = []
+        for p in issue_files():
+            i = read_issue(p)
+            if i.task != args.task:
+                continue
+            if (i.origin == "introduced" or i.blocking) and i.status != "fixed":
+                bad.append(f"{p.name}: origin={i.origin} blocking={i.blocking} "
+                           f"status={i.status}")
+        if bad:
+            print("\n".join(bad), file=sys.stderr)
+            print(f"error: task={args.task} 存在未解决阻塞问题", file=sys.stderr)
+            return 1
+        print(f"known-issues 门禁通过（task={args.task} 无未解决阻塞问题）")
+        return 0
 
     data = load()
     baselines = data.setdefault("baselines", [])
@@ -73,8 +108,9 @@ def main(argv=None):
             print(f"error: 读取收据失败 {args.receipt_path}: {e}", file=sys.stderr)
             return 1
         # build/package 共用收据 build 阶段，board_verify 取 push_board，均大写（不再伪造 PASS）
-        build_result = (r.build or "skip").upper()
-        board_verify = (r.push_board or "skip").upper()
+        # 空值（""/None/纯空白）记 FAIL 不记 SKIP——空值不是合法 skip 证据，证据链从严
+        build_result = ((r.build or "").strip() or "FAIL").upper()
+        board_verify = ((r.push_board or "").strip() or "FAIL").upper()
         # 去重复用：同 source_commit 且仍为 candidate 的记录不新增（防重复 prepare 冗余登记；
         # 收据路径不同则对齐最新证据，保持 promote 证据链一致）
         for b in baselines:

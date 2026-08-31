@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # publish-main-base：基线发布编排器末两步（candidate 登记 + dev → main squash promote）。
 # 前置：最新收据 result∈{pass,skip} 且 最近内容提交的父(short=12) == verified_commit；
-#       指定 --task 时，目标任务下存在 origin=introduced 或 blocking 且 status!=fixed
-#       的 known-issues 即拒（known-issues 门禁）。
+#       指定 --task 时走 known-issues 门禁（实现下移 baseline_register.py check-issues）：
+#       先判登记畸形（validate_issue 有红即拒），再判目标任务下存在 origin=introduced
+#       或 blocking 且 status!=fixed 的问题即拒。
 # --check（= --check-only）：干跑前置校验，失败时输出 check_class=<分类> 供编排分流：
 #   NEED_VERIFY（存在未验证改动→进验证路径）/ NO_RECEIPT（无收据）/ RECEIPT_FAIL（收据
 #   result 非 pass/skip）/ DOC_VIOLATION（文档提交夹带非 docs/ 或 prepare 前已存在文档提交）/
@@ -131,26 +132,11 @@ PARENT=$(git rev-parse --short=12 "$BH^" 2>/dev/null || echo "")
   echo "error: 最近内容提交父($PARENT) != verified_commit($VC)：dev 存在未验证改动（跳过 meta=$SKIP_META doc=$SKIP_DOC）" >&2; exit 1; }
 
 # ── known-issues 门禁（--task 指定时；prepare/promote/check-only 共用）────────
-# 目标任务下存在 origin=introduced 或 blocking 且 status!=fixed 的问题即拒
+# 门禁实现下移 baseline_register.py check-issues：先判畸形登记（validate_issue
+# 有红即拒），再判目标任务 origin=introduced/blocking 且 status!=fixed 即拒
 if [ -n "$TASK" ]; then
-  python3 - "$TASK" <<'PYEOF' || { check_class KI_BLOCKED; echo "error: known-issues 门禁未通过（目标任务存在未解决阻塞问题）" >&2; exit 1; }
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path("harness/skills/cross-device/lib/python").resolve()))
-import cdp_issue
-task = sys.argv[1]
-bad = []
-for p in cdp_issue.issue_files():
-    i = cdp_issue.read_issue(p)
-    if i.task != task:
-        continue
-    if (i.origin == "introduced" or i.blocking) and i.status != "fixed":
-        bad.append(f"{p.name}: origin={i.origin} blocking={i.blocking} status={i.status}")
-if bad:
-    print("\n".join(bad))
-    sys.exit(1)
-print(f"known-issues 门禁通过（task={task} 无未解决阻塞问题）")
-PYEOF
+  python3 harness/skills/publish-main-base/baseline_register.py check-issues --task "$TASK" \
+    || { check_class KI_BLOCKED; echo "error: known-issues 门禁未通过（存在未解决阻塞问题或登记畸形）" >&2; exit 1; }
 fi
 
 if [ "$MODE" = "check-only" ]; then
