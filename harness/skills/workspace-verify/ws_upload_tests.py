@@ -16,6 +16,7 @@
 # ============================================================
 
 import argparse
+import posixpath
 import re
 import shlex
 import subprocess
@@ -180,10 +181,13 @@ def _default_out():
         from paths import env_path
         aosp = env_path("AOSP_WS")
         if aosp:
-            return str(Path(aosp) / "out")
+            # posixpath 拼接：AOSP out 路径跨平台统一正斜杠（emit 侧 Windows
+            # Path 会产出反斜杠，被传给 adb/设备侧时破坏路径）
+            return posixpath.join(aosp, "out")
     except Exception:
         pass
-    return str(Path.home() / "workspace" / "aosp" / "out")
+    # 回退分支同样 posix 拼接（Windows Path 会产出反斜杠，传给 adb/设备侧破坏路径）
+    return posixpath.join(str(Path.home()), "workspace", "aosp", "out")
 
 
 def main(argv=None):

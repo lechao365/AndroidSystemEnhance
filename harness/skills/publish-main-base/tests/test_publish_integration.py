@@ -54,14 +54,14 @@ class TestSyncModifyIntegration(unittest.TestCase):
     # ── git 原语 ──────────────────────────────────────────────────────────
     def _git(self, args, check=True):
         return subprocess.run(["git", *args], cwd=self.work,
-                              capture_output=True, text=True, check=check)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", check=check)
 
     def _git_out(self, args):
         return self._git(args).stdout.strip()
 
     def _origin(self, args, check=True):
         return subprocess.run(["git", "-C", str(self.origin), *args],
-                              capture_output=True, text=True, check=check)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", check=check)
 
     def _commit_all(self, msg):
         self._git(["add", "-A"])
@@ -73,7 +73,7 @@ class TestSyncModifyIntegration(unittest.TestCase):
         # 防 python 导入生成 __pycache__ 污染工作树（git status 非空会使预检拒绝）
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         return subprocess.run(["bash", str(SCRIPT), *args], cwd=self.work,
-                              capture_output=True, text=True, env=env)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
 
     # ── 场景构建 ──────────────────────────────────────────────────────────
     def _base_repo(self):
@@ -191,7 +191,8 @@ class TestSyncModifyIntegration(unittest.TestCase):
         self._register_commit(b12)
         self._doc_commit()
         self._push_dev()
-        r = self._run_script("--prepare", "--task", "lcview-refactor")
+        r = self._run_script("--prepare", "--task", "lcview-refactor",
+                                "--evidence-scope", "lcview-liveness")
         self.assertEqual(r.returncode, 1)
         self.assertIn("prepare 前 dev 已存在 1 个文档提交", r.stderr)
 
@@ -221,14 +222,16 @@ class TestSyncModifyIntegration(unittest.TestCase):
         # source_commit 取内容提交（BH 回溯后），重复 prepare 复用 candidate
         vc = self._base_repo()
         b12 = self._content_commit(vc)
-        r = self._run_script("--prepare", "--task", "lcview-refactor")
+        r = self._run_script("--prepare", "--task", "lcview-refactor",
+                                "--evidence-scope", "lcview-liveness")
         self.assertEqual(r.returncode, 0, r.stderr)
         yaml_text = (self.work / "harness/config/baseline-status.yaml").read_text(
             encoding="utf-8")
         self.assertIn("status: candidate", yaml_text)
         self.assertIn(f"source_commit: {b12}", yaml_text)
         # 第二次 prepare：复用，不新增记录
-        r2 = self._run_script("--prepare", "--task", "lcview-refactor")
+        r2 = self._run_script("--prepare", "--task", "lcview-refactor",
+                                "--evidence-scope", "lcview-liveness")
         self.assertEqual(r2.returncode, 0, r2.stderr)
         self.assertIn("candidate 复用", r2.stdout)
         yaml_text2 = (self.work / "harness/config/baseline-status.yaml").read_text(

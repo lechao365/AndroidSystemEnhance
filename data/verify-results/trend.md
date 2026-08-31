@@ -1,12 +1,3 @@
-2026-08-26 09:42:09 27ce0645416f skip build=skip board=skip acc=- batch_id 抗空格插入，退出码补全，冒烟前测遗留（-s 无需上板；EXTR
-2026-08-26 10:17:08 1c27a03a43a2 skip build=skip board=skip acc=- 上板前补 adb 就绪、连接重试、超时可辨与 prop 判据（-s 无需上板）
-2026-08-26 10:27:22 6fd3048d34d2 skip build=skip board=skip acc=- logcat 收窄时间窗，log 判据可辨，CLI 不裸崩（-s 无需上板）
-2026-08-26 10:38:12 8edfea81314c skip build=skip board=skip acc=- 冒烟证据不留空洞，假绿条件强制拦截，缩进清尾（-s 无需上板）
-2026-08-26 10:52:03 17a6a4c9696c skip build=skip board=skip acc=- data/ci 真正出库，返 2 路径有归宿，命令块可拷贝（-s 无需上板）
-2026-08-26 14:30:53 1a34402f22c1 skip build=skip board=skip acc=- 建用例资产层（-s 无需上板）
-2026-08-26 14:43:34 eed1cdec047a skip build=skip board=skip acc=- 独立触发闭环（-s 无需上板）
-2026-08-26 14:59:54 ec10f7ba1c1b skip build=skip board=skip acc=- 测试源码归档进 code（-s 无需上板）
-2026-08-26 15:09:24 d1dfcb778909 skip build=skip board=skip acc=- 冻结版 AIDL 归档 + Windows 串口转发器（-s 无需上板）
 2026-08-26 16:52:26 a934b5b6da4a skip build=skip board=skip acc=- WSL 侧串口客户端落地（-s 无需上板）
 2026-08-26 22:21:38 manual-2608262221 pass build=pass board=pass acc=svc:lechao_lcview_hal=pass svc:lechao_lc lcview CXX 修复批首次真实上板验证通过（7P1 全清，设备健康运行）
 2026-08-26 23:14:50 manual-2608262314 pass build=skip board=pass acc=jsonl_files_exist=pass jsonl_valid_json= lcview 业务板端验证通过（L1 管道健康 4PASS + L2 触发全链路
@@ -48,3 +39,12 @@
 2026-08-29 17:41:11 18f27638d9f6 skip build=skip board=skip acc=- 补 known-issues 校验与门禁（-s 无需上板）
 2026-08-29 20:41:12 manual-2608292041 skip build=skip board=skip acc=- 清理去 HAL/迁 vendor 残留：README/recover hal 分
 2026-08-30 20:34:09 manual-2608302034 pass build=pass board=pass acc=[{"tag":"svc:lechao_lcview","status":"pa publish-main-base 基线发布验证：lcview 去 HAL 迁移
+2026-08-31 10:31:08 f43558ffa5c7 skip build=skip board=skip acc=- known-issues 未闭环不老化并修 precheck 假拒（-s 无需上
+2026-08-31 10:50:54 3b2019456966 skip build=skip board=skip acc=- 门禁下移到 Python 并堵畸形登记（-s 无需上板）
+2026-08-31 11:32:30 80634fbba714 skip build=skip board=skip acc=- promote 收紧为 pass 且 board 并记 ki_gate（-s 无
+2026-08-31 11:45:28 7b5fe41de795 skip build=skip board=skip acc=- promote 打 verified tag 并断言树等价（-s 无需上板）
+2026-08-31 14:30:55 30d0ce4139d2 skip build=skip board=skip acc=- 证据快照与 evidence_scope 登记（-s 无需上板）
+2026-08-31 15:07:03 ecee8106f315 skip build=skip board=skip acc=- 清空验收假绿与指纹过激归一化（-s 无需上板）
+2026-08-31 15:39:36 8548e61e03c0 skip build=skip board=skip acc=- 修 emit 侧 11 项测试红并扩引用扫描（-s 无需上板）
+2026-08-31 16:55:03 ec62ae0ce5f6 pass build=pass board=pass acc={ lcview 重构闭环证据:四组验收全绿+单测 190 全过+perf 指标齐备 | {"daemon_rss_kb": 5040, "dd_s": 2.33, "drain_ms_per_event": 0.371, "jsonl_delta": 3075, "load_mb": 64, "throughput_evs": 1319.8, "total_delta": 3075}
+2026-08-31 17:29:24 manual-2608311729 pass build=pass board=pass acc={ 基线发布验证:四组验收全绿+单测190全过+perf指标齐备 | {"daemon_rss_kb": 5040, "dd_s": 2.357, "drain_ms_per_event": 0.373, "jsonl_delta": 3081, "load_mb": 64, "throughput_evs": 1307.2, "total_delta": 3081}

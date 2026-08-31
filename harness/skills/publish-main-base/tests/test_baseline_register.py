@@ -49,7 +49,8 @@ class TestBaselineRegister(unittest.TestCase):
         # candidate 必须实读收据：build/package=build、board_verify=push_board，均大写
         rp = self._make_receipt(build="pass", board="fail")
         rc, out = self._run("add-candidate", "--receipt-path", rp,
-                            "--source-commit", "abc123")
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
         self.assertEqual(rc, 0)
         self.assertIn("candidate:", out)
         b = br.load()["baselines"][0]
@@ -60,17 +61,29 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(b["evidence"]["build_result"], "PASS")
         self.assertEqual(b["evidence"]["package_result"], "PASS")
         self.assertEqual(b["evidence"]["board_verify"], "FAIL")
+        self.assertEqual(b["evidence_scope"], "lcview-liveness")
+        self.assertEqual(b["evidence"]["evidence_scope"], "lcview-liveness")
         self.assertEqual(b["sync_manifest"], rp)
         self.assertEqual(b["evidence"]["sync_manifest"], rp)
 
     def test_add_candidate_lowercase_receipt(self):
         # 收据 build=skip 等小写值须转大写登记，不硬编码 PASS
         rp = self._make_receipt(build="skip", board="skip")
-        rc, _ = self._run("add-candidate", "--receipt-path", rp)
+        rc, _ = self._run("add-candidate", "--receipt-path", rp,
+                          "--evidence-scope", "lcview-liveness")
         self.assertEqual(rc, 0)
         b = br.load()["baselines"][0]
         self.assertEqual(b["build_result"], "SKIP")
         self.assertEqual(b["board_verify"], "SKIP")
+
+    def test_add_candidate_missing_evidence_scope(self):
+        # 缺 --evidence-scope：证据范围必填，必须拒绝登记（退 1）
+        rp = self._make_receipt()
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123")
+        self.assertEqual(rc, 1)
+        self.assertIn("--evidence-scope", out)
+        self.assertEqual(br.load()["baselines"], [])
 
     def test_add_candidate_missing_receipt_path(self):
         # 缺 --receipt-path：证据链要求实读收据，必须拒绝
@@ -83,11 +96,13 @@ class TestBaselineRegister(unittest.TestCase):
         # 同 source_commit 重复登记：复用既有 candidate，不新增记录
         rp = self._make_receipt()
         rc, out = self._run("add-candidate", "--receipt-path", rp,
-                            "--source-commit", "abc123")
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
         self.assertEqual(rc, 0)
         self.assertIn("candidate:", out)
         rc, out = self._run("add-candidate", "--receipt-path", rp,
-                            "--source-commit", "abc123")
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
         self.assertEqual(rc, 0)
         self.assertIn("candidate 复用", out)
         self.assertEqual(len(br.load()["baselines"]), 1)
@@ -96,10 +111,12 @@ class TestBaselineRegister(unittest.TestCase):
         # 复用且收据路径不同：对齐最新证据（sync_manifest/build/board 更新）
         rp1 = self._make_receipt(build="pass", board="fail")
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp1,
-                                   "--source-commit", "abc123")[0], 0)
+                                   "--source-commit", "abc123",
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
         rp2 = self._make_receipt(build="skip", board="skip")
         rc, out = self._run("add-candidate", "--receipt-path", rp2,
-                            "--source-commit", "abc123")
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
         self.assertEqual(rc, 0)
         self.assertIn("candidate 复用并更新收据", out)
         b = br.load()["baselines"][0]
@@ -111,7 +128,8 @@ class TestBaselineRegister(unittest.TestCase):
     def test_add_candidate_bad_receipt_path(self):
         # --receipt-path 指向不存在/非法文件：拒绝
         rc, out = self._run("add-candidate", "--receipt-path",
-                            str(self._root / "no-such-receipt.md"))
+                            str(self._root / "no-such-receipt.md"),
+                            "--evidence-scope", "lcview-liveness")
         self.assertEqual(rc, 1)
         self.assertIn("读取收据失败", out)
         self.assertEqual(br.load()["baselines"], [])
@@ -119,17 +137,62 @@ class TestBaselineRegister(unittest.TestCase):
     def test_promote_requires_candidate(self):
         # 非 candidate 状态 promote 必须拒绝（门禁可信）
         rp = self._make_receipt()
-        self.assertEqual(self._run("add-candidate", "--receipt-path", rp)[0], 0)
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
         self.assertEqual(self._run("promote", "--baseline-id", bid)[0], 0)
         rc, out = self._run("promote", "--baseline-id", bid)
         self.assertEqual(rc, 1)
         self.assertIn("仅 candidate 可 promote", out)
 
+    def test_promote_creates_evidence_snapshot(self):
+        # promote 落盘证据快照：data/baselines/<id>-<收据名>.md，内容与收据一致
+        rp = self._make_receipt()
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        bid = br.load()["baselines"][0]["baseline_id"]
+        rc, out = self._run("promote", "--baseline-id", bid)
+        self.assertEqual(rc, 0)
+        self.assertIn("promoted:", out)
+        snapshot = self._root / "data" / "baselines" / f"{bid}-{Path(rp).name}"
+        self.assertTrue(snapshot.is_file(), f"快照未落盘: {snapshot}")
+        self.assertEqual(snapshot.read_text(encoding="utf-8"),
+                         Path(rp).read_text(encoding="utf-8"))
+
+    def test_promote_duplicate_snapshot_rejected(self):
+        # 重复 promote（revert 后再 promote）：快照已存在即拒，不得覆盖历史证据
+        rp = self._make_receipt()
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        bid = br.load()["baselines"][0]["baseline_id"]
+        self.assertEqual(self._run("promote", "--baseline-id", bid)[0], 0)
+        snapshot = self._root / "data" / "baselines" / f"{bid}-{Path(rp).name}"
+        snapshot.write_text("历史证据，不可覆盖", encoding="utf-8")
+        # 回退 candidate 后再次 promote：应命中快照已存在而拒绝
+        self.assertEqual(self._run("revert-candidate", "--baseline-id", bid)[0], 0)
+        rc, out = self._run("promote", "--baseline-id", bid)
+        self.assertEqual(rc, 1)
+        self.assertIn("快照已存在", out)
+        self.assertEqual(snapshot.read_text(encoding="utf-8"), "历史证据，不可覆盖")
+
+    def test_promote_rewrites_evidence_scope(self):
+        # promote 透传 --evidence-scope：改写条目与 evidence 中的范围（如 no-code-change）
+        rp = self._make_receipt()
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        bid = br.load()["baselines"][0]["baseline_id"]
+        rc, _ = self._run("promote", "--baseline-id", bid,
+                          "--evidence-scope", "no-code-change")
+        self.assertEqual(rc, 0)
+        b = br.load()["baselines"][0]
+        self.assertEqual(b["evidence_scope"], "no-code-change")
+        self.assertEqual(b["evidence"]["evidence_scope"], "no-code-change")
+
     def test_revert_candidate_requires_promoted(self):
         # 仅 promoted 可 revert-candidate：直接对 candidate revert 必须拒绝
         rp = self._make_receipt()
-        self.assertEqual(self._run("add-candidate", "--receipt-path", rp)[0], 0)
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
         rc, out = self._run("revert-candidate", "--baseline-id", bid)
         self.assertEqual(rc, 1)

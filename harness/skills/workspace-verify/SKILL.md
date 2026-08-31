@@ -56,7 +56,7 @@ stages:
 ---
 ## 工作流（参考实现细节）
 0. 耗时打点（模式 A 可选）：打点文件由 apply 侧 start（batch_id 经
-   cdp_parse.batch_id_from_text 解析，文件 harness/log/cross-device-apply/
+   cdp_parse.batch_id_from_text 解析，文件 harness/log/cross-device/
    timings-<batch_id>.json）；文件存在则在阶段切换 mark（命令：
    python3 harness/skills/cross-device/lib/python/cdp_timing.py mark
    --name <阶段名>，缺省取最新打点文件；文件不存在/未 start 则跳过，warn 不阻断）。
@@ -112,7 +112,7 @@ stages:
    --summary "<一句话>" --result <pass|fail|skip> --build <pass|fail|skip> --board <pass|fail|skip> \
    --body <正文文件> --batch-file <cdp> --target $(git rev-parse --short=12 HEAD) \
    [--metrics "<性能三指标 JSON 对象>"] \
-   [--timings-file harness/log/cross-device-apply/timings-<batch_id>.json]
+   [--timings-file harness/log/cross-device/timings-<batch_id>.json]
    （--batch-file/--target 为模式 A 参数；--body 必传：CDP 原文 + 各阶段明细 +
    失败现场摘录，自动脱敏；--acceptance 必传步骤 5 的逐项结果——-sv 批次缺它
    ws_report 返 2 拒写收据，避免 promote 时 baseline 证据链有洞；

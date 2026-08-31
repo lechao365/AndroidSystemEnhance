@@ -25,6 +25,17 @@ def data_verify_results_dir() -> Path:
     return d
 
 
+def data_baselines_dir() -> Path:
+    """证据快照目录（会 mkdir）：data/baselines。
+
+    promote 阶段把 verify 收据副本固化为 <baseline_id>-<收据名>.md，
+    随登记 yaml 一并提交入库，作为晋升证据链的落盘快照。
+    """
+    d = project_root() / "data" / "baselines"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def data_known_issues_dir() -> Path:
     """已知问题登记目录（会 mkdir）；与收据同源，仅 apply 侧写。"""
     d = project_root() / "data" / "known-issues"
@@ -33,12 +44,12 @@ def data_known_issues_dir() -> Path:
 
 
 def log_apply_dir() -> Path:
-    """cross-device-apply 工作态目录（会 mkdir）：批次临时文件、链路耗时打点文件。
+    """cross-device 工作态目录（会 mkdir）：批次临时文件、链路耗时打点文件。
 
     gitignore 工作态（不入库）；打点文件 timings-<batch_id>.json 由 cdp_timing.py
     start 创建、finish 落盘，最终数据经 ws_report --timings-file 并入收据持久化。
     """
-    d = project_root() / "harness" / "log" / "cross-device-apply"
+    d = project_root() / "harness" / "log" / "cross-device"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

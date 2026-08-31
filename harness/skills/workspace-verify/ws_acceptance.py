@@ -136,7 +136,8 @@ def resolve_acceptance(args, cases_path=_CASES_PATH):
 
     返回 (acceptance, err)：err 非 None 时 acceptance 为 None（err 为错误消息）。
     --batch-file 经 cdp_parse.parse_batch 取批次验收文本（-s 批次验收为「无」则拒绝）；
-    --case 从 verify-cases.yaml cases 段取标签对应验收文本（值内可用引号）。
+    --case 从 verify-cases.yaml cases 段取标签对应验收文本（值内可用引号），
+    支持逗号分隔多用例（逐个查表拼接，任一缺失即拒）。
     """
     sources = [s for s in (args.acceptance, args.case, args.batch_file) if s]
     if len(sources) > 1:
@@ -158,11 +159,16 @@ def resolve_acceptance(args, cases_path=_CASES_PATH):
             cases = data.get("cases") or {}
         except (OSError, yaml.YAMLError) as e:
             return None, f"verify-cases.yaml 读取失败: {e}"
-        if args.case not in cases:
+        # --case 支持逗号分隔多用例：逐个查表拼接，任一缺失即整批拒绝（不部分拼接）
+        labels = [c.strip() for c in args.case.split(",") if c.strip()]
+        if not labels:
+            return None, "--case 标签为空（逗号分隔后无有效标签）"
+        missing = [c for c in labels if c not in cases]
+        if missing:
             opts = ", ".join(sorted(cases)) or "无"
-            return None, (f"用例标签 {args.case!r} 不存在于 verify-cases.yaml cases 段"
+            return None, (f"用例标签 {', '.join(missing)} 不存在于 verify-cases.yaml cases 段"
                           f"（可选: {opts}）")
-        return cases[args.case], None
+        return " ".join(cases[c] for c in labels), None
     return args.acceptance, None
 
 
@@ -262,6 +268,12 @@ def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False):
     tags = parse_acceptance(acceptance_text)
     if ensure_boot and "boot" not in tags:
         tags = tags + ["boot"]
+    if not tags:
+        # 空验收（空文本/未提取到任何标签）判红并附说明项：未判定不算成功，
+        # 防空验收静默返回 pass 的假绿（三态语义下无标签即无证据）
+        return "fail", [{"tag": "", "status": "fail",
+                         "detail": "验收为空：未提取到任何标签/判据，按 fail 处理"
+                                   "（防空验收假绿；-sv 批次须有非「无」验收）"}]
     for tag in tags:
         status, detail = execute_tag(tag, adb_exec, adb_logcat)
         items.append({"tag": tag, "status": status, "detail": detail})
@@ -280,7 +292,7 @@ def main(argv=None):
     p.add_argument("--acceptance", default=None, help="验收文本（含标签）")
     p.add_argument("--case", default=None,
                    help="验收用例标签（从 harness/config/verify-cases.yaml cases 段取，"
-                        "含空格/引号命令在此书写）")
+                        "支持逗号分隔多用例，含空格/引号命令在此书写）")
     p.add_argument("--batch-file", default=None,
                    help="CDP 批次文件（经 cdp_parse 解析取验收文本，-sv 批次用）")
     p.add_argument("--ensure-boot", action="store_true",

@@ -65,10 +65,30 @@ baselines:
   build_result: PASS
   package_result: PASS
   board_verify: PASS
+  evidence_scope: lcview-liveness
   evidence:
     build_result: PASS
     package_result: PASS
     board_verify: PASS
     sync_manifest: data/verify-results/20260830-203409-manual-2608302034.md
+    evidence_scope: lcview-liveness
   approved_by: lechao
   approved_at: '2026-08-30T20:56:56+08:00'
+- baseline_id: BL-20260831-01
+  status: promoted
+  source_branch: dev
+  source_commit: 0b927e29d571
+  sync_manifest: data/verify-results/20260831-172924-manual-2608311729.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lcview-liveness,lcview-transfer,lcview-pipeline,lcview-perf
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260831-172924-manual-2608311729.md
+    ki_gate: pass
+    evidence_scope: lcview-liveness,lcview-transfer,lcview-pipeline,lcview-perf
+  approved_by: lechao
+  approved_at: '2026-08-31T17:33:12+08:00'

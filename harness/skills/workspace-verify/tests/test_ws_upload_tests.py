@@ -5,6 +5,7 @@
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -115,7 +116,7 @@ class TestBinaryIsStale(unittest.TestCase):
         aosp_root, src_rel, binary = self._mk()
         src_file = aosp_root / src_rel / "b.cpp"
         src_file.write_text("new")
-        os.utime(src_file, (10**12, 10**12))  # mtime 晚于二进制
+        os.utime(src_file, (time.time() + 10, time.time() + 10))  # mtime 晚于二进制
         self.assertTrue(wu.binary_is_stale(str(binary), str(aosp_root), src_rel))
 
     def test_missing_src_dir_not_stale(self):
@@ -181,7 +182,7 @@ class TestRunOne(unittest.TestCase):
             p = out / "target" / "product" / "rpi5" / "data" / "nativetest64" / "t1" / "t1"
             p.parent.mkdir(parents=True)
             p.write_text("x")
-            os.utime(src_file, (10**12, 10**12))  # 源码比二进制新
+            os.utime(src_file, (time.time() + 10, time.time() + 10))  # 源码比二进制新
             ok, detail = wu.run_one("ep", str(out), "rpi5", "t1",
                                     aosp_root=str(aosp_root), src_rel="src")
         self.assertFalse(ok)

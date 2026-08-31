@@ -6,7 +6,7 @@
 解析失败），长期未被发现（2026-08-30 修复）。本脚本把检查固化，防止 skill 改动
 再次引入悬空引用。
 
-检查范围（harness/skills 全部 skill + .opencode/command）：
+检查范围（harness/skills 全部 skill + docs 设计文档 + .opencode/command）：
   1. markdown 链接 `[..](path)` —— 剥离 `#锚点` 后按文件相对目录/项目根解析
   2. 反引号内类路径 token（含 .md/.py/.sh/.yaml/.conf 等扩展名，或 harness/ 等前缀）
   3. `python3|bash <path>` 命令路径
@@ -113,28 +113,36 @@ def scan_command_files() -> list[tuple[Path, list[str]]]:
 
 
 def iter_scan_targets(rel: str | None) -> list[Path]:
-    """收集待检查文件；排除 __pycache__ / .pytest_cache / tests/ 目录。"""
-    base = ROOT / rel if rel else ROOT / "harness" / "skills"
-    if base.is_file():
-        return [base]
-    if not base.is_dir():
-        return []
+    """收集待检查文件；排除 __pycache__ / .pytest_cache / tests/ 目录。
+
+    默认（rel 为空）扫描 harness/skills 与 docs 两个根（skill 文档与设计
+    文档的引用同样须防悬空）；--path 指定时只扫描该文件/目录。
+    """
+    bases = [ROOT / rel] if rel else [ROOT / "harness" / "skills", ROOT / "docs"]
     targets: list[Path] = []
-    for f in sorted(base.rglob("*")):
-        if not f.is_file():
+    for base in bases:
+        if base.is_file():
+            targets.append(base)
             continue
-        if "__pycache__" in f.parts or ".pytest_cache" in f.parts or "tests" in f.parts:
+        if not base.is_dir():
             continue
-        if f.suffix not in (".md", ".py", ".sh", ".yaml", ".yml", ".conf"):
-            continue
-        targets.append(f)
+        for f in sorted(base.rglob("*")):
+            if not f.is_file():
+                continue
+            if "__pycache__" in f.parts or ".pytest_cache" in f.parts or "tests" in f.parts:
+                continue
+            if f.suffix not in (".md", ".py", ".sh", ".yaml", ".yml", ".conf"):
+                continue
+            targets.append(f)
     return targets
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="harness/skills 引用完整性检查")
+    parser = argparse.ArgumentParser(
+        description="harness/skills + docs 引用完整性检查")
     parser.add_argument("--path", default=None,
-                        help="仅检查指定相对路径（文件或目录），默认全量 harness/skills")
+                        help="仅检查指定相对路径（文件或目录），"
+                             "默认全量 harness/skills + docs")
     args = parser.parse_args()
 
     total = 0
@@ -156,7 +164,7 @@ def main() -> int:
     if total:
         print(f"\n==== 共 {total} 处悬空引用（exit 1）====")
         return 1
-    print("OK: harness/skills 引用完整，无悬空。")
+    print("OK: harness/skills + docs 引用完整，无悬空。")
     return 0
 
 

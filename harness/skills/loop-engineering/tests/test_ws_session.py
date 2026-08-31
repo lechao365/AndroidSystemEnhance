@@ -16,23 +16,31 @@ import ws_session
 
 class TestFingerprint(unittest.TestCase):
     def test_normalize_strips_volatile(self):
-        # 时间戳/绝对路径/十六进制地址/数字均归一化，语义稳定部分保留
+        # 时间戳/绝对路径/十六进制地址归一化；数字保留（_NUM_RE 已删，
+        # 数值是语义稳定部分——端口/行号/计数不同即不同问题，不过激打码）
         a = ws_session.normalize_error_line(
             "08-30 10:00:00.123 /home/u/ws/out err 0xdeadbeef size=42")
         b = ws_session.normalize_error_line(
-            "08-30 11:20:33.999 /home/u/ws/out err 0x1234abcd size=7")
+            "08-30 11:20:33.999 /home/u/ws/out err 0x1234abcd size=42")
         self.assertEqual(a, b)
+
+        # 数字不再归一化：同为"size=42"才等指纹，数值差异保留（过激归一化
+        # 会把不同问题折叠成同一指纹而误判"指纹冻结"）
+        c = ws_session.normalize_error_line(
+            "08-30 12:00:00.000 /home/u/ws/out err 0xbeef size=7")
+        self.assertNotEqual(a, c)
 
         # logcat 首错误行（MM-DD HH:MM:SS.mmm）：时间戳必须走 <TS> 路径归一化，
         # 而非仅靠数字打码，避免 _NUM_RE 削弱后时间戳方差破坏指纹稳定
         lc1 = ws_session.normalize_error_line(
             "08-30 10:20:15.123 LcView: heartbeat fail count=42")
         lc2 = ws_session.normalize_error_line(
-            "08-30 11:22:33.456 LcView: heartbeat fail count=7")
+            "08-30 11:22:33.456 LcView: heartbeat fail count=42")
         self.assertEqual(lc1, lc2)
         self.assertIn("<TS>", lc1)
         self.assertNotIn("10:20:15.123", lc1)
-        self.assertNotIn("42", lc1)
+        # 数字保留：count=42 原样留在指纹中（时间戳已打码，其余语义保留）
+        self.assertIn("count=42", lc1)
 
     def test_normalize_keeps_semantics(self):
         # 错误类别与稳定消息不同 -> 归一化结果不同

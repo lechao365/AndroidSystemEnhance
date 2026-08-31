@@ -645,6 +645,10 @@ class TestModeConserve(unittest.TestCase):
 
 class TestModePerf(unittest.TestCase):
     def _run(self, fake, totals, jsonls, monotonic=None, **kw):
+        if monotonic is None:
+            # 缺省 mock 递增值：粗粒度钟（Windows/mingw 等）下两次调用可能
+            # 同值 → dd_s=0 被 C4 守卫恒判红；递增值保证 dd_s>0 走正常流程
+            monotonic = [100.0, 100.5, 101.0, 101.5, 102.0, 102.5]
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(lc, "adb", fake):
                 with mock.patch.object(lc, "kernel_total",
@@ -652,11 +656,9 @@ class TestModePerf(unittest.TestCase):
                     with mock.patch.object(lc, "jsonl_line_count",
                                            side_effect=jsonls):
                         with mock.patch.object(lc.time, "sleep"):
-                            if monotonic:
-                                with mock.patch.object(lc.time, "monotonic",
-                                                       side_effect=monotonic):
-                                    return lc.mode_perf(tmp, _args(**kw))
-                            return lc.mode_perf(tmp, _args(**kw))
+                            with mock.patch.object(lc.time, "monotonic",
+                                                   side_effect=monotonic):
+                                return lc.mode_perf(tmp, _args(**kw))
 
     def test_perf_full_pipeline_ok(self):
         # dd 前直读内核 total=100/jsonl=90；dd 后直读 total=1321/jsonl=1311
@@ -674,6 +676,8 @@ class TestModePerf(unittest.TestCase):
         self.assertTrue(any(c[1].startswith("cat /proc/") for c in fake.calls))
 
     def test_perf_metrics_json_emitted(self):
+        # 走 TestModePerf._run（缺省 mock monotonic 递增值，与 C4 守卫同源）；
+        # 上批漏转的独立实现仍无 monotonic mock，粗粒度钟下 dd_s=0 恒判红
         fake = FakeAdb(dd_rc=0,
                        pidof_out="1234\n", pidof_rc=0,
                        proc_out="VmHWM:\t    5516 kB\n", proc_rc=0)
@@ -685,8 +689,11 @@ class TestModePerf(unittest.TestCase):
                     with mock.patch.object(lc, "jsonl_line_count",
                                            side_effect=[90, 1311, 1311]):
                         with mock.patch.object(lc.time, "sleep"):
-                            with contextlib.redirect_stdout(out):
-                                rc = lc.mode_perf(tmp, _args())
+                            with mock.patch.object(lc.time, "monotonic",
+                                                   side_effect=[100.0, 103.7,
+                                                                103.7, 104.1]):
+                                with contextlib.redirect_stdout(out):
+                                    rc = lc.mode_perf(tmp, _args())
         self.assertEqual(rc, 0)
         line = [ln for ln in out.getvalue().splitlines()
                 if ln.startswith("METRICS ")]
@@ -715,6 +722,24 @@ class TestModePerf(unittest.TestCase):
         fake = FakeAdb(dd_rc=1)
         rc = self._run(fake, totals=[100], jsonls=[90])
         self.assertEqual(rc, 1)
+
+    def test_perf_dd_s_zero_fails(self):
+        # dd_s<=0（负载未执行或计时异常）→ 判红并提示，不得出 throughput=inf 假基线
+        fake = FakeAdb(dd_rc=0)
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(lc, "adb", fake):
+                with mock.patch.object(lc, "kernel_total",
+                                       side_effect=[100]):
+                    with mock.patch.object(lc, "jsonl_line_count",
+                                           side_effect=[90]):
+                        with mock.patch.object(lc.time, "sleep"):
+                            with mock.patch.object(lc.time, "monotonic",
+                                                   side_effect=[100.0, 100.0]):
+                                with contextlib.redirect_stdout(out):
+                                    rc = lc.mode_perf(tmp, _args())
+        self.assertEqual(rc, 1)
+        self.assertIn("负载未执行", out.getvalue())
 
     def test_perf_kernel_lag_waits_for_update(self):
         # dd 后首轮直读仍为 dd 前旧值（内核计数尚未反映）→ 不得把 0>=0

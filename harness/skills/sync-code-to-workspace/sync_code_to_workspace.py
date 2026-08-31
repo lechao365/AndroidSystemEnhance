@@ -58,7 +58,7 @@ def _aosp_ws() -> str:
 @lru_cache(maxsize=None)
 def _artifacts_dir() -> Path:
     """同步脚本 artifacts 目录: harness/log/<script>/artifacts/。"""
-    d = core_log_dir() / "sync_code_to_workspace" / "artifacts"
+    d = core_log_dir() / "sync-code-to-workspace" / "artifacts"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -101,7 +101,7 @@ def _git_run(args: list[str], cwd: str | Path, timeout: int = 300) -> subprocess
     """
     cmd = ["git"] + args
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, cwd=str(cwd), timeout=timeout)
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(cwd), timeout=timeout)
     except subprocess.TimeoutExpired:
         log_error(f"git {' '.join(args)} 超时({timeout}s)")
         return subprocess.CompletedProcess(cmd, returncode=-1, stdout="", stderr=f"超时({timeout}s)")

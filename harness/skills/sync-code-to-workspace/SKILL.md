@@ -54,8 +54,8 @@ stages:
 ## Outputs / artifacts（输出/产物）
 
 - 同步后的 workspace working tree（不自动 commit）
-- plan 文件：默认写入 `harness/log/sync_code_to_workspace/artifacts/`（`--plan-file` 可指定持久路径）
-- 校验文件：默认写入 `harness/log/sync_code_to_workspace/artifacts/`（apply 后强制全量扫描）
+- plan 文件：默认写入 `harness/log/sync-code-to-workspace/artifacts/`（`--plan-file` 可指定持久路径）
+- 校验文件：默认写入 `harness/log/sync-code-to-workspace/artifacts/`（apply 后强制全量扫描）
 - 逐条执行结果（`[CHECKOUT]` / `[RESTORE]` / `[SYNC]` 动作打印 + 退出码）
 - 日志输出到 stderr
 
@@ -108,7 +108,7 @@ python3 harness/skills/sync-code-to-workspace/sync_code_to_workspace.py --plan-f
 python3 harness/skills/sync-code-to-workspace/sync_code_to_workspace.py --check-only  # 仅预览，不生成 plan
 ```
 
-plan 默认写入 `harness/log/sync_code_to_workspace/artifacts/`（`--plan-file` 可指定持久路径）。
+plan 默认写入 `harness/log/sync-code-to-workspace/artifacts/`（`--plan-file` 可指定持久路径）。
 
 脚本扫描 workspace 与 code 差异，输出五类分类：
 
@@ -149,7 +149,7 @@ python3 harness/skills/sync-code-to-workspace/sync_code_to_workspace.py --apply 
 
 （校验矩阵见上方 Outputs / artifacts）
 
-落盘文件：默认写入 `harness/log/sync_code_to_workspace/artifacts/`
+落盘文件：默认写入 `harness/log/sync-code-to-workspace/artifacts/`
 
 ### 5. 执行结果报告
 

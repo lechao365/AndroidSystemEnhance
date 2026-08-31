@@ -91,7 +91,7 @@ class TestGitWorksPush(unittest.TestCase):
     def _run(self, *args, mock_git=MOCK_GIT_OK):
         env = self._env_with_mock_git(mock_git)
         return subprocess.run(["bash", str(SCRIPT), *args],
-                              capture_output=True, text=True, env=env)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
 
     def test_remote_sha_empty_exits_2(self):
         # ls-remote 空输出（exit 0）→ 空值判定触发，不落到「疑似推送未生效」误导文案

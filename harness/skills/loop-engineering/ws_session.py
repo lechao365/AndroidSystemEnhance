@@ -35,7 +35,10 @@ from cdp_receipt import read_receipt  # noqa: E402
 # 会话老化配额（spec §4.7）：目录级，仅删已终结会话
 _SESSION_KEEP = 20
 
-# 归一化规则：剥时间戳（三种格式）/ 家目录与 workspace 路径 / 十六进制地址 / 数字
+# 归一化规则：剥时间戳（三种格式）/ 家目录与 workspace 路径 / 十六进制地址。
+# 数字不再归一化（_NUM_RE 已删）：错误行中的数值（端口/行号/计数）是语义稳定
+# 部分，剥掉会把不同问题折叠成同一指纹（过激归一化），保留 TS/HOME/HEX 三类
+# 纯易变字段即可满足误判防护（spec §4.3）。
 # 三种格式：ISO 日期时间（YYYY-MM-DD[ T]HH:MM:SS(.ms)）、MM/DD HH:MM:SS、logcat MM-DD HH:MM:SS.mmm
 _TS_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?"
@@ -44,11 +47,10 @@ _TS_RE = re.compile(
 )
 _HOME_RE = re.compile(r"/home/[A-Za-z0-9_.-]+")
 _HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
-_NUM_RE = re.compile(r"\d+")
 
 
 def normalize_error_line(text):
-    """首错误行归一化：剥易变字段（时间戳/路径/地址/数字），保留语义稳定部分。
+    """首错误行归一化：剥易变字段（时间戳/路径/地址），保留语义稳定部分。
 
     误判防护（spec §4.3）：同一问题但错误行含时间戳/地址微变时，
     不得被误判为指纹演化而无限清零 patience。
@@ -57,7 +59,6 @@ def normalize_error_line(text):
     t = _TS_RE.sub("<TS>", t)
     t = _HOME_RE.sub("~", t)
     t = _HEX_RE.sub("<HEX>", t)
-    t = _NUM_RE.sub("<NUM>", t)
     return t[:200]
 
 
@@ -395,11 +396,15 @@ def _resolve_acceptance_for_run(session):
         except (OSError, yaml.YAMLError) as exc:
             raise RuntimeError(f"verify-cases.yaml 读取失败: {exc}") from exc
         cases = data.get("cases") or {}
-        if session["case"] not in cases:
+        # 与 ws_acceptance.py resolve_acceptance 对齐：--case 支持逗号分隔
+        # 多用例，逐个查表拼接，任一缺失即拒（不部分拼接）
+        labels = [c.strip() for c in session["case"].split(",") if c.strip()]
+        missing = [c for c in labels if c not in cases]
+        if missing:
             raise RuntimeError(
-                f"用例标签 {session['case']!r} 不存在于 verify-cases.yaml"
+                f"用例标签 {', '.join(missing)} 不存在于 verify-cases.yaml"
                 f"（可选: {', '.join(sorted(cases)) or '无'}）")
-        return "--case", session["case"], cases[session["case"]], ""
+        return "--case", session["case"], " ".join(cases[c] for c in labels), ""
     raise RuntimeError("会话缺验收源（模式 A 须 --batch-file；模式 B 须 --case）")
 
 

@@ -44,6 +44,11 @@ def precheck(root=None, do_pull=True):
     # 时无法判定，保持放行兼容。
     latest = read_latest_receipt(root / "data" / "verify-results")
     if latest and latest.verified_commit:
+        # 先判可达性：verified_commit 本地不可达（gc 裁剪/浅克隆等）时
+        # merge-base 返非 0 会造成"未推送"假拒批，放行并记录无法判定原因
+        cat = _git(root, "cat-file", "-e", latest.verified_commit)
+        if cat.returncode != 0:
+            return True, "verified_commit 不可达无法判定", latest.batch_id
         r = _git(root, "merge-base", "--is-ancestor",
                  latest.verified_commit, "origin/dev")
         origin_head12 = _git(root, "rev-parse", "--short=12",

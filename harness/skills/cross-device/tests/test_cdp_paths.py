@@ -33,7 +33,7 @@ class TestCdpPaths(unittest.TestCase):
     def test_log_apply_dir_env_override(self):
         self.assertEqual(str(cdp_paths.log_apply_dir()),
                          os.path.join(self._tmp.name, "harness", "log",
-                                      "cross-device-apply"))
+                                      "cross-device"))
 
     def test_log_apply_dir_mkdir(self):
         d = cdp_paths.log_apply_dir()
