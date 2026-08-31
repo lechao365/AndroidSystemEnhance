@@ -53,11 +53,27 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         (self.root / "b.txt").write_text("2\n", encoding="utf-8")
         self._git("add", "-A")
         self._git("commit", "-m", "修复(test): 内容提交二")
+        self.head_vc = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
         self._write_receipt(self.parent_vc)
 
     def tearDown(self):
         os.environ.pop("CDP_PROJECT_ROOT")
         self._tmp.cleanup()
+        if getattr(self, "_remote_tmp", None):
+            self._remote_tmp.cleanup()
+
+    def _setup_remote(self):
+        """bare 远端 fixture：bare 仓放仓库树外（push 写 objects/refs 会弄脏树内
+        工作区），origin=origin.git（main=c1，dev=c2），供 fetch/push e2e。"""
+        if not getattr(self, "_remote_tmp", None):
+            self._remote_tmp = tempfile.TemporaryDirectory()
+        bare = Path(self._remote_tmp.name) / "origin.git"
+        self._git("init", "--bare", str(bare))
+        self._git("remote", "add", "origin", str(bare))
+        self._git("branch", "main", self.parent_vc)
+        self._git("push", "origin", "main")
+        self._git("push", "origin", "dev")
+        return bare
 
     def _git(self, *args, check=True):
         r = subprocess.run(["git", "-C", str(self.root), *args],
@@ -67,14 +83,14 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         return r
 
     def _write_receipt(self, verified_commit, build="pass", push_board="pass",
-                       batch_id="000000000001"):
+                       batch_id="000000000001", result="pass", verify_mode="board"):
         d = self.root / "data" / "verify-results"
         d.mkdir(parents=True, exist_ok=True)
         p = d / f"20260831-100000-{batch_id}.md"
         p.write_text(
             f"- schema_version: 1\n- batch_id: {batch_id}\n"
             f"- batch_base: edd5748dc3c6\n- verified_commit: {verified_commit}\n"
-            f"- verify_mode: board\n- result: pass\n- build: {build}\n"
+            f"- verify_mode: {verify_mode}\n- result: {result}\n- build: {build}\n"
             f"- push_board: {push_board}\n- acceptance: t\n- elapsed_s: 1\n"
             f"- summary: fixture\n- metrics: \n- timings: \n"
             f"\n## body\n\nfixture\n", encoding="utf-8")
@@ -212,6 +228,80 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         b = self._registered_evidence()
         self.assertEqual(b["build_result"], "SKIP")
         self.assertEqual(b["board_verify"], "SKIP")
+
+    # ── 方向 5：promote 收紧与 ki_gate 证据链（bare 远端 e2e）────────────
+    def _receipt_commit_c3(self, batch_id="000000000002", **kw):
+        # 收据入库为 c3（内容提交，父=c2==VC），保证 promote/prepare 工作树干净
+        self._write_receipt(self.head_vc, batch_id=batch_id, **kw)
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): 收据入库三")
+        self._git("push", "origin", "dev")
+
+    def _candidate_yaml(self):
+        (self.root / "harness" / "config" / "baseline-status.yaml").write_text(
+            "baselines:\n"
+            f"  - baseline_id: BL-TEST-01\n"
+            f"    status: candidate\n"
+            f"    source_commit: {self.head_vc}\n"
+            f"    sync_manifest: data/verify-results/20260831-100000-000000000002.md\n"
+            f"    build_result: PASS\n"
+            f"    package_result: PASS\n"
+            f"    board_verify: SKIP\n"
+            f"    evidence:\n"
+            f"      ki_gate: pass\n",
+            encoding="utf-8")
+
+    def _promote(self, *extra):
+        # message 文件放仓库树外，避免弄脏工作树（promote 前置要求树净）
+        msg = Path(self._remote_tmp.name) / "promote-msg.txt"
+        msg.write_text("构建(baseline): BL-TEST-01 基线晋升\n", encoding="utf-8")
+        return self._run("--promote", "--baseline-id", "BL-TEST-01",
+                         "--message-file", str(msg), "--task", "t1", *extra)
+
+    def test_promote_rejects_non_board_receipt(self):
+        # 方向 2 board 拒：result=pass 但 verify_mode=skip 且 dev 有 code/ 改动 → RECEIPT_FAIL
+        self._setup_remote()
+        (self.root / "code").mkdir()
+        (self.root / "code" / "foo.txt").write_text("x\n", encoding="utf-8")
+        self._receipt_commit_c3(verify_mode="skip")
+        r = self._promote()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("check_class=RECEIPT_FAIL", r.stderr)
+        self.assertIn("verify_mode=board", r.stderr)
+
+    def test_promote_passes_zero_code_change(self):
+        # 方向 2 零改动豁免：verify_mode=skip 但无 code/ 改动 → warn 豁免 + e2e promote 完成
+        self._setup_remote()
+        self._candidate_yaml()
+        self._receipt_commit_c3(verify_mode="skip")
+        r = self._promote()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("无 code/ 改动，豁免放行", r.stdout)
+        self.assertIn("promote 完成", r.stdout)
+
+    def test_prepare_without_task_records_ki_gate_not_run(self):
+        # 方向 3/4：prepare 未传 --task → warn + KIGATE=not-run 写入 evidence
+        self._setup_remote()
+        self._receipt_commit_c3()
+        r = self._run("--prepare")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("KIGATE=not-run", r.stderr)
+        data = yaml.safe_load(
+            (self.root / "harness" / "config" / "baseline-status.yaml").read_text(
+                encoding="utf-8"))
+        self.assertEqual(data["baselines"][0]["evidence"]["ki_gate"], "not-run")
+
+    def test_prepare_with_task_records_ki_gate_pass(self):
+        # 方向 3/4：--task 门禁通过（空登记合法）→ KIGATE=pass 写入 evidence
+        self._setup_remote()
+        self._receipt_commit_c3()
+        r = self._run("--prepare", "--task", "t1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("KIGATE=not-run", r.stderr)
+        data = yaml.safe_load(
+            (self.root / "harness" / "config" / "baseline-status.yaml").read_text(
+                encoding="utf-8"))
+        self.assertEqual(data["baselines"][0]["evidence"]["ki_gate"], "pass")
 
 
 if __name__ == "__main__":

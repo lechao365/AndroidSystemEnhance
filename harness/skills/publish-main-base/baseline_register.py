@@ -60,6 +60,7 @@ def main(argv=None):
     ap.add_argument("--receipt-path")
     ap.add_argument("--approved-by")
     ap.add_argument("--task")
+    ap.add_argument("--ki-gate", help="known-issues 门禁结论 pass/not-run，写入 evidence")
     args = ap.parse_args(argv)
 
     # check-issues：known-issues 门禁（publish_main_base.sh 委托；不读写登记 yaml）
@@ -111,6 +112,8 @@ def main(argv=None):
         # 空值（""/None/纯空白）记 FAIL 不记 SKIP——空值不是合法 skip 证据，证据链从严
         build_result = ((r.build or "").strip() or "FAIL").upper()
         board_verify = ((r.push_board or "").strip() or "FAIL").upper()
+        # ki_gate：known-issues 门禁结论（拒批已在脚本层 exit，缺参视为 not-run）
+        ki_gate = (args.ki_gate or "").strip() or "not-run"
         # 去重复用：同 source_commit 且仍为 candidate 的记录不新增（防重复 prepare 冗余登记；
         # 收据路径不同则对齐最新证据，保持 promote 证据链一致）
         for b in baselines:
@@ -126,6 +129,7 @@ def main(argv=None):
                         "package_result": build_result,
                         "board_verify": board_verify,
                         "sync_manifest": args.receipt_path,
+                        "ki_gate": ki_gate,
                     }
                     save(data)
                     print(f"candidate 复用并更新收据: {b['baseline_id']}（source_commit={args.source_commit}）")
@@ -147,6 +151,7 @@ def main(argv=None):
                 "package_result": build_result,
                 "board_verify": board_verify,
                 "sync_manifest": args.receipt_path,
+                "ki_gate": ki_gate,
             },
         })
         save(data)

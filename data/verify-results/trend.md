@@ -1,4 +1,3 @@
-2026-08-26 10:27:22 6fd3048d34d2 skip build=skip board=skip acc=- logcat 收窄时间窗，log 判据可辨，CLI 不裸崩（-s 无需上板）
 2026-08-26 10:38:12 8edfea81314c skip build=skip board=skip acc=- 冒烟证据不留空洞，假绿条件强制拦截，缩进清尾（-s 无需上板）
 2026-08-26 10:52:03 17a6a4c9696c skip build=skip board=skip acc=- data/ci 真正出库，返 2 路径有归宿，命令块可拷贝（-s 无需上板）
 2026-08-26 14:30:53 1a34402f22c1 skip build=skip board=skip acc=- 建用例资产层（-s 无需上板）
@@ -48,3 +47,4 @@
 2026-08-30 20:34:09 manual-2608302034 pass build=pass board=pass acc=[{"tag":"svc:lechao_lcview","status":"pa publish-main-base 基线发布验证：lcview 去 HAL 迁移
 2026-08-31 10:31:08 f43558ffa5c7 skip build=skip board=skip acc=- known-issues 未闭环不老化并修 precheck 假拒（-s 无需上
 2026-08-31 10:50:54 3b2019456966 skip build=skip board=skip acc=- 门禁下移到 Python 并堵畸形登记（-s 无需上板）
+2026-08-31 11:32:30 80634fbba714 skip build=skip board=skip acc=- promote 收紧为 pass 且 board 并记 ki_gate（-s 无
