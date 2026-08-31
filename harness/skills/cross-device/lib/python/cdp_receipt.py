@@ -6,9 +6,12 @@
 """
 import datetime
 import re
+import sys
 from pathlib import Path
 
-from cdp_paths import data_verify_results_dir
+import yaml
+
+from cdp_paths import data_verify_results_dir, project_root
 
 _DETAIL_KEEP = 20
 _TREND_KEEP = 50
@@ -152,9 +155,50 @@ def read_trend_last(verify_dir=None):
     return lines[-1] if lines else ""
 
 
+def _referred_receipt_names(verify_dir: Path):
+    """baseline-status.yaml 引用的收据文件名集合（sync_manifest 指向
+    data/verify-results/ 的文件名），老化删除时受保护。
+
+    防断链：promote 门禁依赖 sync_manifest 指向的收据做证据链比对，
+    被引用文件一旦被 prune 删除即断链（BL-20260828-01 已实际丢失）。
+    yaml 缺失/非法时 warn 并返回 None（调用方保守不删任何文件——保护优先）。
+    """
+    cfg = project_root() / "harness" / "config" / "baseline-status.yaml"
+    if not cfg.is_file():
+        return set()
+    try:
+        data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as e:
+        print(f"WARN: baseline-status.yaml 读取失败，跳过老化保护判定: {e}",
+              file=sys.stderr)
+        return None
+    names = set()
+    for b in data.get("baselines") or []:
+        if not isinstance(b, dict):
+            continue
+        ref = (b.get("sync_manifest") or "").strip()
+        if ref:
+            names.add(Path(ref).name)
+    return names
+
+
 def prune_details(verify_dir=None):
-    """详情老化保留 _DETAIL_KEEP 份（trend.md 不计入配额）。"""
+    """详情老化保留 _DETAIL_KEEP 份（trend.md 不计入配额）。
+
+    被 baseline-status.yaml 引用的收据跳过删除（证据链保护）：已被 promote
+    引用或即将引用的收据是基线证据，不得因配额被老化删除。
+    """
     d = verify_dir or data_verify_results_dir()
     files = _detail_files(d)
+    referred = _referred_receipt_names(d)
+    if referred is None:
+        return  # 引用解析失败（yaml 不可读）：保守不删任何文件
+    keep = 0
     for old in files[: max(0, len(files) - _DETAIL_KEEP)]:
+        if old.name in referred:
+            keep += 1
+            continue
         old.unlink()
+    if keep:
+        print(f"info: {keep} 份被 baseline-status.yaml 引用的收据跳过老化（证据链保护）",
+              file=sys.stderr)

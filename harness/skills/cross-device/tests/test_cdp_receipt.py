@@ -1,3 +1,5 @@
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -110,6 +112,67 @@ class TestReceipt(unittest.TestCase):
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         self.assertEqual(len(details), 20)
         self.assertTrue((self._dir / "trend.md").exists())
+
+    def _write_baseline_status(self, refs):
+        """在 CDP_PROJECT_ROOT 下写 baseline-status.yaml（引用指定收据名列表）。"""
+        cfg = Path(self._tmp.name) / "harness" / "config"
+        cfg.mkdir(parents=True, exist_ok=True)
+        lines = ["baselines:"]
+        for i, name in enumerate(refs):
+            lines.append(f"- baseline_id: BL-TEST-{i:02d}")
+            lines.append("  status: promoted")
+            lines.append(f"  sync_manifest: data/verify-results/{name}")
+        (cfg / "baseline-status.yaml").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_prune_keeps_referred_receipt(self):
+        # 被 baseline-status.yaml 引用的收据不得被老化删除（证据链保护）：
+        # 先写 20 份满配额，再写 4 份触发老化，被引用最旧份须保留
+        for i in range(20):
+            cdp_receipt.write_receipt(_mk_receipt(f"batch{i:012d}"), f"body{i}")
+        files = sorted(f.name for f in self._dir.glob("*.md")
+                       if f.name != "trend.md")
+        self.assertEqual(len(files), 20)
+        referred = files[0]  # 最旧一份将被新写入挤出配额
+        self._write_baseline_status([referred])
+        for i in range(20, 24):
+            cdp_receipt.write_receipt(_mk_receipt(f"batch{i:012d}"), f"body{i}")
+        details = [f.name for f in self._dir.glob("*.md")
+                   if f.name != "trend.md"]
+        self.assertIn(referred, details,
+                      "被引用收据必须保留（证据链保护）")
+        self.assertEqual(len(details), 21)  # 20 配额 + 1 受保护
+
+    def test_prune_without_yaml_ages_normally(self):
+        # 无 baseline-status.yaml：无引用，正常老化到 20 份
+        for i in range(25):
+            cdp_receipt.write_receipt(_mk_receipt(f"batch{i:012d}"), f"body{i}")
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        self.assertEqual(len(details), 20)
+
+    def test_prune_yaml_unreadable_conservative(self):
+        # baseline-status.yaml 非法（无法解析引用）→ 保守不删任何文件
+        cfg = Path(self._tmp.name) / "harness" / "config"
+        cfg.mkdir(parents=True, exist_ok=True)
+        (cfg / "baseline-status.yaml").write_text(
+            "baselines: [unclosed\n", encoding="utf-8")
+        for i in range(21):
+            cdp_receipt.write_receipt(_mk_receipt(f"batch{i:012d}"), f"body{i}")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cdp_receipt.prune_details(self._dir)
+        self.assertIn("跳过老化保护判定", err.getvalue())
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        self.assertEqual(len(details), 21, "yaml 不可读时须保守保留全部")
+
+    def test_prune_broken_reference_ignored(self):
+        # 断链引用（sync_manifest 指向已丢失收据）不影响老化：目标文件已
+        # 不存在，仅保护仍存在的引用收据
+        for i in range(25):
+            cdp_receipt.write_receipt(_mk_receipt(f"batch{i:012d}"), f"body{i}")
+        self._write_baseline_status(["lost-20260828-lost00000000.md"])
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        self.assertEqual(len(details), 20, "断链引用不产生保护对象，正常老化")
 
     def test_same_second_same_batch_id_no_overwrite(self):
         """同秒同 batch_id 写入两份：不覆盖，latest 取最新写入（失败现场不丢）。"""

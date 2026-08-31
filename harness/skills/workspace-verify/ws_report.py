@@ -36,6 +36,35 @@ from paths import env_path  # noqa: E402
 _HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
+def _validate_acceptance_pass(acceptance):
+    """result=pass 时验收证据门禁：解析 acceptance JSON，overall 须为 pass 且
+    无 fail 项，否则拒写（堵手填假绿混过 promote——仅查有无不看内容是洞）。
+
+    兼容两种结构（ws_acceptance.run 输出 {"overall","items"} 与历史数组格式
+    [{...}]）：overall 缺失的数组格式按「存在 fail 项」判定。
+    返回 (parsed, err)：err 非 None 时拒写（parsed 为 None）。
+    """
+    if not acceptance.strip():
+        return None, "result=pass 必须传 --acceptance（逐项验收 JSON）"
+    try:
+        data = json.loads(acceptance)
+    except (ValueError, json.JSONDecodeError) as e:
+        return None, f"--acceptance 须为合法 JSON（解析失败: {e}）"
+    if isinstance(data, dict):
+        if data.get("overall") != "pass":
+            return None, (f"acceptance overall 非 pass（实际 {data.get('overall')!r}），"
+                          "拒绝写 pass 收据")
+        items = data.get("items") or []
+    elif isinstance(data, list):
+        items = data
+    else:
+        return None, "--acceptance 须为 JSON 对象或数组"
+    for it in items:
+        if isinstance(it, dict) and it.get("status") == "fail":
+            return None, "acceptance 含 fail 项（假绿），拒绝写 pass 收据"
+    return data, None
+
+
 def _resolve_target(target: str):
     """把 --target 解析为 12hex commit，返回 (resolved, err)。
 
@@ -186,6 +215,17 @@ def main(argv=None):
         if terr:
             print(f"error: {terr}", file=sys.stderr)
             return 2
+
+    # 验收证据门禁：result=pass 必须带逐项验收 JSON 且整体通过，否则拒写
+    # （堵手填假绿混过 promote）；通过后单行化落盘——header 逐行 key-value，
+    # 多行 JSON 会被 from_text 只读首行截断，单行化保证 apply_done 能读全
+    if args.result == "pass":
+        parsed, acc_err = _validate_acceptance_pass(args.acceptance)
+        if acc_err:
+            print(f"error: {acc_err}", file=sys.stderr)
+            return 2
+        args.acceptance = json.dumps(parsed, ensure_ascii=False,
+                                     separators=(",", ":"))
 
     # 自检证据（-s 批次必带，堵零验证通道）：对照 -sv 缺 --acceptance 返 2 的既有约束，
     # result=skip 而 selfcheck 为空即拒写。自检门禁以退出码为主判据（方向 1-5）：

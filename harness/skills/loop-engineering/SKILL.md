@@ -71,7 +71,7 @@ stages:
    收据 timings 可看出每轮各阶段耗时；未 start 则跳过，warn 不阻断）
 3. 收据落盘后记账：
    python3 harness/skills/loop-engineering/ws_session.py done --session <json>
-     --receipt <收据路径> [--stage sync|build|push|acceptance]
+     --receipt <收据路径> [--stage sync|build|unit_test|push|acceptance]
      [--error-line "<首错误行>"] [--attribution env_fail|framework_error]
    （AI 职责：砖机三分法证据齐全时显式 env_fail；harness 脚本 traceback 时
    显式 framework_error 并停环；每轮把修复动作摘要写进 session.json 的

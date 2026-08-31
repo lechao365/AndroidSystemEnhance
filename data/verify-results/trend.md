@@ -1,4 +1,3 @@
-2026-08-27 11:42:41 89e54e60548f skip build=skip board=skip acc=- rescue 编排落地,串口成第三级救援通道（-s 无需上板）
 2026-08-27 14:26:32 7e4c72374085 skip build=skip board=skip acc=- 回收 rescue 6 处缺陷,消错分与句柄泄漏（-s 无需上板）
 2026-08-27 14:52:35 8e173bc0801d skip build=skip board=skip acc=- 接线 rescue 消死代码,消文档矛盾与端点重复推导（-s 无需上板）
 2026-08-27 15:07:36 d9eedee45eda skip build=skip board=skip acc=- 修 lcview-trigger 截断 P0 与残余静默丢弃（-s 无需上板）
@@ -48,3 +47,4 @@
 2026-08-31 20:04:57 eca792c3c91a skip build=skip board=skip acc=- 自检门禁改按退出码判定,补两处漏判（-s 无需上板）
 2026-08-31 20:21:41 073d27101524 skip build=skip board=skip acc=- 自检生产侧改可执行脚本,修 rc 恒零（-s 无需上板）
 2026-08-31 20:32:10 a1a3a1879cd8 skip build=skip board=skip acc=- 计数行只认 stdout,修兜底伪造计数复发（-s 无需上板）
+2026-08-31 21:40:10 264b4faab6a6 skip build=skip board=skip acc=- 堵验收假绿并保住基线证据不被老化删（-s 无需上板）

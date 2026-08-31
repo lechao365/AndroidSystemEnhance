@@ -291,6 +291,57 @@ class TestDoneLogic(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             ws_session.apply_done(self._s, "/nonexistent/receipt.md")
 
+    def test_done_pass_acceptance_overall_fail_rejected(self):
+        # 收据 result=pass 但 acceptance overall=fail → 拒记账（防手填假绿
+        # 推进会话/终态 pass）
+        rp = self._receipt("pass", acceptance=(
+            '{"overall":"fail","items":[{"tag":"svc:x","status":"fail",'
+            '"detail":"stopped"}]}'))
+        with self.assertRaises(RuntimeError) as cm:
+            ws_session.apply_done(self._s, rp, stage="acceptance")
+        self.assertIn("验收未通过", str(cm.exception))
+        self.assertIn("overall 非 pass", str(cm.exception))
+        self.assertIsNone(self._s["exit_attribution"])
+        self.assertEqual(self._s["total_attempts"], 0)
+
+    def test_done_pass_acceptance_non_json_rejected(self):
+        # result=pass 而 acceptance 非 JSON（如手填 "ok"）→ 拒记账
+        rp = self._receipt("pass", acceptance="手填 ok")
+        with self.assertRaises(RuntimeError) as cm:
+            ws_session.apply_done(self._s, rp, stage="acceptance")
+        self.assertIn("非合法 JSON", str(cm.exception))
+
+    def test_done_pass_acceptance_fail_item_rejected(self):
+        # overall=pass 但 items 含 fail 项（自相矛盾）→ 拒记账
+        rp = self._receipt("pass", acceptance=(
+            '{"overall":"pass","items":[{"status":"fail","detail":"x"}]}'))
+        with self.assertRaises(RuntimeError) as cm:
+            ws_session.apply_done(self._s, rp, stage="acceptance")
+        self.assertIn("含 fail 项", str(cm.exception))
+
+    def test_done_pass_acceptance_empty_rejected(self):
+        # result=pass 而 acceptance 为空（纯空白）→ 拒记账
+        rp = self._receipt("pass", acceptance="   ")
+        with self.assertRaises(RuntimeError) as cm:
+            ws_session.apply_done(self._s, rp, stage="acceptance")
+        self.assertIn("acceptance 为空", str(cm.exception))
+
+    def test_done_pass_acceptance_array_format_ok(self):
+        # 历史数组格式（无 overall）全 pass → 兼容放行（有逐项证据即真绿）
+        rp = self._receipt("pass", acceptance=(
+            '[{"tag":"svc:x","status":"pass","detail":"running"}]'))
+        s, guidance = ws_session.apply_done(self._s, rp, stage="acceptance")
+        self.assertEqual(s["exit_attribution"], "pass")
+        self.assertIn("终结", guidance)
+
+    def test_done_pass_acceptance_array_with_fail_rejected(self):
+        # 数组格式含 fail 项 → 拒记账
+        rp = self._receipt("pass", acceptance=(
+            '[{"tag":"svc:x","status":"fail","detail":"stopped"}]'))
+        with self.assertRaises(RuntimeError) as cm:
+            ws_session.apply_done(self._s, rp, stage="acceptance")
+        self.assertIn("含 fail 项", str(cm.exception))
+
     def test_extract_first_fail(self):
         line = ws_session.extract_first_fail_line(
             '{"items":[{"status":"fail","detail":"first bad"},'
@@ -487,6 +538,8 @@ class TestRunStatus(unittest.TestCase):
     def test_run_guidance_mode_a(self):
         s = ws_session.create_session(goal="g", batch_file=self._batch_file())
         text = ws_session.run_guidance(s)
+        self.assertIn("ws_upload_tests.py", text)       # 上板真跑 C++ 单测步骤
+        self.assertIn("unit_test", text)                # done --stage 含 unit_test
         self.assertIn("ws_acceptance.py run --batch-file", text)
         self.assertIn("svc:lechao_lcview boot", text)   # 批次验收已解析
         self.assertIn("--target 1a2b3c4d5e6f", text)    # 模式 A --target 取批次 base
@@ -657,7 +710,9 @@ class TestCli(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(ws_session.main(["run", "--session", sj]), 0)
         rp = write_receipt(Receipt(batch_id="cb", result="pass", build="pass",
-                                   push_board="pass", summary="ok"),
+                                   push_board="pass",
+                                   acceptance='{"overall":"pass","items":[]}',
+                                   summary="ok"),
                            "pass body")
         with redirect_stdout(io.StringIO()):
             self.assertEqual(

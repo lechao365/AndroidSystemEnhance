@@ -47,6 +47,8 @@ baselines:
   source_branch: dev
   source_commit: 526b5623b274
   sync_manifest: data/verify-results/20260828-111825-fdc2e9820a41.md
+  evidence_broken: true
+  evidence_note: 'sync_manifest 收据 20260828-111825-fdc2e9820a41.md 已老化丢失（2026-08-31 检测），证据链断链，不可作为 promote 证据引用'
   build_result: PASS
   package_result: PASS
   board_verify: PASS

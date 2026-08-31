@@ -9,7 +9,7 @@ CLI:
   start    --goal <文本> (--batch-file <cdp> | --target <12hex|dev|main> --case <标签>)
            [--max-patience 3] [--max-total 10]
   run      --session <json>                          # 输出本轮 verify 执行指引
-  done     --session <json> --receipt <路径> [--stage <sync|build|push|acceptance>]
+  done     --session <json> --receipt <路径> [--stage <sync|build|unit_test|push|acceptance>]
            [--error-line <首错误行>] [--attribution env_fail|framework_error]
   status   --session <json>
   diagnose --session <json>
@@ -204,6 +204,33 @@ def extract_first_fail_line(acceptance):
     return ""
 
 
+def _acceptance_passed(acceptance):
+    """收据 result=pass 时验收一致性校验：acceptance 须为合法 JSON 且 overall
+    为 pass 且无 fail 项（与 ws_report 拒写同语义，堵手填假绿推进会话）。
+
+    兼容 dict（overall+items）与数组（历史格式）两种结构。
+    返回 (ok, reason)。
+    """
+    if not (acceptance or "").strip():
+        return False, "acceptance 为空"
+    try:
+        data = json.loads(acceptance)
+    except (ValueError, json.JSONDecodeError) as e:
+        return False, f"acceptance 非合法 JSON（{e}）"
+    if isinstance(data, dict):
+        if data.get("overall") != "pass":
+            return False, f"overall 非 pass（实际 {data.get('overall')!r}）"
+        items = data.get("items") or []
+    elif isinstance(data, list):
+        items = data
+    else:
+        return False, "acceptance 非 JSON 对象或数组"
+    for it in items:
+        if isinstance(it, dict) and it.get("status") == "fail":
+            return False, "acceptance 含 fail 项"
+    return True, ""
+
+
 def apply_done(session, receipt_path, stage=None, error_line=None,
                attribution=None):
     """记账一轮：读收据快照 -> 指纹比对 -> 双层计数 -> 归因/退出判定。
@@ -219,6 +246,13 @@ def apply_done(session, receipt_path, stage=None, error_line=None,
         r = read_receipt(receipt_path)
     except (OSError, UnicodeDecodeError) as exc:
         raise RuntimeError(f"收据读取失败 {receipt_path}: {exc}") from exc
+
+    if r.result == "pass":
+        # 验收证据门禁：收据 result=pass 时 acceptance overall 须也为 pass
+        # 且无 fail 项，否则拒记账（防手填假绿收据推进会话/终态 pass）
+        ok, why = _acceptance_passed(r.acceptance)
+        if not ok:
+            raise RuntimeError(f"收据 result=pass 但验收未通过（{why}），拒绝记账")
 
     prev_fail = next((run for run in reversed(session["runs"])
                       if run["result"] == "fail"), None)
@@ -418,14 +452,16 @@ def run_guidance(session):
     return "\n".join([
         f"[第 {session['total_attempts'] + 1} 轮] 按 workspace-verify SKILL 工作流执行:",
         "  1. code->workspace 同步 + 影响面判定 + 编译 + adb 推送（SKILL 步骤 1-4）",
-        f"  2. python3 {vdir}/ws_acceptance.py run {flag} {val}"
+        f"  2. python3 {vdir}/ws_upload_tests.py（上板真跑 C++ 单测：lcview/lciod "
+        "unit_test+hal_test 先推后跑，有失败即本轮失败）",
+        f"  3. python3 {vdir}/ws_acceptance.py run {flag} {val}"
         " [--ensure-boot 无 boot 标签时自动追加] [--wait-ready --log-since ... 有 reboot 时]",
-        f"  3. python3 {vdir}/ws_report.py --result <pass|fail> --build ... --board ..."
+        f"  4. python3 {vdir}/ws_report.py --result <pass|fail> --build ... --board ..."
         f" --acceptance <逐项 JSON> [--batch-file {session.get('batch_file') or '<批次>'}]"
         f" --target {session.get('target') or base or '<12hex>'} --body <正文文件>"
         + (f" --case {session.get('case')}" if session.get("case") else ""),
-        f"  4. python3 {ws_session_cli_path()} done --session <session.json>"
-        " --receipt <步骤 3 输出的收据路径> --stage <sync|build|push|acceptance>",
+        f"  5. python3 {ws_session_cli_path()} done --session <session.json>"
+        " --receipt <步骤 4 输出的收据路径> --stage <sync|build|unit_test|push|acceptance>",
         f"验收文本: {acc}",
         "失败时: 读收据失败现场分析 -> 修复编辑 code/ -> 复跑本轮（rescue/补参不耗轮次）",
     ])
@@ -487,7 +523,8 @@ def main(argv=None):
     p_done = sub.add_parser("done", help="记账一轮（收据落盘后调用）")
     p_done.add_argument("--session", required=True)
     p_done.add_argument("--receipt", required=True)
-    p_done.add_argument("--stage", choices=["sync", "build", "push", "acceptance"])
+    p_done.add_argument("--stage", choices=["sync", "build", "unit_test", "push",
+                                            "acceptance"])
     p_done.add_argument("--error-line", default=None,
                         help="首错误行（缺省从收据 acceptance 提取首个 fail detail）")
     p_done.add_argument("--attribution", choices=["env_fail", "framework_error"])
