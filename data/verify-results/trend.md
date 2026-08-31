@@ -1,6 +1,3 @@
-2026-08-27 07:50:56 manual-2608270750 pass build=pass board=pass acc=svc:lechao_lcview_hal=pass svc:lechao_lc lcview 业务链路日志验证通过（build tag 命中16次+batch 
-2026-08-27 09:18:48 8c814ca8e1dc skip build=skip board=skip acc=- 清测试红线,解 promote 阻塞,消时钟人工与机器绑定（-s 无需上板）
-2026-08-27 09:53:51 14ea313975d6 skip build=skip board=skip acc=- 回收上批 6 处缺陷,消静默降级与时钟不可信（-s 无需上板）
 2026-08-27 10:12:19 607399554675 skip build=skip board=skip acc=- 用例层内聚消仓外依赖,兼修 lcview_check 必崩（-s 无需上板）
 2026-08-27 10:48:58 a771b060ffe2 skip build=skip board=skip acc=- 堵 lcview_check 假绿,补零覆盖,清仓外引用（-s 无需上板）
 2026-08-27 11:08:38 7bde70c61fae skip build=skip board=skip acc=- 串口链路收尾,补零覆盖修错误分类,为 rescue 清场（-s 无需上板）
@@ -48,3 +45,6 @@
 2026-08-31 17:49:01 d736c6283cd0 skip build=skip board=skip acc=- evidence-scope 由人工申报改为证据推导（-s 无需上板）
 2026-08-31 19:16:52 641d371c3da2 skip build=skip board=skip acc=- 解畸形登记堵死门禁并自动推断 task（-s 无需上板）
 2026-08-31 19:30:35 7a04f2d146f1 skip build=skip board=skip acc=- 编排器接线,让参数推断真正生效（-s 无需上板）
+2026-08-31 19:47:04 f6c8c3376282 skip build=skip board=skip acc=- 给 -s 批加自检证据要求,堵零验证通道（-s 无需上板）
+2026-08-31 19:47:55 f6c8c3376282 skip build=skip board=skip acc=- 给 -s 批加自检证据要求,堵零验证通道（-s 无需上板）
+2026-08-31 19:48:46 f6c8c3376282 skip build=skip board=skip acc=- 给 -s 批加自检证据要求,堵零验证通道（-s 无需上板）

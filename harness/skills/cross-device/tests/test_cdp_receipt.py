@@ -166,6 +166,24 @@ class TestReceipt(unittest.TestCase):
         got = cdp_receipt.read_receipt(p)
         self.assertEqual(got.cases, r.cases)
 
+    def test_selfcheck_roundtrip(self):
+        # selfcheck 字段（-s 批次自检摘要）写读往返
+        r = _mk_receipt()
+        r.selfcheck = "121 passed, 3 skipped in 6.0s\nOK: 引用完整"
+        p = cdp_receipt.write_receipt(r, "正文")
+        got = cdp_receipt.read_receipt(p)
+        # 多行字段 header 单行解析（与 acceptance 同语义）：回落首行
+        self.assertEqual(got.selfcheck, r.selfcheck.splitlines()[0])
+
+    def test_old_receipt_without_selfcheck_falls_back(self):
+        # 老收据无 selfcheck 字段 → 回落空串（不崩）
+        r = _mk_receipt()
+        p = cdp_receipt.write_receipt(r, "正文")
+        text = p.read_text(encoding="utf-8").replace("- selfcheck: ", "- xselfcheck: ")
+        p.write_text(text, encoding="utf-8")
+        got = cdp_receipt.read_receipt(p)
+        self.assertEqual(got.selfcheck, "")
+
     def test_old_receipt_without_cases_falls_back(self):
         # 旧收据无 cases 字段 → from_text 回落空串（证据推导无源时须显式报错）
         r = cdp_receipt.Receipt.from_text(

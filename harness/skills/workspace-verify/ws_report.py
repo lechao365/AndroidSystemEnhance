@@ -86,6 +86,9 @@ def main(argv=None):
     ap.add_argument("--case", default="",
                     help="本次实际验收用例标签（逗号分隔；写入收据 cases 字段，"
                          "供 baseline_register 推导 evidence-scope）")
+    ap.add_argument("--selfcheck", default="",
+                    help="自检摘要文本（-s 批次必带：pytest harness -q 与 "
+                         "check_skill_refs 输出；含 failed 非零或缺 skipped 计数即拒写）")
     ap.add_argument("--metrics", default="",
                     help="三指标结构化 JSON 对象（写入收据 metrics 字段与 trend 行尾）")
     ap.add_argument("--timings-file", default="",
@@ -184,9 +187,34 @@ def main(argv=None):
             print(f"error: {terr}", file=sys.stderr)
             return 2
 
+    # 自检证据（-s 批次必带，堵零验证通道）：对照 -sv 缺 --acceptance 返 2 的既有约束，
+    # result=skip 而 selfcheck 为空即拒写；非空时须无红（failed 非零）且含 skipped 计数。
+    # 置于批次校验之后：flattened/sv 拒写优先报原因，selfcheck 只拦本应落盘的 skip 收据
+    if args.result == "skip" and not args.selfcheck.strip():
+        print("error: result=skip 必须传 --selfcheck（自检摘要：pytest harness -q 与 "
+              "check_skill_refs 输出），否则零验证通道敞开", file=sys.stderr)
+        return 2
+    if args.selfcheck.strip():
+        # pytest 摘要为 "<n> failed, <n> passed, <n> skipped in ..."（数字在前），
+        # 兼容 failed=3 / skipped: 2 的等号/冒号形态
+        if re.search(r"\b([1-9]\d*)\s*failed\b", args.selfcheck) or \
+                re.search(r"\bfailed\s*[=,: ]+\s*([1-9]\d*)", args.selfcheck):
+            print("error: --selfcheck 含 failed 非零（带红落地，拒绝写收据）",
+                  file=sys.stderr)
+            return 2
+        if not (re.search(r"\b\d+\s*skipped\b", args.selfcheck)
+                or re.search(r"\bskipped\s*[=,: ]+\s*\d+", args.selfcheck)):
+            print("error: --selfcheck 缺 skipped 计数（平台跳过的测试数须显式可见）",
+                  file=sys.stderr)
+            return 2
+
     body = ""
     if args.body and Path(args.body).is_file():
         body = _sanitize(Path(args.body).read_text(encoding="utf-8"))
+
+    # selfcheck 单行化（header 逐行 key-value，多行正文信息须并入一行才可见）：
+    # "531 passed in 27.9s | skipped=0 | OK: ..."，保证 skipped 计数随收据显式落地
+    args.selfcheck = " | ".join(l for l in args.selfcheck.splitlines() if l.strip())
 
     r = Receipt(batch_id=batch_id, batch_base=batch_base,
                 verified_commit=verified,
@@ -194,7 +222,8 @@ def main(argv=None):
                 build=args.build, push_board=args.board,
                 acceptance=args.acceptance, elapsed_s=args.elapsed,
                 summary=args.summary, metrics=args.metrics,
-                timings=args.timings, cases=args.case)
+                timings=args.timings, cases=args.case,
+                selfcheck=args.selfcheck)
     path = write_receipt(r, body or args.summary)
     append_trend(time.strftime("%Y-%m-%d %H:%M:%S"), batch_id, args.result,
                  f"build={args.build} board={args.board} "

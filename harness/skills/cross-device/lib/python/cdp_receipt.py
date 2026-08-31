@@ -20,7 +20,7 @@ _FIELD_RE = re.compile(r"^- (\w+): (.*)$", re.MULTILINE)
 _FIELDS = [
     "schema_version", "batch_id", "batch_base", "verified_commit",
     "verify_mode", "result", "build", "push_board", "acceptance",
-    "elapsed_s", "summary", "metrics", "timings", "cases",
+    "elapsed_s", "summary", "metrics", "timings", "cases", "selfcheck",
 ]
 
 
@@ -28,7 +28,7 @@ class Receipt:
     def __init__(self, schema_version=1, batch_id="", batch_base="",
                  verified_commit="", verify_mode="board", result="fail",
                  build="skip", push_board="skip", acceptance="", elapsed_s=0,
-                 summary="", metrics="", timings="", cases=""):
+                 summary="", metrics="", timings="", cases="", selfcheck=""):
         self.schema_version = schema_version
         self.batch_id = batch_id
         self.batch_base = batch_base
@@ -43,6 +43,7 @@ class Receipt:
         self.metrics = metrics
         self.timings = timings
         self.cases = cases
+        self.selfcheck = selfcheck
 
     @classmethod
     def from_text(cls, text):

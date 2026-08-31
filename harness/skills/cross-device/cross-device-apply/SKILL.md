@@ -72,8 +72,12 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
      loop 终结（收据落盘）后打点：cdp_timing.py mark --batch <batch_id> --name verify_end
    - 收据落盘是进步骤 6 的前提：ws_report 返 2（如 -sv 缺 --acceptance、
      --log-since 非法等参数错误）即收据未落盘，必须补参重试，禁止无收据进步骤 6
-   - -s → 写 skip 收据：
-     python3 harness/skills/workspace-verify/ws_report.py --batch-file <批次文件> --result skip --build skip --board skip --summary "<意图首句>（-s 无需上板）" --body <批次文件> [--timings-file harness/log/cross-device/timings-<batch_id>.json]
+- -s → 写 skip 收据（先自检，证据随收据落地；自检带红/缺 skipped 计数即拒写）：
+      SELFCHECK=$( { PY=$(python3 -m pytest harness -q 2>&1 | tail -1);
+                     printf '%s\n' "$PY";
+                     printf '%s\n' "$PY" | grep -q skipped || echo "skipped=0";
+                     python3 harness/lib/check_skill_refs.py 2>&1 | tail -1; } )
+      python3 harness/skills/workspace-verify/ws_report.py --batch-file <批次文件> --result skip --build skip --board skip --summary "<意图首句>（-s 无需上板）" --selfcheck "$SELFCHECK" --body <批次文件> [--timings-file harness/log/cross-device/timings-<batch_id>.json]
     verify 无论 pass/fail，收据落盘后必须执行下一步骤（git-works-push）
 6. 显式执行 /git-works-push（收据+代码统一 commit push）
    完成后打点收尾（可选）：cdp_timing.py mark --batch <batch_id> --name push
