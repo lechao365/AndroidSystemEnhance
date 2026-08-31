@@ -146,6 +146,23 @@ class TestWsReport(unittest.TestCase):
         self.assertIn("refs_rc=1", err.getvalue())
         self.assertFalse(self._dir.exists())
 
+    def test_selfcheck_contradictory_refs_text_rejected(self):
+        # 方向 4/5：rc 为 0 而文本仍含悬空引用字样（矛盾：工具已败却报 rc=0）
+        # → 冗余文本防线拒写
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | "
+                                 "531 passed in 27.9s | skipped=0 | "
+                                 "==== 共 3 处悬空引用（exit 1）===="])
+        self.assertEqual(rc, 2)
+        self.assertIn("悬空引用", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
     def test_selfcheck_normal_roundtrip(self):
         # 方向 2/3/7：正常自检文本（含 skipped 计数、failed 零）写读往返
         batch = self._write(VALID_S, ".cdp")

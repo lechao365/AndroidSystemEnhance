@@ -210,12 +210,18 @@ def main(argv=None):
             print(f"error: --selfcheck 存在非零退出码（pytest_rc={rcs['pytest_rc']} "
                   f"refs_rc={rcs['refs_rc']}），自检未通过拒绝写收据", file=sys.stderr)
             return 2
-        # 冗余文本防线：pytest 摘要为 "<n> failed, <n> passed, <n> skipped in ..."
-        # （数字在前），兼容 failed=3 / skipped: 2 的等号/冒号形态
+        # 冗余文本防线（rc 全 0 后的补充）：rc 为 0 而文本仍含 failed 非零/
+        # 悬空引用字样即矛盾——两工具已败却报 rc=0，拒写防伪造。
+        # pytest 摘要为 "<n> failed, <n> passed, <n> skipped in ..."（数字在前），
+        # 兼容 failed=3 / skipped: 2 的等号/冒号形态
         if re.search(r"\b([1-9]\d*)\s*failed\b", args.selfcheck) or \
                 re.search(r"\bfailed\s*[=,: ]+\s*([1-9]\d*)", args.selfcheck):
             print("error: --selfcheck 含 failed 非零（带红落地，拒绝写收据）",
                   file=sys.stderr)
+            return 2
+        if re.search(r"悬空引用", args.selfcheck):
+            print("error: --selfcheck 含悬空引用字样（引用完整性未通过，"
+                  "拒绝写收据）", file=sys.stderr)
             return 2
         if not (re.search(r"\b\d+\s*skipped\b", args.selfcheck)
                 or re.search(r"\bskipped\s*[=,: ]+\s*\d+", args.selfcheck)):
