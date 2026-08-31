@@ -17,7 +17,7 @@ import sync_code_to_workspace as sw
 
 
 def _git(cwd, *args):
-    r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+    r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
         raise AssertionError(f"git {' '.join(args)} failed: {r.stderr.strip()}")
     return r.stdout.strip()

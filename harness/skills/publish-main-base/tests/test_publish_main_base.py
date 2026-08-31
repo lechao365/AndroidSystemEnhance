@@ -77,7 +77,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
 
     def _git(self, *args, check=True):
         r = subprocess.run(["git", "-C", str(self.root), *args],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
         if check:
             self.assertEqual(r.returncode, 0, r.stderr)
         return r
@@ -99,7 +99,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
     def _run(self, *args):
         script = self.root / "harness" / "skills" / "publish-main-base" / "publish_main_base.sh"
         return subprocess.run(["bash", str(script), *args],
-                              capture_output=True, text=True,
+                              capture_output=True, text=True, encoding="utf-8", errors="replace",
                               cwd=self.root, env=self._env)
 
     def _run_register(self, *args):
@@ -107,7 +107,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
             [sys.executable,
              str(self.root / "harness" / "skills" / "publish-main-base" / "baseline_register.py"),
              *args],
-            capture_output=True, text=True, cwd=self.root, env=self._env)
+            capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=self.root, env=self._env)
 
     def _mk_issue(self, task="t1", status="open", origin="introduced", blocking=True):
         return cdp_issue.Issue(

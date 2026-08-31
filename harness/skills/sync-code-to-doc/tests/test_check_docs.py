@@ -155,7 +155,7 @@ class TestCmdCheckDocs(unittest.TestCase):
         script = Path(__file__).resolve().parents[1] / "sync_code_to_doc.py"
         r = subprocess.run(
             [sys.executable, str(script), "--check-docs", "--docs-root", str(docs)],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         self.assertEqual(r.returncode, 0)
         self.assertIn("一致", r.stdout)
@@ -168,7 +168,7 @@ class TestCmdCheckDocs(unittest.TestCase):
         script = Path(__file__).resolve().parents[1] / "sync_code_to_doc.py"
         r = subprocess.run(
             [sys.executable, str(script), "--check-docs", "--docs-root", str(docs)],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         self.assertEqual(r.returncode, 5)
 
@@ -177,7 +177,7 @@ class TestCmdCheckDocs(unittest.TestCase):
         script = Path(__file__).resolve().parents[1] / "sync_code_to_doc.py"
         r = subprocess.run(
             [sys.executable, str(script), "--check-docs", "--docs-root", "/nonexistent/xyz"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         self.assertEqual(r.returncode, 3)
 

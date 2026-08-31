@@ -310,7 +310,7 @@ def _git_result(args: list[str], timeout: int = 300) -> subprocess.CompletedProc
         return subprocess.run(
             ["git"] + args,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             cwd=repo_root(),
             timeout=timeout,
         )

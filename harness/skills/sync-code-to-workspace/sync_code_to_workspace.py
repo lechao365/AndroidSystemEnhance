@@ -101,7 +101,7 @@ def _git_run(args: list[str], cwd: str | Path, timeout: int = 300) -> subprocess
     """
     cmd = ["git"] + args
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, cwd=str(cwd), timeout=timeout)
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(cwd), timeout=timeout)
     except subprocess.TimeoutExpired:
         log_error(f"git {' '.join(args)} 超时({timeout}s)")
         return subprocess.CompletedProcess(cmd, returncode=-1, stdout="", stderr=f"超时({timeout}s)")

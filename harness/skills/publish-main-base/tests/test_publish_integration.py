@@ -54,14 +54,14 @@ class TestSyncModifyIntegration(unittest.TestCase):
     # ── git 原语 ──────────────────────────────────────────────────────────
     def _git(self, args, check=True):
         return subprocess.run(["git", *args], cwd=self.work,
-                              capture_output=True, text=True, check=check)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", check=check)
 
     def _git_out(self, args):
         return self._git(args).stdout.strip()
 
     def _origin(self, args, check=True):
         return subprocess.run(["git", "-C", str(self.origin), *args],
-                              capture_output=True, text=True, check=check)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", check=check)
 
     def _commit_all(self, msg):
         self._git(["add", "-A"])
@@ -73,7 +73,7 @@ class TestSyncModifyIntegration(unittest.TestCase):
         # 防 python 导入生成 __pycache__ 污染工作树（git status 非空会使预检拒绝）
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         return subprocess.run(["bash", str(SCRIPT), *args], cwd=self.work,
-                              capture_output=True, text=True, env=env)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
 
     # ── 场景构建 ──────────────────────────────────────────────────────────
     def _base_repo(self):

@@ -108,7 +108,7 @@ def main(argv=None):
 
         def _tree(ref):
             r = subprocess.run(["git", "rev-parse", f"{ref}^{{tree}}"],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
             return r.stdout.strip() if r.returncode == 0 else ""
 
         tag_tree, main_tree = _tree(tag), _tree("main")
@@ -116,7 +116,7 @@ def main(argv=None):
             print(f"error: 无法解析 {tag} 或 main 的树对象", file=sys.stderr)
             return 1
         r = subprocess.run(["git", "diff", "--name-only", tag_tree, main_tree],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r.returncode != 0:
             print(f"error: 树对比失败: {r.stderr.strip()}", file=sys.stderr)
             return 1
