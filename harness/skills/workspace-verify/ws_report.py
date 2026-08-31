@@ -188,15 +188,30 @@ def main(argv=None):
             return 2
 
     # 自检证据（-s 批次必带，堵零验证通道）：对照 -sv 缺 --acceptance 返 2 的既有约束，
-    # result=skip 而 selfcheck 为空即拒写；非空时须无红（failed 非零）且含 skipped 计数。
-    # 置于批次校验之后：flattened/sv 拒写优先报原因，selfcheck 只拦本应落盘的 skip 收据
+    # result=skip 而 selfcheck 为空即拒写。自检门禁以退出码为主判据（方向 1-5）：
+    #   - 缺 pytest_rc/refs_rc 任一即返 2（rc 不可见则自检不可信）
+    #   - 任一 rc 非零即返 2（pytest 崩溃/悬空引用均带 rc，文本可能无 failed/skipped）
+    # failed 文本匹配与 skipped 计数保留作冗余（rc 全 0 后的补充防线）
     if args.result == "skip" and not args.selfcheck.strip():
         print("error: result=skip 必须传 --selfcheck（自检摘要：pytest harness -q 与 "
-              "check_skill_refs 输出），否则零验证通道敞开", file=sys.stderr)
+              "check_skill_refs 输出，含 pytest_rc/refs_rc），否则零验证通道敞开",
+              file=sys.stderr)
         return 2
     if args.selfcheck.strip():
-        # pytest 摘要为 "<n> failed, <n> passed, <n> skipped in ..."（数字在前），
-        # 兼容 failed=3 / skipped: 2 的等号/冒号形态
+        rcs = {}
+        for key in ("pytest_rc", "refs_rc"):
+            m = re.search(rf"{re.escape(key)}=(\d+)", args.selfcheck)
+            if not m:
+                print(f"error: --selfcheck 缺 {key}（退出码为主判据，文本匹配仅冗余）",
+                      file=sys.stderr)
+                return 2
+            rcs[key] = int(m.group(1))
+        if rcs["pytest_rc"] != 0 or rcs["refs_rc"] != 0:
+            print(f"error: --selfcheck 存在非零退出码（pytest_rc={rcs['pytest_rc']} "
+                  f"refs_rc={rcs['refs_rc']}），自检未通过拒绝写收据", file=sys.stderr)
+            return 2
+        # 冗余文本防线：pytest 摘要为 "<n> failed, <n> passed, <n> skipped in ..."
+        # （数字在前），兼容 failed=3 / skipped: 2 的等号/冒号形态
         if re.search(r"\b([1-9]\d*)\s*failed\b", args.selfcheck) or \
                 re.search(r"\bfailed\s*[=,: ]+\s*([1-9]\d*)", args.selfcheck):
             print("error: --selfcheck 含 failed 非零（带红落地，拒绝写收据）",
