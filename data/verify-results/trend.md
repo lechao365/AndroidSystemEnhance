@@ -1,4 +1,3 @@
-2026-08-26 14:59:54 ec10f7ba1c1b skip build=skip board=skip acc=- 测试源码归档进 code（-s 无需上板）
 2026-08-26 15:09:24 d1dfcb778909 skip build=skip board=skip acc=- 冻结版 AIDL 归档 + Windows 串口转发器（-s 无需上板）
 2026-08-26 16:52:26 a934b5b6da4a skip build=skip board=skip acc=- WSL 侧串口客户端落地（-s 无需上板）
 2026-08-26 22:21:38 manual-2608262221 pass build=pass board=pass acc=svc:lechao_lcview_hal=pass svc:lechao_lc lcview CXX 修复批首次真实上板验证通过（7P1 全清，设备健康运行）
@@ -48,3 +47,4 @@
 2026-08-31 14:30:55 30d0ce4139d2 skip build=skip board=skip acc=- 证据快照与 evidence_scope 登记（-s 无需上板）
 2026-08-31 15:07:03 ecee8106f315 skip build=skip board=skip acc=- 清空验收假绿与指纹过激归一化（-s 无需上板）
 2026-08-31 15:39:36 8548e61e03c0 skip build=skip board=skip acc=- 修 emit 侧 11 项测试红并扩引用扫描（-s 无需上板）
+2026-08-31 16:55:03 ec62ae0ce5f6 pass build=pass board=pass acc={ lcview 重构闭环证据:四组验收全绿+单测 190 全过+perf 指标齐备 | {"daemon_rss_kb": 5040, "dd_s": 2.33, "drain_ms_per_event": 0.371, "jsonl_delta": 3075, "load_mb": 64, "throughput_evs": 1319.8, "total_delta": 3075}
