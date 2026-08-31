@@ -281,3 +281,4 @@ deactivate D
 - **用户态源码**：[`code/rpi5/aosp/new/vendor/lechao/services/lechao_lcview/`](../../code/rpi5/aosp/new/vendor/lechao/services/lechao_lcview/) — Daemon（直读）+ Schema 配置
 - **SELinux 策略**：[`code/rpi5/aosp/new/device/brcm/rpi5/sepolicy/`](../../code/rpi5/aosp/new/device/brcm/rpi5/sepolicy/) — `lechao_lcview.te`
 - **上传器 Spec**：二期独立进程 `lcview_uploader` 设计（待补充）
+- **开发效率工具**：[`../development-tools.md`](../development-tools.md) — VS Code / OpenGrok 源码阅读环境搭建（人类开发者向）

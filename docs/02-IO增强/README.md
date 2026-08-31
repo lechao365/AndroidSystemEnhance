@@ -7,8 +7,8 @@
 | 编号 | 名称 | 层级 | 说明 |
 |------|------|------|------|
 | 02.01 | [内核态增强](./02.01-内核态增强-lciod-kernel.md) | 内核态 | usb-storage notifier 注入 + LcIod 驱动 |
-| 02.02 | HAL 增强 | 用户态 (vendor) | IIoHal AIDL + 设备缓存 + ioctl 封装 |
-| 02.03 | Daemon 增强 | 用户态 (system) | IIoService 代理 + 字段投影 + 监控线程 |
+| 02.02 | [HAL 增强](./02.02-HAL增强-lciod-hal.md) | 用户态 (vendor) | IIoHal AIDL + 设备缓存 + ioctl 封装 |
+| 02.03 | [Daemon 增强](./02.03-Daemon增强-lciod-daemon.md) | 用户态 (system) | IIoService 代理 + 字段投影 + 监控线程 |
 | 02.04 | [故障注入工具](./02.04-故障注入工具-usb-fault-inject.md) | 外围 (Device 端) | usb-fault-inject — 12 类协议级故障注入 CLI |
 | 02.05 | [故障注入验证](./02.05-故障注入验证-usb-verify.md) | 外围 (Host 端) | usb-verify — 统计读取 + 事件等待 + 阈值断言 CLI |
 

@@ -209,6 +209,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self._write_receipt(self.parent_vc, build="", push_board="",
                             batch_id="000000000003")
         r = self._run_register("add-candidate", "--source-commit", "abc123def456",
+                               "--evidence-scope", "lcview-liveness",
                                "--receipt-path",
                                "data/verify-results/20260831-100000-000000000003.md")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -222,6 +223,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self._write_receipt(self.parent_vc, build="skip", push_board="skip",
                             batch_id="000000000004")
         r = self._run_register("add-candidate", "--source-commit", "abc123def456",
+                               "--evidence-scope", "lcview-liveness",
                                "--receipt-path",
                                "data/verify-results/20260831-100000-000000000004.md")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -319,7 +321,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         # 方向 3/4：prepare 未传 --task → warn + KIGATE=not-run 写入 evidence
         self._setup_remote()
         self._receipt_commit_c3()
-        r = self._run("--prepare")
+        r = self._run("--prepare", "--evidence-scope", "lcview-liveness")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("KIGATE=not-run", r.stderr)
         data = yaml.safe_load(
@@ -331,7 +333,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         # 方向 3/4：--task 门禁通过（空登记合法）→ KIGATE=pass 写入 evidence
         self._setup_remote()
         self._receipt_commit_c3()
-        r = self._run("--prepare", "--task", "t1")
+        r = self._run("--prepare", "--task", "t1", "--evidence-scope", "lcview-liveness")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("KIGATE=not-run", r.stderr)
         data = yaml.safe_load(

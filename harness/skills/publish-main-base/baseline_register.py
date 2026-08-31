@@ -121,7 +121,9 @@ def main(argv=None):
             print(f"error: 树对比失败: {r.stderr.strip()}", file=sys.stderr)
             return 1
         # 排除项：登记 yaml（promote 元提交必然改动）与 docs/（文档同步提交）
-        excludes = ("harness/config/baseline-status.yaml", "docs/")
+        # 与 data/baselines/（promote 生成的证据快照目录，随晋升提交入库）
+        excludes = ("harness/config/baseline-status.yaml", "docs/",
+                    "data/baselines/")
         diffs = [ln for ln in r.stdout.splitlines()
                  if ln and not any(ln == e or ln.startswith(e) for e in excludes)]
         if diffs:
