@@ -6,6 +6,7 @@ save() 手工保留 yaml 头部注释块（PyYAML 往返不保留注释）。
 """
 import argparse
 import datetime
+import subprocess
 import sys
 from pathlib import Path
 
@@ -54,7 +55,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="baseline candidate/promoted 登记")
     ap.add_argument("action",
                     choices=["add-candidate", "promote", "revert-candidate",
-                             "check-issues"])
+                             "check-issues", "verify-tree"])
     ap.add_argument("--baseline-id")
     ap.add_argument("--source-commit")
     ap.add_argument("--receipt-path")
@@ -92,6 +93,42 @@ def main(argv=None):
             print(f"error: task={args.task} 存在未解决阻塞问题", file=sys.stderr)
             return 1
         print(f"known-issues 门禁通过（task={args.task} 无未解决阻塞问题）")
+        return 0
+
+    # verify-tree：树等价断言（publish_main_base.sh squash 后、push main 前委托）。
+    # 比较 verified/<id> tag 与 main 的树，排除登记 yaml 与 docs 后必须无差异，
+    # 防未验证内容借 meta/doc 提交夹带进 main（不读写登记 yaml）
+    if args.action == "verify-tree":
+        if not args.baseline_id:
+            print("error: verify-tree 必须传 --baseline-id", file=sys.stderr)
+            return 1
+        tag = f"verified/{args.baseline_id}"
+
+        def _tree(ref):
+            r = subprocess.run(["git", "rev-parse", f"{ref}^{{tree}}"],
+                               capture_output=True, text=True)
+            return r.stdout.strip() if r.returncode == 0 else ""
+
+        tag_tree, main_tree = _tree(tag), _tree("main")
+        if not tag_tree or not main_tree:
+            print(f"error: 无法解析 {tag} 或 main 的树对象", file=sys.stderr)
+            return 1
+        r = subprocess.run(["git", "diff", "--name-only", tag_tree, main_tree],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"error: 树对比失败: {r.stderr.strip()}", file=sys.stderr)
+            return 1
+        # 排除项：登记 yaml（promote 元提交必然改动）与 docs/（文档同步提交）
+        excludes = ("harness/config/baseline-status.yaml", "docs/")
+        diffs = [ln for ln in r.stdout.splitlines()
+                 if ln and not any(ln == e or ln.startswith(e) for e in excludes)]
+        if diffs:
+            print("\n".join(diffs), file=sys.stderr)
+            print(f"error: verified/{args.baseline_id} 与 main 树不等价"
+                  f"（排除登记 yaml 与 docs 后仍有差异）", file=sys.stderr)
+            return 1
+        print(f"树等价断言通过：verified/{args.baseline_id} ≡ main"
+              f"（排除登记 yaml 与 docs）")
         return 0
 
     data = load()

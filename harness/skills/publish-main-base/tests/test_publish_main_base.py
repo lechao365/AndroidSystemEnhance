@@ -278,6 +278,42 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("无 code/ 改动，豁免放行", r.stdout)
         self.assertIn("promote 完成", r.stdout)
+        # 正常放行：verified tag 本地与远端均存在（方向 1）
+        self.assertIn("verified/BL-TEST-01",
+                      self._git("tag", "-l", "verified/BL-TEST-01").stdout)
+        self.assertIn("refs/tags/verified/BL-TEST-01",
+                      self._git("ls-remote", "origin",
+                                "refs/tags/verified/BL-TEST-01").stdout)
+
+    def test_promote_rejects_duplicate_tag(self):
+        # 方向 1 同名 tag 拒：verified/BL-TEST-01 已存在 → 退 3（未发生任何变更）
+        self._setup_remote()
+        self._receipt_commit_c3()
+        self._git("tag", "-a", "verified/BL-TEST-01", "-m", "pre-existing", "HEAD")
+        r = self._promote()
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("已存在", r.stderr)
+
+    def test_promote_rejects_tree_mismatch(self):
+        # 方向 2/3 树不等拒：meta 提交夹带 code/evil.txt → verify-tree 失败，
+        # rollback 一并删除本地与远端 verified tag（方向 4），退 1
+        self._setup_remote()
+        self._receipt_commit_c3()
+        self._candidate_yaml()
+        (self.root / "code").mkdir()
+        (self.root / "code" / "evil.txt").write_text("x\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "构建(baseline): 伪造元提交夹带")
+        self._git("push", "origin", "dev")
+        r = self._promote()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("树等价", r.stderr)
+        self.assertIn("code/evil.txt", r.stderr)
+        self.assertEqual(
+            self._git("tag", "-l", "verified/BL-TEST-01").stdout.strip(), "")
+        self.assertEqual(
+            self._git("ls-remote", "origin",
+                      "refs/tags/verified/BL-TEST-01").stdout.strip(), "")
 
     def test_prepare_without_task_records_ki_gate_not_run(self):
         # 方向 3/4：prepare 未传 --task → warn + KIGATE=not-run 写入 evidence

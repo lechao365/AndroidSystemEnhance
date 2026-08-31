@@ -12,6 +12,9 @@
 # 无 code/ 改动时豁免放行并 warn，否则 RECEIPT_FAIL 拒绝。
 # KIGATE：--task 过门禁记 pass，未传 --task 记 not-run（warn），随 add-candidate
 # --ki-gate 写入 candidate evidence（known-issues 证据链）。
+# verified tag：promote 对 BH 打注解 tag verified/<id> 并推送（同名即拒退 3）；
+# squash 后 push main 前以 baseline_register.py verify-tree 断言 tag 与 main 树等价
+# （排除登记 yaml 与 docs），失败回滚（rollback 一并删本地/远端 tag）。
 # prepare：登记 candidate（随 dev 提交推送）；promote：晋升 promoted + squash + 重建。
 #
 # 提交分类约定（前置校验据此回溯定位最近内容提交）：
@@ -218,11 +221,25 @@ rollback_promote() {
     git reset --hard origin/main || exit 1
   fi
   git checkout dev || exit 1
+  # verified tag 一并回滚（本地 + 远端尽力而为），防残留假锚点阻断后续重试
+  git tag -d "verified/$BID" >/dev/null 2>&1 || true
+  git push origin ":refs/tags/verified/$BID" >/dev/null 2>&1 || true
   # 先在晋升提交状态下回退 candidate（此时工作区 yaml 为 promoted），再 reset 丢弃晋升提交
   python3 harness/skills/publish-main-base/baseline_register.py revert-candidate \
     --baseline-id "$BID" || echo "warn: baseline ${BID} 回退 candidate 失败，请人工处理"
   git reset --hard HEAD^ || exit 1
 }
+# verified tag 锚点：对 BH（最近内容提交）打注解 tag 并推送，供树等价断言与追溯；
+# 同名 tag 已存在即拒退 3（重复 promote / baseline_id 复用防线）
+if git rev-parse -q --verify "refs/tags/verified/$BID" >/dev/null 2>&1; then
+  echo "error: tag verified/$BID 已存在（疑似重复 promote 或 baseline_id 复用），拒绝" >&2
+  exit 3
+fi
+git tag -a "verified/$BID" -m "verified baseline $BID" "$BH" \
+  || { echo "error: 打 tag verified/$BID 失败" >&2; exit 1; }
+git push origin "refs/tags/verified/$BID" || {
+  git tag -d "verified/$BID" >/dev/null 2>&1 || true
+  echo "error: 推送 tag verified/$BID 失败" >&2; exit 2; }
 python3 harness/skills/publish-main-base/baseline_register.py promote \
   --baseline-id "$BID" --approved-by "$APPROVED_BY" \
   || { echo "error: baseline 晋升登记失败（检查 $BID 是否为 candidate）" >&2; exit 1; }
@@ -240,6 +257,10 @@ git merge --squash dev || { rollback_promote; echo "error: merge --squash 失败
 # 一致性检查在 commit 前：暂存区须与 dev tree 一致（此时 main 尚无 commit，rollback 可干净撤销）
 git diff --cached --quiet dev || { rollback_promote; echo "error: squash 暂存与 dev 内容不一致" >&2; exit 1; }
 git commit -F "$MSG_FILE" || { rollback_promote; echo "error: squash commit 失败" >&2; exit 1; }
+# 树等价断言：tag verified/$BID 与 main 树（排除登记 yaml 与 docs）必须无差异，
+# 防未验证内容借 meta/doc 提交夹带进 main；失败走 rollback（含删 tag）退 1
+python3 harness/skills/publish-main-base/baseline_register.py verify-tree --baseline-id "$BID" \
+  || { rollback_promote; echo "error: 树等价断言失败（verified/$BID 与 main 树不一致），已回滚" >&2; exit 1; }
 git push origin main || { rollback_promote; echo "error: push main 失败（本地 main 已回退 origin/main，dev 已回退）" >&2; exit 2; }
 
 # 重建 dev（force push 一步覆盖，避免 delete-then-push 的非原子窗口——delete 成功而
