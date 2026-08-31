@@ -23,11 +23,11 @@
 #     须通过 docs/** 路径校验，防「文档(」前缀夹带未验证代码随 squash 混入 main）
 #   - 内容提交：其余（须经验证；最近内容提交的父须等于 verified_commit）
 set -euo pipefail
-MODE=""; MSG_FILE=""; BID=""; TASK=""; APPROVED_BY=""
+MODE=""; MSG_FILE=""; BID=""; TASK=""; APPROVED_BY=""; EVIDENCE_SCOPE=""
 # check 模式失败分类输出（stderr；prepare/promote 亦输出，不影响既有行为与退出码）
 check_class() { echo "check_class=$1" >&2; }
 
-usage() { echo "usage: $0 --check [--task <id>] | --prepare [--task <id>] | --promote --baseline-id <id> --message-file <f> --task <id> [--approved-by <id>]"; exit 3; }
+usage() { echo "usage: $0 --check [--task <id>] | --prepare --evidence-scope <scope> [--task <id>] | --promote --baseline-id <id> --message-file <f> --task <id> [--approved-by <id>] [--evidence-scope <scope>]"; exit 3; }
 [ $# -ge 1 ] || usage
 case "$1" in
   --prepare) MODE="prepare"; shift ;;
@@ -41,16 +41,18 @@ case "$1" in
         --message-file) [ $# -ge 2 ] || usage; MSG_FILE="$2"; shift ;;
         --task) [ $# -ge 2 ] || usage; TASK="$2"; shift ;;
         --approved-by) [ $# -ge 2 ] || usage; APPROVED_BY="$2"; shift ;;
+        --evidence-scope) [ $# -ge 2 ] || usage; EVIDENCE_SCOPE="$2"; shift ;;
         *) usage ;;
       esac
       shift
     done ;;
   *) usage ;;
 esac
-# --task 为通用前置参数（prepare/check-only 亦可指定）
+# 通用前置参数（prepare/check-only/promote 亦可指定）
 while [ $# -gt 0 ]; do
   case "$1" in
     --task) [ $# -ge 2 ] || usage; TASK="$2"; shift ;;
+    --evidence-scope) [ $# -ge 2 ] || usage; EVIDENCE_SCOPE="$2"; shift ;;
     *) usage ;;
   esac
   shift
@@ -166,13 +168,15 @@ if [ "$MODE" = "check-only" ]; then
 fi
 
 if [ "$MODE" = "prepare" ]; then
+  # evidence-scope 必填（证据范围标签，随 candidate 写入登记；缺则退 3）
+  [ -n "$EVIDENCE_SCOPE" ] || { echo "error: --evidence-scope 必填（证据范围标签，如 lcview-liveness）" >&2; exit 3; }
   git fetch origin || { echo "error: fetch 失败" >&2; exit 1; }
   CNT=$(git rev-list --count main..dev)
   [ "$CNT" -gt 0 ] || { echo "dev 无领先 main 的提交（exit 4）"; exit 4; }
   # source_commit 取回溯后的最近内容提交 BH（非 HEAD，避免重复 prepare 时误记登记元提交）
   python3 harness/skills/publish-main-base/baseline_register.py add-candidate \
     --source-commit "$(git rev-parse --short=12 "$BH")" --receipt-path "$LATEST" \
-    --ki-gate "$KIGATE" \
+    --ki-gate "$KIGATE" --evidence-scope "$EVIDENCE_SCOPE" \
     || { echo "error: candidate 登记失败" >&2; exit 1; }
   # 登记随 dev 提交推送（避免弄脏工作树阻塞后续 precheck）
   git add harness/config/baseline-status.yaml
@@ -195,12 +199,15 @@ fi
 [ -n "$TASK" ] || { echo "error: promote 必须指定 --task（known-issues 门禁，与 prepare 保持一致）" >&2; exit 3; }
 git fetch origin || { echo "error: fetch 失败" >&2; exit 1; }
 # promote 收紧（基线晋升须上板证据）：最新收据须 result=pass 且 verify_mode=board；
-# dev 相对 origin/main 无 code/ 改动（纯文档/登记等非代码批次）时豁免放行并 warn；
+# dev 相对 origin/main 无 code/ 改动（纯文档/登记等非代码批次）时豁免放行并 warn，
+# 且证据范围改写为 no-code-change（本批无代码改动，原 scope 不适用）；
 # 其余（如 skip 收据 + 有代码改动）按 RECEIPT_FAIL 拒绝
+PROMOTE_SCOPE="$EVIDENCE_SCOPE"
 if [ "$RESULT" = "pass" ] && [ "$MODEV" = "board" ]; then
   :  # 上板验证证据齐备，放行
 elif [ -z "$(git diff --name-only origin/main...dev -- code/)" ]; then
   echo "warn: 最新收据 result=$RESULT verify_mode=$MODEV 非 pass+board，但 dev 相对 origin/main 无 code/ 改动，豁免放行"
+  PROMOTE_SCOPE="no-code-change"
 else
   check_class RECEIPT_FAIL
   echo "error: promote 要求最新收据 result=pass 且 verify_mode=board（实际 result=$RESULT verify_mode=$MODEV，且 dev 存在 code/ 改动）" >&2
@@ -242,9 +249,12 @@ git push origin "refs/tags/verified/$BID" || {
   echo "error: 推送 tag verified/$BID 失败" >&2; exit 2; }
 python3 harness/skills/publish-main-base/baseline_register.py promote \
   --baseline-id "$BID" --approved-by "$APPROVED_BY" \
+  ${PROMOTE_SCOPE:+--evidence-scope "$PROMOTE_SCOPE"} \
   || { echo "error: baseline 晋升登记失败（检查 $BID 是否为 candidate）" >&2; exit 1; }
 # 晋升登记随 dev 提交（squash 时一并进入 main；重建 dev 后仍在——reset --hard 前）
+# 证据快照目录 data/baselines/ 一并 add（promote 已生成 <id>-<收据名>.md 快照）
 git add harness/config/baseline-status.yaml
+if [ -d data/baselines ]; then git add data/baselines; fi
 if git diff --cached --quiet; then
   echo "warn: baseline-status.yaml 无变更，跳过晋升提交"
 else

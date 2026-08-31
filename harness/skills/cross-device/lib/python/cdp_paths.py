@@ -25,6 +25,17 @@ def data_verify_results_dir() -> Path:
     return d
 
 
+def data_baselines_dir() -> Path:
+    """证据快照目录（会 mkdir）：data/baselines。
+
+    promote 阶段把 verify 收据副本固化为 <baseline_id>-<收据名>.md，
+    随登记 yaml 一并提交入库，作为晋升证据链的落盘快照。
+    """
+    d = project_root() / "data" / "baselines"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def data_known_issues_dir() -> Path:
     """已知问题登记目录（会 mkdir）；与收据同源，仅 apply 侧写。"""
     d = project_root() / "data" / "known-issues"

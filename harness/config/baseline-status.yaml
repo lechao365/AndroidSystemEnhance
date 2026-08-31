@@ -65,10 +65,12 @@ baselines:
   build_result: PASS
   package_result: PASS
   board_verify: PASS
+  evidence_scope: lcview-liveness
   evidence:
     build_result: PASS
     package_result: PASS
     board_verify: PASS
     sync_manifest: data/verify-results/20260830-203409-manual-2608302034.md
+    evidence_scope: lcview-liveness
   approved_by: lechao
   approved_at: '2026-08-30T20:56:56+08:00'

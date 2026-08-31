@@ -1,4 +1,3 @@
-2026-08-26 10:52:03 17a6a4c9696c skip build=skip board=skip acc=- data/ci 真正出库，返 2 路径有归宿，命令块可拷贝（-s 无需上板）
 2026-08-26 14:30:53 1a34402f22c1 skip build=skip board=skip acc=- 建用例资产层（-s 无需上板）
 2026-08-26 14:43:34 eed1cdec047a skip build=skip board=skip acc=- 独立触发闭环（-s 无需上板）
 2026-08-26 14:59:54 ec10f7ba1c1b skip build=skip board=skip acc=- 测试源码归档进 code（-s 无需上板）
@@ -48,3 +47,4 @@
 2026-08-31 10:50:54 3b2019456966 skip build=skip board=skip acc=- 门禁下移到 Python 并堵畸形登记（-s 无需上板）
 2026-08-31 11:32:30 80634fbba714 skip build=skip board=skip acc=- promote 收紧为 pass 且 board 并记 ki_gate（-s 无
 2026-08-31 11:45:28 7b5fe41de795 skip build=skip board=skip acc=- promote 打 verified tag 并断言树等价（-s 无需上板）
+2026-08-31 14:30:55 30d0ce4139d2 skip build=skip board=skip acc=- 证据快照与 evidence_scope 登记（-s 无需上板）

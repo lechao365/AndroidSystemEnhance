@@ -19,6 +19,7 @@ CONFIG = Path(__file__).resolve().parents[2] / "config" / "baseline-status.yaml"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "lib" / "python"))
 from cdp_receipt import read_receipt  # noqa: E402
 from cdp_issue import issue_files, read_issue, validate_issue  # noqa: E402
+from cdp_paths import data_baselines_dir  # noqa: E402
 
 
 def load():
@@ -62,6 +63,7 @@ def main(argv=None):
     ap.add_argument("--approved-by")
     ap.add_argument("--task")
     ap.add_argument("--ki-gate", help="known-issues 门禁结论 pass/not-run，写入 evidence")
+    ap.add_argument("--evidence-scope", help="证据范围标签（如 lcview-liveness）；add-candidate 必填")
     args = ap.parse_args(argv)
 
     # check-issues：known-issues 门禁（publish_main_base.sh 委托；不读写登记 yaml）
@@ -140,6 +142,12 @@ def main(argv=None):
             print("error: add-candidate 必须传 --receipt-path（证据链要求实读 verify 收据）",
                   file=sys.stderr)
             return 1
+        # evidence_scope：证据范围标签必填（缺则退 1）——登记必须声明证据覆盖范围
+        evidence_scope = (args.evidence_scope or "").strip()
+        if not evidence_scope:
+            print("error: add-candidate 必须传 --evidence-scope（证据范围标签，缺则拒绝登记）",
+                  file=sys.stderr)
+            return 1
         try:
             r = read_receipt(args.receipt_path)
         except (OSError, UnicodeDecodeError) as e:
@@ -161,12 +169,14 @@ def main(argv=None):
                     b["build_result"] = build_result
                     b["package_result"] = build_result
                     b["board_verify"] = board_verify
+                    b["evidence_scope"] = evidence_scope
                     b["evidence"] = {
                         "build_result": build_result,
                         "package_result": build_result,
                         "board_verify": board_verify,
                         "sync_manifest": args.receipt_path,
                         "ki_gate": ki_gate,
+                        "evidence_scope": evidence_scope,
                     }
                     save(data)
                     print(f"candidate 复用并更新收据: {b['baseline_id']}（source_commit={args.source_commit}）")
@@ -183,12 +193,14 @@ def main(argv=None):
             "build_result": build_result,
             "package_result": build_result,
             "board_verify": board_verify,
+            "evidence_scope": evidence_scope,
             "evidence": {
                 "build_result": build_result,
                 "package_result": build_result,
                 "board_verify": board_verify,
                 "sync_manifest": args.receipt_path,
                 "ki_gate": ki_gate,
+                "evidence_scope": evidence_scope,
             },
         })
         save(data)
@@ -202,13 +214,36 @@ def main(argv=None):
                     print(f"error: baseline {args.baseline_id} 状态为 "
                           f"{b.get('status')!r}，仅 candidate 可 promote", file=sys.stderr)
                     return 1
+                # 证据快照：把条目 sync_manifest（verify 收据）复制到 data/baselines/
+                # <id>-<收据名>.md，随登记 yaml 一并入库；同名快照已存在即拒（防覆盖历史证据）
+                receipt = Path(b.get("sync_manifest") or "")
+                if not receipt.is_file():
+                    print(f"error: 收据文件不存在，无法生成证据快照: {receipt}",
+                          file=sys.stderr)
+                    return 1
+                snapshot_name = f"{args.baseline_id}-{receipt.name}"
+                if not snapshot_name.endswith(".md"):
+                    snapshot_name += ".md"
+                snapshot_path = data_baselines_dir() / snapshot_name
+                if snapshot_path.exists():
+                    print(f"error: 证据快照已存在，拒绝覆盖: {snapshot_path}",
+                          file=sys.stderr)
+                    return 1
+                snapshot_path.write_text(receipt.read_text(encoding="utf-8"),
+                                         encoding="utf-8")
+                # promote 允许透传/改写 evidence_scope（如零改动豁免时改写 no-code-change）
+                scope = (args.evidence_scope or "").strip()
+                if scope:
+                    b["evidence_scope"] = scope
+                    if isinstance(b.get("evidence"), dict):
+                        b["evidence"]["evidence_scope"] = scope
                 b["status"] = "promoted"
                 b["approved_by"] = args.approved_by or "lechao"
                 b["approved_at"] = datetime.datetime.now(
                     datetime.timezone(datetime.timedelta(hours=8))
                 ).strftime("%Y-%m-%dT%H:%M:%S+08:00")
                 save(data)
-                print(f"promoted: {args.baseline_id}")
+                print(f"promoted: {args.baseline_id}（快照: {snapshot_path}）")
                 return 0
         print(f"error: 未找到 baseline {args.baseline_id}")
         return 1
