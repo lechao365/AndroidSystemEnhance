@@ -1,4 +1,3 @@
-2026-08-26 14:43:34 eed1cdec047a skip build=skip board=skip acc=- 独立触发闭环（-s 无需上板）
 2026-08-26 14:59:54 ec10f7ba1c1b skip build=skip board=skip acc=- 测试源码归档进 code（-s 无需上板）
 2026-08-26 15:09:24 d1dfcb778909 skip build=skip board=skip acc=- 冻结版 AIDL 归档 + Windows 串口转发器（-s 无需上板）
 2026-08-26 16:52:26 a934b5b6da4a skip build=skip board=skip acc=- WSL 侧串口客户端落地（-s 无需上板）
@@ -48,3 +47,4 @@
 2026-08-31 11:45:28 7b5fe41de795 skip build=skip board=skip acc=- promote 打 verified tag 并断言树等价（-s 无需上板）
 2026-08-31 14:30:55 30d0ce4139d2 skip build=skip board=skip acc=- 证据快照与 evidence_scope 登记（-s 无需上板）
 2026-08-31 15:07:03 ecee8106f315 skip build=skip board=skip acc=- 清空验收假绿与指纹过激归一化（-s 无需上板）
+2026-08-31 15:39:36 8548e61e03c0 skip build=skip board=skip acc=- 修 emit 侧 11 项测试红并扩引用扫描（-s 无需上板）

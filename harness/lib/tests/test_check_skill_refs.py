@@ -85,9 +85,21 @@ class TestCheckSkillRefs(unittest.TestCase):
         self._mk("harness/skills/demo/SKILL.md", "ok\n")
         self._mk("harness/skills/demo/__pycache__/x.pyc", "")
         targets = ckr.iter_scan_targets(None)
-        rels = [str(t.relative_to(self.tmp)) for t in targets]
+        rels = [t.relative_to(self.tmp).as_posix() for t in targets]
         self.assertIn("harness/skills/demo/SKILL.md", rels)
         self.assertNotIn("harness/skills/demo/__pycache__/x.pyc", rels)
+
+    def test_iter_scan_targets_includes_docs(self):
+        # 默认扫描兼含 docs/（设计文档引用同样防悬空，不再只扫 harness/skills）
+        self._mk("harness/skills/demo/SKILL.md", "ok\n")
+        self._mk("docs/design/plan.md", "ok\n")
+        self._mk("docs/design/notes.txt", "txt 不纳入\n")
+        targets = ckr.iter_scan_targets(None)
+        rels = [t.relative_to(self.tmp).as_posix() for t in targets]
+        self.assertIn("harness/skills/demo/SKILL.md", rels)
+        self.assertIn("docs/design/plan.md", rels)
+        # 非目标后缀不纳入（.txt 不在 .md/.py/.sh/.yaml/.yml/.conf 白名单）
+        self.assertNotIn("docs/design/notes.txt", rels)
 
     def test_command_file_at_ref(self):
         self._mk("harness/skills/demo/SKILL.md", "x\n")
@@ -106,7 +118,7 @@ class TestCheckSkillRefs(unittest.TestCase):
         self._mk("harness/skills/a/SKILL.md", "[x](../b/m.md)")
         self._mk("harness/skills/b/m.md", "x\n")
         targets = ckr.iter_scan_targets("harness/skills/a/SKILL.md")
-        self.assertEqual([str(t.relative_to(self.tmp)) for t in targets],
+        self.assertEqual([t.relative_to(self.tmp).as_posix() for t in targets],
                          ["harness/skills/a/SKILL.md"])
 
 

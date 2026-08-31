@@ -645,6 +645,10 @@ class TestModeConserve(unittest.TestCase):
 
 class TestModePerf(unittest.TestCase):
     def _run(self, fake, totals, jsonls, monotonic=None, **kw):
+        if monotonic is None:
+            # 缺省 mock 递增值：粗粒度钟（Windows/mingw 等）下两次调用可能
+            # 同值 → dd_s=0 被 C4 守卫恒判红；递增值保证 dd_s>0 走正常流程
+            monotonic = [100.0, 100.5, 101.0, 101.5, 102.0, 102.5]
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(lc, "adb", fake):
                 with mock.patch.object(lc, "kernel_total",
@@ -652,11 +656,9 @@ class TestModePerf(unittest.TestCase):
                     with mock.patch.object(lc, "jsonl_line_count",
                                            side_effect=jsonls):
                         with mock.patch.object(lc.time, "sleep"):
-                            if monotonic:
-                                with mock.patch.object(lc.time, "monotonic",
-                                                       side_effect=monotonic):
-                                    return lc.mode_perf(tmp, _args(**kw))
-                            return lc.mode_perf(tmp, _args(**kw))
+                            with mock.patch.object(lc.time, "monotonic",
+                                                   side_effect=monotonic):
+                                return lc.mode_perf(tmp, _args(**kw))
 
     def test_perf_full_pipeline_ok(self):
         # dd 前直读内核 total=100/jsonl=90；dd 后直读 total=1321/jsonl=1311
