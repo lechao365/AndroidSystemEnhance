@@ -31,11 +31,11 @@ class TestBaselineRegister(unittest.TestCase):
         os.environ.pop("CDP_PROJECT_ROOT", None)
         self._tmp.cleanup()
 
-    def _make_receipt(self, build="pass", board="fail"):
+    def _make_receipt(self, build="pass", board="fail", cases="lcview-liveness"):
         r = Receipt(batch_id="batch-test", batch_base="", verified_commit="abc",
                     verify_mode="board", result="pass", build=build,
                     push_board=board, acceptance="ok", elapsed_s=10,
-                    summary="test")
+                    summary="test", cases=cases)
         return str(write_receipt(r, "body"))
 
     def _run(self, *args):
@@ -77,12 +77,43 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(b["board_verify"], "SKIP")
 
     def test_add_candidate_missing_evidence_scope(self):
-        # 缺 --evidence-scope：证据范围必填，必须拒绝登记（退 1）
-        rp = self._make_receipt()
+        # 缺 --evidence-scope 且收据无 cases：证据推导无源，拒绝登记（退 1）
+        rp = self._make_receipt(cases="")
         rc, out = self._run("add-candidate", "--receipt-path", rp,
                             "--source-commit", "abc123")
         self.assertEqual(rc, 1)
         self.assertIn("--evidence-scope", out)
+        self.assertEqual(br.load()["baselines"], [])
+
+    def test_add_candidate_evidence_scope_defaults_from_cases(self):
+        # 缺 --evidence-scope 且收据含 cases → 缺省推导（取收据实测范围）
+        rp = self._make_receipt(cases="lcview-liveness,lcview-transfer,lcview-perf")
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123")
+        self.assertEqual(rc, 0)
+        b = br.load()["baselines"][0]
+        self.assertEqual(b["evidence_scope"], "lcview-liveness,lcview-perf,lcview-transfer")
+        self.assertEqual(b["evidence"]["evidence_scope"], b["evidence_scope"])
+
+    def test_add_candidate_evidence_scope_manual_subset_ok(self):
+        # 人工传值为收据 cases 子集 → 放行（收窄声明合法）
+        rp = self._make_receipt(cases="lcview-liveness,lcview-transfer")
+        rc, _ = self._run("add-candidate", "--receipt-path", rp,
+                          "--source-commit", "abc123",
+                          "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 0)
+        b = br.load()["baselines"][0]
+        self.assertEqual(b["evidence_scope"], "lcview-liveness")
+
+    def test_add_candidate_evidence_scope_overshoot_rejected(self):
+        # 人工传值超出收据 cases → 拒绝（过度声称：未实测范围不得登记）
+        rp = self._make_receipt(cases="lcview-liveness")
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness,lcview-perf")
+        self.assertEqual(rc, 1)
+        self.assertIn("过度声称", out)
+        self.assertIn("lcview-perf", out)
         self.assertEqual(br.load()["baselines"], [])
 
     def test_add_candidate_missing_receipt_path(self):

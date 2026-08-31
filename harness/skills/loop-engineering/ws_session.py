@@ -422,7 +422,8 @@ def run_guidance(session):
         " [--ensure-boot 无 boot 标签时自动追加] [--wait-ready --log-since ... 有 reboot 时]",
         f"  3. python3 {vdir}/ws_report.py --result <pass|fail> --build ... --board ..."
         f" --acceptance <逐项 JSON> [--batch-file {session.get('batch_file') or '<批次>'}]"
-        f" --target {session.get('target') or base or '<12hex>'} --body <正文文件>",
+        f" --target {session.get('target') or base or '<12hex>'} --body <正文文件>"
+        + (f" --case {session.get('case')}" if session.get("case") else ""),
         f"  4. python3 {ws_session_cli_path()} done --session <session.json>"
         " --receipt <步骤 3 输出的收据路径> --stage <sync|build|push|acceptance>",
         f"验收文本: {acc}",

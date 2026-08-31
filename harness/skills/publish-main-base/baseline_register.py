@@ -63,7 +63,8 @@ def main(argv=None):
     ap.add_argument("--approved-by")
     ap.add_argument("--task")
     ap.add_argument("--ki-gate", help="known-issues 门禁结论 pass/not-run，写入 evidence")
-    ap.add_argument("--evidence-scope", help="证据范围标签（如 lcview-liveness）；add-candidate 必填")
+    ap.add_argument("--evidence-scope", help="证据范围标签（如 lcview-liveness）；"
+                        "缺省从收据 cases 推导，人工传值须为其子集（防过度声称）")
     args = ap.parse_args(argv)
 
     # check-issues：known-issues 门禁（publish_main_base.sh 委托；不读写登记 yaml）
@@ -144,17 +145,30 @@ def main(argv=None):
             print("error: add-candidate 必须传 --receipt-path（证据链要求实读 verify 收据）",
                   file=sys.stderr)
             return 1
-        # evidence_scope：证据范围标签必填（缺则退 1）——登记必须声明证据覆盖范围
+        # evidence_scope：证据推导优先——缺省取该收据 cases（上板实测范围），
+        # 人工传值须为其子集否则拒（防过度声称：不得声称未实测的用例范围）
         evidence_scope = (args.evidence_scope or "").strip()
-        if not evidence_scope:
-            print("error: add-candidate 必须传 --evidence-scope（证据范围标签，缺则拒绝登记）",
-                  file=sys.stderr)
-            return 1
         try:
             r = read_receipt(args.receipt_path)
         except (OSError, UnicodeDecodeError) as e:
             print(f"error: 读取收据失败 {args.receipt_path}: {e}", file=sys.stderr)
             return 1
+        receipt_cases = {c.strip() for c in (r.cases or "").split(",") if c.strip()}
+        if not evidence_scope:
+            if not receipt_cases:
+                print("error: add-candidate 缺 --evidence-scope 且收据无 cases 字段"
+                      "（证据推导无源），须传 --evidence-scope 或先让 ws_report 落 cases",
+                      file=sys.stderr)
+                return 1
+            evidence_scope = ",".join(sorted(receipt_cases))
+        else:
+            manual = {c.strip() for c in evidence_scope.split(",") if c.strip()}
+            if not manual.issubset(receipt_cases):
+                extra = ", ".join(sorted(manual - receipt_cases))
+                print(f"error: --evidence-scope {manual} 超出收据实测 cases"
+                      f"（{sorted(receipt_cases) or '无'}），过度声称拒绝登记: {extra}",
+                      file=sys.stderr)
+                return 1
         # build/package 共用收据 build 阶段，board_verify 取 push_board，均大写（不再伪造 PASS）
         # 空值（""/None/纯空白）记 FAIL 不记 SKIP——空值不是合法 skip 证据，证据链从严
         build_result = ((r.build or "").strip() or "FAIL").upper()

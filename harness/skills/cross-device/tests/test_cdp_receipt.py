@@ -158,6 +158,45 @@ class TestReceipt(unittest.TestCase):
             "- schema_version: 1\n- batch_id: abc123def456\n## body\n\nx\n")
         self.assertEqual(r.timings, "")
 
+    def test_cases_roundtrip(self):
+        # cases 字段（本次实际验收用例标签，逗号分隔）写读往返
+        r = _mk_receipt()
+        r.cases = "lcview-liveness,lcview-transfer,lcview-pipeline,lcview-perf"
+        p = cdp_receipt.write_receipt(r, "正文")
+        got = cdp_receipt.read_receipt(p)
+        self.assertEqual(got.cases, r.cases)
+
+    def test_old_receipt_without_cases_falls_back(self):
+        # 旧收据无 cases 字段 → from_text 回落空串（证据推导无源时须显式报错）
+        r = cdp_receipt.Receipt.from_text(
+            "- schema_version: 1\n- batch_id: abc123def456\n## body\n\nx\n")
+        self.assertEqual(r.cases, "")
+
+    def test_latest_board_receipt_picks_board_not_latest(self):
+        # 最新收据是 skip（-s 文档批）→ latest_board_receipt 须跳过，
+        # 取最新 verify_mode=board 的收据（evidence-scope 推导锚点）
+        r_skip = _mk_receipt("aaa111111111", "skip")
+        r_skip.verify_mode = "skip"
+        cdp_receipt.write_receipt(r_skip, "skip 批")
+        r_board = _mk_receipt("bbb222222222", "pass")
+        cdp_receipt.write_receipt(r_board, "board 批")
+        r_last = _mk_receipt("ccc333333333", "pass")
+        r_last.verify_mode = "manual"
+        cdp_receipt.write_receipt(r_last, "manual 批")
+        path, got = cdp_receipt.latest_board_receipt(self._dir)
+        self.assertTrue(path.name.endswith("-bbb222222222.md"))
+        self.assertEqual(got.batch_id, "bbb222222222")
+        self.assertEqual(got.verify_mode, "board")
+
+    def test_latest_board_receipt_none_when_no_board(self):
+        # 全无 board 收据 → (None, None)
+        r = _mk_receipt("aaa111111111", "skip")
+        r.verify_mode = "skip"
+        cdp_receipt.write_receipt(r, "skip 批")
+        path, got = cdp_receipt.latest_board_receipt(self._dir)
+        self.assertIsNone(path)
+        self.assertIsNone(got)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -83,6 +83,9 @@ def main(argv=None):
     ap.add_argument("--acceptance", default="")
     ap.add_argument("--elapsed", type=int, default=0)
     ap.add_argument("--summary", default="")
+    ap.add_argument("--case", default="",
+                    help="本次实际验收用例标签（逗号分隔；写入收据 cases 字段，"
+                         "供 baseline_register 推导 evidence-scope）")
     ap.add_argument("--metrics", default="",
                     help="三指标结构化 JSON 对象（写入收据 metrics 字段与 trend 行尾）")
     ap.add_argument("--timings-file", default="",
@@ -191,7 +194,7 @@ def main(argv=None):
                 build=args.build, push_board=args.board,
                 acceptance=args.acceptance, elapsed_s=args.elapsed,
                 summary=args.summary, metrics=args.metrics,
-                timings=args.timings)
+                timings=args.timings, cases=args.case)
     path = write_receipt(r, body or args.summary)
     append_trend(time.strftime("%Y-%m-%d %H:%M:%S"), batch_id, args.result,
                  f"build={args.build} board={args.board} "

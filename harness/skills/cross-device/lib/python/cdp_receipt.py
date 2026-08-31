@@ -20,7 +20,7 @@ _FIELD_RE = re.compile(r"^- (\w+): (.*)$", re.MULTILINE)
 _FIELDS = [
     "schema_version", "batch_id", "batch_base", "verified_commit",
     "verify_mode", "result", "build", "push_board", "acceptance",
-    "elapsed_s", "summary", "metrics", "timings",
+    "elapsed_s", "summary", "metrics", "timings", "cases",
 ]
 
 
@@ -28,7 +28,7 @@ class Receipt:
     def __init__(self, schema_version=1, batch_id="", batch_base="",
                  verified_commit="", verify_mode="board", result="fail",
                  build="skip", push_board="skip", acceptance="", elapsed_s=0,
-                 summary="", metrics="", timings=""):
+                 summary="", metrics="", timings="", cases=""):
         self.schema_version = schema_version
         self.batch_id = batch_id
         self.batch_base = batch_base
@@ -42,6 +42,7 @@ class Receipt:
         self.summary = summary
         self.metrics = metrics
         self.timings = timings
+        self.cases = cases
 
     @classmethod
     def from_text(cls, text):
@@ -108,6 +109,21 @@ def latest_receipt_with_path(verify_dir=None):
     if not files:
         return (None, None)
     return (files[-1], read_receipt(files[-1]))
+
+
+def latest_board_receipt(verify_dir=None):
+    """取最新 verify_mode=board 的收据（从最新往旧扫，跳过 skip/非 board）。
+
+    evidence-scope 推导锚点：登记时须以上板验证收据为准——最新收据可能
+    是 -s skip 或非 board 的文档批，其 cases 不代表真实上板证据范围。
+    返回 (路径, Receipt)；无 board 收据返回 (None, None)。
+    """
+    d = verify_dir or data_verify_results_dir()
+    for f in reversed(_detail_files(d)):
+        r = read_receipt(f)
+        if r.verify_mode == "board":
+            return (f, r)
+    return (None, None)
 
 
 def append_trend(timestamp, batch_id, result, stage, summary, metrics=""):
