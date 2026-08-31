@@ -186,7 +186,8 @@ def _default_out():
             return posixpath.join(aosp, "out")
     except Exception:
         pass
-    return str(Path.home() / "workspace" / "aosp" / "out")
+    # 回退分支同样 posix 拼接（Windows Path 会产出反斜杠，传给 adb/设备侧破坏路径）
+    return posixpath.join(str(Path.home()), "workspace", "aosp", "out")
 
 
 def main(argv=None):

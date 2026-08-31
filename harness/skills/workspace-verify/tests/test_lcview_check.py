@@ -676,6 +676,8 @@ class TestModePerf(unittest.TestCase):
         self.assertTrue(any(c[1].startswith("cat /proc/") for c in fake.calls))
 
     def test_perf_metrics_json_emitted(self):
+        # 走 TestModePerf._run（缺省 mock monotonic 递增值，与 C4 守卫同源）；
+        # 上批漏转的独立实现仍无 monotonic mock，粗粒度钟下 dd_s=0 恒判红
         fake = FakeAdb(dd_rc=0,
                        pidof_out="1234\n", pidof_rc=0,
                        proc_out="VmHWM:\t    5516 kB\n", proc_rc=0)
@@ -687,8 +689,11 @@ class TestModePerf(unittest.TestCase):
                     with mock.patch.object(lc, "jsonl_line_count",
                                            side_effect=[90, 1311, 1311]):
                         with mock.patch.object(lc.time, "sleep"):
-                            with contextlib.redirect_stdout(out):
-                                rc = lc.mode_perf(tmp, _args())
+                            with mock.patch.object(lc.time, "monotonic",
+                                                   side_effect=[100.0, 103.7,
+                                                                103.7, 104.1]):
+                                with contextlib.redirect_stdout(out):
+                                    rc = lc.mode_perf(tmp, _args())
         self.assertEqual(rc, 0)
         line = [ln for ln in out.getvalue().splitlines()
                 if ln.startswith("METRICS ")]

@@ -394,6 +394,26 @@ class TestResolveAcceptance(unittest.TestCase):
         self.assertIn("不存在", err)
         self.assertIn("my-case", err)
 
+    def test_case_comma_multi_concat(self):
+        # 逗号分隔多用例：逐个查表按序拼接（空格连接）
+        with tempfile.TemporaryDirectory() as d:
+            y = Path(d) / "verify-cases.yaml"
+            y.write_text('cases:\n  a: "svc:x"\n  b: "log:heartbeat"\n',
+                         encoding="utf-8")
+            acc, err = wa.resolve_acceptance(self._args(case="a,b"), cases_path=y)
+        self.assertIsNone(err)
+        self.assertEqual(acc, "svc:x log:heartbeat")
+
+    def test_case_comma_multi_missing_rejects(self):
+        # 多用例中任一标签缺失 → 整批拒绝（不部分拼接）
+        with tempfile.TemporaryDirectory() as d:
+            y = Path(d) / "verify-cases.yaml"
+            y.write_text("cases:\n  a: boot\n", encoding="utf-8")
+            acc, err = wa.resolve_acceptance(self._args(case="a,nope"), cases_path=y)
+        self.assertIsNone(acc)
+        self.assertIn("nope", err)
+        self.assertIn("不存在", err)
+
     def test_inbuilt_lcview_liveness_present(self):
         # 资产层内建 lcview-liveness 可解析（daemon 直读内核 + 持续心跳 +
         # logfield 字段断言 0（overrun/dropped/readErr，防子串命中历史零值

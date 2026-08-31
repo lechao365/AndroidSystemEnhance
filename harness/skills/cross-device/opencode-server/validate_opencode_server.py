@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -124,6 +125,37 @@ def validate_no_lcskills_core_ref() -> list[str]:
     return errors
 
 
+def validate_script_runs() -> list[str]:
+    """脚本须可真跑：bash -n 语法检查退 0；--help 断言退 0 且含 usage。
+
+    让校验跑真脚本（而非仅静态正则）：语法错误/参数解析破坏在检查期暴露，
+    不再等上板/手工触发。
+    """
+    if not SCRIPT.is_file():
+        return [f"脚本不存在: {SCRIPT}"]
+    errors = []
+    try:
+        r = subprocess.run(["bash", "-n", str(SCRIPT)],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=60)
+        if r.returncode != 0:
+            errors.append(f"bash -n 语法检查失败: {r.stderr.strip()[:200]}")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        errors.append(f"bash -n 执行失败: {e}")
+    try:
+        r = subprocess.run(["bash", str(SCRIPT), "--help"],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=60)
+        if r.returncode != 0:
+            errors.append(f"--help 退出码 {r.returncode} != 0: "
+                          f"{(r.stderr or r.stdout).strip()[:200]}")
+        elif "usage" not in r.stdout.lower():
+            errors.append("--help 输出不含 usage（用法说明缺失）")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        errors.append(f"--help 执行失败: {e}")
+    return errors
+
+
 def main() -> int:
     log_info("validate_opencode_server - 校验脚本与 SKILL.md 一致性")
     all_errors: list[str] = []
@@ -133,6 +165,7 @@ def main() -> int:
     all_errors.extend(validate_atomic_write())
     all_errors.extend(validate_help_before_init())
     all_errors.extend(validate_no_lcskills_core_ref())
+    all_errors.extend(validate_script_runs())
     if all_errors:
         for e in all_errors:
             log_error(e)
