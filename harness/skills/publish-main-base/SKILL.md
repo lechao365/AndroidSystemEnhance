@@ -94,7 +94,8 @@ python3 harness/skills/loop-engineering/ws_session.py start --goal "基线发布
 
 ### 阶段 3：candidate 登记
 ```bash
-bash harness/skills/publish-main-base/publish_main_base.sh --prepare [--task <id>]
+bash harness/skills/publish-main-base/publish_main_base.sh --prepare [--task <id>] [--evidence-scope <scope>]
+（--evidence-scope 缺省从最新 board 收据 cases 推导；人工传值须为其子集，防过度声称）
 ```
 （登记 candidate 随 dev 提交推送；输出 baseline_id）
 

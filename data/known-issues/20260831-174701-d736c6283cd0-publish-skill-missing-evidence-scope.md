@@ -5,7 +5,7 @@
 - origin: introduced
 - blocking: False
 - blocking_reason: 
-- status: open
+- status: fixed
 - task: lcview-refactor
 - resolved_in: 
 

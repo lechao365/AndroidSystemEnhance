@@ -76,6 +76,15 @@ class TestIssue(unittest.TestCase):
         self.assertEqual(got.task, _TASK)
         self.assertEqual(got.resolved_in, "")
 
+    def test_write_issue_rejects_invalid_batch_id(self):
+        # batch_id 非 12 位小写 hex → 写时抛错（畸形文件名不留到 promote 才暴露）
+        for bad in ("", "abc", "18F27638D9F6", "18f27638d9f6-", "18f27638d9f"):
+            r = _mk_issue()
+            r.batch_id = bad
+            with self.assertRaises(ValueError) as cm:
+                cdp_issue.write_issue(r, "现场")
+            self.assertIn("batch_id 非法", str(cm.exception))
+
     def test_body_fields_do_not_bleed(self):
         # 正文含 "- status: wontfix" 等 key-value 行不得覆盖头部字段
         r = _mk_issue(status="open", origin="introduced")

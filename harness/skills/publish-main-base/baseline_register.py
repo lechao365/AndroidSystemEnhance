@@ -69,9 +69,6 @@ def main(argv=None):
 
     # check-issues：known-issues 门禁（publish_main_base.sh 委托；不读写登记 yaml）
     if args.action == "check-issues":
-        if not args.task:
-            print("error: check-issues 必须传 --task（门禁按任务过滤）", file=sys.stderr)
-            return 1
         # 先判畸形登记：validate_issue 有红即拒（文件名/头字段/枚举/index 一致性全局把关，
         # 防 index 按空格切分错位等畸形记录污染门禁判定）
         for p in issue_files():
@@ -82,6 +79,26 @@ def main(argv=None):
                 print("error: known-issues 畸形登记，拒绝（先修复登记再发布基线）",
                       file=sys.stderr)
                 return 1
+        # task 推断：缺省从 status 非 fixed 条目的 task 集合推断（自动，无需人工申报）
+        active_tasks = {i.task for p in issue_files()
+                        if (i := read_issue(p)).status != "fixed" and i.task}
+        if args.task:
+            # 白名单：显式传 --task 不在活跃集合内即 exit 3（防拼错静默通过；
+            # 空集合时放行——无活跃任务则无冲突对象）
+            if active_tasks and args.task not in active_tasks:
+                print(f"error: --task {args.task!r} 不在活跃任务集合 "
+                      f"{sorted(active_tasks)} 内（防拼错静默通过）",
+                      file=sys.stderr)
+                return 3
+        else:
+            if len(active_tasks) == 1:
+                args.task = next(iter(active_tasks))
+            elif len(active_tasks) > 1:
+                print(f"error: 活跃任务集合多值 {sorted(active_tasks)}，"
+                      f"须显式传 --task 之一", file=sys.stderr)
+                return 1
+            else:
+                args.task = "empty-registry"
         # 再判目标任务未解决阻塞：origin=introduced 或 blocking 且 status!=fixed 即拒
         bad = []
         for p in issue_files():
