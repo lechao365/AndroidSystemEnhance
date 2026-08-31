@@ -483,6 +483,61 @@ class TestResolveAcceptance(unittest.TestCase):
             wa.parse_acceptance("boot 设备能正常播放音频")
 
 
+class TestMultiCase(unittest.TestCase):
+    def test_case_comma_separated_concatenates(self):
+        # --case 支持逗号分隔多用例：逐个查表，验收文本按序拼接（空格连接）
+        with tempfile.TemporaryDirectory() as d:
+            y = Path(d) / "verify-cases.yaml"
+            y.write_text("cases:\n  c1: svc:a\n  c2: log:x\n  c3: boot\n",
+                         encoding="utf-8")
+            acc, err = wa.resolve_acceptance(
+                argparse.Namespace(acceptance=None, case="c1,c2,c3",
+                                   batch_file=None),
+                cases_path=y)
+        self.assertIsNone(err)
+        self.assertEqual(acc, "svc:a log:x boot")
+
+    def test_case_comma_any_missing_rejected(self):
+        # 逗号分隔多用例中任一缺失 → 整批拒绝（不部分拼接，防静默丢用例）
+        with tempfile.TemporaryDirectory() as d:
+            y = Path(d) / "verify-cases.yaml"
+            y.write_text("cases:\n  c1: boot\n", encoding="utf-8")
+            acc, err = wa.resolve_acceptance(
+                argparse.Namespace(acceptance=None, case="c1,missing",
+                                   batch_file=None),
+                cases_path=y)
+        self.assertIsNone(acc)
+        self.assertIn("missing", err)
+        self.assertIn("不存在", err)
+
+    def test_case_comma_all_empty_rejected(self):
+        # 逗号分隔后无有效标签（全空白/空串）→ 拒绝
+        with tempfile.TemporaryDirectory() as d:
+            y = Path(d) / "verify-cases.yaml"
+            y.write_text("cases:\n  c1: boot\n", encoding="utf-8")
+            acc, err = wa.resolve_acceptance(
+                argparse.Namespace(acceptance=None, case=" ,, ",
+                                   batch_file=None),
+                cases_path=y)
+        self.assertIsNone(acc)
+        self.assertIn("为空", err)
+
+
+class TestEmptyAcceptance(unittest.TestCase):
+    def test_run_acceptance_empty_fails(self):
+        # 空验收（无任何标签）→ 判红并附说明项：防空验收静默返 pass 的假绿
+        overall, items = wa.run_acceptance("", lambda c: ("", 0), lambda: "")
+        self.assertEqual(overall, "fail")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["status"], "fail")
+        self.assertIn("验收为空", items[0]["detail"])
+
+    def test_run_acceptance_blank_fails(self):
+        # 纯空白验收同样判红（parse 无标签且 strip 后为空）
+        overall, items = wa.run_acceptance("   \n\t ", lambda c: ("", 0), lambda: "")
+        self.assertEqual(overall, "fail")
+
+
 class TestConvertSince(unittest.TestCase):
     def _dev(self, epoch, tz="+0000"):
         def dev(cmd):

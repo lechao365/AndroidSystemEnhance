@@ -668,6 +668,11 @@ def mode_perf(tmp, args):
     if rc != 0:
         print(f"ERROR: dd 负载执行失败 rc={rc}（块设备 {dev} 不可读？）")
         return 1
+    if dd_s <= 0:
+        # 单调钟下 dd_s<=0 说明负载从未真正执行（计时异常/空转），
+        # 出数会得到 throughput=inf 的假基线，判红并提示负载未执行
+        print("ERROR: dd 计时非正（dd_s<=0），负载未执行或计时异常，判红防假基线")
+        return 1
 
     # drain 计时起点 = dd 完成时刻；直读按 100ms 采样——先等内核计数出现增量
     # （dd 产生事件已计入），再等 jsonl 落盘达标（与心跳观测 28s 粒度解耦）

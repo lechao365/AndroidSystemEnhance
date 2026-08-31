@@ -716,6 +716,24 @@ class TestModePerf(unittest.TestCase):
         rc = self._run(fake, totals=[100], jsonls=[90])
         self.assertEqual(rc, 1)
 
+    def test_perf_dd_s_zero_fails(self):
+        # dd_s<=0（负载未执行或计时异常）→ 判红并提示，不得出 throughput=inf 假基线
+        fake = FakeAdb(dd_rc=0)
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(lc, "adb", fake):
+                with mock.patch.object(lc, "kernel_total",
+                                       side_effect=[100]):
+                    with mock.patch.object(lc, "jsonl_line_count",
+                                           side_effect=[90]):
+                        with mock.patch.object(lc.time, "sleep"):
+                            with mock.patch.object(lc.time, "monotonic",
+                                                   side_effect=[100.0, 100.0]):
+                                with contextlib.redirect_stdout(out):
+                                    rc = lc.mode_perf(tmp, _args())
+        self.assertEqual(rc, 1)
+        self.assertIn("负载未执行", out.getvalue())
+
     def test_perf_kernel_lag_waits_for_update(self):
         # dd 后首轮直读仍为 dd 前旧值（内核计数尚未反映）→ 不得把 0>=0
         # 误判达标，须等内核计数出现增量后再判 jsonl 达标

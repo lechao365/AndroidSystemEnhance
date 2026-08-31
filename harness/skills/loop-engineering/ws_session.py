@@ -35,7 +35,10 @@ from cdp_receipt import read_receipt  # noqa: E402
 # 会话老化配额（spec §4.7）：目录级，仅删已终结会话
 _SESSION_KEEP = 20
 
-# 归一化规则：剥时间戳（三种格式）/ 家目录与 workspace 路径 / 十六进制地址 / 数字
+# 归一化规则：剥时间戳（三种格式）/ 家目录与 workspace 路径 / 十六进制地址。
+# 数字不再归一化（_NUM_RE 已删）：错误行中的数值（端口/行号/计数）是语义稳定
+# 部分，剥掉会把不同问题折叠成同一指纹（过激归一化），保留 TS/HOME/HEX 三类
+# 纯易变字段即可满足误判防护（spec §4.3）。
 # 三种格式：ISO 日期时间（YYYY-MM-DD[ T]HH:MM:SS(.ms)）、MM/DD HH:MM:SS、logcat MM-DD HH:MM:SS.mmm
 _TS_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?"
@@ -44,11 +47,10 @@ _TS_RE = re.compile(
 )
 _HOME_RE = re.compile(r"/home/[A-Za-z0-9_.-]+")
 _HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
-_NUM_RE = re.compile(r"\d+")
 
 
 def normalize_error_line(text):
-    """首错误行归一化：剥易变字段（时间戳/路径/地址/数字），保留语义稳定部分。
+    """首错误行归一化：剥易变字段（时间戳/路径/地址），保留语义稳定部分。
 
     误判防护（spec §4.3）：同一问题但错误行含时间戳/地址微变时，
     不得被误判为指纹演化而无限清零 patience。
@@ -57,7 +59,6 @@ def normalize_error_line(text):
     t = _TS_RE.sub("<TS>", t)
     t = _HOME_RE.sub("~", t)
     t = _HEX_RE.sub("<HEX>", t)
-    t = _NUM_RE.sub("<NUM>", t)
     return t[:200]
 
 

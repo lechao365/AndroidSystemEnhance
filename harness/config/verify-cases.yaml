@@ -48,9 +48,9 @@ cases:
   # 新事件落盘（delta --event 4）与轮转 seq 递增（重启后 FileWriter
   # 从目录续接 seq，写更高 _p{seq}，不重复写 _p0）。kill 有副作用（服务重启，
   # init 自动恢复），单独用例不并入 liveness。
-  # 注：lcview-recover-hal 随 HAL 停用移除（HAL rc 改名 .disabled，设备无
-  # HAL 进程可 kill，用例语义失效；lcview_recover.sh 现仅支持 daemon 分支，
-  # hal 分支已删除）
+  # 注：lcview-recover-hal 已移除——HAL 源码/模块/服务全部删除，设备上不存在
+  #   HAL 进程可 kill，用例语义失效；lcview_recover.sh 现仅支持 daemon 分支，
+  #   hal 分支已删除
   lcview-recover-daemon: 'hostcmd:"cases/lcview_recover.sh daemon"'
 
   # L1 被动数据管道主用例（原 cases/lcview_pipeline.yaml 收敛于此，critical 项）：
