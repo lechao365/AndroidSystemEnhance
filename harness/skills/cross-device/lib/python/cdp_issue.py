@@ -1,7 +1,8 @@
-"""data/known-issues 已知问题登记模块：写详情、读详情、校验、索引（写时老化保留 _ISSUE_KEEP 份）。
+"""data/known-issues 已知问题登记模块：写详情、读详情、校验、索引（写时老化仅已闭环记录计配额，保留 _ISSUE_KEEP 份已闭环记录）。
 
 问题文件: data/known-issues/<YYYYMMDD-HHMMSS>-<batch_id>-<slug>.md
-（markdown key-value 头 + 正文；命名保证唯一写入，超 _ISSUE_KEEP 删最旧）
+（markdown key-value 头 + 正文；命名保证唯一写入，已闭环超 _ISSUE_KEEP 删最旧，
+未闭环条目不计配额不删）
 索引文件: data/known-issues/index.md（一行一条: issue_id origin blocking task status，
 write_issue 与状态变更均重建回写；index.md 不计配额）
 模板: harness/config/known-issues-template.md（头字段集必须与 _FIELDS 完全一致，
@@ -88,7 +89,7 @@ def _slug_from_title(title: str) -> str:
 
 
 def write_issue(issue, body_text, slug=""):
-    """写详情文件（唯一写入：<时间戳>-<batch_id>-<slug>.md；超 _ISSUE_KEEP 删最旧）并回写 index，返回路径。
+    """写详情文件（唯一写入：<时间戳>-<batch_id>-<slug>.md；已闭环超 _ISSUE_KEEP 删最旧）并回写 index，返回路径。
 
     slug 缺省由 title 派生；batch_id 来自 issue.batch_id（命名元数据，非头字段）。
     同秒同批同名冲突时追加 -1/-2 序号，绝不覆盖既有记录。
@@ -120,10 +121,15 @@ def issue_files(issues_dir=None):
 
 
 def prune_issues(issues_dir=None):
-    """问题文件老化保留 _ISSUE_KEEP 份（index.md 不计配额），删最旧。"""
+    """问题文件老化：仅已闭环记录（status=fixed 且 blocking=false）计配额，
+    保留 _ISSUE_KEEP 份已闭环记录删最旧；未闭环条目不计配额不删。"""
     d = issues_dir or data_known_issues_dir()
-    files = issue_files(d)
-    for old in files[: max(0, len(files) - _ISSUE_KEEP)]:
+    closed = []
+    for p in issue_files(d):
+        i = read_issue(p)
+        if i.status == "fixed" and not i.blocking:
+            closed.append(p)
+    for old in closed[: max(0, len(closed) - _ISSUE_KEEP)]:
         old.unlink()
 
 
@@ -211,6 +217,9 @@ def validate_issue(path, issues_dir=None):
         blocking = fields.get("blocking", "false").lower() in ("true", "1", "yes")
         if blocking and not fields.get("blocking_reason", ""):
             errs.append("blocking=true 但 blocking_reason 为空")
+        # task 含空白判红：read_index 按空格切分 index 行，task 内空白会列错位
+        if re.search(r"\s", fields.get("task", "")):
+            errs.append(f"task 含空白: {fields['task']!r}（index 按空格切分会错位）")
 
     # index 与文件集一致（文件缺失/多余均检出；目标文件字段须与 index 匹配）
     entries = read_index(d)

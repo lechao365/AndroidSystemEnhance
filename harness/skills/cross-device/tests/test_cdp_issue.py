@@ -93,10 +93,21 @@ class TestIssue(unittest.TestCase):
             cdp_issue.write_issue(_mk_issue(f"KI-20260829-00{i}"), f"body{i}")
         self.assertEqual(len(cdp_issue.issue_files(self._dir)), 5)
 
-    def test_prune_keeps_20_issues(self):
-        # 超配额：写 25 份只保留最新 20，index 与文件集一致（validate 无红）
+    def test_prune_open_never_aged_out(self):
+        # 未闭环不老化：25 条 open（blocking=true）不计配额，全部保留
         for i in range(25):
             cdp_issue.write_issue(_mk_issue(f"KI-20260829-{i:03d}"), f"body{i}")
+        files = cdp_issue.issue_files(self._dir)
+        self.assertEqual(len(files), 25)
+        self.assertEqual(cdp_issue.validate_issue(files[-1], self._dir), [])
+
+    def test_prune_fixed_keeps_20(self):
+        # 已闭环配额：25 条 fixed 且 blocking=false，仅保留最新 20 条已闭环记录
+        for i in range(25):
+            r = _mk_issue(f"KI-20260829-{i:03d}", status="fixed")
+            r.blocking = False
+            r.blocking_reason = ""
+            cdp_issue.write_issue(r, f"body{i}")
         files = cdp_issue.issue_files(self._dir)
         self.assertEqual(len(files), cdp_issue._ISSUE_KEEP)
         self.assertEqual(len(files), 20)
@@ -198,6 +209,18 @@ class TestIssue(unittest.TestCase):
             encoding="utf-8")
         errs = cdp_issue.validate_issue(p, self._dir)
         self.assertTrue(any("blocking_reason" in e for e in errs), errs)
+
+    def test_validate_task_with_whitespace_red(self):
+        # task 含空白判红：read_index 按空格切分 index 行，task 内空白会列错位
+        p = self._dir / "20260829-180000-18f27638d9f6-bad.md"
+        p.write_text(
+            "- schema_version: 1\n- issue_id: KI-X\n- title: t\n"
+            "- discovered_in: 38433d446f07\n- origin: introduced\n"
+            "- blocking: false\n- blocking_reason: \n- status: open\n"
+            "- task: fix lcview bug\n- resolved_in: \n\n## body\n\nx\n",
+            encoding="utf-8")
+        errs = cdp_issue.validate_issue(p, self._dir)
+        self.assertTrue(any("task 含空白" in e for e in errs), errs)
 
     def test_validate_bad_filename(self):
         p = self._dir / "notes.md"

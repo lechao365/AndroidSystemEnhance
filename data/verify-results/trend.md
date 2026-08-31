@@ -1,4 +1,3 @@
-2026-08-26 09:42:09 27ce0645416f skip build=skip board=skip acc=- batch_id 抗空格插入，退出码补全，冒烟前测遗留（-s 无需上板；EXTR
 2026-08-26 10:17:08 1c27a03a43a2 skip build=skip board=skip acc=- 上板前补 adb 就绪、连接重试、超时可辨与 prop 判据（-s 无需上板）
 2026-08-26 10:27:22 6fd3048d34d2 skip build=skip board=skip acc=- logcat 收窄时间窗，log 判据可辨，CLI 不裸崩（-s 无需上板）
 2026-08-26 10:38:12 8edfea81314c skip build=skip board=skip acc=- 冒烟证据不留空洞，假绿条件强制拦截，缩进清尾（-s 无需上板）
@@ -48,3 +47,4 @@
 2026-08-29 17:41:11 18f27638d9f6 skip build=skip board=skip acc=- 补 known-issues 校验与门禁（-s 无需上板）
 2026-08-29 20:41:12 manual-2608292041 skip build=skip board=skip acc=- 清理去 HAL/迁 vendor 残留：README/recover hal 分
 2026-08-30 20:34:09 manual-2608302034 pass build=pass board=pass acc=[{"tag":"svc:lechao_lcview","status":"pa publish-main-base 基线发布验证：lcview 去 HAL 迁移
+2026-08-31 10:31:08 f43558ffa5c7 skip build=skip board=skip acc=- known-issues 未闭环不老化并修 precheck 假拒（-s 无需上
