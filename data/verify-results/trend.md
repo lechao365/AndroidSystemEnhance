@@ -1,4 +1,3 @@
-2026-08-26 23:14:50 manual-2608262314 pass build=skip board=pass acc=jsonl_files_exist=pass jsonl_valid_json= lcview 业务板端验证通过（L1 管道健康 4PASS + L2 触发全链路
 2026-08-27 07:50:56 manual-2608270750 pass build=pass board=pass acc=svc:lechao_lcview_hal=pass svc:lechao_lc lcview 业务链路日志验证通过（build tag 命中16次+batch 
 2026-08-27 09:18:48 8c814ca8e1dc skip build=skip board=skip acc=- 清测试红线,解 promote 阻塞,消时钟人工与机器绑定（-s 无需上板）
 2026-08-27 09:53:51 14ea313975d6 skip build=skip board=skip acc=- 回收上批 6 处缺陷,消静默降级与时钟不可信（-s 无需上板）
@@ -48,3 +47,4 @@
 2026-08-31 17:29:24 manual-2608311729 pass build=pass board=pass acc={ 基线发布验证:四组验收全绿+单测190全过+perf指标齐备 | {"daemon_rss_kb": 5040, "dd_s": 2.357, "drain_ms_per_event": 0.373, "jsonl_delta": 3081, "load_mb": 64, "throughput_evs": 1307.2, "total_delta": 3081}
 2026-08-31 17:49:01 d736c6283cd0 skip build=skip board=skip acc=- evidence-scope 由人工申报改为证据推导（-s 无需上板）
 2026-08-31 19:16:52 641d371c3da2 skip build=skip board=skip acc=- 解畸形登记堵死门禁并自动推断 task（-s 无需上板）
+2026-08-31 19:30:35 7a04f2d146f1 skip build=skip board=skip acc=- 编排器接线,让参数推断真正生效（-s 无需上板）

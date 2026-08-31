@@ -345,17 +345,23 @@ class TestSyncModifyToMainBase(unittest.TestCase):
             self._git("ls-remote", "origin",
                       "refs/tags/verified/BL-TEST-01").stdout.strip(), "")
 
-    def test_prepare_without_task_records_ki_gate_not_run(self):
-        # 方向 3/4：prepare 未传 --task → warn + KIGATE=not-run 写入 evidence
+    def test_prepare_without_task_infers_ki_gate(self):
+        # 方向 7：prepare 全不传（--task/--evidence-scope）走通——门禁无条件执行，
+        # 缺省从唯一活跃 task 推断（KIGATE=inferred），scope 从收据 cases 推导
         self._setup_remote()
+        # 唯一活跃 task（非阻塞非 introduced，门禁推断后可放行），随收据入库为 c3
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
         self._receipt_commit_c3()
-        r = self._run("--prepare", "--evidence-scope", "lcview-liveness")
+        r = self._run("--prepare")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("KIGATE=not-run", r.stderr)
+        self.assertIn("known-issues 门禁通过（task=t1", r.stderr)
         data = yaml.safe_load(
             (self.root / "harness" / "config" / "baseline-status.yaml").read_text(
                 encoding="utf-8"))
-        self.assertEqual(data["baselines"][0]["evidence"]["ki_gate"], "not-run")
+        self.assertEqual(data["baselines"][0]["evidence"]["ki_gate"], "inferred")
+        # scope 缺省推导自收据 cases，而非要求人工申报
+        self.assertEqual(data["baselines"][0]["evidence_scope"], "lcview-liveness")
 
     def test_prepare_with_task_records_ki_gate_pass(self):
         # 方向 3/4：--task 门禁通过（空登记合法）→ KIGATE=pass 写入 evidence
@@ -368,6 +374,25 @@ class TestSyncModifyToMainBase(unittest.TestCase):
             (self.root / "harness" / "config" / "baseline-status.yaml").read_text(
                 encoding="utf-8"))
         self.assertEqual(data["baselines"][0]["evidence"]["ki_gate"], "pass")
+
+    def test_promote_without_task_infers_ki_gate(self):
+        # 方向 7：promote 全不传（--task/--evidence-scope）走通——强制 --task 已删，
+        # 门禁在共用段推断唯一活跃 task 后放行，完整 e2e 晋升完成
+        self._setup_remote()
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
+        self._candidate_yaml()
+        self._receipt_commit_c3(verify_mode="skip")
+        msg = Path(self._remote_tmp.name) / "promote-msg.txt"
+        msg.write_text("构建(baseline): BL-TEST-01 基线晋升\n", encoding="utf-8")
+        r = self._run("--promote", "--baseline-id", "BL-TEST-01",
+                      "--message-file", str(msg))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("known-issues 门禁通过（task=t1", r.stderr)
+        self.assertIn("promote 完成", r.stdout)
+        self.assertIn("refs/tags/verified/BL-TEST-01",
+                      self._git("ls-remote", "origin",
+                                "refs/tags/verified/BL-TEST-01").stdout)
 
 
 if __name__ == "__main__":
