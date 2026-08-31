@@ -1,4 +1,3 @@
-2026-08-26 15:09:24 d1dfcb778909 skip build=skip board=skip acc=- 冻结版 AIDL 归档 + Windows 串口转发器（-s 无需上板）
 2026-08-26 16:52:26 a934b5b6da4a skip build=skip board=skip acc=- WSL 侧串口客户端落地（-s 无需上板）
 2026-08-26 22:21:38 manual-2608262221 pass build=pass board=pass acc=svc:lechao_lcview_hal=pass svc:lechao_lc lcview CXX 修复批首次真实上板验证通过（7P1 全清，设备健康运行）
 2026-08-26 23:14:50 manual-2608262314 pass build=skip board=pass acc=jsonl_files_exist=pass jsonl_valid_json= lcview 业务板端验证通过（L1 管道健康 4PASS + L2 触发全链路
@@ -48,3 +47,4 @@
 2026-08-31 15:07:03 ecee8106f315 skip build=skip board=skip acc=- 清空验收假绿与指纹过激归一化（-s 无需上板）
 2026-08-31 15:39:36 8548e61e03c0 skip build=skip board=skip acc=- 修 emit 侧 11 项测试红并扩引用扫描（-s 无需上板）
 2026-08-31 16:55:03 ec62ae0ce5f6 pass build=pass board=pass acc={ lcview 重构闭环证据:四组验收全绿+单测 190 全过+perf 指标齐备 | {"daemon_rss_kb": 5040, "dd_s": 2.33, "drain_ms_per_event": 0.371, "jsonl_delta": 3075, "load_mb": 64, "throughput_evs": 1319.8, "total_delta": 3075}
+2026-08-31 17:29:24 manual-2608311729 pass build=pass board=pass acc={ 基线发布验证:四组验收全绿+单测190全过+perf指标齐备 | {"daemon_rss_kb": 5040, "dd_s": 2.357, "drain_ms_per_event": 0.373, "jsonl_delta": 3081, "load_mb": 64, "throughput_evs": 1307.2, "total_delta": 3081}

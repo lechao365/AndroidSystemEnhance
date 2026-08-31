@@ -396,11 +396,15 @@ def _resolve_acceptance_for_run(session):
         except (OSError, yaml.YAMLError) as exc:
             raise RuntimeError(f"verify-cases.yaml 读取失败: {exc}") from exc
         cases = data.get("cases") or {}
-        if session["case"] not in cases:
+        # 与 ws_acceptance.py resolve_acceptance 对齐：--case 支持逗号分隔
+        # 多用例，逐个查表拼接，任一缺失即拒（不部分拼接）
+        labels = [c.strip() for c in session["case"].split(",") if c.strip()]
+        missing = [c for c in labels if c not in cases]
+        if missing:
             raise RuntimeError(
-                f"用例标签 {session['case']!r} 不存在于 verify-cases.yaml"
+                f"用例标签 {', '.join(missing)} 不存在于 verify-cases.yaml"
                 f"（可选: {', '.join(sorted(cases)) or '无'}）")
-        return "--case", session["case"], cases[session["case"]], ""
+        return "--case", session["case"], " ".join(cases[c] for c in labels), ""
     raise RuntimeError("会话缺验收源（模式 A 须 --batch-file；模式 B 须 --case）")
 
 
