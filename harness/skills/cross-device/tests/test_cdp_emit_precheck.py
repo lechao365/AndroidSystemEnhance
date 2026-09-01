@@ -95,6 +95,60 @@ class TestEmitPrecheck(unittest.TestCase):
         self.assertIn("未推送", reason)
         self.assertIn("333333333333", reason)
 
+    # ── KIR-005 存量告警：open/scheduled 条数阈值 8，只告警不阻断 ──
+    def _write_index(self, n_open, extra_status=()):
+        d = self.root / "data" / "known-issues"
+        d.mkdir(parents=True, exist_ok=True)
+        lines = [f"KI-{i:04d} batch-test false t{i} open" for i in range(1, n_open + 1)]
+        lines += [f"KI-{9000 + i:04d} batch-test false t{i} {s}"
+                  for i, s in enumerate(extra_status, start=1)]
+        (d / "index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_warns_7_open_no_warning(self):
+        self._write_index(7)
+        self.assertEqual(cdp_emit_precheck.known_issues_warns(self.root), [])
+
+    def test_warns_8_open_alerts(self):
+        self._write_index(8)
+        warns = cdp_emit_precheck.known_issues_warns(self.root)
+        self.assertEqual(len(warns), 8)
+        self.assertEqual(warns[0], "KI-0001")
+        self.assertEqual(warns[-1], "KI-0008")
+
+    def test_warns_fixed_and_wontfix_not_counted(self):
+        # 6 条 open + fixed/wontfix 各 1 条 = 6 < 8，不告警
+        self._write_index(6, extra_status=("fixed", "wontfix"))
+        self.assertEqual(cdp_emit_precheck.known_issues_warns(self.root), [])
+
+    def test_warns_index_missing_no_crash(self):
+        self.assertEqual(cdp_emit_precheck.known_issues_warns(self.root), [])
+
+    # ── precheck 领先告警：origin/main..origin/dev 提交数 > 1 即告警 ──
+    def _mk_lead(self, n):
+        # 造 n 笔领先提交：main 锚在 init，dev 领先 n 笔（update-ref 模拟远端）
+        for _ in range(n):
+            self._git("commit", "--allow-empty", "-m", "lead")
+        self._git("update-ref", "refs/remotes/origin/main", f"HEAD~{n}")
+        self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+
+    def test_lead_one_no_warning(self):
+        # 领先 1 笔（正常节奏）→ 无告警
+        self._mk_lead(1)
+        self.assertEqual(cdp_emit_precheck.lead_warns(self.root), [])
+
+    def test_lead_two_alerts(self):
+        # 领先 2 笔（批量连续 apply 中间提交无验证证据）→ 告警串提示先发布基线
+        self._mk_lead(2)
+        warns = cdp_emit_precheck.lead_warns(self.root)
+        self.assertEqual(len(warns), 1)
+        self.assertIn("领先 main 2 笔", warns[0])
+        self.assertIn("/publish-main-base", warns[0])
+
+    def test_lead_main_missing_no_crash(self):
+        # 无 origin/main（新仓未推 main）→ rev-list 报错返空不崩
+        self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        self.assertEqual(cdp_emit_precheck.lead_warns(self.root), [])
+
 
 if __name__ == "__main__":
     unittest.main()

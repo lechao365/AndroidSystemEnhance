@@ -85,11 +85,13 @@ static ssize_t readOnce(EpollDeviceReader& reader, uint8_t* buf, size_t bufSize,
 // 含 invalid 写失败恢复不成 invalidWriteFailed），
 // readErr 为读错误计数——HAL 停用后三字段由 daemon 补齐，
 // 供 liveness 判据（logfield overrun/dropped/readErr=0）继续成立；
+// invalidRecords 为 parseBatch 丢弃累计（wire 漂移/坏记录判红可见性：
+// 采集链路死了 jsonl 归零、三个零值字段仍全 0，须 invalid 累计兜底）；
 // 写路径指标（方向 3）：formatJsonLine 与 writeRecord 平均微秒/条，
 // 作微优化的可判定指标（drain 被攒包策略钉死，对写路径不敏感）
 static void emitHeartbeat(int loopCount, EpollDeviceReader& reader,
                           FileWriter& writer, int64_t& overrunAccum, int readErr,
-                          long long jsonlRecords)
+                          long long jsonlRecords, long long invalidRecords)
 {
     uint32_t ov = reader.getOverrun();
     overrunAccum += ov;
@@ -102,12 +104,13 @@ static void emitHeartbeat(int loopCount, EpollDeviceReader& reader,
     uint64_t avgWriteUs = wt.writeCount ? wt.writeTotalUs / wt.writeCount : 0;
     ALOGI("lechao_lcview: heartbeat, loop=%d, overrun=%lld, dropped=%llu, "
           "readErr=%d, total_records=%u, jsonl_records=%lld, "
+          "invalid_records=%lld, "
           "drop_open=%llu drop_format=%llu drop_oob=%llu "
           "drop_reopen=%llu drop_retry=%llu drop_invalid=%llu "
           "drop_invalidwrite=%llu, "
           "avg_format_us=%llu avg_write_us=%llu",
           loopCount, static_cast<long long>(overrunAccum), dropped,
-          readErr, reader.getTotalRecords(), jsonlRecords,
+          readErr, reader.getTotalRecords(), jsonlRecords, invalidRecords,
           static_cast<unsigned long long>(dc.openFailed),
           static_cast<unsigned long long>(dc.formatEmpty),
           static_cast<unsigned long long>(dc.formatOob),
@@ -127,7 +130,8 @@ static void emitHeartbeat(int loopCount, EpollDeviceReader& reader,
 static void flushSegment(EpollDeviceReader& reader, SchemaParser& schema,
                          FileWriter& writer, const uint8_t* buf, size_t& offset,
                          std::chrono::steady_clock::time_point& dataArrivedAt,
-                         int& flushCount, long long& jsonlRecords, ssize_t n,
+                         int& flushCount, long long& jsonlRecords,
+                         long long& invalidRecords, ssize_t n,
                          size_t bufSize)
 {
     static constexpr auto kMaxBufferAge = std::chrono::milliseconds(500);
@@ -139,6 +143,9 @@ static void flushSegment(EpollDeviceReader& reader, SchemaParser& schema,
         std::vector<uint8_t> batch(buf, buf + offset);
         BatchParseResult parsed = parseBatch(schema, writer, batch);
         jsonlRecords += parsed.validCnt;
+        // invalid 累计透传（方向 1）：wire 漂移等丢弃可见于心跳，
+        // 防"采集链路死了 jsonl 归零而零值字段仍全 0"假绿
+        invalidRecords += parsed.invalidCnt;
         ALOGI("lechao_lcview: batch parsed: %u valid, %u invalid, %zuB "
               "(build=%s)", parsed.validCnt, parsed.invalidCnt, batch.size(),
               LCVIEW_BUILD_TAG);
@@ -163,6 +170,8 @@ static int runMainLoop(EpollDeviceReader& reader, SchemaParser& schema,
     int64_t overrunAccum = 0;
     // JSONL 落盘累计条数（守恒校验基准：内核 total_records ≈ overrun + 落盘条数）
     long long jsonlRecords = 0;
+    // parseBatch 丢弃累计（invalid 计数，方向 1：心跳可见性）
+    long long invalidRecords = 0;
     static constexpr size_t kBufSize = 64 * 1024;
     static constexpr int kEpollTimeoutMs = 1000;
     uint8_t buf[kBufSize];
@@ -185,7 +194,7 @@ static int runMainLoop(EpollDeviceReader& reader, SchemaParser& schema,
         auto now = std::chrono::steady_clock::now();
         if (now - lastBeatAt >= std::chrono::seconds(30)) {
             emitHeartbeat(loopCount, reader, writer, overrunAccum, readErr,
-                          jsonlRecords);
+                          jsonlRecords, invalidRecords);
             lastBeatAt = now;
         }
 
@@ -196,7 +205,7 @@ static int runMainLoop(EpollDeviceReader& reader, SchemaParser& schema,
         }
 
         flushSegment(reader, schema, writer, buf, offset, dataArrivedAt,
-                     flushCount, jsonlRecords, n, kBufSize);
+                     flushCount, jsonlRecords, invalidRecords, n, kBufSize);
     }
 
     ALOGI("lechao_lcview: exiting, readOk=%d readEmpty=%d readErr=%d flush=%d",

@@ -7,6 +7,9 @@
 **改动 `code/`（dev 分支）源码前，必须先加载** [harness/rules/source-code-modify.md](harness/rules/source-code-modify.md)（含验证流程、归档纪律、禁止行为）。
 `code/`（dev 分支）是唯一改动源头，`~/workspace/` 是编译缓存镜像（code → workspace 单向同步），改动必须从源头开始。
 
+## 缺陷归属判定
+缺陷归属判定（当批修或登记 known-issues）前，必须先加载 [harness/rules/known-issues.md](harness/rules/known-issues.md)（KIR-001~007 有序判据与准入场景表）。
+
 ## Harness 工作流命令
 
 | 命令 | 用途 |

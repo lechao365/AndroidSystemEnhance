@@ -28,6 +28,7 @@ stages:
 - selfcheck 不过：AI 修批次后重跑
 ## Related policy IDs（关联规则 ID）
 - CDP-001（契约成对修改）
+- KIR-001~003（缺陷归属有序判据，见 harness/rules/known-issues.md）
 ---
 > 注记：工作流命令统一以 python3 解释器书写，拷贝即用；若平台仅提供
 > python 命令，请等价替换（python3 → python）。
@@ -64,6 +65,13 @@ stages:
 - 人工确认须在交付批次之前提出：确认内容（含批次意图/范围/验收口径
   调整）在产批文本交付前完成对话确认，交付后不再追加确认类交互
   （交付即视为确认通过，后续只走 apply 执行链路）
+## 收口规则（开工冻结清单）
+- 开工时冻结范围清单（人工确认），只做清单内项，不追加任务
+- 期间新发现的缺陷按 KIR-001~003 有序判据判定归属（先加载
+  harness/rules/known-issues.md）：命中任一当批修，全不命中登记 known-issues，
+  不追加批次
+- 存量 open/scheduled 达 8 条时 precheck 输出 warns（KIR-005），只告警不阻断产批
+
 ## 环路串行
 - apply 执行 → 结果落地 → emit 复盘 → 产批 → 交付严格串行：批次锚定
   base 与行号，apply 一执行 origin/dev 即变，提前产批必被 exit 18 拒

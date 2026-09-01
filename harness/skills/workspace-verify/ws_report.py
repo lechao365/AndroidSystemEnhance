@@ -29,11 +29,59 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "l
 sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
 from cdp_parse import (SOFT_ERRORS, batch_id_from_text, parse_batch,  # noqa: E402
                        validate_batch)
+from cdp_paths import log_apply_dir  # noqa: E402
 from cdp_receipt import Receipt, append_trend, write_receipt  # noqa: E402
 from paths import env_path  # noqa: E402
 
 
 _HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def _resolve_timings(timings_file, batch_id):
+    """解析链路耗时打点，返回 (timings_json_str, elapsed_int|None)。
+
+    显式 --timings-file 优先；未传时自动探测 log_apply_dir() 下
+    timings-<batch_id>.json（cdp_paths 绝对路径，与 cdp_timing.py 写入同源，
+    认 CDP_PROJECT_ROOT，不依赖 cwd），存在即用。
+    缺失/非法仅 warn 降级（timings 置空，elapsed 不推导），不阻断主流程。
+    elapsed 从 wall_end 减 wall_start 取整（start/mark 结构 wall_end 缺省
+    按当前时刻兜底），供 --elapsed 缺省时填写 elapsed_s（显式传参优先）。
+    """
+    if not timings_file and batch_id:
+        probe = log_apply_dir() / f"timings-{batch_id}.json"
+        if probe.is_file():
+            timings_file = str(probe)
+            print(f"NOTE: 自动探测到打点文件: {probe}", file=sys.stderr)
+    if not timings_file:
+        print(f"warn: 未传 --timings-file 且未探测到 timings-{batch_id}.json，"
+              "timings 置空", file=sys.stderr)
+        return "", None
+    try:
+        from cdp_timing import compute_segments
+        t = json.loads(Path(timings_file).read_text(encoding="utf-8"))
+        if not isinstance(t, dict):
+            raise ValueError("非 JSON 对象")
+        if isinstance(t.get("segments"), list) and t["segments"]:
+            segments = t["segments"]
+        elif isinstance(t.get("marks"), list):
+            segments = compute_segments(t)
+        else:
+            raise ValueError("缺 segments/marks（非 cdp_timing 打点结构）")
+        wall_start = t.get("start_wall") or t.get("wall_start")
+        wall_end = t.get("wall_end") or time.time()
+        out = {
+            "batch_id": t.get("batch_id", ""),
+            "wall_start": wall_start,
+            "wall_end": wall_end,
+            "segments": segments,
+        }
+        elapsed = None
+        if isinstance(wall_start, (int, float)) and isinstance(wall_end, (int, float)):
+            elapsed = int(wall_end - wall_start)
+        return json.dumps(out, ensure_ascii=False, sort_keys=True), elapsed
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        print(f"warn: --timings-file 读取失败，timings 置空: {e}", file=sys.stderr)
+        return "", None
 
 
 def _validate_acceptance_pass(acceptance):
@@ -110,7 +158,9 @@ def main(argv=None):
     ap.add_argument("--build", choices=["pass", "fail", "skip"], default="skip")
     ap.add_argument("--board", choices=["pass", "fail", "skip"], default="skip")
     ap.add_argument("--acceptance", default="")
-    ap.add_argument("--elapsed", type=int, default=0)
+    ap.add_argument("--elapsed", type=int, default=None,
+                    help="耗时秒数；缺省从 timings 的 wall_end-wall_start 推导"
+                         "（推导不出则 0），显式传参优先")
     ap.add_argument("--summary", default="")
     ap.add_argument("--case", default="",
                     help="本次实际验收用例标签（逗号分隔；写入收据 cases 字段，"
@@ -136,36 +186,6 @@ def main(argv=None):
         except (ValueError, json.JSONDecodeError) as e:
             print(f"error: --metrics 须为合法 JSON 对象: {e}", file=sys.stderr)
             return 2
-
-    if args.timings_file:
-        # 读链路耗时打点（cdp_timing.py 采集），兼容两种结构：
-        #   - 原始 start/mark 结构（有 marks）→ compute_segments 计算段耗时
-        #   - finish 归档结构（有 segments）→ 直接用（AI 先 finish 再落收据也 OK）
-        # 诊断数据缺失/非法仅 warn 降级（timings 置空），不阻断 push 主流程——
-        # 区别于 --acceptance 的返 2 拒写（那是 promote 证据链，缺了有洞）
-        try:
-            from cdp_timing import compute_segments
-            t = json.loads(Path(args.timings_file).read_text(encoding="utf-8"))
-            if not isinstance(t, dict):
-                raise ValueError("非 JSON 对象")
-            if isinstance(t.get("segments"), list) and t["segments"]:
-                segments = t["segments"]
-            elif isinstance(t.get("marks"), list):
-                segments = compute_segments(t)
-            else:
-                raise ValueError("缺 segments/marks（非 cdp_timing 打点结构）")
-            out = {
-                "batch_id": t.get("batch_id", ""),
-                "wall_start": t.get("start_wall") or t.get("wall_start"),
-                "wall_end": t.get("wall_end") or time.time(),
-                "segments": segments,
-            }
-            args.timings = json.dumps(out, ensure_ascii=False, sort_keys=True)
-        except (OSError, json.JSONDecodeError, ValueError) as e:
-            print(f"warn: --timings-file 读取失败，timings 置空: {e}", file=sys.stderr)
-            args.timings = ""
-    else:
-        args.timings = ""
 
     if not args.batch_file and not args.target:
         print("error: 模式 A（--batch-file）与模式 B（--target）必选其一", file=sys.stderr)
@@ -215,6 +235,16 @@ def main(argv=None):
         if terr:
             print(f"error: {terr}", file=sys.stderr)
             return 2
+
+    # 链路耗时打点：显式 --timings-file 优先，未传自动探测
+    # log_apply_dir()/timings-<batch_id>.json（cdp_paths 绝对路径与
+    # cdp_timing 写入同源，认 CDP_PROJECT_ROOT）；
+    # --elapsed 缺省从 timings 的 wall_end-wall_start 推导（显式传参优先）
+    args.timings, derived_elapsed = _resolve_timings(args.timings_file, batch_id)
+    if args.elapsed is None and derived_elapsed is not None:
+        args.elapsed = derived_elapsed
+    if args.elapsed is None:
+        args.elapsed = 0
 
     # 验收证据门禁：result=pass 必须带逐项验收 JSON 且整体通过，否则拒写
     # （堵手填假绿混过 promote）；通过后单行化落盘——header 逐行 key-value，

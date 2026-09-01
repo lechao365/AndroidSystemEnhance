@@ -13,13 +13,14 @@ _TASK = "lcview-refactor"
 
 
 def _mk_issue(issue_id="KI-20260829-001", status="open", origin="introduced",
-              title="lcview 重复落盘计数异常"):
+              severity="P2", title="lcview 重复落盘计数异常"):
     return cdp_issue.Issue(
         schema_version=1,
         issue_id=issue_id,
         title=title,
         discovered_in="38433d446f07",
         origin=origin,
+        severity=severity,
         blocking=True,
         blocking_reason="影响数据一致性",
         status=status,
@@ -69,6 +70,7 @@ class TestIssue(unittest.TestCase):
         self.assertEqual(got.title, "lcview 重复落盘计数异常")
         self.assertEqual(got.discovered_in, "38433d446f07")
         self.assertEqual(got.origin, "introduced")
+        self.assertEqual(got.severity, "P2")
         self.assertTrue(got.blocking)
         self.assertEqual(got.blocking_reason, "影响数据一致性")
         self.assertEqual(got.status, "open")
@@ -97,36 +99,90 @@ class TestIssue(unittest.TestCase):
         self.assertEqual(got.origin, "introduced")
 
     def test_keeps_all_within_quota(self):
-        # 未超配额：写入多份全部保留（对照收据 _DETAIL_KEEP=20 的 prune）
+        # 写时不再老化（KIR-006 promote 清算）：写入多份全部保留，无配额
         for i in range(5):
             cdp_issue.write_issue(_mk_issue(f"KI-20260829-00{i}"), f"body{i}")
         self.assertEqual(len(cdp_issue.issue_files(self._dir)), 5)
 
-    def test_prune_open_never_aged_out(self):
-        # 未闭环不老化：25 条 open（blocking=true）不计配额，全部保留
-        for i in range(25):
-            cdp_issue.write_issue(_mk_issue(f"KI-20260829-{i:03d}"), f"body{i}")
-        files = cdp_issue.issue_files(self._dir)
-        self.assertEqual(len(files), 25)
-        self.assertEqual(cdp_issue.validate_issue(files[-1], self._dir), [])
-
-    def test_prune_fixed_keeps_20(self):
-        # 已闭环配额：25 条 fixed 且 blocking=false，仅保留最新 20 条已闭环记录
+    def test_write_no_aging_keeps_all_terminal(self):
+        # 终态条目写时全留（无配额老化）：25 条 fixed 与 wontfix 写后一份不删
         for i in range(25):
             r = _mk_issue(f"KI-20260829-{i:03d}", status="fixed")
             r.blocking = False
             r.blocking_reason = ""
             cdp_issue.write_issue(r, f"body{i}")
         files = cdp_issue.issue_files(self._dir)
-        self.assertEqual(len(files), cdp_issue._ISSUE_KEEP)
-        self.assertEqual(len(files), 20)
+        self.assertEqual(len(files), 25)
         self.assertEqual(cdp_issue.validate_issue(files[-1], self._dir), [])
+
+    # ── 方向 1：promote 清算（closed_issue_ids + delete_closed）───────────
+    def test_closed_issue_ids_only_terminal(self):
+        # 终态只看 status：fixed 与 wontfix 计入清单，open/scheduled 不算，
+        # fixed 即使 blocking=true 也计入（不看 blocking）
+        cdp_issue.write_issue(_mk_issue("KI-FIXED", status="fixed"), "x")
+        cdp_issue.write_issue(_mk_issue("KI-WONTFIX", status="wontfix"), "y")
+        cdp_issue.write_issue(_mk_issue("KI-OPEN"), "z")
+        cdp_issue.write_issue(_mk_issue("KI-SCHED", status="scheduled"), "w")
+        closed = set(cdp_issue.closed_issue_ids(self._dir))
+        self.assertEqual(closed, {"KI-FIXED", "KI-WONTFIX"})
+
+    def test_closed_issue_details_include_identity(self):
+        # 明细清单每项含 issue_id/resolved_in/title（删文件后仍可辨认），
+        # open/scheduled 不入清单
+        r1 = _mk_issue("KI-FIXED", status="fixed")
+        r1.resolved_in = "abc123def456"
+        cdp_issue.write_issue(r1, "x")
+        cdp_issue.write_issue(_mk_issue("KI-WONTFIX", status="wontfix"), "y")
+        cdp_issue.write_issue(_mk_issue("KI-OPEN"), "z")
+        details = cdp_issue.closed_issue_details(self._dir)
+        self.assertEqual(
+            sorted(details, key=lambda d: d["issue_id"]), [
+                {"issue_id": "KI-FIXED", "resolved_in": "abc123def456",
+                 "title": "lcview 重复落盘计数异常"},
+                {"issue_id": "KI-WONTFIX", "resolved_in": "",
+                 "title": "lcview 重复落盘计数异常"},
+            ])
+
+    def test_closed_fixed_blocking_still_terminal(self):
+        # blocking=true 的 fixed 条目同样属终态（终态判定不看 blocking）
+        r = _mk_issue("KI-BLK-FIXED", status="fixed")
+        r.blocking = True  # _mk_issue 默认 blocking=True
+        cdp_issue.write_issue(r, "x")
+        self.assertEqual(cdp_issue.closed_issue_ids(self._dir), ["KI-BLK-FIXED"])
+
+    def test_delete_closed_removes_files_and_syncs_index(self):
+        # 清算删除：终态文件删除 + index 同步重建，活项（open/scheduled）全留
+        cdp_issue.write_issue(_mk_issue("KI-FIXED", status="fixed"), "x")
+        cdp_issue.write_issue(_mk_issue("KI-WONTFIX", status="wontfix"), "y")
+        cdp_issue.write_issue(_mk_issue("KI-OPEN"), "z")
+        cdp_issue.write_issue(_mk_issue("KI-SCHED", status="scheduled"), "w")
+        removed = cdp_issue.delete_closed(["KI-FIXED", "KI-WONTFIX"], self._dir)
+        self.assertEqual(len(removed), 2)
+        remaining = {i.issue_id for p in cdp_issue.issue_files(self._dir)
+                     for i in [cdp_issue.read_issue(p)]}
+        self.assertEqual(remaining, {"KI-OPEN", "KI-SCHED"})
+        # index 与文件集一致（删除后重建，无悬空条目）
+        index_ids = {e["issue_id"] for e in cdp_issue.read_index(self._dir)}
+        self.assertEqual(index_ids, remaining)
+        self.assertNotIn("KI-FIXED", index_ids)
+        self.assertNotIn("KI-WONTFIX", index_ids)
+
+    def test_delete_closed_unknown_ids_ignored(self):
+        # 清单含不存在的 id：静默跳过，不影响其余删除
+        cdp_issue.write_issue(_mk_issue("KI-FIXED", status="fixed"), "x")
+        cdp_issue.write_issue(_mk_issue("KI-OPEN"), "z")
+        removed = cdp_issue.delete_closed(["KI-FIXED", "KI-GHOST"], self._dir)
+        self.assertEqual(len(removed), 1)
+        self.assertEqual({i.issue_id for p in cdp_issue.issue_files(self._dir)
+                          for i in [cdp_issue.read_issue(p)]}, {"KI-OPEN"})
 
     def test_origin_status_invalid_falls_back(self):
         # 非法枚举回落默认值，不崩
         r = cdp_issue.Issue.from_text(
-            "- origin: badvalue\n- status: badvalue\n## body\n\nx\n")
+            "- origin: badvalue\n- severity: badvalue\n- status: badvalue\n"
+            "## body\n\nx\n")
         self.assertEqual(r.origin, "introduced")
+        self.assertEqual(r.severity, "P2")
         self.assertEqual(r.status, "open")
 
     def test_from_text_strips_values(self):
@@ -201,12 +257,28 @@ class TestIssue(unittest.TestCase):
         p.write_text(
             "- schema_version: 1\n- issue_id: KI-X\n- title: t\n"
             "- discovered_in: 38433d446f07\n- origin: badvalue\n"
-            "- blocking: false\n- blocking_reason: \n- status: badstatus\n"
-            "- task: lcview-refactor\n- resolved_in: \n\n## body\n\nx\n",
+            "- severity: badvalue\n- blocking: false\n- blocking_reason: \n"
+            "- status: badstatus\n- task: lcview-refactor\n- resolved_in: \n"
+            "\n## body\n\nx\n",
             encoding="utf-8")
         errs = cdp_issue.validate_issue(p, self._dir)
         self.assertTrue(any("origin 非法" in e for e in errs), errs)
+        self.assertTrue(any("severity 非法" in e for e in errs), errs)
         self.assertTrue(any("status 非法" in e for e in errs), errs)
+
+    def test_validate_bad_severity_red(self):
+        # severity 非法枚举判红（方向 2：validate_issue 增 severity 非法判红）
+        p = self._dir / "20260829-180000-18f27638d9f6-bad.md"
+        p.write_text(
+            "- schema_version: 1\n- issue_id: KI-X\n- title: t\n"
+            "- discovered_in: 38433d446f07\n- origin: introduced\n"
+            "- severity: P3\n- blocking: false\n- blocking_reason: \n"
+            "- status: open\n- task: lcview-refactor\n- resolved_in: \n"
+            "\n## body\n\nx\n",
+            encoding="utf-8")
+        errs = cdp_issue.validate_issue(p, self._dir)
+        self.assertTrue(any("severity 非法" in e for e in errs), errs)
+        self.assertFalse(any("头字段缺失" in e for e in errs), errs)
 
     def test_validate_blocking_without_reason(self):
         p = self._dir / "20260829-180000-18f27638d9f6-bad.md"
@@ -252,6 +324,21 @@ class TestIssue(unittest.TestCase):
         errs2 = cdp_issue.validate_issue(stray, self._dir)
         self.assertTrue(any("缺该问题条目" in e for e in errs2), errs2)
         self.assertTrue(any("缺文件条目" in e for e in errs2), errs2)
+
+
+class TestBackfilledSeverity(unittest.TestCase):
+    """回填后仓库真实 data/known-issues 全部条目 validate 无红（防堵 promote 门禁）。"""
+
+    def test_all_repo_issues_pass_validation(self):
+        # 不设 CDP_PROJECT_ROOT：data_known_issues_dir() 回落仓库真实路径
+        os.environ.pop("CDP_PROJECT_ROOT", None)
+        files = cdp_issue.issue_files()
+        self.assertTrue(files, "data/known-issues 下应存在存量条目")
+        for p in files:
+            errs = cdp_issue.validate_issue(p)
+            self.assertEqual(errs, [], f"{p.name}: {errs}")
+            severity = cdp_issue.read_issue(p).severity
+            self.assertIn(severity, cdp_issue._SEVERITIES)
 
 
 if __name__ == "__main__":

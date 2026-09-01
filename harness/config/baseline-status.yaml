@@ -113,3 +113,35 @@ baselines:
     evidence_scope: lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-transfer
   approved_by: lechao
   approved_at: '2026-09-01T09:57:17+08:00'
+- baseline_id: BL-20260901-02
+  status: promoted
+  source_branch: dev
+  source_commit: 952c913d622f
+  sync_manifest: data/verify-results/20260901-151032-ffc3da1ebcb4.md
+  build_result: SKIP
+  package_result: SKIP
+  board_verify: PASS
+  evidence_scope: lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-transfer
+  evidence:
+    build_result: SKIP
+    package_result: SKIP
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260901-151032-ffc3da1ebcb4.md
+    ki_gate: pass
+    evidence_scope: lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-transfer
+    known_issues_carried: KI-20260829-001
+    known_issues_closed:
+    - issue_id: KI-20260831-003
+      resolved_in: 41daf105ac74
+      title: emit 侧 35 项 bash 测试平台跳过成盲区
+    - issue_id: KI-20260831-001
+      resolved_in: 41daf105ac74
+      title: precheck 领先超一笔无告警
+    - issue_id: KI-20260831-002
+      resolved_in: 01b665fa99dc
+      title: publish-main-base SKILL 阶段三漏写 evidence-scope
+    - issue_id: KI-20260901-001
+      resolved_in: ffc3da1ebcb4
+      title: logfield 取末行不按进程归属筛致 E1 首跑认旧进程心跳
+  approved_by: lechao
+  approved_at: '2026-09-01T19:40:57+08:00'

@@ -1,10 +1,11 @@
-"""data/known-issues 已知问题登记模块：写详情、读详情、校验、索引（写时老化仅已闭环记录计配额，保留 _ISSUE_KEEP 份已闭环记录）。
+"""data/known-issues 已知问题登记模块：写详情、读详情、校验、索引（终态条目由 promote 清算，写时不再老化）。
 
 问题文件: data/known-issues/<YYYYMMDD-HHMMSS>-<batch_id>-<slug>.md
-（markdown key-value 头 + 正文；命名保证唯一写入，已闭环超 _ISSUE_KEEP 删最旧，
-未闭环条目不计配额不删）
+（markdown key-value 头 + 正文；命名保证唯一写入，不设配额不老化，
+终态（status 属 fixed 或 wontfix）条目在 promote 晋升时由
+closed_issue_ids + delete_closed 整体清算删除）
 索引文件: data/known-issues/index.md（一行一条: issue_id origin blocking task status，
-write_issue 与状态变更均重建回写；index.md 不计配额）
+write_issue 与状态变更均重建回写；index.md 不计清算）
 模板: harness/config/known-issues-template.md（头字段集必须与 _FIELDS 完全一致，
 由单测强制）。
 """
@@ -20,18 +21,18 @@ _FIELD_RE = re.compile(r"^- (\w+): (.*)$", re.MULTILINE)
 # 文件名式样: <YYYYMMDD>-<HHMMSS>-<12hex batch_id>-<slug>.md（index.md 除外）
 _NAME_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{12}-.+\.md$")
 
-# 问题文件保留配额（写时老化；index.md 不计配额，对照 cdp_receipt._DETAIL_KEEP）
-_ISSUE_KEEP = 20
-
 # 头字段定序：只列头字段；余项（现场/复现步骤/修法描述等自由信息）一律入正文。
 _FIELDS = [
     "schema_version", "issue_id", "title", "discovered_in",
-    "origin", "blocking", "blocking_reason", "status", "task", "resolved_in",
+    "origin", "severity", "blocking", "blocking_reason", "status", "task",
+    "resolved_in",
 ]
 
-# origin / status 允许取值（模板逐字段注释同源维护）
+# origin / severity / status 允许取值（模板逐字段注释同源维护）
 _ORIGINS = ("introduced", "pre-existing")
 _ORIGIN_DEFAULT = "introduced"
+_SEVERITIES = ("P0", "P1", "P2")
+_SEVERITY_DEFAULT = "P2"
 _STATUSES = ("open", "scheduled", "fixed", "wontfix")
 _STATUS_DEFAULT = "open"
 
@@ -40,13 +41,15 @@ _SLUG_MAX = 40
 
 class Issue:
     def __init__(self, schema_version=1, issue_id="", title="", discovered_in="",
-                 origin=_ORIGIN_DEFAULT, blocking=False, blocking_reason="",
+                 origin=_ORIGIN_DEFAULT, severity=_SEVERITY_DEFAULT,
+                 blocking=False, blocking_reason="",
                  status=_STATUS_DEFAULT, task="", resolved_in="", batch_id=""):
         self.schema_version = schema_version
         self.issue_id = issue_id
         self.title = title
         self.discovered_in = discovered_in
         self.origin = origin if origin in _ORIGINS else _ORIGIN_DEFAULT
+        self.severity = severity if severity in _SEVERITIES else _SEVERITY_DEFAULT
         self.blocking = blocking
         self.blocking_reason = blocking_reason
         self.status = status if status in _STATUSES else _STATUS_DEFAULT
@@ -71,6 +74,8 @@ class Issue:
                     pass  # 非法数值回落默认值，不崩
             elif key == "origin" and val not in _ORIGINS:
                 continue  # 非法枚举回落默认值，不崩
+            elif key == "severity" and val not in _SEVERITIES:
+                continue  # 非法枚举回落默认值，不崩
             elif key == "status" and val not in _STATUSES:
                 continue
             elif hasattr(r, key):
@@ -89,13 +94,14 @@ def _slug_from_title(title: str) -> str:
 
 
 def write_issue(issue, body_text, slug=""):
-    """写详情文件（唯一写入：<时间戳>-<batch_id>-<slug>.md；已闭环超 _ISSUE_KEEP 删最旧）并回写 index，返回路径。
+    """写详情文件（唯一写入：<时间戳>-<batch_id>-<slug>.md；不老化不配额）并回写 index，返回路径。
 
     slug 缺省由 title 派生；batch_id 来自 issue.batch_id（命名元数据，非头字段）。
     batch_id 必须为 12 位小写 hex，否则抛 ValueError——写时失败（现场可修）不留到
     promote 才暴露（畸形文件名式样会被 validate_issue 判红堵死门禁）。
     同秒同批同名冲突时追加 -1/-2 序号，绝不覆盖既有记录。
-    老化与 index 重建顺序：先 prune 再 sync_index，保证 index 与文件集一致。
+    终态条目不在此处老化删除：由 promote 晋升时 closed_issue_ids + delete_closed
+    整体清算（KIR-006 改 promote 清算语义，写时配额老化已删）。
     """
     if not re.fullmatch(r"[0-9a-f]{12}", issue.batch_id or ""):
         raise ValueError(f"batch_id 非法: {issue.batch_id!r}（须 12 位小写 hex，"
@@ -110,7 +116,6 @@ def write_issue(issue, body_text, slug=""):
         n += 1
     content = issue.header_lines() + "\n\n## body\n\n" + body_text.strip() + "\n"
     path.write_text(content, encoding="utf-8")
-    prune_issues(d)
     sync_index(d)
     return path
 
@@ -125,17 +130,41 @@ def issue_files(issues_dir=None):
     return sorted(p for p in d.glob("*.md") if p.name != "index.md")
 
 
-def prune_issues(issues_dir=None):
-    """问题文件老化：仅已闭环记录（status=fixed 且 blocking=false）计配额，
-    保留 _ISSUE_KEEP 份已闭环记录删最旧；未闭环条目不计配额不删。"""
+def closed_issue_ids(issues_dir=None):
+    """终态条目 issue_id 列表：status 属 fixed 或 wontfix（终态只看 status，
+    不看 blocking——promote 清算的依据）。"""
     d = issues_dir or data_known_issues_dir()
-    closed = []
+    return [i.issue_id for p in issue_files(d)
+            if (i := read_issue(p)).status in ("fixed", "wontfix")]
+
+
+def closed_issue_details(issues_dir=None):
+    """终态条目明细列表（promote 清算入档用）：每项含 issue_id / resolved_in /
+    title，删文件后仍可从清单辨认条目（只存 id 无从辨认）。"""
+    d = issues_dir or data_known_issues_dir()
+    return [{"issue_id": i.issue_id, "resolved_in": i.resolved_in,
+             "title": i.title}
+            for p in issue_files(d)
+            if (i := read_issue(p)).status in ("fixed", "wontfix")]
+
+
+def delete_closed(issue_ids, issues_dir=None):
+    """按 issue_id 清算删除终态条目文件（index 同步重建），返回删除文件列表。
+
+    删除是 promote 晋升的收尾动作（KIR-006 promote 清算）：终态记录已随
+    evidence.known_issues_closed 入档，删除不销毁证据链。不存在的 id 静默跳过；
+    文件删除失败（OSError）抛错由调用方决定是否阻断（快照已入档不回滚）。
+    """
+    d = issues_dir or data_known_issues_dir()
+    wanted = set(issue_ids)
+    removed = []
     for p in issue_files(d):
-        i = read_issue(p)
-        if i.status == "fixed" and not i.blocking:
-            closed.append(p)
-    for old in closed[: max(0, len(closed) - _ISSUE_KEEP)]:
-        old.unlink()
+        if read_issue(p).issue_id in wanted:
+            p.unlink()
+            removed.append(p)
+    if removed:
+        sync_index(d)
+    return removed
 
 
 def set_status(path, new_status, issues_dir=None):
@@ -216,6 +245,9 @@ def validate_issue(path, issues_dir=None):
         origin = fields.get("origin", _ORIGIN_DEFAULT)
         if origin not in _ORIGINS:
             errs.append(f"origin 非法: {origin!r}，允许 {_ORIGINS}")
+        severity = fields.get("severity", _SEVERITY_DEFAULT)
+        if severity not in _SEVERITIES:
+            errs.append(f"severity 非法: {severity!r}，允许 {_SEVERITIES}")
         status = fields.get("status", _STATUS_DEFAULT)
         if status not in _STATUSES:
             errs.append(f"status 非法: {status!r}，允许 {_STATUSES}")

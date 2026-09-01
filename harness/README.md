@@ -61,6 +61,19 @@ python3 harness/lib/check_skill_refs.py    # harness/skills 引用完整性检�
 ./harness/scripts/mk_rpi5_full_image.sh -h
 ```
 
+环境准备（apply 侧）：自检并行依赖 pytest-xdist（`-s` 收据 selfcheck 提速，缺失时自检自动回落串行）：
+
+```bash
+pip install pytest-xdist
+```
+
+Windows（emit 侧）跑依赖 bash 的测试（test_git_works_push / test_publish_*）前，先设开关让
+`shell_env.find_bash` 从 Git for Windows 推导 bash.exe（PATH 无 bash 时），否则测试整体 skip：
+
+```bash
+export LC_HARNESS_WIN_BASH=1
+```
+
 ## 路径配置（harness/config/paths.conf）
 
 | key | 说明 | 覆盖方式 |

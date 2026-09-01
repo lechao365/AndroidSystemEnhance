@@ -18,7 +18,8 @@ CONFIG = Path(__file__).resolve().parents[2] / "config" / "baseline-status.yaml"
 # 仿 ws_report.py：引入 cross-device 共享收据模块，candidate 实读真实 verify 收据
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "lib" / "python"))
 from cdp_receipt import read_receipt  # noqa: E402
-from cdp_issue import issue_files, read_issue, validate_issue  # noqa: E402
+from cdp_issue import (closed_issue_details, delete_closed,
+                       issue_files, read_index, read_issue, validate_issue)  # noqa: E402
 from cdp_paths import data_baselines_dir  # noqa: E402
 
 
@@ -52,6 +53,19 @@ def next_id(data, today):
     return f"BL-{today}-{n:02d}"
 
 
+def carried_issue_ids(task, issues_dir=None):
+    """取 status 属 open 或 scheduled 且 task 匹配的条目 id（带病项自动携带）。
+
+    prepare 升基线时把遗留问题记账进 candidate evidence（known_issues_carried），
+    只记录不阻断——硬阻断会死锁（遗留问题恰好是升基线要延续跟踪的对象）。
+    task 为空（未显式指定）返回空列表，不携带任何条目。
+    """
+    if not task:
+        return []
+    return [e["issue_id"] for e in read_index(issues_dir)
+            if e["status"] in ("open", "scheduled") and e["task"] == task]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="baseline candidate/promoted 登记")
     ap.add_argument("action",
@@ -65,6 +79,9 @@ def main(argv=None):
     ap.add_argument("--ki-gate", help="known-issues 门禁结论 pass/not-run，写入 evidence")
     ap.add_argument("--evidence-scope", help="证据范围标签（如 lcview-liveness）；"
                         "缺省从收据 cases 推导，人工传值须为其子集（防过度声称）")
+    ap.add_argument("--known-issues-carried",
+                    help="带病登记 issue_id 列表（逗号分隔，写入 evidence 的 "
+                         "known_issues_carried；缺参记空，只记录不阻断）")
     args = ap.parse_args(argv)
 
     # check-issues：known-issues 门禁（publish_main_base.sh 委托；不读写登记 yaml）
@@ -140,8 +157,10 @@ def main(argv=None):
             return 1
         # 排除项：登记 yaml（promote 元提交必然改动）与 docs/（文档同步提交）
         # 与 data/baselines/（promote 生成的证据快照目录，随晋升提交入库）
+        # 与 data/known-issues/（promote 清算删除目录，随晋升提交入库——
+        # 不排除则清算删除让树等价断言必红回滚）
         excludes = ("harness/config/baseline-status.yaml", "docs/",
-                    "data/baselines/")
+                    "data/baselines/", "data/known-issues/")
         diffs = [ln for ln in r.stdout.splitlines()
                  if ln and not any(ln == e or ln.startswith(e) for e in excludes)]
         if diffs:
@@ -192,6 +211,8 @@ def main(argv=None):
         board_verify = ((r.push_board or "").strip() or "FAIL").upper()
         # ki_gate：known-issues 门禁结论（拒批已在脚本层 exit，缺参视为 not-run）
         ki_gate = (args.ki_gate or "").strip() or "not-run"
+        # known_issues_carried：带病项记账（缺参记空；只记录不阻断，硬阻断会死锁）
+        known_issues_carried = (args.known_issues_carried or "").strip()
         # 去重复用：同 source_commit 且仍为 candidate 的记录不新增（防重复 prepare 冗余登记；
         # 收据路径不同则对齐最新证据，保持 promote 证据链一致）
         for b in baselines:
@@ -210,6 +231,7 @@ def main(argv=None):
                         "sync_manifest": args.receipt_path,
                         "ki_gate": ki_gate,
                         "evidence_scope": evidence_scope,
+                        "known_issues_carried": known_issues_carried,
                     }
                     save(data)
                     print(f"candidate 复用并更新收据: {b['baseline_id']}（source_commit={args.source_commit}）")
@@ -234,6 +256,7 @@ def main(argv=None):
                 "sync_manifest": args.receipt_path,
                 "ki_gate": ki_gate,
                 "evidence_scope": evidence_scope,
+                "known_issues_carried": known_issues_carried,
             },
         })
         save(data)
@@ -275,7 +298,28 @@ def main(argv=None):
                 b["approved_at"] = datetime.datetime.now(
                     datetime.timezone(datetime.timedelta(hours=8))
                 ).strftime("%Y-%m-%dT%H:%M:%S+08:00")
-                save(data)
+                # promote 清算（KIR-006）：晋升前先把终态条目清单（status 属
+                # fixed 或 wontfix，不看 blocking）记入 evidence.known_issues_closed
+                # 再 save——快照与清单先入档，随后 delete_closed 删文件（终态
+                # 记录随清单入档，删除不销毁证据链）；删失败仅 warn 不回滚快照。
+                # 清单存明细列表（issue_id/resolved_in/title），只存 id 在删文件
+                # 后无从辨认；evidence 非字典写不成清单时跳过清算删除并告警
+                #（无清单入档即删 = 无快照删证据）
+                closed_details = closed_issue_details()
+                evidence = b.get("evidence")
+                if isinstance(evidence, dict):
+                    evidence["known_issues_closed"] = closed_details
+                    save(data)
+                    try:
+                        delete_closed([d["issue_id"] for d in closed_details])
+                    except OSError as e:
+                        print(f"warn: 终态条目清算删除失败（快照与清单已入档不回滚）: "
+                              f"{e}", file=sys.stderr)
+                else:
+                    print(f"warn: evidence 非字典（{type(evidence).__name__}），"
+                          "写不成 known_issues_closed 清单，跳过清算删除"
+                          "（无清单入档即删 = 无快照删证据）", file=sys.stderr)
+                    save(data)
                 print(f"promoted: {args.baseline_id}（快照: {snapshot_path}）")
                 return 0
         print(f"error: 未找到 baseline {args.baseline_id}")

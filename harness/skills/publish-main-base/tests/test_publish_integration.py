@@ -7,9 +7,15 @@ push main 失败时 rollback 清 main squash commit。
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+from shell_env import find_bash, write_python3_shim  # noqa: E402
+
+BASH = find_bash()
 
 SKILL = Path(__file__).resolve().parents[1]          # .../publish-main-base
 SCRIPT = SKILL / "publish_main_base.sh"
@@ -20,7 +26,7 @@ RECEIPT_REL = "data/verify-results/20260830-000000-inttest.md"
 BID = "BL-inttest-01"
 
 
-@unittest.skipUnless(shutil.which("bash") and shutil.which("git"),
+@unittest.skipUnless(BASH and shutil.which("git"),
                      "需要 bash 与 git（本环境为 Linux）")
 class TestSyncModifyIntegration(unittest.TestCase):
     def setUp(self):
@@ -72,7 +78,11 @@ class TestSyncModifyIntegration(unittest.TestCase):
         env["CDP_PROJECT_ROOT"] = str(self.work)
         # 防 python 导入生成 __pycache__ 污染工作树（git status 非空会使预检拒绝）
         env["PYTHONDONTWRITEBYTECODE"] = "1"
-        return subprocess.run(["bash", str(SCRIPT), *args], cwd=self.work,
+        # PATH 前置 python3 shim（Windows 无 python3 命令，脚本内调用经 shim
+        # 转发到当前解释器；shim 目录在 git 仓外）——bash 用 find_bash 绝对路径
+        shim_dir = write_python3_shim(Path(self._tmp.name) / "shim")
+        env["PATH"] = f"{shim_dir}{os.pathsep}{env['PATH']}"
+        return subprocess.run([BASH, str(SCRIPT), *args], cwd=self.work,
                               capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
 
     # ── 场景构建 ──────────────────────────────────────────────────────────

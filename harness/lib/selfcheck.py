@@ -52,8 +52,16 @@ def last_stdout_line(stdout):
 
 
 def main():
-    py_rc, py_out, py_err = run_tool([sys.executable, "-m", "pytest",
-                                      "harness", "-q"])
+    pytest_cmd = [sys.executable, "-m", "pytest", "harness", "-q"]
+    # xdist 可导入时并行跑（-n auto 按 CPU 核数分流，apply 侧 586 项串行 30s
+    # → 并行显著提速）；导入不到照旧串行。计数行正则不动（-q + -n auto 摘要
+    # 行格式与串行一致，仍含 passed/skipped 计数）
+    try:
+        import xdist  # noqa: F401
+        pytest_cmd += ["-n", "auto"]
+    except ImportError:
+        pass
+    py_rc, py_out, py_err = run_tool(pytest_cmd)
     # refs 用 ROOT 拼绝对路径调用，不依赖 cwd（任意工作目录下自检结果一致）
     refs_rc, refs_out, refs_err = run_tool([sys.executable,
                                             str(ROOT / "harness" / "lib"

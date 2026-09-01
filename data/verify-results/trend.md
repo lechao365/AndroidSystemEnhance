@@ -1,13 +1,3 @@
-2026-08-27 15:07:36 d9eedee45eda skip build=skip board=skip acc=- 修 lcview-trigger 截断 P0 与残余静默丢弃（-s 无需上板）
-2026-08-27 15:58:14 5407e52257f2 pass build=pass board=pass acc=lcview-liveness=pass(5/5) lcview-pipelin 首次上板取 lcview 用例与单测真值（trigger 全链路 6/6 过，f
-2026-08-27 16:50:30 ae65531af480 pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass p 修 hal_test 全灭与三红与时钟（hal 0/10→10/10、unit 
-2026-08-27 17:18:58 852d5d24314c pass build=skip board=pass acc=svc_hal=pass svc_daemon=pass boot=pass p 修 trusted_tss 两处假绿与 manifest 护栏（四用例全绿）
-2026-08-27 17:57:45 7bdd5c43bfab pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass l 引覆盖率度量并加固心跳与 ts 判据（覆盖84.33%、liveness 8/8
-2026-08-27 19:27:27 2f8bc25f84a0 pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass l 修心跳子串假绿与 ts 全历史判据并补 DeviceReader UT（trig
-2026-08-27 20:13:07 8cfe4f9cf98b pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass l 补 daemon 主循环与生产配置 UT 并清历史污染（warn/trigger
-2026-08-27 20:39:29 a2b467030005 pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass l 补事件 4/5 DT 并加收据删除护栏（transfer 5/5、事件7实测无打
-2026-08-27 21:22:56 2ae3f7ad0eac pass build=skip board=pass acc=svc_hal=pass svc_daemon=pass boot=pass l 撤错误护栏并做 lcview 收口审计（2 处假绿修复、事件登记归因修订）
-2026-08-27 23:16:31 manual-2608272316 pass build=pass board=pass acc=[{"case":"lciod-liveness","status":"pass lciod 防护栏全新构建+lcview轻量收口：4测试target编译过、板上
 2026-08-27 23:35:43 manual-2608272335 pass build=pass board=pass acc=[{"case":"lciod-liveness","status":"pass lciod 防护栏缺口补齐：enabled==1 假绿修复 + AIDL 投影抽
 2026-08-27 23:39:52 manual-2608272339 pass build=pass board=pass acc=[{"case":"lcview-liveness","status":"pas 当前最终工作树闭环：lcview 5条(liveness 8/8,pipelin
 2026-08-28 09:35:39 be5969c4fa93 pass build=pass board=pass acc={"overall":"pass","items":[{"tag":"svc:l 修 lciod 三处假绿与速率溢出：空expect判红+error_count/
@@ -48,3 +38,18 @@
 2026-08-31 21:40:10 264b4faab6a6 skip build=skip board=skip acc=- 堵验收假绿并保住基线证据不被老化删（-s 无需上板）
 2026-09-01 09:22:30 253457e98980 pass build=pass board=pass acc={"overall":"pass","items":[{"tag":"svc:l 修 FileWriter 裂行 P0 与 writeInvalid 假绿：jso
 2026-09-01 09:39:50 4cbc6c1fcc01 pass build=pass board=pass acc={"overall":"pass","items":[{"tag":"svc:l 心跳时间驱动+解码器测真化+verify-cases 组自洽：单测 195 全过 | {"daemon_rss_kb": 5124, "dd_s": 2.365, "drain_ms_per_event": 0.378, "jsonl_delta": 3079, "load_mb": 64, "throughput_evs": 1302.1, "total_delta": 3079}
+2026-09-01 10:20:34 fb7bca7bc046 pass build=pass board=pass acc={"overall":"pass","items":[{"tag":"svc:l 心跳 invalid 计数与时效断言：invalid_records 入心跳、l | {"daemon_rss_kb": 5076, "dd_s": 2.562, "drain_ms_per_event": 0.381, "jsonl_delta": 3078, "load_mb": 64, "throughput_evs": 1201.2, "total_delta": 3078}
+2026-09-01 10:50:07 41b465d6e5b3 skip build=skip board=skip acc=- 新增 known-issues 准入规则骨架与有序四门（-s 无需上板）
+2026-09-01 11:03:17 870931e50fcb skip build=skip board=skip acc=- 补 KIR-004 至 007 与准入场景表（-s 无需上板）
+2026-09-01 11:42:42 7866aaab29d7 skip build=skip board=skip acc=- 挂载规则指引并实现 KIR-005 阈值告警（-s 无需上板）
+2026-09-01 12:15:57 9278a842ef04 skip build=skip board=skip acc=- 补 severity 字段并回填存量条目（-s 无需上板）
+2026-09-01 12:33:49 912659304ee2 skip build=skip board=skip acc=- 基线记带病项并按 KIR 判定 E1 遗留（-s 无需上板）
+2026-09-01 15:10:32 ffc3da1ebcb4 pass build=skip board=pass acc={"overall":"pass","items":[{"tag":"svc:l logfield 按进程归属筛并等新进程首心跳：验收与五用例组全绿 | {"daemon_rss_kb": 5120, "dd_s": 2.361, "drain_ms_per_event": 0.387, "load_mb": 64, "throughput_evs": 1304.3}
+2026-09-01 15:49:18 671b4dc5033d skip build=skip board=skip acc=- 打开 emit 侧 bash 测试盲区（-s 无需上板）
+2026-09-01 16:21:29 ad91215da5bf skip build=skip board=skip acc=- 修 Windows 实跑暴露的 8 项失败（-s 无需上板）
+2026-09-01 16:36:37 b36ccd69ec6a skip build=skip board=skip acc=- 修开关跨模块污染并补 precheck 领先告警（-s 无需上板）
+2026-09-01 17:16:49 41daf105ac74 skip build=skip board=skip acc=- 收据配额扩到 50 并闭环两笔已修 issue（-s 无需上板）
+2026-09-01 17:50:57 95fa089b5eeb skip build=skip board=skip acc=- 打点强制化并把 -s 自检改并行（-s 无需上板）
+2026-09-01 18:42:08 b0997051da41 skip build=skip board=skip acc=- 闭环记录改 promote 清算并写基线快照（-s 无需上板）
+2026-09-01 19:02:14 e7dce056f5a7 skip build=skip board=skip acc=- 补齐清算证据与打点路径同源并装并行依赖（-s 无需上板）
+2026-09-01 19:29:12 manual-2609011929 skip build=skip board=skip acc=- 修复 publish-main-base 证据锚点（board 收据回溯）与 p

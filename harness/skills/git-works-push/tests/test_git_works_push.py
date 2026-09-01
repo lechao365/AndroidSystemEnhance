@@ -1,10 +1,15 @@
 import os
-import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+from shell_env import bash_argv, find_bash, write_python3_shim  # noqa: E402
+
+BASH = find_bash()
 
 SCRIPT = Path(__file__).resolve().parents[1] / "git_works_push.sh"
 
@@ -66,7 +71,7 @@ MOCK_BASELINE = """baselines:
 """
 
 
-@unittest.skipUnless(shutil.which("bash"), "需要 bash 解释器（Windows 环境跳过）")
+@unittest.skipUnless(BASH, "需要 bash 解释器（Windows 环境跳过）")
 class TestGitWorksPush(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -84,13 +89,21 @@ class TestGitWorksPush(unittest.TestCase):
         git = bin_dir / "git"
         git.write_text(mock_git, encoding="utf-8")
         git.chmod(git.stat().st_mode | stat.S_IEXEC)
-        env = dict(os.environ)
-        env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
-        return env
+        # python3 shim 目录（Windows 无 python3 命令，脚本内调用经 shim
+        # 转发到当前解释器）；目录经 bash_argv 前置目录传入（shell 内 PATH
+        # 前置，绕开 bin/bash.exe 启动期强插 mingw64/usr 到 PATH 最前）
+        shim_dir = write_python3_shim(Path(self._tmp.name) / "shim")
+        return bin_dir, shim_dir
 
     def _run(self, *args, mock_git=MOCK_GIT_OK):
-        env = self._env_with_mock_git(mock_git)
-        return subprocess.run(["bash", str(SCRIPT), *args],
+        bin_dir, shim_dir = self._env_with_mock_git(mock_git)
+        argv = bash_argv(SCRIPT, args, prepend_dirs=[shim_dir, bin_dir])
+        if argv is None:
+            # find_bash 返 None（本机无 bash）→ skip 单测，防 None 进 subprocess
+            # 变 TypeError（Windows 未设 LC_HARNESS_WIN_BASH 时触发）
+            self.skipTest("无 bash（find_bash 返 None）")
+        env = dict(os.environ)
+        return subprocess.run(argv,
                               capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
 
     def test_remote_sha_empty_exits_2(self):

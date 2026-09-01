@@ -3,7 +3,9 @@
 标签语法（推荐格式）：svc:<svc> / log:<kw> / prop:<k>=<v> / file:<path> /
 cmd:"<含空格的 shell>" 或 cmd:<无空格> / hostcmd:"<host 侧 shell>"（在
 workspace-verify 目录执行，payload 相对路径以其为根，如
-hostcmd:"cases/lcview_check.sh --mode files"）/ boot（裸词）；其余内容视为
+hostcmd:"cases/lcview_check.sh --mode files"）/ boot（裸词）/ logfresh:"锚点|秒数"
+（以设备时钟回退 N 秒作 logcat 时间窗起点，窗内未命中锚点即判红——时效性判据，
+daemon 卡死而进程存活时旧心跳不再判绿）；其余内容视为
 自由文本（status='ai'，由 verify AI 现场判定）。
 overall 语义（三态）：任一自动项 fail 即 fail；无 fail 但含未判定项（ai）则 ai；
 全 pass 且无 ai 才 pass（未判定不算成功）。
@@ -45,11 +47,16 @@ _VERIFY_ROOT = Path(__file__).resolve().parent
 # log 支持引号包裹（含空格关键字，如 log:"LcView HAL: registered"）；
 # cmd/hostcmd 支持引号包裹（含空格）；引号内支持反斜杠转义（\"），否则
 # 含转义引号的命令（如 adb shell \"echo ...\"）会在转义处截断成坏标签；
-# logfield 取 logcat 含锚点的最后一行按字段名提取数值比较（锚点|字段|比较符|数值），
-# 防 log: 子串匹配命中历史零值心跳的假绿；boot 为裸词；其余标签不含空格
+# logfield 取 logcat 含锚点的最后一行按字段名提取数值比较（锚点|字段|比较符|数值
+# [|进程名]），防 log: 子串匹配命中历史零值心跳的假绿；第 5 段进程名经 pidof 取 pid
+# 后日志按该 pid 收窄（防旧进程心跳残留行被当新进程心跳），锚点未命中时每 5s 重取
+# 到 90s 超时判红；logfresh 取设备时钟回退 N 秒的
+# logcat 时间窗（锚点|秒数），窗内未命中锚点即判红（时效性判据）；
+# boot 为裸词；其余标签不含空格
 _TAG_RE = re.compile(
     r'(?:svc|log|prop|file|hostcmd):(?:"(?:\\.|[^"\\])*"|\S+)'
     r'|logfield:(?:"(?:\\.|[^"\\])*"|\S+)'
+    r'|logfresh:(?:"(?:\\.|[^"\\])*"|\S+)'
     r'|cmd:(?:"(?:\\.|[^"\\])*"|\S+)|\bboot\b')
 # --log-since 时间窗起点格式：MM-DD 或 YYYY-MM-DD 的 HH:MM:SS.mmm
 _SINCE_RE = re.compile(r"^(?:\d{4}-)?\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$")
@@ -124,7 +131,7 @@ def split_tag(tag):
         return "boot", ""
     if ":" in tag:
         kind, payload = tag.split(":", 1)
-        if kind in ("cmd", "log", "hostcmd", "logfield") and payload.startswith('"') and payload.endswith('"'):
+        if kind in ("cmd", "log", "hostcmd", "logfield", "logfresh") and payload.startswith('"') and payload.endswith('"'):
             payload = payload[1:-1]
             payload = payload.replace('\\"', '"')  # 反转义：\" → "
         return kind, payload
@@ -194,17 +201,44 @@ def execute_tag(tag, adb_exec, adb_logcat):
         return ("pass" if hit else "fail",
                 f"logcat {'命中' if hit else '未命中'} 关键字 {payload!r}（取回 {len(out)} 字符）")
     if kind == "logfield":
-        # 锚点|字段名|比较符|数值：取 logcat 含锚点的最后一行按字段名提取
+        # 锚点|字段名|比较符|数值[|进程名]：取 logcat 含锚点的最后一行按字段名提取
         # 数值比较——log: 子串匹配会命中历史零值心跳（5000 行缓冲），
-        # 故障累计后仍 PASS 的假绿由此防
+        # 故障累计后仍 PASS 的假绿由此防。
+        # 第 5 段进程名（5 段写法）：经 pidof 取 pid 后日志按该 pid 收窄
+        # （logcat --pid），防旧进程心跳残留行被当新进程心跳（E1 首跑认旧
+        # 进程心跳根因：logfield 取末行不按进程归属筛）；4 段写法不变。
         parts = payload.split("|")
-        if len(parts) != 4:
-            return "fail", f"logfield 语法错误（须 锚点|字段|比较符|数值）: {payload!r}"
-        anchor, field, op, expect_s = [p.strip() for p in parts]
-        out = adb_logcat()
-        lines = [ln for ln in out.splitlines() if anchor in ln]
-        if not lines:
-            return "fail", f"logfield: logcat 未命中锚点 {anchor!r}"
+        if len(parts) not in (4, 5):
+            return "fail", (f"logfield 语法错误（须 锚点|字段|比较符|数值"
+                            f"[|进程名]）: {payload!r}")
+        anchor, field, op, expect_s = [p.strip() for p in parts[:4]]
+        proc = parts[4].strip() if len(parts) == 5 else ""
+        if len(parts) == 5 and not proc:
+            return "fail", f"logfield: 第 5 段进程名为空: {payload!r}"
+        if proc:
+            # 5 段写法：pidof 取 pid（空或非数字判红），日志按 pid 收窄；
+            # 锚点未命中（新进程首心跳未到）时每 5s 重取（重新 pidof + logcat）
+            # 到 90s 超时判红——不得回落全量筛（回落即旧进程行重新混入假绿）
+            deadline = time.monotonic() + 90
+            while True:
+                body, code = adb_exec(f"pidof {shlex.quote(proc)}")
+                pid = body.strip()
+                if code != 0 or not pid.isdigit():
+                    return "fail", (f"logfield: 进程 {proc!r} pidof 为空或非数字"
+                                    f" {pid!r}（exit={code}）")
+                out = adb_logcat(pid)
+                lines = [ln for ln in out.splitlines() if anchor in ln]
+                if lines:
+                    break
+                if time.monotonic() >= deadline:
+                    return "fail", (f"logfield: 进程 {proc!r}(pid={pid}) 90s 内"
+                                    f"未命中锚点 {anchor!r}（未回落全量筛）")
+                time.sleep(5)
+        else:
+            out = adb_logcat()
+            lines = [ln for ln in out.splitlines() if anchor in ln]
+            if not lines:
+                return "fail", f"logfield: logcat 未命中锚点 {anchor!r}"
         last = lines[-1]
         m = re.search(rf"{re.escape(field)}=(-?\d+)", last)
         if not m:
@@ -221,6 +255,47 @@ def execute_tag(tag, adb_exec, adb_logcat):
             return "fail", f"logfield: 未知比较符 {op!r}（须 = != > < >= <=）"
         return ("pass" if ok else "fail",
                 f"logfield {field}={actual} {op} {expect}（锚点末行: {last[:120]}）")
+    if kind == "logfresh":
+        # 锚点|秒数：取设备 date 回退 N 秒作 logcat 时间窗起点，窗内未命中
+        # 锚点即判红——log:/logfield 取末行不看时效，daemon 卡死而进程存活时
+        # 旧心跳仍判绿（假绿精确条件：进程活着但采集链路死了）。
+        # 时间窗文本按设备时区格式化后直接透传 build_logcat_cmd（-t <since>），
+        # 不解析时间戳（复用既有命令构造，PIT-5 同源防护）
+        parts = payload.split("|")
+        if len(parts) != 2:
+            return "fail", f"logfresh 语法错误（须 锚点|秒数）: {payload!r}"
+        anchor, window_s = [p.strip() for p in parts]
+        try:
+            window = int(window_s)
+        except ValueError:
+            return "fail", f"logfresh 秒数非数字: {window_s!r}"
+        body, code = adb_exec("date +%s")
+        if code != 0 or not body.strip().isdigit():
+            return "fail", "logfresh: 无法读取设备时钟（date +%s）"
+        since_epoch = int(body.strip()) - window
+        out, code = adb_exec("date +%z")
+        if code != 0:
+            return "fail", "logfresh: 无法读取设备时区（date +%z）"
+        m = re.match(r"([+-])(\d{2})(\d{2})", out.strip())
+        if not m:
+            return "fail", f"logfresh: 设备时区格式非法 {out.strip()!r}"
+        sign = 1 if m.group(1) == "+" else -1
+        offset = sign * (int(m.group(2)) * 3600 + int(m.group(3)) * 60)
+        tz = timezone(timedelta(seconds=offset))
+        dt = datetime.fromtimestamp(since_epoch, tz=tz)
+        since_text = dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        try:
+            r = subprocess.run(ac.build_logcat_cmd(None, 5000, since=since_text),
+                               capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=60)
+            out = r.stdout
+        except subprocess.TimeoutExpired:
+            return "fail", "logfresh: logcat 执行超时"
+        hit = anchor in out
+        return ("pass" if hit else "fail",
+                f"logfresh: 设备时钟回退 {window}s（窗起点 {since_text}），"
+                f"窗内{'命中' if hit else '未命中'} 锚点 {anchor!r}"
+                f"（取回 {len(out)} 字符）")
     if kind == "prop":
         k, _, v = payload.partition("=")
         body, code = adb_exec(f"getprop {shlex.quote(k)}")
@@ -350,7 +425,8 @@ def main(argv=None):
     #  门禁，无 reboot 的 fresh/ts 用例从不校准时钟而恒红）
     need_clock = args.wait_ready or any(
         "--mode fresh" in p or "--mode ts" in p
-        for _, p in (split_tag(t) for t in parse_acceptance(acceptance)))
+        for _, p in (split_tag(t) for t in parse_acceptance(acceptance))) or any(
+        t.startswith("logfresh") for t in parse_acceptance(acceptance))
     if need_clock:
         # 就绪后校准设备时钟：偏差超阈值自动 root 修正（PIT-5 复发防护，
         # 避免 ts/fresh 等时间敏感验收因时钟漂移误判）
@@ -383,10 +459,10 @@ def main(argv=None):
         print(f"NOTE: --log-since 本地 {args.log_since} → 设备 {device_since}"
               f"（按设备时钟/时区换算）")
 
-    def adb_logcat():
+    def adb_logcat(pid=None):
         try:
             r = subprocess.run(ac.build_logcat_cmd(None, 5000,
-                                                   since=device_since),
+                                                   since=device_since, pid=pid),
                                capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=60)
             return r.stdout
