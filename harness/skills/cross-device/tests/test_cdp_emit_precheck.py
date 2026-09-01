@@ -95,6 +95,34 @@ class TestEmitPrecheck(unittest.TestCase):
         self.assertIn("未推送", reason)
         self.assertIn("333333333333", reason)
 
+    # ── KIR-005 存量告警：open/scheduled 条数阈值 8，只告警不阻断 ──
+    def _write_index(self, n_open, extra_status=()):
+        d = self.root / "data" / "known-issues"
+        d.mkdir(parents=True, exist_ok=True)
+        lines = [f"KI-{i:04d} batch-test false t{i} open" for i in range(1, n_open + 1)]
+        lines += [f"KI-{9000 + i:04d} batch-test false t{i} {s}"
+                  for i, s in enumerate(extra_status, start=1)]
+        (d / "index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_warns_7_open_no_warning(self):
+        self._write_index(7)
+        self.assertEqual(cdp_emit_precheck.known_issues_warns(self.root), [])
+
+    def test_warns_8_open_alerts(self):
+        self._write_index(8)
+        warns = cdp_emit_precheck.known_issues_warns(self.root)
+        self.assertEqual(len(warns), 8)
+        self.assertEqual(warns[0], "KI-0001")
+        self.assertEqual(warns[-1], "KI-0008")
+
+    def test_warns_fixed_and_wontfix_not_counted(self):
+        # 6 条 open + fixed/wontfix 各 1 条 = 6 < 8，不告警
+        self._write_index(6, extra_status=("fixed", "wontfix"))
+        self.assertEqual(cdp_emit_precheck.known_issues_warns(self.root), [])
+
+    def test_warns_index_missing_no_crash(self):
+        self.assertEqual(cdp_emit_precheck.known_issues_warns(self.root), [])
+
 
 if __name__ == "__main__":
     unittest.main()

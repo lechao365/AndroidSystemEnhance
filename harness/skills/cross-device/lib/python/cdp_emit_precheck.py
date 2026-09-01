@@ -12,8 +12,24 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from cdp_issue import read_index  # noqa: E402
 from cdp_paths import project_root  # noqa: E402
 from cdp_receipt import read_latest_receipt  # noqa: E402
+
+
+def known_issues_warns(root=None):
+    """KIR-005 存量告警：open/scheduled 条目达 8 条时返回其 id 列表，否则空。
+
+    只告警不阻断（阻断会连开专项任务的批次一起卡住）；index 缺失视为 0 条。
+    """
+    root = Path(root) if root else project_root()
+    try:
+        entries = read_index(root / "data" / "known-issues")
+    except OSError:
+        return []
+    open_ids = [e["issue_id"] for e in entries
+                if e.get("status") in ("open", "scheduled")]
+    return open_ids if len(open_ids) >= 8 else []
 
 
 def _git(root, *args):
@@ -63,8 +79,11 @@ def main(argv=None):
     ap.add_argument("--no-pull", action="store_true", help="干跑：不执行 git pull")
     args = ap.parse_args(argv)
     ok, reason, detail = precheck(do_pull=not args.no_pull)
-    print(json.dumps({"ok": ok, "reason": reason, "detail": detail[:100]},
-                     ensure_ascii=False))
+    out = {"ok": ok, "reason": reason, "detail": detail[:100]}
+    warns = known_issues_warns()
+    if warns:
+        out["warns"] = warns
+    print(json.dumps(out, ensure_ascii=False))
     return 0 if ok else 1
 
 

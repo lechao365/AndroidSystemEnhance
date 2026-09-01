@@ -1,4 +1,3 @@
-2026-08-27 17:18:58 852d5d24314c pass build=skip board=pass acc=svc_hal=pass svc_daemon=pass boot=pass p 修 trusted_tss 两处假绿与 manifest 护栏（四用例全绿）
 2026-08-27 17:57:45 7bdd5c43bfab pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass l 引覆盖率度量并加固心跳与 ts 判据（覆盖84.33%、liveness 8/8
 2026-08-27 19:27:27 2f8bc25f84a0 pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass l 修心跳子串假绿与 ts 全历史判据并补 DeviceReader UT（trig
 2026-08-27 20:13:07 8cfe4f9cf98b pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass l 补 daemon 主循环与生产配置 UT 并清历史污染（warn/trigger
@@ -48,3 +47,4 @@
 2026-09-01 10:20:34 fb7bca7bc046 pass build=pass board=pass acc={"overall":"pass","items":[{"tag":"svc:l 心跳 invalid 计数与时效断言：invalid_records 入心跳、l | {"daemon_rss_kb": 5076, "dd_s": 2.562, "drain_ms_per_event": 0.381, "jsonl_delta": 3078, "load_mb": 64, "throughput_evs": 1201.2, "total_delta": 3078}
 2026-09-01 10:50:07 41b465d6e5b3 skip build=skip board=skip acc=- 新增 known-issues 准入规则骨架与有序四门（-s 无需上板）
 2026-09-01 11:03:17 870931e50fcb skip build=skip board=skip acc=- 补 KIR-004 至 007 与准入场景表（-s 无需上板）
+2026-09-01 11:42:42 7866aaab29d7 skip build=skip board=skip acc=- 挂载规则指引并实现 KIR-005 阈值告警（-s 无需上板）
