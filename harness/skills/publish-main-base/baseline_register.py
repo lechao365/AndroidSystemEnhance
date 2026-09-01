@@ -18,7 +18,8 @@ CONFIG = Path(__file__).resolve().parents[2] / "config" / "baseline-status.yaml"
 # 仿 ws_report.py：引入 cross-device 共享收据模块，candidate 实读真实 verify 收据
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "lib" / "python"))
 from cdp_receipt import read_receipt  # noqa: E402
-from cdp_issue import issue_files, read_index, read_issue, validate_issue  # noqa: E402
+from cdp_issue import (closed_issue_ids, delete_closed, issue_files,
+                       read_index, read_issue, validate_issue)  # noqa: E402
 from cdp_paths import data_baselines_dir  # noqa: E402
 
 
@@ -156,8 +157,10 @@ def main(argv=None):
             return 1
         # 排除项：登记 yaml（promote 元提交必然改动）与 docs/（文档同步提交）
         # 与 data/baselines/（promote 生成的证据快照目录，随晋升提交入库）
+        # 与 data/known-issues/（promote 清算删除目录，随晋升提交入库——
+        # 不排除则清算删除让树等价断言必红回滚）
         excludes = ("harness/config/baseline-status.yaml", "docs/",
-                    "data/baselines/")
+                    "data/baselines/", "data/known-issues/")
         diffs = [ln for ln in r.stdout.splitlines()
                  if ln and not any(ln == e or ln.startswith(e) for e in excludes)]
         if diffs:
@@ -295,7 +298,19 @@ def main(argv=None):
                 b["approved_at"] = datetime.datetime.now(
                     datetime.timezone(datetime.timedelta(hours=8))
                 ).strftime("%Y-%m-%dT%H:%M:%S+08:00")
+                # promote 清算（KIR-006）：晋升前先把终态条目清单（status 属
+                # fixed 或 wontfix，不看 blocking）记入 evidence.known_issues_closed
+                # 再 save——快照与清单先入档，随后 delete_closed 删文件（终态
+                # 记录随清单入档，删除不销毁证据链）；删失败仅 warn 不回滚快照
+                closed = closed_issue_ids()
+                if isinstance(b.get("evidence"), dict):
+                    b["evidence"]["known_issues_closed"] = ",".join(closed)
                 save(data)
+                try:
+                    delete_closed(closed)
+                except OSError as e:
+                    print(f"warn: 终态条目清算删除失败（快照与清单已入档不回滚）: "
+                          f"{e}", file=sys.stderr)
                 print(f"promoted: {args.baseline_id}（快照: {snapshot_path}）")
                 return 0
         print(f"error: 未找到 baseline {args.baseline_id}")

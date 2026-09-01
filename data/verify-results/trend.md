@@ -50,3 +50,4 @@
 2026-09-01 16:36:37 b36ccd69ec6a skip build=skip board=skip acc=- 修开关跨模块污染并补 precheck 领先告警（-s 无需上板）
 2026-09-01 17:16:49 41daf105ac74 skip build=skip board=skip acc=- 收据配额扩到 50 并闭环两笔已修 issue（-s 无需上板）
 2026-09-01 17:50:57 95fa089b5eeb skip build=skip board=skip acc=- 打点强制化并把 -s 自检改并行（-s 无需上板）
+2026-09-01 18:42:08 b0997051da41 skip build=skip board=skip acc=- 闭环记录改 promote 清算并写基线快照（-s 无需上板）

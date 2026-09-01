@@ -408,6 +408,29 @@ class TestSyncModifyToMainBase(unittest.TestCase):
             self._git("ls-remote", "origin",
                       "refs/tags/verified/BL-TEST-01").stdout.strip(), "")
 
+    def test_promote_passes_known_issues_excluded(self):
+        # 方向 3/4 排除生效：meta 提交夹带 data/known-issues/ 文件（promote
+        # 清算删除目录）→ verify-tree 排除后仍等价，promote 放行；
+        # 且清算目录随晋升提交入库（git add -A data/known-issues）
+        self._setup_remote()
+        self._receipt_commit_c3(verify_mode="skip")
+        self._candidate_yaml()
+        # 合法登记（活项，门禁不拒）：随收据提交后的 meta 提交夹带入 dev
+        cdp_issue.write_issue(cdp_issue.Issue(
+            issue_id="KI-EXCL", title="排除目录条目", discovered_in="abc",
+            origin="pre-existing", blocking=False, status="open",
+            task="t1", batch_id="0000000000ab"), "现场")
+        self._git("add", "-A")
+        self._git("commit", "-m", "构建(baseline): 夹带 known-issues 清算文件")
+        self._git("push", "origin", "dev")
+        r = self._promote()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("promote 完成", r.stdout)
+        # 方向 4：data/known-issues 随晋升提交入库（main 树含清算文件）
+        self.assertIn("data/known-issues",
+                      self._git("ls-tree", "-r", "--name-only", "main",
+                                "data/known-issues").stdout)
+
     def test_prepare_without_task_infers_ki_gate(self):
         # 方向 7：prepare 全不传（--task/--evidence-scope）走通——门禁无条件执行，
         # 缺省从唯一活跃 task 推断（KIGATE=inferred），scope 从收据 cases 推导

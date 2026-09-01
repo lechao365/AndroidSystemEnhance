@@ -99,30 +99,65 @@ class TestIssue(unittest.TestCase):
         self.assertEqual(got.origin, "introduced")
 
     def test_keeps_all_within_quota(self):
-        # 未超配额：写入多份全部保留（对照收据 _DETAIL_KEEP=50 的 prune）
+        # 写时不再老化（KIR-006 promote 清算）：写入多份全部保留，无配额
         for i in range(5):
             cdp_issue.write_issue(_mk_issue(f"KI-20260829-00{i}"), f"body{i}")
         self.assertEqual(len(cdp_issue.issue_files(self._dir)), 5)
 
-    def test_prune_open_never_aged_out(self):
-        # 未闭环不老化：25 条 open（blocking=true）不计配额，全部保留
-        for i in range(25):
-            cdp_issue.write_issue(_mk_issue(f"KI-20260829-{i:03d}"), f"body{i}")
-        files = cdp_issue.issue_files(self._dir)
-        self.assertEqual(len(files), 25)
-        self.assertEqual(cdp_issue.validate_issue(files[-1], self._dir), [])
-
-    def test_prune_fixed_keeps_20(self):
-        # 已闭环配额：25 条 fixed 且 blocking=false，仅保留最新 20 条已闭环记录
+    def test_write_no_aging_keeps_all_terminal(self):
+        # 终态条目写时全留（无配额老化）：25 条 fixed 与 wontfix 写后一份不删
         for i in range(25):
             r = _mk_issue(f"KI-20260829-{i:03d}", status="fixed")
             r.blocking = False
             r.blocking_reason = ""
             cdp_issue.write_issue(r, f"body{i}")
         files = cdp_issue.issue_files(self._dir)
-        self.assertEqual(len(files), cdp_issue._ISSUE_KEEP)
-        self.assertEqual(len(files), 20)
+        self.assertEqual(len(files), 25)
         self.assertEqual(cdp_issue.validate_issue(files[-1], self._dir), [])
+
+    # ── 方向 1：promote 清算（closed_issue_ids + delete_closed）───────────
+    def test_closed_issue_ids_only_terminal(self):
+        # 终态只看 status：fixed 与 wontfix 计入清单，open/scheduled 不算，
+        # fixed 即使 blocking=true 也计入（不看 blocking）
+        cdp_issue.write_issue(_mk_issue("KI-FIXED", status="fixed"), "x")
+        cdp_issue.write_issue(_mk_issue("KI-WONTFIX", status="wontfix"), "y")
+        cdp_issue.write_issue(_mk_issue("KI-OPEN"), "z")
+        cdp_issue.write_issue(_mk_issue("KI-SCHED", status="scheduled"), "w")
+        closed = set(cdp_issue.closed_issue_ids(self._dir))
+        self.assertEqual(closed, {"KI-FIXED", "KI-WONTFIX"})
+
+    def test_closed_fixed_blocking_still_terminal(self):
+        # blocking=true 的 fixed 条目同样属终态（终态判定不看 blocking）
+        r = _mk_issue("KI-BLK-FIXED", status="fixed")
+        r.blocking = True  # _mk_issue 默认 blocking=True
+        cdp_issue.write_issue(r, "x")
+        self.assertEqual(cdp_issue.closed_issue_ids(self._dir), ["KI-BLK-FIXED"])
+
+    def test_delete_closed_removes_files_and_syncs_index(self):
+        # 清算删除：终态文件删除 + index 同步重建，活项（open/scheduled）全留
+        cdp_issue.write_issue(_mk_issue("KI-FIXED", status="fixed"), "x")
+        cdp_issue.write_issue(_mk_issue("KI-WONTFIX", status="wontfix"), "y")
+        cdp_issue.write_issue(_mk_issue("KI-OPEN"), "z")
+        cdp_issue.write_issue(_mk_issue("KI-SCHED", status="scheduled"), "w")
+        removed = cdp_issue.delete_closed(["KI-FIXED", "KI-WONTFIX"], self._dir)
+        self.assertEqual(len(removed), 2)
+        remaining = {i.issue_id for p in cdp_issue.issue_files(self._dir)
+                     for i in [cdp_issue.read_issue(p)]}
+        self.assertEqual(remaining, {"KI-OPEN", "KI-SCHED"})
+        # index 与文件集一致（删除后重建，无悬空条目）
+        index_ids = {e["issue_id"] for e in cdp_issue.read_index(self._dir)}
+        self.assertEqual(index_ids, remaining)
+        self.assertNotIn("KI-FIXED", index_ids)
+        self.assertNotIn("KI-WONTFIX", index_ids)
+
+    def test_delete_closed_unknown_ids_ignored(self):
+        # 清单含不存在的 id：静默跳过，不影响其余删除
+        cdp_issue.write_issue(_mk_issue("KI-FIXED", status="fixed"), "x")
+        cdp_issue.write_issue(_mk_issue("KI-OPEN"), "z")
+        removed = cdp_issue.delete_closed(["KI-FIXED", "KI-GHOST"], self._dir)
+        self.assertEqual(len(removed), 1)
+        self.assertEqual({i.issue_id for p in cdp_issue.issue_files(self._dir)
+                          for i in [cdp_issue.read_issue(p)]}, {"KI-OPEN"})
 
     def test_origin_status_invalid_falls_back(self):
         # 非法枚举回落默认值，不崩

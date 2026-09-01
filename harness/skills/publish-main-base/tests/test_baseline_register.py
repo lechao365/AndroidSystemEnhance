@@ -219,6 +219,71 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(b["evidence_scope"], "no-code-change")
         self.assertEqual(b["evidence"]["evidence_scope"], "no-code-change")
 
+    # ── 方向 1/2：promote 清算终态条目（KIR-006 promote 清算）────────────
+    def _write_issue_files(self):
+        # 在 CDP_PROJECT_ROOT 下写 known-issues：2 终态 + 1 活项（blocking 混杂）
+        from cdp_issue import Issue, write_issue
+        base = dict(schema_version=1, discovered_in="abc", severity="P2",
+                    task="t1", batch_id="18f27638d9f6")
+        write_issue(Issue(issue_id="KI-CLOSE-1", title="问题一",
+                          origin="pre-existing", blocking=False,
+                          status="fixed", resolved_in="abc123", **base), "x")
+        write_issue(Issue(issue_id="KI-CLOSE-2", title="问题二",
+                          origin="introduced", blocking=True,
+                          blocking_reason="影响一致性", status="wontfix", **base), "y")
+        write_issue(Issue(issue_id="KI-OPEN-1", title="问题三",
+                          origin="pre-existing", blocking=False,
+                          status="open", **base), "z")
+
+    def test_promote_writes_known_issues_closed_and_deletes(self):
+        # promote 清算：清单先入 evidence.known_issues_closed 再 save，
+        # 随后删终态文件（不看 blocking），活项全留，index 同步重建
+        from cdp_issue import issue_files, read_index
+        self._write_issue_files()
+        rp = self._make_receipt()
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        bid = br.load()["baselines"][0]["baseline_id"]
+        rc, out = self._run("promote", "--baseline-id", bid)
+        self.assertEqual(rc, 0)
+        self.assertIn("promoted:", out)
+        b = br.load()["baselines"][0]
+        # 清单入档（固定顺序：fixed 在前按文件升序，终态不看 blocking）
+        self.assertEqual(b["evidence"]["known_issues_closed"],
+                         "KI-CLOSE-1,KI-CLOSE-2")
+        # 终态全删、活项全留（CDP_PROJECT_ROOT 指向 tmp，见 setUp）
+        issues_dir = self._root / "data" / "known-issues"
+        remaining = {i.issue_id for p in issue_files(issues_dir)
+                     for i in [br.read_issue(p)]}
+        self.assertEqual(remaining, {"KI-OPEN-1"})
+        self.assertEqual({e["issue_id"] for e in read_index(issues_dir)},
+                         {"KI-OPEN-1"})
+
+    def test_promote_delete_failure_keeps_snapshot(self):
+        # 删失败不回滚快照（KIR-006）：delete_closed 抛错仅 warn，
+        # promoted 状态与证据快照保留
+        from unittest import mock
+        self._write_issue_files()
+        rp = self._make_receipt()
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        bid = br.load()["baselines"][0]["baseline_id"]
+        with mock.patch("baseline_register.delete_closed",
+                        side_effect=OSError("perm denied")):
+            rc, out = self._run("promote", "--baseline-id", bid)
+        self.assertEqual(rc, 0)
+        self.assertIn("清算删除失败", out)
+        self.assertIn("promoted:", out)
+        b = br.load()["baselines"][0]
+        self.assertEqual(b["status"], "promoted")
+        self.assertEqual(b["evidence"]["known_issues_closed"],
+                         "KI-CLOSE-1,KI-CLOSE-2")
+        snapshot = self._root / "data" / "baselines" / f"{bid}-{Path(rp).name}"
+        self.assertTrue(snapshot.is_file(), "删失败快照仍须保留")
+        # 快照内容 = 收据原文（清单入档后仍一致）
+        self.assertEqual(snapshot.read_text(encoding="utf-8"),
+                         Path(rp).read_text(encoding="utf-8"))
+
     def test_revert_candidate_requires_promoted(self):
         # 仅 promoted 可 revert-candidate：直接对 candidate revert 必须拒绝
         rp = self._make_receipt()
