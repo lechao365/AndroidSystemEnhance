@@ -1,4 +1,3 @@
-2026-08-27 16:50:30 ae65531af480 pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass p 修 hal_test 全灭与三红与时钟（hal 0/10→10/10、unit 
 2026-08-27 17:18:58 852d5d24314c pass build=skip board=pass acc=svc_hal=pass svc_daemon=pass boot=pass p 修 trusted_tss 两处假绿与 manifest 护栏（四用例全绿）
 2026-08-27 17:57:45 7bdd5c43bfab pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass l 引覆盖率度量并加固心跳与 ts 判据（覆盖84.33%、liveness 8/8
 2026-08-27 19:27:27 2f8bc25f84a0 pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass l 修心跳子串假绿与 ts 全历史判据并补 DeviceReader UT（trig
@@ -48,3 +47,4 @@
 2026-09-01 09:39:50 4cbc6c1fcc01 pass build=pass board=pass acc={"overall":"pass","items":[{"tag":"svc:l 心跳时间驱动+解码器测真化+verify-cases 组自洽：单测 195 全过 | {"daemon_rss_kb": 5124, "dd_s": 2.365, "drain_ms_per_event": 0.378, "jsonl_delta": 3079, "load_mb": 64, "throughput_evs": 1302.1, "total_delta": 3079}
 2026-09-01 10:20:34 fb7bca7bc046 pass build=pass board=pass acc={"overall":"pass","items":[{"tag":"svc:l 心跳 invalid 计数与时效断言：invalid_records 入心跳、l | {"daemon_rss_kb": 5076, "dd_s": 2.562, "drain_ms_per_event": 0.381, "jsonl_delta": 3078, "load_mb": 64, "throughput_evs": 1201.2, "total_delta": 3078}
 2026-09-01 10:50:07 41b465d6e5b3 skip build=skip board=skip acc=- 新增 known-issues 准入规则骨架与有序四门（-s 无需上板）
+2026-09-01 11:03:17 870931e50fcb skip build=skip board=skip acc=- 补 KIR-004 至 007 与准入场景表（-s 无需上板）
