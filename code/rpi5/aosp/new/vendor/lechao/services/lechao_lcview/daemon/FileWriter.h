@@ -70,6 +70,7 @@ public:
         uint64_t reopenFailed = 0;   // 写失败恢复重开失败
         uint64_t retryFailed = 0;    // 恢复后重试二次写失败
         uint64_t invalidNotOpen = 0; // invalid 事件流未打开
+        uint64_t invalidWriteFailed = 0; // invalid 写失败恢复后仍失败（reopen/retry）
     };
     // 返回当前累计的 DROP 计数（心跳输出用）
     const DropCounters& dropCounters() const { return mDrops; }

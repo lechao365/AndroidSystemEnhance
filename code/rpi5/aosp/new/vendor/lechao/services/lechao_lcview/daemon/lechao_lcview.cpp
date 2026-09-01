@@ -81,7 +81,8 @@ static ssize_t readOnce(EpollDeviceReader& reader, uint8_t* buf, size_t bufSize,
 }
 
 // 心跳段（每 30 loop）：直读内核 overrun/total_records，
-// dropped 取 FileWriter DROP 合计（六条丢记录路径汇总），
+// dropped 取 FileWriter DROP 合计（七条丢记录路径汇总，
+// 含 invalid 写失败恢复不成 invalidWriteFailed），
 // readErr 为读错误计数——HAL 停用后三字段由 daemon 补齐，
 // 供 liveness 判据（logfield overrun/dropped/readErr=0）继续成立；
 // 写路径指标（方向 3）：formatJsonLine 与 writeRecord 平均微秒/条，
@@ -95,14 +96,15 @@ static void emitHeartbeat(int loopCount, EpollDeviceReader& reader,
     const FileWriter::DropCounters& dc = writer.dropCounters();
     uint64_t dropped = static_cast<uint64_t>(dc.openFailed)
         + dc.formatEmpty + dc.formatOob + dc.reopenFailed
-        + dc.retryFailed + dc.invalidNotOpen;
+        + dc.retryFailed + dc.invalidNotOpen + dc.invalidWriteFailed;
     const FileWriter::WriteTimings& wt = writer.writeTimings();
     uint64_t avgFormatUs = wt.formatCount ? wt.formatTotalUs / wt.formatCount : 0;
     uint64_t avgWriteUs = wt.writeCount ? wt.writeTotalUs / wt.writeCount : 0;
     ALOGI("lechao_lcview: heartbeat, loop=%d, overrun=%lld, dropped=%llu, "
           "readErr=%d, total_records=%u, jsonl_records=%lld, "
           "drop_open=%llu drop_format=%llu drop_oob=%llu "
-          "drop_reopen=%llu drop_retry=%llu drop_invalid=%llu, "
+          "drop_reopen=%llu drop_retry=%llu drop_invalid=%llu "
+          "drop_invalidwrite=%llu, "
           "avg_format_us=%llu avg_write_us=%llu",
           loopCount, static_cast<long long>(overrunAccum), dropped,
           readErr, reader.getTotalRecords(), jsonlRecords,
@@ -112,6 +114,7 @@ static void emitHeartbeat(int loopCount, EpollDeviceReader& reader,
           static_cast<unsigned long long>(dc.reopenFailed),
           static_cast<unsigned long long>(dc.retryFailed),
           static_cast<unsigned long long>(dc.invalidNotOpen),
+          static_cast<unsigned long long>(dc.invalidWriteFailed),
           static_cast<unsigned long long>(avgFormatUs),
           static_cast<unsigned long long>(avgWriteUs));
 }

@@ -1,4 +1,3 @@
-2026-08-27 14:26:32 7e4c72374085 skip build=skip board=skip acc=- 回收 rescue 6 处缺陷,消错分与句柄泄漏（-s 无需上板）
 2026-08-27 14:52:35 8e173bc0801d skip build=skip board=skip acc=- 接线 rescue 消死代码,消文档矛盾与端点重复推导（-s 无需上板）
 2026-08-27 15:07:36 d9eedee45eda skip build=skip board=skip acc=- 修 lcview-trigger 截断 P0 与残余静默丢弃（-s 无需上板）
 2026-08-27 15:58:14 5407e52257f2 pass build=pass board=pass acc=lcview-liveness=pass(5/5) lcview-pipelin 首次上板取 lcview 用例与单测真值（trigger 全链路 6/6 过，f
@@ -48,3 +47,4 @@
 2026-08-31 20:21:41 073d27101524 skip build=skip board=skip acc=- 自检生产侧改可执行脚本,修 rc 恒零（-s 无需上板）
 2026-08-31 20:32:10 a1a3a1879cd8 skip build=skip board=skip acc=- 计数行只认 stdout,修兜底伪造计数复发（-s 无需上板）
 2026-08-31 21:40:10 264b4faab6a6 skip build=skip board=skip acc=- 堵验收假绿并保住基线证据不被老化删（-s 无需上板）
+2026-09-01 09:22:30 253457e98980 pass build=pass board=pass acc={"overall":"pass","items":[{"tag":"svc:l 修 FileWriter 裂行 P0 与 writeInvalid 假绿：jso
