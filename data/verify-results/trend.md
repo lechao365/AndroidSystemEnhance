@@ -1,4 +1,3 @@
-2026-08-27 19:27:27 2f8bc25f84a0 pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass l 修心跳子串假绿与 ts 全历史判据并补 DeviceReader UT（trig
 2026-08-27 20:13:07 8cfe4f9cf98b pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass l 补 daemon 主循环与生产配置 UT 并清历史污染（warn/trigger
 2026-08-27 20:39:29 a2b467030005 pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass l 补事件 4/5 DT 并加收据删除护栏（transfer 5/5、事件7实测无打
 2026-08-27 21:22:56 2ae3f7ad0eac pass build=skip board=pass acc=svc_hal=pass svc_daemon=pass boot=pass l 撤错误护栏并做 lcview 收口审计（2 处假绿修复、事件登记归因修订）
@@ -48,3 +47,4 @@
 2026-09-01 11:03:17 870931e50fcb skip build=skip board=skip acc=- 补 KIR-004 至 007 与准入场景表（-s 无需上板）
 2026-09-01 11:42:42 7866aaab29d7 skip build=skip board=skip acc=- 挂载规则指引并实现 KIR-005 阈值告警（-s 无需上板）
 2026-09-01 12:15:57 9278a842ef04 skip build=skip board=skip acc=- 补 severity 字段并回填存量条目（-s 无需上板）
+2026-09-01 12:33:49 912659304ee2 skip build=skip board=skip acc=- 基线记带病项并按 KIR 判定 E1 遗留（-s 无需上板）

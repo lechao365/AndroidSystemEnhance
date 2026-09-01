@@ -13,6 +13,7 @@ REAL_SKILL_DIR = REPO_ROOT / "harness" / "skills" / "publish-main-base"
 REAL_CDP_LIB = REPO_ROOT / "harness" / "skills" / "cross-device" / "lib" / "python"
 
 sys.path.insert(0, str(REAL_CDP_LIB))
+sys.path.insert(0, str(REAL_SKILL_DIR))
 import cdp_issue  # noqa: E402 （fixture 进程内构造登记，路径经 CDP_PROJECT_ROOT 指向临时根）
 
 
@@ -258,6 +259,56 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertEqual(b["build_result"], "SKIP")
         self.assertEqual(b["board_verify"], "SKIP")
 
+    # ── 方向 1：add-candidate 带病项记账（known_issues_carried）─────────
+    def test_add_candidate_carried_written(self):
+        # 显式传 --known-issues-carried → evidence 写入逗号分隔 issue_id
+        self._write_receipt(self.parent_vc, batch_id="000000000005",
+                            cases="lcview-liveness")
+        r = self._run_register("add-candidate", "--source-commit", "abc123def456",
+                               "--evidence-scope", "lcview-liveness",
+                               "--known-issues-carried", "KI-001,KI-002",
+                               "--receipt-path",
+                               "data/verify-results/20260831-100000-000000000005.md")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        b = self._registered_evidence()
+        self.assertEqual(b["evidence"]["known_issues_carried"], "KI-001,KI-002")
+
+    def test_add_candidate_carried_missing_is_empty(self):
+        # 缺参 → evidence 记空字符串（只记录不阻断，硬阻断会死锁）
+        self._write_receipt(self.parent_vc, batch_id="000000000006",
+                            cases="lcview-liveness")
+        r = self._run_register("add-candidate", "--source-commit", "abc123def456",
+                               "--evidence-scope", "lcview-liveness",
+                               "--receipt-path",
+                               "data/verify-results/20260831-100000-000000000006.md")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        b = self._registered_evidence()
+        self.assertEqual(b["evidence"]["known_issues_carried"], "")
+
+    # ── 方向 2：carried_issue_ids 自动取 id（只收 open 与 scheduled）────
+    def test_carried_issue_ids_only_open_scheduled(self):
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False, issue_id="KI-OPEN"),
+                              "x")
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False, status="scheduled",
+                                             issue_id="KI-SCHED"), "y")
+        cdp_issue.write_issue(self._mk_issue(task="t1", status="fixed",
+                                             origin="pre-existing", blocking=False,
+                                             issue_id="KI-FIXED"), "z")
+        cdp_issue.write_issue(self._mk_issue(task="t1", status="wontfix",
+                                             origin="pre-existing", blocking=False,
+                                             issue_id="KI-WONT"), "w")
+        cdp_issue.write_issue(self._mk_issue(task="t2", origin="pre-existing",
+                                             blocking=False, issue_id="KI-OTHER"),
+                              "v")
+        from baseline_register import carried_issue_ids
+        self.assertEqual(set(carried_issue_ids("t1")), {"KI-OPEN", "KI-SCHED"})
+        self.assertEqual(carried_issue_ids("t2"), ["KI-OTHER"])
+        self.assertEqual(carried_issue_ids(""), [])
+        self.assertEqual(set(carried_issue_ids("t1", self.root / "data" / "known-issues")),
+                         {"KI-OPEN", "KI-SCHED"})
+
     # ── 方向 5：promote 收紧与 ki_gate 证据链（bare 远端 e2e）────────────
     def _receipt_commit_c3(self, batch_id="000000000002", **kw):
         # 收据入库为 c3（内容提交，父=c2==VC），保证 promote/prepare 工作树干净
@@ -362,10 +413,16 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertEqual(data["baselines"][0]["evidence"]["ki_gate"], "inferred")
         # scope 缺省推导自收据 cases，而非要求人工申报
         self.assertEqual(data["baselines"][0]["evidence_scope"], "lcview-liveness")
+        # 推断任务（t1）的 open 条目同样自动携带（方向 2：read_index 取 open/scheduled）
+        self.assertEqual(data["baselines"][0]["evidence"]["known_issues_carried"],
+                         "KI-X")
 
     def test_prepare_with_task_records_ki_gate_pass(self):
         # 方向 3/4：--task 门禁通过（空登记合法）→ KIGATE=pass 写入 evidence
         self._setup_remote()
+        # 该任务存在 open（非阻塞非 introduced）遗留 → prepare 自动携带进 candidate
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
         self._receipt_commit_c3()
         r = self._run("--prepare", "--task", "t1", "--evidence-scope", "lcview-liveness")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -374,6 +431,9 @@ class TestSyncModifyToMainBase(unittest.TestCase):
             (self.root / "harness" / "config" / "baseline-status.yaml").read_text(
                 encoding="utf-8"))
         self.assertEqual(data["baselines"][0]["evidence"]["ki_gate"], "pass")
+        # 带病项自动携带：open 条目 id 写入 known_issues_carried（只记录不阻断）
+        self.assertEqual(data["baselines"][0]["evidence"]["known_issues_carried"],
+                         "KI-X")
 
     def test_promote_without_task_infers_ki_gate(self):
         # 方向 7：promote 全不传（--task/--evidence-scope）走通——强制 --task 已删，

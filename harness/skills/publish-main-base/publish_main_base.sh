@@ -171,6 +171,9 @@ else
     KIGATE="empty-registry"
   else
     KIGATE="inferred"
+    # 提取门禁推断出的唯一活跃任务（输出含 task=<id>），供带病项自动携带匹配
+    INFERRED=$(printf '%s\n' "$KI_OUT" | sed -n 's/.*task=\([^ )]*\).*/\1/p' | head -1)
+    [ -n "$INFERRED" ] && TASK="$INFERRED"
   fi
   printf '%s\n' "$KI_OUT" >&2
 fi
@@ -189,9 +192,26 @@ if [ "$MODE" = "prepare" ]; then
   CNT=$(git rev-list --count main..dev)
   [ "$CNT" -gt 0 ] || { echo "dev 无领先 main 的提交（exit 4）"; exit 4; }
   # source_commit 取回溯后的最近内容提交 BH（非 HEAD，避免重复 prepare 时误记登记元提交）
+  # 带病项自动携带：从 read_index 取 status 属 open/scheduled 且 task 匹配的条目 id
+  #（逗号分隔写入 evidence.known_issues_carried；未显式 --task 时按门禁推断任务匹配，
+  #  无匹配任务即记空。只记录不阻断，硬阻断会死锁）
+  KNOWN_ISSUES_CARRIED=""
+  if [ -n "$TASK" ]; then
+    KNOWN_ISSUES_CARRIED=$(TASK_VAL="$TASK" python3 - <<'PYEOF'
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path("harness/skills/cross-device/lib/python").resolve()))
+sys.path.insert(0, str(Path("harness/skills/publish-main-base").resolve()))
+from baseline_register import carried_issue_ids
+print(",".join(carried_issue_ids(os.environ.get("TASK_VAL", ""))))
+PYEOF
+    ) || true
+  fi
   python3 harness/skills/publish-main-base/baseline_register.py add-candidate \
     --source-commit "$(git rev-parse --short=12 "$BH")" --receipt-path "$LATEST" \
     --ki-gate "$KIGATE" --evidence-scope "$EVIDENCE_SCOPE" \
+    --known-issues-carried "$KNOWN_ISSUES_CARRIED" \
     || { echo "error: candidate 登记失败" >&2; exit 1; }
   # 登记随 dev 提交推送（避免弄脏工作树阻塞后续 precheck）
   git add harness/config/baseline-status.yaml
