@@ -236,8 +236,9 @@ class TestBaselineRegister(unittest.TestCase):
                           status="open", **base), "z")
 
     def test_promote_writes_known_issues_closed_and_deletes(self):
-        # promote 清算：清单先入 evidence.known_issues_closed 再 save，
-        # 随后删终态文件（不看 blocking），活项全留，index 同步重建
+        # promote 清算：清单（明细列表：issue_id/resolved_in/title）先入
+        # evidence.known_issues_closed 再 save，随后删终态文件（不看 blocking），
+        # 活项全留，index 同步重建
         from cdp_issue import issue_files, read_index
         self._write_issue_files()
         rp = self._make_receipt()
@@ -248,9 +249,13 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("promoted:", out)
         b = br.load()["baselines"][0]
-        # 清单入档（固定顺序：fixed 在前按文件升序，终态不看 blocking）
-        self.assertEqual(b["evidence"]["known_issues_closed"],
-                         "KI-CLOSE-1,KI-CLOSE-2")
+        # 清单入档为明细列表（删文件后仍可辨认条目，含 resolved_in 与 title）
+        self.assertEqual(b["evidence"]["known_issues_closed"], [
+            {"issue_id": "KI-CLOSE-1", "resolved_in": "abc123",
+             "title": "问题一"},
+            {"issue_id": "KI-CLOSE-2", "resolved_in": "",
+             "title": "问题二"},
+        ])
         # 终态全删、活项全留（CDP_PROJECT_ROOT 指向 tmp，见 setUp）
         issues_dir = self._root / "data" / "known-issues"
         remaining = {i.issue_id for p in issue_files(issues_dir)
@@ -258,6 +263,31 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(remaining, {"KI-OPEN-1"})
         self.assertEqual({e["issue_id"] for e in read_index(issues_dir)},
                          {"KI-OPEN-1"})
+
+    def test_promote_skips_cleanup_when_evidence_not_dict(self):
+        # evidence 非字典写不成清单 → 跳过清算删除并告警（无清单入档即删 =
+        # 无快照删证据），promote 照常完成且终态文件保留
+        self._write_issue_files()
+        rp = self._make_receipt()
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        b = br.load()["baselines"][0]
+        data = br.load()
+        data["baselines"][0]["evidence"] = "not-a-dict"
+        br.save(data)
+        bid = b["baseline_id"]
+        rc, out = self._run("promote", "--baseline-id", bid)
+        self.assertEqual(rc, 0)
+        self.assertIn("evidence 非字典", out)
+        self.assertIn("跳过清算删除", out)
+        self.assertIn("promoted:", out)
+        # 终态文件未被删除（无清单入档不删），状态仍 promoted
+        from cdp_issue import issue_files
+        issues_dir = self._root / "data" / "known-issues"
+        remaining = {i.issue_id for p in issue_files(issues_dir)
+                     for i in [br.read_issue(p)]}
+        self.assertEqual(remaining, {"KI-CLOSE-1", "KI-CLOSE-2", "KI-OPEN-1"})
+        self.assertEqual(br.load()["baselines"][0]["status"], "promoted")
 
     def test_promote_delete_failure_keeps_snapshot(self):
         # 删失败不回滚快照（KIR-006）：delete_closed 抛错仅 warn，
@@ -276,8 +306,12 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertIn("promoted:", out)
         b = br.load()["baselines"][0]
         self.assertEqual(b["status"], "promoted")
-        self.assertEqual(b["evidence"]["known_issues_closed"],
-                         "KI-CLOSE-1,KI-CLOSE-2")
+        self.assertEqual(b["evidence"]["known_issues_closed"], [
+            {"issue_id": "KI-CLOSE-1", "resolved_in": "abc123",
+             "title": "问题一"},
+            {"issue_id": "KI-CLOSE-2", "resolved_in": "",
+             "title": "问题二"},
+        ])
         snapshot = self._root / "data" / "baselines" / f"{bid}-{Path(rp).name}"
         self.assertTrue(snapshot.is_file(), "删失败快照仍须保留")
         # 快照内容 = 收据原文（清单入档后仍一致）

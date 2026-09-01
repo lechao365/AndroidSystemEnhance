@@ -138,6 +138,16 @@ def closed_issue_ids(issues_dir=None):
             if (i := read_issue(p)).status in ("fixed", "wontfix")]
 
 
+def closed_issue_details(issues_dir=None):
+    """终态条目明细列表（promote 清算入档用）：每项含 issue_id / resolved_in /
+    title，删文件后仍可从清单辨认条目（只存 id 无从辨认）。"""
+    d = issues_dir or data_known_issues_dir()
+    return [{"issue_id": i.issue_id, "resolved_in": i.resolved_in,
+             "title": i.title}
+            for p in issue_files(d)
+            if (i := read_issue(p)).status in ("fixed", "wontfix")]
+
+
 def delete_closed(issue_ids, issues_dir=None):
     """按 issue_id 清算删除终态条目文件（index 同步重建），返回删除文件列表。
 

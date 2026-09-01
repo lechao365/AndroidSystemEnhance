@@ -18,8 +18,8 @@ CONFIG = Path(__file__).resolve().parents[2] / "config" / "baseline-status.yaml"
 # 仿 ws_report.py：引入 cross-device 共享收据模块，candidate 实读真实 verify 收据
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "lib" / "python"))
 from cdp_receipt import read_receipt  # noqa: E402
-from cdp_issue import (closed_issue_ids, delete_closed, issue_files,
-                       read_index, read_issue, validate_issue)  # noqa: E402
+from cdp_issue import (closed_issue_details, delete_closed,
+                       issue_files, read_index, read_issue, validate_issue)  # noqa: E402
 from cdp_paths import data_baselines_dir  # noqa: E402
 
 
@@ -301,16 +301,25 @@ def main(argv=None):
                 # promote 清算（KIR-006）：晋升前先把终态条目清单（status 属
                 # fixed 或 wontfix，不看 blocking）记入 evidence.known_issues_closed
                 # 再 save——快照与清单先入档，随后 delete_closed 删文件（终态
-                # 记录随清单入档，删除不销毁证据链）；删失败仅 warn 不回滚快照
-                closed = closed_issue_ids()
-                if isinstance(b.get("evidence"), dict):
-                    b["evidence"]["known_issues_closed"] = ",".join(closed)
-                save(data)
-                try:
-                    delete_closed(closed)
-                except OSError as e:
-                    print(f"warn: 终态条目清算删除失败（快照与清单已入档不回滚）: "
-                          f"{e}", file=sys.stderr)
+                # 记录随清单入档，删除不销毁证据链）；删失败仅 warn 不回滚快照。
+                # 清单存明细列表（issue_id/resolved_in/title），只存 id 在删文件
+                # 后无从辨认；evidence 非字典写不成清单时跳过清算删除并告警
+                #（无清单入档即删 = 无快照删证据）
+                closed_details = closed_issue_details()
+                evidence = b.get("evidence")
+                if isinstance(evidence, dict):
+                    evidence["known_issues_closed"] = closed_details
+                    save(data)
+                    try:
+                        delete_closed([d["issue_id"] for d in closed_details])
+                    except OSError as e:
+                        print(f"warn: 终态条目清算删除失败（快照与清单已入档不回滚）: "
+                              f"{e}", file=sys.stderr)
+                else:
+                    print(f"warn: evidence 非字典（{type(evidence).__name__}），"
+                          "写不成 known_issues_closed 清单，跳过清算删除"
+                          "（无清单入档即删 = 无快照删证据）", file=sys.stderr)
+                    save(data)
                 print(f"promoted: {args.baseline_id}（快照: {snapshot_path}）")
                 return 0
         print(f"error: 未找到 baseline {args.baseline_id}")

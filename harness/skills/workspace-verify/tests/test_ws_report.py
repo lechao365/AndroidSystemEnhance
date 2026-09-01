@@ -399,19 +399,22 @@ class TestWsReport(unittest.TestCase):
 
     # ── 方向 2/3：未传 --timings-file 自动探测 + elapsed 推导 ────────────
     def _write_probe_timings(self, batch_path, payload):
-        """在 harness/log/cross-device/ 下按 batch_id 写打点探测文件（返回路径）。"""
+        """在 log_apply_dir()（cdp_paths 绝对路径，认 CDP_PROJECT_ROOT）下
+        按 batch_id 写打点探测文件（与 cdp_timing.py 写入同源）。"""
         from cdp_parse import batch_id_from_text
+        from cdp_paths import log_apply_dir
         bid = batch_id_from_text(Path(batch_path).read_text(encoding="utf-8"))
-        probe_dir = Path("harness") / "log" / "cross-device"
+        probe_dir = log_apply_dir()
         probe_dir.mkdir(parents=True, exist_ok=True)
         tfile = probe_dir / f"timings-{bid}.json"
         tfile.write_text(json.dumps(payload), encoding="utf-8")
-        self.addCleanup(tfile.unlink)
+        self.addCleanup(lambda: tfile.unlink(missing_ok=True))
         return bid
 
     def test_timings_auto_probe_hit_and_elapsed_derived(self):
         # 未传 --timings-file → 自动探测 timings-<batch_id>.json 命中即用，
-        # elapsed_s 缺省从 wall_end-wall_start 取整推导（1005-1000=5）
+        # elapsed_s 缺省从 wall_end-wall_start 取整推导（1005-1000=5）；
+        # 探测路径与 cdp_timing 写入同源（log_apply_dir，认 CDP_PROJECT_ROOT）
         batch = self._write(VALID_S, ".cdp")
         body = self._write("## 现场\n")
         bid = self._write_probe_timings(batch, {
@@ -428,13 +431,38 @@ class TestWsReport(unittest.TestCase):
                                  "--board", "skip", "--summary", "s",
                                  "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
-        self.assertIn(f"自动探测到打点文件: harness/log/cross-device/timings-{bid}.json",
+        from cdp_paths import log_apply_dir
+        self.assertIn(f"自动探测到打点文件: {log_apply_dir()}/timings-{bid}.json",
                       err.getvalue())
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         content = details[0].read_text(encoding="utf-8")
         self.assertIn("- timings: {", content)
         self.assertIn('"name": "precheck"', content)
         self.assertIn("- elapsed_s: 5", content)  # 推导值
+
+    def test_timings_probe_respects_cdp_project_root(self):
+        # 同源验证：探测路径由 CDP_PROJECT_ROOT 驱动（不依赖 cwd）——
+        # 真实 cwd 下不存在该文件，仅 tmp 根（CDP_PROJECT_ROOT）下存在即命中
+        from cdp_paths import log_apply_dir
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        bid = self._write_probe_timings(batch, {
+            "batch_id": "probe-root",
+            "start_wall": 2000.0,
+            "wall_end": 2003.0,
+            "marks": [{"name": "precheck", "wall": 2001.0}],
+        })
+        self.assertFalse((Path("harness") / "log" / "cross-device"
+                          / f"timings-{bid}.json").exists())
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        self.assertIn(f"自动探测到打点文件: {log_apply_dir()}/timings-{bid}.json",
+                      err.getvalue())
 
     def test_timings_auto_probe_miss_warns_not_block(self):
         # 未传 --timings-file 且探测不到 → warn 降级（timings 置空，

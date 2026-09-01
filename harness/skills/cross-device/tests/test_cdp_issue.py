@@ -126,6 +126,23 @@ class TestIssue(unittest.TestCase):
         closed = set(cdp_issue.closed_issue_ids(self._dir))
         self.assertEqual(closed, {"KI-FIXED", "KI-WONTFIX"})
 
+    def test_closed_issue_details_include_identity(self):
+        # 明细清单每项含 issue_id/resolved_in/title（删文件后仍可辨认），
+        # open/scheduled 不入清单
+        r1 = _mk_issue("KI-FIXED", status="fixed")
+        r1.resolved_in = "abc123def456"
+        cdp_issue.write_issue(r1, "x")
+        cdp_issue.write_issue(_mk_issue("KI-WONTFIX", status="wontfix"), "y")
+        cdp_issue.write_issue(_mk_issue("KI-OPEN"), "z")
+        details = cdp_issue.closed_issue_details(self._dir)
+        self.assertEqual(
+            sorted(details, key=lambda d: d["issue_id"]), [
+                {"issue_id": "KI-FIXED", "resolved_in": "abc123def456",
+                 "title": "lcview 重复落盘计数异常"},
+                {"issue_id": "KI-WONTFIX", "resolved_in": "",
+                 "title": "lcview 重复落盘计数异常"},
+            ])
+
     def test_closed_fixed_blocking_still_terminal(self):
         # blocking=true 的 fixed 条目同样属终态（终态判定不看 blocking）
         r = _mk_issue("KI-BLK-FIXED", status="fixed")

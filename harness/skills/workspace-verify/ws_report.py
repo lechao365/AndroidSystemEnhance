@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "l
 sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
 from cdp_parse import (SOFT_ERRORS, batch_id_from_text, parse_batch,  # noqa: E402
                        validate_batch)
+from cdp_paths import log_apply_dir  # noqa: E402
 from cdp_receipt import Receipt, append_trend, write_receipt  # noqa: E402
 from paths import env_path  # noqa: E402
 
@@ -39,15 +40,15 @@ _HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
 def _resolve_timings(timings_file, batch_id):
     """解析链路耗时打点，返回 (timings_json_str, elapsed_int|None)。
 
-    显式 --timings-file 优先；未传时自动探测
-    harness/log/cross-device/timings-<batch_id>.json，存在即用。
+    显式 --timings-file 优先；未传时自动探测 log_apply_dir() 下
+    timings-<batch_id>.json（cdp_paths 绝对路径，与 cdp_timing.py 写入同源，
+    认 CDP_PROJECT_ROOT，不依赖 cwd），存在即用。
     缺失/非法仅 warn 降级（timings 置空，elapsed 不推导），不阻断主流程。
     elapsed 从 wall_end 减 wall_start 取整（start/mark 结构 wall_end 缺省
     按当前时刻兜底），供 --elapsed 缺省时填写 elapsed_s（显式传参优先）。
     """
     if not timings_file and batch_id:
-        probe = (Path("harness") / "log" / "cross-device"
-                 / f"timings-{batch_id}.json")
+        probe = log_apply_dir() / f"timings-{batch_id}.json"
         if probe.is_file():
             timings_file = str(probe)
             print(f"NOTE: 自动探测到打点文件: {probe}", file=sys.stderr)
@@ -236,7 +237,8 @@ def main(argv=None):
             return 2
 
     # 链路耗时打点：显式 --timings-file 优先，未传自动探测
-    # harness/log/cross-device/timings-<batch_id>.json（存在即用）；
+    # log_apply_dir()/timings-<batch_id>.json（cdp_paths 绝对路径与
+    # cdp_timing 写入同源，认 CDP_PROJECT_ROOT）；
     # --elapsed 缺省从 timings 的 wall_end-wall_start 推导（显式传参优先）
     args.timings, derived_elapsed = _resolve_timings(args.timings_file, batch_id)
     if args.elapsed is None and derived_elapsed is not None:

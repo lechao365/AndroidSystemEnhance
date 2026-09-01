@@ -51,3 +51,4 @@
 2026-09-01 17:16:49 41daf105ac74 skip build=skip board=skip acc=- 收据配额扩到 50 并闭环两笔已修 issue（-s 无需上板）
 2026-09-01 17:50:57 95fa089b5eeb skip build=skip board=skip acc=- 打点强制化并把 -s 自检改并行（-s 无需上板）
 2026-09-01 18:42:08 b0997051da41 skip build=skip board=skip acc=- 闭环记录改 promote 清算并写基线快照（-s 无需上板）
+2026-09-01 19:02:14 e7dce056f5a7 skip build=skip board=skip acc=- 补齐清算证据与打点路径同源并装并行依赖（-s 无需上板）
