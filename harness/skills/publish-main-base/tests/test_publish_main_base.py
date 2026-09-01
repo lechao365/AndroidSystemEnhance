@@ -352,7 +352,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
                          "--message-file", str(msg), "--task", "t1", *extra)
 
     def test_promote_rejects_non_board_receipt(self):
-        # 方向 2 board 拒：result=pass 但 verify_mode=skip 且 dev 有 code/ 改动 → RECEIPT_FAIL
+        # 方向 2 board 拒：仅 skip 收据（board 收据不覆盖 code/ 改动）→ RECEIPT_FAIL
         self._setup_remote()
         (self.root / "code").mkdir()
         (self.root / "code" / "foo.txt").write_text("x\n", encoding="utf-8")
@@ -360,7 +360,77 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         r = self._promote()
         self.assertEqual(r.returncode, 1)
         self.assertIn("check_class=RECEIPT_FAIL", r.stderr)
-        self.assertIn("verify_mode=board", r.stderr)
+        self.assertIn("被最新 board 收据覆盖", r.stderr)
+
+    def test_prepare_evidence_anchor_uses_latest_board_receipt(self):
+        # 缺陷修复：最新收据为 -s skip（cases 空），evidence 锚点须回溯最新
+        # board 收据——candidate 的 evidence_scope/sync_manifest/build/board_verify
+        # 均取 board 收据实测值（SKILL 阶段 3 语义），而非在 skip 收据上死锁
+        self._setup_remote()
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
+        # 先落 board 收据（有实测 cases），再落 skip 收据（最新，cases 空）
+        self._write_receipt(self.parent_vc, batch_id="000000000001",
+                            cases="lcview-liveness", verify_mode="board")
+        self._write_receipt(self.head_vc, batch_id="000000000002",
+                            cases="", verify_mode="skip")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): board 与 skip 收据双落")
+        self._git("push", "origin", "dev")
+        r = self._run("--prepare", "--task", "t1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        data = yaml.safe_load(
+            (self.root / "harness" / "config" / "baseline-status.yaml").read_text(
+                encoding="utf-8"))
+        b = data["baselines"][0]
+        # 证据锚点 = board 收据：scope 从其 cases 推导，收据路径指向它
+        self.assertEqual(b["evidence_scope"], "lcview-liveness")
+        self.assertIn("000000000001", b["sync_manifest"])
+        self.assertEqual(b["build_result"], "PASS")
+        self.assertEqual(b["board_verify"], "PASS")
+
+    def test_promote_passes_code_covered_by_board_receipt(self):
+        # 缺陷修复：code/ 改动已被较早 board 收据覆盖，仅最新收据被 -s skip
+        # 批刷成非 board → promote 收紧回溯 board 收据判覆盖，放行（原
+        # "最新收据须 board" 语义误拒该场景）
+        self._setup_remote()
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
+        (self.root / "code").mkdir()
+        (self.root / "code" / "foo.txt").write_text("x\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): code 改动")
+        self._git("push", "origin", "dev")
+        code_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        # board 收据覆盖 code 改动提交（candidate yaml 一并入库，promote 要求树净）
+        self._write_receipt(code_head, batch_id="000000000001",
+                            cases="lcview-liveness", verify_mode="board")
+        (self.root / "harness" / "config" / "baseline-status.yaml").write_text(
+            "baselines:\n"
+            f"  - baseline_id: BL-TEST-01\n"
+            f"    status: candidate\n"
+            f"    source_commit: {code_head}\n"
+            f"    sync_manifest: data/verify-results/20260831-100000-000000000001.md\n"
+            f"    build_result: PASS\n"
+            f"    package_result: PASS\n"
+            f"    board_verify: PASS\n"
+            f"    evidence:\n"
+            f"      ki_gate: pass\n",
+            encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): board 收据与 candidate 入库")
+        self._git("push", "origin", "dev")
+        board_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        self._write_receipt(board_head, batch_id="000000000002",
+                            cases="", verify_mode="skip")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): skip 收据入库")
+        self._git("push", "origin", "dev")
+        r = self._promote()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("promote 完成", r.stdout)
+        self.assertIn("verified/BL-TEST-01",
+                      self._git("tag", "-l", "verified/BL-TEST-01").stdout)
 
     def test_promote_passes_zero_code_change(self):
         # 方向 2 零改动豁免：verify_mode=skip 但无 code/ 改动 → warn 豁免 + e2e promote 完成
@@ -388,20 +458,20 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertIn("已存在", r.stderr)
 
     def test_promote_rejects_tree_mismatch(self):
-        # 方向 2/3 树不等拒：meta 提交夹带 code/evil.txt → verify-tree 失败，
-        # rollback 一并删除本地与远端 verified tag（方向 4），退 1
+        # 方向 2/3 树不等拒：meta 提交夹带 data/evil.txt（非 code/ 非排除项，
+        # 不被 code 收紧误拦）→ verify-tree 失败，rollback 一并删除本地与
+        # 远端 verified tag（方向 4），退 1
         self._setup_remote()
         self._receipt_commit_c3()
         self._candidate_yaml()
-        (self.root / "code").mkdir()
-        (self.root / "code" / "evil.txt").write_text("x\n", encoding="utf-8")
+        (self.root / "data" / "evil.txt").write_text("x\n", encoding="utf-8")
         self._git("add", "-A")
         self._git("commit", "-m", "构建(baseline): 伪造元提交夹带")
         self._git("push", "origin", "dev")
         r = self._promote()
         self.assertEqual(r.returncode, 1)
         self.assertIn("树等价", r.stderr)
-        self.assertIn("code/evil.txt", r.stderr)
+        self.assertIn("data/evil.txt", r.stderr)
         self.assertEqual(
             self._git("tag", "-l", "verified/BL-TEST-01").stdout.strip(), "")
         self.assertEqual(

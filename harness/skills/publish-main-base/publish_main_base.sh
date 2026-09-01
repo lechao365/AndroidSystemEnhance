@@ -186,6 +186,22 @@ if [ "$MODE" = "check-only" ]; then
 fi
 
 if [ "$MODE" = "prepare" ]; then
+  # evidence 锚点回溯：add-candidate 的收据取最新 board 收据（SKILL 阶段 3：
+  # evidence-scope 缺省从最新 board 收据 cases 推导）——最新收据可能是 -s
+  # skip 的 harness 批（cases 为空），直接以它登记会让证据推导无源而死锁；
+  # 快路径判定（PARENT==VC）仍以 $LATEST 为准，两者职责分离。
+  # 无 board 收据（从未上板验证）时回落 $LATEST，由 add-candidate 从严拒绝
+  EVIDENCE_RECEIPT=$(python3 - <<'PYEOF'
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path("harness/skills/cross-device/lib/python").resolve()))
+import cdp_receipt
+p, _ = cdp_receipt.latest_board_receipt()
+print(os.path.relpath(p) if p else "")
+PYEOF
+  ) || true
+  [ -n "$EVIDENCE_RECEIPT" ] || EVIDENCE_RECEIPT="$LATEST"
   # evidence-scope 可选：缺省交 baseline_register add-candidate 从 board 收据 cases
   # 推导（人工传值仅可为收据实测范围子集，防过度声称）
   git fetch origin || { echo "error: fetch 失败" >&2; exit 1; }
@@ -209,7 +225,7 @@ PYEOF
     ) || true
   fi
   python3 harness/skills/publish-main-base/baseline_register.py add-candidate \
-    --source-commit "$(git rev-parse --short=12 "$BH")" --receipt-path "$LATEST" \
+    --source-commit "$(git rev-parse --short=12 "$BH")" --receipt-path "$EVIDENCE_RECEIPT" \
     --ki-gate "$KIGATE" --evidence-scope "$EVIDENCE_SCOPE" \
     --known-issues-carried "$KNOWN_ISSUES_CARRIED" \
     || { echo "error: candidate 登记失败" >&2; exit 1; }
@@ -218,7 +234,7 @@ PYEOF
   if git diff --cached --quiet; then
     echo "warn: baseline-status.yaml 无变更，跳过登记提交"
   else
-    git commit -m "构建(baseline): 登记 candidate（receipt=$(basename "$LATEST")）" || {
+    git commit -m "构建(baseline): 登记 candidate（receipt=$(basename "$EVIDENCE_RECEIPT")）" || {
       echo "error: candidate 登记提交失败" >&2; exit 1; }
   fi
   git push origin dev || { echo "error: candidate 登记推送失败，请人工 push" >&2; exit 2; }
@@ -233,20 +249,41 @@ fi
 # promote 不再强制 --task：known-issues 门禁在共用段已无条件执行（缺省推断；
 # 推断失败时门禁段 exit 1 拒绝），显式 --task 仅作白名单确认
 git fetch origin || { echo "error: fetch 失败" >&2; exit 1; }
-# promote 收紧（基线晋升须上板证据）：最新收据须 result=pass 且 verify_mode=board；
-# dev 相对 origin/main 无 code/ 改动（纯文档/登记等非代码批次）时豁免放行并 warn，
+# promote 收紧（基线晋升须上板证据）：dev 相对 origin/main 的 code/ 改动须被
+# 最新 board 收据覆盖（其 verified_commit 为该 code 改动提交的后代或自身）；
+# 最新收据可能是 -s skip 的 harness 批（verify_mode=none），上板证据锚点回溯
+# latest_board_receipt，不被 skip 批干扰。dev 无 code/ 改动时豁免放行并 warn，
 # 且证据范围改写为 no-code-change（本批无代码改动，原 scope 不适用）；
-# 其余（如 skip 收据 + 有代码改动）按 RECEIPT_FAIL 拒绝
+# 其余（board 收据缺失或未覆盖 code 改动）按 RECEIPT_FAIL 拒绝
 PROMOTE_SCOPE="$EVIDENCE_SCOPE"
-if [ "$RESULT" = "pass" ] && [ "$MODEV" = "board" ]; then
-  :  # 上板验证证据齐备，放行
-elif [ -z "$(git diff --name-only origin/main...dev -- code/)" ]; then
+CODE_HEAD=$(git log --format=%H origin/main...dev -- code/ | head -1)
+if [ -z "$CODE_HEAD" ]; then
   echo "warn: 最新收据 result=$RESULT verify_mode=$MODEV 非 pass+board，但 dev 相对 origin/main 无 code/ 改动，豁免放行"
   PROMOTE_SCOPE="no-code-change"
 else
-  check_class RECEIPT_FAIL
-  echo "error: promote 要求最新收据 result=pass 且 verify_mode=board（实际 result=$RESULT verify_mode=$MODEV，且 dev 存在 code/ 改动）" >&2
-  exit 1
+  # code/ 改动是否被最新 board 收据覆盖：merge-base --is-ancestor 判覆盖链
+  BOARD_OK=$(CODE_HEAD="$CODE_HEAD" python3 - <<'PYEOF'
+import os
+import subprocess
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path("harness/skills/cross-device/lib/python").resolve()))
+import cdp_receipt
+p, r = cdp_receipt.latest_board_receipt()
+if not p or not r.verified_commit:
+    print("0")
+    sys.exit(0)
+r0 = subprocess.run(["git", "merge-base", "--is-ancestor",
+                     os.environ["CODE_HEAD"], r.verified_commit],
+                    capture_output=True)
+print("1" if r0.returncode == 0 else "0")
+PYEOF
+  ) || true
+  if [ "$BOARD_OK" != "1" ]; then
+    check_class RECEIPT_FAIL
+    echo "error: promote 要求 code/ 改动被最新 board 收据覆盖（board 收据缺失或 verified_commit 不覆盖 code 改动提交 $CODE_HEAD）" >&2
+    exit 1
+  fi
 fi
 # 文档同步遗漏提示（warn 不阻断）：dev 相对 origin/main 无 docs/ 改动时提示
 if ! git diff --name-only origin/main...dev | grep -q '^docs/'; then
