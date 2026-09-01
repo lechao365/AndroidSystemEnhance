@@ -26,9 +26,9 @@ index 9692b33..503c891 100644
 +#  daemon 直读内核后 HAL 退役：/vendor/bin/lechao_lcview_hal 的
 +#  lechao_lcview_hal_exec 条目已删（二进制退役）
 +#  显示设备节点 /dev/vendor_lechao_lcview（单实例，固定名称）
-+#  标签 lechao_lcview_hal_device（类型定义已并入 lechao_lcview.te），
++#  标签 lechao_lcview_device（类型定义已并入 lechao_lcview.te），
 +#  daemon 直读该节点，保留标签
-+/dev/vendor_lechao_lcview                    u:object_r:lechao_lcview_hal_device:s0
++/dev/vendor_lechao_lcview                    u:object_r:lechao_lcview_device:s0
 +
 +# ===== rpi5_wifi_connect - 开机自动连接 WiFi 脚本（system 分区） =====
 +#  shell 脚本 /system/bin/rpi5_wifi_connect

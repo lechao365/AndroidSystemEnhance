@@ -178,7 +178,7 @@ adb shell ls -l /dev/vendor_lechao_lcview /dev/vendor_lechao_usbd*
 | `device/brcm/rpi5/scripts/rpi5-wifi-connect.sh` | 开机自动连接 WiFi 脚本（读 wifi.conf → wpa_cli 连接 → 静态 IP 维持） |
 | `device/brcm/rpi5/sepolicy/lechao_lciod.te` | lciod 系统服务 SELinux 策略 |
 | `device/brcm/rpi5/sepolicy/lechao_lciod_hal.te` | lciod HAL SELinux 策略 |
-| `device/brcm/rpi5/sepolicy/lechao_lcview.te` | lcview 系统服务 SELinux 策略（含直读设备节点类型 lechao_lcview_hal_device，HAL 退役后并入） |
+| `device/brcm/rpi5/sepolicy/lechao_lcview.te` | lcview 系统服务 SELinux 策略（含直读设备节点类型 lechao_lcview_device，HAL 退役后并入） |
 | `device/brcm/rpi5/sepolicy/rpi5_wifi_connect.te` | WiFi 连接脚本独立 SELinux 域（init_daemon_domain + 完整 allow 规则：shell_exec/vfat/binder/netlink/capability/logd，支持 enforcing 模式） |
 | `vendor/lechao/Android.bp` | Soong 命名空间声明 |
 | `vendor/lechao/services/include/` | 共享头文件（lechao_log.h） |

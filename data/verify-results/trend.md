@@ -53,3 +53,4 @@
 2026-09-01 18:42:08 b0997051da41 skip build=skip board=skip acc=- 闭环记录改 promote 清算并写基线快照（-s 无需上板）
 2026-09-01 19:02:14 e7dce056f5a7 skip build=skip board=skip acc=- 补齐清算证据与打点路径同源并装并行依赖（-s 无需上板）
 2026-09-01 19:29:12 manual-2609011929 skip build=skip board=skip acc=- 修复 publish-main-base 证据锚点（board 收据回溯）与 p
+2026-09-01 20:13:12 701fd8213408 pass build=pass board=pass acc={"overall":"pass","items":[{"tag":"cmd:\ sepolicy 类型改名去 hal 残留：节点重打标 lechao_lcvie
