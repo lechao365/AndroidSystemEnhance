@@ -398,6 +398,10 @@ bool FileWriter::writeLineFlush(FileState& fs, const std::string& line)
                   fs.eventId);
             mDrops.retryFailed++;
             fs.stream.clear();
+            // CXX-004 坏行归零延续：重试同样可能部分落盘，须回退到写前
+            // 偏移截断残留半行——否则残留与下一条记录粘成非法 JSON
+            // （下一条从 currentSize=writeBase 续写，不清残留即粘连）
+            rollbackFileTo(fs.currentFilename, writeBase);
             recordWriteTiming(tWriteStart);
             return false;
         }

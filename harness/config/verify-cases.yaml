@@ -30,7 +30,9 @@ cases:
   # 注意6：conserve 已迁至 lcview-transfer（静止确认 + 自造负载采样两段式）——
   #       liveness 为静止态用例组不跑 conserve（无自造负载时 produced==0 判红，
   #       属防假绿设计而非用例缺陷）；有负载时才可校验守恒。
-  lcview-liveness: 'svc:lechao_lcview log:"heartbeat, loop=" logfield:"heartbeat, loop=|overrun|=|0" logfield:"heartbeat, loop=|dropped|=|0" logfield:"heartbeat, loop=|readErr|=|0" boot'
+  # 注意7：drop_invalidwrite（invalid 写失败恢复不成计数）与其余 drop_* 分项
+  #       同语义用 logfield 断言 0——failbit 粘滞假绿修复的回归点。
+  lcview-liveness: 'svc:lechao_lcview log:"heartbeat, loop=" logfield:"heartbeat, loop=|overrun|=|0" logfield:"heartbeat, loop=|dropped|=|0" logfield:"heartbeat, loop=|drop_invalidwrite|=|0" logfield:"heartbeat, loop=|readErr|=|0" boot'
 
   # 性能采集（脚本化统一负载，只报数不设门禁）：dd 读块设备 64MB（与性能基线
   # 负载一致，消除 4MB 用例负载失真）→ 事件吞吐 / 平均落盘延迟 / daemon RSS，
@@ -60,10 +62,13 @@ cases:
   # 无活动不产生新事件，静止态跑 fresh/ts 永不能过（曾实测 fresh 超窗 29069s）
   lcview-pipeline: 'hostcmd:"cases/lcview_check.sh --mode files" hostcmd:"cases/lcview_check.sh --mode valid_json" hostcmd:"cases/lcview_check.sh --mode schema"'
 
-  # L1 两条 warn 项另立（no_invalid 非阻断 + ts 全历史卫生检查），勿混主用例致假 fail。
-  # 注：ts 无 baseline 时判全历史——校准回拨前未来记录（PIT-5）在此暴露，
-  # 属卫生检查而非链路判据（trigger 的 ts 以 baseline 限定只判新记录）
-  lcview-pipeline-warn: 'hostcmd:"cases/lcview_check.sh --mode invalid" hostcmd:"cases/lcview_check.sh --mode ts --skew 600"'
+# L1 两条 warn 项另立（no_invalid 非阻断 + ts 全历史卫生检查），勿混主用例致假 fail。
+  # 注1：ts 无 baseline 时判全历史——校准回拨前未来记录（PIT-5）在此暴露，
+  #   属卫生检查而非链路判据（trigger 的 ts 以 baseline 限定只判新记录）。
+  # 注2：ts 前插 dd 读 U 盘产载（同 lcview-transfer 触发手段）——ts 判据
+  #   要求"最新记录与设备时钟偏差 < skew"，静止态无新事件必超窗（事件驱动
+  #   模型），组内产载使用例自洽，不再依赖外部验收顺序。
+  lcview-pipeline-warn: 'hostcmd:"cases/lcview_check.sh --mode invalid" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode ts --skew 600"'
 
   # L2 触发型全链路（原 cases/lcview_trigger.yaml 收敛于此，requires 拓扑保序）：
   # adb root（显式，写 authorized 需 root，不依赖 baseline 内部 root 的隐式顺序）

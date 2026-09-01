@@ -1,4 +1,3 @@
-2026-08-27 14:52:35 8e173bc0801d skip build=skip board=skip acc=- 接线 rescue 消死代码,消文档矛盾与端点重复推导（-s 无需上板）
 2026-08-27 15:07:36 d9eedee45eda skip build=skip board=skip acc=- 修 lcview-trigger 截断 P0 与残余静默丢弃（-s 无需上板）
 2026-08-27 15:58:14 5407e52257f2 pass build=pass board=pass acc=lcview-liveness=pass(5/5) lcview-pipelin 首次上板取 lcview 用例与单测真值（trigger 全链路 6/6 过，f
 2026-08-27 16:50:30 ae65531af480 pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass p 修 hal_test 全灭与三红与时钟（hal 0/10→10/10、unit 
@@ -48,3 +47,4 @@
 2026-08-31 20:32:10 a1a3a1879cd8 skip build=skip board=skip acc=- 计数行只认 stdout,修兜底伪造计数复发（-s 无需上板）
 2026-08-31 21:40:10 264b4faab6a6 skip build=skip board=skip acc=- 堵验收假绿并保住基线证据不被老化删（-s 无需上板）
 2026-09-01 09:22:30 253457e98980 pass build=pass board=pass acc={"overall":"pass","items":[{"tag":"svc:l 修 FileWriter 裂行 P0 与 writeInvalid 假绿：jso
+2026-09-01 09:39:50 4cbc6c1fcc01 pass build=pass board=pass acc={"overall":"pass","items":[{"tag":"svc:l 心跳时间驱动+解码器测真化+verify-cases 组自洽：单测 195 全过 | {"daemon_rss_kb": 5124, "dd_s": 2.365, "drain_ms_per_event": 0.378, "jsonl_delta": 3079, "load_mb": 64, "throughput_evs": 1302.1, "total_delta": 3079}

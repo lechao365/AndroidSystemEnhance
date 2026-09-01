@@ -168,6 +168,8 @@ static int runMainLoop(EpollDeviceReader& reader, SchemaParser& schema,
     uint8_t buf[kBufSize];
     size_t offset = 0;
     auto dataArrivedAt = std::chrono::steady_clock::time_point::max();
+    // 上次心跳时刻（时间驱动锚点，见主循环心跳判定）
+    auto lastBeatAt = std::chrono::steady_clock::now();
 
     while (gRunning) {
         ssize_t n = readOnce(reader, buf, kBufSize, kEpollTimeoutMs, offset,
@@ -177,9 +179,15 @@ static int runMainLoop(EpollDeviceReader& reader, SchemaParser& schema,
         if (n < 0)
             return 1;  // 致命读错误：readOnce 已打日志，退出交 init 重启
 
-        if (loopCount % 30 == 0)
+        // 心跳时间驱动：距上次满 30s 才发（原 loopCount % 30 在重载下
+        // epoll 立返、loop 计数快速膨胀，心跳空转刷屏；时间驱动与
+        // 负载解耦，静默期/高负载期都恒 30s 一发）
+        auto now = std::chrono::steady_clock::now();
+        if (now - lastBeatAt >= std::chrono::seconds(30)) {
             emitHeartbeat(loopCount, reader, writer, overrunAccum, readErr,
                           jsonlRecords);
+            lastBeatAt = now;
+        }
 
         if (::lechao::debugVerbose()) {
             ALOGI("lechao_lcview: tick loop=%d buffered=%zu readOk=%d "

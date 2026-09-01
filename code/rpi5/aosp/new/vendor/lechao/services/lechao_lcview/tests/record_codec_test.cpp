@@ -20,6 +20,13 @@
 #include <cstdint>
 #include <vector>
 #include "lcview_events.h"
+#include "record_codec.h"
+
+// 生产解码器符号（decodeRecordField 定义于 vendor::lechao::lcview，
+// 逐符号引入避免全量 using 的歧义风险）
+using vendor::lechao::lcview::DecodedField;
+using vendor::lechao::lcview::FieldDecodeResult;
+using vendor::lechao::lcview::decodeRecordField;
 
 namespace {
 
@@ -88,8 +95,13 @@ std::vector<uint8_t> wrapAsBatch(const std::vector<uint8_t>& record) {
     return batch;
 }
 
-// 模拟 daemon 解析循环（与 lechao_lcview.cpp:160-205 完全一致的逻辑）
-// 返回解析出的 record 数量；失败时返回 -1 并设置 errMsg
+// 模拟 daemon 解析循环（与 lechao_lcview.cpp 批次解析同语义）
+// 返回解析出的 record 数量；失败时返回 -1 并设置 errMsg。
+// 解码器真化（2026-09-01）：字段遍历改调生产 record_codec.h 的
+// decodeRecordField（与 FileWriter::formatJsonLine 同一入口）——
+// 原本地 parseBatch 是测试文件副本，23 例全测副本，生产解码器
+// 坏了仍全绿。生产语义（kTruncated 丢弃 / kUnknown 输出 null 继续）
+// 在本测试中按协议校验语义映射为拒绝（与既有断言关键字兼容）。
 int parseBatch(const std::vector<uint8_t>& batch, std::string& errMsg) {
     size_t offset = 0;
     int recordsParsed = 0;
@@ -120,34 +132,20 @@ int parseBatch(const std::vector<uint8_t>& batch, std::string& errMsg) {
             return -1;
         }
 
-        // 逐字段推进（与 SchemaParser::validate 一致：le16toh 读 2B 前缀）
+        // 逐字段推进（与 FileWriter::formatJsonLine 同一解码器）
         const uint8_t* p = recordStart + sizeof(lcview_record_hdr);
         const uint8_t* end = recordStart + recordLen;
         for (uint8_t i = 0; i < hdr->field_count; i++) {
             if (p >= end) { errMsg = "EOF at field"; return -1; }
-            uint8_t type = *p++;
-            switch (type) {
-            case LCVIEW_TYPE_INT32:
-            case LCVIEW_TYPE_FLOAT:
-                if (p + 4 > end) { errMsg = "EOF int32/float"; return -1; }
-                p += 4;
-                break;
-            case LCVIEW_TYPE_INT64:
-                if (p + 8 > end) { errMsg = "EOF int64"; return -1; }
-                p += 8;
-                break;
-            case LCVIEW_TYPE_STRING:
-            case LCVIEW_TYPE_BINARY: {
-                if (p + 2 > end) { errMsg = "EOF len prefix"; return -1; }
-                uint16_t flen;
-                memcpy(&flen, p, 2);
-                flen = le16toh(flen);  // S5 核心
-                p += 2;
-                if (p + flen > end) { errMsg = "field exceeds"; return -1; }
-                p += flen;
-                break;
+            DecodedField df;
+            FieldDecodeResult r = decodeRecordField(&p, end, &df);
+            if (r == FieldDecodeResult::kTruncated) {
+                // 变长值区越界（valueLen>0 已读到长度）与其余不足
+                // 统一按越界拒绝（保留原测试断言关键字）
+                errMsg = (df.valueLen > 0) ? "field exceeds" : "EOF at field";
+                return -1;
             }
-            default:
+            if (r == FieldDecodeResult::kUnknown) {
                 errMsg = "unknown type";
                 return -1;
             }
