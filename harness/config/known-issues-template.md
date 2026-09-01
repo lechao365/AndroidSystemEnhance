@@ -12,6 +12,7 @@
 - title: 一句话问题描述          # 简洁标题，缺省派生文件名 slug
 - discovered_in: 01b54c14779f    # 发现时所在 commit（12 位 hex）
 - origin: introduced             # 来源：introduced（本批引入）/ pre-existing（历史遗留）
+- severity: P2                   # 严重级：P0（阻断发布）/ P1（高优，近期修复）/ P2（低优，暂缓），默认 P2
 - blocking: false                # 是否阻塞发布（true/false）
 - blocking_reason:               # 阻塞原因（blocking=true 时必填）
 - status: open                   # 状态：open / scheduled / fixed / wontfix

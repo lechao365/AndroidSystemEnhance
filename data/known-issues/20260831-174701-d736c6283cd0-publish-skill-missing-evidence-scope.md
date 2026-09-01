@@ -3,6 +3,7 @@
 - title: publish-main-base SKILL 阶段三漏写 evidence-scope
 - discovered_in: ab303f32bdaf
 - origin: introduced
+- severity: P1
 - blocking: False
 - blocking_reason: 
 - status: fixed

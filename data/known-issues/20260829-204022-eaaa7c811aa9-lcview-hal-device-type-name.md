@@ -3,6 +3,7 @@
 - title: lechao_lcview_hal_device 设备节点类型名残留（HAL 退役后命名未同步）
 - discovered_in: eaaa7c811aa9
 - origin: pre-existing
+- severity: P2
 - blocking: False
 - blocking_reason: 
 - status: open

@@ -3,6 +3,7 @@
 - title: emit 侧 35 项 bash 测试平台跳过成盲区
 - discovered_in: ab303f32bdaf
 - origin: pre-existing
+- severity: P1
 - blocking: False
 - blocking_reason: 
 - status: open

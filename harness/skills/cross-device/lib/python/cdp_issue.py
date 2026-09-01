@@ -26,12 +26,15 @@ _ISSUE_KEEP = 20
 # 头字段定序：只列头字段；余项（现场/复现步骤/修法描述等自由信息）一律入正文。
 _FIELDS = [
     "schema_version", "issue_id", "title", "discovered_in",
-    "origin", "blocking", "blocking_reason", "status", "task", "resolved_in",
+    "origin", "severity", "blocking", "blocking_reason", "status", "task",
+    "resolved_in",
 ]
 
-# origin / status 允许取值（模板逐字段注释同源维护）
+# origin / severity / status 允许取值（模板逐字段注释同源维护）
 _ORIGINS = ("introduced", "pre-existing")
 _ORIGIN_DEFAULT = "introduced"
+_SEVERITIES = ("P0", "P1", "P2")
+_SEVERITY_DEFAULT = "P2"
 _STATUSES = ("open", "scheduled", "fixed", "wontfix")
 _STATUS_DEFAULT = "open"
 
@@ -40,13 +43,15 @@ _SLUG_MAX = 40
 
 class Issue:
     def __init__(self, schema_version=1, issue_id="", title="", discovered_in="",
-                 origin=_ORIGIN_DEFAULT, blocking=False, blocking_reason="",
+                 origin=_ORIGIN_DEFAULT, severity=_SEVERITY_DEFAULT,
+                 blocking=False, blocking_reason="",
                  status=_STATUS_DEFAULT, task="", resolved_in="", batch_id=""):
         self.schema_version = schema_version
         self.issue_id = issue_id
         self.title = title
         self.discovered_in = discovered_in
         self.origin = origin if origin in _ORIGINS else _ORIGIN_DEFAULT
+        self.severity = severity if severity in _SEVERITIES else _SEVERITY_DEFAULT
         self.blocking = blocking
         self.blocking_reason = blocking_reason
         self.status = status if status in _STATUSES else _STATUS_DEFAULT
@@ -70,6 +75,8 @@ class Issue:
                 except ValueError:
                     pass  # 非法数值回落默认值，不崩
             elif key == "origin" and val not in _ORIGINS:
+                continue  # 非法枚举回落默认值，不崩
+            elif key == "severity" and val not in _SEVERITIES:
                 continue  # 非法枚举回落默认值，不崩
             elif key == "status" and val not in _STATUSES:
                 continue
@@ -216,6 +223,9 @@ def validate_issue(path, issues_dir=None):
         origin = fields.get("origin", _ORIGIN_DEFAULT)
         if origin not in _ORIGINS:
             errs.append(f"origin 非法: {origin!r}，允许 {_ORIGINS}")
+        severity = fields.get("severity", _SEVERITY_DEFAULT)
+        if severity not in _SEVERITIES:
+            errs.append(f"severity 非法: {severity!r}，允许 {_SEVERITIES}")
         status = fields.get("status", _STATUS_DEFAULT)
         if status not in _STATUSES:
             errs.append(f"status 非法: {status!r}，允许 {_STATUSES}")

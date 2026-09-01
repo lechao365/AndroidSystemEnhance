@@ -3,6 +3,7 @@
 - title: precheck 领先超一笔无告警
 - discovered_in: ab303f32bdaf
 - origin: pre-existing
+- severity: P2
 - blocking: False
 - blocking_reason: 
 - status: open

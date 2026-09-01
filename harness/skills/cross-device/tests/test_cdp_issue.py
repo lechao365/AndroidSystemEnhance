@@ -13,13 +13,14 @@ _TASK = "lcview-refactor"
 
 
 def _mk_issue(issue_id="KI-20260829-001", status="open", origin="introduced",
-              title="lcview 重复落盘计数异常"):
+              severity="P2", title="lcview 重复落盘计数异常"):
     return cdp_issue.Issue(
         schema_version=1,
         issue_id=issue_id,
         title=title,
         discovered_in="38433d446f07",
         origin=origin,
+        severity=severity,
         blocking=True,
         blocking_reason="影响数据一致性",
         status=status,
@@ -69,6 +70,7 @@ class TestIssue(unittest.TestCase):
         self.assertEqual(got.title, "lcview 重复落盘计数异常")
         self.assertEqual(got.discovered_in, "38433d446f07")
         self.assertEqual(got.origin, "introduced")
+        self.assertEqual(got.severity, "P2")
         self.assertTrue(got.blocking)
         self.assertEqual(got.blocking_reason, "影响数据一致性")
         self.assertEqual(got.status, "open")
@@ -125,8 +127,10 @@ class TestIssue(unittest.TestCase):
     def test_origin_status_invalid_falls_back(self):
         # 非法枚举回落默认值，不崩
         r = cdp_issue.Issue.from_text(
-            "- origin: badvalue\n- status: badvalue\n## body\n\nx\n")
+            "- origin: badvalue\n- severity: badvalue\n- status: badvalue\n"
+            "## body\n\nx\n")
         self.assertEqual(r.origin, "introduced")
+        self.assertEqual(r.severity, "P2")
         self.assertEqual(r.status, "open")
 
     def test_from_text_strips_values(self):
@@ -201,12 +205,28 @@ class TestIssue(unittest.TestCase):
         p.write_text(
             "- schema_version: 1\n- issue_id: KI-X\n- title: t\n"
             "- discovered_in: 38433d446f07\n- origin: badvalue\n"
-            "- blocking: false\n- blocking_reason: \n- status: badstatus\n"
-            "- task: lcview-refactor\n- resolved_in: \n\n## body\n\nx\n",
+            "- severity: badvalue\n- blocking: false\n- blocking_reason: \n"
+            "- status: badstatus\n- task: lcview-refactor\n- resolved_in: \n"
+            "\n## body\n\nx\n",
             encoding="utf-8")
         errs = cdp_issue.validate_issue(p, self._dir)
         self.assertTrue(any("origin 非法" in e for e in errs), errs)
+        self.assertTrue(any("severity 非法" in e for e in errs), errs)
         self.assertTrue(any("status 非法" in e for e in errs), errs)
+
+    def test_validate_bad_severity_red(self):
+        # severity 非法枚举判红（方向 2：validate_issue 增 severity 非法判红）
+        p = self._dir / "20260829-180000-18f27638d9f6-bad.md"
+        p.write_text(
+            "- schema_version: 1\n- issue_id: KI-X\n- title: t\n"
+            "- discovered_in: 38433d446f07\n- origin: introduced\n"
+            "- severity: P3\n- blocking: false\n- blocking_reason: \n"
+            "- status: open\n- task: lcview-refactor\n- resolved_in: \n"
+            "\n## body\n\nx\n",
+            encoding="utf-8")
+        errs = cdp_issue.validate_issue(p, self._dir)
+        self.assertTrue(any("severity 非法" in e for e in errs), errs)
+        self.assertFalse(any("头字段缺失" in e for e in errs), errs)
 
     def test_validate_blocking_without_reason(self):
         p = self._dir / "20260829-180000-18f27638d9f6-bad.md"
@@ -252,6 +272,21 @@ class TestIssue(unittest.TestCase):
         errs2 = cdp_issue.validate_issue(stray, self._dir)
         self.assertTrue(any("缺该问题条目" in e for e in errs2), errs2)
         self.assertTrue(any("缺文件条目" in e for e in errs2), errs2)
+
+
+class TestBackfilledSeverity(unittest.TestCase):
+    """回填后仓库真实 data/known-issues 全部条目 validate 无红（防堵 promote 门禁）。"""
+
+    def test_all_repo_issues_pass_validation(self):
+        # 不设 CDP_PROJECT_ROOT：data_known_issues_dir() 回落仓库真实路径
+        os.environ.pop("CDP_PROJECT_ROOT", None)
+        files = cdp_issue.issue_files()
+        self.assertTrue(files, "data/known-issues 下应存在存量条目")
+        for p in files:
+            errs = cdp_issue.validate_issue(p)
+            self.assertEqual(errs, [], f"{p.name}: {errs}")
+            severity = cdp_issue.read_issue(p).severity
+            self.assertIn(severity, cdp_issue._SEVERITIES)
 
 
 if __name__ == "__main__":
