@@ -175,6 +175,23 @@ TEST_F(DaemonLoopTest, TrailingBytes_WritesInvalid) {
     EXPECT_EQ(r.invalidCnt, 1u);  // trailing 计数
 }
 
+TEST_F(DaemonLoopTest, MixedBatch_ValidAndInvalidCounts) {
+    // invalid 透传语义（方向 1）：混合批次合法/坏记录分别累计——
+    // 心跳 invalid_records 数据源即 parseBatch 的 invalidCnt 逐批累加，
+    // 合法与坏记录各自独立计数，不相互吞噬
+    SchemaParser sp = makeSchema();
+    FileWriter writer(mCfg);
+    auto batch = makeBatch(makeValidRecord());  // 1 valid
+    auto bad = makeValidRecord();
+    reinterpret_cast<lcview_record_hdr*>(bad.data())->event_id = 999;  // validate fail
+    auto badBatch = makeBatch(bad);             // 1 invalid
+    batch.insert(batch.end(), badBatch.begin(), badBatch.end());
+    batch.push_back(0xFF);                      // trailing → 1 invalid
+    BatchParseResult r = parseBatch(sp, writer, batch);
+    EXPECT_EQ(r.validCnt, 1u);
+    EXPECT_EQ(r.invalidCnt, 2u);  // validate fail + trailing
+}
+
 TEST(DaemonLoopHelperTest, SchemaLoadRetry_EventualSuccess) {
     // schema 路径不存在 → 重试失败；maxRetries=0 直接失败
     SchemaParser sp;

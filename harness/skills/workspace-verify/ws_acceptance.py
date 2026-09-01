@@ -3,7 +3,9 @@
 标签语法（推荐格式）：svc:<svc> / log:<kw> / prop:<k>=<v> / file:<path> /
 cmd:"<含空格的 shell>" 或 cmd:<无空格> / hostcmd:"<host 侧 shell>"（在
 workspace-verify 目录执行，payload 相对路径以其为根，如
-hostcmd:"cases/lcview_check.sh --mode files"）/ boot（裸词）；其余内容视为
+hostcmd:"cases/lcview_check.sh --mode files"）/ boot（裸词）/ logfresh:"锚点|秒数"
+（以设备时钟回退 N 秒作 logcat 时间窗起点，窗内未命中锚点即判红——时效性判据，
+daemon 卡死而进程存活时旧心跳不再判绿）；其余内容视为
 自由文本（status='ai'，由 verify AI 现场判定）。
 overall 语义（三态）：任一自动项 fail 即 fail；无 fail 但含未判定项（ai）则 ai；
 全 pass 且无 ai 才 pass（未判定不算成功）。
@@ -46,10 +48,13 @@ _VERIFY_ROOT = Path(__file__).resolve().parent
 # cmd/hostcmd 支持引号包裹（含空格）；引号内支持反斜杠转义（\"），否则
 # 含转义引号的命令（如 adb shell \"echo ...\"）会在转义处截断成坏标签；
 # logfield 取 logcat 含锚点的最后一行按字段名提取数值比较（锚点|字段|比较符|数值），
-# 防 log: 子串匹配命中历史零值心跳的假绿；boot 为裸词；其余标签不含空格
+# 防 log: 子串匹配命中历史零值心跳的假绿；logfresh 取设备时钟回退 N 秒的
+# logcat 时间窗（锚点|秒数），窗内未命中锚点即判红（时效性判据）；
+# boot 为裸词；其余标签不含空格
 _TAG_RE = re.compile(
     r'(?:svc|log|prop|file|hostcmd):(?:"(?:\\.|[^"\\])*"|\S+)'
     r'|logfield:(?:"(?:\\.|[^"\\])*"|\S+)'
+    r'|logfresh:(?:"(?:\\.|[^"\\])*"|\S+)'
     r'|cmd:(?:"(?:\\.|[^"\\])*"|\S+)|\bboot\b')
 # --log-since 时间窗起点格式：MM-DD 或 YYYY-MM-DD 的 HH:MM:SS.mmm
 _SINCE_RE = re.compile(r"^(?:\d{4}-)?\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$")
@@ -124,7 +129,7 @@ def split_tag(tag):
         return "boot", ""
     if ":" in tag:
         kind, payload = tag.split(":", 1)
-        if kind in ("cmd", "log", "hostcmd", "logfield") and payload.startswith('"') and payload.endswith('"'):
+        if kind in ("cmd", "log", "hostcmd", "logfield", "logfresh") and payload.startswith('"') and payload.endswith('"'):
             payload = payload[1:-1]
             payload = payload.replace('\\"', '"')  # 反转义：\" → "
         return kind, payload
@@ -221,6 +226,47 @@ def execute_tag(tag, adb_exec, adb_logcat):
             return "fail", f"logfield: 未知比较符 {op!r}（须 = != > < >= <=）"
         return ("pass" if ok else "fail",
                 f"logfield {field}={actual} {op} {expect}（锚点末行: {last[:120]}）")
+    if kind == "logfresh":
+        # 锚点|秒数：取设备 date 回退 N 秒作 logcat 时间窗起点，窗内未命中
+        # 锚点即判红——log:/logfield 取末行不看时效，daemon 卡死而进程存活时
+        # 旧心跳仍判绿（假绿精确条件：进程活着但采集链路死了）。
+        # 时间窗文本按设备时区格式化后直接透传 build_logcat_cmd（-t <since>），
+        # 不解析时间戳（复用既有命令构造，PIT-5 同源防护）
+        parts = payload.split("|")
+        if len(parts) != 2:
+            return "fail", f"logfresh 语法错误（须 锚点|秒数）: {payload!r}"
+        anchor, window_s = [p.strip() for p in parts]
+        try:
+            window = int(window_s)
+        except ValueError:
+            return "fail", f"logfresh 秒数非数字: {window_s!r}"
+        body, code = adb_exec("date +%s")
+        if code != 0 or not body.strip().isdigit():
+            return "fail", "logfresh: 无法读取设备时钟（date +%s）"
+        since_epoch = int(body.strip()) - window
+        out, code = adb_exec("date +%z")
+        if code != 0:
+            return "fail", "logfresh: 无法读取设备时区（date +%z）"
+        m = re.match(r"([+-])(\d{2})(\d{2})", out.strip())
+        if not m:
+            return "fail", f"logfresh: 设备时区格式非法 {out.strip()!r}"
+        sign = 1 if m.group(1) == "+" else -1
+        offset = sign * (int(m.group(2)) * 3600 + int(m.group(3)) * 60)
+        tz = timezone(timedelta(seconds=offset))
+        dt = datetime.fromtimestamp(since_epoch, tz=tz)
+        since_text = dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        try:
+            r = subprocess.run(ac.build_logcat_cmd(None, 5000, since=since_text),
+                               capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=60)
+            out = r.stdout
+        except subprocess.TimeoutExpired:
+            return "fail", "logfresh: logcat 执行超时"
+        hit = anchor in out
+        return ("pass" if hit else "fail",
+                f"logfresh: 设备时钟回退 {window}s（窗起点 {since_text}），"
+                f"窗内{'命中' if hit else '未命中'} 锚点 {anchor!r}"
+                f"（取回 {len(out)} 字符）")
     if kind == "prop":
         k, _, v = payload.partition("=")
         body, code = adb_exec(f"getprop {shlex.quote(k)}")
@@ -350,7 +396,8 @@ def main(argv=None):
     #  门禁，无 reboot 的 fresh/ts 用例从不校准时钟而恒红）
     need_clock = args.wait_ready or any(
         "--mode fresh" in p or "--mode ts" in p
-        for _, p in (split_tag(t) for t in parse_acceptance(acceptance)))
+        for _, p in (split_tag(t) for t in parse_acceptance(acceptance))) or any(
+        t.startswith("logfresh") for t in parse_acceptance(acceptance))
     if need_clock:
         # 就绪后校准设备时钟：偏差超阈值自动 root 修正（PIT-5 复发防护，
         # 避免 ts/fresh 等时间敏感验收因时钟漂移误判）

@@ -32,7 +32,13 @@ cases:
   #       属防假绿设计而非用例缺陷）；有负载时才可校验守恒。
   # 注意7：drop_invalidwrite（invalid 写失败恢复不成计数）与其余 drop_* 分项
   #       同语义用 logfield 断言 0——failbit 粘滞假绿修复的回归点。
-  lcview-liveness: 'svc:lechao_lcview log:"heartbeat, loop=" logfield:"heartbeat, loop=|overrun|=|0" logfield:"heartbeat, loop=|dropped|=|0" logfield:"heartbeat, loop=|drop_invalidwrite|=|0" logfield:"heartbeat, loop=|readErr|=|0" boot'
+  # 注意8：invalid_records（parseBatch 丢弃累计）断言 0——wire 漂移时每条判红、
+  #       jsonl 归零而三个零值字段仍全 0，采集链路死了 liveness 仍判绿，
+  #       invalid 累计作判红兜底。
+  # 注意9：logfresh 为时效性判据（锚点|秒数）：以设备时钟回退 90s 作 logcat
+  #       时间窗，窗内未命中心跳即判红——logfield 取末行不看时效，daemon 卡死
+  #       而进程存活时旧心跳仍判绿（心跳时间驱动 30s 一发，90s 窗 3 倍余量）。
+  lcview-liveness: 'svc:lechao_lcview log:"heartbeat, loop=" logfield:"heartbeat, loop=|overrun|=|0" logfield:"heartbeat, loop=|dropped|=|0" logfield:"heartbeat, loop=|drop_invalidwrite|=|0" logfield:"heartbeat, loop=|invalid_records|=|0" logfield:"heartbeat, loop=|readErr|=|0" logfresh:"heartbeat, loop=|90" boot'
 
   # 性能采集（脚本化统一负载，只报数不设门禁）：dd 读块设备 64MB（与性能基线
   # 负载一致，消除 4MB 用例负载失真）→ 事件吞吐 / 平均落盘延迟 / daemon RSS，
