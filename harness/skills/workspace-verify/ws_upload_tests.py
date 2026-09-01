@@ -16,6 +16,7 @@
 # ============================================================
 
 import argparse
+import os
 import posixpath
 import re
 import shlex
@@ -190,6 +191,25 @@ def _default_out():
     return posixpath.join(str(Path.home()), "workspace", "aosp", "out")
 
 
+def _mark_stage(name):
+    """验证阶段自动打点：cdp_timing.py mark（batch 识别：CDP_BATCH_ID 环境变量
+    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。"""
+    timing = (Path(__file__).resolve().parents[1] / "cross-device"
+              / "lib" / "python" / "cdp_timing.py")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(timing.parent) + os.pathsep + env.get("PYTHONPATH", "")
+    try:
+        r = subprocess.run([sys.executable, str(timing), "mark", "--name", name],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=10, env=env)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"warn: 打点 {name} 失败（不阻断）: {e}", file=sys.stderr)
+        return
+    if r.returncode != 0:
+        print(f"warn: 打点 {name} 失败（不阻断）: {r.stderr.strip()}",
+              file=sys.stderr)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--product", default="rpi5", help="AOSP 产品名（默认 rpi5）")
@@ -239,6 +259,8 @@ def main(argv=None):
     # 跑完恢复 shell 用户，避免 root 状态影响后续 verify 环节
     ensure_user(ep, False)
     print(f"\n设备侧单测{'全部通过' if all_ok else '存在失败'}：{len(targets)} 目标")
+    # 脚本自动打点单测段（失败不阻断）
+    _mark_stage("verify_unit_test")
     return 0 if all_ok else 1
 
 

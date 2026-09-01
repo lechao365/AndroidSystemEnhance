@@ -6,9 +6,9 @@
 - severity: P2
 - blocking: False
 - blocking_reason: 
-- status: open
+- status: fixed
 - task: lcview-refactor
-- resolved_in: 
+- resolved_in: 701fd8213408
 
 ## body
 

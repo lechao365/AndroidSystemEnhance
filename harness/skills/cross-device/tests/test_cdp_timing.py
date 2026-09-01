@@ -126,6 +126,55 @@ class TestCdpTiming(unittest.TestCase):
         self.assertEqual(cdp_timing.compute_segments({"start_wall": 1.0, "marks": []}), [])
         self.assertEqual(cdp_timing.compute_segments({}), [])
 
+    # ── 方向 3：batch 自动识别（脚本自动 mark 依赖）──────────────────
+    # 优先级：显式 --batch/--file > 环境变量 CDP_BATCH_ID > log 目录唯一
+    # timings 文件；均缺静默跳过（返 0 不阻断，且不写文件）。
+
+    def test_mark_uses_env_cdp_batch_id(self):
+        # CDP_BATCH_ID 环境变量识别：不传 --batch 也能 mark 到对应文件
+        self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
+        os.environ["CDP_BATCH_ID"] = self.batch
+        try:
+            self.assertEqual(
+                cdp_timing.main(["mark", "--name", "verify_sync"]), 0)
+        finally:
+            os.environ.pop("CDP_BATCH_ID", None)
+        data = json.loads(self._path().read_text(encoding="utf-8"))
+        self.assertEqual(data["marks"][0]["name"], "verify_sync")
+
+    def test_mark_uses_unique_timing_file(self):
+        # 目录仅一个 timings 文件且无 env → 自动识别该文件
+        self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
+        self.assertEqual(cdp_timing.main(["mark", "--name", "verify_acceptance"]), 0)
+        data = json.loads(self._path().read_text(encoding="utf-8"))
+        self.assertEqual(data["marks"][0]["name"], "verify_acceptance")
+
+    def test_mark_silent_skip_no_source(self):
+        # 无 env 且目录多文件（无法唯一识别）→ 静默跳过返 0，不写任何文件
+        self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
+        self.assertEqual(cdp_timing.main(["start", "--batch", "fedcba654321"]), 0)
+        before = sorted(p.name for p in cdp_paths.log_apply_dir().glob("timings-*.json"))
+        self.assertEqual(cdp_timing.main(["mark", "--name", "verify_sync"]), 0)
+        after = sorted(p.name for p in cdp_paths.log_apply_dir().glob("timings-*.json"))
+        self.assertEqual(before, after, "多文件且无 env 应静默跳过，不得误标")
+
+    def test_mark_silent_skip_empty_dir(self):
+        # 无 env 且目录无打点文件 → 静默跳过返 0（脚本自动 mark 未 start 不阻断）
+        self.assertEqual(cdp_timing.main(["mark", "--name", "verify_sync"]), 0)
+
+    def test_mark_explicit_batch_overrides_env(self):
+        # 显式 --batch 优先于环境变量（env 指向另一文件时写显式目标）
+        self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
+        self.assertEqual(cdp_timing.main(["start", "--batch", "fedcba654321"]), 0)
+        os.environ["CDP_BATCH_ID"] = "fedcba654321"
+        try:
+            self.assertEqual(
+                cdp_timing.main(["mark", "--batch", self.batch, "--name", "precheck"]), 0)
+        finally:
+            os.environ.pop("CDP_BATCH_ID", None)
+        data = json.loads(self._path().read_text(encoding="utf-8"))
+        self.assertEqual(data["marks"][0]["name"], "precheck")
+
 
 if __name__ == "__main__":
     unittest.main()

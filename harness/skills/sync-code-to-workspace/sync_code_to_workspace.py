@@ -864,6 +864,24 @@ def _verify_after_apply(orig_plan: str) -> bool:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def _mark_stage(name):
+    """验证阶段自动打点：cdp_timing.py mark（batch 识别：CDP_BATCH_ID 环境变量
+    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。"""
+    timing = (Path(__file__).resolve().parents[1] / "cross-device"
+              / "lib" / "python" / "cdp_timing.py")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(timing.parent) + os.pathsep + env.get("PYTHONPATH", "")
+    try:
+        r = subprocess.run([sys.executable, str(timing), "mark", "--name", name],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=10, env=env)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log_warn(f"打点 {name} 失败（不阻断）: {e}")
+        return
+    if r.returncode != 0:
+        log_warn(f"打点 {name} 失败（不阻断）: {r.stderr.strip()}")
+
+
 def main():
     harness_init("sync_code_to_workspace")
 
@@ -914,6 +932,7 @@ def main():
                       if l and l[0] in "+-"]
         if not plan_lines:
             log_info("auto: plan 为空，code 与 workspace 一致，无需同步")
+            _mark_stage("verify_sync")
             harness_exit(0)
         step_begin("阶段 2: 执行同步计划")
         if not _apply_plan(plan_file):
@@ -924,6 +943,8 @@ def main():
         step_begin("阶段 3: 落盘校验")
         ok = _verify_after_apply(plan_file)
         step_end(ok)
+        # 脚本自动打点同步段（--auto 闭环完成即记；失败不阻断口径）
+        _mark_stage("verify_sync")
         harness_exit(0 if ok else 1)
 
     mode = "apply" if args.apply else ("check-only" if args.check_only else "plan")

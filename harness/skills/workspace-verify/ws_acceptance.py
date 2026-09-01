@@ -26,6 +26,7 @@ import shlex
 import subprocess
 import sys
 import time
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -360,6 +361,25 @@ def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False):
     return "pass", items
 
 
+def _mark_stage(name):
+    """验证阶段自动打点：cdp_timing.py mark（batch 识别：CDP_BATCH_ID 环境变量
+    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。"""
+    timing = (Path(__file__).resolve().parents[1] / "cross-device"
+              / "lib" / "python" / "cdp_timing.py")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(timing.parent) + os.pathsep + env.get("PYTHONPATH", "")
+    try:
+        r = subprocess.run([sys.executable, str(timing), "mark", "--name", name],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=10, env=env)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"warn: 打点 {name} 失败（不阻断）: {e}", file=sys.stderr)
+        return
+    if r.returncode != 0:
+        print(f"warn: 打点 {name} 失败（不阻断）: {r.stderr.strip()}",
+              file=sys.stderr)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="验收执行器")
     sub = ap.add_subparsers(dest="action", required=True)
@@ -473,6 +493,8 @@ def main(argv=None):
                                     ensure_boot=args.ensure_boot)
     print(json.dumps({"overall": overall, "items": items}, ensure_ascii=False,
                      indent=2))
+    # 脚本自动打点验收段（失败不阻断，结果 pass/fail 均记）
+    _mark_stage("verify_acceptance")
     if overall == "fail":
         return 1
     if overall == "ai":
