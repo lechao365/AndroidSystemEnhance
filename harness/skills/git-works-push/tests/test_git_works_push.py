@@ -98,6 +98,10 @@ class TestGitWorksPush(unittest.TestCase):
     def _run(self, *args, mock_git=MOCK_GIT_OK):
         bin_dir, shim_dir = self._env_with_mock_git(mock_git)
         argv = bash_argv(SCRIPT, args, prepend_dirs=[shim_dir, bin_dir])
+        if argv is None:
+            # find_bash 返 None（本机无 bash）→ skip 单测，防 None 进 subprocess
+            # 变 TypeError（Windows 未设 LC_HARNESS_WIN_BASH 时触发）
+            self.skipTest("无 bash（find_bash 返 None）")
         env = dict(os.environ)
         return subprocess.run(argv,
                               capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)

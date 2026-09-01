@@ -32,6 +32,27 @@ def known_issues_warns(root=None):
     return open_ids if len(open_ids) >= 8 else []
 
 
+def lead_warns(root=None):
+    """precheck 领先告警：origin/main..origin/dev 提交数 > 1 时返回告警串列表。
+
+    批量连续 apply 后 HEAD 与 verified_commit 之间的中间提交全部无验证证据，
+    precheck 只校验 base 匹配不校验领先笔数——领先 >1 笔提示先 /publish-main-base
+    再继续产批；origin/main 缺失（新仓未推 main）返空不崩。
+    """
+    root = Path(root) if root else project_root()
+    r = _git(root, "rev-list", "--count", "origin/main..origin/dev")
+    if r.returncode != 0:
+        return []  # origin/main 缺失（rev-list 报 unknown revision）
+    try:
+        n = int(r.stdout.strip())
+    except ValueError:
+        return []
+    if n <= 1:
+        return []
+    return [f"dev 领先 main {n} 笔内容提交（中间提交无验证证据），"
+            "建议先 /publish-main-base 再继续产批"]
+
+
 def _git(root, *args):
     return subprocess.run(["git", "-C", str(root), *args],
                           capture_output=True, text=True,
@@ -80,7 +101,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     ok, reason, detail = precheck(do_pull=not args.no_pull)
     out = {"ok": ok, "reason": reason, "detail": detail[:100]}
-    warns = known_issues_warns()
+    # warns 合入两类：KIR-005 存量告警（issue_id 列表）+ 领先告警（文字串）
+    warns = known_issues_warns() + lead_warns()
     if warns:
         out["warns"] = warns
     print(json.dumps(out, ensure_ascii=False))

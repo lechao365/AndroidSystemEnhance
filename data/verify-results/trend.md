@@ -1,4 +1,3 @@
-2026-08-27 23:16:31 manual-2608272316 pass build=pass board=pass acc=[{"case":"lciod-liveness","status":"pass lciod 防护栏全新构建+lcview轻量收口：4测试target编译过、板上
 2026-08-27 23:35:43 manual-2608272335 pass build=pass board=pass acc=[{"case":"lciod-liveness","status":"pass lciod 防护栏缺口补齐：enabled==1 假绿修复 + AIDL 投影抽
 2026-08-27 23:39:52 manual-2608272339 pass build=pass board=pass acc=[{"case":"lcview-liveness","status":"pas 当前最终工作树闭环：lcview 5条(liveness 8/8,pipelin
 2026-08-28 09:35:39 be5969c4fa93 pass build=pass board=pass acc={"overall":"pass","items":[{"tag":"svc:l 修 lciod 三处假绿与速率溢出：空expect判红+error_count/
@@ -48,3 +47,4 @@
 2026-09-01 15:10:32 ffc3da1ebcb4 pass build=skip board=pass acc={"overall":"pass","items":[{"tag":"svc:l logfield 按进程归属筛并等新进程首心跳：验收与五用例组全绿 | {"daemon_rss_kb": 5120, "dd_s": 2.361, "drain_ms_per_event": 0.387, "load_mb": 64, "throughput_evs": 1304.3}
 2026-09-01 15:49:18 671b4dc5033d skip build=skip board=skip acc=- 打开 emit 侧 bash 测试盲区（-s 无需上板）
 2026-09-01 16:21:29 ad91215da5bf skip build=skip board=skip acc=- 修 Windows 实跑暴露的 8 项失败（-s 无需上板）
+2026-09-01 16:36:37 b36ccd69ec6a skip build=skip board=skip acc=- 修开关跨模块污染并补 precheck 领先告警（-s 无需上板）

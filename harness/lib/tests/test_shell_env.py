@@ -13,9 +13,6 @@ import shell_env  # noqa: E402
 
 
 class TestFindBash(unittest.TestCase):
-    def tearDown(self):
-        os.environ.pop("LC_HARNESS_WIN_BASH", None)
-
     def test_path_hit(self):
         # PATH 命中：直接返回 PATH 中的 bash
         with mock.patch("shell_env.shutil.which",
@@ -24,47 +21,50 @@ class TestFindBash(unittest.TestCase):
             self.assertEqual(shell_env.find_bash(), "/usr/bin/bash")
 
     def test_switch_off_returns_none(self):
-        # PATH 无 bash 且 LC_HARNESS_WIN_BASH 非 1 → None（不推 git 路径）
-        with mock.patch("shell_env.shutil.which", return_value=None) as wh:
-            self.assertIsNone(shell_env.find_bash())
-            self.assertEqual(wh.call_count, 1)  # 开关关：只查 bash，不查 git
+        # PATH 无 bash 且 LC_HARNESS_WIN_BASH 非 1 → None（不推 git 路径）；
+        # 上下文内 pop 开关键（patch.dict 退出时恢复外部值，不污染后续模块）
+        with mock.patch.dict(os.environ, {"LC_HARNESS_WIN_BASH": "1"}):
+            os.environ.pop("LC_HARNESS_WIN_BASH")
+            with mock.patch("shell_env.shutil.which", return_value=None) as wh:
+                self.assertIsNone(shell_env.find_bash())
+                self.assertEqual(wh.call_count, 1)  # 开关关：只查 bash，不查 git
 
     def test_switch_on_infers_from_git(self):
         # PATH 无 bash 且 LC_HARNESS_WIN_BASH=1 → 由 git 路径推 Git for Windows
         # 的 bin/bash.exe（git 在 <root>/cmd/ 布局）；真实临时目录造文件，
-        # 不 mock is_file
-        os.environ["LC_HARNESS_WIN_BASH"] = "1"
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "cmd").mkdir()
-            (root / "bin").mkdir()
-            (root / "cmd" / "git.exe").touch()
-            (root / "bin" / "bash.exe").touch()
-            with mock.patch("shell_env.shutil.which",
-                            side_effect=lambda c: str(root / "cmd" / "git.exe")
-                            if c == "git" else None):
-                self.assertEqual(shell_env.find_bash(),
-                                 str(root / "bin" / "bash.exe"))
+        # 不 mock is_file；开关经 patch.dict 局部设置，退出即恢复
+        with mock.patch.dict(os.environ, {"LC_HARNESS_WIN_BASH": "1"}):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "cmd").mkdir()
+                (root / "bin").mkdir()
+                (root / "cmd" / "git.exe").touch()
+                (root / "bin" / "bash.exe").touch()
+                with mock.patch("shell_env.shutil.which",
+                                side_effect=lambda c: str(root / "cmd" / "git.exe")
+                                if c == "git" else None):
+                    self.assertEqual(shell_env.find_bash(),
+                                     str(root / "bin" / "bash.exe"))
 
     def test_switch_on_bin_layout_infers_same_bash(self):
         # git 在 <root>/bin/ 布局：parent.parent 仍为 root，推得 root/bin/bash.exe
-        os.environ["LC_HARNESS_WIN_BASH"] = "1"
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "bin").mkdir()
-            (root / "bin" / "git.exe").touch()
-            (root / "bin" / "bash.exe").touch()
-            with mock.patch("shell_env.shutil.which",
-                            side_effect=lambda c: str(root / "bin" / "git.exe")
-                            if c == "git" else None):
-                self.assertEqual(shell_env.find_bash(),
-                                 str(root / "bin" / "bash.exe"))
+        with mock.patch.dict(os.environ, {"LC_HARNESS_WIN_BASH": "1"}):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "bin").mkdir()
+                (root / "bin" / "git.exe").touch()
+                (root / "bin" / "bash.exe").touch()
+                with mock.patch("shell_env.shutil.which",
+                                side_effect=lambda c: str(root / "bin" / "git.exe")
+                                if c == "git" else None):
+                    self.assertEqual(shell_env.find_bash(),
+                                     str(root / "bin" / "bash.exe"))
 
     def test_switch_on_git_missing_returns_none(self):
         # 开关开但 git 也不在 PATH → None
-        os.environ["LC_HARNESS_WIN_BASH"] = "1"
-        with mock.patch("shell_env.shutil.which", return_value=None):
-            self.assertIsNone(shell_env.find_bash())
+        with mock.patch.dict(os.environ, {"LC_HARNESS_WIN_BASH": "1"}):
+            with mock.patch("shell_env.shutil.which", return_value=None):
+                self.assertIsNone(shell_env.find_bash())
 
 
 class TestWritePython3Shim(unittest.TestCase):
