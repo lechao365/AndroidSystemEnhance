@@ -38,7 +38,12 @@ cases:
   # 注意9：logfresh 为时效性判据（锚点|秒数）：以设备时钟回退 90s 作 logcat
   #       时间窗，窗内未命中心跳即判红——logfield 取末行不看时效，daemon 卡死
   #       而进程存活时旧心跳仍判绿（心跳时间驱动 30s 一发，90s 窗 3 倍余量）。
-  lcview-liveness: 'svc:lechao_lcview log:"heartbeat, loop=" logfield:"heartbeat, loop=|overrun|=|0" logfield:"heartbeat, loop=|dropped|=|0" logfield:"heartbeat, loop=|drop_invalidwrite|=|0" logfield:"heartbeat, loop=|invalid_records|=|0" logfield:"heartbeat, loop=|readErr|=|0" logfresh:"heartbeat, loop=|90" boot'
+  # 注意10：logfield 五条追加第 5 段进程名 lechao_lcview——日志按进程归属收窄
+  #       （pidof 取 pid + logcat --pid 过滤），防旧进程心跳残留行被当新进程
+  #       心跳（E1 首跑认旧进程心跳根因：logfield 取末行不按进程归属筛）；
+  #       新进程首心跳未到（锚点未命中）时每 5s 重取，90s 超时判红，不回落
+  #       全量筛（回落即旧进程行重新混入假绿）。
+  lcview-liveness: 'svc:lechao_lcview log:"heartbeat, loop=" logfield:"heartbeat, loop=|overrun|=|0|lechao_lcview" logfield:"heartbeat, loop=|dropped|=|0|lechao_lcview" logfield:"heartbeat, loop=|drop_invalidwrite|=|0|lechao_lcview" logfield:"heartbeat, loop=|invalid_records|=|0|lechao_lcview" logfield:"heartbeat, loop=|readErr|=|0|lechao_lcview" logfresh:"heartbeat, loop=|90" boot'
 
   # 性能采集（脚本化统一负载，只报数不设门禁）：dd 读块设备 64MB（与性能基线
   # 负载一致，消除 4MB 用例负载失真）→ 事件吞吐 / 平均落盘延迟 / daemon RSS，

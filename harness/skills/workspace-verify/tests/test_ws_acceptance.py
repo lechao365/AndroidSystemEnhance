@@ -73,6 +73,75 @@ class TestParseAcceptance(unittest.TestCase):
         self.assertEqual(status, "fail")
         self.assertIn("语法错误", detail)
 
+    def test_logfield_pid_narrows_and_passes(self):
+        # 5 段写法：pidof 取 pid → adb_logcat(pid) 按进程收窄；旧进程行
+        #（pid 不匹配，已被 logcat --pid 过滤出返回）不被采纳为末行
+        seen = {}
+
+        def adb_exec(cmd):
+            if cmd == "pidof lechao_lcview":
+                return "4242", 0
+            return "", 1
+
+        def adb_logcat(pid=None):
+            seen["pid"] = pid
+            return ("4242: heartbeat, loop=0 overrun=0 dropped=0 readErr=1\n"
+                    "4242: heartbeat, loop=0 overrun=0 dropped=0 readErr=0\n")
+
+        status, detail = wa.execute_tag(
+            'logfield:"heartbeat, loop=|readErr|=|0|lechao_lcview"',
+            adb_exec=adb_exec, adb_logcat=adb_logcat)
+        self.assertEqual(status, "pass")
+        self.assertEqual(seen["pid"], "4242")  # pid 透传进 adb_logcat
+        self.assertIn("readErr=0", detail)
+
+    def test_logfield_pid_process_missing_red(self):
+        # 进程不存在（pidof 空）→ 判红
+        def adb_exec(cmd):
+            return "", 1
+
+        status, detail = wa.execute_tag(
+            'logfield:"heartbeat, loop=|readErr|=|0|lechao_lcview"',
+            adb_exec=adb_exec, adb_logcat=lambda pid=None: "x\n")
+        self.assertEqual(status, "fail")
+        self.assertIn("pidof 为空或非数字", detail)
+
+    def test_logfield_pid_non_numeric_red(self):
+        # pidof 输出非数字（如多实例空格分隔）→ 判红
+        def adb_exec(cmd):
+            return "4242 4243", 0
+
+        status, detail = wa.execute_tag(
+            'logfield:"heartbeat, loop=|readErr|=|0|lechao_lcview"',
+            adb_exec=adb_exec, adb_logcat=lambda pid=None: "x\n")
+        self.assertEqual(status, "fail")
+        self.assertIn("非数字", detail)
+
+    def test_logfield_pid_anchor_miss_polls_until_timeout(self):
+        # 5 段锚点未命中：每 5s 重取（重新 pidof + logcat），90s 超时判红；
+        # 不得回落全量筛——全程仅带 pid 调用 adb_logcat（无全量回落）
+        calls = []
+
+        def adb_exec(cmd):
+            return "4242", 0
+
+        def adb_logcat(pid=None):
+            calls.append(pid)
+            return "其他进程日志行\n"  # 锚点永不命中
+
+        mono = mock.patch("ws_acceptance.time.monotonic",
+                          side_effect=[0] + [5 * i for i in range(1, 21)])
+        sleep = mock.patch("ws_acceptance.time.sleep")
+        with mono, sleep:
+            status, detail = wa.execute_tag(
+                'logfield:"heartbeat, loop=|readErr|=|0|lechao_lcview"',
+                adb_exec=adb_exec, adb_logcat=adb_logcat)
+        self.assertEqual(status, "fail")
+        self.assertIn("90s 内未命中锚点", detail)
+        self.assertIn("未回落全量筛", detail)
+        self.assertTrue(calls)
+        self.assertTrue(all(p == "4242" for p in calls))
+
     def test_logfresh_hit_in_window_passes(self):
         # logfresh 窗内命中锚点 → pass；时间窗 = 设备时钟回退 90s
         # （设备 1788226000 = 2026-09-01 01:26:40 GMT，窗起点 01:25:10）
@@ -488,16 +557,17 @@ class TestResolveAcceptance(unittest.TestCase):
         # readErr，防子串命中历史零值心跳假绿）+ logfresh 90s 时效判据 +
         # boot 判据；HAL 已退役，svc 只留 lechao_lcview，
         # conserve 已迁至 lcview-transfer 不在本用例）
+        # 五条 logfield 均带第 5 段进程名 lechao_lcview（按进程归属收窄）
         acc, err = wa.resolve_acceptance(self._args(case="lcview-liveness"))
         self.assertIsNone(err)
         self.assertEqual(
             acc,
             'svc:lechao_lcview log:"heartbeat, loop=" '
-            'logfield:"heartbeat, loop=|overrun|=|0" '
-            'logfield:"heartbeat, loop=|dropped|=|0" '
-            'logfield:"heartbeat, loop=|drop_invalidwrite|=|0" '
-            'logfield:"heartbeat, loop=|invalid_records|=|0" '
-            'logfield:"heartbeat, loop=|readErr|=|0" '
+            'logfield:"heartbeat, loop=|overrun|=|0|lechao_lcview" '
+            'logfield:"heartbeat, loop=|dropped|=|0|lechao_lcview" '
+            'logfield:"heartbeat, loop=|drop_invalidwrite|=|0|lechao_lcview" '
+            'logfield:"heartbeat, loop=|invalid_records|=|0|lechao_lcview" '
+            'logfield:"heartbeat, loop=|readErr|=|0|lechao_lcview" '
             'logfresh:"heartbeat, loop=|90" boot')
         # log: 子串断言 0 已弃用（5000 行缓冲命中开机初期零值心跳假绿）
         self.assertNotIn('log:"overrun=0"', acc)

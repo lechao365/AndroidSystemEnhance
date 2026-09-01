@@ -30,6 +30,14 @@ class TestCmdBuild(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("-t") + 1], "08-26 10:00:00.000")
         self.assertNotIn("5000", cmd)
 
+    def test_logcat_pid_narrows_by_process(self):
+        # pid 非空 → 追加 --pid=<pid> 按进程归属收窄（logfield 5 段写法，
+        # 防旧进程心跳残留行被当新进程心跳）；缺省/空 pid 不追加
+        cmd = ac.build_logcat_cmd(None, 5000, pid="4242")
+        self.assertIn("--pid=4242", cmd)
+        self.assertNotIn("--pid=", " ".join(ac.build_logcat_cmd(None, 5000)))
+        self.assertNotIn("--pid=", " ".join(ac.build_logcat_cmd(None, 5000, pid=None)))
+
     def test_parse_devices_states(self):
         out = ("List of devices attached\n"
                "192.168.1.5:5555\tdevice\n"

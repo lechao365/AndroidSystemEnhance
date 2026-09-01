@@ -169,13 +169,17 @@ def build_exec_cmd(cmd):
     return [adb_bin(), "shell", f"{cmd}; echo __LE_EXIT_CODE__=$?"]
 
 
-def build_logcat_cmd(filter_expr=None, tail=200, since=None):
+def build_logcat_cmd(filter_expr=None, tail=200, since=None, pid=None):
     """since 非空时以 `-t <since>` 收窄时间窗（代 -t <tail>），
-    避免命中上轮旧日志致假绿（如 reboot 后验收须从 reboot 时刻起）。"""
+    避免命中上轮旧日志致假绿（如 reboot 后验收须从 reboot 时刻起）；
+    pid 非空时追加 --pid=<pid> 按进程归属收窄（logfield 5 段写法：日志按
+    进程筛，防旧进程心跳残留行被当新进程心跳）。"""
     cmd = [adb_bin(), "logcat", "-d"]
     if filter_expr:
         cmd += ["-s", filter_expr]
     cmd += ["-t", since if since else str(tail)]
+    if pid:
+        cmd += [f"--pid={pid}"]
     return cmd
 
 

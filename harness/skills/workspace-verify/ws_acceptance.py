@@ -47,8 +47,10 @@ _VERIFY_ROOT = Path(__file__).resolve().parent
 # log 支持引号包裹（含空格关键字，如 log:"LcView HAL: registered"）；
 # cmd/hostcmd 支持引号包裹（含空格）；引号内支持反斜杠转义（\"），否则
 # 含转义引号的命令（如 adb shell \"echo ...\"）会在转义处截断成坏标签；
-# logfield 取 logcat 含锚点的最后一行按字段名提取数值比较（锚点|字段|比较符|数值），
-# 防 log: 子串匹配命中历史零值心跳的假绿；logfresh 取设备时钟回退 N 秒的
+# logfield 取 logcat 含锚点的最后一行按字段名提取数值比较（锚点|字段|比较符|数值
+# [|进程名]），防 log: 子串匹配命中历史零值心跳的假绿；第 5 段进程名经 pidof 取 pid
+# 后日志按该 pid 收窄（防旧进程心跳残留行被当新进程心跳），锚点未命中时每 5s 重取
+# 到 90s 超时判红；logfresh 取设备时钟回退 N 秒的
 # logcat 时间窗（锚点|秒数），窗内未命中锚点即判红（时效性判据）；
 # boot 为裸词；其余标签不含空格
 _TAG_RE = re.compile(
@@ -199,17 +201,44 @@ def execute_tag(tag, adb_exec, adb_logcat):
         return ("pass" if hit else "fail",
                 f"logcat {'命中' if hit else '未命中'} 关键字 {payload!r}（取回 {len(out)} 字符）")
     if kind == "logfield":
-        # 锚点|字段名|比较符|数值：取 logcat 含锚点的最后一行按字段名提取
+        # 锚点|字段名|比较符|数值[|进程名]：取 logcat 含锚点的最后一行按字段名提取
         # 数值比较——log: 子串匹配会命中历史零值心跳（5000 行缓冲），
-        # 故障累计后仍 PASS 的假绿由此防
+        # 故障累计后仍 PASS 的假绿由此防。
+        # 第 5 段进程名（5 段写法）：经 pidof 取 pid 后日志按该 pid 收窄
+        # （logcat --pid），防旧进程心跳残留行被当新进程心跳（E1 首跑认旧
+        # 进程心跳根因：logfield 取末行不按进程归属筛）；4 段写法不变。
         parts = payload.split("|")
-        if len(parts) != 4:
-            return "fail", f"logfield 语法错误（须 锚点|字段|比较符|数值）: {payload!r}"
-        anchor, field, op, expect_s = [p.strip() for p in parts]
-        out = adb_logcat()
-        lines = [ln for ln in out.splitlines() if anchor in ln]
-        if not lines:
-            return "fail", f"logfield: logcat 未命中锚点 {anchor!r}"
+        if len(parts) not in (4, 5):
+            return "fail", (f"logfield 语法错误（须 锚点|字段|比较符|数值"
+                            f"[|进程名]）: {payload!r}")
+        anchor, field, op, expect_s = [p.strip() for p in parts[:4]]
+        proc = parts[4].strip() if len(parts) == 5 else ""
+        if len(parts) == 5 and not proc:
+            return "fail", f"logfield: 第 5 段进程名为空: {payload!r}"
+        if proc:
+            # 5 段写法：pidof 取 pid（空或非数字判红），日志按 pid 收窄；
+            # 锚点未命中（新进程首心跳未到）时每 5s 重取（重新 pidof + logcat）
+            # 到 90s 超时判红——不得回落全量筛（回落即旧进程行重新混入假绿）
+            deadline = time.monotonic() + 90
+            while True:
+                body, code = adb_exec(f"pidof {shlex.quote(proc)}")
+                pid = body.strip()
+                if code != 0 or not pid.isdigit():
+                    return "fail", (f"logfield: 进程 {proc!r} pidof 为空或非数字"
+                                    f" {pid!r}（exit={code}）")
+                out = adb_logcat(pid)
+                lines = [ln for ln in out.splitlines() if anchor in ln]
+                if lines:
+                    break
+                if time.monotonic() >= deadline:
+                    return "fail", (f"logfield: 进程 {proc!r}(pid={pid}) 90s 内"
+                                    f"未命中锚点 {anchor!r}（未回落全量筛）")
+                time.sleep(5)
+        else:
+            out = adb_logcat()
+            lines = [ln for ln in out.splitlines() if anchor in ln]
+            if not lines:
+                return "fail", f"logfield: logcat 未命中锚点 {anchor!r}"
         last = lines[-1]
         m = re.search(rf"{re.escape(field)}=(-?\d+)", last)
         if not m:
@@ -430,10 +459,10 @@ def main(argv=None):
         print(f"NOTE: --log-since 本地 {args.log_since} → 设备 {device_since}"
               f"（按设备时钟/时区换算）")
 
-    def adb_logcat():
+    def adb_logcat(pid=None):
         try:
             r = subprocess.run(ac.build_logcat_cmd(None, 5000,
-                                                   since=device_since),
+                                                   since=device_since, pid=pid),
                                capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=60)
             return r.stdout
