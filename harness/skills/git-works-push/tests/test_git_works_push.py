@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
-from shell_env import find_bash, write_python3_shim  # noqa: E402
+from shell_env import bash_argv, find_bash, write_python3_shim  # noqa: E402
 
 BASH = find_bash()
 
@@ -89,16 +89,17 @@ class TestGitWorksPush(unittest.TestCase):
         git = bin_dir / "git"
         git.write_text(mock_git, encoding="utf-8")
         git.chmod(git.stat().st_mode | stat.S_IEXEC)
-        # PATH 前置 python3 shim（Windows 无 python3 命令，脚本内调用经 shim
-        # 转发到当前解释器）再前置 mock git 目录
+        # python3 shim 目录（Windows 无 python3 命令，脚本内调用经 shim
+        # 转发到当前解释器）；目录经 bash_argv 前置目录传入（shell 内 PATH
+        # 前置，绕开 bin/bash.exe 启动期强插 mingw64/usr 到 PATH 最前）
         shim_dir = write_python3_shim(Path(self._tmp.name) / "shim")
-        env = dict(os.environ)
-        env["PATH"] = f"{shim_dir}{os.pathsep}{bin_dir}{os.pathsep}{env['PATH']}"
-        return env
+        return bin_dir, shim_dir
 
     def _run(self, *args, mock_git=MOCK_GIT_OK):
-        env = self._env_with_mock_git(mock_git)
-        return subprocess.run([BASH, str(SCRIPT), *args],
+        bin_dir, shim_dir = self._env_with_mock_git(mock_git)
+        argv = bash_argv(SCRIPT, args, prepend_dirs=[shim_dir, bin_dir])
+        env = dict(os.environ)
+        return subprocess.run(argv,
                               capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
 
     def test_remote_sha_empty_exits_2(self):

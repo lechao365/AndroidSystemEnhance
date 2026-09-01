@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 from shell_env import find_bash, write_python3_shim  # noqa: E402
 
 BASH = find_bash()
