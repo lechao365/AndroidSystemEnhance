@@ -129,6 +129,44 @@ class TestSelfcheck(unittest.TestCase):
         self.assertIn("OK: 引用完整", out)
         self.assertNotIn("非判定信息", out)
 
+    # ── 方向 1：xdist 可导入时 -n auto，导入不到回落串行 ────────────────
+    def _run_capture_cmd(self, fake):
+        """桩 subprocess.run 并捕获 pytest 命令；返回捕获列表。"""
+        seen = []
+
+        def _run(cmd, **kw):
+            seen.append(cmd)
+            return fake(cmd, **kw)
+
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=_run):
+            with redirect_stdout(io.StringIO()):
+                selfcheck.main()
+        return seen
+
+    def test_xdist_importable_uses_parallel(self):
+        # xdist 可导入 → pytest 命令加 -n auto（并行提速，计数行正则不动）
+        fake = _fake_run([
+            _FakeProc(0, "531 passed in 27.9s\n"),
+            _FakeProc(0, "OK: 引用完整\n"),
+        ])
+        with mock.patch.dict(sys.modules, {"xdist": mock.Mock()}):
+            seen = self._run_capture_cmd(fake)
+        pytest_cmd = seen[0]
+        self.assertIn("-n", pytest_cmd)
+        self.assertIn("auto", pytest_cmd)
+
+    def test_xdist_missing_falls_back_serial(self):
+        # xdist 不可导入（sys.modules 置 None → import 抛 ImportError）
+        # → pytest 命令照旧串行（无 -n auto）
+        fake = _fake_run([
+            _FakeProc(0, "531 passed in 27.9s\n"),
+            _FakeProc(0, "OK: 引用完整\n"),
+        ])
+        with mock.patch.dict(sys.modules, {"xdist": None}):
+            seen = self._run_capture_cmd(fake)
+        pytest_cmd = seen[0]
+        self.assertNotIn("-n", pytest_cmd)
+
 
 if __name__ == "__main__":
     unittest.main()

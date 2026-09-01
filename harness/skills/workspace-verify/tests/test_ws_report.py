@@ -397,6 +397,84 @@ class TestWsReport(unittest.TestCase):
         content = details[0].read_text(encoding="utf-8")
         self.assertIn("- timings: ", content)
 
+    # ── 方向 2/3：未传 --timings-file 自动探测 + elapsed 推导 ────────────
+    def _write_probe_timings(self, batch_path, payload):
+        """在 harness/log/cross-device/ 下按 batch_id 写打点探测文件（返回路径）。"""
+        from cdp_parse import batch_id_from_text
+        bid = batch_id_from_text(Path(batch_path).read_text(encoding="utf-8"))
+        probe_dir = Path("harness") / "log" / "cross-device"
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        tfile = probe_dir / f"timings-{bid}.json"
+        tfile.write_text(json.dumps(payload), encoding="utf-8")
+        self.addCleanup(tfile.unlink)
+        return bid
+
+    def test_timings_auto_probe_hit_and_elapsed_derived(self):
+        # 未传 --timings-file → 自动探测 timings-<batch_id>.json 命中即用，
+        # elapsed_s 缺省从 wall_end-wall_start 取整推导（1005-1000=5）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        bid = self._write_probe_timings(batch, {
+            "batch_id": "probe-hit",
+            "start_wall": 1000.0,
+            "wall_end": 1005.0,
+            "marks": [{"name": "precheck", "wall": 1001.5},
+                      {"name": "edit", "wall": 1005.0}],
+        })
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        self.assertIn(f"自动探测到打点文件: harness/log/cross-device/timings-{bid}.json",
+                      err.getvalue())
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- timings: {", content)
+        self.assertIn('"name": "precheck"', content)
+        self.assertIn("- elapsed_s: 5", content)  # 推导值
+
+    def test_timings_auto_probe_miss_warns_not_block(self):
+        # 未传 --timings-file 且探测不到 → warn 降级（timings 置空，
+        # elapsed 推导不出记 0），收据仍落盘不阻断
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        self.assertIn("未探测到", err.getvalue())
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- timings: ", content)
+        self.assertIn("- elapsed_s: 0", content)
+
+    def test_elapsed_explicit_overrides_derived(self):
+        # --elapsed 显式传参优先于 timings 推导（推导出 5 也以显式 42 为准）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        self._write_probe_timings(batch, {
+            "batch_id": "probe-hit",
+            "start_wall": 1000.0,
+            "wall_end": 1005.0,
+            "marks": [{"name": "precheck", "wall": 1001.5}],
+        })
+        with redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--elapsed", "42",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- elapsed_s: 42", content)
+
     def test_mode_b_board_skip_verify_mode_none(self):
         # 模式 B：--board skip（revert 恢复验证未上板）→ verify_mode=none
         buf = io.StringIO()

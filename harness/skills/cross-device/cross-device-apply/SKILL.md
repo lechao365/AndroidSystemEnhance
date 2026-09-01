@@ -40,15 +40,15 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
    批次临时文件必须用 heredoc 写入且定界符加单引号以禁用展开（cat > <文件> <<'EOF' ... EOF）；
    禁止 echo 类写法（引号被吞、多行压成一行致批次结构损坏，收据 batch_base 空）
 2. 门禁：git branch --show-current 须为 dev、git status --porcelain 须为空，否则停止
-2b. 耗时打点 start（可选，失败不阻断主流程）：
+2b. 耗时打点 start（必做，失败仍不阻断主流程）：
     python3 harness/skills/cross-device/lib/python/cdp_timing.py start --batch-file <批次文件>
     （batch_id 从批次文件内部解析；打点文件 harness/log/cross-device/
-    timings-<batch_id>.json，供后续各步骤 mark）
+    timings-<batch_id>.json，供后续各步骤 mark；start 失败仅提示，继续主流程）
 3. precheck（含 base 拒批）：
    python3 harness/skills/cross-device/lib/python/cdp_parse.py --role apply --expect-base "$(git rev-parse --short=12 HEAD)" <批次文件>
    （exit 0 通过；17 在 apply 角色降级 WARN，16 预算超限仍 blocking；
     exit 18 = base 不匹配，整批拒绝回 emit；exit 3 = 参数/文件错误）
-   通过后打点：cdp_timing.py mark --batch <batch_id> --name precheck
+   通过后打点（必做）：cdp_timing.py mark --batch <batch_id> --name precheck
    （batch_id 取本步输出；未 start 时 mark 返 3 仅提示，不阻断）
 4. 编辑：按批次意图/方向编辑 code/ 全目录：
    - code/rpi5/{aosp,kernel}/{new,modified}、code/rpi5/others、code/rpi-zero2w：全量文件直接编辑
@@ -59,17 +59,17 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
      python3 harness/skills/cross-device/lib/python/cdp_validate_patch.py <diff 文件>
    - 涉及 code/rpi5 时：python3 harness/skills/cross-device/lib/python/gen_manifest.py
      （重生成 code/rpi5/manifest.yaml，patch↔workspace 结构映射；sync-workspace-to-code 已删除）
-   编辑完成打点：cdp_timing.py mark --batch <batch_id> --name edit
+编辑完成打点（必做）：cdp_timing.py mark --batch <batch_id> --name edit
 5. 分流：
    - -sv → 显式执行 /loop-engineering（模式 A）：
-     打点：cdp_timing.py mark --batch <batch_id> --name verify_start
+      打点（必做）：cdp_timing.py mark --batch <batch_id> --name verify_start
      python3 harness/skills/loop-engineering/ws_session.py start
        --goal "<批次意图>" --batch-file <批次文件>
      按 loop SKILL 执行收敛循环（run verify 工作流 → done 记账 → 失败分析
      修复重试，patience/total 上限退出）；loop 终结回传末轮收据+归因+attempt 数
      （session 丢失/异常时降级：直接执行 /workspace-verify 模式 A，基线行为）
      末轮收据正文必须含 CDP 原文 + 失败现场（--body；超限终结批并含诊断报告）
-     loop 终结（收据落盘）后打点：cdp_timing.py mark --batch <batch_id> --name verify_end
+     loop 终结（收据落盘）后打点（必做）：cdp_timing.py mark --batch <batch_id> --name verify_end
    - 收据落盘是进步骤 6 的前提：ws_report 返 2（如 -sv 缺 --acceptance、
      --log-since 非法等参数错误）即收据未落盘，必须补参重试，禁止无收据进步骤 6
 - -s → 写 skip 收据（先自检，证据随收据落地；rc 为主判据，缺 rc/任一非零即拒写）：
@@ -79,7 +79,7 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
      命令替换赋值会把 PIPESTATUS 重置为 0，shell 内联取 rc 恒零，禁回退内联写法）
     verify 无论 pass/fail，收据落盘后必须执行下一步骤（git-works-push）
 6. 显式执行 /git-works-push（收据+代码统一 commit push）
-   完成后打点收尾（可选）：cdp_timing.py mark --batch <batch_id> --name push
+   完成后打点收尾（必做，失败仍不阻断）：cdp_timing.py mark --batch <batch_id> --name push
    然后 cdp_timing.py finish --batch <batch_id>（生成段耗时 JSON 归档，供人工/emit 参考）
    （-sv 批次的收据 timings 由 workspace-verify 步骤 6 的 --timings-file 写入，
     apply 侧 finish 仅归档含 push 段的完整打点）
