@@ -1,4 +1,3 @@
-2026-08-27 20:39:29 a2b467030005 pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass l 补事件 4/5 DT 并加收据删除护栏（transfer 5/5、事件7实测无打
 2026-08-27 21:22:56 2ae3f7ad0eac pass build=skip board=pass acc=svc_hal=pass svc_daemon=pass boot=pass l 撤错误护栏并做 lcview 收口审计（2 处假绿修复、事件登记归因修订）
 2026-08-27 23:16:31 manual-2608272316 pass build=pass board=pass acc=[{"case":"lciod-liveness","status":"pass lciod 防护栏全新构建+lcview轻量收口：4测试target编译过、板上
 2026-08-27 23:35:43 manual-2608272335 pass build=pass board=pass acc=[{"case":"lciod-liveness","status":"pass lciod 防护栏缺口补齐：enabled==1 假绿修复 + AIDL 投影抽
@@ -48,3 +47,4 @@
 2026-09-01 12:15:57 9278a842ef04 skip build=skip board=skip acc=- 补 severity 字段并回填存量条目（-s 无需上板）
 2026-09-01 12:33:49 912659304ee2 skip build=skip board=skip acc=- 基线记带病项并按 KIR 判定 E1 遗留（-s 无需上板）
 2026-09-01 15:10:32 ffc3da1ebcb4 pass build=skip board=pass acc={"overall":"pass","items":[{"tag":"svc:l logfield 按进程归属筛并等新进程首心跳：验收与五用例组全绿 | {"daemon_rss_kb": 5120, "dd_s": 2.361, "drain_ms_per_event": 0.387, "load_mb": 64, "throughput_evs": 1304.3}
+2026-09-01 15:49:18 671b4dc5033d skip build=skip board=skip acc=- 打开 emit 侧 bash 测试盲区（-s 无需上板）

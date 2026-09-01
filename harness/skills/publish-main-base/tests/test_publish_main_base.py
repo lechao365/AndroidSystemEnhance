@@ -14,10 +14,14 @@ REAL_CDP_LIB = REPO_ROOT / "harness" / "skills" / "cross-device" / "lib" / "pyth
 
 sys.path.insert(0, str(REAL_CDP_LIB))
 sys.path.insert(0, str(REAL_SKILL_DIR))
+sys.path.insert(0, str(REPO_ROOT / "harness" / "lib"))
+from shell_env import find_bash, write_python3_shim  # noqa: E402
 import cdp_issue  # noqa: E402 （fixture 进程内构造登记，路径经 CDP_PROJECT_ROOT 指向临时根）
 
+BASH = find_bash()
 
-@unittest.skipUnless(shutil.which("bash") and shutil.which("git"),
+
+@unittest.skipUnless(BASH and shutil.which("git"),
                      "需要 bash 与 git 解释器（Windows 环境跳过）")
 class TestSyncModifyToMainBase(unittest.TestCase):
     """真 git 仓 fixture：tempdir + git init 造提交链 c1→c2(HEAD)。
@@ -30,6 +34,8 @@ class TestSyncModifyToMainBase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
+        # python3 shim 目录独立于 git 仓外（仓内脏文件会被 prepare 预检拒绝）
+        self._shim_tmp = tempfile.TemporaryDirectory()
         self._env = dict(os.environ)
         self._env["CDP_PROJECT_ROOT"] = str(self.root)
         os.environ["CDP_PROJECT_ROOT"] = str(self.root)
@@ -60,6 +66,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
     def tearDown(self):
         os.environ.pop("CDP_PROJECT_ROOT")
         self._tmp.cleanup()
+        self._shim_tmp.cleanup()
         if getattr(self, "_remote_tmp", None):
             self._remote_tmp.cleanup()
 
@@ -100,9 +107,14 @@ class TestSyncModifyToMainBase(unittest.TestCase):
 
     def _run(self, *args):
         script = self.root / "harness" / "skills" / "publish-main-base" / "publish_main_base.sh"
-        return subprocess.run(["bash", str(script), *args],
+        # PATH 前置 python3 shim（Windows 无 python3 命令，脚本内调用经 shim
+        # 转发到当前解释器）——bash 用 find_bash 绝对路径，不依赖 PATH
+        shim_dir = write_python3_shim(Path(self._shim_tmp.name))
+        env = dict(self._env)
+        env["PATH"] = f"{shim_dir}{os.pathsep}{env['PATH']}"
+        return subprocess.run([BASH, str(script), *args],
                               capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              cwd=self.root, env=self._env)
+                              cwd=self.root, env=env)
 
     def _run_register(self, *args):
         return subprocess.run(
