@@ -202,16 +202,36 @@ void FileWriter::openFile(uint16_t eventId, const EventSchema& schema)
     mFiles[eventId] = std::move(fs);
 }
 
-// JSON 字符串转义：对 " 和 \ 字符进行转义处理
+// JSON 字符串转义（formatJsonLine 与 writeInvalid 共用同一函数）：
+// 对 " \ 及控制字符做 JSON 合法转义，防止输出行裂行/非法 JSONL。
+//   - "  \  \b \f \n \r \t 具名转义；
+//   - 其余 < 0x20 控制字符按 \u00XX 转义（按 unsigned char 判读，
+//     避免有符号 char 下非 ASCII 高位字节误判为负值进入 \u 分支）；
+//   - 原实现仅转引号与反斜杠，USB 描述符含换行时输出行即裂行（P0）。
 // 为什么手动实现而非用 JSON 库：formatJsonLine 需要最高性能，
 // 减少 JSON 库的字符串处理开销
 static void jsonEscapeString(std::ostringstream& oss, const std::string& s)
 {
     oss << "\"";
-    for (char c : s) {
-        if (c == '"' || c == '\\')
-            oss << '\\';
-        oss << c;
+    for (unsigned char c : s) {
+        switch (c) {
+        case '"':  oss << "\\\""; break;
+        case '\\': oss << "\\\\"; break;
+        case '\b': oss << "\\b"; break;
+        case '\f': oss << "\\f"; break;
+        case '\n': oss << "\\n"; break;
+        case '\r': oss << "\\r"; break;
+        case '\t': oss << "\\t"; break;
+        default:
+            if (c < 0x20) {
+                oss << "\\u00" << std::hex << std::setw(2)
+                    << std::setfill('0') << static_cast<unsigned>(c)
+                    << std::dec;
+            } else {
+                oss << c;
+            }
+            break;
+        }
     }
     oss << "\"";
 }
@@ -378,6 +398,10 @@ bool FileWriter::writeLineFlush(FileState& fs, const std::string& line)
                   fs.eventId);
             mDrops.retryFailed++;
             fs.stream.clear();
+            // CXX-004 坏行归零延续：重试同样可能部分落盘，须回退到写前
+            // 偏移截断残留半行——否则残留与下一条记录粘成非法 JSON
+            // （下一条从 currentSize=writeBase 续写，不清残留即粘连）
+            rollbackFileTo(fs.currentFilename, writeBase);
             recordWriteTiming(tWriteStart);
             return false;
         }
@@ -435,7 +459,8 @@ void FileWriter::writeRecord(const EventSchema& schema,
 
 // 写入非法记录到 invalid_records.log
 // 记录原因、大小和原始字节（hex 截断），供事后离线重解析定位协议缺陷
-// CXX-003: reason 含 " / \ 时必须转义，否则输出行非合法 JSONL
+// CXX-003: reason 含 " / \ 及控制字符时必须转义（转义并入 jsonEscapeString，
+// 与 formatJsonLine 同规则），否则输出行非合法 JSONL / 裂行
 void FileWriter::writeInvalid(const uint8_t* data, size_t len,
                                const std::string& reason)
 {
@@ -447,19 +472,48 @@ void FileWriter::writeInvalid(const uint8_t* data, size_t len,
     // 原始数据 hex 落盘上限：足够定位协议问题，又不至于在损坏风暴下写爆磁盘
     static constexpr size_t kMaxDumpBytes = 256;
 
-    mInvalidStream << "{\"reason\":\"";
-    for (char c : reason) {
-        if (c == '"' || c == '\\')
-            mInvalidStream << '\\';
-        mInvalidStream << c;
-    }
-    mInvalidStream << "\",\"size\":" << len << ",\"data\":\"";
+    // 整行先拼入局部流（reason 转义复用 jsonEscapeString），再一次性写盘
+    std::ostringstream line;
+    line << "{\"reason\":";
+    jsonEscapeString(line, reason);
+    line << ",\"size\":" << len << ",\"data\":\"";
     size_t dump = len < kMaxDumpBytes ? len : kMaxDumpBytes;
     for (size_t i = 0; i < dump; i++)
-        mInvalidStream << std::hex << std::setfill('0') << std::setw(2)
-                       << (unsigned)data[i];
-    mInvalidStream << std::dec << "\"}\n";
+        line << std::hex << std::setfill('0') << std::setw(2)
+             << (unsigned)data[i];
+    line << std::dec << "\"}\n";
+    const std::string payload = line.str();
+
+    // 写 + flush：fail 判定必须看 flush——ofstream 缓冲未满时 << 只在内存
+    // 缓冲不落盘、不设 failbit（与 writeLineFlush 同语义，CXX-002）
+    mInvalidStream << payload;
     mInvalidStream.flush();
+    if (mInvalidStream.fail()) {
+        /* CXX-002: failbit 粘滞不清除会让 invalid 流从此永久失败——
+         * 首写失败后余生空转，mode_invalid 反判绿（坏记录静默丢失）。
+         * 恢复路径：clear 清粘滞 → 重开流 → 重试一次，仍失败计
+         * invalidWriteFailed（进心跳 dropped 求和与 drop_invalidwrite 分项） */
+        ALOGE("FileWriter: writeInvalid: write failed, attempting recovery");
+        mInvalidStream.clear();
+        mInvalidStream.close();
+        mInvalidStream.open(mInvalidFilename, std::ios::app);
+        if (!mInvalidStream.is_open()) {
+            ALOGE("FileWriter: writeInvalid: recovery reopen failed, DROPPING reason=%s",
+                  reason.c_str());
+            mDrops.invalidWriteFailed++;
+            return;
+        }
+        mInvalidStream << payload;
+        mInvalidStream.flush();
+        if (mInvalidStream.fail()) {
+            ALOGE("FileWriter: writeInvalid: retry write failed, DROPPING reason=%s",
+                  reason.c_str());
+            mDrops.invalidWriteFailed++;
+            mInvalidStream.clear();
+            return;
+        }
+        ALOGI("FileWriter: writeInvalid: recovered invalid stream");
+    }
 }
 
 // 文件轮转检查：

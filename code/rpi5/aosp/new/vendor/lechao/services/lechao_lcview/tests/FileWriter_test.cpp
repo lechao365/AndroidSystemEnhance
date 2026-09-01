@@ -196,6 +196,32 @@ TEST_F(FormatJsonLineTest, StringField_WithSpecialChars_Escaped) {
     EXPECT_NE(line.find("\\\\"), std::string::npos);
 }
 
+TEST_F(FormatJsonLineTest, StringField_WithNewline_ProducesValidJson) {
+    // P0 修复：USB 描述符等字符串含换行时原实现输出裸 \n 裂行（一行被拆成
+    // 两行，json.loads 失败）；修复后 \n 具名转义，输出为合法 JSONL
+    auto schema = makeSchema(4, "e", {FieldType::STRING});
+    auto hdr = makeHdr(4, 1);
+    auto fields = buildFields({FieldType::STRING}, {"line1\nline2"});
+    auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+    // 具名转义存在（反斜杠 + n 两个字符，非裸换行）
+    EXPECT_NE(line.find("\\n"), std::string::npos);
+    // 引号内无裸换行：整行除行尾 \n 外不得再有换行
+    size_t nl = line.find('\n');
+    EXPECT_NE(nl, std::string::npos);
+    EXPECT_EQ(line.find('\n', nl + 1), std::string::npos);
+}
+
+TEST_F(FormatJsonLineTest, StringField_ControlChars_EscapeUnicode) {
+    // 其余 < 0x20 控制字符（如 0x01）按 \u00XX 转义，输出仍为合法 JSON
+    auto schema = makeSchema(4, "e", {FieldType::STRING});
+    auto hdr = makeHdr(4, 1);
+    std::string s;
+    s.push_back('\x01');
+    auto fields = buildFields({FieldType::STRING}, {s});
+    auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+    EXPECT_NE(line.find("\\u0001"), std::string::npos);
+}
+
 TEST_F(FormatJsonLineTest, BinaryField_Le16_ProducesHex) {
     auto schema = makeSchema(4, "e", {FieldType::BINARY});
     auto hdr = makeHdr(4, 1);
@@ -352,6 +378,74 @@ TEST(FileWriterWriteInvalidTest, NormalWrite_ProdusJsonl) {
     std::string content = readFile(dir.path() + "/invalid_records.log");
     EXPECT_NE(content.find("bad magic"), std::string::npos);
     EXPECT_NE(content.find("\"size\":2"), std::string::npos);
+}
+
+TEST(FileWriterWriteInvalidTest, ReasonWithNewline_EscapesJson) {
+    // reason 转义并入 jsonEscapeString（与 formatJsonLine 同规则）：
+    // 含换行的 reason 不得裂行，输出仍为合法 JSONL
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+
+    uint8_t data[] = {0xDE, 0xAD};
+    writer.writeInvalid(data, 2, "bad\nmagic");
+
+    std::string content = readFile(dir.path() + "/invalid_records.log");
+    // 具名转义存在（反斜杠 + n）
+    EXPECT_NE(content.find("bad\\nmagic"), std::string::npos);
+    // 无裂行：整行除行尾 \n 外不得再有换行
+    size_t nl = content.find('\n');
+    EXPECT_NE(nl, std::string::npos);
+    EXPECT_EQ(content.find('\n', nl + 1), std::string::npos);
+}
+
+TEST(FileWriterWriteInvalidTest, WriteFail_RecoversByReopen) {
+    // P0 修复：failbit 粘滞使首写失败后 invalid 流余生空转（mode_invalid
+    // 反判绿）；恢复路径 clear+reopen+retry 自愈，坏记录仍落盘。
+    // 首写流指向 /dev/full（is_open 但写必 ENOSPC 设 failbit），
+    // mInvalidFilename 保持正常路径 → 恢复 reopen 打开正常文件 retry 成功
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+
+    writer.mInvalidStream.close();
+    writer.mInvalidStream.open("/dev/full", std::ios::app);
+    ASSERT_TRUE(writer.mInvalidStream.is_open());
+
+    uint8_t data[] = {0xDE, 0xAD};
+    writer.writeInvalid(data, 2, "broken");
+
+    // 恢复路径成功：流重开回 invalid_records.log 且数据落盘，无 DROP 计数
+    EXPECT_TRUE(writer.mInvalidStream.is_open());
+    EXPECT_FALSE(writer.mInvalidStream.fail());
+    EXPECT_EQ(writer.dropCounters().invalidWriteFailed, 0);
+    std::string content = readFile(dir.path() + "/invalid_records.log");
+    EXPECT_NE(content.find("broken"), std::string::npos);
+}
+
+TEST(FileWriterWriteInvalidTest, WriteFail_RetryFail_CountsAndClearsSticky) {
+    // retry 仍失败（reopen 目标 /dev/full 恒 ENOSPC）→ invalidWriteFailed +1
+    // （进心跳 dropped 求和与 drop_invalidwrite 分项）；failbit 被 clear，
+    // 粘滞清除不空转（mode_invalid 不反判绿）
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+
+    writer.mInvalidFilename = "/dev/full";
+    writer.mInvalidStream.close();
+    writer.mInvalidStream.open("/dev/full", std::ios::app);
+    ASSERT_TRUE(writer.mInvalidStream.is_open());
+
+    uint8_t data[] = {0x01, 0x02};
+    writer.writeInvalid(data, 2, "broken");
+
+    EXPECT_EQ(writer.dropCounters().invalidWriteFailed, 1);
+    EXPECT_EQ(writer.dropCounters().invalidNotOpen, 0);
+    EXPECT_FALSE(writer.mInvalidStream.fail());
+    SUCCEED();
 }
 
 // ============================================================

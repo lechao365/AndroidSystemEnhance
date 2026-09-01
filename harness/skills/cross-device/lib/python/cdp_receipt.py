@@ -6,9 +6,12 @@
 """
 import datetime
 import re
+import sys
 from pathlib import Path
 
-from cdp_paths import data_verify_results_dir
+import yaml
+
+from cdp_paths import data_verify_results_dir, project_root
 
 _DETAIL_KEEP = 20
 _TREND_KEEP = 50
@@ -20,7 +23,7 @@ _FIELD_RE = re.compile(r"^- (\w+): (.*)$", re.MULTILINE)
 _FIELDS = [
     "schema_version", "batch_id", "batch_base", "verified_commit",
     "verify_mode", "result", "build", "push_board", "acceptance",
-    "elapsed_s", "summary", "metrics", "timings",
+    "elapsed_s", "summary", "metrics", "timings", "cases", "selfcheck",
 ]
 
 
@@ -28,7 +31,7 @@ class Receipt:
     def __init__(self, schema_version=1, batch_id="", batch_base="",
                  verified_commit="", verify_mode="board", result="fail",
                  build="skip", push_board="skip", acceptance="", elapsed_s=0,
-                 summary="", metrics="", timings=""):
+                 summary="", metrics="", timings="", cases="", selfcheck=""):
         self.schema_version = schema_version
         self.batch_id = batch_id
         self.batch_base = batch_base
@@ -42,6 +45,8 @@ class Receipt:
         self.summary = summary
         self.metrics = metrics
         self.timings = timings
+        self.cases = cases
+        self.selfcheck = selfcheck
 
     @classmethod
     def from_text(cls, text):
@@ -110,6 +115,21 @@ def latest_receipt_with_path(verify_dir=None):
     return (files[-1], read_receipt(files[-1]))
 
 
+def latest_board_receipt(verify_dir=None):
+    """取最新 verify_mode=board 的收据（从最新往旧扫，跳过 skip/非 board）。
+
+    evidence-scope 推导锚点：登记时须以上板验证收据为准——最新收据可能
+    是 -s skip 或非 board 的文档批，其 cases 不代表真实上板证据范围。
+    返回 (路径, Receipt)；无 board 收据返回 (None, None)。
+    """
+    d = verify_dir or data_verify_results_dir()
+    for f in reversed(_detail_files(d)):
+        r = read_receipt(f)
+        if r.verify_mode == "board":
+            return (f, r)
+    return (None, None)
+
+
 def append_trend(timestamp, batch_id, result, stage, summary, metrics=""):
     d = data_verify_results_dir()
     trend = d / "trend.md"
@@ -135,9 +155,50 @@ def read_trend_last(verify_dir=None):
     return lines[-1] if lines else ""
 
 
+def _referred_receipt_names(verify_dir: Path):
+    """baseline-status.yaml 引用的收据文件名集合（sync_manifest 指向
+    data/verify-results/ 的文件名），老化删除时受保护。
+
+    防断链：promote 门禁依赖 sync_manifest 指向的收据做证据链比对，
+    被引用文件一旦被 prune 删除即断链（BL-20260828-01 已实际丢失）。
+    yaml 缺失/非法时 warn 并返回 None（调用方保守不删任何文件——保护优先）。
+    """
+    cfg = project_root() / "harness" / "config" / "baseline-status.yaml"
+    if not cfg.is_file():
+        return set()
+    try:
+        data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as e:
+        print(f"WARN: baseline-status.yaml 读取失败，跳过老化保护判定: {e}",
+              file=sys.stderr)
+        return None
+    names = set()
+    for b in data.get("baselines") or []:
+        if not isinstance(b, dict):
+            continue
+        ref = (b.get("sync_manifest") or "").strip()
+        if ref:
+            names.add(Path(ref).name)
+    return names
+
+
 def prune_details(verify_dir=None):
-    """详情老化保留 _DETAIL_KEEP 份（trend.md 不计入配额）。"""
+    """详情老化保留 _DETAIL_KEEP 份（trend.md 不计入配额）。
+
+    被 baseline-status.yaml 引用的收据跳过删除（证据链保护）：已被 promote
+    引用或即将引用的收据是基线证据，不得因配额被老化删除。
+    """
     d = verify_dir or data_verify_results_dir()
     files = _detail_files(d)
+    referred = _referred_receipt_names(d)
+    if referred is None:
+        return  # 引用解析失败（yaml 不可读）：保守不删任何文件
+    keep = 0
     for old in files[: max(0, len(files) - _DETAIL_KEEP)]:
+        if old.name in referred:
+            keep += 1
+            continue
         old.unlink()
+    if keep:
+        print(f"info: {keep} 份被 baseline-status.yaml 引用的收据跳过老化（证据链保护）",
+              file=sys.stderr)

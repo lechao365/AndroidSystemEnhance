@@ -83,7 +83,8 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         return r
 
     def _write_receipt(self, verified_commit, build="pass", push_board="pass",
-                       batch_id="000000000001", result="pass", verify_mode="board"):
+                       batch_id="000000000001", result="pass", verify_mode="board",
+                       cases=""):
         d = self.root / "data" / "verify-results"
         d.mkdir(parents=True, exist_ok=True)
         p = d / f"20260831-100000-{batch_id}.md"
@@ -92,7 +93,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
             f"- batch_base: edd5748dc3c6\n- verified_commit: {verified_commit}\n"
             f"- verify_mode: {verify_mode}\n- result: {result}\n- build: {build}\n"
             f"- push_board: {push_board}\n- acceptance: t\n- elapsed_s: 1\n"
-            f"- summary: fixture\n- metrics: \n- timings: \n"
+            f"- summary: fixture\n- metrics: \n- timings: \n- cases: {cases}\n"
             f"\n## body\n\nfixture\n", encoding="utf-8")
         return p
 
@@ -109,9 +110,10 @@ class TestSyncModifyToMainBase(unittest.TestCase):
              *args],
             capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=self.root, env=self._env)
 
-    def _mk_issue(self, task="t1", status="open", origin="introduced", blocking=True):
+    def _mk_issue(self, task="t1", status="open", origin="introduced", blocking=True,
+                  issue_id="KI-X"):
         return cdp_issue.Issue(
-            issue_id="KI-X", title="测试问题", discovered_in="38433d446f07",
+            issue_id=issue_id, title="测试问题", discovered_in="38433d446f07",
             origin=origin, blocking=blocking,
             blocking_reason="r" if blocking else "", status=status, task=task,
             batch_id="000000000001")
@@ -195,9 +197,34 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertIn("known-issues 门禁通过", r.stdout)
 
     def test_check_issues_requires_task(self):
+        # 空注册表（无活跃任务）→ 缺省推断 empty-registry 放行（不再要求必传）
+        r = self._run_register("check-issues")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("task=empty-registry", r.stdout)
+
+    def test_check_issues_infers_single_task(self):
+        # 唯一活跃任务（非 fixed 条目）→ 缺省自动推断采用，无需人工传参
+        cdp_issue.write_issue(self._mk_issue(task="lcview-refactor"), "现场")
+        r = self._run_register("check-issues")
+        self.assertEqual(r.returncode, 1)  # 推断出任务后按其门禁（open+introduced → 拒）
+        self.assertIn("task=lcview-refactor", r.stderr)
+
+    def test_check_issues_infers_multiple_tasks_rejects(self):
+        # 多活跃任务 → 缺省推断歧义，报错列候选要求显式传 --task
+        cdp_issue.write_issue(self._mk_issue(task="t1"), "现场")
+        cdp_issue.write_issue(self._mk_issue(task="t2", issue_id="KI-Y"), "现场")
         r = self._run_register("check-issues")
         self.assertEqual(r.returncode, 1)
-        self.assertIn("--task", r.stderr)
+        self.assertIn("多值", r.stderr)
+        self.assertIn("t1", r.stderr)
+        self.assertIn("t2", r.stderr)
+
+    def test_check_issues_rejects_typo_task(self):
+        # 显式 --task 不在活跃集合内 → exit 3（防拼错静默通过）
+        cdp_issue.write_issue(self._mk_issue(task="lcview-refactor"), "现场")
+        r = self._run_register("check-issues", "--task", "lcview-rafactr")
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("不在活跃任务集合", r.stderr)
 
     # ── 方向 3：空 build/push_board 记 FAIL 不记 SKIP ────────────────────
     def _registered_evidence(self):
@@ -207,7 +234,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
     def test_add_candidate_empty_build_registers_fail(self):
         # 收据 build/push_board 为空 → 登记为 FAIL（空值非合法 skip 证据）
         self._write_receipt(self.parent_vc, build="", push_board="",
-                            batch_id="000000000003")
+                            batch_id="000000000003", cases="lcview-liveness")
         r = self._run_register("add-candidate", "--source-commit", "abc123def456",
                                "--evidence-scope", "lcview-liveness",
                                "--receipt-path",
@@ -221,7 +248,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
     def test_add_candidate_explicit_skip_still_skip(self):
         # 显式 skip（-s 批次收据）保持 SKIP，不受空值从严影响
         self._write_receipt(self.parent_vc, build="skip", push_board="skip",
-                            batch_id="000000000004")
+                            batch_id="000000000004", cases="lcview-liveness")
         r = self._run_register("add-candidate", "--source-commit", "abc123def456",
                                "--evidence-scope", "lcview-liveness",
                                "--receipt-path",
@@ -234,7 +261,8 @@ class TestSyncModifyToMainBase(unittest.TestCase):
     # ── 方向 5：promote 收紧与 ki_gate 证据链（bare 远端 e2e）────────────
     def _receipt_commit_c3(self, batch_id="000000000002", **kw):
         # 收据入库为 c3（内容提交，父=c2==VC），保证 promote/prepare 工作树干净
-        self._write_receipt(self.head_vc, batch_id=batch_id, **kw)
+        self._write_receipt(self.head_vc, batch_id=batch_id,
+                            cases="lcview-liveness", **kw)
         self._git("add", "-A")
         self._git("commit", "-m", "修复(test): 收据入库三")
         self._git("push", "origin", "dev")
@@ -317,17 +345,23 @@ class TestSyncModifyToMainBase(unittest.TestCase):
             self._git("ls-remote", "origin",
                       "refs/tags/verified/BL-TEST-01").stdout.strip(), "")
 
-    def test_prepare_without_task_records_ki_gate_not_run(self):
-        # 方向 3/4：prepare 未传 --task → warn + KIGATE=not-run 写入 evidence
+    def test_prepare_without_task_infers_ki_gate(self):
+        # 方向 7：prepare 全不传（--task/--evidence-scope）走通——门禁无条件执行，
+        # 缺省从唯一活跃 task 推断（KIGATE=inferred），scope 从收据 cases 推导
         self._setup_remote()
+        # 唯一活跃 task（非阻塞非 introduced，门禁推断后可放行），随收据入库为 c3
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
         self._receipt_commit_c3()
-        r = self._run("--prepare", "--evidence-scope", "lcview-liveness")
+        r = self._run("--prepare")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("KIGATE=not-run", r.stderr)
+        self.assertIn("known-issues 门禁通过（task=t1", r.stderr)
         data = yaml.safe_load(
             (self.root / "harness" / "config" / "baseline-status.yaml").read_text(
                 encoding="utf-8"))
-        self.assertEqual(data["baselines"][0]["evidence"]["ki_gate"], "not-run")
+        self.assertEqual(data["baselines"][0]["evidence"]["ki_gate"], "inferred")
+        # scope 缺省推导自收据 cases，而非要求人工申报
+        self.assertEqual(data["baselines"][0]["evidence_scope"], "lcview-liveness")
 
     def test_prepare_with_task_records_ki_gate_pass(self):
         # 方向 3/4：--task 门禁通过（空登记合法）→ KIGATE=pass 写入 evidence
@@ -340,6 +374,25 @@ class TestSyncModifyToMainBase(unittest.TestCase):
             (self.root / "harness" / "config" / "baseline-status.yaml").read_text(
                 encoding="utf-8"))
         self.assertEqual(data["baselines"][0]["evidence"]["ki_gate"], "pass")
+
+    def test_promote_without_task_infers_ki_gate(self):
+        # 方向 7：promote 全不传（--task/--evidence-scope）走通——强制 --task 已删，
+        # 门禁在共用段推断唯一活跃 task 后放行，完整 e2e 晋升完成
+        self._setup_remote()
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
+        self._candidate_yaml()
+        self._receipt_commit_c3(verify_mode="skip")
+        msg = Path(self._remote_tmp.name) / "promote-msg.txt"
+        msg.write_text("构建(baseline): BL-TEST-01 基线晋升\n", encoding="utf-8")
+        r = self._run("--promote", "--baseline-id", "BL-TEST-01",
+                      "--message-file", str(msg))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("known-issues 门禁通过（task=t1", r.stderr)
+        self.assertIn("promote 完成", r.stdout)
+        self.assertIn("refs/tags/verified/BL-TEST-01",
+                      self._git("ls-remote", "origin",
+                                "refs/tags/verified/BL-TEST-01").stdout)
 
 
 if __name__ == "__main__":

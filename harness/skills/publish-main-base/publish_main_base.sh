@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # publish-main-base：基线发布编排器末两步（candidate 登记 + dev → main squash promote）。
 # 前置：最新收据 result∈{pass,skip} 且 最近内容提交的父(short=12) == verified_commit；
-#       指定 --task 时走 known-issues 门禁（实现下移 baseline_register.py check-issues）：
-#       先判登记畸形（validate_issue 有红即拒），再判目标任务下存在 origin=introduced
-#       或 blocking 且 status!=fixed 的问题即拒。
+#       known-issues 门禁无条件执行（实现下移 baseline_register.py check-issues）：
+#       先判登记畸形（validate_issue 有红即拒），--task 缺省时从 status 非 fixed 条目
+#       的 task 集合自动推断，再判目标任务下存在 origin=introduced 或 blocking 且
+#       status!=fixed 的问题即拒。门禁不再依赖显式 task。
 # --check（= --check-only）：干跑前置校验，失败时输出 check_class=<分类> 供编排分流：
 #   NEED_VERIFY（存在未验证改动→进验证路径）/ NO_RECEIPT（无收据）/ RECEIPT_FAIL（收据
 #   result 非 pass/skip）/ DOC_VIOLATION（文档提交夹带非 docs/ 或 prepare 前已存在文档提交）/
 # KI_BLOCKED（known-issues 门禁）。prepare/promote 模式分类行仅提示不阻断既有行为。
 # promote 收紧：最新收据须 result=pass 且 verify_mode=board；dev 相对 origin/main
 # 无 code/ 改动时豁免放行并 warn，否则 RECEIPT_FAIL 拒绝。
-# KIGATE：--task 过门禁记 pass，未传 --task 记 not-run（warn），随 add-candidate
+# KIGATE：门禁结论四值——pass（显式 --task 通过）/ inferred（缺省推断唯一 task 通过）/
+# empty-registry（无活跃任务放行）/ not-run（门禁未执行兜底），随 add-candidate
 # --ki-gate 写入 candidate evidence（known-issues 证据链）。
 # verified tag：promote 对 BH 打注解 tag verified/<id> 并推送（同名即拒退 3）；
 # squash 后 push main 前以 baseline_register.py verify-tree 断言 tag 与 main 树等价
@@ -27,7 +29,7 @@ MODE=""; MSG_FILE=""; BID=""; TASK=""; APPROVED_BY=""; EVIDENCE_SCOPE=""
 # check 模式失败分类输出（stderr；prepare/promote 亦输出，不影响既有行为与退出码）
 check_class() { echo "check_class=$1" >&2; }
 
-usage() { echo "usage: $0 --check [--task <id>] | --prepare --evidence-scope <scope> [--task <id>] | --promote --baseline-id <id> --message-file <f> --task <id> [--approved-by <id>] [--evidence-scope <scope>]"; exit 3; }
+usage() { echo "usage: $0 --check [--task <id>] | --prepare [--task <id>] [--evidence-scope <scope>] | --promote --baseline-id <id> --message-file <f> [--task <id>] [--approved-by <id>] [--evidence-scope <scope>]"; exit 3; }
 [ $# -ge 1 ] || usage
 case "$1" in
   --prepare) MODE="prepare"; shift ;;
@@ -142,11 +144,13 @@ PARENT=$(git rev-parse --short=12 "$BH^" 2>/dev/null || echo "")
   check_class NEED_VERIFY
   echo "error: 最近内容提交父($PARENT) != verified_commit($VC)：dev 存在未验证改动（跳过 meta=$SKIP_META doc=$SKIP_DOC）" >&2; exit 1; }
 
-# ── known-issues 门禁（--task 指定时；prepare/promote/check-only 共用）────────
+# ── known-issues 门禁（prepare/promote/check-only 共用，无条件执行）────────
 # 门禁实现下移 baseline_register.py check-issues：先判畸形登记（validate_issue
 # 有红即拒），再判目标任务 origin=introduced/blocking 且 status!=fixed 即拒。
-# KIGATE 记执行结论（pass/not-run）：未传 --task 时 warn 并记 not-run，
-# 门禁通过记 pass，随 add-candidate --ki-gate 写入 candidate 证据链
+# --task 缺省时由 check-issues 自动推断：status 非 fixed 条目 task 集合唯一→采用
+# （KIGATE=inferred）、多值→拒、空集→empty-registry 放行（无活跃任务无冲突对象）。
+# KIGATE 记门禁结论（pass/inferred/empty-registry/not-run），随 add-candidate
+# --ki-gate 写入 candidate 证据链
 KIGATE="not-run"
 if [ -n "$TASK" ]; then
   if python3 harness/skills/publish-main-base/baseline_register.py check-issues --task "$TASK"; then
@@ -157,7 +161,18 @@ if [ -n "$TASK" ]; then
     exit 1
   fi
 else
-  echo "warn: 未指定 --task，known-issues 门禁未执行（KIGATE=not-run）" >&2
+  KI_OUT=$(python3 harness/skills/publish-main-base/baseline_register.py check-issues 2>&1) || {
+    check_class KI_BLOCKED
+    echo "$KI_OUT" >&2
+    echo "error: known-issues 门禁未通过（task 推断失败或存在未解决阻塞问题）" >&2
+    exit 1
+  }
+  if printf '%s\n' "$KI_OUT" | grep -q "task=empty-registry"; then
+    KIGATE="empty-registry"
+  else
+    KIGATE="inferred"
+  fi
+  printf '%s\n' "$KI_OUT" >&2
 fi
 
 if [ "$MODE" = "check-only" ]; then
@@ -168,8 +183,8 @@ if [ "$MODE" = "check-only" ]; then
 fi
 
 if [ "$MODE" = "prepare" ]; then
-  # evidence-scope 必填（证据范围标签，随 candidate 写入登记；缺则退 3）
-  [ -n "$EVIDENCE_SCOPE" ] || { echo "error: --evidence-scope 必填（证据范围标签，如 lcview-liveness）" >&2; exit 3; }
+  # evidence-scope 可选：缺省交 baseline_register add-candidate 从 board 收据 cases
+  # 推导（人工传值仅可为收据实测范围子集，防过度声称）
   git fetch origin || { echo "error: fetch 失败" >&2; exit 1; }
   CNT=$(git rev-list --count main..dev)
   [ "$CNT" -gt 0 ] || { echo "dev 无领先 main 的提交（exit 4）"; exit 4; }
@@ -188,15 +203,15 @@ if [ "$MODE" = "prepare" ]; then
   fi
   git push origin dev || { echo "error: candidate 登记推送失败，请人工 push" >&2; exit 2; }
   echo "candidate 已登记并推送；人工评审后执行："
-  echo "  $0 --promote --baseline-id <id> --message-file <f> --task <id>"
+  echo "  $0 --promote --baseline-id <id> --message-file <f> [--task <id>]"
   exit 0
 fi
 
 # ── promote ────────────────────────────────────────────────────────
 [ -n "$BID" ] || { echo "error: --baseline-id 必填" >&2; exit 3; }
 [ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || { echo "error: --message-file 缺失或不存在" >&2; exit 3; }
-# promote 强制 --task：与 prepare 门禁保持一致，防评审后新引入阻塞问题被绕过
-[ -n "$TASK" ] || { echo "error: promote 必须指定 --task（known-issues 门禁，与 prepare 保持一致）" >&2; exit 3; }
+# promote 不再强制 --task：known-issues 门禁在共用段已无条件执行（缺省推断；
+# 推断失败时门禁段 exit 1 拒绝），显式 --task 仅作白名单确认
 git fetch origin || { echo "error: fetch 失败" >&2; exit 1; }
 # promote 收紧（基线晋升须上板证据）：最新收据须 result=pass 且 verify_mode=board；
 # dev 相对 origin/main 无 code/ 改动（纯文档/登记等非代码批次）时豁免放行并 warn，

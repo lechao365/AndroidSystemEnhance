@@ -36,6 +36,35 @@ from paths import env_path  # noqa: E402
 _HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
+def _validate_acceptance_pass(acceptance):
+    """result=pass 时验收证据门禁：解析 acceptance JSON，overall 须为 pass 且
+    无 fail 项，否则拒写（堵手填假绿混过 promote——仅查有无不看内容是洞）。
+
+    兼容两种结构（ws_acceptance.run 输出 {"overall","items"} 与历史数组格式
+    [{...}]）：overall 缺失的数组格式按「存在 fail 项」判定。
+    返回 (parsed, err)：err 非 None 时拒写（parsed 为 None）。
+    """
+    if not acceptance.strip():
+        return None, "result=pass 必须传 --acceptance（逐项验收 JSON）"
+    try:
+        data = json.loads(acceptance)
+    except (ValueError, json.JSONDecodeError) as e:
+        return None, f"--acceptance 须为合法 JSON（解析失败: {e}）"
+    if isinstance(data, dict):
+        if data.get("overall") != "pass":
+            return None, (f"acceptance overall 非 pass（实际 {data.get('overall')!r}），"
+                          "拒绝写 pass 收据")
+        items = data.get("items") or []
+    elif isinstance(data, list):
+        items = data
+    else:
+        return None, "--acceptance 须为 JSON 对象或数组"
+    for it in items:
+        if isinstance(it, dict) and it.get("status") == "fail":
+            return None, "acceptance 含 fail 项（假绿），拒绝写 pass 收据"
+    return data, None
+
+
 def _resolve_target(target: str):
     """把 --target 解析为 12hex commit，返回 (resolved, err)。
 
@@ -83,6 +112,12 @@ def main(argv=None):
     ap.add_argument("--acceptance", default="")
     ap.add_argument("--elapsed", type=int, default=0)
     ap.add_argument("--summary", default="")
+    ap.add_argument("--case", default="",
+                    help="本次实际验收用例标签（逗号分隔；写入收据 cases 字段，"
+                         "供 baseline_register 推导 evidence-scope）")
+    ap.add_argument("--selfcheck", default="",
+                    help="自检摘要文本（-s 批次必带：pytest harness -q 与 "
+                         "check_skill_refs 输出；含 failed 非零或缺 skipped 计数即拒写）")
     ap.add_argument("--metrics", default="",
                     help="三指标结构化 JSON 对象（写入收据 metrics 字段与 trend 行尾）")
     ap.add_argument("--timings-file", default="",
@@ -181,9 +216,66 @@ def main(argv=None):
             print(f"error: {terr}", file=sys.stderr)
             return 2
 
+    # 验收证据门禁：result=pass 必须带逐项验收 JSON 且整体通过，否则拒写
+    # （堵手填假绿混过 promote）；通过后单行化落盘——header 逐行 key-value，
+    # 多行 JSON 会被 from_text 只读首行截断，单行化保证 apply_done 能读全
+    if args.result == "pass":
+        parsed, acc_err = _validate_acceptance_pass(args.acceptance)
+        if acc_err:
+            print(f"error: {acc_err}", file=sys.stderr)
+            return 2
+        args.acceptance = json.dumps(parsed, ensure_ascii=False,
+                                     separators=(",", ":"))
+
+    # 自检证据（-s 批次必带，堵零验证通道）：对照 -sv 缺 --acceptance 返 2 的既有约束，
+    # result=skip 而 selfcheck 为空即拒写。自检门禁以退出码为主判据（方向 1-5）：
+    #   - 缺 pytest_rc/refs_rc 任一即返 2（rc 不可见则自检不可信）
+    #   - 任一 rc 非零即返 2（pytest 崩溃/悬空引用均带 rc，文本可能无 failed/skipped）
+    # failed 文本匹配与 skipped 计数保留作冗余（rc 全 0 后的补充防线）
+    if args.result == "skip" and not args.selfcheck.strip():
+        print("error: result=skip 必须传 --selfcheck（自检摘要：pytest harness -q 与 "
+              "check_skill_refs 输出，含 pytest_rc/refs_rc），否则零验证通道敞开",
+              file=sys.stderr)
+        return 2
+    if args.selfcheck.strip():
+        rcs = {}
+        for key in ("pytest_rc", "refs_rc"):
+            m = re.search(rf"{re.escape(key)}=(\d+)", args.selfcheck)
+            if not m:
+                print(f"error: --selfcheck 缺 {key}（退出码为主判据，文本匹配仅冗余）",
+                      file=sys.stderr)
+                return 2
+            rcs[key] = int(m.group(1))
+        if rcs["pytest_rc"] != 0 or rcs["refs_rc"] != 0:
+            print(f"error: --selfcheck 存在非零退出码（pytest_rc={rcs['pytest_rc']} "
+                  f"refs_rc={rcs['refs_rc']}），自检未通过拒绝写收据", file=sys.stderr)
+            return 2
+        # 冗余文本防线（rc 全 0 后的补充）：rc 为 0 而文本仍含 failed 非零/
+        # 悬空引用字样即矛盾——两工具已败却报 rc=0，拒写防伪造。
+        # pytest 摘要为 "<n> failed, <n> passed, <n> skipped in ..."（数字在前），
+        # 兼容 failed=3 / skipped: 2 的等号/冒号形态
+        if re.search(r"\b([1-9]\d*)\s*failed\b", args.selfcheck) or \
+                re.search(r"\bfailed\s*[=,: ]+\s*([1-9]\d*)", args.selfcheck):
+            print("error: --selfcheck 含 failed 非零（带红落地，拒绝写收据）",
+                  file=sys.stderr)
+            return 2
+        if re.search(r"悬空引用", args.selfcheck):
+            print("error: --selfcheck 含悬空引用字样（引用完整性未通过，"
+                  "拒绝写收据）", file=sys.stderr)
+            return 2
+        if not (re.search(r"\b\d+\s*skipped\b", args.selfcheck)
+                or re.search(r"\bskipped\s*[=,: ]+\s*\d+", args.selfcheck)):
+            print("error: --selfcheck 缺 skipped 计数（平台跳过的测试数须显式可见）",
+                  file=sys.stderr)
+            return 2
+
     body = ""
     if args.body and Path(args.body).is_file():
         body = _sanitize(Path(args.body).read_text(encoding="utf-8"))
+
+    # selfcheck 单行化（header 逐行 key-value，多行正文信息须并入一行才可见）：
+    # "531 passed in 27.9s | skipped=0 | OK: ..."，保证 skipped 计数随收据显式落地
+    args.selfcheck = " | ".join(l for l in args.selfcheck.splitlines() if l.strip())
 
     r = Receipt(batch_id=batch_id, batch_base=batch_base,
                 verified_commit=verified,
@@ -191,7 +283,8 @@ def main(argv=None):
                 build=args.build, push_board=args.board,
                 acceptance=args.acceptance, elapsed_s=args.elapsed,
                 summary=args.summary, metrics=args.metrics,
-                timings=args.timings)
+                timings=args.timings, cases=args.case,
+                selfcheck=args.selfcheck)
     path = write_receipt(r, body or args.summary)
     append_trend(time.strftime("%Y-%m-%d %H:%M:%S"), batch_id, args.result,
                  f"build={args.build} board={args.board} "

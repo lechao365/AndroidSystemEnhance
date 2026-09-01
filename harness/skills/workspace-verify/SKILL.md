@@ -110,6 +110,7 @@ stages:
 6. 收据：python3 harness/skills/workspace-verify/ws_report.py \
    --acceptance "<步骤 5 逐项结果 JSON>" \
    --summary "<一句话>" --result <pass|fail|skip> --build <pass|fail|skip> --board <pass|fail|skip> \
+   --case "<本次实际 --case 标签，逗号分隔（模式 B 逐字透传；模式 A 无则省略）>" \
    --body <正文文件> --batch-file <cdp> --target $(git rev-parse --short=12 HEAD) \
    [--metrics "<性能三指标 JSON 对象>"] \
    [--timings-file harness/log/cross-device/timings-<batch_id>.json]

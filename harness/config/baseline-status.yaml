@@ -47,6 +47,9 @@ baselines:
   source_branch: dev
   source_commit: 526b5623b274
   sync_manifest: data/verify-results/20260828-111825-fdc2e9820a41.md
+  evidence_broken: true
+  evidence_note: sync_manifest 收据 20260828-111825-fdc2e9820a41.md 已老化丢失（2026-08-31
+    检测），证据链断链，不可作为 promote 证据引用
   build_result: PASS
   package_result: PASS
   board_verify: PASS
@@ -92,3 +95,21 @@ baselines:
     evidence_scope: lcview-liveness,lcview-transfer,lcview-pipeline,lcview-perf
   approved_by: lechao
   approved_at: '2026-08-31T17:33:12+08:00'
+- baseline_id: BL-20260901-01
+  status: promoted
+  source_branch: dev
+  source_commit: bc4a5c830a64
+  sync_manifest: data/verify-results/20260901-093950-4cbc6c1fcc01.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-transfer
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260901-093950-4cbc6c1fcc01.md
+    ki_gate: inferred
+    evidence_scope: lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-transfer
+  approved_by: lechao
+  approved_at: '2026-09-01T09:57:17+08:00'

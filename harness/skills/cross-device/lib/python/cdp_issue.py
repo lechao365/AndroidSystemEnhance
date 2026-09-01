@@ -92,9 +92,14 @@ def write_issue(issue, body_text, slug=""):
     """写详情文件（唯一写入：<时间戳>-<batch_id>-<slug>.md；已闭环超 _ISSUE_KEEP 删最旧）并回写 index，返回路径。
 
     slug 缺省由 title 派生；batch_id 来自 issue.batch_id（命名元数据，非头字段）。
+    batch_id 必须为 12 位小写 hex，否则抛 ValueError——写时失败（现场可修）不留到
+    promote 才暴露（畸形文件名式样会被 validate_issue 判红堵死门禁）。
     同秒同批同名冲突时追加 -1/-2 序号，绝不覆盖既有记录。
     老化与 index 重建顺序：先 prune 再 sync_index，保证 index 与文件集一致。
     """
+    if not re.fullmatch(r"[0-9a-f]{12}", issue.batch_id or ""):
+        raise ValueError(f"batch_id 非法: {issue.batch_id!r}（须 12 位小写 hex，"
+                         f"如 d736c6283cd0；写时校验防畸形文件名堵死 promote 门禁）")
     d = data_known_issues_dir()
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     slug = slug or _slug_from_title(issue.title)

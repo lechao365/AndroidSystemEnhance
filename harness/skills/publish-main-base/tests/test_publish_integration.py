@@ -86,22 +86,23 @@ class TestSyncModifyIntegration(unittest.TestCase):
         self._git(["push", "-q", "-u", "origin", "dev"])
         return vc
 
-    def _write_receipt(self, vc, batch_id="inttest"):
+    def _write_receipt(self, vc, batch_id="inttest", cases=""):
         content = (
             f"- schema_version: 1\n- batch_id: {batch_id}\n"
             f"- batch_base: {vc}\n- verified_commit: {vc}\n"
             "- verify_mode: board\n- result: pass\n- build: pass\n"
             "- push_board: pass\n- acceptance: ok\n- elapsed_s: 0\n"
-            "- summary: integration\n- metrics: \n\n## body\n\nintegration test\n")
+            f"- summary: integration\n- metrics: \n- cases: {cases}\n"
+            "\n## body\n\nintegration test\n")
         p = self.work / RECEIPT_REL
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         return RECEIPT_REL
 
-    def _content_commit(self, vc):
+    def _content_commit(self, vc, cases=""):
         """B：内容提交（修改 README + 收据随批入库）。"""
         (self.work / "README.md").write_text("content B\n", encoding="utf-8")
-        self._write_receipt(vc)
+        self._write_receipt(vc, cases=cases)
         self._commit_all("feat: 内容提交 B")
         return self._git_out(["rev-parse", "--short=12", "HEAD"])
 
@@ -207,21 +208,22 @@ class TestSyncModifyIntegration(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("含非 docs/ 改动", r.stderr)
 
-    def test_promote_requires_task(self):
-        # promote 强制 --task（known-issues 门禁与 prepare 一致）
+    def test_promote_without_task_passes(self):
+        # promote 不传 --task 也能走通：强制已删，known-issues 门禁在共用段
+        # 缺省推断（空登记 → empty-registry 放行），不再要求人工申报
         vc = self._base_repo()
         b12 = self._content_commit(vc)
         self._register_commit(b12)
         self._push_dev()
         r = self._run_script("--promote", "--baseline-id", BID,
                              "--message-file", self._msg_file())
-        self.assertEqual(r.returncode, 3)
-        self.assertIn("必须指定 --task", r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("promote 完成", r.stdout)
 
     def test_prepare_source_commit_and_dedup(self):
         # source_commit 取内容提交（BH 回溯后），重复 prepare 复用 candidate
         vc = self._base_repo()
-        b12 = self._content_commit(vc)
+        b12 = self._content_commit(vc, cases="lcview-liveness")
         r = self._run_script("--prepare", "--task", "lcview-refactor",
                                 "--evidence-scope", "lcview-liveness")
         self.assertEqual(r.returncode, 0, r.stderr)

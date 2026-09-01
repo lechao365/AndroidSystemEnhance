@@ -1,15 +1,3 @@
-2026-08-26 16:52:26 a934b5b6da4a skip build=skip board=skip acc=- WSL 侧串口客户端落地（-s 无需上板）
-2026-08-26 22:21:38 manual-2608262221 pass build=pass board=pass acc=svc:lechao_lcview_hal=pass svc:lechao_lc lcview CXX 修复批首次真实上板验证通过（7P1 全清，设备健康运行）
-2026-08-26 23:14:50 manual-2608262314 pass build=skip board=pass acc=jsonl_files_exist=pass jsonl_valid_json= lcview 业务板端验证通过（L1 管道健康 4PASS + L2 触发全链路
-2026-08-27 07:50:56 manual-2608270750 pass build=pass board=pass acc=svc:lechao_lcview_hal=pass svc:lechao_lc lcview 业务链路日志验证通过（build tag 命中16次+batch 
-2026-08-27 09:18:48 8c814ca8e1dc skip build=skip board=skip acc=- 清测试红线,解 promote 阻塞,消时钟人工与机器绑定（-s 无需上板）
-2026-08-27 09:53:51 14ea313975d6 skip build=skip board=skip acc=- 回收上批 6 处缺陷,消静默降级与时钟不可信（-s 无需上板）
-2026-08-27 10:12:19 607399554675 skip build=skip board=skip acc=- 用例层内聚消仓外依赖,兼修 lcview_check 必崩（-s 无需上板）
-2026-08-27 10:48:58 a771b060ffe2 skip build=skip board=skip acc=- 堵 lcview_check 假绿,补零覆盖,清仓外引用（-s 无需上板）
-2026-08-27 11:08:38 7bde70c61fae skip build=skip board=skip acc=- 串口链路收尾,补零覆盖修错误分类,为 rescue 清场（-s 无需上板）
-2026-08-27 11:42:41 89e54e60548f skip build=skip board=skip acc=- rescue 编排落地,串口成第三级救援通道（-s 无需上板）
-2026-08-27 14:26:32 7e4c72374085 skip build=skip board=skip acc=- 回收 rescue 6 处缺陷,消错分与句柄泄漏（-s 无需上板）
-2026-08-27 14:52:35 8e173bc0801d skip build=skip board=skip acc=- 接线 rescue 消死代码,消文档矛盾与端点重复推导（-s 无需上板）
 2026-08-27 15:07:36 d9eedee45eda skip build=skip board=skip acc=- 修 lcview-trigger 截断 P0 与残余静默丢弃（-s 无需上板）
 2026-08-27 15:58:14 5407e52257f2 pass build=pass board=pass acc=lcview-liveness=pass(5/5) lcview-pipelin 首次上板取 lcview 用例与单测真值（trigger 全链路 6/6 过，f
 2026-08-27 16:50:30 ae65531af480 pass build=pass board=pass acc=svc_hal=pass svc_daemon=pass boot=pass p 修 hal_test 全灭与三红与时钟（hal 0/10→10/10、unit 
@@ -48,3 +36,15 @@
 2026-08-31 15:39:36 8548e61e03c0 skip build=skip board=skip acc=- 修 emit 侧 11 项测试红并扩引用扫描（-s 无需上板）
 2026-08-31 16:55:03 ec62ae0ce5f6 pass build=pass board=pass acc={ lcview 重构闭环证据:四组验收全绿+单测 190 全过+perf 指标齐备 | {"daemon_rss_kb": 5040, "dd_s": 2.33, "drain_ms_per_event": 0.371, "jsonl_delta": 3075, "load_mb": 64, "throughput_evs": 1319.8, "total_delta": 3075}
 2026-08-31 17:29:24 manual-2608311729 pass build=pass board=pass acc={ 基线发布验证:四组验收全绿+单测190全过+perf指标齐备 | {"daemon_rss_kb": 5040, "dd_s": 2.357, "drain_ms_per_event": 0.373, "jsonl_delta": 3081, "load_mb": 64, "throughput_evs": 1307.2, "total_delta": 3081}
+2026-08-31 17:49:01 d736c6283cd0 skip build=skip board=skip acc=- evidence-scope 由人工申报改为证据推导（-s 无需上板）
+2026-08-31 19:16:52 641d371c3da2 skip build=skip board=skip acc=- 解畸形登记堵死门禁并自动推断 task（-s 无需上板）
+2026-08-31 19:30:35 7a04f2d146f1 skip build=skip board=skip acc=- 编排器接线,让参数推断真正生效（-s 无需上板）
+2026-08-31 19:47:04 f6c8c3376282 skip build=skip board=skip acc=- 给 -s 批加自检证据要求,堵零验证通道（-s 无需上板）
+2026-08-31 19:47:55 f6c8c3376282 skip build=skip board=skip acc=- 给 -s 批加自检证据要求,堵零验证通道（-s 无需上板）
+2026-08-31 19:48:46 f6c8c3376282 skip build=skip board=skip acc=- 给 -s 批加自检证据要求,堵零验证通道（-s 无需上板）
+2026-08-31 20:04:57 eca792c3c91a skip build=skip board=skip acc=- 自检门禁改按退出码判定,补两处漏判（-s 无需上板）
+2026-08-31 20:21:41 073d27101524 skip build=skip board=skip acc=- 自检生产侧改可执行脚本,修 rc 恒零（-s 无需上板）
+2026-08-31 20:32:10 a1a3a1879cd8 skip build=skip board=skip acc=- 计数行只认 stdout,修兜底伪造计数复发（-s 无需上板）
+2026-08-31 21:40:10 264b4faab6a6 skip build=skip board=skip acc=- 堵验收假绿并保住基线证据不被老化删（-s 无需上板）
+2026-09-01 09:22:30 253457e98980 pass build=pass board=pass acc={"overall":"pass","items":[{"tag":"svc:l 修 FileWriter 裂行 P0 与 writeInvalid 假绿：jso
+2026-09-01 09:39:50 4cbc6c1fcc01 pass build=pass board=pass acc={"overall":"pass","items":[{"tag":"svc:l 心跳时间驱动+解码器测真化+verify-cases 组自洽：单测 195 全过 | {"daemon_rss_kb": 5124, "dd_s": 2.365, "drain_ms_per_event": 0.378, "jsonl_delta": 3079, "load_mb": 64, "throughput_evs": 1302.1, "total_delta": 3079}
