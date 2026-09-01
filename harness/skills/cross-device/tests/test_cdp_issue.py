@@ -99,7 +99,7 @@ class TestIssue(unittest.TestCase):
         self.assertEqual(got.origin, "introduced")
 
     def test_keeps_all_within_quota(self):
-        # 未超配额：写入多份全部保留（对照收据 _DETAIL_KEEP=20 的 prune）
+        # 未超配额：写入多份全部保留（对照收据 _DETAIL_KEEP=50 的 prune）
         for i in range(5):
             cdp_issue.write_issue(_mk_issue(f"KI-20260829-00{i}"), f"body{i}")
         self.assertEqual(len(cdp_issue.issue_files(self._dir)), 5)

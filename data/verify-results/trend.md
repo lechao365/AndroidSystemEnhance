@@ -48,3 +48,4 @@
 2026-09-01 15:49:18 671b4dc5033d skip build=skip board=skip acc=- 打开 emit 侧 bash 测试盲区（-s 无需上板）
 2026-09-01 16:21:29 ad91215da5bf skip build=skip board=skip acc=- 修 Windows 实跑暴露的 8 项失败（-s 无需上板）
 2026-09-01 16:36:37 b36ccd69ec6a skip build=skip board=skip acc=- 修开关跨模块污染并补 precheck 领先告警（-s 无需上板）
+2026-09-01 17:16:49 41daf105ac74 skip build=skip board=skip acc=- 收据配额扩到 50 并闭环两笔已修 issue（-s 无需上板）
