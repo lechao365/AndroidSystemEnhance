@@ -1,6 +1,8 @@
 import argparse
 import contextlib
 import io
+import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -787,6 +789,188 @@ class TestLogcatCacheAndTiming(unittest.TestCase):
         self.assertEqual(overall, "pass")
         self.assertEqual(items[0]["elapsed_s"], 0.25)
         self.assertEqual(items[1]["elapsed_s"], 0.5)
+
+
+class TestAcceptanceInternalSegments(unittest.TestCase):
+    """方向 1：acceptance 段内部分段打点——connect/wait_ready/clock_sync/
+    since 换算/每个 case 各记一段（收据 timings 可归因 180s 去向）。"""
+
+    def _batch(self, d):
+        p = Path(d) / "b.cdp"
+        p.write_text("-sv base:111111111111\n意图: 分段\n"
+                     "验收: boot logfresh:\"heartbeat, loop=|90\"\n"
+                     "方向: 测试\n", encoding="utf-8")
+        return p
+
+    def test_internal_segments_and_case_marks(self):
+        # batch-file 模式：connect/wait_ready/clock_sync/since_convert/
+        # acc_1..n/verify_acceptance 全序列落本批打点文件（batch_id 显式
+        # 传参，多打点文件也不静默跳过）
+        marks = []
+        LOGCAT = ["adb", "logcat", "-d"]
+
+        def fake_run(cmd, **kw):
+            if cmd == LOGCAT:
+                return mock.Mock(stdout="09-02 01:00:00 heartbeat, loop=5\n",
+                                 stderr="", returncode=0)
+            if cmd == ["adb", "shell", "date +%s"]:
+                out = "1788226000\n"
+            elif cmd == ["adb", "shell", "date +%z"]:
+                out = "+0000\n"
+            elif cmd == ["adb", "shell", "getprop sys.boot_completed"]:
+                out = "1\n"
+            else:
+                out = ""
+            return mock.Mock(stdout=out + "__LE_EXIT_CODE__=0\n", stderr="",
+                             returncode=0)
+
+        def fake_parse(stdout):
+            body = stdout.split("__LE_EXIT_CODE__=")[0].rstrip()
+            return body, 0
+
+        def fake_mark(name, batch_id=None, zero=False):
+            marks.append((name, batch_id, zero))
+
+        with tempfile.TemporaryDirectory() as d:
+            batch = self._batch(d)
+            with mock.patch.object(wa, "ac") as m_ac, \
+                    mock.patch.object(wa, "_mark_stage",
+                                      side_effect=fake_mark), \
+                    mock.patch.object(wa, "_backfill_zero_marks"), \
+                    mock.patch.object(wa.subprocess, "run",
+                                      side_effect=fake_run):
+                m_ac.ensure_connected.return_value = "ep"
+                m_ac.ensure_ready.return_value = True
+                m_ac.clock_sync.return_value = (True, "ok")
+                m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+                m_ac.parse_exec_output.side_effect = fake_parse
+                m_ac.build_logcat_cmd.return_value = LOGCAT
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = wa.main(["run", "--batch-file", str(batch),
+                                  "--wait-ready",
+                                  "--log-since", "09-02 01:00:00.000"])
+        self.assertEqual(rc, 0)
+        names = [m[0] for m in marks]
+        self.assertEqual(names, ["verify_acceptance_connect",
+                                 "verify_acceptance_wait_ready",
+                                 "verify_acceptance_clock_sync",
+                                 "verify_acceptance_since_convert",
+                                 "verify_acceptance_acc_1",
+                                 "verify_acceptance_acc_2",
+                                 "verify_acceptance"])
+        # batch_id 显式传参（来自批次内容），非 None
+        self.assertTrue(all(m[1] for m in marks), "batch-file 模式须显式传 batch_id")
+        self.assertIn("overall", buf.getvalue())
+
+    def test_no_wait_ready_skips_segment(self):
+        # 无 --wait-ready/--log-since/无时间判据：条件段不 mark（未执行无
+        # 耗时可记），connect 与 case 级照记
+        marks = []
+        LOGCAT = ["adb", "logcat", "-d"]
+
+        def fake_run(cmd, **kw):
+            if cmd == LOGCAT:
+                return mock.Mock(stdout="x\n", stderr="", returncode=0)
+            if cmd == ["adb", "shell", "getprop sys.boot_completed"]:
+                out = "1\n"
+            else:
+                out = ""
+            return mock.Mock(stdout=out + "__LE_EXIT_CODE__=0\n", stderr="",
+                             returncode=0)
+
+        def fake_parse(stdout):
+            return stdout.split("__LE_EXIT_CODE__=")[0].rstrip(), 0
+
+        def fake_mark(name, batch_id=None, zero=False):
+            marks.append((name, batch_id, zero))
+
+        with tempfile.TemporaryDirectory() as d:
+            batch = self._batch(d)
+            p = Path(d) / "b2.cdp"
+            p.write_text("-sv base:111111111111\n意图: 分段\n"
+                         "验收: boot\n方向: 测试\n", encoding="utf-8")
+            with mock.patch.object(wa, "ac") as m_ac, \
+                    mock.patch.object(wa, "_mark_stage",
+                                      side_effect=fake_mark), \
+                    mock.patch.object(wa, "_backfill_zero_marks"), \
+                    mock.patch.object(wa.subprocess, "run",
+                                      side_effect=fake_run):
+                m_ac.ensure_connected.return_value = "ep"
+                m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+                m_ac.parse_exec_output.side_effect = fake_parse
+                m_ac.build_logcat_cmd.return_value = LOGCAT
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = wa.main(["run", "--batch-file", str(p)])
+        self.assertEqual(rc, 0)
+        names = [m[0] for m in marks]
+        self.assertEqual(names, ["verify_acceptance_connect",
+                                 "verify_acceptance_acc_1",
+                                 "verify_acceptance"])
+
+
+class TestBackfillZeroMarks(unittest.TestCase):
+    """方向 3：sync/build/push/unit_test 四段跳过时补零 mark（段完整可归因）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+        self.batch = "abc123def456"
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("CDP_PROJECT_ROOT", None)
+        else:
+            os.environ["CDP_PROJECT_ROOT"] = self._old
+        self._tmp.cleanup()
+
+    def _timing(self):
+        return wa.cdp_paths.log_apply_dir() / f"timings-{self.batch}.json"
+
+    def test_fills_missing_four_segments_zero(self):
+        # 四段均缺失：以最近 mark 同刻补零，收据 timings 五段齐全
+        wa.cdp_timing.main(["start", "--batch", self.batch])
+        wa.cdp_timing.main(["mark", "--batch", self.batch, "--name",
+                            "verify_acceptance"])
+        wa._backfill_zero_marks(self.batch)
+        data = json.loads(self._timing().read_text(encoding="utf-8"))
+        names = [m["name"] for m in data["marks"]]
+        self.assertEqual(names, ["verify_acceptance", "verify_sync",
+                                 "verify_build", "verify_push",
+                                 "verify_unit_test"])
+        last_wall = data["marks"][0]["wall"]
+        for m in data["marks"][1:]:
+            self.assertEqual(m["wall"], last_wall, "补零段须与最近 mark 同刻")
+        # 段耗时可归因：补零段 0
+        wa.cdp_timing.main(["finish", "--batch", self.batch])
+        data = json.loads(self._timing().read_text(encoding="utf-8"))
+        segs = {s["name"]: s["elapsed_s"] for s in data["segments"]}
+        for seg in ("verify_sync", "verify_build", "verify_push",
+                    "verify_unit_test"):
+            self.assertEqual(segs[seg], 0)
+
+    def test_existing_segments_not_overwritten(self):
+        # 已有真实 mark 的段不重复补零（真实耗时保留）
+        wa.cdp_timing.main(["start", "--batch", self.batch])
+        wa.cdp_timing.main(["mark", "--batch", self.batch, "--name",
+                            "verify_sync"])
+        wa._backfill_zero_marks(self.batch)
+        data = json.loads(self._timing().read_text(encoding="utf-8"))
+        names = [m["name"] for m in data["marks"]]
+        self.assertEqual(names, ["verify_sync", "verify_build",
+                                 "verify_push", "verify_unit_test"])
+        self.assertEqual(data["marks"][0]["wall"],
+                         data["marks"][1]["wall"])
+
+    def test_no_batch_id_skips(self):
+        # 无 batch_id（非 batch-file 模式）不写（自动识别不可靠时不补，
+        # 防误标其他批次打点文件）
+        wa.cdp_timing.main(["start", "--batch", self.batch])
+        wa._backfill_zero_marks(None)
+        data = json.loads(self._timing().read_text(encoding="utf-8"))
+        self.assertEqual(data["marks"], [])
 
 
 class TestConvertSince(unittest.TestCase):

@@ -175,6 +175,34 @@ class TestCdpTiming(unittest.TestCase):
         data = json.loads(self._path().read_text(encoding="utf-8"))
         self.assertEqual(data["marks"][0]["name"], "precheck")
 
+    # ── 方向 3：--zero 记零 mark（跳过段占位，段耗时 0）──────────────
+
+    def test_mark_zero_uses_last_mark_wall(self):
+        # --zero 的 wall 取最近 mark 同刻：段耗时 0（跳过段占位可归因）
+        cdp_timing.main(["start", "--batch", self.batch])
+        cdp_timing.main(["mark", "--batch", self.batch, "--name", "verify_acceptance"])
+        self.assertEqual(
+            cdp_timing.main(["mark", "--batch", self.batch, "--name",
+                             "verify_build", "--zero"]), 0)
+        data = json.loads(self._path().read_text(encoding="utf-8"))
+        self.assertEqual(data["marks"][0]["name"], "verify_acceptance")
+        self.assertEqual(data["marks"][1]["name"], "verify_build")
+        self.assertEqual(data["marks"][1]["wall"], data["marks"][0]["wall"],
+                         "零 mark 须与最近 mark 同刻")
+        cdp_timing.main(["finish", "--batch", self.batch])
+        data = json.loads(self._path().read_text(encoding="utf-8"))
+        segs = {s["name"]: s["elapsed_s"] for s in data["segments"]}
+        self.assertEqual(segs["verify_build"], 0, "零 mark 段耗时须为 0")
+
+    def test_mark_zero_no_marks_uses_start_wall(self):
+        # 无任何 mark 时 --zero 落 start_wall 同刻（start 后直接补零）
+        cdp_timing.main(["start", "--batch", self.batch])
+        self.assertEqual(
+            cdp_timing.main(["mark", "--batch", self.batch, "--name",
+                             "verify_sync", "--zero"]), 0)
+        data = json.loads(self._path().read_text(encoding="utf-8"))
+        self.assertEqual(data["marks"][0]["wall"], data["start_wall"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -56,3 +56,4 @@
 2026-09-01 20:13:12 701fd8213408 pass build=pass board=pass acc={"overall":"pass","items":[{"tag":"cmd:\ sepolicy 类型改名去 hal 残留：节点重打标 lechao_lcvie
 2026-09-01 20:48:26 8ee7daa2bf13 skip build=skip board=skip acc=- 闭环 sepolicy 项并让验证分段打点自动化（-s 无需上板）
 2026-09-02 09:30:52 7833c640079a pass build=skip board=pass acc={"overall":"pass","items":[{"tag":"svc:l 验收全绿: lcview-liveness+lcview-sepolicy-la
+2026-09-02 09:50:04 7d2ea045e3fb skip build=skip board=skip acc=- acceptance 段内部细分打点找真瓶颈（-s 无需上板）

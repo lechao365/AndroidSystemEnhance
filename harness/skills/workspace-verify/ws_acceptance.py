@@ -36,7 +36,9 @@ import ws_adb_connect as ac  # noqa: E402（ensure 连接/就绪/时钟/救援�
 
 # 复用 CDP 解析（与 ws_report.py 同款路径注入）：parse_batch 取批次验收文本
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "lib" / "python"))
-from cdp_parse import parse_batch  # noqa: E402
+from cdp_parse import batch_id_from_text, parse_batch  # noqa: E402
+import cdp_paths  # noqa: E402
+import cdp_timing  # noqa: E402
 
 # harness/config/verify-cases.yaml：--case 标签源（资产层，批次内禁引号用例集中维护）
 _CASES_PATH = Path(__file__).resolve().parents[2] / "config" / "verify-cases.yaml"
@@ -342,11 +344,14 @@ def execute_tag(tag, adb_exec, adb_logcat):
     return "ai", payload
 
 
-def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False):
+def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False,
+                   on_item=None):
     """执行全部条目，返回 (overall, items)。overall ∈ pass|fail|ai。
 
     ensure_boot=True 且标签无 boot 时自动追加（兑现 workspace-verify SKILL L20：
     模式 B 设备存活是恢复的最低判据）。
+    on_item(n) 可选回调：每项完成后调用（n 为已完成项数，1-based），
+    供调用方逐项打点（case 级耗时归因）；无回调时行为与之前一致。
     """
     items = []
     tags = parse_acceptance(acceptance_text)
@@ -365,6 +370,8 @@ def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False):
         status, detail = execute_tag(tag, adb_exec, adb_logcat)
         items.append({"tag": tag, "status": status, "detail": detail,
                       "elapsed_s": round(time.monotonic() - start, 3)})
+        if on_item:
+            on_item(len(items))
     auto = [i for i in items if i["status"] in ("pass", "fail")]
     if any(i["status"] == "fail" for i in auto):
         return "fail", items
@@ -373,16 +380,23 @@ def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False):
     return "pass", items
 
 
-def _mark_stage(name):
-    """验证阶段自动打点：cdp_timing.py mark（batch 识别：CDP_BATCH_ID 环境变量
-    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。"""
+def _mark_stage(name, batch_id=None, zero=False):
+    """验证阶段自动打点：cdp_timing.py mark（batch 识别：显式 batch_id >
+    环境变量 CDP_BATCH_ID > log 目录唯一 timings 文件；均缺时静默跳过返 0，
+    失败不阻断口径）。batch_id 显式传参解决多打点文件时自动识别静默跳过
+    （batch-file 模式从批次内容解析，mark 必然落到本批打点文件）。
+    zero=True 记零 mark（跳过段占位，段耗时 0）。"""
     timing = (Path(__file__).resolve().parents[1] / "cross-device"
               / "lib" / "python" / "cdp_timing.py")
     env = dict(os.environ)
     env["PYTHONPATH"] = str(timing.parent) + os.pathsep + env.get("PYTHONPATH", "")
+    cmd = [sys.executable, str(timing), "mark", "--name", name]
+    if batch_id:
+        cmd += ["--batch", batch_id]
+    if zero:
+        cmd += ["--zero"]
     try:
-        r = subprocess.run([sys.executable, str(timing), "mark", "--name", name],
-                           capture_output=True, text=True, encoding="utf-8",
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=10, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         print(f"warn: 打点 {name} 失败（不阻断）: {e}", file=sys.stderr)
@@ -390,6 +404,33 @@ def _mark_stage(name):
     if r.returncode != 0:
         print(f"warn: 打点 {name} 失败（不阻断）: {r.stderr.strip()}",
               file=sys.stderr)
+
+
+# 标准五段中的前四段（sync/build/push/unit_test）：跳过时补零 mark 占位，
+# 保证收据 timings 段完整可归因（缺段 vs 0 耗时语义不同：缺段=去向不明）
+_STANDARD_ZERO_SEGMENTS = ("verify_sync", "verify_build", "verify_push",
+                           "verify_unit_test")
+
+
+def _backfill_zero_marks(batch_id):
+    """标准四段缺失时补零 mark（跳过段记 0 耗时，收据段完整可归因）。
+
+    上一批收据只有 verify_start 与 verify_acceptance 两段即因四段跳过时
+    未发 mark；验收是最末验证阶段，由它兜底补齐。batch_id 缺失（非
+    batch-file 模式）时跳过——自动识别不可靠时不写，防误标其他批次。
+    """
+    if not batch_id:
+        return
+    try:
+        p = cdp_paths.log_apply_dir() / f"timings-{batch_id}.json"
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    have = {m.get("name") for m in (data.get("marks") or [])}
+    for seg in _STANDARD_ZERO_SEGMENTS:
+        if seg not in have:
+            cdp_timing.main(["mark", "--batch", batch_id, "--name", seg,
+                             "--zero"])
 
 
 def main(argv=None):
@@ -437,6 +478,16 @@ def main(argv=None):
                   file=sys.stderr)
             return 2
 
+    # 模式 A（batch-file）显式解析 batch_id：内部分段/case 级/补零 mark
+    # 全部落本批打点文件（多打点文件时自动识别静默跳过，缺段无法归因）
+    batch_id = None
+    if args.batch_file:
+        try:
+            batch_id = batch_id_from_text(
+                Path(args.batch_file).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            batch_id = None
+
     ep = ac.ensure_connected()
     if not ep:
         # 编排层接线 rescue（激活第三级通道）：mDNS/静态失败后以
@@ -447,11 +498,14 @@ def main(argv=None):
         print(json.dumps({"overall": "fail", "error": "设备不可达",
                           "items": []}, ensure_ascii=False))
         return 1
+    _mark_stage("verify_acceptance_connect", batch_id)
     if args.wait_ready and not ac.ensure_ready():
         print(json.dumps({"overall": "fail",
                           "error": "设备未就绪（sys.boot_completed 超时，按不可达处理）",
                           "items": []}, ensure_ascii=False))
         return 1
+    if args.wait_ready:
+        _mark_stage("verify_acceptance_wait_ready", batch_id)
     # 时钟校准触发条件：--wait-ready（reboot 场景）或验收含 ts/fresh 判据
     # （时间敏感判据须设备时钟可信，否则 skew 大必判红——曾因只挂 wait_ready
     #  门禁，无 reboot 的 fresh/ts 用例从不校准时钟而恒红）
@@ -468,6 +522,7 @@ def main(argv=None):
                               "error": f"设备时钟修正失败: {detail}",
                               "items": []}, ensure_ascii=False))
             return 1
+        _mark_stage("verify_acceptance_clock_sync", batch_id)
 
     def adb_exec(cmd):
         try:
@@ -490,6 +545,7 @@ def main(argv=None):
             return 1
         print(f"NOTE: --log-since 本地 {args.log_since} → 设备 {device_since}"
               f"（按设备时钟/时区换算）")
+        _mark_stage("verify_acceptance_since_convert", batch_id)
 
     # logcat 缓存：key=(pid, device_since)——同批多标签（如 liveness 的 log:
     # + 5 条同 pid logfield）只拉一次 5000 行，避免各拉一遍拖慢验收段；
@@ -513,12 +569,20 @@ def main(argv=None):
         _logcat_cache[key] = out
         return out
 
+    # case 级打点：每项完成记 verify_acceptance_acc_<n>（n 为 1-based 序号），
+    # 段耗时 = 相邻 mark 差，hostcmd 含 dd/sleep 的大头逐项可见
+    def mark_case(n):
+        _mark_stage(f"verify_acceptance_acc_{n}", batch_id)
+
     overall, items = run_acceptance(acceptance, adb_exec, adb_logcat,
-                                    ensure_boot=args.ensure_boot)
+                                    ensure_boot=args.ensure_boot,
+                                    on_item=mark_case)
     print(json.dumps({"overall": overall, "items": items}, ensure_ascii=False,
                      indent=2))
-    # 脚本自动打点验收段（失败不阻断，结果 pass/fail 均记）
-    _mark_stage("verify_acceptance")
+    # 标准四段缺失补零（跳过段记 0，收据段完整可归因）+ 验收总段打点
+    # （失败不阻断，结果 pass/fail 均记）
+    _backfill_zero_marks(batch_id)
+    _mark_stage("verify_acceptance", batch_id)
     if overall == "fail":
         return 1
     if overall == "ai":

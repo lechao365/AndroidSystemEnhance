@@ -110,15 +110,28 @@ def _cmd_start(batch_id: str) -> int:
     return 0
 
 
-def _cmd_mark(path: Path, name: str) -> int:
-    """mark：追加一个时间戳；未 start 返 3（AI 漏 start 可发现）。"""
+def _cmd_mark(path: Path, name: str, zero: bool = False) -> int:
+    """mark：追加一个时间戳；未 start 返 3（AI 漏 start 可发现）。
+
+    zero=True 记零 mark：wall 取最近 mark（无 mark 则 start_wall）同一时刻——
+    跳过段（如无编译/无上板时的 sync/build/push/unit_test）以 0 耗时占位，
+    收据 timings 段完整可归因（缺段 vs 0 耗时语义不同：缺段=去向不明）。
+    """
     data = _load(path)
     if data is None:
         print(f"error: 未 start（缺打点文件 {path}），先执行 cdp_timing.py start", file=sys.stderr)
         return 3
-    data.setdefault("marks", []).append({"name": name, "wall": _wall()})
+    if zero:
+        marks = data.get("marks") or []
+        wall = marks[-1]["wall"] if marks else data.get("start_wall")
+        if wall is None:
+            print("error: 无 start_wall 且无 marks，无法记零", file=sys.stderr)
+            return 3
+    else:
+        wall = _wall()
+    data.setdefault("marks", []).append({"name": name, "wall": wall})
     _save(path, data)
-    print(f"mark: {name} @ {_wall():.3f}")
+    print(f"mark: {name} @ {wall:.3f}" + ("（零耗时占位）" if zero else ""))
     return 0
 
 
@@ -157,6 +170,8 @@ def main(argv=None) -> int:
     p_mark = sub.add_parser("mark", help="追加一个时间戳")
     p_mark.add_argument("--name", required=True, help="阶段名（如 precheck/edit/verify_build）")
     p_mark.add_argument("--batch", default=None, help="12 位 batch_id（缺省从打点目录取最新）")
+    p_mark.add_argument("--zero", action="store_true",
+                        help="记零 mark：wall 取最近 mark 同刻（跳过段占位，段耗时 0）")
 
     p_finish = sub.add_parser("finish", help="计算段耗时并落盘")
     p_finish.add_argument("--file", default=None, help="打点文件路径（缺省取最新）")
@@ -190,7 +205,7 @@ def main(argv=None) -> int:
             return 3
 
     if args.cmd == "mark":
-        return _cmd_mark(path, args.name)
+        return _cmd_mark(path, args.name, zero=args.zero)
     if args.cmd == "finish":
         return _cmd_finish(path)
     return 2
