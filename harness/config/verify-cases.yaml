@@ -44,6 +44,11 @@ cases:
   #       新进程首心跳未到（锚点未命中）时每 5s 重取，90s 超时判红，不回落
   #       全量筛（回落即旧进程行重新混入假绿）。
   lcview-liveness: 'svc:lechao_lcview log:"heartbeat, loop=" logfield:"heartbeat, loop=|overrun|=|0|lechao_lcview" logfield:"heartbeat, loop=|dropped|=|0|lechao_lcview" logfield:"heartbeat, loop=|drop_invalidwrite|=|0|lechao_lcview" logfield:"heartbeat, loop=|invalid_records|=|0|lechao_lcview" logfield:"heartbeat, loop=|readErr|=|0|lechao_lcview" logfresh:"heartbeat, loop=|90" boot'
+  # sepolicy 类型改名回归点（去 hal 残留）：设备节点标签须命中新类型
+  # lechao_lcview_device（file_contexts 重打标，reboot 后生效），且近窗
+  # logcat 无 avc denied 命中 lechao_lcview（sepolicy 规则与标签一致）。
+  # cmd 判据 exit 0 即 pass：grep -q 命中新类型 && avc denied 无 lechao_lcview。
+  lcview-sepolicy-label: 'cmd:"ls -Z /dev/vendor_lechao_lcview | grep -q lechao_lcview_device:s0 && ! logcat -d -t 5000 | grep -E \"avc: denied .*lechao_lcview\" | grep -q ." boot'
 
   # 性能采集（脚本化统一负载，只报数不设门禁）：dd 读块设备 64MB（与性能基线
   # 负载一致，消除 4MB 用例负载失真）→ 事件吞吐 / 平均落盘延迟 / daemon RSS，

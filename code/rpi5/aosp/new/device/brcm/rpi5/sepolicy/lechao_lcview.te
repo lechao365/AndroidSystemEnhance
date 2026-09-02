@@ -12,8 +12,9 @@ type lechao_lcview_exec, exec_type, vendor_file_type, file_type;
 #   data_file_type 表示这是一类数据文件，确保存放在 /data/vendor/ 下
 type lechao_lcview_data_file, file_type, data_file_type;
 # 内核设备节点类型（原定义于 lechao_lcview_hal.te，HAL 退役后并入本域；
-# file_contexts 匹配 /dev/vendor_lechao_lcview，daemon 直读使用）
-type lechao_lcview_hal_device, dev_type, file_type;
+# file_contexts 匹配 /dev/vendor_lechao_lcview，daemon 直读使用；
+# 2026-09-01 去 hal 残留：类型名 lechao_lcview_hal_device → lechao_lcview_device）
+type lechao_lcview_device, dev_type, file_type;
 
 # init 启动守护进程 —— init 执行 lchao_lcview_exec → domain transition
 init_daemon_domain(lechao_lcview)
@@ -40,6 +41,6 @@ allow lechao_lcview logd:unix_dgram_socket write;
 # 允许 daemon 直读内核设备节点 /dev/vendor_lechao_lcview（HAL 停用后）
 #   ioctl 是核心：read/ioctl 取环形缓冲批量记录（LCVIEW_GET/READ_RING），
 #   open/read/write/getattr 为基础设备操作（对照 hal.te 同款规则）
-allow lechao_lcview lechao_lcview_hal_device:chr_file { open read write ioctl getattr };
+allow lechao_lcview lechao_lcview_device:chr_file { open read write ioctl getattr };
 # 允许 daemon 搜索 /dev 目录 —— 打开 /dev/vendor_lechao_lcview 之前需要遍历 /dev
 allow lechao_lcview device:dir { search read };

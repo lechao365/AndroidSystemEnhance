@@ -219,7 +219,7 @@ DAEMONP --> LOGS : JSONL 写入
 | `lechao_lcview` (vendor 域) | `system:system` | 读字符设备 + 读写数据目录 + 写 logd | 不注册任何 binder 服务 |
 
 **跨域通信**：
-1. **内核 → Daemon**：字符设备 `/dev/vendor_lechao_lcview`（`lechao_lcview_hal_device` 类型）
+1. **内核 → Daemon**：字符设备 `/dev/vendor_lechao_lcview`（`lechao_lcview_device` 类型）
 
 > 各域的完整 `.te` 策略、`file_contexts`、`service_contexts` 规则详见各子文档的"部署视图"章节。
 

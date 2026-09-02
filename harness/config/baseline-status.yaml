@@ -145,3 +145,26 @@ baselines:
       title: logfield 取末行不按进程归属筛致 E1 首跑认旧进程心跳
   approved_by: lechao
   approved_at: '2026-09-01T19:40:57+08:00'
+- baseline_id: BL-20260902-01
+  status: promoted
+  source_branch: dev
+  source_commit: 27b8a3656161
+  sync_manifest: data/verify-results/20260902-093052-7833c640079a.md
+  build_result: SKIP
+  package_result: SKIP
+  board_verify: PASS
+  evidence_scope: lcview-liveness,lcview-sepolicy-label
+  evidence:
+    build_result: SKIP
+    package_result: SKIP
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260902-093052-7833c640079a.md
+    ki_gate: empty-registry
+    evidence_scope: lcview-liveness,lcview-sepolicy-label
+    known_issues_carried: ''
+    known_issues_closed:
+    - issue_id: KI-20260829-001
+      resolved_in: 701fd8213408
+      title: lechao_lcview_hal_device 设备节点类型名残留（HAL 退役后命名未同步）
+  approved_by: lechao
+  approved_at: '2026-09-02T10:50:22+08:00'

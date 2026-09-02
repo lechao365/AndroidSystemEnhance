@@ -53,3 +53,8 @@
 2026-09-01 18:42:08 b0997051da41 skip build=skip board=skip acc=- 闭环记录改 promote 清算并写基线快照（-s 无需上板）
 2026-09-01 19:02:14 e7dce056f5a7 skip build=skip board=skip acc=- 补齐清算证据与打点路径同源并装并行依赖（-s 无需上板）
 2026-09-01 19:29:12 manual-2609011929 skip build=skip board=skip acc=- 修复 publish-main-base 证据锚点（board 收据回溯）与 p
+2026-09-01 20:13:12 701fd8213408 pass build=pass board=pass acc={"overall":"pass","items":[{"tag":"cmd:\ sepolicy 类型改名去 hal 残留：节点重打标 lechao_lcvie
+2026-09-01 20:48:26 8ee7daa2bf13 skip build=skip board=skip acc=- 闭环 sepolicy 项并让验证分段打点自动化（-s 无需上板）
+2026-09-02 09:30:52 7833c640079a pass build=skip board=pass acc={"overall":"pass","items":[{"tag":"svc:l 验收全绿: lcview-liveness+lcview-sepolicy-la
+2026-09-02 09:50:04 7d2ea045e3fb skip build=skip board=skip acc=- acceptance 段内部细分打点找真瓶颈（-s 无需上板）
+2026-09-02 10:46:02 manual-2609021046 skip build=skip board=skip acc=- 补全收据 7833c640079a cases 证据字段（-s 无需上板）

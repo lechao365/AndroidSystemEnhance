@@ -9,13 +9,17 @@
     cdp_timing.py start --batch <12hex> | --batch-file <cdp 批次文件>
     cdp_timing.py mark --name <阶段名>        # 记录一个时间戳
     cdp_timing.py finish [--file <path>]      # 计算相邻段耗时并落盘
-退出码: 0 正常 / 2 参数错误 / 3 未 start 即 mark/finish
+mark/finish 的 batch 识别（脚本自动打点依赖）：显式 --batch/--file >
+环境变量 CDP_BATCH_ID > log 目录唯一 timings 文件；均不可得时静默跳过
+（返回 0，失败不阻断口径）。
+退出码: 0 正常 / 2 参数错误 / 3 未 start 即 mark/finish（显式来源时）
 打点文件: <project_root>/harness/log/cross-device/timings-<batch_id>.json
 （gitignore 工作态；ws_report --timings-file 读原始打点文件经 compute_segments
 计算段耗时并入收据 timings 字段——finish 仅归档/人工查看，不依赖其先跑）
 """
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -27,6 +31,35 @@ from cdp_paths import log_apply_dir
 def _timing_path(batch_id: str) -> Path:
     """打点文件路径：timings-<batch_id>.json（工作态目录）。"""
     return log_apply_dir() / f"timings-{batch_id}.json"
+
+
+def _resolve_timing_path(args) -> tuple[Path | None, bool]:
+    """解析打点文件路径，返回 (path, silent)。
+
+    优先级：显式 --batch/--file > 环境变量 CDP_BATCH_ID > log 目录唯一
+    timings 文件；均不可得时返回 (None, True)——静默跳过（脚本自动 mark
+    拿不到 batch 属正常降级，调用方返回 0 不阻断，失败不阻断口径不变）。
+    多文件且无 CDP_BATCH_ID 时同样静默跳过（防误标其他批次的打点文件，
+    不再按文件名倒序盲取最新）。
+    """
+    batch = getattr(args, "batch", None)
+    if batch:
+        return _timing_path(batch), False
+    if getattr(args, "file", None):
+        return Path(args.file), False
+    env_id = os.environ.get("CDP_BATCH_ID", "").strip()
+    if env_id:
+        return _timing_path(env_id), False
+    files = sorted(log_apply_dir().glob("timings-*.json"))
+    if len(files) == 1:
+        return files[0], False
+    if not files:
+        print("info: 无打点文件且无 CDP_BATCH_ID，静默跳过（未 start）",
+              file=sys.stderr)
+    else:
+        print(f"info: log 目录 {len(files)} 个打点文件且无 CDP_BATCH_ID，"
+              "静默跳过（仅唯一文件自动识别）", file=sys.stderr)
+    return None, True
 
 
 def _load(path: Path):
@@ -77,15 +110,28 @@ def _cmd_start(batch_id: str) -> int:
     return 0
 
 
-def _cmd_mark(path: Path, name: str) -> int:
-    """mark：追加一个时间戳；未 start 返 3（AI 漏 start 可发现）。"""
+def _cmd_mark(path: Path, name: str, zero: bool = False) -> int:
+    """mark：追加一个时间戳；未 start 返 3（AI 漏 start 可发现）。
+
+    zero=True 记零 mark：wall 取最近 mark（无 mark 则 start_wall）同一时刻——
+    跳过段（如无编译/无上板时的 sync/build/push/unit_test）以 0 耗时占位，
+    收据 timings 段完整可归因（缺段 vs 0 耗时语义不同：缺段=去向不明）。
+    """
     data = _load(path)
     if data is None:
         print(f"error: 未 start（缺打点文件 {path}），先执行 cdp_timing.py start", file=sys.stderr)
         return 3
-    data.setdefault("marks", []).append({"name": name, "wall": _wall()})
+    if zero:
+        marks = data.get("marks") or []
+        wall = marks[-1]["wall"] if marks else data.get("start_wall")
+        if wall is None:
+            print("error: 无 start_wall 且无 marks，无法记零", file=sys.stderr)
+            return 3
+    else:
+        wall = _wall()
+    data.setdefault("marks", []).append({"name": name, "wall": wall})
     _save(path, data)
-    print(f"mark: {name} @ {_wall():.3f}")
+    print(f"mark: {name} @ {wall:.3f}" + ("（零耗时占位）" if zero else ""))
     return 0
 
 
@@ -124,6 +170,8 @@ def main(argv=None) -> int:
     p_mark = sub.add_parser("mark", help="追加一个时间戳")
     p_mark.add_argument("--name", required=True, help="阶段名（如 precheck/edit/verify_build）")
     p_mark.add_argument("--batch", default=None, help="12 位 batch_id（缺省从打点目录取最新）")
+    p_mark.add_argument("--zero", action="store_true",
+                        help="记零 mark：wall 取最近 mark 同刻（跳过段占位，段耗时 0）")
 
     p_finish = sub.add_parser("finish", help="计算段耗时并落盘")
     p_finish.add_argument("--file", default=None, help="打点文件路径（缺省取最新）")
@@ -147,21 +195,17 @@ def main(argv=None) -> int:
         return _cmd_start(batch_id)
 
     path = None
+    silent = False
     if args.cmd in ("mark", "finish"):
-        if getattr(args, "batch", None):
-            path = _timing_path(args.batch)
-        elif getattr(args, "file", None):
-            path = Path(args.file)
-        else:
-            # 缺省取最新打点文件（AI 不显式传 batch 时容错；按文件名倒序取首个）
-            files = sorted(log_apply_dir().glob("timings-*.json"), reverse=True)
-            path = files[0] if files else None
+        path, silent = _resolve_timing_path(args)
+        if silent:
+            return 0
         if path is None:
             print("error: 找不到打点文件（未 start 或目录为空）", file=sys.stderr)
             return 3
 
     if args.cmd == "mark":
-        return _cmd_mark(path, args.name)
+        return _cmd_mark(path, args.name, zero=args.zero)
     if args.cmd == "finish":
         return _cmd_finish(path)
     return 2

@@ -57,14 +57,23 @@ stages:
 ## 工作流（参考实现细节）
 0. 耗时打点（模式 A 可选）：打点文件由 apply 侧 start（batch_id 经
    cdp_parse.batch_id_from_text 解析，文件 harness/log/cross-device/
-   timings-<batch_id>.json）；文件存在则在阶段切换 mark（命令：
-   python3 harness/skills/cross-device/lib/python/cdp_timing.py mark
-   --name <阶段名>，缺省取最新打点文件；文件不存在/未 start 则跳过，warn 不阻断）。
-   loop 多轮时阶段名带轮次前缀 run_<n>_<stage>（如 run_2_verify_build）区分重试轮。
+   timings-<batch_id>.json）。**各验证阶段由脚本自动打点**（sync/build/push/
+   unit_test/acceptance 各一段，脚本完成即 mark，失败不阻断口径不变）：
+   - sync：sync_code_to_workspace.py --auto 闭环完成自动 mark verify_sync
+   - build：编译由执行者完成时触发（cdp_timing.py mark --name verify_build；
+     batch 识别走 CDP_BATCH_ID 环境变量 > log 目录唯一 timings 文件，均缺
+     静默跳过返 0，不阻断）
+   - push：ws_adb_connect.py ensure 连接成功自动 mark verify_push（推送
+     前置连接就绪即推送段终点，产物 adb push 紧随其后秒级）
+   - unit_test：ws_upload_tests.py 执行完成自动 mark verify_unit_test
+   - acceptance：ws_acceptance.py run 完成自动 mark verify_acceptance
+   loop 多轮时阶段名带轮次前缀 run_<n>_<stage>（如 run_2_verify_build）
+   区分重试轮（脚本自动 mark 缺轮次上下文时由执行者以 run_<n>_<stage>
+   触发 verify_build 段）。
 1. 同步：python3 harness/skills/sync-code-to-workspace/sync_code_to_workspace.py --auto
    （同步源 = code 工作树当前状态；范围 = code/rpi5/{aosp,kernel}；
    data/verify-results、others/、rpi-zero2w 不参与同步）
-   完成打点：--name verify_sync
+   同步段打点（verify_sync）：脚本闭环完成自动 mark，无需手动
 2. 影响面判定：git status --porcelain + git diff --name-only → 分类
    （aosp 模块 / 内核 / boot 相关 / others 不同步）
 3. 编译：按 harness/config/verify-cases.yaml modules 段执行（不再硬编码）：
@@ -79,23 +88,24 @@ stages:
    - 打包：mk_rpi5_full_image.sh -mode 2|3|4（BLD-007 sudo 打包显式传
      TARGET_PRODUCT+ANDROID_PRODUCT_OUT；BLD-008 选对 mode）
    - 全程：INC-001 禁 make clean/clobber；BLD-009 CCACHE_DIR=out/ccache
-   编译完成打点：--name verify_build
+   编译段打点（verify_build）：编译完成由执行者触发
+   （cdp_timing.py mark --name verify_build，失败不阻断）
 4. adb 推送：python3 harness/skills/workspace-verify/ws_adb_connect.py ensure --rescue
    （mDNS→静态 fallback→串口救援自接：推送前置必须连上设备，本步中止则步骤 5
    不执行，不能等编排层兜底；成功输出 endpoint）
    adb root && adb remount（INC-003 失败查 verifiedbootstate=orange；INC-005 需 userdebug）
    → 按 modules.<模块>.push 映射 push 编译产物到对应分区路径（分区有别：
    daemon 无 vendor 落 /system，HAL 有 vendor 落 /vendor，均含 bin 与 init 两处）
-   → 重启服务或 reboot
-    （boot.img 刷写只写第一分区 INC-004，且属人工确认门）
-   推送完成打点：--name verify_push
+→ 重启服务或 reboot
+     （boot.img 刷写只写第一分区 INC-004，且属人工确认门）
+   推送段打点（verify_push）：ws_adb_connect ensure 连接成功自动 mark，无需手动
 4b. 设备侧单测执行（制度化，AGENTS.md 测试防护强制）：
     python3 harness/skills/workspace-verify/ws_upload_tests.py
     （从 verify-cases.yaml modules 段读 test_targets，覆盖 lcview/lciod 全部
     unit_test 与 hal_test；nativetest push 到设备运行 gtest 并汇总——
     仅编译不执行不达标，C++ 单测长期只编译不执行是 nextSeqFor 真 bug
     未被发现的根因；任一失败须修复后重跑，全部通过才进步骤 5）
-   单测完成打点：--name verify_unit_test
+   单测段打点（verify_unit_test）：脚本执行完成自动 mark，无需手动
 5. 验收：python3 harness/skills/workspace-verify/ws_acceptance.py run --case <用例标签>
    （--case 为一等入口（默认 lcview-liveness），从 verify-cases.yaml cases 段取验收文本，
    与 L19/L26 一致；手打验收文本（--acceptance）为兜底；
@@ -105,8 +115,8 @@ stages:
    logcat 时间窗从该时刻起，避免命中上轮旧日志致假绿；--log-since 自动按设备
    时钟/时区换算（本地 CST 时刻映射到设备 UTC 域，PIT-5 复发防护——直接传本地
    时刻会让窗落在设备"未来"取回 0 字符判红，已复发三次，勿再人工换算）；
-   模式 B 加 --ensure-boot——验收无 boot 标签时自动追加，兑现 L20 设备存活最低判据）
-   验收完成打点：--name verify_acceptance
+模式 B 加 --ensure-boot——验收无 boot 标签时自动追加，兑现 L20 设备存活最低判据）
+   验收段打点（verify_acceptance）：脚本执行完成自动 mark，无需手动
 6. 收据：python3 harness/skills/workspace-verify/ws_report.py \
    --acceptance "<步骤 5 逐项结果 JSON>" \
    --summary "<一句话>" --result <pass|fail|skip> --build <pass|fail|skip> --board <pass|fail|skip> \

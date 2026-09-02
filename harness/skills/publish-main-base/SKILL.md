@@ -26,8 +26,9 @@ sync-code-to-doc**——不复制任何子 skill 的实现逻辑。
 - 当前分支 dev；工作树干净；origin 可达
 - 最新收据 pass/skip 且最近内容提交父 == verified_commit（快路径）；
   否则自动进入验证路径（阶段 2）
-- known-issues 门禁：promote 强制 `--task <id>`；目标任务下存在 origin=introduced
-  或 blocking 且 status!=fixed 的问题即拒
+- known-issues 门禁：promote 不强制 `--task`（门禁无条件执行，缺省由
+  check-issues 推断唯一活跃任务，推断失败即拒）；目标任务下存在
+  origin=introduced 或 blocking 且 status!=fixed 的问题即拒
 ## Human confirmation gates（人工确认门）
 - 阶段 2 验证 fail 轮的**修改方案须人工确认**（涉及业务代码改动，用户对改动负责）；
   确认后修复 → 重验 pass 后**二次确认**才进 promote
@@ -115,7 +116,7 @@ bash harness/skills/publish-main-base/publish_main_base.sh --prepare [--task <id
 ### 阶段 6：promote
 ```bash
 bash harness/skills/publish-main-base/publish_main_base.sh --promote \
-  --baseline-id <id> --message-file <f> --task <id> [--approved-by <id>]
+  --baseline-id <id> --message-file <f> [--task <id>] [--approved-by <id>]
 ```
 （squash 会把阶段 5 文档改动一并并入 main；--approved-by 缺省为 lechao；
 失败自动 rollback_promote）
@@ -125,5 +126,5 @@ bash harness/skills/publish-main-base/publish_main_base.sh --promote \
 （核对 origin/main == origin/dev == 本地 dev）
 ## 退出码（publish_main_base.sh）
 0 成功（含 check-only 干跑）/ 1 校验失败（前置校验、fetch 与登记提交失败；promote 中途
-merge/squash 失败已 rollback 回退 dev）/ 2 push 类失败 / 3 参数错误（含 promote 缺
---task）/ 4 dev 无领先提交
+merge/squash 失败已 rollback 回退 dev）/ 2 push 类失败 / 3 参数错误
+/ 4 dev 无领先提交
