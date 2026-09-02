@@ -63,3 +63,4 @@
 2026-09-02 15:17:17 e656cfe14c13 skip build=skip board=skip acc=- 打点定位改指针制并固化段名常量表（-s 无需上板）
 2026-09-02 16:37:46 4f10012c115e skip build=skip board=skip acc=- 缺段可见与 trend 带耗时并登记打点起点缺陷（-s 无需上板） | {"elapsed_s":233,"segs":{"precheck":15.114,"edit":184.035,"apply_selfcheck":22.029,"report":12.406,"finish":0.02}}
 2026-09-02 17:48:34 e3e823bdb0eb skip build=skip board=skip acc=- edit 段细分与缺段判定按模式收窄（-s 无需上板） | {"elapsed_s":446,"segs":{"precheck":34.985,"edit":381.14,"apply_selfcheck":21.703,"report":8.256,"finish":0.02}}
+2026-09-02 18:10:41 fe4130528980 skip build=skip board=skip acc=- 条件段不判缺并补 edit 打点约定与复盘判据（-s 无需上板） | {"elapsed_s":250,"segs":{"precheck":74.534,"edit":145.515,"apply_selfcheck":20.984,"report":9.112,"finish":0.021}}

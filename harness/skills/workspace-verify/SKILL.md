@@ -67,9 +67,8 @@ stages:
      前置连接就绪即推送段终点，产物 adb push 紧随其后秒级）
    - unit_test：ws_upload_tests.py 执行完成自动 mark verify_unit_test
    - acceptance：ws_acceptance.py run 完成自动 mark verify_acceptance
-   loop 多轮时阶段名带轮次前缀 run_<n>_<stage>（如 run_2_verify_build）
-   区分重试轮（脚本自动 mark 缺轮次上下文时由执行者以 run_<n>_<stage>
-   触发 verify_build 段）。
+   重试轮沿用同段名 mark，不追加轮次前缀（段名保持稳定供复盘按段统计）；
+   脚本自动 mark 缺轮次上下文时由执行者触发对应段。
 1. 同步：python3 harness/skills/sync-code-to-workspace/sync_code_to_workspace.py --auto
    （同步源 = code 工作树当前状态；范围 = code/rpi5/{aosp,kernel}；
    data/verify-results、others/、rpi-zero2w 不参与同步）

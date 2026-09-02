@@ -383,9 +383,10 @@ class TestWsReport(unittest.TestCase):
         self.assertIn('"elapsed_s": 1.0', content)
 
     def test_timings_missing_none_mode_narrows(self):
-        # 方向 1：-s（verify_mode=none）missing 判定按 none 模式收窄——应有
-        # 段集 = KNOWN_SEGMENTS 去掉 verify_* 五段（无 verify 环节不再误报缺
-        # verify 段）；多余段（finish 兜底段）不删、耗时原样保留
+        # 方向 1/2：-s（verify_mode=none）missing 判定收窄——应有段集先减
+        # CONDITIONAL_SEGMENTS（edit_validate/gen_manifest/edit_plan/edit_retry
+        # 未产出不判缺），再减 verify_* 五段（无 verify 环节）；多余段（finish
+        # 兜底段）不删、耗时原样保留
         batch = self._write(VALID_S, ".cdp")
         body = self._write("## 现场\n")
         timings = json.dumps({
@@ -406,9 +407,14 @@ class TestWsReport(unittest.TestCase):
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         content = details[0].read_text(encoding="utf-8")
         self.assertIn('"missing"', content)
-        # none 模式应有段集（去 verify_*）：本批仅 precheck/edit → 缺以下 4 段
-        for seg in ("edit_validate", "gen_manifest", "apply_selfcheck", "report"):
+        # none 模式应有段集（去条件段 + 去 verify_*）：本批仅 precheck/edit
+        # → 缺 apply_selfcheck/report
+        for seg in ("apply_selfcheck", "report"):
             self.assertIn(f'"{seg}"', content, f"none 模式缺段 {seg} 应列 missing")
+        # 条件段未产出不判缺（edit_validate/gen_manifest/edit_plan/edit_retry）
+        for seg in ("edit_validate", "gen_manifest", "edit_plan", "edit_retry"):
+            self.assertNotIn(f'"{seg}"', content,
+                             f"条件段 {seg} 未产出不应在 missing")
         # verify_* 五段不应在 missing（none 模式收窄，无 verify 环节）
         for seg in ("verify_sync", "verify_build", "verify_push",
                     "verify_unit_test", "verify_acceptance"):
@@ -421,8 +427,9 @@ class TestWsReport(unittest.TestCase):
         self.assertIn('"finish"', content)
 
     def test_timings_missing_board_full_table(self):
-        # 方向 1：-sv（verify_mode=board）missing 按全表判定，verify_* 缺段可见
-        # （board 模式有 verify 环节，缺段须显式暴露供 emit 定位）
+        # 方向 1/2：-sv（verify_mode=board）missing 按全表判定，verify_* 缺段
+        # 可见（board 模式有 verify 环节），但条件段（edit_validate 等）未产出
+        # 仍不判缺
         batch = self._write(VALID_SV, ".cdp")
         body = self._write("## 现场\n")
         timings = json.dumps({
@@ -443,13 +450,16 @@ class TestWsReport(unittest.TestCase):
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         content = details[0].read_text(encoding="utf-8")
         self.assertIn('"missing"', content)
+        # board 模式应有段集 = 全表去条件段：本批仅 precheck → verify_* 全缺
         for seg in ("verify_sync", "verify_build", "verify_push",
                     "verify_unit_test", "verify_acceptance"):
             self.assertIn(f'"{seg}"', content,
                           f"board 模式缺段 {seg} 应列 missing（全表判定）")
-        # board 模式亦须报 edit 段内细分缺段（edit_validate/gen_manifest）
-        self.assertIn('"edit_validate"', content)
-        self.assertIn('"gen_manifest"', content)
+        self.assertIn('"edit"', content, "board 模式本批未打 edit 应列 missing")
+        # 条件段未产出不判缺（board 模式亦然）
+        for seg in ("edit_validate", "gen_manifest", "edit_plan", "edit_retry"):
+            self.assertNotIn(f'"{seg}"', content,
+                             f"条件段 {seg} 未产出不应在 missing（board 亦然）")
 
     def test_timings_trend_carries_elapsed_and_segs(self):
         # 方向 3：ws_report 向 append_trend 传 timing 参数，trend 行尾含

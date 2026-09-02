@@ -51,6 +51,7 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
    通过后打点（必做）：cdp_timing.py mark --batch <batch_id> --name precheck
    （batch_id 取本步输出；未 start 时 mark 返 3 仅提示，不阻断）
 4. 编辑：按批次意图/方向编辑 code/ 全目录：
+   读取批次方向后打点（必做）：cdp_timing.py mark --batch <batch_id> --name edit_plan
    - code/rpi5/{aosp,kernel}/{new,modified}、code/rpi5/others、code/rpi-zero2w：全量文件直接编辑
    - modified/*.diff：hunk 内编辑（+ 行/已有 context），禁引入新 context；
      每个编辑过的 .diff 跑 cdp_validate_patch.py 做结构/语义校验（不传 --against，
@@ -59,6 +60,7 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
      python3 harness/skills/cross-device/lib/python/cdp_validate_patch.py <diff 文件>
    - 涉及 code/rpi5 时：python3 harness/skills/cross-device/lib/python/gen_manifest.py
      （重生成 code/rpi5/manifest.yaml，patch↔workspace 结构映射；sync-workspace-to-code 已删除）
+编辑自愈重试前打点：cdp_timing.py mark --batch <batch_id> --name edit_retry
 编辑完成打点（必做）：cdp_timing.py mark --batch <batch_id> --name edit
 5. 分流：
    - -sv → 显式执行 /loop-engineering（模式 A）：

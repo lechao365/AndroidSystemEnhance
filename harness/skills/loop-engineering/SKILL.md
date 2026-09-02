@@ -67,8 +67,8 @@ stages:
 2. 执行轮次（run 给出指引，AI 按 workspace-verify SKILL 步骤 1-6 执行）：
    python3 harness/skills/loop-engineering/ws_session.py run --session <json>
    （模式 A 链路耗时打点：apply 侧已 start 打点文件，本轮 verify 内部各阶段
-   mark 名带轮次前缀 run_<n>_<stage>，如 run_2_verify_build——区分重试轮，
-   收据 timings 可看出每轮各阶段耗时；未 start 则跳过，warn 不阻断）
+   沿用同段名 mark（不追加轮次前缀，段名稳定供复盘按段统计），收据
+   timings 可看出各段耗时；未 start 则跳过，warn 不阻断）
 3. 收据落盘后记账：
    python3 harness/skills/loop-engineering/ws_session.py done --session <json>
      --receipt <收据路径> [--stage sync|build|unit_test|push|acceptance]

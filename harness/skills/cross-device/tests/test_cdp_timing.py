@@ -255,10 +255,19 @@ class TestCdpTiming(unittest.TestCase):
 
     # ── 方向 5：段名常量表，表外名仅 warn 不阻断 ───────────────────────
     def test_known_segments_include_edit_sub_stages(self):
-        # 方向 2：KNOWN_SEGMENTS 增 edit_validate 与 gen_manifest（edit 段细分，
-        # cdp_validate_patch/gen_manifest 自发 mark 不告警）
-        self.assertIn("edit_validate", cdp_timing.KNOWN_SEGMENTS)
-        self.assertIn("gen_manifest", cdp_timing.KNOWN_SEGMENTS)
+        # 方向 2：KNOWN_SEGMENTS 增 edit_validate/gen_manifest/edit_plan/edit_retry
+        # （edit 段细分 + 编辑打点约定），自发/约定 mark 不告警
+        for seg in ("edit_validate", "gen_manifest", "edit_plan", "edit_retry"):
+            self.assertIn(seg, cdp_timing.KNOWN_SEGMENTS)
+
+    def test_conditional_segments_defined(self):
+        # 方向 1：CONDITIONAL_SEGMENTS 含 4 个条件段（未产出不判缺），
+        # 且为 KNOWN_SEGMENTS 子集（表内 mark 不告警）
+        self.assertEqual(cdp_timing.CONDITIONAL_SEGMENTS,
+                         frozenset({"edit_validate", "gen_manifest",
+                                    "edit_plan", "edit_retry"}))
+        self.assertLessEqual(cdp_timing.CONDITIONAL_SEGMENTS,
+                             cdp_timing.KNOWN_SEGMENTS)
 
     def test_mark_known_segment_no_warn(self):
         # 表内段名（如 verify_acceptance）不告警

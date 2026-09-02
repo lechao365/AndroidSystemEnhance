@@ -108,7 +108,8 @@ def _resolve_timings(timings_file, batch_id, verify_mode="board"):
               "timings 置空", file=sys.stderr)
         return "", None
     try:
-        from cdp_timing import KNOWN_SEGMENTS, compute_segments
+        from cdp_timing import CONDITIONAL_SEGMENTS, KNOWN_SEGMENTS, \
+            compute_segments
         t = json.loads(Path(timings_file).read_text(encoding="utf-8"))
         if not isinstance(t, dict):
             raise ValueError("非 JSON 对象")
@@ -120,14 +121,16 @@ def _resolve_timings(timings_file, batch_id, verify_mode="board"):
             raise ValueError("缺 segments/marks（非 cdp_timing 打点结构）")
         wall_start = t.get("start_wall") or t.get("wall_start")
         wall_end = t.get("wall_end") or time.time()
-        # 缺段可见性：按 verify_mode 取应有段集（none 去掉 verify_* 五段、
-        # board 全表），缺失者以 missing 键写入收据 timings（emit 一眼看出
-        # 哪些链路段没打点）；多余段（finish/push 等表外名）不删，耗时原样
-        # 保留可归因。
+        # 缺段可见性：应有段集在两种模式下均先减 CONDITIONAL_SEGMENTS
+        # （edit_validate/gen_manifest/edit_plan/edit_retry 未产出不判缺），
+        # none 模式再减 verify_* 五段（无 verify 环节）；缺失者以 missing 键
+        # 写入收据 timings（emit 一眼看出哪些链路段没打点）；多余段
+        # （finish/push 等表外名）不删，耗时原样保留可归因。
         names = {s.get("name") for s in segments
                  if isinstance(s, dict) and s.get("name")}
-        expected = (KNOWN_SEGMENTS - _VERIFY_PREFIX_SEGMENTS
-                    if verify_mode == "none" else KNOWN_SEGMENTS)
+        expected = KNOWN_SEGMENTS - CONDITIONAL_SEGMENTS
+        if verify_mode == "none":
+            expected = expected - _VERIFY_PREFIX_SEGMENTS
         missing = sorted(expected - names)
         out = {
             "batch_id": t.get("batch_id", ""),
