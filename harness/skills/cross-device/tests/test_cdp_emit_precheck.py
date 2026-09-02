@@ -95,6 +95,21 @@ class TestEmitPrecheck(unittest.TestCase):
         self.assertIn("未推送", reason)
         self.assertIn("333333333333", reason)
 
+    # ── 分支 4：祖先判定不成立但收据文件被 origin/dev 跟踪 → 放行 ──
+    def test_unpushed_by_ancestry_but_receipt_tracked_pass(self):
+        # 祖先判定不成立（origin/dev 停在 verified_commit，equality 分支）时
+        # 回落检查最新收据文件是否已被 origin/dev 跟踪：收据随 commit 入库
+        # （squash/rebase 重写历史后 verified_commit 不再可达），被跟踪则视为
+        # 已推送放行
+        sha = self._head12()
+        self._write_receipt("444444444444", sha)
+        self._commit_all()  # 收据入库提交 → data/verify-results 被 dev 跟踪
+        self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        ok, reason, detail = cdp_emit_precheck.precheck(self.root, do_pull=False)
+        self.assertTrue(ok, reason)
+        self.assertEqual(reason, "")
+        self.assertEqual(detail, "")
+
     # ── KIR-005 存量告警：open/scheduled 条数阈值 8，只告警不阻断 ──
     def _write_index(self, n_open, extra_status=()):
         d = self.root / "data" / "known-issues"

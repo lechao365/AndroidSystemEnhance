@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -206,6 +207,25 @@ class TestRescue(unittest.TestCase):
 
 
 class TestEnsureConnectedRescueLevel(unittest.TestCase):
+    """ensure 编排（ensure CLI 触发 _mark_stage("verify_push") 自动打点）：
+
+    须隔离 CDP_PROJECT_ROOT——_mark_stage 无显式 batch 时按 current-batch.json
+    回落定位批次（cdp_timing 方向 3），不隔离会打到真实当前批次打点文件。
+    打点非本类验证目标，隔离到临时目录即可。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old_root = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+
+    def tearDown(self):
+        if self._old_root is None:
+            os.environ.pop("CDP_PROJECT_ROOT", None)
+        else:
+            os.environ["CDP_PROJECT_ROOT"] = self._old_root
+        self._tmp.cleanup()
+
     def test_third_level_rescue_connects(self):
         # mDNS 与静态皆败 → rescue 取端点 → connect 复核在线（第三级通道，
         # rescue_enabled 由调用方显式开）

@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import sys
@@ -149,24 +151,33 @@ class TestCdpTiming(unittest.TestCase):
         data = json.loads(self._path().read_text(encoding="utf-8"))
         self.assertEqual(data["marks"][0]["name"], "verify_acceptance")
 
-    def test_mark_silent_skip_no_source(self):
-        # 无 env 且目录多文件（无法唯一识别）→ 静默跳过返 0，不写任何文件
+    def test_mark_multi_start_uses_latest_current_batch(self):
+        # 多次 start 后 current-batch.json 指向最近批次，自动 mark 落到本批；
+        # 归档机制把旧批移入 archive/，工作态顶层仅当前批
         self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
         self.assertEqual(cdp_timing.main(["start", "--batch", "fedcba654321"]), 0)
-        before = sorted(p.name for p in cdp_paths.log_apply_dir().glob("timings-*.json"))
         self.assertEqual(cdp_timing.main(["mark", "--name", "verify_sync"]), 0)
-        after = sorted(p.name for p in cdp_paths.log_apply_dir().glob("timings-*.json"))
-        self.assertEqual(before, after, "多文件且无 env 应静默跳过，不得误标")
+        d = cdp_paths.log_apply_dir()
+        data = json.loads((d / "timings-fedcba654321.json").read_text(encoding="utf-8"))
+        self.assertEqual(data["marks"][0]["name"], "verify_sync",
+                         "current-batch 应定位最近批")
+        top = sorted(p.name for p in d.glob("timings-*.json"))
+        self.assertEqual(top, ["timings-fedcba654321.json"], "旧批应已归档")
 
-    def test_mark_silent_skip_empty_dir(self):
-        # 无 env 且目录无打点文件 → 静默跳过返 0（脚本自动 mark 未 start 不阻断）
-        self.assertEqual(cdp_timing.main(["mark", "--name", "verify_sync"]), 0)
+    def test_mark_skip_empty_dir_warns(self):
+        # 无打点且无 current-batch.json（未 start）：stderr warn 后 rc 0
+        # （取消静默跳过：缺打点不再无提示，仍不阻断）
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = cdp_timing.main(["mark", "--name", "verify_sync"])
+        self.assertEqual(rc, 0)
+        self.assertIn("warn", err.getvalue())
+        self.assertIn("current-batch.json", err.getvalue())
 
     def test_mark_explicit_batch_overrides_env(self):
-        # 显式 --batch 优先于环境变量（env 指向另一文件时写显式目标）
+        # 显式 --batch 优先于环境变量（env 指向未 start 文件时仍写显式目标）
         self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
-        self.assertEqual(cdp_timing.main(["start", "--batch", "fedcba654321"]), 0)
-        os.environ["CDP_BATCH_ID"] = "fedcba654321"
+        os.environ["CDP_BATCH_ID"] = "envbatch123456"
         try:
             self.assertEqual(
                 cdp_timing.main(["mark", "--batch", self.batch, "--name", "precheck"]), 0)
@@ -202,6 +213,72 @@ class TestCdpTiming(unittest.TestCase):
                              "verify_sync", "--zero"]), 0)
         data = json.loads(self._path().read_text(encoding="utf-8"))
         self.assertEqual(data["marks"][0]["wall"], data["start_wall"])
+
+    # ── 方向 2：start 落 current-batch.json + 归档历史 timings ─────────
+    def test_start_writes_current_batch(self):
+        # start 落 current-batch.json 记 batch_id（自动 mark/finish 定位本批）
+        self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
+        cb = json.loads((cdp_paths.log_apply_dir() / "current-batch.json")
+                        .read_text(encoding="utf-8"))
+        self.assertEqual(cb["batch_id"], self.batch)
+
+    def test_start_archives_previous_timings(self):
+        # 再次 start 把已有 timings 移入 archive/ 子目录，工作态顶层仅当前批
+        self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
+        self.assertEqual(cdp_timing.main(["mark", "--batch", self.batch,
+                                          "--name", "precheck"]), 0)
+        batch2 = "fedcba654321"
+        self.assertEqual(cdp_timing.main(["start", "--batch", batch2]), 0)
+        d = cdp_paths.log_apply_dir()
+        top = sorted(p.name for p in d.glob("timings-*.json"))
+        self.assertEqual(top, [f"timings-{batch2}.json"], "旧批应归档，顶层仅当前批")
+        archived = sorted(p.name for p in (d / "archive").glob("timings-*.json"))
+        self.assertEqual(archived, [f"timings-{self.batch}.json"])
+        cb = json.loads((d / "current-batch.json").read_text(encoding="utf-8"))
+        self.assertEqual(cb["batch_id"], batch2, "current-batch 应指向最近批")
+
+    # ── 方向 3：第三级回落读 current-batch.json，多文件共存仍定位本批 ──
+    def test_mark_uses_current_batch_multiple_files(self):
+        # current-batch.json 为自动识别指针：即使顶层残留多个 timings 文件
+        # （历史遗留/手工放置，未走 start 归档）仍定位 current-batch 本批
+        self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
+        leftover = cdp_paths.log_apply_dir() / "timings-zzzzzzzzzzzz.json"
+        leftover.write_text(json.dumps(
+            {"batch_id": "zzzzzzzzzzzz", "start_wall": 1.0, "marks": []}),
+            encoding="utf-8")
+        self.assertEqual(cdp_timing.main(["mark", "--name", "verify_sync"]), 0)
+        data = json.loads(self._path().read_text(encoding="utf-8"))
+        self.assertEqual(data["marks"][0]["name"], "verify_sync",
+                         "current-batch 应定位本批打点文件")
+        ldata = json.loads(leftover.read_text(encoding="utf-8"))
+        self.assertEqual(ldata["marks"], [], "残留文件不得被误标")
+
+    # ── 方向 5：段名常量表，表外名仅 warn 不阻断 ───────────────────────
+    def test_mark_known_segment_no_warn(self):
+        # 表内段名（如 verify_acceptance）不告警
+        self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = cdp_timing.main(["mark", "--batch", self.batch,
+                                  "--name", "verify_acceptance"])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("warn", err.getvalue())
+
+    def test_mark_unknown_segment_warns(self):
+        # 表外段名 stderr warn 但不阻断（rc 0，仍记录）
+        self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = cdp_timing.main(["mark", "--batch", self.batch,
+                                  "--name", "unknown_stage"])
+        self.assertEqual(rc, 0)
+        self.assertIn("warn", err.getvalue())
+        self.assertIn("unknown_stage", err.getvalue())
+        self.assertIn("verify_acceptance", err.getvalue(),
+                      "warn 应附常量表名便于对照")
+        data = json.loads(self._path().read_text(encoding="utf-8"))
+        self.assertEqual(data["marks"][0]["name"], "unknown_stage",
+                         "表外名仍记录，仅告警")
 
 
 if __name__ == "__main__":

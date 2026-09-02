@@ -60,3 +60,4 @@
 2026-09-02 10:46:02 manual-2609021046 skip build=skip board=skip acc=- 补全收据 7833c640079a cases 证据字段（-s 无需上板）
 2026-09-02 11:13:23 8c449df08c19 skip build=skip board=skip acc=- 收据 cases 自动落盘并禁事后改历史收据（-s 无需上板）
 2026-09-02 12:59:01 c6431ee59ed3 skip build=skip board=skip acc=- 尾段细分打点让收据兜底段可归因（-s 无需上板）
+2026-09-02 15:17:17 e656cfe14c13 skip build=skip board=skip acc=- 打点定位改指针制并固化段名常量表（-s 无需上板）

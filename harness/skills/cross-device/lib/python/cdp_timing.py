@@ -10,8 +10,9 @@
     cdp_timing.py mark --name <阶段名>        # 记录一个时间戳
     cdp_timing.py finish [--file <path>]      # 计算相邻段耗时并落盘
 mark/finish 的 batch 识别（脚本自动打点依赖）：显式 --batch/--file >
-环境变量 CDP_BATCH_ID > log 目录唯一 timings 文件；均不可得时静默跳过
-（返回 0，失败不阻断口径）。
+环境变量 CDP_BATCH_ID > current-batch.json（start 落盘记录当前批次指针，
+多文件共存仍定位本批）；该级取不到时 stderr warn 后返 0（取消静默跳过，
+失败不阻断口径）。
 退出码: 0 正常 / 2 参数错误 / 3 未 start 即 mark/finish（显式来源时）
 打点文件: <project_root>/harness/log/cross-device/timings-<batch_id>.json
 （gitignore 工作态；ws_report --timings-file 读原始打点文件经 compute_segments
@@ -35,19 +36,70 @@ from cdp_parse import batch_id_from_text
 from cdp_paths import log_apply_dir
 
 
+# 链路阶段名常量表：apply/verify 已知链路段。mark 表外名仅 stderr warn
+# 不阻断（仍记录），供 emit 侧定位耗时瓶颈时识别未知段（方向 5 固化）。
+KNOWN_SEGMENTS = frozenset([
+    "precheck", "edit", "verify_sync", "verify_build", "verify_push",
+    "verify_unit_test", "verify_acceptance", "apply_selfcheck", "report",
+])
+
+
 def _timing_path(batch_id: str) -> Path:
     """打点文件路径：timings-<batch_id>.json（工作态目录）。"""
     return log_apply_dir() / f"timings-{batch_id}.json"
 
 
+def _current_batch_path() -> Path:
+    """current-batch.json：start 落盘记录当前批次指针（自动 mark/finish 定位）。"""
+    return log_apply_dir() / "current-batch.json"
+
+
+def _write_current_batch(batch_id: str) -> None:
+    """start 落 current-batch.json 记 batch_id（原子写，中断不留半写态）。"""
+    p = _current_batch_path()
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"batch_id": batch_id}, ensure_ascii=False) + "\n",
+                   encoding="utf-8")
+    tmp.replace(p)
+
+
+def _read_current_batch() -> str | None:
+    """读 current-batch.json 的 batch_id；缺失/损坏返回 None。"""
+    try:
+        data = json.loads(_current_batch_path().read_text(encoding="utf-8"))
+        bid = (data or {}).get("batch_id", "").strip()
+        return bid or None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _archive_previous_timings(current_batch_id: str) -> None:
+    """start 归档：把工作态目录已有 timings（当前批次除外）移入 archive/ 子目录。
+
+    保持工作态目录只留当前批打点文件 + current-batch.json（多批残留会让
+    自动识别歧义）；archive/ 仅供人工/emit 查阅历史，不参与自动定位
+    （glob 不递归）。当前批次文件保留在工作态顶层（start 覆盖重建）。
+    """
+    d = log_apply_dir()
+    archive = d / "archive"
+    moved = 0
+    for f in sorted(d.glob("timings-*.json")):
+        if f.name == f"timings-{current_batch_id}.json":
+            continue
+        archive.mkdir(parents=True, exist_ok=True)
+        f.replace(archive / f.name)
+        moved += 1
+    if moved:
+        print(f"info: {moved} 份历史打点文件归档到 {archive}", file=sys.stderr)
+
+
 def _resolve_timing_path(args) -> tuple[Path | None, bool]:
     """解析打点文件路径，返回 (path, silent)。
 
-    优先级：显式 --batch/--file > 环境变量 CDP_BATCH_ID > log 目录唯一
-    timings 文件；均不可得时返回 (None, True)——静默跳过（脚本自动 mark
-    拿不到 batch 属正常降级，调用方返回 0 不阻断，失败不阻断口径不变）。
-    多文件且无 CDP_BATCH_ID 时同样静默跳过（防误标其他批次的打点文件，
-    不再按文件名倒序盲取最新）。
+    优先级：显式 --batch/--file > 环境变量 CDP_BATCH_ID > current-batch.json
+    （start 落盘记录当前批次指针，多文件共存仍定位本批）。该级取不到时
+    stderr warn 后返 0（取消静默跳过：缺打点不再无提示，调用方仍不阻断，
+    失败不阻断口径不变）。
     """
     batch = getattr(args, "batch", None)
     if batch:
@@ -57,15 +109,11 @@ def _resolve_timing_path(args) -> tuple[Path | None, bool]:
     env_id = os.environ.get("CDP_BATCH_ID", "").strip()
     if env_id:
         return _timing_path(env_id), False
-    files = sorted(log_apply_dir().glob("timings-*.json"))
-    if len(files) == 1:
-        return files[0], False
-    if not files:
-        print("info: 无打点文件且无 CDP_BATCH_ID，静默跳过（未 start）",
-              file=sys.stderr)
-    else:
-        print(f"info: log 目录 {len(files)} 个打点文件且无 CDP_BATCH_ID，"
-              "静默跳过（仅唯一文件自动识别）", file=sys.stderr)
+    cur = _read_current_batch()
+    if cur:
+        return _timing_path(cur), False
+    print("warn: 无显式 --batch/--file、无 CDP_BATCH_ID 且 current-batch.json "
+          "缺失（未 start），自动 mark/finish 跳过", file=sys.stderr)
     return None, True
 
 
@@ -110,9 +158,15 @@ def compute_segments(data) -> list[dict]:
 
 
 def _cmd_start(batch_id: str) -> int:
-    """start：初始化打点文件（覆盖重建，AI 可重打点）。"""
+    """start：初始化打点文件（覆盖重建，AI 可重打点）。
+
+    落 current-batch.json 记 batch_id（自动 mark/finish 定位本批指针），
+    并把工作态目录已有的历史 timings 移入 archive/ 子目录。
+    """
     data = {"batch_id": batch_id, "start_wall": _wall(), "marks": []}
     _save(_timing_path(batch_id), data)
+    _archive_previous_timings(batch_id)
+    _write_current_batch(batch_id)
     print(f"timing started: {_timing_path(batch_id)}")
     return 0
 
@@ -137,6 +191,10 @@ def _cmd_mark(path: Path, name: str, zero: bool = False) -> int:
     else:
         wall = _wall()
     data.setdefault("marks", []).append({"name": name, "wall": wall})
+    if name not in KNOWN_SEGMENTS:
+        print(f"warn: 段名 {name!r} 不在常量表 "
+              f"（{', '.join(sorted(KNOWN_SEGMENTS))}），仅告警不阻断",
+              file=sys.stderr)
     _save(path, data)
     print(f"mark: {name} @ {wall:.3f}" + ("（零耗时占位）" if zero else ""))
     return 0

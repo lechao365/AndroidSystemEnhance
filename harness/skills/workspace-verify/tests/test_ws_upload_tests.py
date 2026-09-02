@@ -197,6 +197,25 @@ class TestRunOne(unittest.TestCase):
 
 
 class TestMain(unittest.TestCase):
+    """wu.main 完整编排（含 _mark_stage 自动打点）：须隔离 CDP_PROJECT_ROOT。
+
+    _mark_stage 无显式 batch 时按 current-batch.json 回落定位批次（cdp_timing
+    方向 3），不隔离会打到真实当前批次打点文件（selfcheck 全仓 pytest 时
+    污染当批 timings）。打点非本类验证目标，隔离到临时目录即可。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old_root = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+
+    def tearDown(self):
+        if self._old_root is None:
+            os.environ.pop("CDP_PROJECT_ROOT", None)
+        else:
+            os.environ["CDP_PROJECT_ROOT"] = self._old_root
+        self._tmp.cleanup()
+
     def test_all_pass_returns_0(self):
         with mock.patch.object(wu.ac, "ensure_connected", return_value="ep") as ec, \
                 mock.patch.object(wu, "ensure_user", return_value=(True, "")), \
