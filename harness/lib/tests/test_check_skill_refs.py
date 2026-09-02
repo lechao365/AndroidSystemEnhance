@@ -133,7 +133,8 @@ class TestCheckSkillRefs(unittest.TestCase):
         self.assertTrue((self._orig_root / "docs").is_dir())
 
     def test_report_writes_dangling_manifest(self):
-        # 方向 3：--report 把悬空引用清单落盘（可跟踪、随批提交供清零追踪）
+        # 方向 3：--report 把悬空引用清单落盘（可跟踪、随批提交供清零追踪）；
+        # 方向 5：存在悬空即判红（返回码 1），清单仍落盘
         self._mk("harness/skills/demo/SKILL.md", "[a](../other/not-exist.md)")
         report = self.tmp / "data" / "refs-dangling.md"
         old_argv = sys.argv
@@ -143,11 +144,57 @@ class TestCheckSkillRefs(unittest.TestCase):
             rc = ckr.main()
         finally:
             sys.argv = old_argv
-        # 方向 4：悬空只报不判红（返回码 0），清单仍落盘
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 1)
         self.assertTrue(report.exists())
         content = report.read_text(encoding="utf-8")
         self.assertIn("../other/not-exist.md", content)
+
+    def test_code_fence_stripped(self):
+        # 方向 1：扫描前剥离围栏代码块，围栏内失效链接/命令路径不报
+        self._mk("harness/skills/demo/SKILL.md",
+                 "正文 ok\n```bash\n[miss](../nope.md)\n"
+                 "python3 harness/skills/gone.py\n```\n后文 ok\n")
+        self.assertEqual(self._scan("harness/skills/demo/SKILL.md"), [])
+
+    def test_token_not_multiline(self):
+        # 方向 1：TOKEN_RE 不得跨行（多行反引号不匹配，防跨行误配）
+        self._mk("harness/skills/demo/SKILL.md",
+                 "`first\nsecond/missing.md` 见上\n")
+        self.assertEqual(self._scan("harness/skills/demo/SKILL.md"), [])
+
+    def test_space_token_skipped(self):
+        # 方向 2：含空格的 token（描述文字，非路径）跳过
+        self._mk("harness/skills/demo/SKILL.md", "见 `my doc file.md` 说明\n")
+        self.assertEqual(self._scan("harness/skills/demo/SKILL.md"), [])
+
+    def test_bare_filename_skipped(self):
+        # 方向 2：不含斜杠的裸文件名（无法定位所在目录）跳过
+        self._mk("harness/skills/demo/SKILL.md", "见 `manifest.yaml` 与 `run.py`\n")
+        self.assertEqual(self._scan("harness/skills/demo/SKILL.md"), [])
+
+    def test_angle_bracket_placeholder_skipped(self):
+        # 方向 2：含尖括号占位的 token（模板）跳过
+        self._mk("harness/skills/demo/SKILL.md",
+                 "见 `data/verify-results/<ts>-<batch_id>.md`\n")
+        self.assertEqual(self._scan("harness/skills/demo/SKILL.md"), [])
+
+    def test_line_suffix_stripped(self):
+        # 方向 2：剥离 `:行号` 后缀再判存在
+        self._mk("harness/skills/demo/SKILL.md",
+                 "见 `harness/skills/demo/run.py:24`\n")
+        self._mk("harness/skills/demo/run.py", "x\n")
+        self.assertEqual(self._scan("harness/skills/demo/SKILL.md"), [])
+
+    def test_exempt_dirs_not_scanned(self):
+        # 方向 3：豁免清单（docs/superpowers、harness/log）不扫描
+        self._mk("harness/skills/demo/SKILL.md", "ok\n")
+        self._mk("docs/superpowers/plans/x.md", "[miss](../nope.md)\n")
+        self._mk("harness/log/run.log.md", "[miss](../nope.md)\n")
+        targets = ckr.iter_scan_targets(None)
+        rels = [t.relative_to(self.tmp).as_posix() for t in targets]
+        self.assertIn("harness/skills/demo/SKILL.md", rels)
+        self.assertNotIn("docs/superpowers/plans/x.md", rels)
+        self.assertNotIn("harness/log/run.log.md", rels)
 
 
 if __name__ == "__main__":

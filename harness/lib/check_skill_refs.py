@@ -21,8 +21,9 @@
   python3 harness/lib/check_skill_refs.py            # 全量检查
   python3 harness/lib/check_skill_refs.py --path <rel>  # 仅检查单文件/单目录
   python3 harness/lib/check_skill_refs.py --report <path>  # 悬空清单落盘（可跟踪）
-退出码：0（悬空引用当前只报不判红——方向 4 过渡，--report 落清单暴露问题，
-  待清零后另批恢复判红；此前 ROOT 解析错误致真扫描根失效，检查长期假通过）。
+退出码：1（存在悬空引用即判红，--report 落清单可跟踪；0 表示引用完整）。
+  此前 ROOT 解析错误致真扫描根失效、且围栏/示例/占位被误报，检查长期假通过
+  （2026-09-02 方向 1/2/3 收紧误报后清零并恢复判红）。
 """
 
 from __future__ import annotations
@@ -38,23 +39,68 @@ from pathlib import Path
 ROOT = Path(os.environ.get("CHECK_REFS_ROOT", Path(__file__).resolve().parents[2]))
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
-TOKEN_RE = re.compile(r"`([^`]+)`")
+# TOKEN_RE 不得跨行（方向 1）：行内反引号 token，排除换行防跨行误配
+TOKEN_RE = re.compile(r"`([^`\n]+)`")
 CMD_RE = re.compile(r"(?:python3|bash)\s+((?:harness|code|data|docs)/[\w\-./]+)")
 PATH_STR_RE = re.compile(r"[\"']((?:harness|code|data|docs)/[\w\-./]+\.(?:py|sh|yaml|yml|conf|md|json|cdp|diff))[\"']")
 AT_RE = re.compile(r"@(harness/[\w\-./]+\.md)")
 EXT_HINT = re.compile(r"(\.md|\.py|\.sh|\.yaml|\.yml|\.conf|\.json|\.txt|\.cdp|\.patch|\.diff)$")
 # 占位符：中文 / 省略号 / 尖括号 / 变量
 PLACEHOLDER = re.compile(r"[\u4e00-\u9fff]|\.\.\.|^<|^\{|^\$|^~|^\[")
+# glob 通配符（docs/**、docs/*/README.md 等模式描述，非真实路径）
+_GLOB_HINT = re.compile(r"[*?]")
+# 或扩展名复合写法（lcview_check.py/.sh = 校验器 .py 或 .sh，非真实路径）
+_OR_EXT_RE = re.compile(r"\.\w+/\.[a-z]+\s*$")
+# Android 设备根绝对路径（文档引用设备侧文件路径，非仓库内引用）
+_DEVICE_ROOT = ("/vendor/", "/system/", "/data/", "/dev/", "/proc/", "/sys/",
+                "/product/", "/apex/")
+
+# 豁免目录（相对 ROOT 清单常量，运行时基于当前 ROOT 拼接；方向 3 可扩展）：
+# 设计文档历史计划与运行日志含大量示例/模板引用，纳入豁免减少误报
+EXEMPT_RELS = ("docs/superpowers", "harness/log")
 
 
 def is_remote(p: str) -> bool:
     return p.startswith(("http://", "https://", "mailto:", "ftp://"))
 
 
+def strip_code_fences(txt: str) -> str:
+    """剥离围栏代码块（```...```，含语言标注；方向 1 扫描前剥离）。
+
+    围栏内是代码示例而非文档引用，引用其内路径会大量误报；链接/命令/路径
+    正则统一在剥离后的文本上运行。
+    """
+    return re.sub(r"```.*?```", "", txt, flags=re.DOTALL)
+
+
+def strip_line_suffix(p: str) -> str:
+    """剥离 `:行号` 后缀（引用常见 `path.py:24` 形式，方向 2），再判存在。"""
+    return re.sub(r":\d+$", "", p)
+
+
 def path_like(p: str) -> bool:
     if is_remote(p) or p.startswith("#"):
         return False
-    if PLACEHOLDER.search(p):
+    if PLACEHOLDER.search(p) or "<" in p or ">" in p:
+        # 含尖括号占位的 token（如 data/verify-results/<ts>-<batch_id>.md）跳过
+        return False
+    if " " in p:
+        # 含空格的 token（多为描述文字，非路径）跳过
+        return False
+    if "/" not in p:
+        # 不含斜杠的裸文件名（无法确定所在目录，多为误报）跳过
+        return False
+    if p.startswith(_DEVICE_ROOT):
+        # Android 设备根绝对路径（如 /vendor/etc/...，文档引用设备侧文件）跳过
+        return False
+    if p.startswith(".vscode/"):
+        # 编辑器配置示例（指导创建 .vscode/settings.json 等，非仓库引用）跳过
+        return False
+    if _GLOB_HINT.search(p):
+        # glob 通配符（docs/**、docs/*/README.md 等模式描述）跳过
+        return False
+    if _OR_EXT_RE.search(p):
+        # 或扩展名复合写法（xxx.py/.sh）跳过
         return False
     if not EXT_HINT.search(p) and not p.startswith(("harness/", "docs/", "code/", "data/", "./", "../")):
         return False
@@ -66,7 +112,7 @@ def strip_anchor(p: str) -> str:
 
 
 def resolve(base_dir: Path, p: str) -> bool:
-    p = strip_anchor(p)
+    p = strip_anchor(strip_line_suffix(p))
     if p.startswith("/"):
         return Path(p).exists()
     return (base_dir / p).exists() or (ROOT / p).exists()
@@ -78,6 +124,7 @@ def scan_file(f: Path) -> list[str]:
         txt = f.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return []
+    txt = strip_code_fences(txt)  # 方向 1：扫描前剥离围栏代码块
     misses: list[str] = []
     seen: set[str] = set()
 
@@ -123,6 +170,7 @@ def iter_scan_targets(rel: str | None) -> list[Path]:
     文档的引用同样须防悬空）；--path 指定时只扫描该文件/目录。
     """
     bases = [ROOT / rel] if rel else [ROOT / "harness" / "skills", ROOT / "docs"]
+    exempt = tuple(ROOT / r for r in EXEMPT_RELS)
     targets: list[Path] = []
     for base in bases:
         if base.is_file():
@@ -134,6 +182,9 @@ def iter_scan_targets(rel: str | None) -> list[Path]:
             if not f.is_file():
                 continue
             if "__pycache__" in f.parts or ".pytest_cache" in f.parts or "tests" in f.parts:
+                continue
+            if any(f.is_relative_to(ex) for ex in exempt):
+                # 方向 3 豁免目录：设计文档历史计划/运行日志
                 continue
             if f.suffix not in (".md", ".py", ".sh", ".yaml", ".yml", ".conf"):
                 continue
@@ -184,11 +235,10 @@ def main() -> int:
         print(f"report: 悬空引用清单已写入 {report_path}")
 
     if total:
-        # 方向 4 过渡：只报不判红（返回码 0，selfcheck refs_rc=0 可过 ws_report
-        # rc 门禁）；末行结论用「待清零」表述，避免与 ws_report 的悬空引用字样
-        # 冗余防线冲突（明细已落 --report 清单供追踪）。待清零后恢复 return 1。
-        print(f"\nrefs: 引用检查完成，{total} 处待清零（仅报告不判红，清单见 --report）")
-        return 0
+        # 方向 5：悬空恢复判红（返回 1）；refs_rc=1 由 ws_report 按 rc 拒写
+        # 收据，倒逼悬空清零。明细已落 --report 清单供追踪。
+        print(f"\n==== 共 {total} 处悬空引用（判红，见 --report 清单）====")
+        return 1
     print("OK: harness/skills + docs 引用完整，无悬空。")
     return 0
 

@@ -211,7 +211,7 @@ make bootimage -j$(nproc) && 重新刷写
 | INC-005 | `adb root` 需 eng/userdebug 构建 | user 版无法 root |
 | INC-006 | 内核产物必须同一次编译，不可混用 | 启动失败 |
 | INC-007 | 自编译内核必须加 VINTF 绕过 | VINTF 检查失败 |
-| INC-008 | 源码改动先改 `~/workspace/` 再归档（SRC-001） | 编译不生效/归档被覆盖 |
+| INC-008 | 源码改动必须先从 `code/`（dev 分支）出发，再同步到 workspace（`SRC-004`） | 改动源头丢失/workspace 与 code 不一致 |
 | INC-009 | 内核编译必须用 `android_rpi5_defconfig`，禁止 `bcm2712_defconfig` | 启动失败/卡 Logo |
 | INC-010 | 串口配置修改后必须重编 boot.img 刷写 | 改 SD 卡文件不生效（config.txt 打包在 boot.img） |
 
