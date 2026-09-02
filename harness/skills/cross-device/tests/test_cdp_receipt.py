@@ -104,6 +104,26 @@ class TestReceipt(unittest.TestCase):
         self.assertIn("abc123def456", line)
         self.assertIn("pass", line)
 
+    def test_append_trend_with_timing(self):
+        # 方向 2：append_trend 增可选 timing 参数，非空时在 metrics 之后再
+        # 追加一段以竖线分隔的 JSON（跨批可 diff，emit 直读各批耗时）
+        cdp_receipt.append_trend(
+            "2026-08-23 10:00:00", "abc123def456", "pass",
+            "build=pass board=pass acc=pass", "验证通过",
+            metrics='{"m":1}', timing='{"elapsed_s":12,"segs":{"precheck":1.5}}')
+        line = cdp_receipt.read_trend_last(self._dir)
+        self.assertIn('| {"m":1}', line)
+        self.assertIn('| {"elapsed_s":12,"segs":{"precheck":1.5}}', line,
+                      "timing 应在 metrics 之后再追加一段")
+
+    def test_append_trend_timing_optional_unchanged(self):
+        # 方向 2：timing 缺省不追加（向后兼容，旧行尾形态不变）
+        cdp_receipt.append_trend("2026-08-23 10:00:00", "abc123def456", "pass",
+                                 "build=pass x", "验证通过", metrics='{"m":1}')
+        line = cdp_receipt.read_trend_last(self._dir)
+        self.assertIn('| {"m":1}', line)
+        self.assertNotIn("segs", line)
+
     def test_prune_keeps_quota_details_and_keeps_trend(self):
         keep = cdp_receipt._DETAIL_KEEP
         for i in range(keep + 5):

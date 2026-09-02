@@ -130,13 +130,22 @@ def latest_board_receipt(verify_dir=None):
     return (None, None)
 
 
-def append_trend(timestamp, batch_id, result, stage, summary, metrics=""):
+def append_trend(timestamp, batch_id, result, stage, summary, metrics="",
+                 timing=None):
+    """趋势行追加：行尾可带 metrics 与 timing 两段 JSON（竖线分隔，跨批可 diff）。
+
+    timing 为链路耗时摘要 JSON（如 {"elapsed_s": 27, "segs": {...}}，由
+    ws_report 传参），非空时在 metrics 之后再追加一段，供 emit 从 trend
+    快速查看各批耗时，无需回读收据 timings。
+    """
     d = data_verify_results_dir()
     trend = d / "trend.md"
     line = f"{timestamp} {batch_id} {result} {stage} {summary}"
     if metrics:
         # 结构化指标以 JSON 追加行尾（跨批可 diff；emit 消费只读行尾提示不受影响）
         line += f" | {metrics}"
+    if timing:
+        line += f" | {timing}"
     # 原子写：读全量 → 追加新行 → 截断保留 _TREND_KEEP 行 → replace（避免先 append
     # 再整体重写的非原子读-写，中断会留下半写/丢行态）
     lines = trend.read_text(encoding="utf-8").splitlines() if trend.exists() else []

@@ -98,7 +98,7 @@ def _resolve_timings(timings_file, batch_id):
               "timings 置空", file=sys.stderr)
         return "", None
     try:
-        from cdp_timing import compute_segments
+        from cdp_timing import KNOWN_SEGMENTS, compute_segments
         t = json.loads(Path(timings_file).read_text(encoding="utf-8"))
         if not isinstance(t, dict):
             raise ValueError("非 JSON 对象")
@@ -110,11 +110,18 @@ def _resolve_timings(timings_file, batch_id):
             raise ValueError("缺 segments/marks（非 cdp_timing 打点结构）")
         wall_start = t.get("start_wall") or t.get("wall_start")
         wall_end = t.get("wall_end") or time.time()
+        # 缺段可见性：以 KNOWN_SEGMENTS 比对本批段名，缺失者以 missing 键
+        # 写入收据 timings（emit 一眼看出哪些链路段没打点）；多余段
+        # （finish/push 等表外名）不删，段耗时原样保留可归因。
+        names = {s.get("name") for s in segments
+                 if isinstance(s, dict) and s.get("name")}
+        missing = sorted(KNOWN_SEGMENTS - names)
         out = {
             "batch_id": t.get("batch_id", ""),
             "wall_start": wall_start,
             "wall_end": wall_end,
             "segments": segments,
+            "missing": missing,
         }
         elapsed = None
         if isinstance(wall_start, (int, float)) and isinstance(wall_end, (int, float)):
@@ -123,6 +130,27 @@ def _resolve_timings(timings_file, batch_id):
     except (OSError, json.JSONDecodeError, ValueError) as e:
         print(f"warn: --timings-file 读取失败，timings 置空: {e}", file=sys.stderr)
         return "", None
+
+
+def _trend_timing(timings_json, elapsed):
+    """由收据 timings 提取 trend 行尾 timing JSON：{elapsed_s, segs（段名→秒数）}。
+
+    timings 为空（无打点）或非法时返回空串（append_trend 不追加）；有打点
+    则恒带 elapsed_s 与 segs 两键（segs 可能为空映射），供 emit 从 trend
+    直读各批耗时瓶颈。
+    """
+    if not timings_json:
+        return ""
+    segs = {}
+    try:
+        t = json.loads(timings_json)
+        for s in t.get("segments") or []:
+            if isinstance(s, dict) and s.get("name"):
+                segs[s["name"]] = round(float(s.get("elapsed_s", 0)), 3)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return ""
+    return json.dumps({"elapsed_s": elapsed, "segs": segs},
+                      ensure_ascii=False, separators=(",", ":"))
 
 
 def _resolve_cases(cases_arg, batch_id):
@@ -405,7 +433,8 @@ def main(argv=None):
     append_trend(time.strftime("%Y-%m-%d %H:%M:%S"), batch_id, args.result,
                  f"build={args.build} board={args.board} "
                  f"acc={args.acceptance.splitlines()[0][:40] if args.acceptance else '-'}",
-                 args.summary[:40], args.metrics)
+                 args.summary[:40], args.metrics,
+                 timing=_trend_timing(args.timings, args.elapsed))
     print(f"receipt: {path}")
     print(f"batch_id: {batch_id}")
     return 0

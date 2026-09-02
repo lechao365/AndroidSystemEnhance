@@ -376,6 +376,69 @@ class TestWsReport(unittest.TestCase):
         content = details[0].read_text(encoding="utf-8")
         self.assertIn('"elapsed_s": 1.0', content)
 
+    def test_timings_missing_known_segments(self):
+        # 方向 1：算段后用 cdp_timing.KNOWN_SEGMENTS 比对本批段名，缺失者以
+        # missing 键写入收据 timings（emit 一眼看出缺段），多余段（finish
+        # 兜底段等表外名）不删、耗时原样保留
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        timings = json.dumps({
+            "batch_id": "abc123def456",
+            "start_wall": 1000.0,
+            "wall_end": 1005.0,
+            "marks": [{"name": "precheck", "wall": 1001.5},
+                      {"name": "edit", "wall": 1005.0}],
+        })
+        tfile = self._write(timings, ".json")
+        with redirect_stdout(io.StringIO()):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--timings-file", tfile])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn('"missing"', content)
+        # 本批仅打了 precheck/edit → 其余已知段应列于 missing
+        for seg in ("verify_sync", "verify_build", "verify_push",
+                    "verify_unit_test", "verify_acceptance",
+                    "apply_selfcheck", "report"):
+            self.assertIn(f'"{seg}"', content, f"已知段 {seg} 缺失应列于 missing")
+        # 本批已打段不得出现在 missing（segments 里仍可见）
+        self.assertIn('"precheck"', content)
+        self.assertIn('"edit"', content)
+        # 多余段不删：compute_segments 兜底段 finish（非 KNOWN_SEGMENTS 成员）
+        self.assertIn('"finish"', content)
+
+    def test_timings_trend_carries_elapsed_and_segs(self):
+        # 方向 3：ws_report 向 append_trend 传 timing 参数，trend 行尾含
+        # elapsed_s 与 segs 两键（segs 为段名→秒数映射），emit 直读各批耗时
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        timings = json.dumps({
+            "batch_id": "abc123def456",
+            "start_wall": 1000.0,
+            "wall_end": 1005.0,
+            "marks": [{"name": "precheck", "wall": 1001.5},
+                      {"name": "edit", "wall": 1005.0}],
+        })
+        tfile = self._write(timings, ".json")
+        with redirect_stdout(io.StringIO()):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--timings-file", tfile])
+        self.assertEqual(rc, 0)
+        trend = (self._dir / "trend.md").read_text(encoding="utf-8")
+        last = trend.splitlines()[-1]
+        self.assertIn('"elapsed_s":5', last,
+                      "elapsed_s 从 wall_end-wall_start 取整推导（1005-1000=5）")
+        self.assertIn('"segs":', last)
+        self.assertIn('"precheck"', last)
+        self.assertIn('"edit"', last)
+
     def test_mode_a_timings_file_missing_warns_not_block(self):
         # --timings-file 缺失/非法：warn 降级（timings 置空），收据仍落盘不阻断
         # （诊断数据非验收证据，区别于 --acceptance 的返 2）
