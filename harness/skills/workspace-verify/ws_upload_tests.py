@@ -163,7 +163,14 @@ def run_one(ep, out, product, name, verbose=False, aosp_root=None, src_rel=None)
     if m:
         summary = f"{m.group(1)} tests ran"
     if rc == 0 and not failed:
-        detail = f"{name}: PASS{('（' + summary + '）') if summary else ''}"
+        # 用例数判红（方向 5）：解析不到汇总行或实跑用例数为 0 即 FAIL——
+        # 空跑/汇总缺失禁止报绿（无法证明用例真实执行过）
+        if m is None:
+            return False, (f"{name}: FAIL 用例数解析不到（缺 gtest 汇总行"
+                           "「[==========] N tests ... ran」），须确认实跑用例数")
+        if int(m.group(1)) == 0:
+            return False, f"{name}: FAIL 实跑用例数为 0（无用例被执行，禁止报绿）"
+        detail = f"{name}: PASS（{summary}）"
         if verbose:
             detail += f"\n{out_text}"
         return True, detail

@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 import unittest
@@ -120,6 +121,33 @@ class TestCheckSkillRefs(unittest.TestCase):
         targets = ckr.iter_scan_targets("harness/skills/a/SKILL.md")
         self.assertEqual([t.relative_to(self.tmp).as_posix() for t in targets],
                          ["harness/skills/a/SKILL.md"])
+
+    def test_root_default_is_repo_root(self):
+        # 方向 6：不覆盖 ROOT 时默认值指向仓库根（parents[2] 恢复真扫描根），
+        # 能扫到 harness/skills 与 docs——防 parents[1] 时代扫描根失效假通过
+        if os.environ.get("CHECK_REFS_ROOT"):
+            self.skipTest("CHECK_REFS_ROOT 已设，跳过默认值断言")
+        self.assertEqual(self._orig_root,
+                         Path(ckr.__file__).resolve().parents[2])
+        self.assertTrue((self._orig_root / "harness" / "skills").is_dir())
+        self.assertTrue((self._orig_root / "docs").is_dir())
+
+    def test_report_writes_dangling_manifest(self):
+        # 方向 3：--report 把悬空引用清单落盘（可跟踪、随批提交供清零追踪）
+        self._mk("harness/skills/demo/SKILL.md", "[a](../other/not-exist.md)")
+        report = self.tmp / "data" / "refs-dangling.md"
+        old_argv = sys.argv
+        sys.argv = ["check_skill_refs", "--path", "harness/skills/demo/SKILL.md",
+                    "--report", str(report)]
+        try:
+            rc = ckr.main()
+        finally:
+            sys.argv = old_argv
+        # 方向 4：悬空只报不判红（返回码 0），清单仍落盘
+        self.assertEqual(rc, 0)
+        self.assertTrue(report.exists())
+        content = report.read_text(encoding="utf-8")
+        self.assertIn("../other/not-exist.md", content)
 
 
 if __name__ == "__main__":

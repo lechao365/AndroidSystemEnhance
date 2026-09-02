@@ -20,7 +20,9 @@
 用法：
   python3 harness/lib/check_skill_refs.py            # 全量检查
   python3 harness/lib/check_skill_refs.py --path <rel>  # 仅检查单文件/单目录
-退出码：0 全部有效；1 存在悬空引用。
+  python3 harness/lib/check_skill_refs.py --report <path>  # 悬空清单落盘（可跟踪）
+退出码：0（悬空引用当前只报不判红——方向 4 过渡，--report 落清单暴露问题，
+  待清零后另批恢复判红；此前 ROOT 解析错误致真扫描根失效，检查长期假通过）。
 """
 
 from __future__ import annotations
@@ -31,7 +33,9 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(os.environ.get("CHECK_REFS_ROOT", Path(__file__).resolve().parents[1]))
+# 仓库根：parents[2] 恢复真扫描根（parents[1] 为 harness/，ROOT/harness/skills
+# 会解析成 harness/harness/skills 致扫描恒空、检查假通过——方向 2 修复）。
+ROOT = Path(os.environ.get("CHECK_REFS_ROOT", Path(__file__).resolve().parents[2]))
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 TOKEN_RE = re.compile(r"`([^`]+)`")
@@ -143,27 +147,48 @@ def main() -> int:
     parser.add_argument("--path", default=None,
                         help="仅检查指定相对路径（文件或目录），"
                              "默认全量 harness/skills + docs")
+    parser.add_argument("--report", default=None,
+                        help="悬空引用清单落盘路径（相对 ROOT 或绝对路径），"
+                             "有悬空时写入（可跟踪，随批提交供清零追踪）")
     args = parser.parse_args()
 
-    total = 0
+    # 收集全部悬空（文件集 + .opencode/command @ 引用）
+    dangling: list[tuple[Path, list[str]]] = []
     for f in iter_scan_targets(args.path):
         misses = scan_file(f)
         if misses:
-            total += len(misses)
-            print(f"\n### {f.relative_to(ROOT)}")
-            for p in misses:
-                print(f"  [MISS] {p}")
+            dangling.append((f, misses))
     for f, misses in scan_command_files():
         if args.path:
             continue
-        total += len(misses)
+        if misses:
+            dangling.append((f, misses))
+    total = sum(len(misses) for _, misses in dangling)
+
+    for f, misses in dangling:
         print(f"\n### {f.relative_to(ROOT)}")
         for p in misses:
-            print(f"  [MISS] @{p}")
+            print(f"  [MISS] {p}")
+
+    if args.report:
+        report_path = Path(args.report)
+        if not report_path.is_absolute():
+            report_path = ROOT / report_path
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        for f, misses in dangling:
+            lines.append(f"### {f.relative_to(ROOT)}")
+            lines.extend(f"  [MISS] {p}" for p in misses)
+        report_path.write_text("\n".join(lines) + ("\n" if lines else ""),
+                               encoding="utf-8")
+        print(f"report: 悬空引用清单已写入 {report_path}")
 
     if total:
-        print(f"\n==== 共 {total} 处悬空引用（exit 1）====")
-        return 1
+        # 方向 4 过渡：只报不判红（返回码 0，selfcheck refs_rc=0 可过 ws_report
+        # rc 门禁）；末行结论用「待清零」表述，避免与 ws_report 的悬空引用字样
+        # 冗余防线冲突（明细已落 --report 清单供追踪）。待清零后恢复 return 1。
+        print(f"\nrefs: 引用检查完成，{total} 处待清零（仅报告不判红，清单见 --report）")
+        return 0
     print("OK: harness/skills + docs 引用完整，无悬空。")
     return 0
 

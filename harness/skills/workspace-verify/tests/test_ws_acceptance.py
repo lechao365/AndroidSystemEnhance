@@ -522,6 +522,30 @@ class TestResolveAcceptance(unittest.TestCase):
         self.assertIsNone(acc)
         self.assertIn("无", err)
 
+    def test_batch_file_hostcmd_rejected(self):
+        # 方向 1：batch-file 分支取到验收后，含 hostcmd:/cmd: 标签即拒
+        # （禁批次自带宿主命令执行意图），令 main 退 2
+        for tag in ("hostcmd:whoami", "cmd:echo hi"):
+            with tempfile.TemporaryDirectory() as d:
+                p = Path(d) / "b.cdp"
+                p.write_text("-sv base:8c583f57f4e4\n意图: 测试\n"
+                             f"验收: {tag}\n方向: 测试\n", encoding="utf-8")
+                acc, err = wa.resolve_acceptance(self._args(batch_file=str(p)))
+            self.assertIsNone(acc)
+            self.assertIn("hostcmd:/cmd:", err)
+
+    def test_case_branch_unchanged_for_hostcmd(self):
+        # 方向 1：case 与 acceptance 两分支不变——yaml 用例值含 hostcmd: 不因
+        # batch-file 禁令被拒（禁宿主命令仅限批次自带通道）
+        with tempfile.TemporaryDirectory() as d:
+            y = Path(d) / "verify-cases.yaml"
+            y.write_text("cases:\n  my-case: \"hostcmd:'whoami' boot\"\n",
+                         encoding="utf-8")
+            acc, err = wa.resolve_acceptance(self._args(case="my-case"),
+                                             cases_path=y)
+        self.assertIsNone(err)
+        self.assertIn("hostcmd", acc)
+
     def test_case_from_yaml(self):
         # --case 从 verify-cases.yaml cases 段取标签，值内可用引号
         with tempfile.TemporaryDirectory() as d:

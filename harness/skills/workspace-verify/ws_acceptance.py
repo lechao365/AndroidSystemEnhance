@@ -165,6 +165,11 @@ def resolve_acceptance(args, cases_path=_CASES_PATH):
         b = parse_batch(text)
         if not b.acceptance or b.acceptance == "无":
             return None, "--batch-file 批次验收为空或「无」（-s 批次无验收，须用 -sv 批次）"
+        # 禁批次自带宿主命令：验收文本含 hostcmd:/cmd: 标签即拒（批次夹带
+        # 宿主命令执行意图属越权，方向 1 禁；case 与 acceptance 两分支不变）
+        if re.search(r"\bhostcmd\s*:|\bcmd\s*:", b.acceptance):
+            return None, ("--batch-file 批次验收含 hostcmd:/cmd: 标签"
+                          "（禁止批次自带宿主命令，验收走 svc/log/prop/file/boot）")
         return b.acceptance, None
     if args.case:
         try:

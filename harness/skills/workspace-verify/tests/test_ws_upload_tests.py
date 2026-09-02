@@ -195,6 +195,38 @@ class TestRunOne(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("编译产物缺失", detail)
 
+    def test_zero_cases_rejected(self):
+        # 方向 5：汇总行解析到但用例数为 0 → 判红（无用例被执行禁止报绿）
+        with mock.patch.object(wu, "adb_run", side_effect=[
+            ("", 0),  # push
+            ("", 0),  # chmod
+            ("[==========] 0 tests from 0 test suites ran. (1 ms total)\n", 0),
+        ]):
+            with tempfile.TemporaryDirectory() as d:
+                out = Path(d) / "out"
+                p = out / "target" / "product" / "rpi5" / "data" / "nativetest64" / "t1" / "t1"
+                p.parent.mkdir(parents=True)
+                p.write_text("x")
+                ok, detail = wu.run_one("ep", str(out), "rpi5", "t1")
+        self.assertFalse(ok)
+        self.assertIn("用例数为 0", detail)
+
+    def test_missing_summary_rejected(self):
+        # 方向 5：汇总行解析不到 → 判红（无法证明用例真实执行）
+        with mock.patch.object(wu, "adb_run", side_effect=[
+            ("", 0),  # push
+            ("", 0),  # chmod
+            ("[ RUN      ] t1.T1\n[       OK ] t1.T1 (1 ms)\n", 0),
+        ]):
+            with tempfile.TemporaryDirectory() as d:
+                out = Path(d) / "out"
+                p = out / "target" / "product" / "rpi5" / "data" / "nativetest64" / "t1" / "t1"
+                p.parent.mkdir(parents=True)
+                p.write_text("x")
+                ok, detail = wu.run_one("ep", str(out), "rpi5", "t1")
+        self.assertFalse(ok)
+        self.assertIn("用例数解析不到", detail)
+
 
 class TestMain(unittest.TestCase):
     """wu.main 完整编排（含 _mark_stage 自动打点）：须隔离 CDP_PROJECT_ROOT。
