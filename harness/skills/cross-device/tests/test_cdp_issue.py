@@ -331,9 +331,9 @@ class TestBackfilledSeverity(unittest.TestCase):
 
     def test_all_repo_issues_pass_validation(self):
         # 不设 CDP_PROJECT_ROOT：data_known_issues_dir() 回落仓库真实路径
+        # 空目录合法（KIR-006 promote 清算删光终态条目后无存量），跳过校验
         os.environ.pop("CDP_PROJECT_ROOT", None)
         files = cdp_issue.issue_files()
-        self.assertTrue(files, "data/known-issues 下应存在存量条目")
         for p in files:
             errs = cdp_issue.validate_issue(p)
             self.assertEqual(errs, [], f"{p.name}: {errs}")

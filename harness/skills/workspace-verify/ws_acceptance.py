@@ -406,6 +406,47 @@ def _mark_stage(name, batch_id=None, zero=False):
               file=sys.stderr)
 
 
+def _resolve_batch_id(batch_id):
+    """batch 识别三级回落：显式 batch_id > 环境变量 CDP_BATCH_ID >
+    log 目录唯一 timings 文件（复用 _mark_stage/cdp_timing 同款口径，
+    多打点文件时静默跳过防误标其他批次）。返回 batch_id 或 None。"""
+    if batch_id:
+        return batch_id
+    env_id = os.environ.get("CDP_BATCH_ID", "").strip()
+    if env_id:
+        return env_id
+    files = sorted(cdp_paths.log_apply_dir().glob("timings-*.json"))
+    if len(files) == 1:
+        return files[0].stem[len("timings-"):]
+    return None
+
+
+def _write_cases(batch_id, cases_text):
+    """本次实跑 case 标签落盘：log_apply_dir()/cases-<batch_id>.json。
+
+    供 ws_report 未显式传 --case 时自动探测补全（与 timings 探测同源），
+    杜绝 board pass 收据 cases 为空致 prepare evidence-scope 推导死锁
+    （2026-09-02 BL-20260902-01 发布被迫回填 7833c640079a 的教训）。
+    batch 识别三级回落（显式 > 环境变量 > 唯一打点文件）；均不可得或
+    无实跑标签时静默跳过（不阻断，-s 无标签批/独立 CLI 属正常降级）。
+    原子写：临时文件 + replace（对齐 cdp_timing 惯例，中断不留半写态）。
+    """
+    bid = _resolve_batch_id(batch_id)
+    if not bid or not (cases_text or "").strip():
+        return
+    p = cdp_paths.log_apply_dir() / f"cases-{bid}.json"
+    try:
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"batch_id": bid,
+                                   "cases": cases_text.strip()},
+                                  ensure_ascii=False, indent=2) + "\n",
+                       encoding="utf-8")
+        tmp.replace(p)
+        print(f"NOTE: 实跑 case 标签落盘: {p}", file=sys.stderr)
+    except OSError as e:
+        print(f"warn: cases 落盘失败（不阻断）: {e}", file=sys.stderr)
+
+
 # 标准五段中的前四段（sync/build/push/unit_test）：跳过时补零 mark 占位，
 # 保证收据 timings 段完整可归因（缺段 vs 0 耗时语义不同：缺段=去向不明）
 _STANDARD_ZERO_SEGMENTS = ("verify_sync", "verify_build", "verify_push",
@@ -579,6 +620,9 @@ def main(argv=None):
                                     on_item=mark_case)
     print(json.dumps({"overall": overall, "items": items}, ensure_ascii=False,
                      indent=2))
+    # 本次实跑 case 标签落盘（--case 原样写入 cases-<batch_id>.json，
+    # 供 ws_report 自动探测补全，防 board pass 收据 cases 空致 prepare 死锁）
+    _write_cases(batch_id, args.case or "")
     # 标准四段缺失补零（跳过段记 0，收据段完整可归因）+ 验收总段打点
     # （失败不阻断，结果 pass/fail 均记）
     _backfill_zero_marks(batch_id)

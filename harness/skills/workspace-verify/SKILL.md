@@ -131,6 +131,17 @@ stages:
    收据 metrics 字段 + trend 行尾，跨批可 diff——性能数字不再只散在正文；
    --timings-file 为模式 A 链路耗时打点（步骤 0 各阶段 mark 的原始文件，ws_report
    内部经 compute_segments 计算段耗时写收据 timings 字段；缺失/非法仅 warn 不阻断）
+
+   **cases 自动落盘口径（2026-09-02 定）**：
+   - ws_acceptance 验收完成把本次实跑 --case 标签写 log_apply_dir()/cases-<batch_id>.json
+     （batch 识别三级回落：显式 batch_id > 环境变量 CDP_BATCH_ID > log 目录唯一
+     timings 文件），ws_report 未传 --case 时自动探测该文件补全（显式传参优先，
+     与 timings 探测同源）——board pass 收据的 cases 字段由此自动落盘，杜绝空
+     cases 卡死 prepare 的 evidence-scope 推导。
+   - **禁改历史收据文件**：收据一经落盘即证据，事后回填/改写属伪造证据链。
+     board+pass 空 cases 由 ws_report 源头拒写（返 2）兜底，发现缺 cases 时
+     只写新收据引用旧批次（如 -s 自检批 + 说明），禁止编辑旧收据补字段
+     （2026-09-02 BL-20260902-01 发布被迫回填 7833c640079a 的教训）。
 ## 退出码
 - 0 验证完成（含 fail 收据落盘）；1 设备不可达或验收 fail；2 参数错误或验收 ai
 

@@ -84,6 +84,35 @@ def _resolve_timings(timings_file, batch_id):
         return "", None
 
 
+def _resolve_cases(cases_arg, batch_id):
+    """解析收据 cases 字段（本次实跑用例标签）。
+
+    显式 --case 优先；未传时自动探测 log_apply_dir()/cases-<batch_id>.json
+    （cdp_paths 绝对路径，与 _resolve_timings/timings 探测同源；该文件由
+    ws_acceptance 验收后写入本次实跑标签）。探测到即补全，缺失仅 warn
+    降级（返回原值），不阻断——空 cases 阻断语义由调用方按
+    verify_mode/result 组合判定（board+pass 空 cases 拒写）。
+    """
+    if (cases_arg or "").strip():
+        return cases_arg
+    if not batch_id:
+        return cases_arg
+    probe = log_apply_dir() / f"cases-{batch_id}.json"
+    if not probe.is_file():
+        print(f"warn: 未传 --case 且未探测到 cases-{batch_id}.json，"
+              "cases 置空", file=sys.stderr)
+        return cases_arg
+    try:
+        data = json.loads(probe.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not (data.get("cases") or "").strip():
+            raise ValueError("cases 字段为空或非对象")
+        print(f"NOTE: 自动探测到 cases 文件: {probe}", file=sys.stderr)
+        return data["cases"].strip()
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        print(f"warn: cases 探测读取失败，置空: {e}", file=sys.stderr)
+        return cases_arg
+
+
 def _validate_acceptance_pass(acceptance):
     """result=pass 时验收证据门禁：解析 acceptance JSON，overall 须为 pass 且
     无 fail 项，否则拒写（堵手填假绿混过 promote——仅查有无不看内容是洞）。
@@ -245,6 +274,19 @@ def main(argv=None):
         args.elapsed = derived_elapsed
     if args.elapsed is None:
         args.elapsed = 0
+
+    # cases 补全：显式 --case 优先，未传自动探测 cases-<batch_id>.json
+    # （ws_acceptance 验收后写入本次实跑标签，与 timings 探测同源）
+    args.case = _resolve_cases(args.case, batch_id)
+    # board+pass 空 cases 拒写：空 cases 会让 prepare 的 evidence-scope
+    # 推导无源而卡死（2026-09-02 BL-20260902-01 被迫回填 7833c640079a），
+    # 堵住源头比事后改历史收据可靠——收据一经落盘即证据，禁事后修改
+    if args.result == "pass" and verify_mode == "board" \
+            and not (args.case or "").strip():
+        print("error: verify_mode=board 且 result=pass 必须带 cases"
+              "（--case 或 cases-<batch_id>.json 探测），空 cases 会使 "
+              "prepare evidence-scope 推导死锁，拒绝写收据", file=sys.stderr)
+        return 2
 
     # 验收证据门禁：result=pass 必须带逐项验收 JSON 且整体通过，否则拒写
     # （堵手填假绿混过 promote）；通过后单行化落盘——header 逐行 key-value，
