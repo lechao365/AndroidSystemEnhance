@@ -881,6 +881,77 @@ class TestWsReport(unittest.TestCase):
         content = details[0].read_text(encoding="utf-8")
         self.assertIn("- cases: ", content)
 
+    # ── 方向 2：解析打点前自发 report mark（兜底段收窄为纯写收据）─────────
+    def test_report_mark_appended_to_timing_file(self):
+        # 显式 --timings-file 时：解析前自发 mark report 追加到打点文件，
+        # 兜底段（finish）收窄为 report → 算段时刻（纯写收据耗时）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        timings = json.dumps({
+            "batch_id": "abc123def456",
+            "start_wall": 1000.0,
+            "marks": [{"name": "precheck", "wall": 1001.5},
+                      {"name": "edit", "wall": 1005.0}],
+        })
+        tfile = self._write(timings, ".json")
+        with redirect_stdout(io.StringIO()):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--timings-file", tfile])
+        self.assertEqual(rc, 0)
+        data = json.loads(Path(tfile).read_text(encoding="utf-8"))
+        names = [m["name"] for m in data["marks"]]
+        self.assertIn("report", names)
+        self.assertEqual(names[-1], "report", "report 须为末个 mark")
+        # 收据 timings 段含 report 与兜底段（finish = report 到算段时刻）
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn('"name": "report"', content)
+        self.assertIn('"name": "finish"', content)
+
+    def test_report_mark_auto_probe_batch(self):
+        # 未传 --timings-file：自动探测 timings-<batch_id>.json 并自发
+        # report mark（batch 识别三级回落同源）；探测不到不阻断
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        from cdp_parse import batch_id_from_text
+        from cdp_paths import log_apply_dir
+        bid = batch_id_from_text(Path(batch).read_text(encoding="utf-8"))
+        probe_dir = log_apply_dir()
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        tfile = probe_dir / f"timings-{bid}.json"
+        tfile.write_text(json.dumps({
+            "batch_id": bid, "start_wall": 2000.0,
+            "marks": [{"name": "precheck", "wall": 2001.0}],
+        }), encoding="utf-8")
+        self.addCleanup(lambda: tfile.unlink(missing_ok=True))
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        data = json.loads(tfile.read_text(encoding="utf-8"))
+        names = [m["name"] for m in data["marks"]]
+        self.assertEqual(names, ["precheck", "report"])
+
+    def test_report_mark_no_timing_skips(self):
+        # 无打点文件（未 start）时自发 report mark 静默跳过不阻断
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        with redirect_stdout(io.StringIO()):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- timings: ", content)
+
 
 if __name__ == "__main__":
     unittest.main()

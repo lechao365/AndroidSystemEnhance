@@ -12,12 +12,18 @@
   三指标结构化存档：--metrics "<JSON 对象>"（如性能采集的
   {"throughput_evs":328,"drain_ms_per_event":6.4,"daemon_rss_kb":5516}），
   写入收据 metrics 字段 + trend 行尾追加，供跨批 diff；缺省不写。
-  链路耗时打点：--timings-file <cdp_timing.py start/mark 原始打点文件>，经
-  compute_segments 计算段耗时写入收据 timings 字段供 emit 定位耗时瓶颈；
-  缺失/非法仅 warn 不阻断（诊断数据非验收证据）。
+链路耗时打点：--timings-file <cdp_timing.py start/mark 原始打点文件>，经
+   compute_segments 计算段耗时写入收据 timings 字段供 emit 定位耗时瓶颈；
+   缺失/非法仅 warn 不阻断（诊断数据非验收证据）。
+   兜底段语义（finish 两义）：compute_segments 末段名 "finish" 是"末个
+   mark 到算段时刻"的兜底段，与 cdp_timing finish 子命令同名不同义。该段
+   含自检/编排空转，不细分无法归因（15 笔 -s 收据兜底段 0.26~361.9s 乱跳
+   而自检恒 11s 档）。本脚本解析打点前自发 mark report，收窄为纯写收据；
+   selfcheck.py 跑完自发 mark apply_selfcheck，分离自检耗时。
 """
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -35,6 +41,41 @@ from paths import env_path  # noqa: E402
 
 
 _HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def _mark_report(timings_file, batch_id):
+    """自发 report 打点：解析打点前 mark 本批"收据解析+落盘"起点。
+
+    兜底段语义：compute_segments 末段名 finish（与 finish 子命令同名
+    两义——前者是"末个 mark 到算段时刻"的兜底段，后者是归档子命令），
+    其耗时 = 末个 mark 到算段时刻，含自检与编排空转。15 笔 -s 收据兜底段
+    在 0.26~361.9s 间乱跳而自检恒 11s 档即因此（收据在 push 之前落盘）。
+    自发 mark report 后兜底段收窄为"report → 算段时刻"= 纯写收据耗时。
+    目标文件与 timings 探测同源：显式 --timings-file 优先，未传自动探测
+    log_apply_dir()/timings-<batch_id>.json；文件缺失/非法仅 warn 不阻断
+    （打点诊断数据，非收据证据本身）。直接编辑文件（cdp_timing mark 仅
+    支持 --batch 定位，无法覆盖显式 --timings-file 场景）。
+    """
+    target = timings_file
+    if not target and batch_id:
+        probe = log_apply_dir() / f"timings-{batch_id}.json"
+        if probe.is_file():
+            target = str(probe)
+    if not target:
+        return
+    try:
+        p = Path(target)
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("非 JSON 对象")
+        data.setdefault("marks", []).append(
+            {"name": "report", "wall": time.time()})
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                       encoding="utf-8")
+        tmp.replace(p)
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        print(f"warn: report 打点失败（不阻断）: {e}", file=sys.stderr)
 
 
 def _resolve_timings(timings_file, batch_id):
@@ -265,6 +306,9 @@ def main(argv=None):
             print(f"error: {terr}", file=sys.stderr)
             return 2
 
+    # 自发 report 打点：解析打点前 mark 本批收据解析+落盘起点，使兜底段
+    # （末个 mark 到算段时刻）收窄为纯写收据耗时（自检/编排空转不再混入）
+    _mark_report(args.timings_file, batch_id)
     # 链路耗时打点：显式 --timings-file 优先，未传自动探测
     # log_apply_dir()/timings-<batch_id>.json（cdp_paths 绝对路径与
     # cdp_timing 写入同源，认 CDP_PROJECT_ROOT）；

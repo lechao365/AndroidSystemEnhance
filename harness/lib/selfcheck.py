@@ -51,6 +51,29 @@ def last_stdout_line(stdout):
     return lines[-1] if lines else ""
 
 
+def _mark_selfcheck():
+    """自发 apply_selfcheck 打点：自检完成即 mark，供收据兜底段归因。
+
+    15 笔 -s 收据兜底段在 0.26~361.9s 间乱跳而自检恒 11s 档——收据在
+    push 之前落盘，兜底段实为"末个 mark 到算段时刻"，含自检与编排空转，
+    不细分无法归因。自发 mark 后该段收窄为"自检完成→算段时刻"。
+    batch 识别复用 cdp_timing mark 三级回落（显式 --batch > 环境变量
+    CDP_BATCH_ID > log 目录唯一 timings 文件）；发点失败不阻断（打点
+    诊断数据，非自检结果本身）。
+    """
+    timing = ROOT / "harness" / "skills" / "cross-device" / "lib" / "python" / "cdp_timing.py"
+    try:
+        proc = subprocess.run([sys.executable, str(timing), "mark",
+                               "--name", "apply_selfcheck"],
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", cwd=ROOT, timeout=10)
+        if proc.returncode != 0:
+            print(f"warn: apply_selfcheck 打点失败（不阻断）: {proc.stderr.strip()}",
+                  file=sys.stderr)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"warn: apply_selfcheck 打点失败（不阻断）: {e}", file=sys.stderr)
+
+
 def main():
     pytest_cmd = [sys.executable, "-m", "pytest", "harness", "-q"]
     # xdist 可导入时并行跑（-n auto 按 CPU 核数分流，apply 侧 586 项串行 30s
@@ -80,6 +103,7 @@ def main():
     if refs_last:
         parts.append(refs_last)
     print(" | ".join(parts))
+    _mark_selfcheck()
     return 0
 
 
