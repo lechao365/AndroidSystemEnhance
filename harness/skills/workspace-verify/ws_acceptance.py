@@ -51,8 +51,11 @@ _VERIFY_ROOT = Path(__file__).resolve().parent
 # logfield 取 logcat 含锚点的最后一行按字段名提取数值比较（锚点|字段|比较符|数值
 # [|进程名]），防 log: 子串匹配命中历史零值心跳的假绿；第 5 段进程名经 pidof 取 pid
 # 后日志按该 pid 收窄（防旧进程心跳残留行被当新进程心跳），锚点未命中时每 5s 重取
-# 到 90s 超时判红；logfresh 取设备时钟回退 N 秒的
-# logcat 时间窗（锚点|秒数），窗内未命中锚点即判红（时效性判据）；
+# （绕缓存重取——缓存只服务同批同 key 多标签复用）到 90s 超时判红；logfresh 取设备
+# 时钟回退 N 秒的
+# logcat 时间窗（锚点|秒数），窗内未命中锚点即判红（时效性判据，自带时间窗不走
+# 缓存，语义不变）；adb_logcat 按 (pid, 时间窗) 缓存：同批多标签只拉一次 5000 行，
+# 每项执行 wall-clock 计时写 items elapsed_s（收据 acceptance JSON 可见）；
 # boot 为裸词；其余标签不含空格
 _TAG_RE = re.compile(
     r'(?:svc|log|prop|file|hostcmd):(?:"(?:\\.|[^"\\])*"|\S+)'
@@ -219,15 +222,20 @@ def execute_tag(tag, adb_exec, adb_logcat):
         if proc:
             # 5 段写法：pidof 取 pid（空或非数字判红），日志按 pid 收窄；
             # 锚点未命中（新进程首心跳未到）时每 5s 重取（重新 pidof + logcat）
-            # 到 90s 超时判红——不得回落全量筛（回落即旧进程行重新混入假绿）
+            # 到 90s 超时判红——不得回落全量筛（回落即旧进程行重新混入假绿）；
+            # 首次调用走缓存（同批同 key 多标签复用，如 liveness 5 条同 pid
+            # logfield 只拉一次），轮询重试 force=True 绕缓存重取（走缓存永远
+            # 读首拉旧内容死等到 90s 超时判红——缓存只服务复用，轮询须实时）
             deadline = time.monotonic() + 90
+            first = True
             while True:
                 body, code = adb_exec(f"pidof {shlex.quote(proc)}")
                 pid = body.strip()
                 if code != 0 or not pid.isdigit():
                     return "fail", (f"logfield: 进程 {proc!r} pidof 为空或非数字"
                                     f" {pid!r}（exit={code}）")
-                out = adb_logcat(pid)
+                out = adb_logcat(pid, force=not first)
+                first = False
                 lines = [ln for ln in out.splitlines() if anchor in ln]
                 if lines:
                     break
@@ -351,8 +359,12 @@ def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False):
                          "detail": "验收为空：未提取到任何标签/判据，按 fail 处理"
                                    "（防空验收假绿；-sv 批次须有非「无」验收）"}]
     for tag in tags:
+        # 每项 wall-clock 计时（monotonic，轮询/拉取耗时含入）→ items 可见，
+        # 收据 acceptance JSON 可读最慢项（定位耗时瓶颈，非判据本身）
+        start = time.monotonic()
         status, detail = execute_tag(tag, adb_exec, adb_logcat)
-        items.append({"tag": tag, "status": status, "detail": detail})
+        items.append({"tag": tag, "status": status, "detail": detail,
+                      "elapsed_s": round(time.monotonic() - start, 3)})
     auto = [i for i in items if i["status"] in ("pass", "fail")]
     if any(i["status"] == "fail" for i in auto):
         return "fail", items
@@ -479,15 +491,27 @@ def main(argv=None):
         print(f"NOTE: --log-since 本地 {args.log_since} → 设备 {device_since}"
               f"（按设备时钟/时区换算）")
 
-    def adb_logcat(pid=None):
+    # logcat 缓存：key=(pid, device_since)——同批多标签（如 liveness 的 log:
+    # + 5 条同 pid logfield）只拉一次 5000 行，避免各拉一遍拖慢验收段；
+    # force=True 绕过缓存重取（logfield 5 段轮询语义须实时，走缓存永远
+    # 读旧内容死等到 90s 超时判红）；超时（""）不缓存，下次重拉
+    # （缓存空串会放大单次故障影响面，判据语义不得放宽）
+    _logcat_cache = {}
+
+    def adb_logcat(pid=None, force=False):
+        key = (pid, device_since)
+        if not force and key in _logcat_cache:
+            return _logcat_cache[key]
         try:
             r = subprocess.run(ac.build_logcat_cmd(None, 5000,
                                                    since=device_since, pid=pid),
                                capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=60)
-            return r.stdout
+            out = r.stdout
         except subprocess.TimeoutExpired:
             return ""
+        _logcat_cache[key] = out
+        return out
 
     overall, items = run_acceptance(acceptance, adb_exec, adb_logcat,
                                     ensure_boot=args.ensure_boot)

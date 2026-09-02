@@ -83,8 +83,9 @@ class TestParseAcceptance(unittest.TestCase):
                 return "4242", 0
             return "", 1
 
-        def adb_logcat(pid=None):
+        def adb_logcat(pid=None, force=False):
             seen["pid"] = pid
+            seen["force"] = force
             return ("4242: heartbeat, loop=0 overrun=0 dropped=0 readErr=1\n"
                     "4242: heartbeat, loop=0 overrun=0 dropped=0 readErr=0\n")
 
@@ -93,6 +94,7 @@ class TestParseAcceptance(unittest.TestCase):
             adb_exec=adb_exec, adb_logcat=adb_logcat)
         self.assertEqual(status, "pass")
         self.assertEqual(seen["pid"], "4242")  # pid 透传进 adb_logcat
+        self.assertFalse(seen["force"])  # 首次调用走缓存（同批同 key 复用）
         self.assertIn("readErr=0", detail)
 
     def test_logfield_pid_process_missing_red(self):
@@ -119,14 +121,18 @@ class TestParseAcceptance(unittest.TestCase):
 
     def test_logfield_pid_anchor_miss_polls_until_timeout(self):
         # 5 段锚点未命中：每 5s 重取（重新 pidof + logcat），90s 超时判红；
-        # 不得回落全量筛——全程仅带 pid 调用 adb_logcat（无全量回落）
+        # 不得回落全量筛——全程仅带 pid 调用 adb_logcat（无全量回落）；
+        # 首次调用走缓存（同 key 复用），轮询重试须 force=True 绕缓存
+        # （走缓存永远读首拉旧内容死等 90s 超时判红）
         calls = []
+        forces = []
 
         def adb_exec(cmd):
             return "4242", 0
 
-        def adb_logcat(pid=None):
+        def adb_logcat(pid=None, force=False):
             calls.append(pid)
+            forces.append(force)
             return "其他进程日志行\n"  # 锚点永不命中
 
         mono = mock.patch("ws_acceptance.time.monotonic",
@@ -141,6 +147,9 @@ class TestParseAcceptance(unittest.TestCase):
         self.assertIn("未回落全量筛", detail)
         self.assertTrue(calls)
         self.assertTrue(all(p == "4242" for p in calls))
+        # 首次走缓存（force=False），轮询重试全部 force=True（绕缓存重取）
+        self.assertFalse(forces[0])
+        self.assertTrue(all(forces[1:]), "轮询重试必须绕缓存（force=True）")
 
     def test_logfresh_hit_in_window_passes(self):
         # logfresh 窗内命中锚点 → pass；时间窗 = 设备时钟回退 90s
@@ -699,6 +708,85 @@ class TestEmptyAcceptance(unittest.TestCase):
         # 纯空白验收同样判红（parse 无标签且 strip 后为空）
         overall, items = wa.run_acceptance("   \n\t ", lambda c: ("", 0), lambda: "")
         self.assertEqual(overall, "fail")
+
+
+class TestLogcatCacheAndTiming(unittest.TestCase):
+    """批次方向 1/2/3：logcat 同 key 缓存复用、轮询绕缓存、每项计时字段。"""
+
+    LOGCAT = ["adb", "logcat", "-d"]
+
+    def _main_env(self, logcat_stdout):
+        """构造 main 全流程 mock 环境，返回 (m_ac, m_run, logcat_calls)。"""
+        logcat_calls = []
+
+        def fake_run(cmd, **kw):
+            if cmd == self.LOGCAT:
+                logcat_calls.append(1)
+                return mock.Mock(stdout=logcat_stdout, stderr="", returncode=0)
+            return mock.Mock(stdout="out\n__LE_EXIT_CODE__=0\n", stderr="",
+                             returncode=0)
+
+        m_ac = mock.Mock()
+        m_ac.ensure_connected.return_value = "ep"
+        m_ac.ensure_ready.return_value = True
+        m_ac.clock_sync.return_value = (True, "ok")
+        m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+        m_ac.parse_exec_output.return_value = ("4242", 0)
+        m_ac.build_logcat_cmd.return_value = self.LOGCAT
+        m_run = mock.patch.object(wa.subprocess, "run",
+                                  side_effect=fake_run)
+        return m_ac, m_run, logcat_calls
+
+    def test_main_logcat_cache_same_key_pulled_once(self):
+        # 方向 2：同批多标签只拉一次——log:KEY x2 同 key (None, since) 拉 1 次，
+        # 同 pid logfield x2 同 key (4242, since) 拉 1 次，合计 2 次（非 4 次）
+        m_ac, m_run, calls = self._main_env(
+            "LcView: heartbeat, loop=0 overrun=0 dropped=0 readErr=0 KEY\n")
+        buf = io.StringIO()
+        with mock.patch.object(wa, "ac", m_ac), m_run:
+            with contextlib.redirect_stdout(buf):
+                rc = wa.main(["run", "--acceptance",
+                              'log:KEY log:KEY '
+                              'logfield:"heartbeat, loop=|readErr|=|0|lechao_lcview" '
+                              'logfield:"heartbeat, loop=|dropped|=|0|lechao_lcview"'])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 2)
+        self.assertIn('"elapsed_s"', buf.getvalue())
+
+    def test_main_logfield_poll_bypasses_cache(self):
+        # 方向 3：轮询绕缓存——锚点永不命中时每 5s force 重拉，
+        # 90s 超时判红（deadline=90，check 值 5..90 共 18 轮判红）；
+        # 若走缓存只会有 1 次拉取 → 死等 90s 恒红
+        m_ac, m_run, calls = self._main_env("其他进程日志行\n")
+        mono = mock.patch("ws_acceptance.time.monotonic",
+                          side_effect=[0.0, 0.0] + [5 * i for i in range(1, 21)]
+                          + [95.0])
+        sleep = mock.patch("ws_acceptance.time.sleep")
+        buf = io.StringIO()
+        with mock.patch.object(wa, "ac", m_ac), m_run, mono, sleep:
+            with contextlib.redirect_stdout(buf):
+                rc = wa.main(["run", "--acceptance",
+                              'logfield:"heartbeat, loop=|readErr|=|0|lechao_lcview"'])
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(calls), 18)
+        self.assertIn("90s 内未命中锚点", buf.getvalue())
+
+    def test_run_acceptance_items_have_elapsed_s(self):
+        # 方向 1：每项 wall-clock 计时写 items elapsed_s（收据 acceptance 可见）
+        mono = mock.patch("ws_acceptance.time.monotonic",
+                          side_effect=[1.0, 1.25, 2.0, 2.5])
+
+        def adb_exec(cmd):
+            if "boot_completed" in cmd:
+                return ("1", 0)
+            return ("", 0)
+
+        with mono:
+            overall, items = wa.run_acceptance(
+                "boot cmd:true", adb_exec=adb_exec, adb_logcat=lambda: "")
+        self.assertEqual(overall, "pass")
+        self.assertEqual(items[0]["elapsed_s"], 0.25)
+        self.assertEqual(items[1]["elapsed_s"], 0.5)
 
 
 class TestConvertSince(unittest.TestCase):
