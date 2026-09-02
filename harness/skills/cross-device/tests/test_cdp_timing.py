@@ -254,6 +254,12 @@ class TestCdpTiming(unittest.TestCase):
         self.assertEqual(ldata["marks"], [], "残留文件不得被误标")
 
     # ── 方向 5：段名常量表，表外名仅 warn 不阻断 ───────────────────────
+    def test_known_segments_include_edit_sub_stages(self):
+        # 方向 2：KNOWN_SEGMENTS 增 edit_validate 与 gen_manifest（edit 段细分，
+        # cdp_validate_patch/gen_manifest 自发 mark 不告警）
+        self.assertIn("edit_validate", cdp_timing.KNOWN_SEGMENTS)
+        self.assertIn("gen_manifest", cdp_timing.KNOWN_SEGMENTS)
+
     def test_mark_known_segment_no_warn(self):
         # 表内段名（如 verify_acceptance）不告警
         self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)

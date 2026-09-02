@@ -42,6 +42,14 @@ from paths import env_path  # noqa: E402
 
 _HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
 
+# 链路已知段中带 verify 前缀的五段（verify_sync/build/push/unit_test/acceptance）：
+# none 模式（-s/文档批）无 verify 环节，missing 判定按 verify_mode 取应有段集时
+# 从 KNOWN_SEGMENTS 去掉这五段，避免 -s 批永远报 verify 段缺失（方向 1 收窄）。
+_VERIFY_PREFIX_SEGMENTS = frozenset((
+    "verify_sync", "verify_build", "verify_push",
+    "verify_unit_test", "verify_acceptance",
+))
+
 
 def _mark_report(timings_file, batch_id):
     """自发 report 打点：解析打点前 mark 本批"收据解析+落盘"起点。
@@ -78,7 +86,7 @@ def _mark_report(timings_file, batch_id):
         print(f"warn: report 打点失败（不阻断）: {e}", file=sys.stderr)
 
 
-def _resolve_timings(timings_file, batch_id):
+def _resolve_timings(timings_file, batch_id, verify_mode="board"):
     """解析链路耗时打点，返回 (timings_json_str, elapsed_int|None)。
 
     显式 --timings-file 优先；未传时自动探测 log_apply_dir() 下
@@ -87,6 +95,8 @@ def _resolve_timings(timings_file, batch_id):
     缺失/非法仅 warn 降级（timings 置空，elapsed 不推导），不阻断主流程。
     elapsed 从 wall_end 减 wall_start 取整（start/mark 结构 wall_end 缺省
     按当前时刻兜底），供 --elapsed 缺省时填写 elapsed_s（显式传参优先）。
+    missing 判定按 verify_mode 取应有段集：none 模式（-s/文档批）无 verify
+    环节，去掉 verify_* 五段；board 模式（上板验证批）为全表（方向 1 收窄）。
     """
     if not timings_file and batch_id:
         probe = log_apply_dir() / f"timings-{batch_id}.json"
@@ -110,12 +120,15 @@ def _resolve_timings(timings_file, batch_id):
             raise ValueError("缺 segments/marks（非 cdp_timing 打点结构）")
         wall_start = t.get("start_wall") or t.get("wall_start")
         wall_end = t.get("wall_end") or time.time()
-        # 缺段可见性：以 KNOWN_SEGMENTS 比对本批段名，缺失者以 missing 键
-        # 写入收据 timings（emit 一眼看出哪些链路段没打点）；多余段
-        # （finish/push 等表外名）不删，段耗时原样保留可归因。
+        # 缺段可见性：按 verify_mode 取应有段集（none 去掉 verify_* 五段、
+        # board 全表），缺失者以 missing 键写入收据 timings（emit 一眼看出
+        # 哪些链路段没打点）；多余段（finish/push 等表外名）不删，耗时原样
+        # 保留可归因。
         names = {s.get("name") for s in segments
                  if isinstance(s, dict) and s.get("name")}
-        missing = sorted(KNOWN_SEGMENTS - names)
+        expected = (KNOWN_SEGMENTS - _VERIFY_PREFIX_SEGMENTS
+                    if verify_mode == "none" else KNOWN_SEGMENTS)
+        missing = sorted(expected - names)
         out = {
             "batch_id": t.get("batch_id", ""),
             "wall_start": wall_start,
@@ -341,7 +354,8 @@ def main(argv=None):
     # log_apply_dir()/timings-<batch_id>.json（cdp_paths 绝对路径与
     # cdp_timing 写入同源，认 CDP_PROJECT_ROOT）；
     # --elapsed 缺省从 timings 的 wall_end-wall_start 推导（显式传参优先）
-    args.timings, derived_elapsed = _resolve_timings(args.timings_file, batch_id)
+    args.timings, derived_elapsed = _resolve_timings(args.timings_file, batch_id,
+                                                     verify_mode)
     if args.elapsed is None and derived_elapsed is not None:
         args.elapsed = derived_elapsed
     if args.elapsed is None:

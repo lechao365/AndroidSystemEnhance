@@ -10,6 +10,7 @@ workspace→code 归档方向消亡，本脚本仅保留 manifest 重生成能�
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
@@ -106,6 +107,26 @@ def generate_manifest(patch_root: Path, check_only: bool,
     log_info("manifest.yaml 已更新")
 
 
+def _mark_gen_manifest():
+    """自发 gen_manifest 打点：清单重生成完成即 mark，供收据 edit 段细分。
+
+    照 selfcheck._mark_selfcheck 的子进程调法（batch 识别走 cdp_timing
+    current-batch.json 三级回落）；发点失败仅 stderr 提示，不改返回码
+    （打点诊断数据，非清单生成结果本身）。
+    """
+    timing = Path(__file__).resolve().parent / "cdp_timing.py"
+    try:
+        proc = subprocess.run([sys.executable, str(timing), "mark",
+                               "--name", "gen_manifest"],
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=10)
+        if proc.returncode != 0:
+            print(f"warn: gen_manifest 打点失败（不阻断）: {proc.stderr.strip()}",
+                  file=sys.stderr)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"warn: gen_manifest 打点失败（不阻断）: {e}", file=sys.stderr)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="重生成 code/rpi5/manifest.yaml（cross-device 编辑后护栏）"
@@ -119,6 +140,7 @@ def main() -> None:
     patch_root = profile_path("PATCHS_DIR")
     generate_manifest(patch_root, check_only=args.check_only,
                       kernel_deletions=[], aosp_deletions=[])
+    _mark_gen_manifest()
     harness_exit(0)
 
 

@@ -38,8 +38,11 @@ from cdp_paths import log_apply_dir
 
 # 链路阶段名常量表：apply/verify 已知链路段。mark 表外名仅 stderr warn
 # 不阻断（仍记录），供 emit 侧定位耗时瓶颈时识别未知段（方向 5 固化）。
+# edit_validate/gen_manifest：编辑阶段细分（diff 校验器/清单重生成各自
+# 自发 mark），把 edit 段内的机械校验耗时单独归因（方向 2 增）。
 KNOWN_SEGMENTS = frozenset([
-    "precheck", "edit", "verify_sync", "verify_build", "verify_push",
+    "precheck", "edit", "edit_validate", "gen_manifest",
+    "verify_sync", "verify_build", "verify_push",
     "verify_unit_test", "verify_acceptance", "apply_selfcheck", "report",
 ])
 

@@ -18,6 +18,12 @@ VALID_S = """-s base:1a2b3c4d5e6f
 方向: 补充新增文件条目描述
 """
 
+VALID_SV = """-sv base:1a2b3c4d5e6f
+意图: 上板验证
+验收: svc:lechao_lcview boot
+方向: 验证 1 处
+"""
+
 
 class TestWsReport(unittest.TestCase):
     def setUp(self):
@@ -376,10 +382,10 @@ class TestWsReport(unittest.TestCase):
         content = details[0].read_text(encoding="utf-8")
         self.assertIn('"elapsed_s": 1.0', content)
 
-    def test_timings_missing_known_segments(self):
-        # 方向 1：算段后用 cdp_timing.KNOWN_SEGMENTS 比对本批段名，缺失者以
-        # missing 键写入收据 timings（emit 一眼看出缺段），多余段（finish
-        # 兜底段等表外名）不删、耗时原样保留
+    def test_timings_missing_none_mode_narrows(self):
+        # 方向 1：-s（verify_mode=none）missing 判定按 none 模式收窄——应有
+        # 段集 = KNOWN_SEGMENTS 去掉 verify_* 五段（无 verify 环节不再误报缺
+        # verify 段）；多余段（finish 兜底段）不删、耗时原样保留
         batch = self._write(VALID_S, ".cdp")
         body = self._write("## 现场\n")
         timings = json.dumps({
@@ -400,16 +406,50 @@ class TestWsReport(unittest.TestCase):
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         content = details[0].read_text(encoding="utf-8")
         self.assertIn('"missing"', content)
-        # 本批仅打了 precheck/edit → 其余已知段应列于 missing
+        # none 模式应有段集（去 verify_*）：本批仅 precheck/edit → 缺以下 4 段
+        for seg in ("edit_validate", "gen_manifest", "apply_selfcheck", "report"):
+            self.assertIn(f'"{seg}"', content, f"none 模式缺段 {seg} 应列 missing")
+        # verify_* 五段不应在 missing（none 模式收窄，无 verify 环节）
         for seg in ("verify_sync", "verify_build", "verify_push",
-                    "verify_unit_test", "verify_acceptance",
-                    "apply_selfcheck", "report"):
-            self.assertIn(f'"{seg}"', content, f"已知段 {seg} 缺失应列于 missing")
-        # 本批已打段不得出现在 missing（segments 里仍可见）
+                    "verify_unit_test", "verify_acceptance"):
+            self.assertNotIn(f'"{seg}"', content,
+                             f"none 模式无 verify 环节，{seg} 不应在 missing")
+        # 本批已打段在 segments 里可见
         self.assertIn('"precheck"', content)
         self.assertIn('"edit"', content)
         # 多余段不删：compute_segments 兜底段 finish（非 KNOWN_SEGMENTS 成员）
         self.assertIn('"finish"', content)
+
+    def test_timings_missing_board_full_table(self):
+        # 方向 1：-sv（verify_mode=board）missing 按全表判定，verify_* 缺段可见
+        # （board 模式有 verify 环节，缺段须显式暴露供 emit 定位）
+        batch = self._write(VALID_SV, ".cdp")
+        body = self._write("## 现场\n")
+        timings = json.dumps({
+            "batch_id": "abc123def456",
+            "start_wall": 1000.0,
+            "wall_end": 1005.0,
+            "marks": [{"name": "precheck", "wall": 1001.5}],
+        })
+        tfile = self._write(timings, ".json")
+        with redirect_stdout(io.StringIO()):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--acceptance", "svc:lechao_lcview boot",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--timings-file", tfile])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn('"missing"', content)
+        for seg in ("verify_sync", "verify_build", "verify_push",
+                    "verify_unit_test", "verify_acceptance"):
+            self.assertIn(f'"{seg}"', content,
+                          f"board 模式缺段 {seg} 应列 missing（全表判定）")
+        # board 模式亦须报 edit 段内细分缺段（edit_validate/gen_manifest）
+        self.assertIn('"edit_validate"', content)
+        self.assertIn('"gen_manifest"', content)
 
     def test_timings_trend_carries_elapsed_and_segs(self):
         # 方向 3：ws_report 向 append_trend 传 timing 参数，trend 行尾含

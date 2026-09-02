@@ -1,7 +1,13 @@
+import contextlib
+import io
+import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib" / "python"))
 import gen_manifest as gm
@@ -68,6 +74,60 @@ class TestGenManifest(unittest.TestCase):
         self.assertIn("deletions:", content)
         self.assertIn("source: rpi5-kernel-build/common/drivers/z.c", content)
         self.assertIn("source: aosp/vendor/x/z.h", content)
+
+
+class TestGenManifestMark(unittest.TestCase):
+    """方向 4：gen_manifest main 收尾自发 mark gen_manifest（edit 段细分）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old_root = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+        self.batch = "abc123def456"
+
+    def tearDown(self):
+        if self._old_root is None:
+            os.environ.pop("CDP_PROJECT_ROOT", None)
+        else:
+            os.environ["CDP_PROJECT_ROOT"] = self._old_root
+        self._tmp.cleanup()
+
+    def test_mark_gen_manifest_writes(self):
+        # start 建 current-batch.json → _mark_gen_manifest 自发 mark（照
+        # selfcheck._mark_selfcheck 子进程调法，batch 识别走回落）
+        import cdp_timing
+        from cdp_paths import log_apply_dir
+        cdp_timing.main(["start", "--batch", self.batch])
+        gm._mark_gen_manifest()
+        data = json.loads((log_apply_dir() / f"timings-{self.batch}.json")
+                          .read_text(encoding="utf-8"))
+        self.assertEqual(data["marks"][-1]["name"], "gen_manifest")
+
+    def test_mark_failure_not_block(self):
+        # 发点子进程异常（OSError）仅 stderr warn，不改 main 返回码
+        err = io.StringIO()
+        with mock.patch.object(subprocess, "run",
+                               side_effect=OSError("boom")), \
+                contextlib.redirect_stderr(err):
+            gm._mark_gen_manifest()
+        self.assertIn("warn", err.getvalue())
+
+    def test_main_invokes_mark(self):
+        # main 收尾调用 _mark_gen_manifest（mock 生成与 harness 收尾依赖，
+        # 控制 sys.argv 避免读 pytest 参数）
+        old_argv = sys.argv
+        sys.argv = ["gen_manifest", "--check-only"]
+        try:
+            with mock.patch.object(gm, "harness_init"), \
+                    mock.patch.object(gm, "generate_manifest"), \
+                    mock.patch.object(gm, "harness_exit"), \
+                    mock.patch.object(gm, "profile_path",
+                                      return_value=Path(tempfile.mkdtemp())), \
+                    mock.patch.object(gm, "_mark_gen_manifest") as mk:
+                gm.main()
+        finally:
+            sys.argv = old_argv
+        mk.assert_called_once()
 
 
 if __name__ == "__main__":
