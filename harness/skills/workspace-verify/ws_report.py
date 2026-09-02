@@ -12,12 +12,18 @@
   三指标结构化存档：--metrics "<JSON 对象>"（如性能采集的
   {"throughput_evs":328,"drain_ms_per_event":6.4,"daemon_rss_kb":5516}），
   写入收据 metrics 字段 + trend 行尾追加，供跨批 diff；缺省不写。
-  链路耗时打点：--timings-file <cdp_timing.py start/mark 原始打点文件>，经
-  compute_segments 计算段耗时写入收据 timings 字段供 emit 定位耗时瓶颈；
-  缺失/非法仅 warn 不阻断（诊断数据非验收证据）。
+链路耗时打点：--timings-file <cdp_timing.py start/mark 原始打点文件>，经
+   compute_segments 计算段耗时写入收据 timings 字段供 emit 定位耗时瓶颈；
+   缺失/非法仅 warn 不阻断（诊断数据非验收证据）。
+   兜底段语义（finish 两义）：compute_segments 末段名 "finish" 是"末个
+   mark 到算段时刻"的兜底段，与 cdp_timing finish 子命令同名不同义。该段
+   含自检/编排空转，不细分无法归因（15 笔 -s 收据兜底段 0.26~361.9s 乱跳
+   而自检恒 11s 档）。本脚本解析打点前自发 mark report，收窄为纯写收据；
+   selfcheck.py 跑完自发 mark apply_selfcheck，分离自检耗时。
 """
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -35,6 +41,41 @@ from paths import env_path  # noqa: E402
 
 
 _HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def _mark_report(timings_file, batch_id):
+    """自发 report 打点：解析打点前 mark 本批"收据解析+落盘"起点。
+
+    兜底段语义：compute_segments 末段名 finish（与 finish 子命令同名
+    两义——前者是"末个 mark 到算段时刻"的兜底段，后者是归档子命令），
+    其耗时 = 末个 mark 到算段时刻，含自检与编排空转。15 笔 -s 收据兜底段
+    在 0.26~361.9s 间乱跳而自检恒 11s 档即因此（收据在 push 之前落盘）。
+    自发 mark report 后兜底段收窄为"report → 算段时刻"= 纯写收据耗时。
+    目标文件与 timings 探测同源：显式 --timings-file 优先，未传自动探测
+    log_apply_dir()/timings-<batch_id>.json；文件缺失/非法仅 warn 不阻断
+    （打点诊断数据，非收据证据本身）。直接编辑文件（cdp_timing mark 仅
+    支持 --batch 定位，无法覆盖显式 --timings-file 场景）。
+    """
+    target = timings_file
+    if not target and batch_id:
+        probe = log_apply_dir() / f"timings-{batch_id}.json"
+        if probe.is_file():
+            target = str(probe)
+    if not target:
+        return
+    try:
+        p = Path(target)
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("非 JSON 对象")
+        data.setdefault("marks", []).append(
+            {"name": "report", "wall": time.time()})
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                       encoding="utf-8")
+        tmp.replace(p)
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        print(f"warn: report 打点失败（不阻断）: {e}", file=sys.stderr)
 
 
 def _resolve_timings(timings_file, batch_id):
@@ -82,6 +123,35 @@ def _resolve_timings(timings_file, batch_id):
     except (OSError, json.JSONDecodeError, ValueError) as e:
         print(f"warn: --timings-file 读取失败，timings 置空: {e}", file=sys.stderr)
         return "", None
+
+
+def _resolve_cases(cases_arg, batch_id):
+    """解析收据 cases 字段（本次实跑用例标签）。
+
+    显式 --case 优先；未传时自动探测 log_apply_dir()/cases-<batch_id>.json
+    （cdp_paths 绝对路径，与 _resolve_timings/timings 探测同源；该文件由
+    ws_acceptance 验收后写入本次实跑标签）。探测到即补全，缺失仅 warn
+    降级（返回原值），不阻断——空 cases 阻断语义由调用方按
+    verify_mode/result 组合判定（board+pass 空 cases 拒写）。
+    """
+    if (cases_arg or "").strip():
+        return cases_arg
+    if not batch_id:
+        return cases_arg
+    probe = log_apply_dir() / f"cases-{batch_id}.json"
+    if not probe.is_file():
+        print(f"warn: 未传 --case 且未探测到 cases-{batch_id}.json，"
+              "cases 置空", file=sys.stderr)
+        return cases_arg
+    try:
+        data = json.loads(probe.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not (data.get("cases") or "").strip():
+            raise ValueError("cases 字段为空或非对象")
+        print(f"NOTE: 自动探测到 cases 文件: {probe}", file=sys.stderr)
+        return data["cases"].strip()
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        print(f"warn: cases 探测读取失败，置空: {e}", file=sys.stderr)
+        return cases_arg
 
 
 def _validate_acceptance_pass(acceptance):
@@ -236,6 +306,9 @@ def main(argv=None):
             print(f"error: {terr}", file=sys.stderr)
             return 2
 
+    # 自发 report 打点：解析打点前 mark 本批收据解析+落盘起点，使兜底段
+    # （末个 mark 到算段时刻）收窄为纯写收据耗时（自检/编排空转不再混入）
+    _mark_report(args.timings_file, batch_id)
     # 链路耗时打点：显式 --timings-file 优先，未传自动探测
     # log_apply_dir()/timings-<batch_id>.json（cdp_paths 绝对路径与
     # cdp_timing 写入同源，认 CDP_PROJECT_ROOT）；
@@ -245,6 +318,19 @@ def main(argv=None):
         args.elapsed = derived_elapsed
     if args.elapsed is None:
         args.elapsed = 0
+
+    # cases 补全：显式 --case 优先，未传自动探测 cases-<batch_id>.json
+    # （ws_acceptance 验收后写入本次实跑标签，与 timings 探测同源）
+    args.case = _resolve_cases(args.case, batch_id)
+    # board+pass 空 cases 拒写：空 cases 会让 prepare 的 evidence-scope
+    # 推导无源而卡死（2026-09-02 BL-20260902-01 被迫回填 7833c640079a），
+    # 堵住源头比事后改历史收据可靠——收据一经落盘即证据，禁事后修改
+    if args.result == "pass" and verify_mode == "board" \
+            and not (args.case or "").strip():
+        print("error: verify_mode=board 且 result=pass 必须带 cases"
+              "（--case 或 cases-<batch_id>.json 探测），空 cases 会使 "
+              "prepare evidence-scope 推导死锁，拒绝写收据", file=sys.stderr)
+        return 2
 
     # 验收证据门禁：result=pass 必须带逐项验收 JSON 且整体通过，否则拒写
     # （堵手填假绿混过 promote）；通过后单行化落盘——header 逐行 key-value，

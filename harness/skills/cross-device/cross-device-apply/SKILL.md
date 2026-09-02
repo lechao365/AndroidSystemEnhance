@@ -70,8 +70,17 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
      （session 丢失/异常时降级：直接执行 /workspace-verify 模式 A，基线行为）
      末轮收据正文必须含 CDP 原文 + 失败现场（--body；超限终结批并含诊断报告）
      loop 终结（收据落盘）后打点（必做）：cdp_timing.py mark --batch <batch_id> --name verify_end
-   - 收据落盘是进步骤 6 的前提：ws_report 返 2（如 -sv 缺 --acceptance、
-     --log-since 非法等参数错误）即收据未落盘，必须补参重试，禁止无收据进步骤 6
+- 收据落盘是进步骤 6 的前提：ws_report 返 2（如 -sv 缺 --acceptance、
+      --log-since 非法等参数错误）即收据未落盘，必须补参重试，禁止无收据进步骤 6
+   **收据 cases 自动落盘 + 禁改历史口径（2026-09-02 定）**：
+   - -sv 批次走 loop 验证时，ws_acceptance 验收完成自动把实跑 case 标签写
+     log_apply_dir()/cases-<batch_id>.json（batch 识别三级回落），ws_report
+     未传 --case 自动探测补全（显式传参优先）——board pass 收据 cases 由此
+     自动落盘，空 cases 不再卡 prepare 的 evidence-scope 推导。
+   - **禁改历史收据文件**：收据一经落盘即证据，事后回填/改写属伪造证据链。
+     board+pass 空 cases 由 ws_report 源头拒写（返 2）兜底；发现缺 cases 时
+     只写新收据引用旧批次（-s 自检批 + 说明），禁止编辑旧收据补字段
+     （2026-09-02 BL-20260902-01 发布被迫回填 7833c640079a 的教训）。
 - -s → 写 skip 收据（先自检，证据随收据落地；rc 为主判据，缺 rc/任一非零即拒写）：
       SELFCHECK=$(python3 harness/lib/selfcheck.py)
       python3 harness/skills/workspace-verify/ws_report.py --batch-file <批次文件> --result skip --build skip --board skip --summary "<意图首句>（-s 无需上板）" --selfcheck "$SELFCHECK" --body <批次文件> [--timings-file harness/log/cross-device/timings-<batch_id>.json]

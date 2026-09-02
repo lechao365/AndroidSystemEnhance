@@ -973,6 +973,64 @@ class TestBackfillZeroMarks(unittest.TestCase):
         self.assertEqual(data["marks"], [])
 
 
+class TestWriteCases(unittest.TestCase):
+    """方向 1：本次实跑 case 标签落盘 cases-<batch_id>.json（三级回落识别 batch）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+        self.batch = "abc123def456"
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("CDP_PROJECT_ROOT", None)
+        else:
+            os.environ["CDP_PROJECT_ROOT"] = self._old
+        self._tmp.cleanup()
+
+    def _cases_file(self, bid=None):
+        return wa.cdp_paths.log_apply_dir() / f"cases-{bid or self.batch}.json"
+
+    def test_explicit_batch_id_writes(self):
+        # 显式 batch_id 优先：cases-<batch_id>.json 落盘且内容与标签一致
+        wa._write_cases(self.batch, "lcview-liveness,lcview-sepolicy-label")
+        data = json.loads(self._cases_file().read_text(encoding="utf-8"))
+        self.assertEqual(data["batch_id"], self.batch)
+        self.assertEqual(data["cases"],
+                         "lcview-liveness,lcview-sepolicy-label")
+
+    def test_env_batch_id_fallback(self):
+        # 无显式 batch_id → 环境变量 CDP_BATCH_ID 回落
+        os.environ["CDP_BATCH_ID"] = "envbatch123456"
+        try:
+            wa._write_cases(None, "lcview-liveness")
+        finally:
+            os.environ.pop("CDP_BATCH_ID", None)
+        data = json.loads(self._cases_file("envbatch123456")
+                          .read_text(encoding="utf-8"))
+        self.assertEqual(data["batch_id"], "envbatch123456")
+
+    def test_unique_timing_file_fallback(self):
+        # 无显式/环境变量 → log 目录唯一 timings 文件回落（复用 _mark_stage
+        # 同款识别口径；多打点文件时静默跳过防误标）
+        wa.cdp_timing.main(["start", "--batch", self.batch])
+        wa._write_cases(None, "lcview-perf")
+        data = json.loads(self._cases_file().read_text(encoding="utf-8"))
+        self.assertEqual(data["batch_id"], self.batch)
+
+    def test_no_batch_skips(self):
+        # 无显式/环境变量/唯一打点文件 → 静默跳过不落盘（独立 CLI 无 batch
+        # 上下文属正常降级，不阻断）
+        wa._write_cases(None, "lcview-liveness")
+        self.assertFalse(self._cases_file().exists())
+
+    def test_empty_cases_skips(self):
+        # 无实跑标签（--case 空）→ 不落盘（-s 批次无标签属正常）
+        wa._write_cases(self.batch, "")
+        self.assertFalse(self._cases_file().exists())
+
+
 class TestConvertSince(unittest.TestCase):
     def _dev(self, epoch, tz="+0000"):
         def dev(cmd):

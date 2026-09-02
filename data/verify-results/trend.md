@@ -58,3 +58,5 @@
 2026-09-02 09:30:52 7833c640079a pass build=skip board=pass acc={"overall":"pass","items":[{"tag":"svc:l 验收全绿: lcview-liveness+lcview-sepolicy-la
 2026-09-02 09:50:04 7d2ea045e3fb skip build=skip board=skip acc=- acceptance 段内部细分打点找真瓶颈（-s 无需上板）
 2026-09-02 10:46:02 manual-2609021046 skip build=skip board=skip acc=- 补全收据 7833c640079a cases 证据字段（-s 无需上板）
+2026-09-02 11:13:23 8c449df08c19 skip build=skip board=skip acc=- 收据 cases 自动落盘并禁事后改历史收据（-s 无需上板）
+2026-09-02 12:59:01 c6431ee59ed3 skip build=skip board=skip acc=- 尾段细分打点让收据兜底段可归因（-s 无需上板）

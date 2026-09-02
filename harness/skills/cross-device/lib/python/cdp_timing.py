@@ -16,6 +16,13 @@ mark/finish 的 batch 识别（脚本自动打点依赖）：显式 --batch/--fi
 打点文件: <project_root>/harness/log/cross-device/timings-<batch_id>.json
 （gitignore 工作态；ws_report --timings-file 读原始打点文件经 compute_segments
 计算段耗时并入收据 timings 字段——finish 仅归档/人工查看，不依赖其先跑）
+
+兜底段语义（重要，finish 两义）：compute_segments 的末段名固定为 "finish"
+——它是"末个 mark 到算段时刻"的兜底段，与 finish **子命令**（归档命令）
+同名不同义。该段耗时 = 末个 mark 之后的所有未打点活动（如 -s 批次的
+selfcheck、编排空转、收据写盘），不细分无法归因。定位耗时需在阶段
+边界自发 mark：selfcheck.py 跑完发 apply_selfcheck、ws_report 解析打点
+前发 report，使兜底段收窄为纯写收据。
 """
 import argparse
 import json

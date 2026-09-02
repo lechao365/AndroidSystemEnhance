@@ -1,3 +1,4 @@
+import contextlib
 import io
 import sys
 import unittest
@@ -24,6 +25,16 @@ def _fake_run(seq):
 
 
 class TestSelfcheck(unittest.TestCase):
+    def setUp(self):
+        # 屏蔽自发 apply_selfcheck 打点（打点不影响 selfcheck 结果断言，
+        # 其行为由 TestMarkSelfcheck 单独覆盖；不屏蔽会让 mock 的
+        # subprocess.run 固定序列被额外调用耗尽报 IndexError）
+        self._mark = mock.patch.object(selfcheck, "_mark_selfcheck")
+        self._mark.start()
+
+    def tearDown(self):
+        self._mark.stop()
+
     def test_rc_nonzero_passed_through(self):
         # 方向 6：桩令 pytest 与 refs 均非零，rc 必须如实透出（不经管道）
         fake = _fake_run([
@@ -166,6 +177,50 @@ class TestSelfcheck(unittest.TestCase):
             seen = self._run_capture_cmd(fake)
         pytest_cmd = seen[0]
         self.assertNotIn("-n", pytest_cmd)
+
+
+class TestMarkSelfcheck(unittest.TestCase):
+    """方向 1：自检跑完自发 mark apply_selfcheck（batch 三级回落，失败不阻断）。"""
+
+    def test_main_marks_after_selfcheck(self):
+        # main() 完成自检后调用 _mark_selfcheck（打点入 cdp_timing mark 链）
+        with mock.patch.object(selfcheck, "_mark_selfcheck") as m:
+            fake = _fake_run([
+                _FakeProc(0, "531 passed in 27.9s\n"),
+                _FakeProc(0, "OK: 引用完整\n"),
+            ])
+            with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
+                with redirect_stdout(io.StringIO()):
+                    selfcheck.main()
+        m.assert_called_once()
+
+    def test_mark_calls_cdp_timing_with_name(self):
+        # _mark_selfcheck 以 cdp_timing.py mark --name apply_selfcheck 调起，
+        # 不显式 --batch（交 cdp_timing 三级回落：env CDP_BATCH_ID > 唯一文件）
+        seen = []
+
+        def _run(cmd, **kw):
+            seen.append(cmd)
+            return _FakeProc(0, "mark: apply_selfcheck @ 123.456\n")
+
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=_run):
+            with contextlib.redirect_stderr(io.StringIO()):
+                selfcheck._mark_selfcheck()
+        self.assertEqual(len(seen), 1)
+        cmd = seen[0]
+        self.assertTrue(any("cdp_timing" in c for c in cmd))
+        self.assertIn("mark", cmd)
+        self.assertIn("apply_selfcheck", cmd)
+        self.assertNotIn("--batch", cmd)
+
+    def test_mark_failure_not_blocking(self):
+        # 发点失败（returncode 非零）仅 warn 不阻断（自检结果与打点解耦）
+        fake = _FakeProc(3, "", "error: 未 start\n")
+        err = io.StringIO()
+        with mock.patch.object(selfcheck.subprocess, "run", return_value=fake):
+            with contextlib.redirect_stderr(err):
+                selfcheck._mark_selfcheck()  # 不抛异常即通过
+        self.assertIn("打点失败（不阻断）", err.getvalue())
 
 
 if __name__ == "__main__":

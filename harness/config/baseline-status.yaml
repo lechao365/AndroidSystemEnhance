@@ -168,3 +168,23 @@ baselines:
       title: lechao_lcview_hal_device 设备节点类型名残留（HAL 退役后命名未同步）
   approved_by: lechao
   approved_at: '2026-09-02T10:50:22+08:00'
+- baseline_id: BL-20260902-02
+  status: promoted
+  source_branch: dev
+  source_commit: 19f85748f9ed
+  sync_manifest: data/verify-results/20260902-093052-7833c640079a.md
+  build_result: SKIP
+  package_result: SKIP
+  board_verify: PASS
+  evidence_scope: no-code-change
+  evidence:
+    build_result: SKIP
+    package_result: SKIP
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260902-093052-7833c640079a.md
+    ki_gate: empty-registry
+    evidence_scope: no-code-change
+    known_issues_carried: ''
+    known_issues_closed: []
+  approved_by: lechao
+  approved_at: '2026-09-02T14:27:30+08:00'

@@ -518,12 +518,14 @@ class TestWsReport(unittest.TestCase):
         self.assertIn("- verify_mode: none", content)
 
     def test_mode_b_board_pass_verify_mode_board(self):
-        # 模式 B：--board pass（真上板验证）→ verify_mode=board
+        # 模式 B：--board pass（真上板验证）→ verify_mode=board；
+        # board+pass 必须带 cases（新门禁，防 prepare evidence-scope 死锁）
         buf = io.StringIO()
         with redirect_stdout(buf):
             rc = ws_report.main(["--target", "1a2b3c4d5e6f",
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "上板通过",
+                                 "--case", "lcview-liveness",
                                  "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance",
                                  '{"overall": "pass", "items": []}'])
@@ -532,6 +534,7 @@ class TestWsReport(unittest.TestCase):
         self.assertEqual(len(details), 1)
         content = details[0].read_text(encoding="utf-8")
         self.assertIn("- verify_mode: board", content)
+        self.assertIn("- cases: lcview-liveness", content)
 
     def test_pass_without_acceptance_rejected(self):
         # result=pass 而无 --acceptance → 返 2 拒写（堵零验收证据假绿）
@@ -763,6 +766,191 @@ class TestWsReport(unittest.TestCase):
         content = details[0].read_text(encoding="utf-8")
         self.assertIn("aabbccddeeff", content)
         self.assertNotIn("- verified_commit: dev", content)
+
+    # ── 方向 2/3：cases 自动探测补全 + board+pass 空 cases 拒写 ──────────
+    def _write_probe_cases(self, batch_path, cases_text):
+        """在 log_apply_dir()（cdp_paths 绝对路径，认 CDP_PROJECT_ROOT）下
+        按 batch_id 写 cases 探测文件（与 ws_acceptance 写入同源）。"""
+        from cdp_parse import batch_id_from_text
+        from cdp_paths import log_apply_dir
+        bid = batch_id_from_text(Path(batch_path).read_text(encoding="utf-8"))
+        probe_dir = log_apply_dir()
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        cfile = probe_dir / f"cases-{bid}.json"
+        cfile.write_text(json.dumps({"batch_id": bid, "cases": cases_text}),
+                         encoding="utf-8")
+        self.addCleanup(lambda: cfile.unlink(missing_ok=True))
+        return bid
+
+    def test_cases_auto_probe_hit_boardsv(self):
+        # 方向 1/2：-sv 批次未传 --case → 自动探测 cases-<batch_id>.json
+        # 命中即补全（与 timings 探测同源），board pass 收据 cases 字段落盘
+        batch = self._write("""-sv base:1a2b3c4d5e6f
+意图: liveness 验证
+验收: svc:lechao_lcview
+方向: x
+""", ".cdp")
+        body = self._write("## 现场\n")
+        bid = self._write_probe_cases(batch, "lcview-liveness,lcview-sepolicy-label")
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "pass", "--build", "skip",
+                                 "--board", "pass", "--summary", "liveness",
+                                 "--acceptance",
+                                 json.dumps({"overall": "pass",
+                                             "items": [{"tag": "svc:lechao_lcview",
+                                                        "status": "pass"}]})])
+        self.assertEqual(rc, 0)
+        self.assertIn(f"自动探测到 cases 文件: {ws_report.log_apply_dir()}/cases-{bid}.json",
+                      err.getvalue())
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- cases: lcview-liveness,lcview-sepolicy-label", content)
+
+    def test_cases_explicit_overrides_probe(self):
+        # 方向 2：显式 --case 优先于探测文件（探测文件存在也不覆盖显式传参）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        self._write_probe_cases(batch, "lcview-perf")
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--case", "lcview-liveness",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("自动探测到 cases 文件", err.getvalue())
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- cases: lcview-liveness", content)
+
+    def test_cases_auto_probe_miss_warns_not_block(self):
+        # 方向 2：未传 --case 且探测不到 → warn 降级（cases 置空），
+        # skip 收据仍落盘不阻断（空 cases 阻断仅限 board+pass）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        self.assertIn("未探测到", err.getvalue())
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- cases: ", content)
+
+    def test_cases_board_pass_empty_rejected(self):
+        # 方向 3：verify_mode=board 且 result=pass 时 cases 为空 → 返 2 拒写
+        # （空 cases 会让 prepare evidence-scope 推导死锁，堵源头优于事后改收据）
+        batch = self._write("""-sv base:1a2b3c4d5e6f
+意图: liveness 验证
+验收: svc:lechao_lcview
+方向: x
+""", ".cdp")
+        body = self._write("## 现场\n")
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "pass", "--build", "skip",
+                                 "--board", "pass", "--summary", "liveness",
+                                 "--acceptance",
+                                 json.dumps({"overall": "pass",
+                                             "items": [{"tag": "svc:lechao_lcview",
+                                                        "status": "pass"}]})])
+        self.assertEqual(rc, 2)
+        self.assertIn("必须带 cases", err.getvalue())
+        self.assertFalse(any(f.name != "trend.md"
+                             for f in self._dir.glob("*.md") if f.exists()))
+
+    def test_cases_skip_empty_not_rejected(self):
+        # 方向 3 边界：skip 收据（verify_mode=none）空 cases 不拒写
+        # （-s 批次无实跑用例属正常，非 board 证据锚点不受 prepare 死锁影响）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        with redirect_stdout(io.StringIO()):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- cases: ", content)
+
+    # ── 方向 2：解析打点前自发 report mark（兜底段收窄为纯写收据）─────────
+    def test_report_mark_appended_to_timing_file(self):
+        # 显式 --timings-file 时：解析前自发 mark report 追加到打点文件，
+        # 兜底段（finish）收窄为 report → 算段时刻（纯写收据耗时）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        timings = json.dumps({
+            "batch_id": "abc123def456",
+            "start_wall": 1000.0,
+            "marks": [{"name": "precheck", "wall": 1001.5},
+                      {"name": "edit", "wall": 1005.0}],
+        })
+        tfile = self._write(timings, ".json")
+        with redirect_stdout(io.StringIO()):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--timings-file", tfile])
+        self.assertEqual(rc, 0)
+        data = json.loads(Path(tfile).read_text(encoding="utf-8"))
+        names = [m["name"] for m in data["marks"]]
+        self.assertIn("report", names)
+        self.assertEqual(names[-1], "report", "report 须为末个 mark")
+        # 收据 timings 段含 report 与兜底段（finish = report 到算段时刻）
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn('"name": "report"', content)
+        self.assertIn('"name": "finish"', content)
+
+    def test_report_mark_auto_probe_batch(self):
+        # 未传 --timings-file：自动探测 timings-<batch_id>.json 并自发
+        # report mark（batch 识别三级回落同源）；探测不到不阻断
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        from cdp_parse import batch_id_from_text
+        from cdp_paths import log_apply_dir
+        bid = batch_id_from_text(Path(batch).read_text(encoding="utf-8"))
+        probe_dir = log_apply_dir()
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        tfile = probe_dir / f"timings-{bid}.json"
+        tfile.write_text(json.dumps({
+            "batch_id": bid, "start_wall": 2000.0,
+            "marks": [{"name": "precheck", "wall": 2001.0}],
+        }), encoding="utf-8")
+        self.addCleanup(lambda: tfile.unlink(missing_ok=True))
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        data = json.loads(tfile.read_text(encoding="utf-8"))
+        names = [m["name"] for m in data["marks"]]
+        self.assertEqual(names, ["precheck", "report"])
+
+    def test_report_mark_no_timing_skips(self):
+        # 无打点文件（未 start）时自发 report mark 静默跳过不阻断
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        with redirect_stdout(io.StringIO()):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- timings: ", content)
 
 
 if __name__ == "__main__":
