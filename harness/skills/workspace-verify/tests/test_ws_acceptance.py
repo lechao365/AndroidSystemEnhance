@@ -670,8 +670,10 @@ class TestResolveAcceptance(unittest.TestCase):
         self.assertIn("--vid ${LCVIEW_USB_VID:-1256}", acc)
         self.assertIn("${LCVIEW_USB_PID:-25344}", acc)
         self.assertIn("--mode fresh --window 600", acc)
-        # ts 以 --baseline 显式限定（只判基线后新记录，全历史卫生检查在 warn）
-        self.assertIn("--mode ts --skew 600 --baseline /tmp/lcview_baseline.json", acc)
+        # ts 以 --baseline 显式限定（只判基线后新记录，全历史卫生检查在 warn）；
+        # 基线路径经 LCVIEW_BASELINE_FILE 环境变量透传（按轮次隔离，防跨轮串扰）
+        self.assertIn("--mode ts --skew 600 --baseline "
+                      "${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}", acc)
         # 不再有裸设备路径硬编码（env 兜底表达式）
         self.assertNotIn("/sys/bus/usb/devices/1-2/", acc)
 

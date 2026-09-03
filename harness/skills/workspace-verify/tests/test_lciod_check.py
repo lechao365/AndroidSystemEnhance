@@ -7,13 +7,29 @@
 # ============================================================
 
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cases"))
 import lciod_check as lc
+
+
+class TestDefaultBaseline(unittest.TestCase):
+    """方向 4：基线文件按轮次隔离——LCIOD_BASELINE_FILE 环境变量覆盖默认路径。"""
+
+    def test_env_overrides_default(self):
+        with mock.patch.dict(os.environ,
+                             {"LCIOD_BASELINE_FILE": "/tmp/lciod_baseline_r1.json"}):
+            self.assertEqual(lc._default_baseline(),
+                             "/tmp/lciod_baseline_r1.json")
+
+    def test_unset_falls_back(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(lc._default_baseline(), "/tmp/lciod_baseline.json")
 
 # 与 lciod_probe.c 输出同构的合法单行样本（vendor 含空格验证引号解析）
 VALID_LINE = (

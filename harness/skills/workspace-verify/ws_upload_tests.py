@@ -301,23 +301,27 @@ def main(argv=None):
 
     all_ok = True
     target_stats = []
-    for name in targets:
-        need_root = name in run_as_root
-        ok, detail = ensure_user(ep, need_root)
-        if not ok:
-            all_ok = False
-            target_stats.append({"name": name, "rc": 1, "tests": None,
-                                 "failed": None})
-            print(f"  [FAIL] {name}: {detail}")
-            continue
-        ok, detail, stats = run_one(ep, args.out, args.product, name, args.verbose,
-                                    aosp_root=aosp_root, src_rel=src_map.get(name),
-                                    return_stats=True)
-        target_stats.append(stats)
-        all_ok = all_ok and ok
-        print(("  [OK]   " if ok else "  [FAIL] ") + detail)
-    # 跑完恢复 shell 用户，避免 root 状态影响后续 verify 环节
-    ensure_user(ep, False)
+    try:
+        for name in targets:
+            need_root = name in run_as_root
+            ok, detail = ensure_user(ep, need_root)
+            if not ok:
+                all_ok = False
+                target_stats.append({"name": name, "rc": 1, "tests": None,
+                                     "failed": None})
+                print(f"  [FAIL] {name}: {detail}")
+                continue
+            ok, detail, stats = run_one(ep, args.out, args.product, name,
+                                        args.verbose,
+                                        aosp_root=aosp_root, src_rel=src_map.get(name),
+                                        return_stats=True)
+            target_stats.append(stats)
+            all_ok = all_ok and ok
+            print(("  [OK]   " if ok else "  [FAIL] ") + detail)
+    finally:
+        # 跑完恢复 shell 用户，避免 root 状态影响后续 verify 环节
+        # （方向 5：中途异常亦恢复，防 adbd 残留 root 态污染后续环节）
+        ensure_user(ep, False)
     # 自描述单测产物（方向 2/3）：run_id + 每 target 返回码/用例数/失败数，
     # 原子写防半截文件被当证据
     if args.result_file:

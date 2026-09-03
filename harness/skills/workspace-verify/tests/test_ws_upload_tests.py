@@ -282,6 +282,26 @@ class TestMain(unittest.TestCase):
             rc = wu.main(["--test-targets", "t1"])
         self.assertEqual(rc, 1)
 
+    def test_exception_in_run_one_still_restores_shell_user(self):
+        # 方向 5：run_one 中途抛异常（adb 异常等）→ finally 仍恢复 shell 用户，
+        # 防止 adbd 残留 root 态污染后续 verify 环节
+        calls = []
+
+        def fake_ensure_user(ep, need_root):
+            calls.append(need_root)
+            return (True, "")
+
+        with mock.patch.object(wu.ac, "ensure_connected", return_value="ep"), \
+                mock.patch.object(wu, "ensure_user",
+                                  side_effect=fake_ensure_user), \
+                mock.patch.object(wu, "run_one",
+                                  side_effect=RuntimeError("adb boom")):
+            with self.assertRaises(RuntimeError):
+                wu.main(["--test-targets", "t1"])
+        # 异常传播后仍执行了 shell 用户恢复（need_root=False）
+        self.assertIn(False, calls)
+        self.assertEqual(calls[-1], False)
+
     def test_result_file_written(self):
         # 方向 2/3：--result-file 原子写自描述单测产物（run_id + 每 target
         # 返回码/用例数/失败数），无 .tmp 残留

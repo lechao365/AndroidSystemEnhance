@@ -55,6 +55,14 @@ fi
 if [ "$MODE" = "normal" ]; then
   [ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || { err "error: 需 --message-file 且文件存在"; exit 3; }
   [ -n "$(git status --porcelain)" ] || { err "working tree clean"; exit 4; }
+  # 提交信息中文前缀校验（commit-message-format.md）：首行须为
+  # <中文type>(<scope>): <subject>，中文 type 词表限定；英文前缀（feat/fix 等）
+  # 一律拒绝，防提交风格漂移（曾出现 feat(harness) 英文前缀混入）
+  SUBJECT=$(head -1 "$MSG_FILE")
+  if ! printf '%s' "$SUBJECT" | grep -qE '^(新增|修复|重构|文档|构建|杂项)\([^)]*\): '; then
+    err "error: 提交信息首行须为 <中文type>(<scope>): <subject>（type 词表：新增/修复/重构/文档/构建/杂项），英文前缀拒绝。实际: $SUBJECT"
+    exit 1
+  fi
   # 基线声明护栏：提交标题声明 BL-xxx 时须已在登记表登记（防未登记基线混入；
   # 曾提交标题声明 BL-20260828-02 而登记表无此条目，提交后 promote 证据链断裂）
   # 仅对 subject 首行提取声明（commit-message-format.md 约定基线声明位于标题），

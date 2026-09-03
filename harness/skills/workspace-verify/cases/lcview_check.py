@@ -50,7 +50,16 @@ ADB_TARGET = host_port()
 _EP = ADB_TARGET
 LOGS_DIR = "/data/vendor/lechao_lcview/logs"
 SCHEMA_REMOTE = "/vendor/etc/lcview_events.json"
-BASELINE_DEFAULT = "/tmp/lcview_baseline.json"
+
+
+def _default_baseline(env_name="LCVIEW_BASELINE_FILE"):
+    """按轮次隔离的基线路径（方向 4）：轮次编排层经环境变量注入按轮次唯一
+    路径（hostcmd 侧 ${LCVIEW_BASELINE_FILE:-...} 同步透传），防跨轮基线串扰
+    （A 轮写的基线被 B 轮 delta 误读）；未设置时回退固定默认（独立 CLI/单测）。"""
+    return os.environ.get(env_name) or "/tmp/lcview_baseline.json"
+
+
+BASELINE_DEFAULT = _default_baseline()
 
 
 def adb(args, timeout=60):

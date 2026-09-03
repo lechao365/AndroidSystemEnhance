@@ -76,7 +76,7 @@ class TestGitWorksPush(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._msg = Path(self._tmp.name) / "msg.txt"
-        self._msg.write_text("测试提交\n", encoding="utf-8")
+        self._msg.write_text("新增(cross-device): 测试提交\n", encoding="utf-8")
         self._baseline = Path(self._tmp.name) / "baseline-status.yaml"
         self._baseline.write_text(MOCK_BASELINE, encoding="utf-8")
 
@@ -126,6 +126,26 @@ class TestGitWorksPush(unittest.TestCase):
         r = self._run("--message-file", str(msg), "--baseline-status", str(self._baseline))
         self.assertEqual(r.returncode, 1)
         self.assertIn("未在登记表登记", r.stderr)
+
+    def test_english_prefix_rejected_exits_1(self):
+        # 方向 6：英文前缀（feat/fix 等）提交信息一律拒绝，防提交风格漂移
+        for subject in ("feat(harness): 英文前缀提交\n",
+                        "fix: 无 scope 英文前缀\n",
+                        "feat(harness) 缺冒号\n"):
+            msg = Path(self._tmp.name) / "msg_en.txt"
+            msg.write_text(subject, encoding="utf-8")
+            r = self._run("--message-file", str(msg))
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("中文type", r.stderr)
+            self.assertIn("英文前缀拒绝", r.stderr)
+
+    def test_non_type_cn_prefix_rejected_exits_1(self):
+        # 中文但非词表 type（超出 新增/修复/重构/文档/构建/杂项）→ 拒绝
+        msg = Path(self._tmp.name) / "msg_bad_type.txt"
+        msg.write_text("优化(harness): 非词表 type\n", encoding="utf-8")
+        r = self._run("--message-file", str(msg))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("英文前缀拒绝", r.stderr)
 
     def test_baseline_registered_exits_0(self):
         # subject 首行声明已登记 BL → 正常提交
