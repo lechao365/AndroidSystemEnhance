@@ -207,11 +207,12 @@ class TestRescue(unittest.TestCase):
 
 
 class TestEnsureConnectedRescueLevel(unittest.TestCase):
-    """ensure 编排（ensure CLI 触发 _mark_stage("verify_push") 自动打点）：
+    """ensure 编排（方向 5：verify_push 打点已移至 ws_push.py 推送循环
+    完成后，ensure CLI 连接成功不再自动打点）：
 
-    须隔离 CDP_PROJECT_ROOT——_mark_stage 无显式 batch 时按 current-batch.json
-    回落定位批次（cdp_timing 方向 3），不隔离会打到真实当前批次打点文件。
-    打点非本类验证目标，隔离到临时目录即可。
+    本类用例不触发真实 adb；历史口径曾在此隔离 CDP_PROJECT_ROOT 防
+    自动打点写入真实批次打点文件，隔离保留防回归（打点行为已删除，
+    隔离无害）。
     """
 
     def setUp(self):
@@ -225,6 +226,17 @@ class TestEnsureConnectedRescueLevel(unittest.TestCase):
         else:
             os.environ["CDP_PROJECT_ROOT"] = self._old_root
         self._tmp.cleanup()
+
+    def test_ensure_cli_does_not_mark_verify_push(self):
+        # 方向 5：verify_push 打点移至 ws_push.py 实际推送循环完成后，
+        # ensure CLI 连接成功不得再打点——打点函数已从本模块删除
+        # （无函数可 patch），并以"无子进程调用"兜底断言打点未复活
+        self.assertFalse(hasattr(ac, "_mark_stage"))
+        with mock.patch.object(ac, "ensure_connected", return_value="ep"):
+            with mock.patch.object(ac, "_ensure_failure_detail", return_value=[]):
+                with mock.patch.object(ac.subprocess, "run") as run:
+                    ac.main(["ensure"])
+        run.assert_not_called()
 
     def test_third_level_rescue_connects(self):
         # mDNS 与静态皆败 → rescue 取端点 → connect 复核在线（第三级通道，

@@ -63,8 +63,8 @@ stages:
    - build：编译由执行者完成时触发（cdp_timing.py mark --name verify_build；
      batch 识别走 CDP_BATCH_ID 环境变量 > log 目录唯一 timings 文件，均缺
      静默跳过返 0，不阻断）
-   - push：ws_adb_connect.py ensure 连接成功自动 mark verify_push（推送
-     前置连接就绪即推送段终点，产物 adb push 紧随其后秒级）
+   - push：ws_push.py 推送循环完成自动 mark verify_push（实际推送完成后
+     打点；ensure 连接成功不再打点——连接就绪量不到推送）
    - unit_test：ws_upload_tests.py 执行完成自动 mark verify_unit_test
    - acceptance：ws_acceptance.py run 完成自动 mark verify_acceptance
    重试轮沿用同段名 mark，不追加轮次前缀（段名保持稳定供复盘按段统计）；
@@ -89,15 +89,23 @@ stages:
    - 全程：INC-001 禁 make clean/clobber；BLD-009 CCACHE_DIR=out/ccache
    编译段打点（verify_build）：编译完成由执行者触发
    （cdp_timing.py mark --name verify_build，失败不阻断）
-4. adb 推送：python3 harness/skills/workspace-verify/ws_adb_connect.py ensure --rescue
-   （mDNS→静态 fallback→串口救援自接：推送前置必须连上设备，本步中止则步骤 5
-   不执行，不能等编排层兜底；成功输出 endpoint）
-   adb root && adb remount（INC-003 失败查 verifiedbootstate=orange；INC-005 需 userdebug）
-   → 按 modules.<模块>.push 映射 push 编译产物到对应分区路径（分区有别：
-   daemon 无 vendor 落 /system，HAL 有 vendor 落 /vendor，均含 bin 与 init 两处）
-→ 重启服务或 reboot
-     （boot.img 刷写只写第一分区 INC-004，且属人工确认门）
-   推送段打点（verify_push）：ws_adb_connect ensure 连接成功自动 mark，无需手动
+4. adb 推送：python3 harness/skills/workspace-verify/ws_push.py
+   [--modules <模块名...>]（默认推送 verify-cases.yaml modules 段全部
+   push 映射，映射即执行的唯一事实源，取代手敲 adb push；本步中止则
+   步骤 5 不执行，不能等编排层兜底）：
+   - 脚本内聚：ws_adb_connect ensure 连接 → adb root && adb remount
+     （INC-003 失败查 verifiedbootstate=orange；INC-005 需 userdebug）
+     → 按映射逐项推送（本地源 = AOSP out target/product/<product> 下
+     与 dst 同相对路径的编译产物）→ 逐项回读设备侧 SHA256/字节数/
+     SELinux 上下文与本地产物比对，任一不符判红 → 命中 sepolicy
+     （/selinux/）或 vintf（/vintf/）或 init rc（.rc 结尾）的项强制
+     reboot 并等待 sys.boot_completed 启动完成，跳过即判红（无跳过
+     开关）→ 落自描述产物 --result-file（run_id + 逐项源/目标路径 +
+     三项校验值 sha256/bytes/context，原子写）
+   推送段打点（verify_push）：ws_push.py 推送循环完成后自动 mark
+   （实际推送完成后打点，含失败轮；ensure 连接成功不再打点）
+   判红（exit 1）不得回退手敲 adb push——须修产物/环境后重跑本脚本
+   （boot.img 刷写只写第一分区 INC-004，且属人工确认门，不在本脚本范围）
 4b. 设备侧单测执行（制度化，AGENTS.md 测试防护强制）：
     python3 harness/skills/workspace-verify/ws_upload_tests.py \
       --result-file harness/log/cross-device/unit-tests-<batch_id>.json

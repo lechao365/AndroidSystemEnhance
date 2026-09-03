@@ -22,7 +22,6 @@ import re
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 _EXEC_TAG_RE = re.compile(r"__LE_EXIT_CODE__=(\d+)\s*$", re.MULTILINE)
 
@@ -395,25 +394,6 @@ def _ensure_failure_detail() -> list:
     return parts
 
 
-def _mark_stage(name):
-    """验证阶段自动打点：cdp_timing.py mark（batch 识别：CDP_BATCH_ID 环境变量
-    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。"""
-    timing = (Path(__file__).resolve().parents[1] / "cross-device"
-              / "lib" / "python" / "cdp_timing.py")
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(timing.parent) + os.pathsep + env.get("PYTHONPATH", "")
-    try:
-        r = subprocess.run([sys.executable, str(timing), "mark", "--name", name],
-                           capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=10, env=env)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        print(f"warn: 打点 {name} 失败（不阻断）: {e}", file=sys.stderr)
-        return
-    if r.returncode != 0:
-        print(f"warn: 打点 {name} 失败（不阻断）: {r.stderr.strip()}",
-              file=sys.stderr)
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(description="adb 连接工具（mDNS→静态 fallback）")
     sub = ap.add_subparsers(dest="action", required=True)
@@ -441,9 +421,8 @@ def main(argv=None):
     if args.action == "ensure":
         ep = ensure_connected(rescue_enabled=args.rescue)
         if ep:
-            # 推送前置连接成功即自动打点推送段（产物 adb push 紧随其后秒级，
-            # 连接就绪即推送段终点；脚本自动 mark，失败不阻断）
-            _mark_stage("verify_push")
+            # 方向 5：verify_push 打点已移至 ws_push.py 实际推送循环完成后
+            # （此前连接成功即打，量不到推送），本 CLI 只负责连接并输出 endpoint
             print(ep)
         else:
             print(json.dumps(
