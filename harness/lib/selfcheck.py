@@ -13,9 +13,11 @@ subprocess 不经管道直取 returncode，如实透出两工具结果。
 也不静默通过。refs 结论行同理只取 stdout 末行，stderr 仅附注不参与判定。
 
 输出单行（| 连接，供 ws_report --selfcheck 落盘与门禁判定）：
-    pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n> | refs_rc=<n> | <refs 结论行>
-skipped=<n> 仅在 pytest_rc=0 且摘要无 skipped 时补 0。退出码恒 0：拒写与否
-由 ws_report 按 rc 判定，本脚本只负责如实采集（emit 侧可独立自测）。
+    pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n> | refs_rc=<n> | <refs 结论行> | config_rc=<n> | <config 结论行> | contract_rc=<n> | <contract 结论行>
+skipped=<n> 仅在 pytest_rc=0 且摘要无 skipped 时补 0。config_rc/contract_rc
+为 check_config.py 两模式（配置治理/契约检查，方向 4 接入）；ws_report 按
+全部 *_rc 键判红（任一非零拒写收据）。退出码恒 0：拒写与否由 ws_report
+按 rc 判定，本脚本只负责如实采集（emit 侧可独立自测）。
 """
 import re
 import subprocess
@@ -118,6 +120,13 @@ def main():
     refs_rc, refs_out, refs_err = run_tool([sys.executable,
                                             str(ROOT / "harness" / "lib"
                                                 / "check_skill_refs.py")])
+    # 配置治理与契约检查（方向 4）：check_config 两模式各透出一个 rc
+    cfg_rc, cfg_out, _ = run_tool([sys.executable,
+                                   str(ROOT / "harness" / "lib"
+                                       / "check_config.py")])
+    ctr_rc, ctr_out, _ = run_tool([sys.executable,
+                                   str(ROOT / "harness" / "lib"
+                                       / "check_config.py"), "--contract"])
     summary = pytest_summary(py_out)
     parts = [f"pytest_rc={py_rc}"]
     if summary:
@@ -136,6 +145,16 @@ def main():
     refs_last = last_stdout_line(refs_out)
     if refs_last:
         parts.append(refs_last)
+    # 配置/契约两 rc（方向 4）：结论末行随摘要拼接收据（任一非零由
+    # ws_report 全 rc 扫描判红拒写）
+    parts.append(f"config_rc={cfg_rc}")
+    cfg_last = last_stdout_line(cfg_out)
+    if cfg_last:
+        parts.append(cfg_last)
+    parts.append(f"contract_rc={ctr_rc}")
+    ctr_last = last_stdout_line(ctr_out)
+    if ctr_last:
+        parts.append(ctr_last)
     print(" | ".join(parts))
     _mark_selfcheck()
     return 0

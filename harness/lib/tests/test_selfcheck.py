@@ -40,6 +40,8 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(1, "1 failed, 119 passed in 5.0s\n"),
             _FakeProc(2, "==== 共 3 处悬空引用（exit 1）====\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -56,6 +58,8 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(0, "121 passed, 3 skipped in 6.0s\n"),
             _FakeProc(0, "OK: 引用完整\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -71,6 +75,8 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
             _FakeProc(0, "OK: 引用完整\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -84,6 +90,8 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(2, "INTERNALERROR> Killed\n"),
             _FakeProc(0, "OK: 引用完整\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -100,6 +108,8 @@ class TestSelfcheck(unittest.TestCase):
             _FakeProc(0, "531 passed in 27.9s\n",
                       "warn: 某插件加载失败\nwarn: 忽略\n"),
             _FakeProc(0, "OK: 引用完整\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -116,6 +126,8 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(0, "\n", "warn: 某插件加载失败\n"),
             _FakeProc(0, "OK: 引用完整\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -131,6 +143,8 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
             _FakeProc(0, "OK: 引用完整\n", "warn: 非判定信息\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -159,6 +173,8 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
             _FakeProc(0, "OK: 引用完整\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         with mock.patch.dict(sys.modules, {"xdist": mock.Mock()}):
             seen = self._run_capture_cmd(fake)
@@ -172,6 +188,8 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
             _FakeProc(0, "OK: 引用完整\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         with mock.patch.dict(sys.modules, {"xdist": None}):
             seen = self._run_capture_cmd(fake)
@@ -188,6 +206,8 @@ class TestMarkSelfcheck(unittest.TestCase):
             fake = _fake_run([
                 _FakeProc(0, "531 passed in 27.9s\n"),
                 _FakeProc(0, "OK: 引用完整\n"),
+            _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+            _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
             ])
             with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
                 with redirect_stdout(io.StringIO()):

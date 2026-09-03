@@ -549,17 +549,22 @@ def main(argv=None):
               file=sys.stderr)
         return 2
     if args.selfcheck.strip():
-        rcs = {}
+        # 全 rc 键扫描（方向 4）：config_rc/contract_rc 接入后任意 *_rc 非
+        # 零即拒写——固定两键白名单会让新增 rc 的判红静默失效
+        found = {}
+        for m in re.finditer(r"\b(\w+_rc)=(\d+)\b", args.selfcheck):
+            found.setdefault(m.group(1), int(m.group(2)))
+        # 必查键（既有契约）：pytest/refs 两 rc 不可缺席（缺失=自检不可信）
         for key in ("pytest_rc", "refs_rc"):
-            m = re.search(rf"{re.escape(key)}=(\d+)", args.selfcheck)
-            if not m:
+            if key not in found:
                 print(f"error: --selfcheck 缺 {key}（退出码为主判据，文本匹配仅冗余）",
                       file=sys.stderr)
                 return 2
-            rcs[key] = int(m.group(1))
-        if rcs["pytest_rc"] != 0 or rcs["refs_rc"] != 0:
-            print(f"error: --selfcheck 存在非零退出码（pytest_rc={rcs['pytest_rc']} "
-                  f"refs_rc={rcs['refs_rc']}），自检未通过拒绝写收据", file=sys.stderr)
+        bad = {k: v for k, v in found.items() if v != 0}
+        if bad:
+            detail = " ".join(f"{k}={v}" for k, v in sorted(bad.items()))
+            print(f"error: --selfcheck 存在非零退出码（{detail}），"
+                  "自检未通过拒绝写收据", file=sys.stderr)
             return 2
         # 冗余文本防线（rc 全 0 后的补充）：rc 为 0 而文本仍含 failed 非零/
         # 悬空引用字样即矛盾——两工具已败却报 rc=0，拒写防伪造。

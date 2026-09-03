@@ -213,23 +213,54 @@ def _referred_receipt_names(verify_dir: Path):
     return names
 
 
+def _recent_nonpass_names(verify_dir: Path, keep: int = 20) -> set:
+    """result 非 pass 的最近 keep 份收据文件名集合（方向 5）。
+
+    fail/skip/revert 收据是失败归因与 -s 自检证据，不得因配额老化静默
+    丢失；按文件名升序取末 keep 份中 result != "pass" 的。解析出错或读
+    失败按非 pass 护（证据内容不明时保守不删）。
+    """
+    names = set()
+    for f in _detail_files(verify_dir)[-keep:]:
+        try:
+            r, errs = Receipt.from_text(f.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            names.add(f.name)
+            continue
+        if errs or r.result != "pass":
+            names.add(f.name)
+    return names
+
+
 def prune_details(verify_dir=None):
     """详情老化保留 _DETAIL_KEEP 份（trend.md 不计入配额）。
 
-    被 baseline-status.yaml 引用的收据跳过删除（证据链保护）：已被 promote
-    引用或即将引用的收据是基线证据，不得因配额被老化删除。
+    两类证据链保护（跳过删除）：
+    - 被 baseline-status.yaml 引用的收据：已被 promote 引用或即将引用的
+      收据是基线证据；
+    - result 非 pass 的最近 20 份收据（方向 5）：失败归因与 -s 自检证据。
     """
     d = verify_dir or data_verify_results_dir()
     files = _detail_files(d)
     referred = _referred_receipt_names(d)
     if referred is None:
         return  # 引用解析失败（yaml 不可读）：保守不删任何文件
+    guarded = _recent_nonpass_names(d)
     keep = 0
+    referred_kept = 0
+    nonpass_kept = 0
     for old in files[: max(0, len(files) - _DETAIL_KEEP)]:
-        if old.name in referred:
+        if old.name in referred or old.name in guarded:
             keep += 1
+            if old.name in referred:
+                referred_kept += 1
+            if old.name in guarded and old.name not in referred:
+                nonpass_kept += 1
             continue
         old.unlink()
-    if keep:
-        print(f"info: {keep} 份被 baseline-status.yaml 引用的收据跳过老化（证据链保护）",
+    if referred_kept:
+        print(f"info: {referred_kept} 份被 baseline-status.yaml 引用的收据跳过老化（证据链保护）",
+              file=sys.stderr)
+    if nonpass_kept:
+        print(f"info: {nonpass_kept} 份 result 非 pass 的近期收据跳过老化（归因证据保护）",
               file=sys.stderr)

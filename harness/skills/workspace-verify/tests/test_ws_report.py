@@ -1058,6 +1058,53 @@ class TestWsReport(unittest.TestCase):
         self.assertIn("overall 非 pass", err.getvalue())
         self.assertFalse(self._dir.exists())
 
+    def test_selfcheck_new_rc_nonzero_rejected(self):
+        # 方向 4：config_rc/contract_rc 接入后任意 *_rc 非零即拒写
+        # （固定两键白名单会让新增 rc 判红静默失效）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--result", "skip",
+                                 "--build", "skip", "--board", "skip", "--body", body,
+                                 "--summary", "配置违规",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 "
+                                 "config_rc=1 | config: 共 2 处违规 | "
+                                 "contract_rc=0 | OK: contract 检查通过，无违规。"])
+        self.assertEqual(rc, 2)
+        self.assertIn("config_rc=1", err.getvalue())
+        self.assertIn("非零退出码", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_selfcheck_four_rc_all_zero_passes(self):
+        # 四 rc（pytest/refs/config/contract）全零 → 正常落盘
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--result", "skip",
+                                 "--build", "skip", "--board", "skip", "--body", body,
+                                 "--summary", "四 rc 全零",
+                                 "--selfcheck", "pytest_rc=0 | 10 passed in 1.0s"
+                                 " | skipped=0 | refs_rc=0 | OK: refs | "
+                                 "config_rc=0 | OK: config 检查通过，无违规。 | "
+                                 "contract_rc=0 | OK: contract 检查通过，无违规。"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(self._dir.exists())
+
+    def test_selfcheck_missing_pytest_rc_still_rejected(self):
+        # 必查键缺失（pytest_rc 缺席）仍拒写（既有契约不因扫描式放宽）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--result", "skip",
+                                 "--build", "skip", "--board", "skip", "--body", body,
+                                 "--summary", "缺 rc",
+                                 "--selfcheck", "refs_rc=0 skipped=0"])
+        self.assertEqual(rc, 2)
+        self.assertIn("缺 pytest_rc", err.getvalue())
+
     def test_device_dirty_auto_from_acceptance_marks_receipt(self):
         # 方向 3：验收产物 device_dirty=true（teardown 恢复失败）→ PASS 路径
         # 自动透传收据 header device_dirty: true

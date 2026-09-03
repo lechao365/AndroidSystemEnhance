@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib" / "python"))
 import cdp_paths
@@ -142,6 +143,39 @@ class TestReceipt(unittest.TestCase):
         line = cdp_receipt.read_trend_last(self._dir)
         self.assertIn('| {"m":1}', line)
         self.assertNotIn("segs", line)
+
+    def test_prune_guards_recent_nonpass_receipts(self):
+        # 方向 5：result 非 pass 的最近 20 份受保护——配额临时缩到 10 时，
+        # 15 份（5 fail + 10 pass）的删除区恰落在 fail 上，护后 fail 不删
+        # （fail/skip 是失败归因与 -s 自检证据，不得静默老化丢失）
+        with mock.patch.object(cdp_receipt, "_DETAIL_KEEP", 10):
+            for i in range(5):
+                cdp_receipt.write_receipt(
+                    _mk_receipt(f"fail{i:011d}", result="fail"), "b")
+            for i in range(10):
+                cdp_receipt.write_receipt(_mk_receipt(f"pass{i:011d}"), "b")
+        cdp_receipt.prune_details(self._dir)
+        details = sorted(f.name for f in self._dir.glob("*.md")
+                         if f.name != "trend.md")
+        self.assertEqual(len(details), 15)
+        self.assertTrue(all("-fail" in n or "-pass" in n for n in details))
+        self.assertEqual(sum(1 for n in details if "-fail" in n), 5)
+
+    def test_recent_nonpass_names_detection(self):
+        # 名单判定：fail/skip 计入、pass 不计入、解析失败保守计入
+        with mock.patch.object(cdp_receipt, "_DETAIL_KEEP", 10):
+            cdp_receipt.write_receipt(
+                _mk_receipt("raa00000000001", result="fail"), "b")
+            cdp_receipt.write_receipt(
+                _mk_receipt("rbb00000000001", result="skip"), "b")
+            cdp_receipt.write_receipt(_mk_receipt("rcc00000000001"), "b")
+            (self._dir / "20260101-000000-broken0000000.md").write_text(
+                "garbage", encoding="utf-8")
+        names = cdp_receipt._recent_nonpass_names(self._dir, keep=20)
+        self.assertTrue(any("raa00000000001" in n for n in names))
+        self.assertTrue(any("rbb00000000001" in n for n in names))
+        self.assertTrue(any("broken" in n for n in names))
+        self.assertFalse(any("rcc00000000001" in n for n in names))
 
     def test_prune_keeps_quota_details_and_keeps_trend(self):
         keep = cdp_receipt._DETAIL_KEEP

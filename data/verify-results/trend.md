@@ -77,3 +77,4 @@
 2026-09-03 16:52:58 b2d690e1e521 skip build=skip board=skip acc=- 推送证据入判定并堵提交前缀绕过（-s 无需上板） | {"elapsed_s":1531,"segs":{"precheck":0.211,"edit_plan":0.175,"edit":1400.03,"apply_selfcheck":99.632,"report":0.29,"finish":0.02}}
 2026-09-03 17:54:09 4e83d2669dbe skip build=skip board=skip acc=- 消除自检实时等待并补失败取证（-s 无需上板） | {"elapsed_s":1508,"segs":{"precheck":0.204,"edit_plan":0.179,"edit":1456.922,"apply_selfcheck":34.07,"report":0.287,"finish":0.02}}
 2026-09-03 19:46:19 bc6ea04dafb2 skip build=skip board=skip acc=- 副作用用例生命周期化并接取证（-s 无需上板） | {"elapsed_s":1391,"segs":{"precheck":0.21,"edit_plan":0.186,"edit":1284.218,"apply_selfcheck":39.342,"report":0.291,"finish":0.02}}
+2026-09-03 20:22:19 e7950a8ad568 skip build=skip board=skip acc=- 配置与产物治理补齐（-s 无需上板） | {"elapsed_s":964,"segs":{"precheck":0.215,"edit_plan":0.182,"edit":921.239,"apply_selfcheck":27.208,"report":0.292,"finish":0.02}}
