@@ -449,14 +449,17 @@ def run_guidance(session):
             f"会话已终结（{session['exit_attribution']}），不得再生成新轮指引")
     flag, val, acc, base = _resolve_acceptance_for_run(session)
     vdir = "harness/skills/workspace-verify"
-    # 方向 4：先产自描述产物再传给报告——单测/验收产物落在本会话日志目录，
-    # ws_report PASS 路径（--acceptance-file/--unit-test-file）按产物核验
+    # 方向 4：先产自描述产物再传给报告——单测/验收/推送产物落在本会话日志目录，
+    # ws_report PASS 路径（--acceptance-file/--unit-test-file/--push-file）
+    # 按产物核验
     logdir = sessions_root() / f"session-{session['id']}"
     ut_file = logdir / "unit-tests.json"
     acc_file = logdir / "acceptance.json"
+    push_file = logdir / "push.json"
     return "\n".join([
         f"[第 {session['total_attempts'] + 1} 轮] 按 workspace-verify SKILL 工作流执行:",
-        "  1. code->workspace 同步 + 影响面判定 + 编译 + adb 推送（SKILL 步骤 1-4）",
+        f"  1. code->workspace 同步 + 影响面判定 + 编译 + adb 推送（SKILL 步骤 1-4，"
+        f"ws_push.py --result-file {push_file}）",
         f"  2. python3 {vdir}/ws_upload_tests.py --result-file {ut_file}"
         "（上板真跑 C++ 单测：lcview/lciod unit_test+hal_test 先推后跑，"
         "有失败即本轮失败）",
@@ -464,7 +467,8 @@ def run_guidance(session):
         f" --result-file {acc_file}"
         " [--ensure-boot 无 boot 标签时自动追加] [--wait-ready --log-since ... 有 reboot 时]",
         f"  4. python3 {vdir}/ws_report.py --result <pass|fail> --build ... --board ..."
-        f" --acceptance-file {acc_file} --unit-test-file {ut_file}（pass 必需按产物核验；"
+        f" --acceptance-file {acc_file} --unit-test-file {ut_file}"
+        f" --push-file {push_file}（pass 必需按产物核验；"
         "fail 可 --acceptance 直传现场）"
         f" [--batch-file {session.get('batch_file') or '<批次>'}]"
         f" --target {session.get('target') or base or '<12hex>'} --body <正文文件>"

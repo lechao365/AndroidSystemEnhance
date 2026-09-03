@@ -10,6 +10,7 @@ verified_commit 不再可达于 origin/dev，但收据文件已入库仍应放�
 """
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cdp_issue import read_index  # noqa: E402
 from cdp_paths import project_root  # noqa: E402
 from cdp_receipt import latest_receipt_with_path  # noqa: E402
+
+# 中文 type 前缀词表与正则：与 .githooks/commit-msg、
+# harness/skills/git-works-push/git_works_push.sh 内校验同一（三处须成对修改）
+_COMMIT_PREFIX_RE = re.compile(r"^(新增|修复|重构|文档|构建|杂项)\([^)]*\): ")
 
 
 def known_issues_warns(root=None):
@@ -54,6 +59,24 @@ def lead_warns(root=None):
         return []
     return [f"dev 领先 main {n} 笔内容提交（中间提交无验证证据），"
             "建议先 /publish-main-base 再继续产批"]
+
+
+def commit_prefix_warns(root=None):
+    """origin/dev 最新提交标题中文前缀核查（方向 4）：不符仅告警不阻断。
+
+    历史已有英文前缀提交（feat(harness) 等经外部 skill 路径混入，钩子接线
+    前的存量），追溯阻断会卡死产批，故只告警提示风格漂移；origin/dev 缺失
+    或 git 执行失败返空不崩（诊断数据非门禁）。
+    """
+    root = Path(root) if root else project_root()
+    r = _git(root, "log", "-1", "--format=%s", "origin/dev")
+    if r.returncode != 0:
+        return []
+    subject = r.stdout.strip()
+    if not subject or _COMMIT_PREFIX_RE.match(subject):
+        return []
+    return [f"origin/dev 最新提交标题非中文 type 前缀（词表：新增/修复/"
+            f"重构/文档/构建/杂项）: {subject[:40]}"]
 
 
 def _git(root, *args):
@@ -122,8 +145,9 @@ def main(argv=None):
     args = ap.parse_args(argv)
     ok, reason, detail = precheck(do_pull=not args.no_pull)
     out = {"ok": ok, "reason": reason, "detail": detail[:100]}
-    # warns 合入两类：KIR-005 存量告警（issue_id 列表）+ 领先告警（文字串）
-    warns = known_issues_warns() + lead_warns()
+    # warns 合入三类：KIR-005 存量告警（issue_id 列表）+ 领先告警（文字串）
+    # + 提交前缀告警（方向 4，origin/dev 最新提交标题风格漂移提示）
+    warns = known_issues_warns() + lead_warns() + commit_prefix_warns()
     if warns:
         out["warns"] = warns
     print(json.dumps(out, ensure_ascii=False))

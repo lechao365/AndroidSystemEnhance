@@ -1,4 +1,5 @@
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -12,6 +13,10 @@ from shell_env import bash_argv, find_bash, write_python3_shim  # noqa: E402
 BASH = find_bash()
 
 SCRIPT = Path(__file__).resolve().parents[1] / "git_works_push.sh"
+# 仓内钩子目录（git_works_push.sh 幂等接线的目标，方向 3）：
+# parents: [0]=tests [1]=git-works-push [2]=skills [3]=harness [4]=仓根
+HOOKS_DIR = Path(__file__).resolve().parents[4] / ".githooks"
+COMMIT_MSG_HOOK = HOOKS_DIR / "commit-msg"
 
 # ls-remote 空输出（exit 0）：触发 REMOTE_SHA 空值判定
 MOCK_GIT_EMPTY = """#!/usr/bin/env bash
@@ -194,6 +199,97 @@ class TestGitWorksPush(unittest.TestCase):
         r = self._run("--push-only")
         self.assertEqual(r.returncode, 0)
         self.assertIn("pushed: dev", r.stdout)
+
+
+@unittest.skipUnless(BASH and shutil.which("git"), "需要 bash 与 git（真 git 验证钩子接线）")
+class TestCommitMsgHook(unittest.TestCase):
+    """方向 3：commit-msg 钩子（中文前缀校验）+ git_works_push.sh 幂等接线。
+
+    用真 git 在临时仓验证：脚本启动把 core.hooksPath 指向仓内 .githooks
+    （幂等），裸 git commit 路径同样被钩子拦截（此前脚本内校验只覆盖
+    git_works_push.sh 自身提交路径，可绕过）。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._repo = Path(self._tmp.name) / "repo"
+        self._repo.mkdir()
+        env = dict(os.environ)
+        env["GIT_AUTHOR_NAME"] = env["GIT_COMMITTER_NAME"] = "t"
+        env["GIT_AUTHOR_EMAIL"] = env["GIT_COMMITTER_EMAIL"] = "t@t"
+        self._env = env
+        r = subprocess.run(["git", "-c", "init.defaultBranch=dev", "init"],
+                           cwd=self._repo, capture_output=True, text=True,
+                           encoding="utf-8", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # 初始空提交（接线前，钩子未生效；--allow-empty 在空仓无 HEAD 会失败）
+        r = subprocess.run(["git", "commit", "--allow-empty", "-m", "init"],
+                           cwd=self._repo, capture_output=True, text=True,
+                           encoding="utf-8", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _git(self, *args):
+        return subprocess.run(["git", *args], cwd=self._repo,
+                              capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
+                              env=self._env)
+
+    def _run_script(self, *args):
+        argv = bash_argv(SCRIPT, list(args))
+        if argv is None:
+            self.skipTest("无 bash（find_bash 返 None）")
+        return subprocess.run(argv, cwd=self._repo, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace",
+                              env=self._env)
+
+    def test_hook_file_exists_and_executable(self):
+        # 钩子随仓入库且可执行（core.hooksPath 接线后按此文件触发）
+        self.assertTrue(COMMIT_MSG_HOOK.is_file())
+        self.assertTrue(os.access(COMMIT_MSG_HOOK, os.X_OK))
+
+    def test_hook_accepts_cn_prefix_and_rejects_english(self):
+        # 钩子与 git_works_push.sh 内校验同一词表：中文 type 过、英文前缀拒
+        good = Path(self._tmp.name) / "good.txt"
+        good.write_text("修复(harness): 中文前缀提交\n", encoding="utf-8")
+        r = subprocess.run(["bash", str(COMMIT_MSG_HOOK), str(good)],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        self.assertEqual(r.returncode, 0)
+        bad = Path(self._tmp.name) / "bad.txt"
+        bad.write_text("feat(harness): english prefix\n", encoding="utf-8")
+        r = subprocess.run(["bash", str(COMMIT_MSG_HOOK), str(bad)],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("英文前缀拒绝", r.stderr)
+
+    def test_script_sets_hooks_path_idempotent(self):
+        # git_works_push.sh 启动幂等设 core.hooksPath（dry-run 即完成接线：
+        # 设置在 dry-run 分支之前）；两次运行同值
+        for _ in range(2):
+            r = self._run_script("--dry-run")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            got = self._git("config", "core.hooksPath").stdout.strip()
+            self.assertTrue(got)
+            self.assertEqual(Path(got).resolve(), HOOKS_DIR.resolve())
+
+    def test_hook_blocks_bare_git_commit(self):
+        # 接线后裸 git commit 也过钩子（堵绕过口子）：英文前缀 commit 被拒、
+        # 中文前缀 commit 成功
+        r = self._run_script("--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        bad = self._repo / "msg_en.txt"
+        bad.write_text("feat(x): english prefix\n", encoding="utf-8")
+        r = self._git("commit", "--allow-empty", "-F", str(bad))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("英文前缀拒绝", r.stderr)
+        good = self._repo / "msg_cn.txt"
+        good.write_text("新增(harness): 中文前缀提交\n", encoding="utf-8")
+        r = self._git("commit", "--allow-empty", "-F", str(good))
+        self.assertEqual(r.returncode, 0)
 
 
 if __name__ == "__main__":

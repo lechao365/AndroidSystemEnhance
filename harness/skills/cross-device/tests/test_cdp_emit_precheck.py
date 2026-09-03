@@ -179,6 +179,28 @@ class TestEmitPrecheck(unittest.TestCase):
         self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
         self.assertEqual(cdp_emit_precheck.lead_warns(self.root), [])
 
+    # ── 提交前缀告警（方向 4）：origin/dev 最新提交标题非中文 type 前缀 ──
+    def test_commit_prefix_english_alerts(self):
+        # 英文前缀（feat(harness) 等存量经绕过路径混入）→ 告警不阻断
+        self._git("commit", "--allow-empty", "-m", "feat(harness): legacy style")
+        self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        warns = cdp_emit_precheck.commit_prefix_warns(self.root)
+        self.assertEqual(len(warns), 1)
+        self.assertIn("非中文 type 前缀", warns[0])
+        self.assertIn("feat(harness)", warns[0])
+
+    def test_commit_prefix_cn_no_warning(self):
+        # 中文词表 type 前缀（新增/修复/重构/文档/构建/杂项）→ 无告警
+        for subject in ("修复(harness): 中文前缀提交",
+                        "新增(cross-device): 补推送证据核验"):
+            self._git("commit", "--allow-empty", "-m", subject)
+            self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+            self.assertEqual(cdp_emit_precheck.commit_prefix_warns(self.root), [])
+
+    def test_commit_prefix_origin_missing_no_crash(self):
+        # origin/dev 缺失（git log 报 unknown revision）→ 返空不崩
+        self.assertEqual(cdp_emit_precheck.commit_prefix_warns(self.root), [])
+
 
 if __name__ == "__main__":
     unittest.main()

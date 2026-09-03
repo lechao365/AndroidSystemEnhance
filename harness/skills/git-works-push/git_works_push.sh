@@ -41,6 +41,15 @@ if [ -z "$CUR" ] || [ "$CUR" != "$BRANCH" ]; then
   err "error: 当前分支 $CUR 非 $BRANCH（含 detached HEAD），禁止提交"; exit 1
 fi
 
+# 方向 3：幂等把 core.hooksPath 指向仓内 .githooks（commit-msg 中文前缀
+# 校验），堵裸 git commit / 外部 skill 提交路径绕过脚本内校验的口子；
+# 每次启动重复设置同值无害（幂等），钩子文件随仓入库（hooksPath 为本机
+# .git/config 配置，不入库，故须每次启动确保接线）
+HOOKS_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)/.githooks"
+if [ -d "$HOOKS_DIR" ]; then
+  git config core.hooksPath "$HOOKS_DIR"
+fi
+
 if [ "$MODE" = "dry-run" ]; then
   out "== dry-run：改动预览（不执行 add/commit/push）=="
   out "== 工作树状态（status --porcelain）=="

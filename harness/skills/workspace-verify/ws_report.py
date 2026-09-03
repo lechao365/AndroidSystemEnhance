@@ -5,6 +5,7 @@
     ws_report.py --batch-file <cdp> [--target <12hex起点HEAD>] \
         --result pass|fail|skip --build ... --board ... \
         --acceptance-file "<自描述验收产物 JSON>" --unit-test-file "<自描述单测产物 JSON>" \
+        --push-file "<自描述推送产物 JSON>" \
         --elapsed <秒> --summary "<一句话>" \
         [--body <正文文件>（CDP 原文+失败现场，必传见 SKILL）]
    模式 B（独立触发）:
@@ -300,6 +301,42 @@ def _validate_unit_test_file(path, acceptance_run_id):
     return data, None
 
 
+def _validate_push_file(path, acceptance_run_id):
+    """result=pass 时推送证据门禁（方向 1）：ws_push.py 自描述推送产物
+    此前无人核验（推送判红可被 PASS 收据绕过），本门禁核验产物 run_id
+    与验收产物一致（同批）且逐项 sha256/字节数/上下文三项校验值全绿，
+    overall=pass。任一不符或缺失即拒绝 PASS。返回 (data, err)。"""
+    if not (path or "").strip():
+        return None, "result=pass 必须传 --push-file（自描述推送产物 JSON 路径）"
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as e:
+        return None, f"--push-file 读取失败（{e}）"
+    except (ValueError, json.JSONDecodeError) as e:
+        return None, f"--push-file 须为合法 JSON（解析失败: {e}）"
+    if not isinstance(data, dict) or "items" not in data:
+        return None, "--push-file 须为 JSON 对象且含 items（自描述推送产物）"
+    rid = (data.get("run_id") or "").strip()
+    if not rid:
+        return None, "--push-file 缺 run_id，拒绝 PASS"
+    if acceptance_run_id and rid != acceptance_run_id:
+        return None, "--push-file run_id 与验收产物不一致（非同批产物），拒绝 PASS"
+    items = data.get("items") or []
+    if not items:
+        return None, "--push-file items 为空（无任何推送项证据），拒绝 PASS"
+    for it in items:
+        if not isinstance(it, dict):
+            return None, "--push-file 含非法推送项，拒绝 PASS"
+        checks = it.get("checks") or {}
+        bad = [k for k in ("sha256", "bytes", "context") if checks.get(k) != "pass"]
+        if bad:
+            return None, (f"--push-file 推送项 {it.get('dst')!r} 校验值非全绿"
+                          f"（{', '.join(bad)} 不符），拒绝 PASS")
+    if data.get("overall") != "pass":
+        return None, "--push-file overall 非 pass（推送存在失败），拒绝 PASS"
+    return data, None
+
+
 def _resolve_target(target: str):
     """把 --target 解析为 12hex commit，返回 (resolved, err)。
 
@@ -351,6 +388,10 @@ def main(argv=None):
     ap.add_argument("--unit-test-file", default="",
                     help="自描述单测产物 JSON 路径（PASS 必需；run_id 与验收产物"
                          "一致且每个 target 全绿）")
+    ap.add_argument("--push-file", default="",
+                    help="自描述推送产物 JSON 路径（ws_push.py --result-file 落盘；"
+                         "PASS 必需；run_id 与验收产物一致且逐项 sha256/字节/上下文"
+                         "三项校验值全绿）")
     ap.add_argument("--elapsed", type=int, default=None,
                     help="耗时秒数；缺省从 timings 的 wall_end-wall_start 推导"
                          "（推导不出则 0），显式传参优先")
@@ -459,7 +500,9 @@ def main(argv=None):
 
     # 验收证据门禁：result=pass 只接受自描述验收产物文件（--acceptance-file），
     # 校验 run_id/输入摘要/单调时间且整体通过，否则拒写；单测产物（--unit-test-file）
-    # 为必需且 run_id 一致、每 target 全绿。通过后单行化落盘——header 逐行
+    # 为必需且 run_id 一致、每 target 全绿；推送产物（--push-file）为必需且
+    # run_id 一致、逐项 sha256/字节数/上下文三项校验值全绿（方向 1：ws_push
+    # 产物入判定，推送判红不得被 PASS 收据绕过）。通过后单行化落盘——header 逐行
     # key-value，多行 JSON 会被 from_text 只读首行截断，单行化保证 apply_done
     # 能读全（方向 6：收据内嵌经校验的 acceptance JSON，保 _acceptance_passed 不断）
     if args.result == "pass":
@@ -476,6 +519,11 @@ def main(argv=None):
                                                 (parsed or {}).get("run_id"))
         if ut_err:
             print(f"error: {ut_err}", file=sys.stderr)
+            return 2
+        pres, push_err = _validate_push_file(args.push_file,
+                                             (parsed or {}).get("run_id"))
+        if push_err:
+            print(f"error: {push_err}", file=sys.stderr)
             return 2
         args.acceptance = json.dumps(parsed, ensure_ascii=False,
                                      separators=(",", ":"))

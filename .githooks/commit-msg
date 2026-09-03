@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# commit-msg 钩子：提交信息中文 type 前缀校验（词表与正则与
+# harness/skills/git-works-push/git_works_push.sh 内校验同一——两处须成对
+# 修改）。动因：脚本内校验只覆盖 git_works_push.sh 提交路径，裸 git commit
+# 与外部 skill 提交路径可绕过（曾混入 feat(harness) 英文前缀提交）；
+# git_works_push.sh 启动时幂等把 core.hooksPath 指向本目录，使所有提交
+# 路径统一过本钩子。
+set -euo pipefail
+SUBJECT=$(head -1 "$1")
+if ! printf '%s' "$SUBJECT" | grep -qE '^(新增|修复|重构|文档|构建|杂项)\([^)]*\): '; then
+  echo "error: 提交信息首行须为 <中文type>(<scope>): <subject>（type 词表：新增/修复/重构/文档/构建/杂项），英文前缀拒绝。实际: $SUBJECT" >&2
+  exit 1
+fi

@@ -100,8 +100,10 @@ stages:
      SELinux 上下文与本地产物比对，任一不符判红 → 命中 sepolicy
      （/selinux/）或 vintf（/vintf/）或 init rc（.rc 结尾）的项强制
      reboot 并等待 sys.boot_completed 启动完成，跳过即判红（无跳过
-     开关）→ 落自描述产物 --result-file（run_id + 逐项源/目标路径 +
-     三项校验值 sha256/bytes/context，原子写）
+      开关）→ 落自描述产物 --result-file
+      harness/log/cross-device/push-<batch_id>.json（run_id + 逐项源/
+      目标路径 + 三项校验值 sha256/bytes/context，原子写；供步骤 6
+      PASS 核验，模式 B 可省略）
    推送段打点（verify_push）：ws_push.py 推送循环完成后自动 mark
    （实际推送完成后打点，含失败轮；ensure 连接成功不再打点）
    判红（exit 1）不得回退手敲 adb push——须修产物/环境后重跑本脚本
@@ -133,6 +135,7 @@ stages:
 6. 收据：python3 harness/skills/workspace-verify/ws_report.py \
    --acceptance-file harness/log/cross-device/acceptance-<batch_id>.json \
    --unit-test-file harness/log/cross-device/unit-tests-<batch_id>.json \
+   --push-file harness/log/cross-device/push-<batch_id>.json \
    --summary "<一句话>" --result <pass|fail|skip> --build <pass|fail|skip> --board <pass|fail|skip> \
    --case "<本次实际 --case 标签，逗号分隔（模式 B 逐字透传；模式 A 无则省略）>" \
    --body <正文文件> --batch-file <cdp> --target $(git rev-parse --short=12 HEAD) \
@@ -140,8 +143,10 @@ stages:
    [--timings-file harness/log/cross-device/timings-<batch_id>.json]
    （--batch-file/--target 为模式 A 参数；--body 必传：CDP 原文 + 各阶段明细 +
    失败现场摘录，自动脱敏；PASS 必传 --acceptance-file（步骤 5 自描述验收产物）
-   与 --unit-test-file（步骤 4 自描述单测产物）——ws_report 按 run_id 与输入摘要
-   与本批一致、单调时间递增、单测每 target 全绿核验，缺失/不一致返 2 拒写，
+   与 --unit-test-file（步骤 4b 自描述单测产物）与 --push-file（步骤 4 自描述
+   推送产物）——ws_report 按 run_id 与输入摘要与本批一致、单调时间递增、
+   单测每 target 全绿、推送逐项 sha256/字节数/上下文三项校验值全绿核验，
+   缺失/不一致返 2 拒写，
    避免 promote 时 baseline 证据链有洞（新鲜度由 run_id/输入摘要/单调时间表达，
    不用固定墙钟，长编译/重试不误伤）；fail 可 --acceptance 直传现场；
    --metrics 为性能三指标结构化 JSON（lcview-perf 采集输出 METRICS 行），写入
