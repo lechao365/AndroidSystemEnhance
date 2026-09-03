@@ -72,3 +72,4 @@
 2026-09-03 11:20:43 900df241cc74 skip build=skip board=skip acc=- 验收与单测产出自描述证据文件（-s 无需上板） | {"elapsed_s":630,"segs":{"precheck":12.551,"edit_plan":0.274,"edit":560.165,"apply_selfcheck":23.023,"report":0.286,"finish":0.02}}
 2026-09-03 12:26:38 95acb3ac632f skip build=skip board=skip acc=- 验收与单测判定改按产物核验并同步指引（-s 无需上板） | {"elapsed_s":513,"segs":{"precheck":10.563,"edit_plan":0.183,"edit":461.29,"apply_selfcheck":21.312,"report":0.286,"finish":0.02}}
 2026-09-03 12:44:51 fc2653c1d76d skip build=skip board=skip acc=- 消除块设备破坏面与跨轮串扰并恢复设备态（-s 无需上板） | {"elapsed_s":625,"segs":{"precheck":0.208,"edit_plan":11.92,"apply_selfcheck":25.639,"edit":35.628,"report":0.276,"finish":0.02}}
+2026-09-03 14:23:52 2ad414fee477 skip build=skip board=skip acc=- 基线隔离真正生效并绑定设备身份（-s 无需上板） | {"elapsed_s":541,"segs":{"precheck":23.792,"edit_plan":6.536,"edit":463.065,"apply_selfcheck":25.743,"report":0.285,"finish":0.02}}

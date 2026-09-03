@@ -211,10 +211,12 @@ def _exec_annotate(detail, code):
     return f"{detail}（adb 执行超时）" if code == -1 else detail
 
 
-def execute_tag(tag, adb_exec, adb_logcat):
+def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
     """adb_exec(cmd)->(body, exit_code)；adb_logcat()->str。返回 (status, detail)。
 
     status: pass | fail | ai（自由文本由 AI 判定）；exit_code=-1 表示 adb 超时。
+    host_env: hostcmd 分支子进程环境（方向 2 按 run_id 导出基线文件路径，
+    实现轮次隔离；为 None 时沿用调用进程环境，行为不变）。
     """
     kind, payload = split_tag(tag)
     if kind == "svc":
@@ -345,11 +347,15 @@ def execute_tag(tag, adb_exec, adb_logcat):
                 _exec_annotate(body.strip()[:200], code))
     if kind == "hostcmd":
         # host 侧执行（不经 adb）：payload 为 shell 串，cwd 落在 workspace-verify，
-        # 相对路径（如 cases/lcview_check.sh）以其为根，用例资产不再硬编码绝对路径
+        # 相对路径（如 cases/lcview_check.sh）以其为根，用例资产不再硬编码绝对路径；
+        # env 按 run_id 注入 LCVIEW_BASELINE_FILE / LCIOD_BASELINE_FILE（轮次隔离）
+        host_kwargs = {"shell": True, "capture_output": True, "text": True,
+                       "encoding": "utf-8", "errors": "replace",
+                       "cwd": str(_VERIFY_ROOT), "timeout": 180}
+        if host_env is not None:
+            host_kwargs["env"] = host_env
         try:
-            r = subprocess.run(payload, shell=True, capture_output=True,
-                               text=True, encoding="utf-8", errors="replace",
-                               cwd=str(_VERIFY_ROOT), timeout=180)
+            r = subprocess.run(payload, **host_kwargs)
             body = (r.stdout + r.stderr).strip()
             return ("pass" if r.returncode == 0 else "fail",
                     _exec_annotate(body[:200], r.returncode))
@@ -366,13 +372,14 @@ def execute_tag(tag, adb_exec, adb_logcat):
 
 
 def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False,
-                   on_item=None):
+                   on_item=None, host_env=None):
     """执行全部条目，返回 (overall, items)。overall ∈ pass|fail|ai。
 
     ensure_boot=True 且标签无 boot 时自动追加（兑现 workspace-verify SKILL L20：
     模式 B 设备存活是恢复的最低判据）。
     on_item(n) 可选回调：每项完成后调用（n 为已完成项数，1-based），
     供调用方逐项打点（case 级耗时归因）；无回调时行为与之前一致。
+    host_env 透传 execute_tag（hostcmd 子进程环境，方向 2 轮次隔离基线）。
     """
     items = []
     tags = parse_acceptance(acceptance_text)
@@ -388,7 +395,7 @@ def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False,
         # 每项 wall-clock 计时（monotonic，轮询/拉取耗时含入）→ items 可见，
         # 收据 acceptance JSON 可读最慢项（定位耗时瓶颈，非判据本身）
         start = time.monotonic()
-        status, detail = execute_tag(tag, adb_exec, adb_logcat)
+        status, detail = execute_tag(tag, adb_exec, adb_logcat, host_env=host_env)
         items.append({"tag": tag, "status": status, "detail": detail,
                       "elapsed_s": round(time.monotonic() - start, 3)})
         if on_item:
@@ -493,6 +500,34 @@ def _backfill_zero_marks(batch_id):
         if seg not in have:
             cdp_timing.main(["mark", "--batch", batch_id, "--name", seg,
                              "--zero"])
+
+
+def _hostcmd_env(run_id):
+    """按 run_id 构造 hostcmd 子进程环境：导出轮次隔离的基线文件路径。
+
+    方向 2：run_id 每次执行唯一，LCVIEW_BASELINE_FILE / LCIOD_BASELINE_FILE
+    随之唯一——baseline/delta 同轮同路径、跨轮隔离（原固定 /tmp 路径使轮次
+    隔离实际未生效）。
+    """
+    env = dict(os.environ)
+    env["LCVIEW_BASELINE_FILE"] = f"/tmp/lcview_baseline_{run_id}.json"
+    env["LCIOD_BASELINE_FILE"] = f"/tmp/lciod_baseline_{run_id}.json"
+    return env
+
+
+def _device_serial(adb_exec):
+    """设备身份标识（产物用）：ro.serialno → ro.boot.serialno → eth0 MAC 依次
+    回落；三者皆空返回 (None, "")（调用方判红）。eth0 MAC 须命令成功且非空。"""
+    for prop in ("ro.serialno", "ro.boot.serialno"):
+        body, _ = adb_exec(f"getprop {prop}")
+        v = (body or "").strip()
+        if v:
+            return v, f"getprop {prop}"
+    body, rc = adb_exec("cat /sys/class/net/eth0/address")
+    mac = (body or "").strip()
+    if rc == 0 and mac:
+        return mac, "eth0 MAC"
+    return None, ""
 
 
 def main(argv=None):
@@ -639,20 +674,35 @@ def main(argv=None):
     def mark_case(n):
         _mark_stage(f"verify_acceptance_acc_{n}", batch_id)
 
+    # 方向 1：run_id 提前到执行前生成，沿用到 hostcmd 环境与产物（不再收尾处
+    # 新生成，保证 hostcmd 基线路径与产物 run_id 同源）
+    run_id = uuid.uuid4().hex
+    host_env = _hostcmd_env(run_id)
     t_start = time.monotonic()
     overall, items = run_acceptance(acceptance, adb_exec, adb_logcat,
                                     ensure_boot=args.ensure_boot,
-                                    on_item=mark_case)
+                                    on_item=mark_case, host_env=host_env)
     t_end = time.monotonic()
     if args.result_file:
         # 方向 1/3：自描述验收产物——run_id/输入摘要/设备序列号/设备指纹/
         # 起止单调时间/逐项结果/总判定；原子写防半截文件被当证据
-        serial = adb_exec("getprop ro.serialno")[0].strip()
+        serial, serial_src = _device_serial(adb_exec)
+        if not serial:
+            # 方向 3：设备身份标识三者皆空即判红（产物身份不可信）
+            print(json.dumps({"overall": "fail",
+                              "error": "设备身份标识获取失败（ro.serialno/"
+                                       "ro.boot.serialno/eth0 MAC 皆空），判红",
+                              "items": []}, ensure_ascii=False))
+            return 1
         fprint = adb_exec("getprop ro.build.fingerprint")[0].strip()
         result = {
-            "run_id": uuid.uuid4().hex,
+            "run_id": run_id,
             "input_summary": acceptance,
             "device_serial": serial,
+            "device_serial_source": serial_src,
+            # 方向 4：身份标识只认基镜像固化值，增量推送不改变，不能识别增量部署
+            "identity_note": "设备身份标识只认基镜像（序列号/MAC 为烧录固化值），"
+                             "增量推送不改变该标识，不能用于识别增量部署",
             "device_fingerprint": fprint,
             "start_monotonic": round(t_start, 3),
             "end_monotonic": round(t_end, 3),

@@ -365,5 +365,87 @@ class TestClockSync(unittest.TestCase):
         self.assertIn("复核未通过", detail)
 
 
+class TestVerifyIdentity(unittest.TestCase):
+    """方向 5：设备身份校验——LC_VERIFY_EXPECT_SERIAL 设置时核对序列号，不符即拒。"""
+
+    def test_unset_expect_skips(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            ok, detail = ac._verify_identity("10.0.0.5:5555")
+        self.assertTrue(ok)
+
+    def test_match_passes(self):
+        with mock.patch.dict("os.environ",
+                             {"LC_VERIFY_EXPECT_SERIAL": "ABC123"}):
+            with mock.patch.object(ac, "run_adb",
+                                   return_value=("ABC123", 0)) as m:
+                ok, detail = ac._verify_identity("10.0.0.5:5555")
+        self.assertTrue(ok)
+        # 校验经 -s 指定端点取 ro.serialno
+        self.assertEqual(m.call_args.args[0][0:3], ["-s", "10.0.0.5:5555",
+                                                    "shell"])
+
+    def test_mismatch_rejected(self):
+        with mock.patch.dict("os.environ",
+                             {"LC_VERIFY_EXPECT_SERIAL": "ABC123"}):
+            with mock.patch.object(ac, "run_adb",
+                                   return_value=("OTHER99", 0)):
+                ok, detail = ac._verify_identity("10.0.0.5:5555")
+        self.assertFalse(ok)
+        self.assertIn("身份不符", detail)
+
+    def test_unreadable_rejected(self):
+        with mock.patch.dict("os.environ",
+                             {"LC_VERIFY_EXPECT_SERIAL": "ABC123"}):
+            with mock.patch.object(ac, "run_adb", return_value=("", 1)):
+                ok, detail = ac._verify_identity("10.0.0.5:5555")
+        self.assertFalse(ok)
+        self.assertIn("无法读取设备序列号", detail)
+
+
+class TestEnsureIdentityCheck(unittest.TestCase):
+    """方向 5：ensure_connected 内嵌期望身份校验——连上后序列号不符即拒，
+    救援通道返回路径同样过校验。"""
+
+    def test_static_identity_mismatch_rejected(self):
+        # 静态端点在线但身份不符 → 拒，返回 None（不误连）
+        with mock.patch.object(ac, "mdns_discover", return_value=[]), \
+                mock.patch.object(ac, "host_port",
+                                  return_value="10.0.0.5:5555"), \
+                mock.patch.object(ac, "_is_online", return_value=True), \
+                mock.patch.object(ac.subprocess, "run"), \
+                mock.patch.object(ac, "_verify_identity",
+                                  return_value=(False, "设备身份不符")):
+            ep = ac.ensure_connected()
+        self.assertIsNone(ep)
+
+    def test_mdns_identity_skip_to_match(self):
+        # mDNS 首端点身份不符 → 拒绝继续尝试，直至匹配端点返回
+        with mock.patch.object(ac, "mdns_discover",
+                               return_value=["10.0.0.1:5555",
+                                             "10.0.0.2:5555"]), \
+                mock.patch.object(ac, "_is_online", return_value=True), \
+                mock.patch.object(ac.subprocess, "run"), \
+                mock.patch.object(ac, "_verify_identity",
+                                  side_effect=[(False, "身份不符"),
+                                               (True, "")]):
+            ep = ac.ensure_connected()
+        self.assertEqual(ep, "10.0.0.2:5555")
+
+    def test_rescue_identity_mismatch_rejected(self):
+        # 救援通道端点身份不符 → 拒，返回 None（救援路径同过校验）
+        with mock.patch.object(ac, "mdns_discover", return_value=[]), \
+                mock.patch.object(ac, "host_port",
+                                  return_value="rp5.local:5555"), \
+                mock.patch.object(ac, "rescue",
+                                  return_value=("10.9.9.9:5555", "ok",
+                                                "串口救援成功")), \
+                mock.patch.object(ac, "_is_online", return_value=True), \
+                mock.patch.object(ac.subprocess, "run"), \
+                mock.patch.object(ac, "_verify_identity",
+                                  return_value=(False, "身份不符")):
+            ep = ac.ensure_connected(rescue_enabled=True)
+        self.assertIsNone(ep)
+
+
 if __name__ == "__main__":
     unittest.main()

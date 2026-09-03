@@ -1175,5 +1175,154 @@ class TestConvertSince(unittest.TestCase):
         self.assertTrue(since.startswith("2026-08-28 "))
 
 
+class TestDeviceSerial(unittest.TestCase):
+    """方向 3：设备身份标识回落——ro.serialno → ro.boot.serialno → eth0 MAC，
+    三者皆空判红。"""
+
+    def _exec(self, serialno="", boot_serialno="", mac="", mac_rc=0):
+        def adb_exec(cmd):
+            if cmd == "getprop ro.serialno":
+                return (serialno, 0)
+            if cmd == "getprop ro.boot.serialno":
+                return (boot_serialno, 0)
+            if cmd == "cat /sys/class/net/eth0/address":
+                return (mac, mac_rc)
+            return ("", 0)
+        return adb_exec
+
+    def test_ro_serialno_primary(self):
+        serial, src = wa._device_serial(self._exec(serialno="SN123"))
+        self.assertEqual(serial, "SN123")
+        self.assertEqual(src, "getprop ro.serialno")
+
+    def test_fallback_to_boot_serialno(self):
+        # ro.serialno 空 → 回落 ro.boot.serialno
+        serial, src = wa._device_serial(self._exec(boot_serialno="BSN456"))
+        self.assertEqual(serial, "BSN456")
+        self.assertEqual(src, "getprop ro.boot.serialno")
+
+    def test_fallback_to_eth0_mac(self):
+        # ro.serialno 与 ro.boot.serialno 皆空 → 回落 eth0 MAC（命令成功且非空）
+        serial, src = wa._device_serial(self._exec(mac="02:00:00:aa:bb:cc"))
+        self.assertEqual(serial, "02:00:00:aa:bb:cc")
+        self.assertEqual(src, "eth0 MAC")
+
+    def test_mac_requires_success_and_nonempty(self):
+        # eth0 MAC 命令失败或为空 → 不算（仍判空）
+        serial, _ = wa._device_serial(self._exec(mac="", mac_rc=1))
+        self.assertIsNone(serial)
+        serial, _ = wa._device_serial(self._exec(mac="", mac_rc=0))
+        self.assertIsNone(serial)
+
+    def test_all_empty_returns_none(self):
+        # 三者皆空 → None（调用方判红）
+        serial, src = wa._device_serial(self._exec())
+        self.assertIsNone(serial)
+        self.assertEqual(src, "")
+
+
+class TestHostcmdEnv(unittest.TestCase):
+    """方向 2：hostcmd 子进程按 run_id 导出轮次隔离基线文件环境变量。"""
+
+    def test_env_exports_baseline_paths_by_run_id(self):
+        env = wa._hostcmd_env("run12345678")
+        self.assertEqual(env["LCVIEW_BASELINE_FILE"],
+                         "/tmp/lcview_baseline_run12345678.json")
+        self.assertEqual(env["LCIOD_BASELINE_FILE"],
+                         "/tmp/lciod_baseline_run12345678.json")
+
+    def test_execute_tag_passes_host_env_to_subprocess(self):
+        # execute_tag 带 host_env 时，hostcmd 子进程 env 含轮次隔离基线路径
+        fake = mock.Mock()
+        fake.returncode = 0
+        fake.stdout = "ok"
+        fake.stderr = ""
+        host_env = wa._hostcmd_env("run999")
+        with mock.patch.object(wa.subprocess, "run", return_value=fake) as m:
+            status, _ = wa.execute_tag(
+                'hostcmd:"cases/lcview_check.sh --mode files"',
+                adb_exec=None, adb_logcat=None, host_env=host_env)
+        self.assertEqual(status, "pass")
+        self.assertEqual(m.call_args.kwargs["env"],
+                         host_env)
+
+    def test_execute_tag_host_env_none_keeps_default(self):
+        # host_env 为 None（独立 CLI/测试）→ 不传 env，行为不变（继承环境）
+        fake = mock.Mock()
+        fake.returncode = 0
+        fake.stdout = "ok"
+        fake.stderr = ""
+        with mock.patch.object(wa.subprocess, "run", return_value=fake) as m:
+            status, _ = wa.execute_tag('hostcmd:"echo ok"',
+                                       adb_exec=None, adb_logcat=None)
+        self.assertEqual(status, "pass")
+        self.assertNotIn("env", m.call_args.kwargs)
+
+
+class TestRunIdLifecycle(unittest.TestCase):
+    """方向 1：run_id 提前到执行前生成，沿用到 hostcmd 环境与产物。"""
+
+    def test_product_run_id_matches_hostcmd_env_run_id(self):
+        # 产物 run_id 与 hostcmd 基线环境变量同源（同一次执行生成一次）
+        out_json = Path(tempfile.mkdtemp()) / "acc.json"
+        captured = {}
+
+        def fake_run_acceptance(acc, adb_exec, adb_logcat, ensure_boot=False,
+                                on_item=None, host_env=None):
+            captured["host_env"] = host_env
+            return "pass", [{"tag": "boot", "status": "pass", "detail": "ok"}]
+
+        with mock.patch.object(wa, "ac") as m_ac:
+            m_ac.ensure_connected.side_effect = ["ep", "ep"]
+            m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+            m_ac.parse_exec_output.return_value = ("1", 0)
+            m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
+            m_sub = mock.Mock()
+            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
+            m_sub.TimeoutExpired = subprocess.TimeoutExpired
+            with mock.patch.object(wa.subprocess, "run", m_sub):
+                with mock.patch.object(wa, "run_acceptance",
+                                       side_effect=fake_run_acceptance):
+                    with mock.patch.object(wa, "_device_serial",
+                                           return_value=("SN1",
+                                                         "getprop ro.serialno")):
+                        rc = wa.main(["run", "--acceptance", "boot",
+                                      "--result-file", str(out_json)])
+        self.assertEqual(rc, 0)
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        env = captured["host_env"]
+        env_run_id = env["LCVIEW_BASELINE_FILE"].rsplit("_", 1)[-1].split(".")[0]
+        self.assertEqual(data["run_id"], env_run_id)
+        self.assertTrue(data["run_id"])
+        self.assertEqual(data["device_serial"], "SN1")
+        # 方向 4：产物注明身份标识只认基镜像
+        self.assertIn("只认基镜像", data["identity_note"])
+        self.assertIn("增量推送不改变", data["identity_note"])
+
+    def test_device_serial_all_empty_red(self):
+        # 方向 3：产物写入路径上序列号三者皆空 → 判红返 1（不写产物）
+        out_json = Path(tempfile.mkdtemp()) / "acc.json"
+        with mock.patch.object(wa, "ac") as m_ac:
+            m_ac.ensure_connected.side_effect = ["ep", "ep"]
+            m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+            m_ac.parse_exec_output.return_value = ("1", 0)
+            m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
+            m_sub = mock.Mock()
+            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
+            m_sub.TimeoutExpired = subprocess.TimeoutExpired
+            buf = io.StringIO()
+            with mock.patch.object(wa.subprocess, "run", m_sub):
+                with mock.patch.object(wa, "run_acceptance",
+                                       return_value=("pass", [])):
+                    with mock.patch.object(wa, "_device_serial",
+                                           return_value=(None, "")):
+                        with contextlib.redirect_stdout(buf):
+                            rc = wa.main(["run", "--acceptance", "boot",
+                                          "--result-file", str(out_json)])
+        self.assertEqual(rc, 1)
+        self.assertIn("判红", buf.getvalue())
+        self.assertFalse(out_json.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

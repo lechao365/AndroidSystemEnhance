@@ -124,12 +124,33 @@ def ensure_ready(timeout=180, poll_interval=5):
     return False
 
 
+def _verify_identity(endpoint):
+    """设备身份校验（方向 5）：LC_VERIFY_EXPECT_SERIAL 设置时核对设备序列号。
+
+    返回 (ok, detail)。身份不符即拒（防连错设备/误连旧机）——设备序列号只认
+    基镜像烧录固化值，增量推送不改变；期望未设置时跳过校验（返回 ok）。
+    """
+    expect = os.environ.get("LC_VERIFY_EXPECT_SERIAL", "").strip()
+    if not expect:
+        return True, ""
+    out, rc = run_adb(["-s", endpoint, "shell", "getprop ro.serialno"], timeout=15)
+    serial = out.strip()
+    if rc != 0 or not serial:
+        return False, f"无法读取设备序列号（endpoint={endpoint} rc={rc}）"
+    if serial != expect:
+        return False, (f"设备身份不符：期望 {expect}，实际 {serial}"
+                       f"（endpoint={endpoint}）")
+    return True, ""
+
+
 def ensure_connected(rescue_enabled=False):
     """mDNS 优先逐个尝试，失败回退静态；皆败后经串口救援（第三级通道）。
 
     返回在线 endpoint 或 None。rescue 会重启设备 adbd（副作用），默认关闭，
     须调用方显式开（ensure --rescue）；触发时必须打印 detail；rescue 返回
     端点后再 connect 复核在线才算成功。
+    方向 5：连上后核对设备身份（LC_VERIFY_EXPECT_SERIAL），不符即拒——
+    mDNS 多候选逐拒，静态/救援路径不符直接返 None。
     """
     for ep in mdns_discover():
         try:
@@ -137,8 +158,13 @@ def ensure_connected(rescue_enabled=False):
                            encoding="utf-8", errors="replace", timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             continue
-        if _is_online(ep):
-            return ep
+        if not _is_online(ep):
+            continue
+        ok, detail = _verify_identity(ep)
+        if not ok:
+            print(f"[identity] {detail}（拒绝该端点，继续尝试）")
+            continue
+        return ep
     ep = host_port()
     try:
         subprocess.run(build_connect_cmd(ep), capture_output=True,
@@ -146,6 +172,10 @@ def ensure_connected(rescue_enabled=False):
     except (OSError, subprocess.TimeoutExpired):
         ep = None
     if ep and _is_online(ep):
+        ok, detail = _verify_identity(ep)
+        if not ok:
+            print(f"[identity] {detail}（静态端点身份不符拒绝）")
+            return None
         return ep
     if not rescue_enabled:
         return None
@@ -162,6 +192,11 @@ def ensure_connected(rescue_enabled=False):
         return None
     if not _is_online(ep_rescued):
         print(f"[rescue] 连接 {ep_rescued} 后复核不在线（adbd 未就绪）")
+        return None
+    # 救援通道返回路径同样过身份校验（方向 5）
+    ok, detail = _verify_identity(ep_rescued)
+    if not ok:
+        print(f"[identity] {detail}（救援通道端点身份不符拒绝）")
         return None
     return ep_rescued
 
