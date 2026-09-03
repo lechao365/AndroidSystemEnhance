@@ -546,6 +546,37 @@ class TestResolveAcceptance(unittest.TestCase):
         self.assertIsNone(err)
         self.assertIn("hostcmd", acc)
 
+    def test_batch_file_case_unknown_id_rejected(self):
+        # 方向 3：batch-file 验收 case: id 未知 → err（main 退 2，任一未知判死）
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "b.cdp"
+            p.write_text("-sv base:8c583f57f4e4\n意图: 测试\n"
+                         "验收: case:no-such-case\n方向: 测试\n", encoding="utf-8")
+            acc, err = wa.resolve_acceptance(self._args(batch_file=str(p)))
+        self.assertIsNone(acc)
+        self.assertIn("不存在于", err)
+
+    def test_batch_file_case_known_id_ok(self):
+        # 方向 3：case id 存在于 verify-cases.yaml 则通过（真实 cases 表）
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "b.cdp"
+            p.write_text("-sv base:8c583f57f4e4\n意图: 测试\n"
+                         "验收: case:lcview-liveness\n方向: 测试\n", encoding="utf-8")
+            acc, err = wa.resolve_acceptance(self._args(batch_file=str(p)))
+        self.assertIsNone(err)
+        self.assertEqual(acc, "case:lcview-liveness")
+
+    def test_batch_file_manual_free_text_ok(self):
+        # 方向 3：manual 模式自由文本不查表，直接返回
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "b.cdp"
+            p.write_text("-sv base:8c583f57f4e4\n意图: 测试\n"
+                         "验收: manual:lcview 服务运行正常\n方向: 测试\n",
+                         encoding="utf-8")
+            acc, err = wa.resolve_acceptance(self._args(batch_file=str(p)))
+        self.assertIsNone(err)
+        self.assertEqual(acc, "manual:lcview 服务运行正常")
+
     def test_case_from_yaml(self):
         # --case 从 verify-cases.yaml cases 段取标签，值内可用引号
         with tempfile.TemporaryDirectory() as d:

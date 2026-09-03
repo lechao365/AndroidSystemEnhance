@@ -166,10 +166,25 @@ def resolve_acceptance(args, cases_path=_CASES_PATH):
         if not b.acceptance or b.acceptance == "无":
             return None, "--batch-file 批次验收为空或「无」（-s 批次无验收，须用 -sv 批次）"
         # 禁批次自带宿主命令：验收文本含 hostcmd:/cmd: 标签即拒（批次夹带
-        # 宿主命令执行意图属越权，方向 1 禁；case 与 acceptance 两分支不变）
+        # 宿主命令执行意图属越权；case 与 acceptance 两分支不变）
         if re.search(r"\bhostcmd\s*:|\bcmd\s*:", b.acceptance):
             return None, ("--batch-file 批次验收含 hostcmd:/cmd: 标签"
-                          "（禁止批次自带宿主命令，验收走 svc/log/prop/file/boot）")
+                          "（禁止批次自带宿主命令，验收走 case/manual 契约）")
+        if b.acceptance.startswith("case:"):
+            # 方向 3：case id 逐个查 verify-cases.yaml cases 段，任一未知即拒
+            # （main 退 2）；manual 模式自由文本不查表
+            ids = [i.strip() for i in b.acceptance[len("case:"):].split(",")
+                   if i.strip()]
+            try:
+                data = yaml.safe_load(Path(cases_path).read_text(encoding="utf-8")) or {}
+                cases = data.get("cases") or {}
+            except (OSError, yaml.YAMLError) as e:
+                return None, f"verify-cases.yaml 读取失败: {e}"
+            missing = [i for i in ids if i not in cases]
+            if missing:
+                opts = ", ".join(sorted(cases)) or "无"
+                return None, (f"验收 case id {', '.join(missing)} 不存在于 "
+                              f"verify-cases.yaml cases 段（可选: {opts}）")
         return b.acceptance, None
     if args.case:
         try:

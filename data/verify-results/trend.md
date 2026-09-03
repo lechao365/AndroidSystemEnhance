@@ -66,3 +66,4 @@
 2026-09-02 18:10:41 fe4130528980 skip build=skip board=skip acc=- 条件段不判缺并补 edit 打点约定与复盘判据（-s 无需上板） | {"elapsed_s":250,"segs":{"precheck":74.534,"edit":145.515,"apply_selfcheck":20.984,"report":9.112,"finish":0.021}}
 2026-09-02 19:28:02 54b6b7593dee skip build=skip board=skip acc=- 禁批次自带宿主命令并让引用检查与单测判定恢复真实（-s 无需上板） | {"elapsed_s":433,"segs":{"precheck":37.385,"edit_plan":350.606,"edit":0.345,"apply_selfcheck":23.075,"report":0.286,"finish":0.02}}
 2026-09-02 20:10:57 0044e13d4e53 skip build=skip board=skip acc=- 收紧引用检查误报并恢复悬空判红（-s 无需上板） | {"elapsed_s":369,"segs":{"precheck":9.952,"edit_plan":7.075,"edit":309.687,"apply_selfcheck":19.786,"report":0.314,"finish":0.02}}
+2026-09-03 09:15:55 6e380b831fc4 skip build=skip board=skip acc=- 验收文本改用例 id 契约并对未知用例判死（-s 无需上板） | {"elapsed_s":381,"segs":{"precheck":58.56,"edit":280.395,"apply_selfcheck":20.21,"report":0.285,"finish":0.019}}

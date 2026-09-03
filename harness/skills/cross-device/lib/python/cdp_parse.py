@@ -21,6 +21,8 @@ BASE_RE = re.compile(r"^[0-9a-fA-F]{12}$")
 # 首行结构只约束「模式标记 + base: 字样」，base 值合法性交给 BASE_RE（保 15 可达）
 MODE_RE = re.compile(r"^(-s|-sv)\s+base:\s*(\S+)\s*$")
 TAG_RE = re.compile(r"^(意图|验收|方向):\s*(.*)$")
+# 验收 case id：限小写字母数字与连字符（方向 1 契约）
+CASE_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 EXIT_OK = 0
 EXIT_ARGS = 3
@@ -120,6 +122,11 @@ def validate_batch(text: str, role: str = "emit"):
     if b.mode == "sv":
         if not b.acceptance or b.acceptance == "无":
             return EXIT_ACCEPTANCE, ["-sv 批次验收必须非空且不得为「无」"]
+        # 方向 2：-sv 验收行校验 case/manual 契约（违规返 17，contract 与
+        # 解析器同批一致）
+        err = check_acceptance_syntax(b.acceptance)
+        if err:
+            return EXIT_ACCEPTANCE, [err]
     else:
         if b.acceptance != "无":
             return EXIT_ACCEPTANCE, ["-s 批次验收必须为「无」"]
@@ -132,6 +139,28 @@ def base_matches(text: str, expect_head12: str) -> bool:
     b = parse_batch(text)
     return bool(b.base) and bool(expect_head12) and \
         b.base.lower() == expect_head12.strip().lower()
+
+
+def check_acceptance_syntax(acc: str) -> str | None:
+    """-sv 验收语法校验（CDP-001 契约，见 docs/cdp-contract.md 验收语法行）：
+    case:<id>[,<id>...]（id 限小写字母数字与连字符，多个用逗号分隔）或
+    manual:<自由文本>（仅 manual 模式保留自由文本）。违规返回错误消息
+    （调用方转 EXIT_ACCEPTANCE=17），合法返回 None。"""
+    if acc == "无":
+        return None
+    if acc.startswith("case:"):
+        ids = [i.strip() for i in acc[len("case:"):].split(",") if i.strip()]
+        if not ids:
+            return "验收 case: 后必须跟至少一个 id（多个用逗号分隔）"
+        bad = [i for i in ids if not CASE_ID_RE.match(i)]
+        if bad:
+            return (f"验收 case id 非法（限小写字母数字与连字符，"
+                    f"多个用逗号分隔）: {bad!r}")
+        return None
+    if acc.startswith("manual:"):
+        return None
+    return ("验收必须为 case:<id>[,<id>...]（id 限小写字母数字与连字符，"
+            "多个用逗号分隔）或 manual:<自由文本>")
 
 
 def main(argv=None):
@@ -172,6 +201,11 @@ def main(argv=None):
     if code != EXIT_OK and not softened:
         # 失败路径不打印 batch_id/mode（空批会打印空串误导上层）
         return code
+    if role == "apply" and expect is None:
+        # 方向 4：apply 角色必须显式传 --expect-base，缺失即拒批（18），
+        # 不再静默跳过 base 校验（防 base 门禁被绕过后批次基座漂移）
+        print("error: apply 角色必须传 --expect-base（base 拒批门禁），缺失拒绝整批")
+        return EXIT_BASE_MISMATCH
     if expect is not None and not base_matches(text, expect):
         b = parse_batch(text)
         print(f"error: base 不匹配（批次 {b.base} != 本地 HEAD {expect.strip()}），整批拒绝")
