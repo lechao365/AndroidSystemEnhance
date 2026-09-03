@@ -16,6 +16,7 @@
 # ============================================================
 
 import argparse
+import json
 import os
 import posixpath
 import re
@@ -23,6 +24,7 @@ import shlex
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import yaml
@@ -141,20 +143,40 @@ def ensure_user(ep, need_root):
     return False, f"adb {cmd} 重启 adbd 后探活失败"
 
 
-def run_one(ep, out, product, name, verbose=False, aosp_root=None, src_rel=None):
-    """push + 执行单个 nativetest，返回 (ok, detail)。"""
+def _atomic_write_json(path, data):
+    """原子写 JSON 产物（方向 3）：先写临时文件再 os.replace，防半截文件被当证据。"""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                   encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def _run_one_stats(ep, out, product, name, verbose=False, aosp_root=None,
+                   src_rel=None):
+    """push + 执行单个 nativetest，返回 (ok, detail, stats)。
+
+    stats 供自描述产物（方向 2）：rc（0/1）、tests（用例数，解析不到 None）、
+    failed（失败数）。判定逻辑与 run_one 一致（方向 5：不改判定）。
+    """
     binary = find_binary(out, product, name)
     if binary is None:
-        return False, f"{name}: 编译产物缺失（{out}/target/product/{product} 下未找到）"
+        return False, (f"{name}: 编译产物缺失（{out}/target/product/{product}"
+                       " 下未找到）"), {"name": name, "rc": 1, "tests": None,
+                                       "failed": None}
     if aosp_root and src_rel and binary_is_stale(binary, aosp_root, src_rel):
         return False, (f"{name}: 编译产物陈旧（早于源码 {src_rel}，可能未含新用例）"
-                       "——须重新编译后再推送，禁止用旧二进制报绿")
+                       "——须重新编译后再推送，禁止用旧二进制报绿"), {
+                           "name": name, "rc": 1, "tests": None, "failed": None}
     _, rc = adb_run(ep, ["push", binary, f"/data/local/tmp/{name}"], timeout=300)
     if rc != 0:
-        return False, f"{name}: adb push 失败 rc={rc}"
+        return False, f"{name}: adb push 失败 rc={rc}", {
+            "name": name, "rc": 1, "tests": None, "failed": None}
     _, rc = adb_run(ep, ["shell", f"chmod +x /data/local/tmp/{name}"], timeout=60)
     if rc != 0:
-        return False, f"{name}: chmod 失败 rc={rc}"
+        return False, f"{name}: chmod 失败 rc={rc}", {
+            "name": name, "rc": 1, "tests": None, "failed": None}
     out_text, rc = adb_run(ep, ["shell", f"/data/local/tmp/{name}"], timeout=600)
     failed = re.search(r"\[  FAILED  \]", out_text)
     summary = None
@@ -162,21 +184,44 @@ def run_one(ep, out, product, name, verbose=False, aosp_root=None, src_rel=None)
                   r"\((\d+) ms total\)", out_text)
     if m:
         summary = f"{m.group(1)} tests ran"
+    failed_count = None
+    mf = re.search(r"\[  FAILED  \] (\d+) tests?", out_text)
+    if mf:
+        failed_count = int(mf.group(1))
+    elif failed:
+        failed_count = 0
+    tests = int(m.group(1)) if m else None
     if rc == 0 and not failed:
         # 用例数判红（方向 5）：解析不到汇总行或实跑用例数为 0 即 FAIL——
         # 空跑/汇总缺失禁止报绿（无法证明用例真实执行过）
         if m is None:
             return False, (f"{name}: FAIL 用例数解析不到（缺 gtest 汇总行"
-                           "「[==========] N tests ... ran」），须确认实跑用例数")
+                           "「[==========] N tests ... ran」），须确认实跑用例数"), {
+                               "name": name, "rc": 1, "tests": tests,
+                               "failed": failed_count}
         if int(m.group(1)) == 0:
-            return False, f"{name}: FAIL 实跑用例数为 0（无用例被执行，禁止报绿）"
+            return False, f"{name}: FAIL 实跑用例数为 0（无用例被执行，禁止报绿）", {
+                "name": name, "rc": 1, "tests": tests, "failed": failed_count}
         detail = f"{name}: PASS（{summary}）"
         if verbose:
             detail += f"\n{out_text}"
-        return True, detail
+        return True, detail, {"name": name, "rc": 0, "tests": tests,
+                              "failed": failed_count}
     detail = f"{name}: FAIL rc={rc}{('，有 FAILED 用例') if failed else ''}"
     detail += f"\n--- 输出摘录 ---\n{out_text[:2000]}"
-    return False, detail
+    return False, detail, {"name": name, "rc": 1, "tests": tests,
+                           "failed": failed_count}
+
+
+def run_one(ep, out, product, name, verbose=False, aosp_root=None, src_rel=None,
+            return_stats=False):
+    """push + 执行单个 nativetest，返回 (ok, detail)；return_stats=True 时
+    追加返回 (ok, detail, stats)（方向 2，默认行为不变）。"""
+    ok, detail, stats = _run_one_stats(ep, out, product, name, verbose,
+                                       aosp_root=aosp_root, src_rel=src_rel)
+    if return_stats:
+        return ok, detail, stats
+    return ok, detail
 
 
 def _default_out():
@@ -230,6 +275,9 @@ def main(argv=None):
                     help="测试目标列表（默认从 verify-cases.yaml 读全部模块）")
     ap.add_argument("--verbose", action="store_true",
                     help="通过时也打印测试完整输出")
+    ap.add_argument("--result-file", default=None,
+                    help="自描述单测产物 JSON 路径（原子写；--out 已被 AOSP "
+                         "输出目录占用，不可复用该名）")
     args = ap.parse_args(argv)
 
     if args.test_targets:
@@ -252,19 +300,31 @@ def main(argv=None):
           f"{('；需 root: ' + ', '.join(sorted(run_as_root))) if run_as_root else ''}")
 
     all_ok = True
+    target_stats = []
     for name in targets:
         need_root = name in run_as_root
         ok, detail = ensure_user(ep, need_root)
         if not ok:
             all_ok = False
+            target_stats.append({"name": name, "rc": 1, "tests": None,
+                                 "failed": None})
             print(f"  [FAIL] {name}: {detail}")
             continue
-        ok, detail = run_one(ep, args.out, args.product, name, args.verbose,
-                             aosp_root=aosp_root, src_rel=src_map.get(name))
+        ok, detail, stats = run_one(ep, args.out, args.product, name, args.verbose,
+                                    aosp_root=aosp_root, src_rel=src_map.get(name),
+                                    return_stats=True)
+        target_stats.append(stats)
         all_ok = all_ok and ok
         print(("  [OK]   " if ok else "  [FAIL] ") + detail)
     # 跑完恢复 shell 用户，避免 root 状态影响后续 verify 环节
     ensure_user(ep, False)
+    # 自描述单测产物（方向 2/3）：run_id + 每 target 返回码/用例数/失败数，
+    # 原子写防半截文件被当证据
+    if args.result_file:
+        _atomic_write_json(args.result_file, {
+            "run_id": uuid.uuid4().hex,
+            "targets": target_stats,
+        })
     print(f"\n设备侧单测{'全部通过' if all_ok else '存在失败'}：{len(targets)} 目标")
     # 脚本自动打点单测段（失败不阻断）
     _mark_stage("verify_unit_test")

@@ -69,3 +69,4 @@
 2026-09-03 09:15:55 6e380b831fc4 skip build=skip board=skip acc=- 验收文本改用例 id 契约并对未知用例判死（-s 无需上板） | {"elapsed_s":381,"segs":{"precheck":58.56,"edit":280.395,"apply_selfcheck":20.21,"report":0.285,"finish":0.019}}
 2026-09-03 09:54:37 19786b3de31b skip build=skip board=skip acc=- 打包证据不再伪造并堵住收据目录改道（-s 无需上板） | {"elapsed_s":908,"segs":{"precheck":29.462,"edit_plan":9.559,"edit":828.084,"apply_selfcheck":19.37,"report":0.284,"finish":0.02}}
 2026-09-03 10:51:37 2174f5fa48ec skip build=skip board=skip acc=- 收据解析不再静默吞错并让审批凭据外部化（-s 无需上板） | {"elapsed_s":1086,"segs":{"precheck":14.208,"edit_plan":53.612,"edit":967.905,"apply_selfcheck":22.403,"report":0.297,"finish":0.02}}
+2026-09-03 11:20:43 900df241cc74 skip build=skip board=skip acc=- 验收与单测产出自描述证据文件（-s 无需上板） | {"elapsed_s":630,"segs":{"precheck":12.551,"edit_plan":0.274,"edit":560.165,"apply_selfcheck":23.023,"report":0.286,"finish":0.02}}

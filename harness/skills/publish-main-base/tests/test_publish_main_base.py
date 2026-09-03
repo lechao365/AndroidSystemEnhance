@@ -261,20 +261,17 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         cfg = self.root / "harness" / "config" / "baseline-status.yaml"
         return yaml.safe_load(cfg.read_text(encoding="utf-8"))["baselines"][0]
 
-    def test_add_candidate_empty_build_registers_fail(self):
-        # 收据 build/push_board 为空 → 登记为 FAIL（空值非合法 skip 证据）；
-        # package 无打包证据记 UNKNOWN（方向 1 不再复制 build_result）
+    def test_add_candidate_empty_build_rejected(self):
+        # 方向 4：收据 build/push_board 为空（记 FAIL）→ Python 层拒登记
+        # （防绕过 shell 直调登记；基线证据须 pass/skip）
         self._write_receipt(self.parent_vc, build="", push_board="",
                             batch_id="000000000003", cases="lcview-liveness")
         r = self._run_register("add-candidate", "--source-commit", "abc123def456",
                                "--evidence-scope", "lcview-liveness",
                                "--receipt-path",
                                "data/verify-results/20260831-100000-000000000003.md")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        b = self._registered_evidence()
-        self.assertEqual(b["build_result"], "FAIL")
-        self.assertEqual(b["package_result"], "UNKNOWN")
-        self.assertEqual(b["board_verify"], "FAIL")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("拒绝登记", r.stderr)
 
     def test_add_candidate_explicit_skip_still_skip(self):
         # 显式 skip（-s 批次收据）保持 SKIP，不受空值从严影响

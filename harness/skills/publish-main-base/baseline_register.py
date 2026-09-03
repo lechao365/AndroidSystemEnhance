@@ -216,6 +216,32 @@ def main(argv=None):
         # build_result 复制给 package_result，杜绝伪造打包证据）
         package_result = "UNKNOWN"
         board_verify = ((r.push_board or "").strip() or "FAIL").upper()
+        # 方向 4：Python 层登记防线——防绕过 shell 直调登记（publish_main_base.sh
+        # prepare 有门禁，直调 add-candidate 须同样从严）
+        # 非法枚举：verify_mode/result 白名单
+        if r.verify_mode not in ("board", "skip", "none"):
+            print(f"error: 收据 verify_mode 非法（{r.verify_mode!r}），拒绝登记",
+                  file=sys.stderr)
+            return 1
+        if r.result not in ("pass", "fail", "skip"):
+            print(f"error: 收据 result 非法（{r.result!r}），拒绝登记",
+                  file=sys.stderr)
+            return 1
+        # 缺必需字段：batch_id/verified_commit/build/push_board 必填
+        missing = [k for k, v in (("batch_id", r.batch_id),
+                                  ("verified_commit", r.verified_commit),
+                                  ("build", r.build),
+                                  ("push_board", r.push_board))
+                   if not (v or "").strip()]
+        if missing:
+            print(f"error: 收据缺必需字段 {', '.join(missing)}，拒绝登记",
+                  file=sys.stderr)
+            return 1
+        # 拒 FAIL：build/board_verify 为 FAIL 不可登记为基线（证据须 pass/skip）
+        if build_result == "FAIL" or board_verify == "FAIL":
+            print("error: 收据 build/board_verify 为 FAIL，拒绝登记"
+                  "（基线证据须 pass/skip）", file=sys.stderr)
+            return 1
         # ki_gate：known-issues 门禁结论（拒批已在脚本层 exit，缺参视为 not-run）
         ki_gate = (args.ki_gate or "").strip() or "not-run"
         # known_issues_carried：带病项记账（缺参记空；只记录不阻断，硬阻断会死锁）

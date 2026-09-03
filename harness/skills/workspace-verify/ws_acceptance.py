@@ -27,6 +27,7 @@ import subprocess
 import sys
 import time
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -510,6 +511,9 @@ def main(argv=None):
                    help="连接后轮询 sys.boot_completed 就绪（步骤 4 有 reboot 时必传）")
     p.add_argument("--log-since", default=None,
                    help="logcat 时间窗起点（MM-DD HH:MM:SS.mmm），代 -t 行数避免命中旧日志")
+    p.add_argument("--result-file", default=None,
+                   help="自描述验收产物 JSON 路径（原子写：run_id/输入摘要/"
+                        "设备序列号/设备指纹/起止单调时间/逐项结果/总判定）")
     args = ap.parse_args(argv)
 
     acceptance, err = resolve_acceptance(args)
@@ -635,9 +639,32 @@ def main(argv=None):
     def mark_case(n):
         _mark_stage(f"verify_acceptance_acc_{n}", batch_id)
 
+    t_start = time.monotonic()
     overall, items = run_acceptance(acceptance, adb_exec, adb_logcat,
                                     ensure_boot=args.ensure_boot,
                                     on_item=mark_case)
+    t_end = time.monotonic()
+    if args.result_file:
+        # 方向 1/3：自描述验收产物——run_id/输入摘要/设备序列号/设备指纹/
+        # 起止单调时间/逐项结果/总判定；原子写防半截文件被当证据
+        serial = adb_exec("getprop ro.serialno")[0].strip()
+        fprint = adb_exec("getprop ro.build.fingerprint")[0].strip()
+        result = {
+            "run_id": uuid.uuid4().hex,
+            "input_summary": acceptance,
+            "device_serial": serial,
+            "device_fingerprint": fprint,
+            "start_monotonic": round(t_start, 3),
+            "end_monotonic": round(t_end, 3),
+            "items": items,
+            "overall": overall,
+        }
+        p = Path(args.result_file)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+                       encoding="utf-8")
+        os.replace(tmp, p)
     print(json.dumps({"overall": overall, "items": items}, ensure_ascii=False,
                      indent=2))
     # 本次实跑 case 标签落盘（--case 原样写入 cases-<batch_id>.json，

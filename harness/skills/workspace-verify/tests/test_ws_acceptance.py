@@ -794,6 +794,29 @@ class TestLogcatCacheAndTiming(unittest.TestCase):
                                   side_effect=fake_run)
         return m_ac, m_run, logcat_calls
 
+    def test_main_writes_result_file(self):
+        # 方向 1/3：--result-file 原子写自描述验收产物（run_id/输入摘要/
+        # 设备序列号/设备指纹/起止单调时间/逐项结果/总判定），无 .tmp 残留
+        m_ac, m_run, _ = self._main_env(
+            "LcView: heartbeat, loop=0 overrun=0 dropped=0 readErr=0 KEY\n")
+        out_json = Path(tempfile.mkdtemp()) / "acceptance.json"
+        buf = io.StringIO()
+        with mock.patch.object(wa, "ac", m_ac), m_run:
+            with contextlib.redirect_stdout(buf):
+                rc = wa.main(["run", "--acceptance", "log:KEY",
+                              "--result-file", str(out_json)])
+        self.assertEqual(rc, 0)
+        self.assertTrue(out_json.is_file())
+        self.assertFalse(out_json.with_name(out_json.name + ".tmp").exists())
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertTrue(data["run_id"])
+        self.assertIn("log:KEY", data["input_summary"])
+        self.assertIn("device_serial", data)
+        self.assertIn("device_fingerprint", data)
+        self.assertLess(data["start_monotonic"], data["end_monotonic"])
+        self.assertIn("overall", data)
+        self.assertIn("items", data)
+
     def test_main_logcat_cache_same_key_pulled_once(self):
         # 方向 2：同批多标签只拉一次——log:KEY x2 同 key (None, since) 拉 1 次，
         # 同 pid logfield x2 同 key (4242, since) 拉 1 次，合计 2 次（非 4 次）

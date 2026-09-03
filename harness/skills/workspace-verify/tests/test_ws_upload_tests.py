@@ -2,6 +2,7 @@
 # 关键场景：yaml test_targets 读取、nativetest 二进制定位、push+执行
 # 汇总 pass/fail、二进制缺失判红、设备不可达退 1。
 
+import json
 import os
 import sys
 import tempfile
@@ -251,7 +252,9 @@ class TestMain(unittest.TestCase):
     def test_all_pass_returns_0(self):
         with mock.patch.object(wu.ac, "ensure_connected", return_value="ep") as ec, \
                 mock.patch.object(wu, "ensure_user", return_value=(True, "")), \
-                mock.patch.object(wu, "run_one", return_value=(True, "t1: PASS")):
+                mock.patch.object(wu, "run_one", return_value=(
+                    True, "t1: PASS", {"name": "t1", "rc": 0,
+                                       "tests": 42, "failed": 0})):
             rc = wu.main(["--test-targets", "t1"])
         self.assertEqual(rc, 0)
         ec.assert_called_once()
@@ -259,14 +262,18 @@ class TestMain(unittest.TestCase):
     def test_fail_returns_1(self):
         with mock.patch.object(wu.ac, "ensure_connected", return_value="ep"), \
                 mock.patch.object(wu, "ensure_user", return_value=(True, "")), \
-                mock.patch.object(wu, "run_one", return_value=(False, "t1: FAIL")):
+                mock.patch.object(wu, "run_one", return_value=(
+                    False, "t1: FAIL", {"name": "t1", "rc": 1,
+                                        "tests": 42, "failed": 3})):
             rc = wu.main(["--test-targets", "t1"])
         self.assertEqual(rc, 1)
 
     def test_ensure_user_failure_marks_fail(self):
         with mock.patch.object(wu.ac, "ensure_connected", return_value="ep"), \
                 mock.patch.object(wu, "ensure_user", return_value=(False, "adb root 失败")), \
-                mock.patch.object(wu, "run_one", return_value=(True, "t1: PASS")):
+                mock.patch.object(wu, "run_one", return_value=(
+                    True, "t1: PASS", {"name": "t1", "rc": 0,
+                                       "tests": 42, "failed": 0})):
             rc = wu.main(["--test-targets", "t1"])
         self.assertEqual(rc, 1)
 
@@ -274,6 +281,43 @@ class TestMain(unittest.TestCase):
         with mock.patch.object(wu.ac, "ensure_connected", return_value=""):
             rc = wu.main(["--test-targets", "t1"])
         self.assertEqual(rc, 1)
+
+    def test_result_file_written(self):
+        # 方向 2/3：--result-file 原子写自描述单测产物（run_id + 每 target
+        # 返回码/用例数/失败数），无 .tmp 残留
+        out_json = Path(self._tmp.name) / "unit-tests.json"
+        with mock.patch.object(wu.ac, "ensure_connected", return_value="ep"), \
+                mock.patch.object(wu, "ensure_user", return_value=(True, "")), \
+                mock.patch.object(wu, "run_one", return_value=(
+                    True, "t1: PASS", {"name": "t1", "rc": 0,
+                                       "tests": 42, "failed": 0})):
+            rc = wu.main(["--test-targets", "t1",
+                          "--result-file", str(out_json)])
+        self.assertEqual(rc, 0)
+        self.assertTrue(out_json.is_file())
+        self.assertFalse(out_json.with_name(out_json.name + ".tmp").exists())
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertTrue(data["run_id"])
+        self.assertEqual(data["targets"][0]["name"], "t1")
+        self.assertEqual(data["targets"][0]["rc"], 0)
+        self.assertEqual(data["targets"][0]["tests"], 42)
+        self.assertEqual(data["targets"][0]["failed"], 0)
+
+    def test_result_file_reports_failed_target(self):
+        # 方向 2：ensure_user 失败（无 run_one 统计）也进产物，rc=1
+        out_json = Path(self._tmp.name) / "unit-tests.json"
+        with mock.patch.object(wu.ac, "ensure_connected", return_value="ep"), \
+                mock.patch.object(wu, "ensure_user", return_value=(False, "adb root 失败")), \
+                mock.patch.object(wu, "run_one", return_value=(
+                    True, "t1: PASS", {"name": "t1", "rc": 0,
+                                       "tests": 42, "failed": 0})):
+            rc = wu.main(["--test-targets", "t1",
+                          "--result-file", str(out_json)])
+        self.assertEqual(rc, 1)
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertEqual(data["targets"][0]["name"], "t1")
+        self.assertEqual(data["targets"][0]["rc"], 1)
+        self.assertIsNone(data["targets"][0]["tests"])
 
 
 class TestEnsureUser(unittest.TestCase):

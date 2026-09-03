@@ -31,7 +31,7 @@ class TestBaselineRegister(unittest.TestCase):
         os.environ.pop("CDP_PROJECT_ROOT", None)
         self._tmp.cleanup()
 
-    def _make_receipt(self, build="pass", board="fail", cases="lcview-liveness"):
+    def _make_receipt(self, build="pass", board="pass", cases="lcview-liveness"):
         r = Receipt(batch_id="batch-test", batch_base="", verified_commit="abc",
                     verify_mode="board", result="pass", build=build,
                     push_board=board, acceptance="ok", elapsed_s=10,
@@ -48,7 +48,7 @@ class TestBaselineRegister(unittest.TestCase):
     def test_add_candidate_reads_receipt(self):
         # candidate 必须实读收据：build=build、board_verify=push_board，均大写；
         # package 无打包证据记 UNKNOWN（不再把 build_result 复制给 package_result）
-        rp = self._make_receipt(build="pass", board="fail")
+        rp = self._make_receipt(build="pass", board="pass")
         rc, out = self._run("add-candidate", "--receipt-path", rp,
                             "--source-commit", "abc123",
                             "--evidence-scope", "lcview-liveness")
@@ -59,10 +59,10 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(b["build_result"], "PASS")
         self.assertEqual(b["package_result"], "UNKNOWN")
         self.assertNotEqual(b["package_result"], b["build_result"])
-        self.assertEqual(b["board_verify"], "FAIL")
+        self.assertEqual(b["board_verify"], "PASS")
         self.assertEqual(b["evidence"]["build_result"], "PASS")
         self.assertEqual(b["evidence"]["package_result"], "UNKNOWN")
-        self.assertEqual(b["evidence"]["board_verify"], "FAIL")
+        self.assertEqual(b["evidence"]["board_verify"], "PASS")
         self.assertEqual(b["evidence_scope"], "lcview-liveness")
         self.assertEqual(b["evidence"]["evidence_scope"], "lcview-liveness")
         self.assertEqual(b["sync_manifest"], rp)
@@ -142,7 +142,7 @@ class TestBaselineRegister(unittest.TestCase):
 
     def test_add_candidate_dedup_updates_receipt(self):
         # 复用且收据路径不同：对齐最新证据（sync_manifest/build/board 更新）
-        rp1 = self._make_receipt(build="pass", board="fail")
+        rp1 = self._make_receipt(build="pass", board="pass")
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp1,
                                    "--source-commit", "abc123",
                                    "--evidence-scope", "lcview-liveness")[0], 0)
@@ -165,6 +165,47 @@ class TestBaselineRegister(unittest.TestCase):
                             "--evidence-scope", "lcview-liveness")
         self.assertEqual(rc, 1)
         self.assertIn("读取收据失败", out)
+        self.assertEqual(br.load()["baselines"], [])
+
+    def _write_raw_receipt(self, **kw):
+        fields = dict(batch_id="batch-test", batch_base="", verified_commit="abc",
+                      verify_mode="board", result="pass", build="pass",
+                      push_board="pass", acceptance="ok", elapsed_s=10,
+                      summary="test", cases="lcview-liveness")
+        fields.update(kw)
+        r = Receipt(**fields)
+        return str(write_receipt(r, "body"))
+
+    def test_add_candidate_rejects_fail(self):
+        # 方向 4：build/board_verify 为 FAIL 拒绝登记（防绕过 shell 直调登记）
+        for kw in ({"build": "fail"}, {"push_board": "fail"}):
+            rp = self._write_raw_receipt(**kw)
+            rc, out = self._run("add-candidate", "--receipt-path", rp,
+                                "--source-commit", "abc123",
+                                "--evidence-scope", "lcview-liveness")
+            self.assertEqual(rc, 1, kw)
+            self.assertIn("拒绝登记", out)
+            self.assertEqual(br.load()["baselines"], [])
+
+    def test_add_candidate_rejects_bad_enum(self):
+        # 方向 4：verify_mode/result 非法枚举拒绝登记
+        for kw in ({"verify_mode": "bogus"}, {"result": "bogus"}):
+            rp = self._write_raw_receipt(**kw)
+            rc, out = self._run("add-candidate", "--receipt-path", rp,
+                                "--source-commit", "abc123",
+                                "--evidence-scope", "lcview-liveness")
+            self.assertEqual(rc, 1, kw)
+            self.assertIn("拒绝登记", out)
+            self.assertEqual(br.load()["baselines"], [])
+
+    def test_add_candidate_rejects_missing_required(self):
+        # 方向 4：缺必需字段（batch_id/verified_commit/build/push_board）拒绝登记
+        rp = self._write_raw_receipt(batch_id="")
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 1)
+        self.assertIn("缺必需字段", out)
         self.assertEqual(br.load()["baselines"], [])
 
     def test_promote_requires_candidate(self):
