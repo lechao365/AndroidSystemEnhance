@@ -4,7 +4,8 @@
   模式 A（apply 拉起，随批次）:
     ws_report.py --batch-file <cdp> [--target <12hex起点HEAD>] \
         --result pass|fail|skip --build ... --board ... \
-        --acceptance "<逐项结果>" --elapsed <秒> --summary "<一句话>" \
+        --acceptance-file "<自描述验收产物 JSON>" --unit-test-file "<自描述单测产物 JSON>" \
+        --elapsed <秒> --summary "<一句话>" \
         [--body <正文文件>（CDP 原文+失败现场，必传见 SKILL）]
    模式 B（独立触发）:
     ws_report.py --target <12hex|dev|main> [--prefix manual|revert] \
@@ -227,6 +228,78 @@ def _validate_acceptance_pass(acceptance):
     return data, None
 
 
+def _norm_text(text: str) -> str:
+    """规范化空白用于文本比对（产物 input_summary 与批次验收文本）。"""
+    return " ".join((text or "").split())
+
+
+def _validate_acceptance_file(path, expect_summary):
+    """result=pass 时验收证据门禁（方向 1/3）：只接受自描述验收产物文件。
+
+    校验：文件存在且为合法 JSON、run_id 非空、input_summary 与本批验收文本
+    一致、单调时间表达新鲜度（start<end，不用固定墙钟，长编译/重试不误伤）、
+    overall=pass 且无 fail 项。返回 (parsed, err)：err 非 None 拒写。
+    """
+    if not (path or "").strip():
+        return None, "result=pass 必须传 --acceptance-file（自描述验收产物 JSON 路径）"
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as e:
+        return None, f"--acceptance-file 读取失败（{e}）"
+    except (ValueError, json.JSONDecodeError) as e:
+        return None, f"--acceptance-file 须为合法 JSON（解析失败: {e}）"
+    if not isinstance(data, dict):
+        return None, "--acceptance-file 须为 JSON 对象（自描述验收产物）"
+    if not (data.get("run_id") or "").strip():
+        return None, "--acceptance-file 缺 run_id（产物身份缺失），拒绝 PASS"
+    summary = (data.get("input_summary") or "").strip()
+    if not summary:
+        return None, "--acceptance-file 缺 input_summary（输入摘要缺失），拒绝 PASS"
+    # 输入摘要与本批一致：验收文本为「无」/空（-s 批本无验收）时跳过比对，
+    # 真 -sv 批（验收非「无」）强制一致，防陈旧/错批产物
+    expect = _norm_text(expect_summary)
+    if expect and expect != "无" and _norm_text(summary) != expect:
+        return None, ("--acceptance-file 输入摘要与本批验收文本不一致，拒绝 PASS"
+                      "（陈旧/错批产物）")
+    # 单调时间表达新鲜度（方向 3）：start<end，不用固定墙钟判新旧
+    st, en = data.get("start_monotonic"), data.get("end_monotonic")
+    if not isinstance(st, (int, float)) or not isinstance(en, (int, float)) \
+            or not st < en:
+        return None, "--acceptance-file 单调时间异常（start/end 缺失或未递增），拒绝 PASS"
+    # 方向 6：复用既有判定（overall=pass 且无 fail 项），内嵌经校验的 JSON
+    parsed, err = _validate_acceptance_pass(json.dumps(data, ensure_ascii=False))
+    if err:
+        return None, err
+    return data, None
+
+
+def _validate_unit_test_file(path, acceptance_run_id):
+    """result=pass 时单测证据门禁（方向 2）：产物 run_id 与验收产物一致，
+    且每个 target 全绿（rc==0 且 failed==0）。返回 (data, err)。"""
+    if not (path or "").strip():
+        return None, "result=pass 必须传 --unit-test-file（自描述单测产物 JSON 路径）"
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as e:
+        return None, f"--unit-test-file 读取失败（{e}）"
+    except (ValueError, json.JSONDecodeError) as e:
+        return None, f"--unit-test-file 须为合法 JSON（解析失败: {e}）"
+    if not isinstance(data, dict) or "targets" not in data:
+        return None, "--unit-test-file 须为 JSON 对象且含 targets（自描述单测产物）"
+    rid = (data.get("run_id") or "").strip()
+    if not rid:
+        return None, "--unit-test-file 缺 run_id，拒绝 PASS"
+    if acceptance_run_id and rid != acceptance_run_id:
+        return None, "--unit-test-file run_id 与验收产物不一致（非同批产物），拒绝 PASS"
+    for t in data.get("targets") or []:
+        if not isinstance(t, dict):
+            return None, "--unit-test-file 含非法 target 项，拒绝 PASS"
+        if t.get("rc") != 0 or t.get("failed") != 0:
+            return None, (f"--unit-test-file target {t.get('name')!r} 非全绿"
+                          f"（rc={t.get('rc')} failed={t.get('failed')}），拒绝 PASS")
+    return data, None
+
+
 def _resolve_target(target: str):
     """把 --target 解析为 12hex commit，返回 (resolved, err)。
 
@@ -272,6 +345,12 @@ def main(argv=None):
     ap.add_argument("--build", choices=["pass", "fail", "skip"], default="skip")
     ap.add_argument("--board", choices=["pass", "fail", "skip"], default="skip")
     ap.add_argument("--acceptance", default="")
+    ap.add_argument("--acceptance-file", default="",
+                    help="自描述验收产物 JSON 路径（PASS 只接受此来源；run_id/"
+                         "输入摘要/单调时间校验，缺失或不一致即拒 PASS）")
+    ap.add_argument("--unit-test-file", default="",
+                    help="自描述单测产物 JSON 路径（PASS 必需；run_id 与验收产物"
+                         "一致且每个 target 全绿）")
     ap.add_argument("--elapsed", type=int, default=None,
                     help="耗时秒数；缺省从 timings 的 wall_end-wall_start 推导"
                          "（推导不出则 0），显式传参优先")
@@ -324,10 +403,11 @@ def main(argv=None):
             if not softened:
                 return 2
         b = parse_batch(text)
-        if b.mode == "sv" and not args.acceptance:
+        if b.mode == "sv" and not args.acceptance and not args.acceptance_file:
             # -sv 批次必须带验收逐项证据，否则 promote 时 baseline 证据链有洞
-            print("error: 模式 A -sv 批次必须传 --acceptance（步骤 5 逐项验收结果），"
-                  "否则 baseline 证据链有洞", file=sys.stderr)
+            # （PASS 走产物文件 --acceptance-file，fail 仍可用 --acceptance 直传）
+            print("error: 模式 A -sv 批次必须传 --acceptance/--acceptance-file"
+                  "（步骤 5 逐项验收结果），否则 baseline 证据链有洞", file=sys.stderr)
             return 2
         batch_id = batch_id_from_text(text)
         batch_base = b.base
@@ -377,13 +457,25 @@ def main(argv=None):
               "prepare evidence-scope 推导死锁，拒绝写收据", file=sys.stderr)
         return 2
 
-    # 验收证据门禁：result=pass 必须带逐项验收 JSON 且整体通过，否则拒写
-    # （堵手填假绿混过 promote）；通过后单行化落盘——header 逐行 key-value，
-    # 多行 JSON 会被 from_text 只读首行截断，单行化保证 apply_done 能读全
+    # 验收证据门禁：result=pass 只接受自描述验收产物文件（--acceptance-file），
+    # 校验 run_id/输入摘要/单调时间且整体通过，否则拒写；单测产物（--unit-test-file）
+    # 为必需且 run_id 一致、每 target 全绿。通过后单行化落盘——header 逐行
+    # key-value，多行 JSON 会被 from_text 只读首行截断，单行化保证 apply_done
+    # 能读全（方向 6：收据内嵌经校验的 acceptance JSON，保 _acceptance_passed 不断）
     if args.result == "pass":
-        parsed, acc_err = _validate_acceptance_pass(args.acceptance)
+        if args.acceptance:
+            print("error: result=pass 已改为只接受 --acceptance-file"
+                  "（自描述验收产物），--acceptance 直传 JSON 已废弃", file=sys.stderr)
+            return 2
+        parsed, acc_err = _validate_acceptance_file(args.acceptance_file,
+                                                    b.acceptance if args.batch_file else "")
         if acc_err:
             print(f"error: {acc_err}", file=sys.stderr)
+            return 2
+        ures, ut_err = _validate_unit_test_file(args.unit_test_file,
+                                                (parsed or {}).get("run_id"))
+        if ut_err:
+            print(f"error: {ut_err}", file=sys.stderr)
             return 2
         args.acceptance = json.dumps(parsed, ensure_ascii=False,
                                      separators=(",", ":"))

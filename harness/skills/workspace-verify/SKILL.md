@@ -99,33 +99,43 @@ stages:
      （boot.img 刷写只写第一分区 INC-004，且属人工确认门）
    推送段打点（verify_push）：ws_adb_connect ensure 连接成功自动 mark，无需手动
 4b. 设备侧单测执行（制度化，AGENTS.md 测试防护强制）：
-    python3 harness/skills/workspace-verify/ws_upload_tests.py
+    python3 harness/skills/workspace-verify/ws_upload_tests.py \
+      --result-file harness/log/cross-device/unit-tests-<batch_id>.json
     （从 verify-cases.yaml modules 段读 test_targets，覆盖 lcview/lciod 全部
     unit_test 与 hal_test；nativetest push 到设备运行 gtest 并汇总——
     仅编译不执行不达标，C++ 单测长期只编译不执行是 nextSeqFor 真 bug
-    未被发现的根因；任一失败须修复后重跑，全部通过才进步骤 5）
-   单测段打点（verify_unit_test）：脚本执行完成自动 mark，无需手动
-5. 验收：python3 harness/skills/workspace-verify/ws_acceptance.py run --case <用例标签>
-   （--case 为一等入口（默认 lcview-liveness），从 verify-cases.yaml cases 段取验收文本，
-   与 L19/L26 一致；手打验收文本（--acceptance）为兜底；
-   语法标签自动执行；overall=ai 的自由文本项由 AI 用 logcat/dmesg 现场判定并覆盖；
-   步骤 4 有 reboot 时必须加 --wait-ready——连接后轮询 sys.boot_completed 就绪，
-   未就绪按设备不可达退 1，且传 reboot 时刻（MM-DD HH:MM:SS.mmm）给 --log-since——
-   logcat 时间窗从该时刻起，避免命中上轮旧日志致假绿；--log-since 自动按设备
-   时钟/时区换算（本地 CST 时刻映射到设备 UTC 域，PIT-5 复发防护——直接传本地
-   时刻会让窗落在设备"未来"取回 0 字符判红，已复发三次，勿再人工换算）；
-模式 B 加 --ensure-boot——验收无 boot 标签时自动追加，兑现 L20 设备存活最低判据）
-   验收段打点（verify_acceptance）：脚本执行完成自动 mark，无需手动
+    未被发现的根因；任一失败须修复后重跑，全部通过才进步骤 5；
+    --result-file 写自描述单测产物（run_id + 每 target 返回码/用例数/失败数），
+    供步骤 6 PASS 核验，无批次时也可省略）
+    单测段打点（verify_unit_test）：脚本执行完成自动 mark，无需手动
+5. 验收：python3 harness/skills/workspace-verify/ws_acceptance.py run --case <用例标签> \
+      --result-file harness/log/cross-device/acceptance-<batch_id>.json
+    （--case 为一等入口（默认 lcview-liveness），从 verify-cases.yaml cases 段取验收文本，
+    与 L19/L26 一致；手打验收文本（--acceptance）为兜底；
+    语法标签自动执行；overall=ai 的自由文本项由 AI 用 logcat/dmesg 现场判定并覆盖；
+    步骤 4 有 reboot 时必须加 --wait-ready——连接后轮询 sys.boot_completed 就绪，
+    未就绪按设备不可达退 1，且传 reboot 时刻（MM-DD HH:MM:SS.mmm）给 --log-since——
+    logcat 时间窗从该时刻起，避免命中上轮旧日志致假绿；--log-since 自动按设备
+    时钟/时区换算（本地 CST 时刻映射到设备 UTC 域，PIT-5 复发防护——直接传本地
+    时刻会让窗落在设备"未来"取回 0 字符判红，已复发三次，勿再人工换算）；
+    模式 B 加 --ensure-boot——验收无 boot 标签时自动追加，兑现 L20 设备存活最低判据；
+    --result-file 写自描述验收产物（run_id/输入摘要/设备指纹/起止单调时间/
+    逐项结果/总判定），供步骤 6 PASS 核验）
+    验收段打点（verify_acceptance）：脚本执行完成自动 mark，无需手动
 6. 收据：python3 harness/skills/workspace-verify/ws_report.py \
-   --acceptance "<步骤 5 逐项结果 JSON>" \
+   --acceptance-file harness/log/cross-device/acceptance-<batch_id>.json \
+   --unit-test-file harness/log/cross-device/unit-tests-<batch_id>.json \
    --summary "<一句话>" --result <pass|fail|skip> --build <pass|fail|skip> --board <pass|fail|skip> \
    --case "<本次实际 --case 标签，逗号分隔（模式 B 逐字透传；模式 A 无则省略）>" \
    --body <正文文件> --batch-file <cdp> --target $(git rev-parse --short=12 HEAD) \
    [--metrics "<性能三指标 JSON 对象>"] \
    [--timings-file harness/log/cross-device/timings-<batch_id>.json]
    （--batch-file/--target 为模式 A 参数；--body 必传：CDP 原文 + 各阶段明细 +
-   失败现场摘录，自动脱敏；--acceptance 必传步骤 5 的逐项结果——-sv 批次缺它
-   ws_report 返 2 拒写收据，避免 promote 时 baseline 证据链有洞；
+   失败现场摘录，自动脱敏；PASS 必传 --acceptance-file（步骤 5 自描述验收产物）
+   与 --unit-test-file（步骤 4 自描述单测产物）——ws_report 按 run_id 与输入摘要
+   与本批一致、单调时间递增、单测每 target 全绿核验，缺失/不一致返 2 拒写，
+   避免 promote 时 baseline 证据链有洞（新鲜度由 run_id/输入摘要/单调时间表达，
+   不用固定墙钟，长编译/重试不误伤）；fail 可 --acceptance 直传现场；
    --metrics 为性能三指标结构化 JSON（lcview-perf 采集输出 METRICS 行），写入
    收据 metrics 字段 + trend 行尾，跨批可 diff——性能数字不再只散在正文；
    --timings-file 为模式 A 链路耗时打点（步骤 0 各阶段 mark 的原始文件，ws_report

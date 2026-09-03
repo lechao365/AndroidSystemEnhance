@@ -72,7 +72,7 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
      （session 丢失/异常时降级：直接执行 /workspace-verify 模式 A，基线行为）
      末轮收据正文必须含 CDP 原文 + 失败现场（--body；超限终结批并含诊断报告）
      loop 终结（收据落盘）后打点（必做）：cdp_timing.py mark --batch <batch_id> --name verify_end
-- 收据落盘是进步骤 6 的前提：ws_report 返 2（如 -sv 缺 --acceptance、
+- 收据落盘是进步骤 6 的前提：ws_report 返 2（如 -sv 缺 --acceptance/--acceptance-file、
       --log-since 非法等参数错误）即收据未落盘，必须补参重试，禁止无收据进步骤 6
    **收据 cases 自动落盘 + 禁改历史口径（2026-09-02 定）**：
    - -sv 批次走 loop 验证时，ws_acceptance 验收完成自动把实跑 case 标签写

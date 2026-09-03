@@ -66,6 +66,9 @@ stages:
    （幂等：同 goal+target 活跃会话自动复用）
 2. 执行轮次（run 给出指引，AI 按 workspace-verify SKILL 步骤 1-6 执行）：
    python3 harness/skills/loop-engineering/ws_session.py run --session <json>
+   （先产自描述产物再传给报告：ws_upload_tests --result-file 与
+   ws_acceptance --result-file 落在本会话日志目录，ws_report PASS 经
+   --acceptance-file/--unit-test-file 按产物核验（run_id/输入摘要/单调时间/全绿）
    （模式 A 链路耗时打点：apply 侧已 start 打点文件，本轮 verify 内部各阶段
    沿用同段名 mark（不追加轮次前缀，段名稳定供复盘按段统计），收据
    timings 可看出各段耗时；未 start 则跳过，warn 不阻断）

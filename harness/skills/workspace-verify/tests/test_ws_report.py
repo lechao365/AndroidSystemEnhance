@@ -43,6 +43,33 @@ class TestWsReport(unittest.TestCase):
         self.addCleanup(Path(f.name).unlink)
         return f.name
 
+    def _write_acc(self, run_id="acc123", summary="svc:lechao_lcview boot",
+                   start=1.0, end=2.0, overall="pass", items=None, **extra):
+        # 自描述验收产物（方向 1/3）：run_id/输入摘要/设备信息/单调时间/逐项/总判定
+        d = {
+            "run_id": run_id,
+            "input_summary": summary,
+            "device_serial": "s1",
+            "device_fingerprint": "f1",
+            "start_monotonic": start,
+            "end_monotonic": end,
+            "items": items if items is not None else
+                    [{"tag": "svc:lechao_lcview", "status": "pass",
+                      "detail": "running"}],
+            "overall": overall,
+        }
+        d.update(extra)
+        return self._write(json.dumps(d, ensure_ascii=False), ".json")
+
+    def _write_ut(self, run_id="acc123", targets=None):
+        # 自描述单测产物（方向 2）：run_id + 每 target 返回码/用例数/失败数
+        d = {
+            "run_id": run_id,
+            "targets": targets if targets is not None else
+                       [{"name": "t1", "rc": 0, "tests": 42, "failed": 0}],
+        }
+        return self._write(json.dumps(d, ensure_ascii=False), ".json")
+
     def test_mode_a_normal(self):
         # 模式 A：--batch-file + --body → exit 0 且收据落盘、body 内容写入
         batch = self._write(VALID_S, ".cdp")
@@ -284,8 +311,8 @@ class TestWsReport(unittest.TestCase):
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "性能基线",
                                  "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
-                                 "--acceptance",
-                                 '{"overall": "pass", "items": []}',
+                                 "--acceptance-file", self._write_acc(),
+                                 "--unit-test-file", self._write_ut(),
                                  "--metrics", metrics])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
@@ -640,8 +667,8 @@ class TestWsReport(unittest.TestCase):
                                  "--board", "pass", "--summary", "上板通过",
                                  "--case", "lcview-liveness",
                                  "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
-                                 "--acceptance",
-                                 '{"overall": "pass", "items": []}'])
+                                 "--acceptance-file", self._write_acc(),
+                                 "--unit-test-file", self._write_ut()])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         self.assertEqual(len(details), 1)
@@ -650,7 +677,7 @@ class TestWsReport(unittest.TestCase):
         self.assertIn("- cases: lcview-liveness", content)
 
     def test_pass_without_acceptance_rejected(self):
-        # result=pass 而无 --acceptance → 返 2 拒写（堵零验收证据假绿）
+        # result=pass 而无 --acceptance-file → 返 2 拒写（堵零验收证据假绿）
         batch = self._write(VALID_S, ".cdp")
         body = self._write("## 现场\n")
         err = io.StringIO()
@@ -660,11 +687,11 @@ class TestWsReport(unittest.TestCase):
                                  "--board", "pass", "--summary", "无验收",
                                  "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 2)
-        self.assertIn("必须传 --acceptance", err.getvalue())
+        self.assertIn("必须传 --acceptance-file", err.getvalue())
         self.assertFalse(self._dir.exists())
 
-    def test_pass_acceptance_invalid_json_rejected(self):
-        # result=pass 而 acceptance 非合法 JSON（如手填 "ok"）→ 返 2 拒写
+    def test_pass_legacy_acceptance_rejected(self):
+        # 方向 1：PASS 只接受 --acceptance-file，--acceptance 直传 JSON 已废弃
         batch = self._write(VALID_S, ".cdp")
         body = self._write("## 现场\n")
         err = io.StringIO()
@@ -673,58 +700,78 @@ class TestWsReport(unittest.TestCase):
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "手填假绿",
                                  "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
-                                 "--acceptance", "手填 ok"])
+                                 "--acceptance",
+                                 '{"overall": "pass", "items": []}'])
+        self.assertEqual(rc, 2)
+        self.assertIn("已改为只接受 --acceptance-file", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_pass_acceptance_file_invalid_json_rejected(self):
+        # result=pass 而 --acceptance-file 非合法 JSON（如手填 "ok"）→ 返 2 拒写
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        bad = self._write("手填 ok", ".json")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "pass", "--build", "pass",
+                                 "--board", "pass", "--summary", "手填假绿",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--acceptance-file", bad,
+                                 "--unit-test-file", self._write_ut()])
         self.assertEqual(rc, 2)
         self.assertIn("须为合法 JSON", err.getvalue())
         self.assertFalse(self._dir.exists())
 
-    def test_pass_acceptance_overall_fail_rejected(self):
-        # result=pass 而 acceptance overall=fail → 返 2 拒写（失败验收不得过 promote）
+    def test_pass_acceptance_file_overall_fail_rejected(self):
+        # result=pass 而验收产物 overall=fail → 返 2 拒写（失败验收不得过 promote）
         batch = self._write(VALID_S, ".cdp")
         body = self._write("## 现场\n")
+        acc = self._write_acc(overall="fail")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "假绿",
                                  "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
-                                 "--acceptance",
-                                 '{"overall": "fail", "items": []}'])
+                                 "--acceptance-file", acc,
+                                 "--unit-test-file", self._write_ut()])
         self.assertEqual(rc, 2)
         self.assertIn("overall 非 pass", err.getvalue())
         self.assertFalse(self._dir.exists())
 
-    def test_pass_acceptance_fail_item_rejected(self):
+    def test_pass_acceptance_file_fail_item_rejected(self):
         # overall=pass 但 items 含 fail 项（自相矛盾）→ 返 2 拒写
         batch = self._write(VALID_S, ".cdp")
         body = self._write("## 现场\n")
+        acc = self._write_acc(items=[{"status": "fail"}])
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "假绿",
                                  "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
-                                 "--acceptance",
-                                 '{"overall": "pass", "items": [{"status": "fail"}]}'])
+                                 "--acceptance-file", acc,
+                                 "--unit-test-file", self._write_ut()])
         self.assertEqual(rc, 2)
         self.assertIn("含 fail 项", err.getvalue())
         self.assertFalse(self._dir.exists())
 
-    def test_pass_acceptance_multiline_valid_singlelined(self):
-        # 合法多行 JSON（ws_acceptance.run 输出）→ exit 0，且单行化落盘
+    def test_pass_acceptance_file_valid_singlelined(self):
+        # 自描述验收产物 + 单测产物（run_id 一致）→ exit 0，且单行化落盘
         # （header 逐行 key-value，多行 JSON 会被 from_text 截断）
         batch = self._write(VALID_S, ".cdp")
         body = self._write("## 现场\n")
-        multiline = ('{\n  "overall": "pass",\n  "items": [\n'
-                     '    {"tag": "svc:x", "status": "pass", "detail": "running"}\n'
-                     '  ]\n}')
+        acc = self._write_acc(run_id="runabc123")
+        ut = self._write_ut(run_id="runabc123")
         buf = io.StringIO()
         with redirect_stdout(buf):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
-                                 "--board", "pass", "--summary", "多行验收",
+                                 "--board", "pass", "--summary", "产物验收",
                                  "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
-                                 "--acceptance", multiline])
+                                 "--acceptance-file", acc,
+                                 "--unit-test-file", ut])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         content = details[0].read_text(encoding="utf-8")
@@ -737,36 +784,127 @@ class TestWsReport(unittest.TestCase):
         self.assertIn('"overall":"pass"', got.acceptance)
         self.assertNotIn("\n", got.acceptance)
 
-    def test_pass_acceptance_array_format_valid(self):
-        # 历史数组格式（无 overall）全 pass → 放行（有逐项证据即真绿）
+    def test_pass_acceptance_file_array_rejected(self):
+        # 方向 1：PASS 只接受自描述验收产物（JSON 对象），历史数组格式不再接受
         batch = self._write(VALID_S, ".cdp")
         body = self._write("## 现场\n")
-        buf = io.StringIO()
-        with redirect_stdout(buf):
+        arr = self._write('[{"tag": "svc:x", "status": "pass"}]', ".json")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "数组验收",
                                  "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
-                                 "--acceptance",
-                                 '[{"tag": "svc:x", "status": "pass"}]'])
-        self.assertEqual(rc, 0)
-        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
-        self.assertEqual(len(details), 1)
+                                 "--acceptance-file", arr,
+                                 "--unit-test-file", self._write_ut()])
+        self.assertEqual(rc, 2)
+        self.assertIn("须为 JSON 对象", err.getvalue())
+        self.assertFalse(self._dir.exists())
 
-    def test_pass_acceptance_array_with_fail_rejected(self):
-        # 数组格式含 fail 项 → 返 2 拒写
+    def test_pass_acceptance_file_missing_run_id_rejected(self):
+        # 方向 1：验收产物缺 run_id（产物身份缺失）→ 拒 PASS
         batch = self._write(VALID_S, ".cdp")
         body = self._write("## 现场\n")
+        acc = self._write_acc()
+        acc_f = self._write(json.dumps({"overall": "pass", "items": []}), ".json")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "假绿",
                                  "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
-                                 "--acceptance",
-                                 '[{"tag": "svc:x", "status": "fail"}]'])
+                                 "--acceptance-file", acc_f,
+                                 "--unit-test-file", self._write_ut()])
         self.assertEqual(rc, 2)
-        self.assertIn("含 fail 项", err.getvalue())
+        self.assertIn("缺 run_id", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_pass_acceptance_file_stale_monotonic_rejected(self):
+        # 方向 3：单调时间异常（start>=end）→ 拒 PASS（不用固定墙钟，用单调时间表达）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        acc = self._write_acc(start=2.0, end=1.0)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "pass", "--build", "pass",
+                                 "--board", "pass", "--summary", "假绿",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--acceptance-file", acc,
+                                 "--unit-test-file", self._write_ut()])
+        self.assertEqual(rc, 2)
+        self.assertIn("单调时间异常", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_pass_acceptance_file_summary_mismatch_rejected(self):
+        # 方向 1：-sv 批（验收文本非「无」）产物输入摘要与本批不一致 → 拒 PASS
+        batch = self._write("""-sv base:1a2b3c4d5e6f
+意图: liveness 验证
+验收: svc:lechao_lcview
+方向: x
+""", ".cdp")
+        body = self._write("## 现场\n")
+        acc = self._write_acc(summary="svc:other_tag")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "pass", "--build", "pass",
+                                 "--board", "pass", "--summary", "假绿",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--acceptance-file", acc,
+                                 "--unit-test-file", self._write_ut(),
+                                 "--case", "lcview-liveness"])
+        self.assertEqual(rc, 2)
+        self.assertIn("输入摘要与本批验收文本不一致", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_pass_without_unit_test_file_rejected(self):
+        # 方向 2：PASS 缺 --unit-test-file → 返 2 拒写
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "pass", "--build", "pass",
+                                 "--board", "pass", "--summary", "无单测",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--acceptance-file", self._write_acc()])
+        self.assertEqual(rc, 2)
+        self.assertIn("必须传 --unit-test-file", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_pass_unit_test_run_id_mismatch_rejected(self):
+        # 方向 2：单测产物 run_id 与验收产物不一致（非同批）→ 拒 PASS
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "pass", "--build", "pass",
+                                 "--board", "pass", "--summary", "错批",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--acceptance-file", self._write_acc(run_id="acc123"),
+                                 "--unit-test-file", self._write_ut(run_id="other456")])
+        self.assertEqual(rc, 2)
+        self.assertIn("run_id 与验收产物不一致", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_pass_unit_test_not_green_rejected(self):
+        # 方向 2：单测 target 非全绿（failed>0 / rc=1）→ 拒 PASS
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        for targets in ([{"name": "t1", "rc": 0, "tests": 42, "failed": 1}],
+                        [{"name": "t1", "rc": 1, "tests": 42, "failed": 0}]):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                     "--result", "pass", "--build", "pass",
+                                     "--board", "pass", "--summary", "假绿",
+                                     "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                     "--acceptance-file", self._write_acc(),
+                                     "--unit-test-file", self._write_ut(targets=targets)])
+            self.assertEqual(rc, 2, targets)
+            self.assertIn("非全绿", err.getvalue())
         self.assertFalse(self._dir.exists())
 
     def test_sanitize_workspace_placeholder(self):
@@ -910,10 +1048,9 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "skip",
                                  "--board", "pass", "--summary", "liveness",
-                                 "--acceptance",
-                                 json.dumps({"overall": "pass",
-                                             "items": [{"tag": "svc:lechao_lcview",
-                                                        "status": "pass"}]})])
+                                 "--acceptance-file",
+                                 self._write_acc(summary="svc:lechao_lcview"),
+                                 "--unit-test-file", self._write_ut()])
         self.assertEqual(rc, 0)
         self.assertIn(f"自动探测到 cases 文件: {ws_report.log_apply_dir()}/cases-{bid}.json",
                       err.getvalue())
@@ -970,10 +1107,9 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "skip",
                                  "--board", "pass", "--summary", "liveness",
-                                 "--acceptance",
-                                 json.dumps({"overall": "pass",
-                                             "items": [{"tag": "svc:lechao_lcview",
-                                                        "status": "pass"}]})])
+                                 "--acceptance-file",
+                                 self._write_acc(summary="svc:lechao_lcview"),
+                                 "--unit-test-file", self._write_ut()])
         self.assertEqual(rc, 2)
         self.assertIn("必须带 cases", err.getvalue())
         self.assertFalse(any(f.name != "trend.md"
