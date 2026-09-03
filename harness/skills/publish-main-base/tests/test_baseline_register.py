@@ -46,7 +46,8 @@ class TestBaselineRegister(unittest.TestCase):
         return rc, buf.getvalue() + err.getvalue()
 
     def test_add_candidate_reads_receipt(self):
-        # candidate 必须实读收据：build/package=build、board_verify=push_board，均大写
+        # candidate 必须实读收据：build=build、board_verify=push_board，均大写；
+        # package 无打包证据记 UNKNOWN（不再把 build_result 复制给 package_result）
         rp = self._make_receipt(build="pass", board="fail")
         rc, out = self._run("add-candidate", "--receipt-path", rp,
                             "--source-commit", "abc123",
@@ -56,10 +57,11 @@ class TestBaselineRegister(unittest.TestCase):
         b = br.load()["baselines"][0]
         self.assertEqual(b["status"], "candidate")
         self.assertEqual(b["build_result"], "PASS")
-        self.assertEqual(b["package_result"], "PASS")
+        self.assertEqual(b["package_result"], "UNKNOWN")
+        self.assertNotEqual(b["package_result"], b["build_result"])
         self.assertEqual(b["board_verify"], "FAIL")
         self.assertEqual(b["evidence"]["build_result"], "PASS")
-        self.assertEqual(b["evidence"]["package_result"], "PASS")
+        self.assertEqual(b["evidence"]["package_result"], "UNKNOWN")
         self.assertEqual(b["evidence"]["board_verify"], "FAIL")
         self.assertEqual(b["evidence_scope"], "lcview-liveness")
         self.assertEqual(b["evidence"]["evidence_scope"], "lcview-liveness")
@@ -189,6 +191,21 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertTrue(snapshot.is_file(), f"快照未落盘: {snapshot}")
         self.assertEqual(snapshot.read_text(encoding="utf-8"),
                          Path(rp).read_text(encoding="utf-8"))
+
+    def test_promote_unknown_package_warns_not_blocks(self):
+        # 方向 2：promote 遇 package_result=UNKNOWN 仅告警放行，不新增阻断
+        # （当前无打包生产者，硬门禁会锁死发布通道）
+        rp = self._make_receipt()
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        b = br.load()["baselines"][0]
+        self.assertEqual(b["package_result"], "UNKNOWN")
+        bid = b["baseline_id"]
+        rc, out = self._run("promote", "--baseline-id", bid)
+        self.assertEqual(rc, 0)
+        self.assertIn("promoted:", out)
+        self.assertIn("package_result=UNKNOWN", out)
+        self.assertIn("仅告警放行", out)
 
     def test_promote_duplicate_snapshot_rejected(self):
         # 重复 promote（revert 后再 promote）：快照已存在即拒，不得覆盖历史证据

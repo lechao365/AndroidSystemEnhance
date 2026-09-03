@@ -67,6 +67,16 @@ if [ "$MODE" != "check-only" ]; then
     echo "error: 工作树非空（未提交改动将干扰 promote/登记提交），请先提交或 stash" >&2; exit 1; }
 fi
 
+# ── 项目根改道防线（方向 4）：CDP_PROJECT_ROOT 若已设且不等于 git 顶层目录即拒绝
+# （收据查找依赖 CDP_PROJECT_ROOT 定位 log_apply_dir，防环境变量把收据目录改道）
+if [ -n "${CDP_PROJECT_ROOT:-}" ]; then
+  TOP="$(git rev-parse --show-toplevel)"
+  if [ "$CDP_PROJECT_ROOT" != "$TOP" ]; then
+    echo "error: CDP_PROJECT_ROOT=$CDP_PROJECT_ROOT 不等于 git 顶层目录 $TOP，拒绝执行（防收据目录改道）" >&2
+    exit 1
+  fi
+fi
+
 # ── 前置校验（prepare/promote/check-only 共用；sha 统一 short=12 比较）─────────
 RECEIPT_INFO=$(python3 - <<'PYEOF'
 import os

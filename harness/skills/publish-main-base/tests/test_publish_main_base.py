@@ -139,6 +139,23 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertIn("前置校验通过", r.stdout)
         self.assertIn(f"PARENT={self.parent_vc}", r.stdout)
 
+    def test_rejects_mismatched_cdp_project_root(self):
+        # 方向 4：CDP_PROJECT_ROOT 已设且不等于 git 顶层目录 → 收据查找前拒绝，
+        # 防收据目录被环境变量改道（CDP_PROJECT_ROOT=root 时正常放行）
+        r_ok = self._run("--check-only")
+        self.assertEqual(r_ok.returncode, 0, r_ok.stderr)
+        env = dict(self._env)
+        env["CDP_PROJECT_ROOT"] = str(self.root / "elsewhere")
+        r = subprocess.run(
+            [BASH, str(self.root / "harness" / "skills" / "publish-main-base"
+                       / "publish_main_base.sh"), "--check-only"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=self.root, env=env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("CDP_PROJECT_ROOT", r.stderr)
+        self.assertIn("git 顶层目录", r.stderr)
+        self.assertIn("拒绝执行", r.stderr)
+
     def test_check_outputs_need_verify_class(self):
         # 父(c1) != verified_commit（伪造）→ NEED_VERIFY（编排进验证路径）
         self._write_receipt("deadbeefdead", batch_id="000000000002")
@@ -245,7 +262,8 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         return yaml.safe_load(cfg.read_text(encoding="utf-8"))["baselines"][0]
 
     def test_add_candidate_empty_build_registers_fail(self):
-        # 收据 build/push_board 为空 → 登记为 FAIL（空值非合法 skip 证据）
+        # 收据 build/push_board 为空 → 登记为 FAIL（空值非合法 skip 证据）；
+        # package 无打包证据记 UNKNOWN（方向 1 不再复制 build_result）
         self._write_receipt(self.parent_vc, build="", push_board="",
                             batch_id="000000000003", cases="lcview-liveness")
         r = self._run_register("add-candidate", "--source-commit", "abc123def456",
@@ -255,7 +273,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         b = self._registered_evidence()
         self.assertEqual(b["build_result"], "FAIL")
-        self.assertEqual(b["package_result"], "FAIL")
+        self.assertEqual(b["package_result"], "UNKNOWN")
         self.assertEqual(b["board_verify"], "FAIL")
 
     def test_add_candidate_explicit_skip_still_skip(self):

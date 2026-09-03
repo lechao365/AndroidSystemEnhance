@@ -205,9 +205,12 @@ def main(argv=None):
                       f"（{sorted(receipt_cases) or '无'}），过度声称拒绝登记: {extra}",
                       file=sys.stderr)
                 return 1
-        # build/package 共用收据 build 阶段，board_verify 取 push_board，均大写（不再伪造 PASS）
+        # build 取收据 build 阶段，board_verify 取 push_board，均大写（不再伪造 PASS）
         # 空值（""/None/纯空白）记 FAIL 不记 SKIP——空值不是合法 skip 证据，证据链从严
         build_result = ((r.build or "").strip() or "FAIL").upper()
+        # package：当前无打包生产者，无打包证据记 UNKNOWN（方向 1 停止把
+        # build_result 复制给 package_result，杜绝伪造打包证据）
+        package_result = "UNKNOWN"
         board_verify = ((r.push_board or "").strip() or "FAIL").upper()
         # ki_gate：known-issues 门禁结论（拒批已在脚本层 exit，缺参视为 not-run）
         ki_gate = (args.ki_gate or "").strip() or "not-run"
@@ -221,12 +224,12 @@ def main(argv=None):
                 if b.get("sync_manifest") != args.receipt_path:
                     b["sync_manifest"] = args.receipt_path
                     b["build_result"] = build_result
-                    b["package_result"] = build_result
+                    b["package_result"] = package_result
                     b["board_verify"] = board_verify
                     b["evidence_scope"] = evidence_scope
                     b["evidence"] = {
                         "build_result": build_result,
-                        "package_result": build_result,
+                        "package_result": package_result,
                         "board_verify": board_verify,
                         "sync_manifest": args.receipt_path,
                         "ki_gate": ki_gate,
@@ -246,12 +249,12 @@ def main(argv=None):
             "source_commit": args.source_commit,
             "sync_manifest": args.receipt_path,
             "build_result": build_result,
-            "package_result": build_result,
+            "package_result": package_result,
             "board_verify": board_verify,
             "evidence_scope": evidence_scope,
             "evidence": {
                 "build_result": build_result,
-                "package_result": build_result,
+                "package_result": package_result,
                 "board_verify": board_verify,
                 "sync_manifest": args.receipt_path,
                 "ki_gate": ki_gate,
@@ -287,6 +290,12 @@ def main(argv=None):
                     return 1
                 snapshot_path.write_text(receipt.read_text(encoding="utf-8"),
                                          encoding="utf-8")
+                # 方向 2：package_result=UNKNOWN 仅告警放行不新增阻断——当前无
+                # 打包生产者，硬门禁会锁死发布通道
+                if b.get("package_result") == "UNKNOWN":
+                    print(f"warn: baseline {args.baseline_id} package_result=UNKNOWN"
+                          "（当前无打包生产者，无打包证据；仅告警放行，不新增阻断）",
+                          file=sys.stderr)
                 # promote 允许透传/改写 evidence_scope（如零改动豁免时改写 no-code-change）
                 scope = (args.evidence_scope or "").strip()
                 if scope:
