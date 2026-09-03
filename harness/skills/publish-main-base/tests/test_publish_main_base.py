@@ -131,6 +131,74 @@ class TestSyncModifyToMainBase(unittest.TestCase):
             blocking_reason="r" if blocking else "", status=status, task=task,
             batch_id="000000000001")
 
+    # ── 方向 3：rollback 状态推导（人工 --rollback 与失败点共用实现）────────
+    BID_RB = "BL-20260903-01"
+
+    def _write_promoted_yaml(self, status="promoted"):
+        (self.root / "harness" / "config" / "baseline-status.yaml").write_text(
+            "baselines:\n"
+            f"- baseline_id: {self.BID_RB}\n"
+            f"  status: {status}\n"
+            "  source_commit: 0123456789ab\n", encoding="utf-8")
+
+    def _state_file(self):
+        p = self.root / "harness" / "log" / "cross-device" / f"promote-{self.BID_RB}.head"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def test_rollback_drops_meta_commit_based_on_recorded_head(self):
+        # 基准（promote 进入时 HEAD）已记状态文件；元提交恰前进一位 → 才 reset：
+        # HEAD 回基准、revert-candidate 生效后随 reset 一并丢弃、状态文件清理
+        self._write_promoted_yaml("candidate")
+        self._git("add", "-A")
+        self._git("commit", "-m", "构建(baseline): 登记")
+        base = self._git("rev-parse", "HEAD").stdout.strip()
+        self._write_promoted_yaml("promoted")   # promote 登记后随元提交入库
+        (self.root / "c.txt").write_text("3\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "构建(baseline): 晋升元提交")
+        self._state_file().write_text(base + "\n", encoding="utf-8")
+        r = self._run("--rollback", "--baseline-id", self.BID_RB)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._git("rev-parse", "HEAD").stdout.strip(), base)
+        self.assertFalse((self.root / "c.txt").exists())
+        self.assertFalse(self._state_file().exists())
+
+    def test_rollback_without_meta_commit_skips_reset_but_reverts(self):
+        # 元提交未建（HEAD==基准）：不 reset（防误删）；登记已落（promoted）
+        # 仍回退 candidate（revert 仅改工作区 yaml，不产生提交）
+        base = self._git("rev-parse", "HEAD").stdout.strip()
+        self._write_promoted_yaml("promoted")
+        self._state_file().write_text(base + "\n", encoding="utf-8")
+        r = self._run("--rollback", "--baseline-id", self.BID_RB)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._git("rev-parse", "HEAD").stdout.strip(), base)
+        data = yaml.safe_load(
+            (self.root / "harness" / "config" / "baseline-status.yaml")
+            .read_text(encoding="utf-8"))
+        self.assertEqual(data["baselines"][0]["status"], "candidate")
+        self.assertFalse(self._state_file().exists())
+
+    def test_rollback_without_state_file_skips_reset(self):
+        # 基准缺失（状态文件丢失/人工环境）：不 reset，提示人工核查，rc 0
+        self._write_promoted_yaml("candidate")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(t): 无状态文件的额外提交")
+        head = self._git("rev-parse", "HEAD").stdout.strip()
+        r = self._run("--rollback", "--baseline-id", self.BID_RB)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._git("rev-parse", "HEAD").stdout.strip(), head)
+        self.assertIn("跳过 dev reset", r.stdout + r.stderr)
+
+    def test_rollback_candidate_status_skips_revert(self):
+        # 推导一：登记未落（candidate）→ 不调 revert-candidate（无 reverted 输出）
+        base = self._git("rev-parse", "HEAD").stdout.strip()
+        self._write_promoted_yaml("candidate")
+        self._state_file().write_text(base + "\n", encoding="utf-8")
+        r = self._run("--rollback", "--baseline-id", self.BID_RB)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("reverted-candidate", r.stdout + r.stderr)
+
     # ── 方向 4：真 git 仓两例（父等于 / 不等 VC）──────────────────────────
     def test_check_parent_equals_vc_passes(self):
         # 父(c1) == verified_commit(c1) → 前置校验通过

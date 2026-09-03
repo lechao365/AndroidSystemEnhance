@@ -1,0 +1,36 @@
+# 最小 CI：只跑 harness 自检（pytest 全量 + 引用完整性 + 配置治理 + 命令/skill 契约）。
+# 硬约束（批次 ca64a314af81 方向 4/5）：
+#   - GitHub 托管 Linux runner；禁止 apply 机（或任何开发机）注册为 self-hosted runner
+#   - 最小权限（contents: read）；不使用任何 secrets
+#   - action 按 commit SHA 固定（不用浮动 tag），升级须显式换 SHA 并评审
+#   - 自检走无打点指针降级路径：CDP_PROJECT_ROOT 指向 runner 临时目录，
+#     cdp_timing mark 无打点指针时 warn 返非零、selfcheck 捕获后不阻断（既有降级行为），
+#     打点/收据落点均在临时目录，不污染检出树
+name: selfcheck
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  selfcheck:
+    runs-on: ubuntu-latest
+    # 无打点指针降级（方向 5）：log/打点/收据落点全指 runner 临时目录，不污染检出树；
+    # cdp_timing mark 无指针时 warn 返非零，selfcheck 捕获后不阻断
+    env:
+      CDP_PROJECT_ROOT: ${{ runner.temp }}/cdp-root
+    steps:
+      # actions/checkout v4.2.2（SHA 固定；禁浮动 tag）
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: 安装测试依赖（无 secrets；runner 自带 Python）
+        run: python3 -m pip install --quiet pyyaml pytest pytest-xdist
+
+      - name: 自检
+        run: |
+          mkdir -p "$CDP_PROJECT_ROOT"
+          python3 harness/lib/selfcheck.py

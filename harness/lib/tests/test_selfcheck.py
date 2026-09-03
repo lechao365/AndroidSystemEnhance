@@ -1,6 +1,8 @@
 import contextlib
 import io
+import os
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -241,6 +243,24 @@ class TestMarkSelfcheck(unittest.TestCase):
             with contextlib.redirect_stderr(err):
                 selfcheck._mark_selfcheck()  # 不抛异常即通过
         self.assertIn("打点失败（不阻断）", err.getvalue())
+
+
+class TestMarkSelfcheckDegraded(unittest.TestCase):
+    """方向 5：CI 无打点指针降级——CDP_PROJECT_ROOT 指空临时根（无 timings
+    文件、无 CDP_BATCH_ID）时自发 mark 走 cdp_timing warn 降级路径，
+    不抛异常、不阻断自检（真子进程，非 mock）。"""
+
+    def test_mark_selfcheck_no_pointer_no_raise(self):
+        root = tempfile.TemporaryDirectory()
+        try:
+            env = dict(os.environ)
+            env["CDP_PROJECT_ROOT"] = root.name
+            env.pop("CDP_BATCH_ID", None)
+            with mock.patch.dict(os.environ, env):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    selfcheck._mark_selfcheck()
+        finally:
+            root.cleanup()
 
 
 if __name__ == "__main__":

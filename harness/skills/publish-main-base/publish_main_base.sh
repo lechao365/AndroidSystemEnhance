@@ -29,7 +29,7 @@ MODE=""; MSG_FILE=""; BID=""; TASK=""; APPROVED_BY=""; EVIDENCE_SCOPE=""
 # check 模式失败分类输出（stderr；prepare/promote 亦输出，不影响既有行为与退出码）
 check_class() { echo "check_class=$1" >&2; }
 
-usage() { echo "usage: $0 --check [--task <id>] | --prepare [--task <id>] [--evidence-scope <scope>] | --promote --baseline-id <id> --message-file <f> [--task <id>] [--approved-by <id>] [--evidence-scope <scope>]"; exit 3; }
+usage() { echo "usage: $0 --check [--task <id>] | --prepare [--task <id>] [--evidence-scope <scope>] | --promote --baseline-id <id> --message-file <f> [--task <id>] [--approved-by <id>] [--evidence-scope <scope>] | --rollback --baseline-id <id>"; exit 3; }
 [ $# -ge 1 ] || usage
 case "$1" in
   --prepare) MODE="prepare"; shift ;;
@@ -48,8 +48,72 @@ case "$1" in
       esac
       shift
     done ;;
+  --rollback)
+    # 人工回滚入口：与 promote 失败点共用 rollback_promote（状态推导，见函数头注）
+    MODE="rollback"; shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --baseline-id) [ $# -ge 2 ] || usage; BID="$2"; shift ;;
+        *) usage ;;
+      esac
+      shift
+    done
+    [ -n "$BID" ] || usage ;;
   *) usage ;;
 esac
+
+# ── 晋升回滚（promote 失败点与人工 --rollback 共用同一实现）──────────────────
+# 状态文件（harness/log/cross-device/promote-<id>.head）记录 promote 进入时的 dev
+# HEAD 作为回滚基准；rollback 据此做状态推导，不再盲目回退：
+#   1) 登记已落（工作区 yaml 该条目 status=promoted）→ revert-candidate（尽力而为）
+#   2) 基准存在且 HEAD 恰前进一位（HEAD^ == 基准，即确有晋升元提交）→ 才 reset 丢弃；
+#      更早阶段失败时 HEAD 未前进，盲 reset HEAD^ 会误删合法提交，故跳过并提示人工核查
+promote_state_file() { echo "harness/log/cross-device/promote-$1.head"; }
+
+rollback_promote() {
+  git fetch origin -q || true
+  if [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ]; then
+    git reset --hard origin/main || exit 1
+  fi
+  git checkout dev || exit 1
+  # verified tag 一并回滚（本地 + 远端尽力而为），防残留假锚点阻断后续重试
+  git tag -d "verified/$BID" >/dev/null 2>&1 || true
+  git push origin ":refs/tags/verified/$BID" >/dev/null 2>&1 || true
+  # 推导一：登记已执行（工作区该条目已 promoted）才回退 candidate；
+  # revert-candidate 仅改工作区 yaml 不产生提交，不影响下方 HEAD 推导
+  if python3 - "$BID" <<'PYEOF'
+import sys, yaml
+try:
+    rows = (yaml.safe_load(open("harness/config/baseline-status.yaml", encoding="utf-8"))
+            or {}).get("baselines") or []
+except FileNotFoundError:
+    sys.exit(1)
+bid = sys.argv[1]
+sys.exit(0 if any(b.get("baseline_id") == bid and b.get("status") == "promoted"
+                  for b in rows) else 1)
+PYEOF
+  then
+    python3 harness/skills/publish-main-base/baseline_register.py revert-candidate \
+      --baseline-id "$BID" || echo "warn: baseline ${BID} 回退 candidate 失败，请人工处理"
+  fi
+  # 推导二：以 promote 前所记 HEAD 为基准，确有新增提交（HEAD^ == 基准）才丢弃
+  BASE_HEAD=""
+  [ -f "$(promote_state_file "$BID")" ] && BASE_HEAD=$(cat "$(promote_state_file "$BID")")
+  if [ -n "$BASE_HEAD" ] \
+     && [ "$(git rev-parse HEAD 2>/dev/null)" != "$BASE_HEAD" ] \
+     && [ "$(git rev-parse HEAD^ 2>/dev/null || true)" = "$BASE_HEAD" ]; then
+    git reset --hard "$BASE_HEAD" || exit 1
+  else
+    echo "info: 未检出晋升元提交（基准缺失或 HEAD 未按预期前进），跳过 dev reset，请人工核查"
+  fi
+  rm -f "$(promote_state_file "$BID")"
+}
+
+# 人工回滚直通：跳过工作树预检/收据校验（回滚现场允许脏树），直进直出
+if [ "$MODE" = "rollback" ]; then
+  rollback_promote
+  exit 0
+fi
 # 通用前置参数（prepare/check-only/promote 亦可指定）
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -258,6 +322,10 @@ PYEOF
 fi
 
 # ── promote ────────────────────────────────────────────────────────
+# 记录 promote 进入时的 dev HEAD 作为回滚基准（rollback_promote 状态推导依据）
+DEV_HEAD_BEFORE=$(git rev-parse HEAD)
+mkdir -p harness/log/cross-device
+printf '%s\n' "$DEV_HEAD_BEFORE" > "$(promote_state_file "$BID")"
 [ -n "$BID" ] || { echo "error: --baseline-id 必填" >&2; exit 3; }
 [ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || { echo "error: --message-file 缺失或不存在" >&2; exit 3; }
 # 方向 6：审批凭据外部化——--approved-by 必填（不再回落默认常量，防审批可自证）
@@ -306,24 +374,10 @@ if ! git diff --name-only origin/main...dev | grep -q '^docs/'; then
   echo "warn: dev 相对 origin/main 无 docs/ 改动（若本批应同步设计文档，请先 /sync-code-to-doc --base origin/main 并 commit 到 dev）"
 fi
 
-# checkout main 至 push main 间任一步失败的回滚：回 dev、丢弃晋升元提交，
-# baseline 改回 candidate（不能后移，squash 需它在 dev 上）。
+# checkout main 至 push main 间任一步失败回滚：调顶层 rollback_promote（与人工
+# --rollback 共用同一实现，状态推导见其函数头注——reset 仅在确有晋升元提交时执行）。
 # 关键：先清掉 main 上的 squash 暂存/提交（reset 到 origin/main，真正丢弃已 commit 的
 # squash，否则 push main 失败后 main 残留未登记 commit 会污染后续任何 push/重试）
-rollback_promote() {
-  git fetch origin -q || true
-  if [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ]; then
-    git reset --hard origin/main || exit 1
-  fi
-  git checkout dev || exit 1
-  # verified tag 一并回滚（本地 + 远端尽力而为），防残留假锚点阻断后续重试
-  git tag -d "verified/$BID" >/dev/null 2>&1 || true
-  git push origin ":refs/tags/verified/$BID" >/dev/null 2>&1 || true
-  # 先在晋升提交状态下回退 candidate（此时工作区 yaml 为 promoted），再 reset 丢弃晋升提交
-  python3 harness/skills/publish-main-base/baseline_register.py revert-candidate \
-    --baseline-id "$BID" || echo "warn: baseline ${BID} 回退 candidate 失败，请人工处理"
-  git reset --hard HEAD^ || exit 1
-}
 # verified tag 锚点：对 BH（最近内容提交）打注解 tag 并推送，供树等价断言与追溯；
 # 同名 tag 已存在即拒退 3（重复 promote / baseline_id 复用防线）
 if git rev-parse -q --verify "refs/tags/verified/$BID" >/dev/null 2>&1; then

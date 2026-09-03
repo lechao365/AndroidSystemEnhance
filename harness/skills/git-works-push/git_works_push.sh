@@ -94,7 +94,53 @@ if [ "$MODE" = "normal" ]; then
       esac
     done
   fi
-  git add -A || { err "error: git add 失败"; exit 1; }
+  # 提交面收窄（防 git add -A 误吞运行态/本地产物）：已跟踪修改全收（add -u）；
+  # 未跟踪仅白名单命中项随批入库，名单外拒绝并列出（请删除、gitignore 或评审后扩名单）。
+  # 白名单 = 源码/证据目录前缀（case glob 跨 /，前缀锁定目录）：
+  # 运行态（harness/log 等）已被 gitignore 挡在 ls-files 之外，不会到这里的判定；
+  # 根目录散文件（临时 msg、tar 包等）不在名单，仍拒绝
+  git add -u || { err "error: git add（已跟踪改动）失败"; exit 1; }
+  UNTRACKED_ALLOW=(
+    'data/verify-results/*'
+    'data/baselines/*'
+    'data/known-issues/*'
+    'harness/*'
+    'code/*'
+    'docs/*'
+    '.github/*'
+    '.githooks/*'
+  )
+  REJECT=()
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    # --message-file 消息文件是提交输入而非提交对象，豁免白名单判定
+    if [ -n "$MSG_FILE" ] && [ "$f" -ef "$MSG_FILE" ]; then continue; fi
+    keep=""
+    for pat in "${UNTRACKED_ALLOW[@]}"; do
+      case "$f" in $pat) keep=1; break ;; esac
+    done
+    if [ -n "$keep" ]; then
+      git add -- "$f" || { err "error: git add $f 失败"; exit 1; }
+    else
+      REJECT+=("$f")
+    fi
+  done < <(git ls-files --others --exclude-standard)
+  if [ ${#REJECT[@]} -gt 0 ]; then
+    err "error: 未跟踪文件不在提交白名单（${UNTRACKED_ALLOW[*]}），不在本批提交面："
+    printf '  %s\n' "${REJECT[@]}" >&2
+    exit 1
+  fi
+  # 凭据扫描：暂存区新增行命中敏感赋值（含低熵 psk 形态，键词+赋值+值 4 字符起）即拒；
+  # 占位符白名单（placeholder/change_me/your_/xxxx/变量引用等）放行
+  # （BL-20260624-01 教训：wifi.conf 真实 psk 曾随批入库）
+  LEAK=$(git diff --cached -U0 | grep '^+' | grep -v '^+++' \
+    | grep -iE '\b(psk|password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)\b[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9/+=._-]{4,}' \
+    | grep -viE 'placeholder|change[-_]?me|replace[-_]?me|your[_-]|xxxx|todo|fixme|dummy|sample|example|\$\{' || true)
+  if [ -n "$LEAK" ]; then
+    err "error: 暂存区新增行疑似凭据（psk/password/secret/token/key 赋值，占位符除外），请核实或改用占位符："
+    printf '%s\n' "$LEAK" >&2
+    exit 1
+  fi
   git commit -F "$MSG_FILE" || { err "error: commit 失败"; exit 1; }
 fi
 
