@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 from shell_env import bash_argv, find_bash, write_python3_shim  # noqa: E402
 
@@ -111,8 +113,10 @@ class TestGitWorksPush(unittest.TestCase):
         return subprocess.run(argv,
                               capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
 
+    @pytest.mark.slow_ok("脚本内 ls-remote 重试 3 次各 sleep 1s，真实子进程语义")
     def test_remote_sha_empty_exits_2(self):
         # ls-remote 空输出（exit 0）→ 空值判定触发，不落到「疑似推送未生效」误导文案
+        # （实测 ~3.05s 贴线，slow guard 显式豁免示范）
         r = self._run("--message-file", str(self._msg), mock_git=MOCK_GIT_EMPTY)
         self.assertEqual(r.returncode, 2)
         self.assertIn("远端 dev 引用无输出", r.stderr)

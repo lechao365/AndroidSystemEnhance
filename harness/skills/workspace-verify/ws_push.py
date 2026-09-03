@@ -52,6 +52,11 @@ _CASES_PATH = Path(__file__).resolve().parents[2] / "config" / "verify-cases.yam
 # 标准 SELinux 上下文形态（u:object_r:<type>:s0）
 _CONTEXT_RE = re.compile(r"^u:object_r:\S+:s0$")
 
+# 可注入睡眠点（方向 1）：reboot_and_wait 的实时等待（重启 settle 8s /
+# 轮询间隔 5s）统一经此下发；单测 patch 本符号消除真实等待——该等待曾使
+# 每次自检多花 15~28s 且随 xdist 分发波动
+_sleep = time.sleep
+
 
 def load_push_map(cases_path, modules=None):
     """从 verify-cases.yaml modules 段收集 push 映射（保持模块顺序）。
@@ -211,7 +216,7 @@ def reboot_and_wait(ep, boot_timeout=240):
     boot_timeout 秒。返回 (ok, detail)。
     """
     adb_run(ep, ["reboot"], timeout=60)
-    time.sleep(8)  # 等 adbd 断开并开始重启
+    _sleep(8)  # 等 adbd 断开并开始重启
     deadline = time.monotonic() + boot_timeout
     last_err = ""
     while time.monotonic() < deadline:
@@ -222,7 +227,7 @@ def reboot_and_wait(ep, boot_timeout=240):
             last_err = "已连接但 sys.boot_completed 未就绪"
         else:
             last_err = "reboot 后 adb 未恢复在线"
-        time.sleep(5)
+        _sleep(5)
     return False, f"reboot 后启动未完成（{boot_timeout}s 超时）: {last_err}"
 
 

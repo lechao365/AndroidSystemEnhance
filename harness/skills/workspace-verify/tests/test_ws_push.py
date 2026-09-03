@@ -221,11 +221,17 @@ class TestNeedsRebootDirection4(unittest.TestCase):
 
 
 class TestRebootAndWaitDirection4(unittest.TestCase):
-    """方向 4：重启后等启动完成；未就绪/不可达超时判红。"""
+    """方向 4：重启后等启动完成；未就绪/不可达超时判红。
+
+    方向 1：wp._sleep（实时等待注入点）全部 patch——reboot settle 8s 与
+    轮询间隔 5s 曾让本类 3 用例实跑 13.0/13.0/8.0s，每次自检多花 15~28s
+    且随 xdist 分发波动。
+    """
 
     def test_recovers_and_ready_passes(self):
-        with mock.patch.object(wp.ac, "ensure_connected",
-                               side_effect=[None, "ep2"]) as ec, \
+        with mock.patch.object(wp, "_sleep") as sl, \
+                mock.patch.object(wp.ac, "ensure_connected",
+                                  side_effect=[None, "ep2"]) as ec, \
                 mock.patch.object(wp.ac, "ensure_ready",
                                   return_value=True) as er:
             ok, detail = wp.reboot_and_wait("ep")
@@ -233,10 +239,13 @@ class TestRebootAndWaitDirection4(unittest.TestCase):
         self.assertIn("启动完成", detail)
         ec.assert_called()
         er.assert_called()
+        # 注入点生效：settle 8s 经 _sleep 下发（无真实等待）
+        self.assertIn(mock.call(8), sl.call_args_list)
 
     def test_never_ready_is_red(self):
-        with mock.patch.object(wp.ac, "ensure_connected",
-                               return_value=None), \
+        with mock.patch.object(wp, "_sleep"), \
+                mock.patch.object(wp.ac, "ensure_connected",
+                                  return_value=None), \
                 mock.patch.object(wp.ac, "ensure_ready", return_value=False):
             ok, detail = wp.reboot_and_wait("ep", boot_timeout=1)
         self.assertFalse(ok)
@@ -245,12 +254,24 @@ class TestRebootAndWaitDirection4(unittest.TestCase):
     def test_reboot_executed_via_adb(self):
         # 重启动作必须真实下发 adb reboot（跳过由门禁语义杜绝，见
         # TestMainOrchestration.test_no_skip_reboot_flag）
-        with mock.patch.object(wp, "adb_run", return_value=("", 0)) as ar, \
+        with mock.patch.object(wp, "_sleep"), \
+                mock.patch.object(wp, "adb_run", return_value=("", 0)) as ar, \
                 mock.patch.object(wp.ac, "ensure_connected",
                                   return_value="ep"), \
                 mock.patch.object(wp.ac, "ensure_ready", return_value=True):
             wp.reboot_and_wait("ep")
         self.assertEqual(ar.call_args.args[1], ["reboot"])
+
+    def test_sleep_injection_point_covers_settle_and_poll(self):
+        # 方向 1：等待全部经 _sleep 注入点（settle 8s + 轮询 5s），
+        # patch 后用例瞬时完成且可断言等待参数（无 time.sleep 直调残留）
+        seen = []
+        with mock.patch.object(wp, "_sleep", side_effect=seen.append), \
+                mock.patch.object(wp.ac, "ensure_connected",
+                                  return_value=None):
+            wp.reboot_and_wait("ep", boot_timeout=1)
+        self.assertIn(8, seen)
+        self.assertIn(5, seen)
 
 
 class TestMainOrchestration(unittest.TestCase):

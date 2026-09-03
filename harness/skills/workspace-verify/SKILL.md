@@ -39,7 +39,13 @@ stages:
 - 编译/验收失败：本 skill 仅执行单次验证并落收据；跨轮重试/失败分析/修复编辑
   归 loop-engineering 会话管理（harness/skills/loop-engineering/SKILL.md）。
   无 loop 会话时由调用方 AI 自行决定是否重跑（重试纪律不内嵌本 skill）
-  -> 失败收据正文含失败现场：logcat/dmesg 摘录，交 loop/调用方分析
+   -> 失败收据正文含失败现场：logcat/dmesg 摘录，交 loop/调用方分析
+   - 失败取证（有界只读）：python3 harness/skills/workspace-verify/ws_forensics.py
+     --since-epoch <验证开始 epoch 秒> [--stdout-file f] [--stderr-file f]
+     （一次收齐 host stdout/stderr + logcat crash + getprop/df/ps +
+     尽力 dmesg/pstore + 仅本轮新增 tombstone；只读不改设备态，单文件
+     512KB/总量 4MB 双上限截断，manifest.json 如实记录截断/跳过；
+     产物 harness/log/forensics/run-<ts>/ 供收据正文引用与 AI 复盘）
 - adb 不可达 → 自动三级通道：ws_acceptance 验收编排 ensure 失败自动以
   rescue_enabled=True 重试一次（rescue 经 ws_serial 设 service.adb.tcp.port 5555
   + 重启 adbd + 取 wlan0 IPv4，副作用必打印；仅编排层失败路径触发）；

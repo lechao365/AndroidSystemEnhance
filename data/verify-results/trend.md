@@ -75,3 +75,4 @@
 2026-09-03 14:23:52 2ad414fee477 skip build=skip board=skip acc=- 基线隔离真正生效并绑定设备身份（-s 无需上板） | {"elapsed_s":541,"segs":{"precheck":23.792,"edit_plan":6.536,"edit":463.065,"apply_selfcheck":25.743,"report":0.285,"finish":0.02}}
 2026-09-03 15:43:15 c35c3d83643c skip build=skip board=skip acc=- 推送脚本化并回读校验与生效门禁（-s 无需上板） | {"elapsed_s":3923,"segs":{"precheck":0.187,"edit_plan":0.165,"apply_selfcheck":67.846,"edit":3686.676,"report":0.271,"finish":0.02}}
 2026-09-03 16:52:58 b2d690e1e521 skip build=skip board=skip acc=- 推送证据入判定并堵提交前缀绕过（-s 无需上板） | {"elapsed_s":1531,"segs":{"precheck":0.211,"edit_plan":0.175,"edit":1400.03,"apply_selfcheck":99.632,"report":0.29,"finish":0.02}}
+2026-09-03 17:54:09 4e83d2669dbe skip build=skip board=skip acc=- 消除自检实时等待并补失败取证（-s 无需上板） | {"elapsed_s":1508,"segs":{"precheck":0.204,"edit_plan":0.179,"edit":1456.922,"apply_selfcheck":34.07,"report":0.287,"finish":0.02}}
