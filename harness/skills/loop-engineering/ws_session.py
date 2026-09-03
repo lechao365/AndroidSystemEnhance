@@ -243,7 +243,7 @@ def apply_done(session, receipt_path, stage=None, error_line=None,
         raise RuntimeError(
             f"会话已终结（{session['exit_attribution']}），拒绝重复记账")
     try:
-        r = read_receipt(receipt_path)
+        r, _receipt_errs = read_receipt(receipt_path)
     except (OSError, UnicodeDecodeError) as exc:
         raise RuntimeError(f"收据读取失败 {receipt_path}: {exc}") from exc
 

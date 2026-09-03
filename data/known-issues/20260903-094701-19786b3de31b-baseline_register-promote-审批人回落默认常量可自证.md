@@ -6,9 +6,9 @@
 - severity: P2
 - blocking: False
 - blocking_reason: 
-- status: open
+- status: fixed
 - task: baseline-promote-approval
-- resolved_in: 
+- resolved_in: b25da0641366
 
 ## body
 

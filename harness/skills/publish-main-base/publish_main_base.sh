@@ -84,8 +84,12 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path("harness/skills/cross-device/lib/python").resolve()))
 import cdp_receipt
-path, r = cdp_receipt.latest_receipt_with_path()
+path, r, receipt_errs = cdp_receipt.latest_receipt_with_path()
 if r is None:
+    sys.exit(1)
+# 方向 5：收据解析有错（非法整数/重复字段/schema 非 1）即拒，不再静默吞错
+if receipt_errs:
+    print("error: 最新收据解析错误: " + "; ".join(receipt_errs), file=sys.stderr)
     sys.exit(1)
 # 头注释约定相对项目根输出（脚本从项目根运行，relpath 相对 cwd），避免泄露 home 绝对路径
 print(os.path.relpath(path))
@@ -256,6 +260,8 @@ fi
 # ── promote ────────────────────────────────────────────────────────
 [ -n "$BID" ] || { echo "error: --baseline-id 必填" >&2; exit 3; }
 [ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || { echo "error: --message-file 缺失或不存在" >&2; exit 3; }
+# 方向 6：审批凭据外部化——--approved-by 必填（不再回落默认常量，防审批可自证）
+[ -n "$APPROVED_BY" ] || { echo "error: --promote 必须传 --approved-by（审批凭据外部化，不再回落默认常量）" >&2; exit 3; }
 # promote 不再强制 --task：known-issues 门禁在共用段已无条件执行（缺省推断；
 # 推断失败时门禁段 exit 1 拒绝），显式 --task 仅作白名单确认
 git fetch origin || { echo "error: fetch 失败" >&2; exit 1; }

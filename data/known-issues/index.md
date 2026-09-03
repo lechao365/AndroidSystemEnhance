@@ -1,3 +1,3 @@
 KI-20260902-001 pre-existing false cdp-timing-start open
 KI-20260903-001 pre-existing false ws-report-timings-dedup open
-KI-20260903-002 pre-existing false baseline-promote-approval open
+KI-20260903-002 pre-existing false baseline-promote-approval fixed

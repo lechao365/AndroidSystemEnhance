@@ -185,9 +185,13 @@ def main(argv=None):
         # 人工传值须为其子集否则拒（防过度声称：不得声称未实测的用例范围）
         evidence_scope = (args.evidence_scope or "").strip()
         try:
-            r = read_receipt(args.receipt_path)
+            r, receipt_errs = read_receipt(args.receipt_path)
         except (OSError, UnicodeDecodeError) as e:
             print(f"error: 读取收据失败 {args.receipt_path}: {e}", file=sys.stderr)
+            return 1
+        if receipt_errs:
+            print(f"error: 收据解析错误 {args.receipt_path}: "
+                  f"{'; '.join(receipt_errs)}", file=sys.stderr)
             return 1
         receipt_cases = {c.strip() for c in (r.cases or "").split(",") if c.strip()}
         if not evidence_scope:
@@ -280,6 +284,12 @@ def main(argv=None):
                     print(f"error: 收据文件不存在，无法生成证据快照: {receipt}",
                           file=sys.stderr)
                     return 1
+                # 方向 6：审批凭据外部化——promote 空审批人即拒（在写快照前校验，
+                # 防快照污染），不再回落默认常量（防审批可自证）
+                if not args.approved_by:
+                    print("error: promote 必须传 --approved-by"
+                          "（审批凭据外部化，不再回落默认常量）", file=sys.stderr)
+                    return 1
                 snapshot_name = f"{args.baseline_id}-{receipt.name}"
                 if not snapshot_name.endswith(".md"):
                     snapshot_name += ".md"
@@ -303,7 +313,7 @@ def main(argv=None):
                     if isinstance(b.get("evidence"), dict):
                         b["evidence"]["evidence_scope"] = scope
                 b["status"] = "promoted"
-                b["approved_by"] = args.approved_by or "lechao"
+                b["approved_by"] = args.approved_by
                 b["approved_at"] = datetime.datetime.now(
                     datetime.timezone(datetime.timedelta(hours=8))
                 ).strftime("%Y-%m-%dT%H:%M:%S+08:00")

@@ -94,7 +94,10 @@ def precheck(root=None, do_pull=True):
     # 只依赖详情收据（latest），不依赖 trend.md——trend 是展示性文件，缺失/损坏
     # 不得让"上批已推送"闸门静默失效（严格生产者）；verified_commit 缺失（旧收据）
     # 时无法判定，保持放行兼容。
-    latest_path, latest = latest_receipt_with_path(root / "data" / "verify-results")
+    latest_path, latest, receipt_errs = latest_receipt_with_path(root / "data" / "verify-results")
+    if receipt_errs:
+        # 方向 5：收据解析有错（非法整数/重复字段/schema 非 1）即拒，不再静默吞错
+        return False, f"最新收据解析错误: {'; '.join(receipt_errs)}", ""
     if latest and latest.verified_commit:
         # 先判可达性：verified_commit 本地不可达（gc 裁剪/浅克隆等）时
         # merge-base 返非 0 会造成"未推送"假拒批，放行并记录无法判定原因

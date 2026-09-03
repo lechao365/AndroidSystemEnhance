@@ -367,7 +367,24 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         msg = Path(self._remote_tmp.name) / "promote-msg.txt"
         msg.write_text("构建(baseline): BL-TEST-01 基线晋升\n", encoding="utf-8")
         return self._run("--promote", "--baseline-id", "BL-TEST-01",
-                         "--message-file", str(msg), "--task", "t1", *extra)
+                         "--message-file", str(msg), "--task", "t1",
+                         "--approved-by", "t", *extra)
+
+    def test_promote_requires_approved_by(self):
+        # 方向 6：--promote 缺 --approved-by → exit 3（审批凭据外部化，
+        # 不再回落默认常量）
+        self._setup_remote()
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
+        self._candidate_yaml()
+        self._receipt_commit_c3(verify_mode="skip")
+        msg = Path(self._remote_tmp.name) / "promote-msg.txt"
+        msg.write_text("构建(baseline): BL-TEST-01 基线晋升\n", encoding="utf-8")
+        r = self._run("--promote", "--baseline-id", "BL-TEST-01",
+                      "--message-file", str(msg))
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("--approved-by", r.stderr)
+        self.assertIn("审批凭据外部化", r.stderr)
 
     def test_promote_rejects_non_board_receipt(self):
         # 方向 2 board 拒：仅 skip 收据（board 收据不覆盖 code/ 改动）→ RECEIPT_FAIL
@@ -569,7 +586,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         msg = Path(self._remote_tmp.name) / "promote-msg.txt"
         msg.write_text("构建(baseline): BL-TEST-01 基线晋升\n", encoding="utf-8")
         r = self._run("--promote", "--baseline-id", "BL-TEST-01",
-                      "--message-file", str(msg))
+                      "--message-file", str(msg), "--approved-by", "t")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("known-issues 门禁通过（task=t1", r.stderr)
         self.assertIn("promote 完成", r.stdout)

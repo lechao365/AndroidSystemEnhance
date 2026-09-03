@@ -56,6 +56,21 @@ class TestEmitPrecheck(unittest.TestCase):
                                 verify_mode="board", result="pass")
         cdp_receipt.write_receipt(r, "test fixture")
 
+    def test_bad_receipt_rejected(self):
+        # 方向 5：最新收据解析有错（非法整数等）即拒，不再静默吞错
+        d = cdp_receipt.data_verify_results_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        bad = d / "20991231-235959-bad000000000.md"
+        bad.write_text("- schema_version: 1\n- batch_id: bad000000000\n"
+                       "- elapsed_s: 12x\n- verified_commit: deadbeefdead\n"
+                       "## body\n\nx\n", encoding="utf-8")
+        self._commit_all()
+        self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        ok, reason, detail = cdp_emit_precheck.precheck(self.root, do_pull=False)
+        self.assertFalse(ok)
+        self.assertIn("解析错误", reason)
+        self.assertIn("elapsed_s", reason)
+
     # ── 分支 1：verified_commit 可达且已被 origin/dev 前进覆盖 → 放行 ──
     def test_reachable_pushed_pass(self):
         sha = self._head12()

@@ -20,53 +20,67 @@ _TREND_KEEP = 200
 # 据此记 FAIL 不记 SKIP；与 cdp_issue._FIELD_RE 同款）
 _FIELD_RE = re.compile(r"^- (\w+): (.*)$", re.MULTILINE)
 
+# 字段与默认值单一声明（方向 4：消除 _FIELDS 与 __init__ 双写漂移；
+# __init__/header_lines/from_text 共用）
 _FIELDS = [
-    "schema_version", "batch_id", "batch_base", "verified_commit",
-    "verify_mode", "result", "build", "push_board", "acceptance",
-    "elapsed_s", "summary", "metrics", "timings", "cases", "selfcheck",
+    ("schema_version", 1),
+    ("batch_id", ""),
+    ("batch_base", ""),
+    ("verified_commit", ""),
+    ("verify_mode", "board"),
+    ("result", "fail"),
+    ("build", "skip"),
+    ("push_board", "skip"),
+    ("acceptance", ""),
+    ("elapsed_s", 0),
+    ("summary", ""),
+    ("metrics", ""),
+    ("timings", ""),
+    ("cases", ""),
+    ("selfcheck", ""),
 ]
 
 
 class Receipt:
-    def __init__(self, schema_version=1, batch_id="", batch_base="",
-                 verified_commit="", verify_mode="board", result="fail",
-                 build="skip", push_board="skip", acceptance="", elapsed_s=0,
-                 summary="", metrics="", timings="", cases="", selfcheck=""):
-        self.schema_version = schema_version
-        self.batch_id = batch_id
-        self.batch_base = batch_base
-        self.verified_commit = verified_commit
-        self.verify_mode = verify_mode
-        self.result = result
-        self.build = build
-        self.push_board = push_board
-        self.acceptance = acceptance
-        self.elapsed_s = elapsed_s
-        self.summary = summary
-        self.metrics = metrics
-        self.timings = timings
-        self.cases = cases
-        self.selfcheck = selfcheck
+    def __init__(self, **kwargs):
+        # 方向 4：字段与默认值单一声明（_FIELDS），构造按名取参
+        for name, default in _FIELDS:
+            setattr(self, name, kwargs.get(name, default))
 
     @classmethod
     def from_text(cls, text):
+        """解析头部返回 (Receipt, parse_errors)。
+
+        方向 1：非法整数不再静默回落默认值，记入 parse_errors；
+        方向 2：同名重复字段记错（防后行覆盖前行造成假绿），保留首个值；
+        方向 3：schema_version 非 1 记错，不按 1 解析（契约失效交调用方拒）。
+        """
         # 只解析 "## body" 之前的头部，防止正文中的 "- key: value" 行污染字段
         header = text.split("\n## body", 1)[0]
         r = cls()
+        errors: list[str] = []
+        seen: set[str] = set()
         for m in _FIELD_RE.finditer(header):
             key, val = m.group(1), m.group(2)
-            if hasattr(r, key):
-                if key in ("schema_version", "elapsed_s"):
-                    try:
-                        setattr(r, key, int(val))
-                    except ValueError:
-                        pass  # 非法数值回落默认值，不崩
-                else:
-                    setattr(r, key, val)
-        return r
+            if not hasattr(r, key):
+                continue
+            if key in seen:
+                errors.append(f"重复字段 {key}: {val!r}")
+                continue
+            seen.add(key)
+            if key in ("schema_version", "elapsed_s"):
+                try:
+                    setattr(r, key, int(val))
+                except ValueError:
+                    errors.append(f"{key} 非法整数: {val!r}")
+            else:
+                setattr(r, key, val)
+        if r.schema_version != 1:
+            errors.append(f"schema_version 非 1（实际 {r.schema_version!r}），不按 1 解析")
+        return r, errors
 
     def header_lines(self):
-        return "\n".join(f"- {f}: {getattr(self, f)}" for f in _FIELDS)
+        return "\n".join(f"- {name}: {getattr(self, name)}" for name, _ in _FIELDS)
 
 
 def _detail_files(verify_dir: Path):
@@ -97,22 +111,27 @@ def write_receipt(receipt, body_text):
 
 
 def read_receipt(path):
+    """读收据返回 (Receipt, parse_errors)；errors 非空表示头部解析有错。"""
     return Receipt.from_text(Path(path).read_text(encoding="utf-8"))
 
 
 def read_latest_receipt(verify_dir=None):
-    """读最新详情（排除 trend.md）。无收据返回 None。"""
-    _, r = latest_receipt_with_path(verify_dir)
-    return r
+    """读最新详情（排除 trend.md），返回 (Receipt, parse_errors)；无收据返回
+    (None, [])。"""
+    _, r, errs = latest_receipt_with_path(verify_dir)
+    return r, errs
 
 
 def latest_receipt_with_path(verify_dir=None):
-    """读最新详情（排除 trend.md），返回 (路径, Receipt)；无收据返回 (None, None)。"""
+    """读最新详情（排除 trend.md），返回 (路径, Receipt, parse_errors)；
+    无收据返回 (None, None, [])。"""
     d = verify_dir or data_verify_results_dir()
     files = _detail_files(d)
     if not files:
-        return (None, None)
-    return (files[-1], read_receipt(files[-1]))
+        return (None, None, [])
+    path = files[-1]
+    r, errs = read_receipt(path)
+    return (path, r, errs)
 
 
 def latest_board_receipt(verify_dir=None):
@@ -124,7 +143,7 @@ def latest_board_receipt(verify_dir=None):
     """
     d = verify_dir or data_verify_results_dir()
     for f in reversed(_detail_files(d)):
-        r = read_receipt(f)
+        r, _ = read_receipt(f)
         if r.verify_mode == "board":
             return (f, r)
     return (None, None)

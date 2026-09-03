@@ -189,7 +189,7 @@ class TestWsReport(unittest.TestCase):
         expected = " | ".join(l for l in selfcheck.splitlines() if l.strip())
         self.assertIn("- selfcheck: " + expected, content)
         from cdp_receipt import read_receipt
-        got = read_receipt(details[0])
+        got, _ = read_receipt(details[0])
         self.assertEqual(got.selfcheck, expected)
 
     def test_mode_mutex_both_missing(self):
@@ -733,7 +733,7 @@ class TestWsReport(unittest.TestCase):
         self.assertNotIn("\n", acc_line)
         self.assertIn('"overall":"pass"', acc_line)
         from cdp_receipt import read_receipt
-        got = read_receipt(details[0])
+        got, _ = read_receipt(details[0])
         self.assertIn('"overall":"pass"', got.acceptance)
         self.assertNotIn("\n", got.acceptance)
 

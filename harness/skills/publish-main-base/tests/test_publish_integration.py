@@ -226,7 +226,8 @@ class TestSyncModifyIntegration(unittest.TestCase):
         self._register_commit(b12)
         self._push_dev()
         r = self._run_script("--promote", "--baseline-id", BID,
-                             "--message-file", self._msg_file())
+                             "--message-file", self._msg_file(),
+                             "--approved-by", "tester")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("promote 完成", r.stdout)
 
@@ -264,7 +265,8 @@ class TestSyncModifyIntegration(unittest.TestCase):
         hook.chmod(hook.stat().st_mode | 0o111)
         r = self._run_script("--promote", "--baseline-id", BID,
                              "--message-file", self._msg_file(),
-                             "--task", "lcview-refactor")
+                             "--task", "lcview-refactor",
+                             "--approved-by", "tester")
         self.assertEqual(r.returncode, 2)
         # main 本地 reset 回 origin/main：无残留 squash commit
         origin_main = self._git_out(["rev-parse", "origin/main"])
