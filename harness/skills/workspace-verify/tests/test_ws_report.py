@@ -1058,6 +1058,54 @@ class TestWsReport(unittest.TestCase):
         self.assertIn("overall 非 pass", err.getvalue())
         self.assertFalse(self._dir.exists())
 
+    def test_device_dirty_auto_from_acceptance_marks_receipt(self):
+        # 方向 3：验收产物 device_dirty=true（teardown 恢复失败）→ PASS 路径
+        # 自动透传收据 header device_dirty: true
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        acc = self._write_acc(device_dirty=True)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "pass", "--build", "pass",
+                                 "--board", "pass", "--summary", "脏态透传",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--acceptance-file", acc,
+                                 "--unit-test-file", self._write_ut(),
+                                 "--push-file", self._write_push()])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- device_dirty: true", content)
+
+    def test_device_dirty_flag_on_fail_receipt(self):
+        # 方向 3：fail 收据无产物核验路径 → --device-dirty 显式标记
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "fail", "--build", "fail",
+                                 "--board", "fail", "--summary", "失败且脏",
+                                 "--device-dirty"])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- device_dirty: true", content)
+
+    def test_device_dirty_absent_writes_empty(self):
+        # 默认（非脏）→ header 恒写空值（显式可见，旧收据解析回落空串兼容）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "fail", "--build", "fail",
+                                 "--board", "fail", "--summary", "普通失败"])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        self.assertIn("- device_dirty: ", details[0].read_text(encoding="utf-8"))
+
     def test_sanitize_workspace_placeholder(self):
         # KERNEL_WS/AOSP_WS 绝对路径 → <KEY> 占位符，且优先于家目录正则
         with mock.patch.object(ws_report, "env_path",

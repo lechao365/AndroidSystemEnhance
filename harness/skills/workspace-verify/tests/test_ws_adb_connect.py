@@ -112,8 +112,10 @@ class TestRescue(unittest.TestCase):
         return fake
 
     def _patch_sleep(self):
-        # adbd 重启后有 2s settle（方向 4），测试中跳过真等待
-        return mock.patch.object(ac.time, "sleep")
+        # adbd 重启后有 2s settle（方向 4），测试中跳过真等待——等待统一经
+        # ac._sleep 注入点（方向 5：rescue/clock_sync 窗口口径一致），
+        # patch ac.time.sleep 不再能拦截 _sleep 名字绑定
+        return mock.patch.object(ac, "_sleep")
 
     def _run_rescue(self, fake, **kw):
         with mock.patch.dict(sys.modules, {"ws_serial": fake}):
@@ -322,8 +324,11 @@ class TestClockSync(unittest.TestCase):
             self._fake(0, f"{now}\n__LE_EXIT_CODE__=0\n"),        # 复核 date +%s
         ]
         with mock.patch.object(ac.subprocess, "run",
-                               side_effect=results) as m:
+                               side_effect=results) as m, \
+                mock.patch.object(ac, "_sleep") as sl:
             ok, detail = ac.clock_sync(max_skew=120)
+        # 方向 5：root 重启 adbd settle 2s 经注入点（无真实等待）
+        self.assertIn(mock.call(2), sl.call_args_list)
         self.assertTrue(ok)
         self.assertIn("已修正", detail)
         self.assertIn("复核偏差", detail)
@@ -356,7 +361,8 @@ class TestClockSync(unittest.TestCase):
             self._fake(0, ""),
             self._fake(1, "date: bad\n__LE_EXIT_CODE__=1\n"),
         ]
-        with mock.patch.object(ac.subprocess, "run", side_effect=results):
+        with mock.patch.object(ac.subprocess, "run", side_effect=results), \
+                mock.patch.object(ac, "_sleep"):
             ok, detail = ac.clock_sync()
         self.assertFalse(ok)
         self.assertIn("exit=1", detail)
@@ -371,7 +377,8 @@ class TestClockSync(unittest.TestCase):
             self._fake(0, "ok\n__LE_EXIT_CODE__=0\n"),            # date -u 修正
             self._fake(0, f"{now - 3600}\n__LE_EXIT_CODE__=0\n"),  # 复核仍偏 1h
         ]
-        with mock.patch.object(ac.subprocess, "run", side_effect=results):
+        with mock.patch.object(ac.subprocess, "run", side_effect=results), \
+                mock.patch.object(ac, "_sleep"):
             ok, detail = ac.clock_sync(max_skew=120)
         self.assertFalse(ok)
         self.assertIn("复核未通过", detail)

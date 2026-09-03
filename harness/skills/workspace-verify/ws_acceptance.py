@@ -25,6 +25,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 import os
 import uuid
@@ -202,7 +203,10 @@ def resolve_acceptance(args, cases_path=_CASES_PATH):
             opts = ", ".join(sorted(cases)) or "无"
             return None, (f"用例标签 {', '.join(missing)} 不存在于 verify-cases.yaml cases 段"
                           f"（可选: {opts}）")
-        return " ".join(cases[c] for c in labels), None
+        try:
+            return " ".join(_case_text(cases[c]) for c in labels), None
+        except ValueError as e:
+            return None, str(e)
     return args.acceptance, None
 
 
@@ -372,7 +376,7 @@ def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
 
 
 def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False,
-                   on_item=None, host_env=None):
+                   on_item=None, host_env=None, deadline=None):
     """执行全部条目，返回 (overall, items)。overall ∈ pass|fail|ai。
 
     ensure_boot=True 且标签无 boot 时自动追加（兑现 workspace-verify SKILL L20：
@@ -380,6 +384,8 @@ def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False,
     on_item(n) 可选回调：每项完成后调用（n 为已完成项数，1-based），
     供调用方逐项打点（case 级耗时归因）；无回调时行为与之前一致。
     host_env 透传 execute_tag（hostcmd 子进程环境，方向 2 轮次隔离基线）。
+    deadline（monotonic 时刻，方向 4）：非 None 时逐项前检查墙钟，超时中断
+    剩余项并落 __timeout__ 标记项（生命周期收尾顺序仍完整执行）。
     """
     items = []
     tags = parse_acceptance(acceptance_text)
@@ -394,6 +400,12 @@ def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False,
     for tag in tags:
         # 每项 wall-clock 计时（monotonic，轮询/拉取耗时含入）→ items 可见，
         # 收据 acceptance JSON 可读最慢项（定位耗时瓶颈，非判据本身）
+        if deadline is not None and time.monotonic() > deadline:
+            items.append({"tag": "__timeout__", "status": "fail",
+                          "detail": f"用例墙钟超 timeout_s 上限，中断剩余 "
+                                    f"{len(tags) - len(items)} 项（方向 4：超时"
+                                    "按生命周期同一顺序收尾）"})
+            break
         start = time.monotonic()
         status, detail = execute_tag(tag, adb_exec, adb_logcat, host_env=host_env)
         items.append({"tag": tag, "status": status, "detail": detail,
@@ -406,6 +418,179 @@ def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False,
     if any(i["status"] == "ai" for i in items):
         return "ai", items
     return "pass", items
+
+
+# ── 副作用用例生命周期（2026-09-03，方向 1~4）─────────────────────────
+# cases 段值新形态（dict）：{acceptance, setup_snapshot, teardown, timeout_s}
+# —— str 旧形态继续支持（无生命周期）。执行固定顺序：
+#   setup_snapshot → 判据（timeout_s 中断）→ first_error 时 ws_forensics
+#   只读取证 → teardown（只恢复实际改变的状态，失败标 device_dirty）。
+
+# teardown 命令模板占位符：${SNAPSHOT_i} 替换为 setup 快照第 i 项输出
+_SNAPSHOT_REF_RE = re.compile(r"\$\{SNAPSHOT_(\d+)\}")
+
+
+def _case_text(val):
+    """cases 段值取验收文本：str 旧形态原样；dict 新形态取 acceptance 键。"""
+    if isinstance(val, dict):
+        v = (val.get("acceptance") or "").strip()
+        if not v:
+            raise ValueError("用例为 dict 形态但缺 acceptance 字段")
+        return v
+    return val
+
+
+def _load_lifecycle(cases_path, label):
+    """取单 case 生命周期（方向 1）：返回 dict 或 None（str 旧形态/缺省）。
+
+    dict 形态且缺 acceptance 时抛 ValueError（资产书写错误须暴露，
+    不静默降级为无生命周期——副作用用例无 teardown 会留脏态）。
+    """
+    try:
+        data = yaml.safe_load(Path(cases_path).read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as e:
+        raise ValueError(f"verify-cases.yaml 读取失败: {e}") from e
+    cases = data.get("cases") or {}
+    if label not in cases:
+        raise ValueError(f"用例标签 {label!r} 不存在于 verify-cases.yaml cases 段")
+    val = cases[label]
+    if isinstance(val, dict):
+        if not (val.get("acceptance") or "").strip():
+            raise ValueError(f"用例 {label!r} 为 dict 形态但缺 acceptance 字段")
+        return val
+    return None
+
+
+def _run_host_cmd(cmd, host_env=None):
+    """生命周期命令执行（host 侧 shell，语义同 execute_tag hostcmd 分支）。"""
+    kwargs = {"shell": True, "capture_output": True, "text": True,
+              "encoding": "utf-8", "errors": "replace",
+              "cwd": str(_VERIFY_ROOT), "timeout": 60}
+    if host_env is not None:
+        kwargs["env"] = host_env
+    try:
+        r = subprocess.run(cmd, **kwargs)
+        return (r.stdout + r.stderr), r.returncode
+    except (subprocess.TimeoutExpired, OSError):
+        return "", -1
+
+
+def _take_snapshot(cmds, host_env=None):
+    """执行快照命令列表，返回输出值列表；任一失败返 None（状态不可知）。"""
+    vals = []
+    for c in cmds:
+        body, rc = _run_host_cmd(c, host_env)
+        if rc != 0:
+            return None
+        vals.append(body.strip())
+    return vals
+
+
+def _expand_teardown(cmds, snapshot):
+    """teardown 模板展开：${SNAPSHOT_i} → setup 快照第 i 项输出。"""
+    out = []
+    for c in cmds:
+        out.append(_SNAPSHOT_REF_RE.sub(
+            lambda m: snapshot[int(m.group(1))] if int(m.group(1)) < len(snapshot)
+            else m.group(0), c))
+    return out
+
+
+def _restore_state(setup_cmds, teardown_cmds, snapshot, host_env=None):
+    """teardown（方向 3）：只恢复本轮实际改变的状态。
+
+    重读 setup 快照命令对比——未改变即跳过（不写设备）；有变才执行
+    teardown 命令（模板展开快照值），恢复后重读复核。返回
+    (device_dirty, detail)：恢复命令失败 / 重读失败 / 复核仍不符 → dirty。
+    """
+    if not setup_cmds or snapshot is None:
+        return False, "无快照（未登记 setup_snapshot），无 teardown 责任面"
+    current = _take_snapshot(setup_cmds, host_env)
+    if current is None:
+        return True, "teardown 重读快照失败（状态不可知），按 device_dirty 处理"
+    if current == snapshot:
+        return False, "状态未改变，teardown 跳过（只恢复实际改变的状态）"
+    for c in _expand_teardown(teardown_cmds or [], snapshot):
+        body, rc = _run_host_cmd(c, host_env)
+        if rc != 0:
+            return True, (f"teardown 命令失败 rc={rc}: {c[:120]} "
+                          f"→ {body.strip()[:120]}")
+    restored = _take_snapshot(setup_cmds, host_env)
+    if restored != snapshot:
+        return True, "teardown 执行后重读快照仍与初值不符（device_dirty）"
+    return False, "已恢复到初值"
+
+
+def _run_forensics(ep, since_epoch, items, first_error):
+    """first_error 时调 ws_forensics 只读取证（方向 2 固定顺序第二环）。
+
+    失败 items 序列化写临时文件传 stdout_file（host 侧失败现场随取证落盘）；
+    取证失败仅 warn 不阻断（收尾顺序继续 teardown）。
+    """
+    try:
+        import ws_forensics as wf
+    except (ImportError, OSError) as e:
+        print(f"warn: 取证模块不可用（不阻断）: {e}", file=sys.stderr)
+        return None
+    try:
+        tmp = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                          encoding="utf-8")
+        tmp.write(json.dumps({"first_error": first_error, "items": items},
+                             ensure_ascii=False, indent=2))
+        tmp.close()
+        _, run_dir = wf.collect(ep=ep, since_epoch=since_epoch,
+                                stdout_file=tmp.name)
+        os.unlink(tmp.name)
+        print(f"NOTE: 失败取证落盘: {run_dir}")
+        return str(run_dir)
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        print(f"warn: 取证失败（不阻断）: {e}", file=sys.stderr)
+        return None
+
+
+def run_case_lifecycle(acceptance_text, lifecycle, adb_exec, adb_logcat,
+                       ep=None, ensure_boot=False, on_item=None, host_env=None,
+                       since_epoch=0):
+    """副作用用例生命周期编排（方向 2 固定顺序）。
+
+    顺序：setup_snapshot → 判据执行（timeout_s 中断）→ first_error 时
+    ws_forensics 只读取证 → teardown → 返回。
+    返回 (overall, items, meta)：meta = {"device_dirty": bool,
+    "timed_out": bool, "teardown_detail": str, "forensics_dir": str|None}。
+    """
+    meta = {"device_dirty": False, "timed_out": False,
+            "teardown_detail": "", "forensics_dir": None}
+    setup_cmds = lifecycle.get("setup_snapshot") or []
+    snapshot = None
+    if setup_cmds:
+        snapshot = _take_snapshot(setup_cmds, host_env)
+        if snapshot is None:
+            # 快照失败 = 设备状态不可知，teardown 无法保证 → 判红收尾
+            # （仍走取证与收据，不执行 teardown——无初值可恢复）
+            items = [{"tag": "setup_snapshot", "status": "fail",
+                      "detail": "快照命令失败（设备状态不可知，teardown 无法"
+                                "保证），按 fail 处理"}]
+            meta["forensics_dir"] = _run_forensics(ep, since_epoch, items,
+                                                   "setup_snapshot 失败")
+            meta["device_dirty"] = True
+            meta["teardown_detail"] = "无初值快照，跳过 teardown"
+            return "fail", items, meta
+    timeout_s = lifecycle.get("timeout_s")
+    deadline = time.monotonic() + int(timeout_s) if timeout_s else None
+    overall, items = run_acceptance(acceptance_text, adb_exec, adb_logcat,
+                                    ensure_boot=ensure_boot, on_item=on_item,
+                                    host_env=host_env, deadline=deadline)
+    meta["timed_out"] = any(i.get("tag") == "__timeout__" for i in items)
+    first_error = next((f"{i['tag']}: {i['detail']}" for i in items
+                        if i["status"] == "fail"), "")
+    if first_error:
+        meta["forensics_dir"] = _run_forensics(ep, since_epoch, items,
+                                               first_error)
+    dirty, tdetail = _restore_state(setup_cmds, lifecycle.get("teardown") or [],
+                                    snapshot, host_env)
+    meta["device_dirty"] = dirty
+    meta["teardown_detail"] = tdetail
+    return overall, items, meta
 
 
 def _mark_stage(name, batch_id=None, zero=False):
@@ -679,9 +864,31 @@ def main(argv=None):
     run_id = uuid.uuid4().hex
     host_env = _hostcmd_env(run_id)
     t_start = time.monotonic()
-    overall, items = run_acceptance(acceptance, adb_exec, adb_logcat,
-                                    ensure_boot=args.ensure_boot,
-                                    on_item=mark_case, host_env=host_env)
+    # 生命周期编排（方向 1/2/4）：--case 单标签且资产为 dict 形态时启用
+    # （setup_snapshot/teardown/timeout_s）；多 case/--acceptance 直传不启用
+    # （生命周期字段随 cases 资产层，逐 case 责任面需单 case 才可归属）
+    case_labels = [c.strip() for c in (args.case or "").split(",") if c.strip()]
+    lifecycle = None
+    if len(case_labels) == 1:
+        lifecycle = _load_lifecycle(_CASES_PATH, case_labels[0])
+    elif len(case_labels) > 1:
+        print("NOTE: 多 case 运行不启用生命周期（setup_snapshot/teardown "
+              "仅单 case 可归属）", file=sys.stderr)
+    if lifecycle:
+        overall, items, life_meta = run_case_lifecycle(
+            acceptance, lifecycle, adb_exec, adb_logcat, ep=ep,
+            ensure_boot=args.ensure_boot, on_item=mark_case, host_env=host_env,
+            since_epoch=int(time.time()))
+        device_dirty = life_meta["device_dirty"]
+        teardown_detail = life_meta["teardown_detail"]
+        forensics_dir = life_meta["forensics_dir"]
+    else:
+        overall, items = run_acceptance(acceptance, adb_exec, adb_logcat,
+                                        ensure_boot=args.ensure_boot,
+                                        on_item=mark_case, host_env=host_env)
+        device_dirty = False
+        teardown_detail = ""
+        forensics_dir = None
     t_end = time.monotonic()
     if args.result_file:
         # 方向 1/3：自描述验收产物——run_id/输入摘要/设备序列号/设备指纹/
@@ -708,6 +915,11 @@ def main(argv=None):
             "end_monotonic": round(t_end, 3),
             "items": items,
             "overall": overall,
+            # 方向 3：teardown 只恢复本轮实际改变的状态，失败即标 dirty
+            #（ws_report 透传收据 header device_dirty）
+            "device_dirty": device_dirty,
+            "teardown_detail": teardown_detail,
+            "forensics_dir": forensics_dir,
         }
         p = Path(args.result_file)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -715,8 +927,10 @@ def main(argv=None):
         tmp.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n",
                        encoding="utf-8")
         os.replace(tmp, p)
-    print(json.dumps({"overall": overall, "items": items}, ensure_ascii=False,
-                     indent=2))
+    print(json.dumps({"overall": overall, "items": items,
+                      "device_dirty": device_dirty,
+                      "teardown_detail": teardown_detail},
+                     ensure_ascii=False, indent=2))
     # 本次实跑 case 标签落盘（--case 原样写入 cases-<batch_id>.json，
     # 供 ws_report 自动探测补全，防 board pass 收据 cases 空致 prepare 死锁）
     _write_cases(batch_id, args.case or "")

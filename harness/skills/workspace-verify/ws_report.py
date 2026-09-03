@@ -392,6 +392,9 @@ def main(argv=None):
                     help="自描述推送产物 JSON 路径（ws_push.py --result-file 落盘；"
                          "PASS 必需；run_id 与验收产物一致且逐项 sha256/字节/上下文"
                          "三项校验值全绿）")
+    ap.add_argument("--device-dirty", action="store_true",
+                    help="teardown 失败（恢复不了本轮改变的设备态）时显式标记"
+                         "（PASS 路径亦可从验收产物 device_dirty 自动透传）")
     ap.add_argument("--elapsed", type=int, default=None,
                     help="耗时秒数；缺省从 timings 的 wall_end-wall_start 推导"
                          "（推导不出则 0），显式传参优先")
@@ -527,6 +530,13 @@ def main(argv=None):
             return 2
         args.acceptance = json.dumps(parsed, ensure_ascii=False,
                                      separators=(",", ":"))
+        # 方向 3：验收产物标 device_dirty（teardown 恢复失败）→ 自动透传收据
+        if (parsed or {}).get("device_dirty") is True:
+            args.device_dirty = True
+
+    if args.device_dirty:
+        print("warn: device_dirty=true（teardown 恢复失败，设备态不可信），"
+              "已在收据 header 标注", file=sys.stderr)
 
     # 自检证据（-s 批次必带，堵零验证通道）：对照 -sv 缺 --acceptance 返 2 的既有约束，
     # result=skip 而 selfcheck 为空即拒写。自检门禁以退出码为主判据（方向 1-5）：
@@ -585,7 +595,8 @@ def main(argv=None):
                 acceptance=args.acceptance, elapsed_s=args.elapsed,
                 summary=args.summary, metrics=args.metrics,
                 timings=args.timings, cases=args.case,
-                selfcheck=args.selfcheck)
+                selfcheck=args.selfcheck,
+                device_dirty="true" if args.device_dirty else "")
     path = write_receipt(r, body or args.summary)
     append_trend(time.strftime("%Y-%m-%d %H:%M:%S"), batch_id, args.result,
                  f"build={args.build} board={args.board} "

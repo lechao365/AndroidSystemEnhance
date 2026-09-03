@@ -438,7 +438,15 @@ def _resolve_acceptance_for_run(session):
             raise RuntimeError(
                 f"用例标签 {', '.join(missing)} 不存在于 verify-cases.yaml"
                 f"（可选: {', '.join(sorted(cases)) or '无'}）")
-        return "--case", session["case"], " ".join(cases[c] for c in labels), ""
+        def _case_text(v):
+            # 与 ws_acceptance._case_text 同款：cases 值 dict 形态
+            # （生命周期资产）取 acceptance 键，str 旧形态原样
+            if isinstance(v, dict):
+                return (v.get("acceptance") or "").strip()
+            return v
+
+        return ("--case", session["case"],
+                " ".join(_case_text(cases[c]) for c in labels), "")
     raise RuntimeError("会话缺验收源（模式 A 须 --batch-file；模式 B 须 --case）")
 
 

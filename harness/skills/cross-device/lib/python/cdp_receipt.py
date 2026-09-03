@@ -38,6 +38,9 @@ _FIELDS = [
     ("timings", ""),
     ("cases", ""),
     ("selfcheck", ""),
+    # 方向 3：teardown 失败（恢复不了本轮改变的状态）时 ws_report 标 "true"；
+    # 空 = 未涉及或已恢复（旧收据无此行 → from_text 默认空，向后兼容）
+    ("device_dirty", ""),
 ]
 
 

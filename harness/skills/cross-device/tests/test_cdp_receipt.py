@@ -324,6 +324,18 @@ class TestReceipt(unittest.TestCase):
             "- schema_version: 1\n- batch_id: abc123def456\n## body\n\nx\n")
         self.assertEqual(r.cases, "")
 
+    def test_old_receipt_without_device_dirty_defaults_empty(self):
+        # 方向 3（生命周期批）：旧收据无 device_dirty 字段 → from_text 回落空串
+        r, errs = cdp_receipt.Receipt.from_text(
+            "- schema_version: 1\n- batch_id: old0000000001\n- result: pass\n\n"
+            "## body\n\nx\n")
+        self.assertEqual(errs, [])
+        self.assertEqual(r.device_dirty, "")
+        # 新收据 header_lines 恒含该字段（显式可见）
+        w = cdp_receipt.Receipt(batch_id="new0000000001", result="fail",
+                                device_dirty="true")
+        self.assertIn("- device_dirty: true", w.header_lines())
+
     def test_latest_board_receipt_picks_board_not_latest(self):
         # 最新收据是 skip（-s 文档批）→ latest_board_receipt 须跳过，
         # 取最新 verify_mode=board 的收据（evidence-scope 推导锚点）

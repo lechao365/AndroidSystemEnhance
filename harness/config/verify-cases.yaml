@@ -69,7 +69,12 @@ cases:
   # 注：lcview-recover-hal 已移除——HAL 源码/模块/服务全部删除，设备上不存在
   #   HAL 进程可 kill，用例语义失效；lcview_recover.sh 现仅支持 daemon 分支，
   #   hal 分支已删除
-  lcview-recover-daemon: 'hostcmd:"cases/lcview_recover.sh daemon"'
+  # kill 有副作用但 init 自动恢复（daemon 重启自愈，无可登记的持久态变更
+  # 面），仅登记 timeout_s（生命周期字段可单用，setup_snapshot/teardown 缺省
+  # 即无快照/无恢复）
+  lcview-recover-daemon:
+    acceptance: 'hostcmd:"cases/lcview_recover.sh daemon"'
+    timeout_s: 180
 
   # L1 被动数据管道主用例（原 cases/lcview_pipeline.yaml 收敛于此，critical 项）：
   # 事件落盘 → JSONL 合法 → schema 匹配。hostcmd 在 workspace-verify
@@ -97,7 +102,19 @@ cases:
   # hostcmd 在 host 侧展开（adb shell 命令也经 hostcmd 保证 host env 生效）；
   # authorized 切换经 grep 断言 cat 输出值（echo 成功但值未变即假绿——cmd 判据
   # 只看 exit code 兜不住，写失败/写被忽略须判红）
-  lcview-trigger: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && adb root >/dev/null 2>&1 && sleep 2 && python3 ws_adb_connect.py ensure >/dev/null" hostcmd:"cases/lcview_check.sh --mode baseline --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"adb shell \"echo 0 > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized\" | grep -q \"^0$\"" hostcmd:"sleep 3 && cases/lcview_check.sh --mode delta --event ${LCVIEW_USB_EVENT_DISCONNECT:-9} --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"adb shell \"echo 1 > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized\" | grep -q \"^1$\"" hostcmd:"sleep 5 && cases/lcview_check.sh --mode delta --event ${LCVIEW_USB_EVENT_PROBE:-8} --vid ${LCVIEW_USB_VID:-1256} --pid ${LCVIEW_USB_PID:-25344} --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"cases/lcview_check.sh --mode fresh --window 600" hostcmd:"cases/lcview_check.sh --mode ts --skew 600 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}"'
+  # 副作用用例生命周期字段（2026-09-03 定，ws_acceptance run_case_lifecycle）：
+  # setup_snapshot = 用例开始前快照命令列表（hostcmd 同语义）；teardown =
+  # 恢复命令模板（${SNAPSHOT_i} 替换为 setup 快照值）；timeout_s = 用例
+  # 墙钟上限（超时中断剩余判据项并走同一收尾顺序：取证 → teardown → 收据）。
+  # teardown 只恢复本轮实际改变的状态：恢复前重读快照对比，未改变即跳过；
+  # 恢复失败/恢复后仍不符 → 产物与收据标 device_dirty。
+  lcview-trigger:
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && adb root >/dev/null 2>&1 && sleep 2 && python3 ws_adb_connect.py ensure >/dev/null" hostcmd:"cases/lcview_check.sh --mode baseline --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"adb shell \"echo 0 > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized\" | grep -q \"^0$\"" hostcmd:"sleep 3 && cases/lcview_check.sh --mode delta --event ${LCVIEW_USB_EVENT_DISCONNECT:-9} --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"adb shell \"echo 1 > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized\" | grep -q \"^1$\"" hostcmd:"sleep 5 && cases/lcview_check.sh --mode delta --event ${LCVIEW_USB_EVENT_PROBE:-8} --vid ${LCVIEW_USB_VID:-1256} --pid ${LCVIEW_USB_PID:-25344} --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"cases/lcview_check.sh --mode fresh --window 600" hostcmd:"cases/lcview_check.sh --mode ts --skew 600 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}"'
+    setup_snapshot:
+      - 'adb shell "cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
+    teardown:
+      - 'adb shell "echo ${SNAPSHOT_0} > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
+    timeout_s: 300
 
   # L2 传输触发（事件 4/5 覆盖）：照 trigger 写法——baseline → 真实 USB 动作
   # → delta 断言对应事件增量。
@@ -120,7 +137,16 @@ cases:
   # 注：usb_reset（事件 7）曾用 USBDEVFS_RESET（usbreset）实测——复位成功但
   #   打点在 USBD 设备栈路径（vendor_lechao_usbd-stats.c），xhci host 模式
   #   不经过，无 id 7 打点（副作用 rate_degraded 出现），归入暂无触发手段。
-  lcview-transfer: 'hostcmd:"cases/lcview_check.sh --mode baseline --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"cases/lcview_check.sh --mode conserve --conserve-load-mb 4" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 4 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"{ [ \"${LCVIEW_ALLOW_DESTRUCTIVE_WRITE:-}\" = YES ] && [ -n \"${LCVIEW_BLOCK_DEV_WRITE:-}\" ]; } || { echo \"拒绝: 此命令会覆盖目标分区数据,须 LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES 且显式设置 LCVIEW_BLOCK_DEV_WRITE\" >&2; exit 1; } && adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE} bs=1M count=1\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 5 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}"'
+  # 副作用字段同 lcview-trigger（authorized 切换 + dd 写）：dd 写不可逆，
+  # teardown 无法撤销（由 LCVIEW_ALLOW_DESTRUCTIVE_WRITE 守卫变量把守），
+  # 快照/恢复只登记 authorized（可恢复状态面）
+  lcview-transfer:
+    acceptance: 'hostcmd:"cases/lcview_check.sh --mode baseline --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"cases/lcview_check.sh --mode conserve --conserve-load-mb 4" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 4 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"{ [ \"${LCVIEW_ALLOW_DESTRUCTIVE_WRITE:-}\" = YES ] && [ -n \"${LCVIEW_BLOCK_DEV_WRITE:-}\" ]; } || { echo \"拒绝: 此命令会覆盖目标分区数据,须 LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES 且显式设置 LCVIEW_BLOCK_DEV_WRITE\" >&2; exit 1; } && adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE} bs=1M count=1\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 5 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}"'
+    setup_snapshot:
+      - 'adb shell "cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
+    teardown:
+      - 'adb shell "echo ${SNAPSHOT_0} > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
+    timeout_s: 300
 
   # lciod 存活综合用例：HAL/Daemon 服务 + 监控线程持续日志 + boot 完成。
   # 注意：log 判据选监控线程统计日志（"monitor: minor="，每 10s 打印），
@@ -143,7 +169,14 @@ cases:
   # 计数未增判红（触发未生效不得假绿）。块设备 env 覆盖同 lcview-transfer
   # （LCVIEW_BLOCK_DEV / LCVIEW_BLOCK_DEV_WRITE / LCVIEW_ALLOW_DESTRUCTIVE_WRITE），
   # 写 dd 守卫与轮次隔离基线（LCIOD_BASELINE_FILE）语义同 lcview-transfer。
-  lciod-trigger: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && adb root >/dev/null 2>&1 && sleep 2 && python3 ws_adb_connect.py ensure >/dev/null" hostcmd:"cases/lciod_check.sh --mode baseline --reset --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode delta --expect read_bytes read_cmds --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}" hostcmd:"{ [ \"${LCVIEW_ALLOW_DESTRUCTIVE_WRITE:-}\" = YES ] && [ -n \"${LCVIEW_BLOCK_DEV_WRITE:-}\" ]; } || { echo \"拒绝: 此命令会覆盖目标分区数据,须 LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES 且显式设置 LCVIEW_BLOCK_DEV_WRITE\" >&2; exit 1; } && adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE} bs=1M count=1\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode delta --expect write_bytes write_cmds --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}"'
+  # 副作用字段同 lcview-trigger（authorized 切换 + dd 读写）
+  lciod-trigger:
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && adb root >/dev/null 2>&1 && sleep 2 && python3 ws_adb_connect.py ensure >/dev/null" hostcmd:"cases/lciod_check.sh --mode baseline --reset --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode delta --expect read_bytes read_cmds --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}" hostcmd:"{ [ \"${LCVIEW_ALLOW_DESTRUCTIVE_WRITE:-}\" = YES ] && [ -n \"${LCVIEW_BLOCK_DEV_WRITE:-}\" ]; } || { echo \"拒绝: 此命令会覆盖目标分区数据,须 LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES 且显式设置 LCVIEW_BLOCK_DEV_WRITE\" >&2; exit 1; } && adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE} bs=1M count=1\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode delta --expect write_bytes write_cmds --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}"'
+    setup_snapshot:
+      - 'adb shell "cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
+    teardown:
+      - 'adb shell "echo ${SNAPSHOT_0} > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
+    timeout_s: 300
 
 
   # 事件覆盖登记（驱动级覆盖盘点，2026-08-27 修订）：

@@ -25,6 +25,12 @@ import time
 
 _EXEC_TAG_RE = re.compile(r"__LE_EXIT_CODE__=(\d+)\s*$", re.MULTILINE)
 
+# 可注入睡眠点（方向 5，与 ws_push._sleep 同款）：clock_sync 的 root 重启
+# adbd settle 与修正前 settle 两处 2s 实时等待经此下发；单测 patch 本符号
+# 消除真实等待——三个时钟同步用例曾各真等 2s，在 slow guard 3s 阈值下
+# 逃过守卫（贴近阈值的等待混入自检）
+_sleep = time.sleep
+
 
 def adb_bin():
     return os.environ.get("LC_VERIFY_ADB_BIN", "adb")
@@ -255,7 +261,7 @@ def clock_sync(endpoint=None, max_skew=120):
                        encoding="utf-8", errors="replace", timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return False, "adb root 执行失败"
-    time.sleep(2)
+    _sleep(2)
     try:
         subprocess.run(build_connect_cmd(endpoint), capture_output=True,
                        text=True, encoding="utf-8", errors="replace",
@@ -347,7 +353,7 @@ def rescue(serial_host=None, serial_port=None, adb_port="5555"):
                 return None, "boot_loop", "adbd 重启失败且串口反复输出相同启动日志（boot loop）"
             return None, "half_brick", f"adbd 未起 exit={code}: {body.strip()[:120]!r}"
         # adbd 重启后 settle（照 clock_sync），否则立刻取 IP 会假半砖
-        time.sleep(2)
+        _sleep(2)
         # 重启 adbd 后取 wlan0 IPv4（复用 ws_serial 的 IPv4 过滤）
         ip = None
         try:
