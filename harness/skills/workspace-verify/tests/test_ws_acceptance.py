@@ -1145,6 +1145,36 @@ class TestResolveRunBatchId(unittest.TestCase):
             self.assertIsNone(wa._resolve_run_batch_id(None))
 
 
+class TestMarkStageInProcess(unittest.TestCase):
+    """验收段每项一发 mark（30+ 次）：_mark_stage 改进程内直调
+    cdp_timing.main（_backfill_zero_marks 同款先例），消除逐项子进程
+    启动开销（0.1~0.3s × 30+ 在验收段内串行叠加）。"""
+
+    def test_calls_cdp_timing_main_in_process(self):
+        with mock.patch.object(wa.cdp_timing, "main",
+                               return_value=0) as m:
+            wa._mark_stage("verify_acceptance_acc_3", "batch001")
+        m.assert_called_once()
+        args = m.call_args.args[0]
+        self.assertEqual(args, ["mark", "--name", "verify_acceptance_acc_3",
+                                "--batch", "batch001"])
+
+    def test_zero_flag_passthrough(self):
+        with mock.patch.object(wa.cdp_timing, "main", return_value=0) as m:
+            wa._mark_stage("verify_sync", "batch001", zero=True)
+        self.assertIn("--zero", m.call_args.args[0])
+
+    def test_nonzero_rc_warns_not_raises(self):
+        # cdp_timing 返回非 0 → 仅 warn 不阻断（失败不阻断口径语义不变）
+        with mock.patch.object(wa.cdp_timing, "main", return_value=3):
+            wa._mark_stage("verify_acceptance", None)
+
+    def test_exception_warns_not_raises(self):
+        with mock.patch.object(wa.cdp_timing, "main",
+                               side_effect=RuntimeError("boom")):
+            wa._mark_stage("verify_acceptance", None)
+
+
 class TestWriteCases(unittest.TestCase):
     """方向 1：本次实跑 case 标签落盘 cases-<batch_id>.json（三级回落识别 batch）。"""
 

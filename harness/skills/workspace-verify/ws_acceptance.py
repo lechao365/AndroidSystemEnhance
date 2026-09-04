@@ -605,29 +605,25 @@ def run_case_lifecycle(acceptance_text, lifecycle, adb_exec, adb_logcat,
 
 
 def _mark_stage(name, batch_id=None, zero=False):
-    """验证阶段自动打点：cdp_timing.py mark（batch 识别：显式 batch_id >
-    环境变量 CDP_BATCH_ID > log 目录唯一 timings 文件；均缺时静默跳过返 0，
-    失败不阻断口径）。batch_id 显式传参解决多打点文件时自动识别静默跳过
-    （batch-file 模式从批次内容解析，mark 必然落到本批打点文件）。
-    zero=True 记零 mark（跳过段占位，段耗时 0）。"""
-    timing = (Path(__file__).resolve().parents[1] / "cross-device"
-              / "lib" / "python" / "cdp_timing.py")
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(timing.parent) + os.pathsep + env.get("PYTHONPATH", "")
-    cmd = [sys.executable, str(timing), "mark", "--name", name]
+    """验证阶段自动打点：进程内直调 cdp_timing.main mark（batch 识别：显式
+    batch_id > 环境变量 CDP_BATCH_ID > log 目录唯一 timings 文件；均缺时
+    静默跳过返 0，失败不阻断口径）。验收段每项一发 mark（30+ 次），子进程
+    版每次 0.1~0.3s 启动开销串行叠加，进程内直调消除（_backfill_zero_marks
+    同款先例）。zero=True 记零 mark（跳过段占位，段耗时 0）。"""
+    args = ["mark", "--name", name]
     if batch_id:
-        cmd += ["--batch", batch_id]
+        args += ["--batch", batch_id]
     if zero:
-        cmd += ["--zero"]
+        args += ["--zero"]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=10, env=env)
-    except (OSError, subprocess.TimeoutExpired) as e:
+        rc = cdp_timing.main(args)
+    except SystemExit as e:
+        rc = e.code
+    except Exception as e:
         print(f"warn: 打点 {name} 失败（不阻断）: {e}", file=sys.stderr)
         return
-    if r.returncode != 0:
-        print(f"warn: 打点 {name} 失败（不阻断）: {r.stderr.strip()}",
-              file=sys.stderr)
+    if rc not in (0, None):
+        print(f"warn: 打点 {name} rc={rc}（不阻断）", file=sys.stderr)
 
 
 def _resolve_batch_id(batch_id):
