@@ -61,8 +61,10 @@ _VERIFY_PREFIX_SEGMENTS = frozenset((
 # 之外的未打点活动即编辑与返工）归入 edit（verify 前缀 gap 归 verify，见
 # _phase_summary）；自检自报段归 selfcheck；verify_* 五段归 verify；
 # 其余（precheck/report/finish/未知段）归 other。
+# edit_item：分方向编辑打点段（B2，同名 #N 剥序号后归 edit 相）。
 _EDIT_SEGMENTS = frozenset((
     "edit", "edit_validate", "gen_manifest", "edit_plan", "edit_retry",
+    "edit_item",
 ))
 
 
@@ -183,9 +185,9 @@ def _resolve_timings(timings_file, batch_id, verify_mode="board"):
         wall_start = t.get("start_wall") or t.get("wall_start")
         wall_end = t.get("wall_end") or time.time()
         # 缺段可见性：应有段集在两种模式下均先减 CONDITIONAL_SEGMENTS
-        # （edit_validate/gen_manifest/edit_plan/edit_retry 未产出不判缺），
-        # none 模式再减 verify_* 五段（无 verify 环节）；缺失者以 missing 键
-        # 写入收据 timings（emit 一眼看出哪些链路段没打点）；多余段
+        # （edit_validate/gen_manifest/edit_plan/edit_retry/edit_item 未产出
+        # 不判缺），none 模式再减 verify_* 五段（无 verify 环节）；缺失者以
+        # missing 键写入收据 timings（emit 一眼看出哪些链路段没打点）；多余段
         # （finish/push 等表外名）不删，耗时原样保留可归因。
         # 段名归一（方向 4）：重复轮次段（apply_selfcheck#2 等）剥 #n 序号后
         # 与应有段集比对，gap_before_* 派生段忽略（不参与应有段判定）。

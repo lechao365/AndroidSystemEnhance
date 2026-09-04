@@ -43,19 +43,21 @@ from cdp_paths import log_apply_dir
 # 自发 mark），把 edit 段内的机械校验耗时单独归因（方向 2 增）。
 # edit_plan/edit_retry：编辑打点约定（读完方向发 edit_plan、自愈重试前发
 # edit_retry，方向 3 增）。
+# edit_item：分方向编辑打点（B2），apply 每完成一个方向 mark 一次，
+# 同名自动 #N 序号，单方向耗时在收据 segments 逐项可见。
 KNOWN_SEGMENTS = frozenset([
     "precheck", "edit",
-    "edit_validate", "gen_manifest", "edit_plan", "edit_retry",
+    "edit_validate", "gen_manifest", "edit_plan", "edit_retry", "edit_item",
     "verify_sync", "verify_build", "verify_push",
     "verify_unit_test", "verify_acceptance", "apply_selfcheck", "report",
 ])
 
 # 条件段：仅在特定条件满足时打点（非每批必出）——edit_validate（跑过 diff
 # 校验器）、gen_manifest（跑过清单重生成）、edit_plan（编辑规划）、edit_retry
-# （自愈重试）。missing 判定（ws_report）应把条件段排除在应有段集之外：
-# 未产出不判缺（方向 1 定）。
+# （自愈重试）、edit_item（分方向编辑，B2）。missing 判定（ws_report）应把
+# 条件段排除在应有段集之外：未产出不判缺（方向 1 定）。
 CONDITIONAL_SEGMENTS = frozenset([
-    "edit_validate", "gen_manifest", "edit_plan", "edit_retry",
+    "edit_validate", "gen_manifest", "edit_plan", "edit_retry", "edit_item",
 ])
 
 # gap_before_<name> 落段的余量阈值（秒）：mark 带 dur_s 时，相邻差额减去

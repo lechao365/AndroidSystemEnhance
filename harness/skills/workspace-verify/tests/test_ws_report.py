@@ -1585,6 +1585,13 @@ class TestPhaseSummary(unittest.TestCase):
         ]
         self.assertEqual(self._ph(segs)["edit"], 35.0)
 
+    def test_phase_summary_edit_item_counts_to_edit(self):
+        # B2：edit_item 分方向段归 edit 相（同名 #N 剥序号后归类）
+        segs = [{"name": "edit_item", "elapsed_s": 120.5},
+                {"name": "edit_item#2", "elapsed_s": 80.3}]
+        got = self._ph(segs)
+        self.assertEqual(got["edit"], 200.8)
+
     def test_selfcheck_with_ordinal_suffix(self):
         # 返工轮次段剥 #n 序号后仍归 selfcheck
         segs = [
