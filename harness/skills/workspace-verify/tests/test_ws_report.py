@@ -1470,8 +1470,10 @@ class TestWsReport(unittest.TestCase):
         data = json.loads(Path(tfile).read_text(encoding="utf-8"))
         names = [m["name"] for m in data["marks"]]
         self.assertIn("report", names)
-        self.assertEqual(names[-1], "report", "report 须为末个 mark")
-        # 收据 timings 段含 report 与兜底段（finish = report 到算段时刻）
+        # B5 收编后 report_post（content_tree 前直写）成为末个 mark，
+        # report 退居次位（尾部工作区间 report → report_post 可归因）
+        self.assertEqual(names[-1], "report_post", "report_post 须为末个 mark")
+        # 收据 timings 段含 report 与兜底段（finish 后移后收窄为纯算段时刻）
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         content = details[0].read_text(encoding="utf-8")
         self.assertIn('"name": "report"', content)
@@ -1502,7 +1504,8 @@ class TestWsReport(unittest.TestCase):
         self.assertEqual(rc, 0)
         data = json.loads(tfile.read_text(encoding="utf-8"))
         names = [m["name"] for m in data["marks"]]
-        self.assertEqual(names, ["precheck", "report"])
+        # B5 收编后自发 report_post 尾随（content_tree 前直写，尾部工作可归因）
+        self.assertEqual(names, ["precheck", "report", "report_post"])
 
     def test_report_mark_no_timing_skips(self):
         # 无打点文件（未 start）时自发 report mark 静默跳过不阻断
@@ -1517,6 +1520,38 @@ class TestWsReport(unittest.TestCase):
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         content = details[0].read_text(encoding="utf-8")
         self.assertIn("- timings: ", content)
+
+    # ── B5：report_post 尾部工作收编（content_tree 前直写 mark + 解析后移）──
+    def test_mode_a_report_post_mark_recorded(self):
+        # B5：ws_report 执行后在打点文件留 report_post mark（尾部工作
+        # content_tree/收据落盘/trend 可归因）——report_post 在 report 之后
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        timings = json.dumps({
+            "batch_id": "abc123def456",
+            "start_wall": 1000.0,
+            "marks": [{"name": "precheck", "wall": 1001.5},
+                      {"name": "edit", "wall": 1005.0}],
+        })
+        tfile = self._write(timings, ".json")
+        with redirect_stdout(io.StringIO()):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--timings-file", tfile])
+        self.assertEqual(rc, 0)
+        data = json.loads(Path(tfile).read_text(encoding="utf-8"))
+        names = [m["name"] for m in data["marks"]]
+        self.assertIn("report", names)
+        self.assertIn("report_post", names)
+        self.assertGreater(names.index("report_post"), names.index("report"),
+                           "report_post 须在 report 之后（尾部工作区间）")
+        # 解析后移（B5）：timings 段计算定格在尾部工作 mark 之后，report_post
+        # 段进收据（此前 content_tree 等尾部开销散落 finish 兜底段不可归因）
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn('"name": "report_post"', content)
 
     def test_phase_summary_verify_gap_counts_to_verify(self):
         # gap_before_verify_* 派生段归 verify 相（此前一律归 edit，verify 前

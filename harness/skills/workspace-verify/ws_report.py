@@ -114,14 +114,9 @@ def _phase_summary(segments):
     return {k: round(v, 3) for k, v in totals.items()}
 
 
-def _mark_report(timings_file, batch_id):
-    """自发 report 打点：解析打点前 mark 本批"收据解析+落盘"起点。
+def _append_direct_mark(timings_file, batch_id, name):
+    """直写自发 mark 到打点文件（B5 参数化共享 helper）。
 
-    兜底段语义：compute_segments 末段名 finish（与 finish 子命令同名
-    两义——前者是"末个 mark 到算段时刻"的兜底段，后者是归档子命令），
-    其耗时 = 末个 mark 到算段时刻，含自检与编排空转。15 笔 -s 收据兜底段
-    在 0.26~361.9s 间乱跳而自检恒 11s 档即因此（收据在 push 之前落盘）。
-    自发 mark report 后兜底段收窄为"report → 算段时刻"= 纯写收据耗时。
     目标文件与 timings 探测同源：显式 --timings-file 优先，未传自动探测
     log_apply_dir()/timings-<batch_id>.json；文件缺失/非法仅 warn 不阻断
     （打点诊断数据，非收据证据本身）。直接编辑文件（cdp_timing mark 仅
@@ -139,14 +134,26 @@ def _mark_report(timings_file, batch_id):
         data = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError("非 JSON 对象")
-        data.setdefault("marks", []).append(
-            {"name": "report", "wall": time.time()})
+        data.setdefault("marks", []).append({"name": name, "wall": time.time()})
         tmp = p.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
                        encoding="utf-8")
         tmp.replace(p)
     except (OSError, json.JSONDecodeError, ValueError) as e:
-        print(f"warn: report 打点失败（不阻断）: {e}", file=sys.stderr)
+        print(f"warn: {name} 打点失败（不阻断）: {e}", file=sys.stderr)
+
+
+def _mark_report(timings_file, batch_id):
+    """自发 report 打点：解析打点前 mark 本批"收据解析+落盘"起点。
+
+    兜底段语义：compute_segments 末段名 finish（与 finish 子命令同名
+    两义——前者是"末个 mark 到算段时刻"的兜底段，后者是归档子命令），
+    其耗时 = 末个 mark 到算段时刻，含自检与编排空转。15 笔 -s 收据兜底段
+    在 0.26~361.9s 间乱跳而自检恒 11s 档即因此（收据在 push 之前落盘）。
+    自发 mark report 后兜底段收窄为"report → 算段时刻"= 纯写收据耗时。
+    直写实现委托 _append_direct_mark（B5 参数化，report_post 同源复用）。
+    """
+    _append_direct_mark(timings_file, batch_id, "report")
 
 
 def _resolve_timings(timings_file, batch_id, verify_mode="board"):
@@ -586,16 +593,14 @@ def main(argv=None):
     # 自发 report 打点：解析打点前 mark 本批收据解析+落盘起点，使兜底段
     # （末个 mark 到算段时刻）收窄为纯写收据耗时（自检/编排空转不再混入）
     _mark_report(args.timings_file, batch_id)
-    # 链路耗时打点：显式 --timings-file 优先，未传自动探测
-    # log_apply_dir()/timings-<batch_id>.json（cdp_paths 绝对路径与
-    # cdp_timing 写入同源，认 CDP_PROJECT_ROOT）；
-    # --elapsed 缺省从 timings 的 wall_end-wall_start 推导（显式传参优先）
-    args.timings, derived_elapsed = _resolve_timings(args.timings_file, batch_id,
-                                                     verify_mode)
-    if args.elapsed is None and derived_elapsed is not None:
-        args.elapsed = derived_elapsed
-    if args.elapsed is None:
-        args.elapsed = 0
+    # 链路耗时打点解析（B5）整体后移至收据尾部工作完成后、Receipt 构造前：
+    # 此前紧随 report mark 执行，compute_segments 在算段时刻定格 finish 段，
+    # 其后的尾部真实开销（content_tree 全树 git add -A，drvfs IO 慢/git
+    # status/Receipt 构造）散落 finish 兜底段不可归因；后移后 finish 段
+    # 收窄为纯算段时刻、report_post 段覆盖尾部开销（见 content_tree 前的
+    # report_post 自发 mark）。args.timings 消费点（Receipt timings 字段、
+    # _trend_timing）均在后移点之后，顺序合法；验收证据门禁段不依赖
+    # timings/elapsed，无需随移。
 
     # cases 补全：显式 --case 优先，未传自动探测 cases-<batch_id>.json
     # （ws_acceptance 验收后写入本次实跑标签，与 timings 探测同源）
@@ -707,6 +712,10 @@ def main(argv=None):
     # 为该时刻 porcelain 清单加摘要。均排除收据目录（自引用豁免）；git 不可
     # 用/空仓等异常时 warn 置空，不阻断收据写入（收据主产物，树为增强证据）
     verified_tree, commit_scope = "", ""
+    # 尾部工作起点自发 mark（B5）：report mark 之后至收据落盘的尾部工作
+    # （content_tree/commit_scope/Receipt/write_receipt/append_trend）此前
+    # 散落 finish 兜底段不可归因，content_tree 前直写 report_post 收编
+    _append_direct_mark(args.timings_file, batch_id, "report_post")
     try:
         verified_tree = content_tree()
         status_out = subprocess.run(
@@ -718,6 +727,18 @@ def main(argv=None):
     except (subprocess.CalledProcessError, OSError, RuntimeError) as e:
         print(f"warn: verified_tree/commit_scope 计算失败（置空不阻断）: {e}",
               file=sys.stderr)
+
+    # 链路耗时打点解析（B5 后移落位）：显式 --timings-file 优先，未传自动
+    # 探测 log_apply_dir()/timings-<batch_id>.json（cdp_paths 绝对路径与
+    # cdp_timing 写入同源，认 CDP_PROJECT_ROOT）；--elapsed 缺省从 timings
+    # 的 wall_end-wall_start 推导（显式传参优先）。此刻 report_post 已直写，
+    # compute_segments 的 finish 定格在尾部工作之后
+    args.timings, derived_elapsed = _resolve_timings(args.timings_file, batch_id,
+                                                     verify_mode)
+    if args.elapsed is None and derived_elapsed is not None:
+        args.elapsed = derived_elapsed
+    if args.elapsed is None:
+        args.elapsed = 0
 
     r = Receipt(batch_id=batch_id, batch_base=batch_base,
                 verified_commit=verified,

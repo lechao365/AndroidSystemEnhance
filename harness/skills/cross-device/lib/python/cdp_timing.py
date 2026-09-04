@@ -45,11 +45,15 @@ from cdp_paths import log_apply_dir
 # edit_retry，方向 3 增）。
 # edit_item：分方向编辑打点（B2），apply 每完成一个方向 mark 一次，
 # 同名自动 #N 序号，单方向耗时在收据 segments 逐项可见。
+# report_post：report mark 之后至收据落盘的尾部工作段（B5，ws_report 自发
+# 直写）——content_tree/commit_scope/Receipt/write_receipt/append_trend，
+# 此前散落 finish 兜底段不可归因。
 KNOWN_SEGMENTS = frozenset([
     "precheck", "edit",
     "edit_validate", "gen_manifest", "edit_plan", "edit_retry", "edit_item",
     "verify_sync", "verify_build", "verify_push",
     "verify_unit_test", "verify_acceptance", "apply_selfcheck", "report",
+    "report_post",
 ])
 
 # 条件段：仅在特定条件满足时打点（非每批必出）——edit_validate（跑过 diff

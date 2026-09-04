@@ -425,6 +425,12 @@ class TestCdpTiming(unittest.TestCase):
         self.assertEqual([n for n in names if n.startswith("edit_item")],
                          ["edit_item", "edit_item#2", "edit_item#3"])
 
+    # ── B5：report_post 尾部工作段 ─────────────────────────────────────
+    def test_report_post_in_known_segments(self):
+        # B5：report 尾部工作（content_tree/收据落盘/trend）段，非条件段
+        self.assertIn("report_post", cdp_timing.KNOWN_SEGMENTS)
+        self.assertNotIn("report_post", cdp_timing.CONDITIONAL_SEGMENTS)
+
 
 if __name__ == "__main__":
     unittest.main()
