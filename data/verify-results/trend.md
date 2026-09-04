@@ -81,3 +81,4 @@
 2026-09-03 21:27:22 ca64a314af81 skip build=skip board=skip acc=- 提交面收窄与回滚状态化与最小CI（-s 无需上板） | {"elapsed_s":904,"segs":{"precheck":0.207,"edit_plan":139.669,"edit":724.146,"apply_selfcheck":25.171,"report":0.286,"finish":0.02}}
 2026-09-03 21:30:08 ca64a314af81 skip build=skip board=skip acc=- 提交面收窄与回滚状态化与最小CI（-s 无需上板；白名单扩源码目录后重检重推） | {"elapsed_s":1070,"segs":{"precheck":0.207,"edit_plan":139.669,"edit":724.146,"apply_selfcheck":34.351,"report":0.261,"finish":0.02}}
 2026-09-03 21:32:19 ca64a314af81 skip build=skip board=skip acc=- 提交面收窄与回滚状态化与最小CI（-s 无需上板；扫描fixture拼接修正后重 | {"elapsed_s":1202,"segs":{"precheck":0.207,"edit_plan":139.669,"edit":724.146,"apply_selfcheck":16.532,"report":0.288,"finish":0.025}}
+2026-09-04 10:33:05 261f10265269 skip build=skip board=skip acc=- 发布内容与验证内容绑定（-s 无需上板） | {"elapsed_s":4827,"segs":{"precheck":17.752,"edit_plan":155.515,"apply_selfcheck":20.076,"edit":17.574,"report":0.284,"finish":0.018}}

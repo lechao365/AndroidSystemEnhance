@@ -41,6 +41,12 @@ _FIELDS = [
     # 方向 3：teardown 失败（恢复不了本轮改变的状态）时 ws_report 标 "true"；
     # 空 = 未涉及或已恢复（旧收据无此行 → from_text 默认空，向后兼容）
     ("device_dirty", ""),
+    # 方向 1（批次 261f10265269）：发布内容与验证内容绑定——
+    # verified_tree：落盘时刻排除统一集合（content_tree.EXCLUDE_PATHS）后的
+    # git 树对象 id（内容寻址可复算）；commit_scope：该时刻 porcelain 文件
+    # 清单加摘要（排除收据目录）。旧收据无此两行 → from_text 默认空，兼容
+    ("verified_tree", ""),
+    ("commit_scope", ""),
 ]
 
 
@@ -232,9 +238,22 @@ def _recent_nonpass_names(verify_dir: Path, keep: int = 20) -> set:
     return names
 
 
+def _receipt_batch_id(path):
+    """从收据文件提取 batch_id；解析失败返 None（调用方保守跳过）。"""
+    try:
+        m = re.search(r"^-\s+batch_id:\s*(\S+)",
+                      path.read_text(encoding="utf-8", errors="replace"),
+                      re.MULTILINE)
+        return m.group(1) if m else None
+    except OSError:
+        return None
+
+
 def prune_details(verify_dir=None):
     """详情老化保留 _DETAIL_KEEP 份（trend.md 不计入配额）。
 
+    同 batch_id 只留最新一份（方向 4）：重检重推的中间态收据先去重、
+    不占配额（被 baseline-status.yaml 引用的文件仍按名保留）。
     两类证据链保护（跳过删除）：
     - 被 baseline-status.yaml 引用的收据：已被 promote 引用或即将引用的
       收据是基线证据；
@@ -245,6 +264,22 @@ def prune_details(verify_dir=None):
     referred = _referred_receipt_names(d)
     if referred is None:
         return  # 引用解析失败（yaml 不可读）：保守不删任何文件
+    # 同 batch_id 去重（方向 4）：每组保文件名最新一份；解析失败/被引用
+    # 的文件保守跳过。去重后重取文件列表再进配额老化。
+    by_batch = {}
+    for f in files:
+        by_batch.setdefault(_receipt_batch_id(f), []).append(f)
+    dedup_removed = 0
+    for fs in by_batch.values():
+        for old in fs[:-1]:
+            if old.name in referred or _receipt_batch_id(old) is None:
+                continue
+            old.unlink()
+            dedup_removed += 1
+    if dedup_removed:
+        print(f"info: 同 batch_id 中间态收据去重 {dedup_removed} 份（只留最新）",
+              file=sys.stderr)
+        files = _detail_files(d)
     guarded = _recent_nonpass_names(d)
     keep = 0
     referred_kept = 0

@@ -144,6 +144,40 @@ class TestReceipt(unittest.TestCase):
         self.assertIn('| {"m":1}', line)
         self.assertNotIn("segs", line)
 
+    def test_prune_dedupes_same_batch_keeps_newest(self):
+        # 方向 4：同 batch_id 只留最新一份（重检重推的中间态不占配额）——
+        # 3 份同批（1 pass + 2 fail 中间态）去重后仅存最新；被引用文件仍护
+        names = [f"2026010{i}-000000-111111111111.md" for i in (1, 2, 3)]
+        for i, n in enumerate(names):
+            p = self._dir / n
+            p.write_text(
+                f"- schema_version: 1\n- batch_id: 111111111111\n"
+                f"- result: {'pass' if i == 2 else 'fail'}\n\n## body\n",
+                encoding="utf-8")
+        cdp_receipt.prune_details(self._dir)
+        left = [f.name for f in self._dir.glob("*111111111111*.md")]
+        self.assertEqual(left, [names[2]])
+
+    def test_prune_dedupe_spares_referred_old_version(self):
+        # 同批去重时被 baseline-status 引用的旧版本按名保留（证据链优先）
+        old = self._dir / "20260101-000000-111111111111.md"
+        new = self._dir / "20260102-000000-111111111111.md"
+        for p in (old, new):
+            p.write_text("- schema_version: 1\n- batch_id: 111111111111\n"
+                         "- result: pass\n\n## body\n", encoding="utf-8")
+        with mock.patch.object(cdp_receipt, "_referred_receipt_names",
+                               return_value={old.name}):
+            cdp_receipt.prune_details(self._dir)
+        self.assertTrue(old.exists())
+        self.assertTrue(new.exists())
+
+    def test_prune_dedupe_skips_unparseable(self):
+        # batch_id 解析失败的文件保守跳过（不删）
+        p = self._dir / "20260101-000000-broken0000000.md"
+        p.write_text("garbage", encoding="utf-8")
+        cdp_receipt.prune_details(self._dir)
+        self.assertTrue(p.exists())
+
     def test_prune_guards_recent_nonpass_receipts(self):
         # 方向 5：result 非 pass 的最近 20 份受保护——配额临时缩到 10 时，
         # 15 份（5 fail + 10 pass）的删除区恰落在 fail 上，护后 fail 不删
@@ -253,15 +287,22 @@ class TestReceipt(unittest.TestCase):
         self.assertEqual(len(details), keep, "断链引用不产生保护对象，正常老化")
 
     def test_same_second_same_batch_id_no_overwrite(self):
-        """同秒同 batch_id 写入两份：不覆盖，latest 取最新写入（失败现场不丢）。"""
+        """同秒同 batch_id 写入两份：文件名唯一不覆盖；latest 取最新写入。
+
+        （批次 261f10265269 方向 4 调整：write_receipt 仍防覆盖，但落盘
+        后的老化去重使同批只留最新一份——最新收据代表该批终态，中间态
+        不占配额；跨批 fail 归因由非 pass 护窗承担）
+        """
         r1 = _mk_receipt(result="fail")
         p1 = cdp_receipt.write_receipt(r1, "第一次失败现场")
         r2 = _mk_receipt(result="pass")
         p2 = cdp_receipt.write_receipt(r2, "第二次通过")
         self.assertNotEqual(p1, p2, "同秒同批应防覆盖，文件名须唯一")
-        self.assertTrue(p1.exists(), "第一次收据不应被覆盖")
         self.assertTrue(p2.exists())
-        self.assertEqual(cdp_receipt.read_receipt(p1)[0].result, "fail")
+        left = sorted(f.name for f in self._dir.glob("*abc123def456*.md")
+                      if f.name != "trend.md")
+        self.assertEqual(left, [p2.name], "同批去重后只留最新一份")
+        self.assertEqual(cdp_receipt.read_receipt(p2)[0].result, "pass")
         latest, errs = cdp_receipt.read_latest_receipt(self._dir)
         self.assertEqual(errs, [])
         self.assertEqual(latest.batch_id, "abc123def456")

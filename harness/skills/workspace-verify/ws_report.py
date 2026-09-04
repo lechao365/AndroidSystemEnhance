@@ -39,6 +39,8 @@ from cdp_parse import (SOFT_ERRORS, batch_id_from_text, parse_batch,  # noqa: E4
                        validate_batch)
 from cdp_paths import log_apply_dir  # noqa: E402
 from cdp_receipt import Receipt, append_trend, write_receipt  # noqa: E402
+from commit_scope import format_scope, porcelain_to_name_status  # noqa: E402
+from content_tree import content_tree  # noqa: E402
 from paths import env_path  # noqa: E402
 
 
@@ -593,6 +595,23 @@ def main(argv=None):
     # "531 passed in 27.9s | skipped=0 | OK: ..."，保证 skipped 计数随收据显式落地
     args.selfcheck = " | ".join(l for l in args.selfcheck.splitlines() if l.strip())
 
+    # 发布内容与验证内容绑定（批次 261f10265269 方向 1）：verified_tree 为
+    # 落盘时刻排除统一集合后的内容树（git 树对象 id，可复算）；commit_scope
+    # 为该时刻 porcelain 清单加摘要。均排除收据目录（自引用豁免）；git 不可
+    # 用/空仓等异常时 warn 置空，不阻断收据写入（收据主产物，树为增强证据）
+    verified_tree, commit_scope = "", ""
+    try:
+        verified_tree = content_tree()
+        status_out = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", check=True)
+        commit_scope = format_scope([
+            porcelain_to_name_status(l)
+            for l in status_out.stdout.splitlines() if l.strip()])
+    except (subprocess.CalledProcessError, OSError, RuntimeError) as e:
+        print(f"warn: verified_tree/commit_scope 计算失败（置空不阻断）: {e}",
+              file=sys.stderr)
+
     r = Receipt(batch_id=batch_id, batch_base=batch_base,
                 verified_commit=verified,
                 verify_mode=verify_mode, result=args.result,
@@ -601,6 +620,7 @@ def main(argv=None):
                 summary=args.summary, metrics=args.metrics,
                 timings=args.timings, cases=args.case,
                 selfcheck=args.selfcheck,
+                verified_tree=verified_tree, commit_scope=commit_scope,
                 device_dirty="true" if args.device_dirty else "")
     path = write_receipt(r, body or args.summary)
     append_trend(time.strftime("%Y-%m-%d %H:%M:%S"), batch_id, args.result,

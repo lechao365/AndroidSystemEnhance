@@ -44,6 +44,12 @@ class TestSyncModifyToMainBase(unittest.TestCase):
                         self.root / "harness" / "skills" / "cross-device" / "lib" / "python")
         shutil.copytree(REAL_SKILL_DIR,
                         self.root / "harness" / "skills" / "publish-main-base")
+        # content_tree.py（promote 绑定比对）与 commit_scope.py 相对路径调用，
+        # 临时根须有 harness/lib/
+        lib_dst = self.root / "harness" / "lib"
+        lib_dst.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO_ROOT / "harness" / "lib" / "content_tree.py", lib_dst)
+        shutil.copy(REPO_ROOT / "harness" / "lib" / "commit_scope.py", lib_dst)
         cfg = self.root / "harness" / "config"
         cfg.mkdir(parents=True, exist_ok=True)
         (cfg / "baseline-status.yaml").write_text("baselines: []\n", encoding="utf-8")
@@ -92,13 +98,23 @@ class TestSyncModifyToMainBase(unittest.TestCase):
 
     def _write_receipt(self, verified_commit, build="pass", push_board="pass",
                        batch_id="000000000001", result="pass", verify_mode="board",
-                       cases=""):
+                       cases="", verified_tree=None):
         d = self.root / "data" / "verify-results"
         d.mkdir(parents=True, exist_ok=True)
         p = d / f"20260831-100000-{batch_id}.md"
+        # verified_tree 默认按当前工作树实算（content_tree CLI，排除统一集合），
+        # 与 promote 侧 --tree HEAD 同算法——正常流程两树一致；绑定拒绝用例
+        # 经参数注入假树
+        if verified_tree is None:
+            r = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "harness" / "lib" / "content_tree.py")],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=self.root, env=self._env)
+            verified_tree = r.stdout.strip() if r.returncode == 0 else ""
         p.write_text(
             f"- schema_version: 1\n- batch_id: {batch_id}\n"
             f"- batch_base: edd5748dc3c6\n- verified_commit: {verified_commit}\n"
+            f"- verified_tree: {verified_tree}\n"
             f"- verify_mode: {verify_mode}\n- result: {result}\n- build: {build}\n"
             f"- push_board: {push_board}\n- acceptance: t\n- elapsed_s: 1\n"
             f"- summary: fixture\n- metrics: \n- timings: \n- cases: {cases}\n"
@@ -198,6 +214,55 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         r = self._run("--rollback", "--baseline-id", self.BID_RB)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("reverted-candidate", r.stdout + r.stderr)
+
+    # ── 方向 3（261f10265269）：promote 绑定 verified_tree（一致过路径由
+    # test_promote_passes_code_covered_by_board_receipt 显式覆盖）──────────
+    # ── 方向 3（261f10265269）：promote 绑定 verified_tree。流程对齐
+    # test_promote_passes（board 收据 verified_commit=code_head、yaml 与收据
+    # 随后入库），BOARD_OK 先过才达绑定比对；一致过路径由该用例显式覆盖。
+    # 注：code/ 无改动的 promote 走豁免分支，不触发绑定比对（见零改动用例）
+    def _board_chain(self, verified_tree):
+        self._setup_remote()
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
+        (self.root / "code").mkdir()
+        (self.root / "code" / "foo.txt").write_text("x\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): code 改动")
+        self._git("push", "origin", "dev")
+        code_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        self._write_receipt(code_head, batch_id="000000000001",
+                            cases="lcview-liveness", verify_mode="board",
+                            verified_tree=verified_tree)
+        (self.root / "harness" / "config" / "baseline-status.yaml").write_text(
+            "baselines:\n"
+            f"  - baseline_id: BL-TEST-01\n"
+            f"    status: candidate\n"
+            f"    source_commit: {code_head}\n"
+            f"    sync_manifest: data/verify-results/20260831-100000-000000000001.md\n"
+            f"    build_result: PASS\n"
+            f"    package_result: PASS\n"
+            f"    board_verify: PASS\n"
+            f"    evidence:\n"
+            f"      ki_gate: pass\n",
+            encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): board 收据与 candidate 入库")
+        self._git("push", "origin", "dev")
+
+    def test_promote_rejects_board_tree_mismatch(self):
+        # 收据 verified_tree 与晋升内容树不一致（发布内容≠验证内容）→ 拒并列差异
+        self._board_chain("0" * 40)
+        r = self._promote()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("verified_tree 与晋升内容树不一致", r.stderr)
+
+    def test_promote_rejects_missing_verified_tree(self):
+        # 旧版收据缺 verified_tree → 无法证明绑定，拒（提示以当前工具重写）
+        self._board_chain("")
+        r = self._promote()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("缺 verified_tree", r.stderr)
 
     # ── 方向 4：真 git 仓两例（父等于 / 不等 VC）──────────────────────────
     def test_check_parent_equals_vc_passes(self):

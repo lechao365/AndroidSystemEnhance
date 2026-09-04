@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -30,6 +31,13 @@ class TestWsReport(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
         self._dir = Path(self._tmp.name) / "data" / "verify-results"
+        # 发布内容绑定（261f10265269）：content_tree 在真仓做全仓临时 index
+        # add -A 太慢（单用例 ~5s 撞 slow_guard 3.0s 墙钟判红），单测注入假树；
+        # 树计算正确性由 lib/tests/test_content_tree.py 真 git 覆盖
+        patcher = mock.patch.object(ws_report, "content_tree",
+                                    return_value="a" * 40)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -104,6 +112,27 @@ class TestWsReport(unittest.TestCase):
         self.assertIn("batch_id: ", content)
         self.assertIn("## body", content)
         self.assertIn("adb 失败", content)
+
+    def test_receipt_header_has_verified_tree_and_commit_scope(self):
+        # 方向 1（261f10265269）：收据头写 verified_tree（40hex 树 id，
+        # setUp mock 注入）与 commit_scope（porcelain 清单摘要）；收据自身
+        # 目录（data/verify-results/）不在 scope（自引用豁免）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "绑定字段",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertRegex(content, r"- verified_tree: [0-9a-f]{40}")
+        m = re.search(r"- commit_scope: (.*)", content)
+        self.assertIsNotNone(m, "收据头须含 commit_scope")
+        self.assertNotIn("data/verify-results", m.group(1),
+                         "scope 不得含收据自身目录（自引用豁免）")
 
     def test_skip_without_selfcheck_rejected(self):
         # 方向 4：result=skip 而 --selfcheck 为空 → 返 2 拒写（堵零验证通道，

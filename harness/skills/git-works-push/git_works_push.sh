@@ -61,6 +61,36 @@ if [ "$MODE" = "dry-run" ]; then
   exit 0
 fi
 
+# 发布内容与验证内容绑定（批次 261f10265269 方向 2）：实际提交面 vs 最新
+# 收据 commit_scope，不一致即拒（两侧同排除 data/verify-results/——收据随批
+# 入库且 scope 生成时排除自身目录）。无收据/旧收据缺字段 → warn 跳过（人工
+# push 场景不阻断）。normal（staged 暂存面）与 push-only（origin..HEAD 待推
+# 提交面）两种模式下均生效。
+check_commit_scope() {
+  local status_out
+  if [ "$1" = "staged" ]; then
+    status_out=$(git diff --cached --name-status --no-renames) || status_out=""
+  else
+    status_out=$(git diff --name-status --no-renames "origin/$BRANCH"..HEAD 2>/dev/null) || status_out=""
+    [ -n "$status_out" ] || return 0   # 无待推提交，无比对对象
+  fi
+  local latest_scope diffs
+  # commit_scope.py 依赖 cdp_receipt（cross-device lib）——脚本相对定位注入
+  # PYTHONPATH（真仓），内部亦有自身定位兜底注入
+  CDP_LIB="$SCRIPT_DIR/../cross-device/lib/python"
+  latest_scope=$(PYTHONPATH="$CDP_LIB" python3 harness/lib/commit_scope.py --latest-scope 2>/dev/null) || latest_scope=""
+  [ -n "$latest_scope" ] || {
+    echo "warn: 无收据 commit_scope（未走 ws_report 或旧收据），跳过提交面比对" >&2
+    return 0
+  }
+  diffs=$(printf '%s\n' "$status_out" | python3 harness/lib/commit_scope.py --check "$latest_scope") || true
+  if [ -n "$diffs" ]; then
+    err "error: 实际提交面与最新收据 commit_scope 不一致（发布内容与验证内容绑定），请核对或重写收据："
+    printf '%s\n' "$diffs" >&2
+    exit 1
+  fi
+}
+
 if [ "$MODE" = "normal" ]; then
   [ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || { err "error: 需 --message-file 且文件存在"; exit 3; }
   [ -n "$(git status --porcelain)" ] || { err "working tree clean"; exit 4; }
@@ -141,10 +171,16 @@ if [ "$MODE" = "normal" ]; then
     printf '%s\n' "$LEAK" >&2
     exit 1
   fi
+  check_commit_scope staged
   git commit -F "$MSG_FILE" || { err "error: commit 失败"; exit 1; }
 fi
 
 # push 失败分类：non-fast-forward（远端领先）给出可恢复提示，其余给原始输出
+# push-only 模式在推送前同样做提交面比对（对 origin..HEAD 的待推提交，
+# 与 normal 模式共用 check_commit_scope——两种模式下均生效）
+if [ "$MODE" = "push-only" ]; then
+  check_commit_scope pushed
+fi
 if ! PUSH_OUTPUT=$(git push -u origin "$BRANCH" 2>&1); then
   case "$PUSH_OUTPUT" in
     *"non-fast-forward"*|*"fetch first"*|*"[rejected]"*)

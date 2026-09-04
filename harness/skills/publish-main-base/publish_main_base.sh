@@ -160,6 +160,7 @@ print(os.path.relpath(path))
 print(r.result)
 print(r.verified_commit)
 print(r.verify_mode)
+print(r.verified_tree)
 PYEOF
 ) || true
 [ -n "$RECEIPT_INFO" ] || { check_class NO_RECEIPT; echo "error: 无 verify 收据" >&2; exit 1; }
@@ -167,6 +168,7 @@ LATEST=$(echo "$RECEIPT_INFO" | sed -n '1p')
 RESULT=$(echo "$RECEIPT_INFO" | sed -n '2p')
 VC=$(echo "$RECEIPT_INFO" | sed -n '3p')
 MODEV=$(echo "$RECEIPT_INFO" | sed -n '4p')
+VTREE=$(echo "$RECEIPT_INFO" | sed -n '5p')
 # 输出完整性校验：四行齐备，缺行说明收据查询输出异常（错误被 || true 吞没时兜底）
 [ -n "$LATEST" ] && [ -n "$RESULT" ] && [ -n "$VC" ] && [ -n "$MODEV" ] || {
   check_class NO_RECEIPT
@@ -346,7 +348,7 @@ if [ -z "$CODE_HEAD" ]; then
   PROMOTE_SCOPE="no-code-change"
 else
   # code/ 改动是否被最新 board 收据覆盖：merge-base --is-ancestor 判覆盖链
-  BOARD_OK=$(CODE_HEAD="$CODE_HEAD" python3 - <<'PYEOF'
+  BOARD_INFO=$(CODE_HEAD="$CODE_HEAD" python3 - <<'PYEOF'
 import os
 import subprocess
 import sys
@@ -356,16 +358,39 @@ import cdp_receipt
 p, r = cdp_receipt.latest_board_receipt()
 if not p or not r.verified_commit:
     print("0")
+    print("")
     sys.exit(0)
 r0 = subprocess.run(["git", "merge-base", "--is-ancestor",
                      os.environ["CODE_HEAD"], r.verified_commit],
                     capture_output=True)
 print("1" if r0.returncode == 0 else "0")
+print(r.verified_tree)
 PYEOF
   ) || true
+  BOARD_OK=$(echo "$BOARD_INFO" | sed -n '1p')
+  BOARD_VTREE=$(echo "$BOARD_INFO" | sed -n '2p')
   if [ "$BOARD_OK" != "1" ]; then
     check_class RECEIPT_FAIL
     echo "error: promote 要求 code/ 改动被最新 board 收据覆盖（board 收据缺失或 verified_commit 不覆盖 code 改动提交 $CODE_HEAD）" >&2
+    exit 1
+  fi
+  # 发布内容与验证内容绑定（批次 261f10265269 方向 3）：现有树等价断言比
+  # promote 时刻所打 tag（自身树恒等），证明不了该树曾被验证；此处比最新
+  # board 收据 verified_tree（验证时刻、排除统一集合后的内容树）与晋升内容
+  # 树（dev HEAD^{tree} 同一算法同一集合，content_tree.EXCLUDE_PATHS：登记
+  # yaml/docs/证据快照/清算目录/收据目录——否则 promote 自身写入会恒判红）
+  if [ -z "$BOARD_VTREE" ]; then
+    check_class RECEIPT_FAIL
+    echo "error: 最新 board 收据缺 verified_tree 字段（旧版 ws_report 产物），无法绑定发布与验证内容；请以当前工具重写收据" >&2
+    exit 1
+  fi
+  PROMOTE_TREE=$(python3 harness/lib/content_tree.py --tree HEAD) || {
+    echo "error: 晋升内容树计算失败" >&2; exit 1; }
+  if [ "$PROMOTE_TREE" != "$BOARD_VTREE" ]; then
+    echo "error: 收据 verified_tree 与晋升内容树不一致（发布内容≠验证内容）：" >&2
+    # 树对象不可解析（假树/被 gc）时 diff 失败——pipefail 下须容错，主结论已定
+    git diff --name-only "$BOARD_VTREE" "$PROMOTE_TREE" 2>/dev/null | sed 's/^/  /' >&2 \
+      || echo "  （树对象不可解析，无法列出差异路径）" >&2
     exit 1
   fi
 fi

@@ -314,12 +314,21 @@ class TestCommitFaceNarrow(unittest.TestCase):
         env = dict(os.environ)
         env["GIT_AUTHOR_NAME"] = env["GIT_COMMITTER_NAME"] = "t"
         env["GIT_AUTHOR_EMAIL"] = env["GIT_COMMITTER_EMAIL"] = "t@t"
+        env["CDP_PROJECT_ROOT"] = str(self._repo)
         self._env = env
         r = subprocess.run(["git", "-c", "init.defaultBranch=dev", "init"],
                            cwd=self._repo, capture_output=True, text=True,
                            encoding="utf-8", env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
+        # 提交面比对（261f10265269 方向 2）依赖 harness/lib/commit_scope.py
+        # 相对路径调用，临时仓须有骨架；在 init 提交前拷入，c0 已含 → 后续
+        # 实际提交面不含它（不影响比对路径集）
+        lib = self._repo / "harness" / "lib"
+        lib.mkdir(parents=True)
+        shutil.copy(Path(__file__).resolve().parents[4] / "harness" / "lib"
+                    / "commit_scope.py", lib)
         (self._repo / "f.txt").write_text("v1\n", encoding="utf-8")
+        (self._repo / "h.txt").write_text("h1\n", encoding="utf-8")
         self._git("add", "-A")
         self._git("commit", "-m", "init")
         self._base = self._git("rev-parse", "HEAD").stdout.strip()
@@ -397,6 +406,44 @@ class TestCommitFaceNarrow(unittest.TestCase):
         r = self._run_script("--message-file", str(self._msg))
         self.assertEqual(r.returncode, 2)
         self.assertIn("PLACEHOLDER_VALUE", self._git("show", "--format=", "HEAD").stdout)
+
+    def _write_scope_receipt(self, scope):
+        d = self._repo / "data" / "verify-results"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "20260101-000000-261f10265269.md"
+        p.write_text(f"- schema_version: 1\n- batch_id: 261f10265269\n"
+                     f"- commit_scope: {scope}\n- result: pass\n"
+                     f"\n## body\nx\n", encoding="utf-8")
+        return p
+
+    def test_commit_scope_mismatch_rejected(self):
+        # 方向 2：实际提交面与收据 commit_scope 不一致（多出 h.txt 修改）→
+        # 拒并列出差异，commit 不创建（收据自身目录两侧同滤）
+        (self._repo / "f.txt").write_text("v2\n", encoding="utf-8")
+        (self._repo / "h.txt").write_text("h2\n", encoding="utf-8")
+        self._write_scope_receipt("add=0 mod=1 del=0 | f.txt")
+        r = self._run_script("--message-file", str(self._msg))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("commit_scope", r.stderr)
+        self.assertIn("h.txt", r.stderr)
+        self.assertEqual(self._git("rev-parse", "HEAD").stdout.strip(), self._base)
+
+    def test_commit_scope_match_passes(self):
+        # 方向 2：一致 → 正常 commit（push 失败 rc 2）；收据目录自身豁免
+        (self._repo / "f.txt").write_text("v2\n", encoding="utf-8")
+        self._write_scope_receipt("add=0 mod=1 del=0 | f.txt")
+        r = self._run_script("--message-file", str(self._msg))
+        self.assertEqual(r.returncode, 2)
+        show = self._git("show", "--name-only", "--format=").stdout
+        self.assertIn("f.txt", show)
+        self.assertIn("data/verify-results/20260101-000000-261f10265269.md", show)
+
+    def test_commit_scope_absent_warns_and_passes(self):
+        # 无收据/旧收据缺 commit_scope → warn 跳过比对（人工 push 场景不阻断）
+        (self._repo / "f.txt").write_text("v2\n", encoding="utf-8")
+        r = self._run_script("--message-file", str(self._msg))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("跳过提交面比对", r.stderr)
 
 
 if __name__ == "__main__":
