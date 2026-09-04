@@ -57,9 +57,10 @@ _VERIFY_PREFIX_SEGMENTS = frozenset((
     "verify_unit_test", "verify_acceptance",
 ))
 
-# 阶段汇总归类（方向 1 增）：编辑阶段细分段 + gap 段（自报段之外的未打点
-# 活动即编辑与返工）归入 edit；自检自报段归 selfcheck；verify_* 五段归
-# verify；其余（precheck/report/finish/未知段）归 other。
+# 阶段汇总归类（方向 1 增）：编辑阶段细分段 + 编辑/自检侧 gap 段（自报段
+# 之外的未打点活动即编辑与返工）归入 edit（verify 前缀 gap 归 verify，见
+# _phase_summary）；自检自报段归 selfcheck；verify_* 五段归 verify；
+# 其余（precheck/report/finish/未知段）归 other。
 _EDIT_SEGMENTS = frozenset((
     "edit", "edit_validate", "gen_manifest", "edit_plan", "edit_retry",
 ))

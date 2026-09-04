@@ -1539,7 +1539,7 @@ class TestWsReport(unittest.TestCase):
 class TestPhaseSummary(unittest.TestCase):
     """阶段汇总（方向 1）：timings 折叠 edit/selfcheck/verify/other 四类。
 
-    gap_before_* 派生段一律归入 edit（自报段之外的未打点活动即编辑与返工）；
+    gap_before_* 派生段按后继段归类（verify 前缀归 verify，其余归 edit）；
     段名剥 #n 序号后归类（apply_selfcheck#2 仍计 selfcheck）；未知段入 other。
     """
 
@@ -1564,7 +1564,7 @@ class TestPhaseSummary(unittest.TestCase):
         return ws_report._phase_summary(segments)
 
     def test_gap_segments_fold_into_edit(self):
-        # gap 归 edit（关键：自报段之外的未打点活动即编辑与返工）
+        # 编辑/自检侧 gap 归 edit（verify 前缀 gap 归 verify，另见专项用例）
         segs = [
             {"name": "gap_before_edit", "elapsed_s": 857.0},
             {"name": "edit", "elapsed_s": 25.0},
