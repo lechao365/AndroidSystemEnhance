@@ -399,7 +399,7 @@ def _write_result(path, ep, results, reboot_info, overall):
     if not path:
         return
     _atomic_write_json(path, {
-        "run_id": uuid.uuid4().hex,
+        "run_id": os.environ.get("CDP_RUN_ID") or uuid.uuid4().hex,
         "endpoint": ep,
         "items": results,
         "reboot": reboot_info,

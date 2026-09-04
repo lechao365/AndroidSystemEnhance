@@ -242,8 +242,10 @@ class TestEnsureConnectedRescueLevel(unittest.TestCase):
 
     def test_third_level_rescue_connects(self):
         # mDNS 与静态皆败 → rescue 取端点 → connect 复核在线（第三级通道，
-        # rescue_enabled 由调用方显式开）
-        with mock.patch.object(ac, "mdns_discover", return_value=[]):
+        # rescue_enabled 由调用方显式开）；配置未设（env_path 空）时
+        # 身份校验跳过，rescue 端点直接可用
+        with mock.patch.object(ac, "env_path", return_value=""), \
+                mock.patch.object(ac, "mdns_discover", return_value=[]):
             with mock.patch.object(ac, "host_port", return_value="rp5.local:5555"):
                 with mock.patch.object(ac, "rescue",
                                        return_value=("10.9.9.9:5555", "ok",
@@ -388,7 +390,10 @@ class TestVerifyIdentity(unittest.TestCase):
     """方向 5：设备身份校验——LC_VERIFY_EXPECT_SERIAL 设置时核对序列号，不符即拒。"""
 
     def test_unset_expect_skips(self):
-        with mock.patch.dict("os.environ", {}, clear=True):
+        # 期望来源含 paths.conf 配置位（env_path，支持环境变量覆盖）：
+        # 配置未设（env 与 env_path 皆空）才跳过校验
+        with mock.patch.dict("os.environ", {}, clear=True), \
+                mock.patch.object(ac, "env_path", return_value=""):
             ok, detail = ac._verify_identity("10.0.0.5:5555")
         self.assertTrue(ok)
 

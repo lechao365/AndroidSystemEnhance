@@ -32,6 +32,8 @@ import sys
 import time
 from pathlib import Path
 
+import yaml
+
 # 本文件位于 harness/skills/workspace-verify/，parents[1] = harness/skills
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "lib" / "python"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
@@ -288,9 +290,39 @@ def _validate_acceptance_pass(acceptance):
     return data, None
 
 
+# verify-cases.yaml：case 验收文本扩展源（与 ws_acceptance 同路径解析）
+_CASES_PATH = Path(__file__).resolve().parents[2] / "config" / "verify-cases.yaml"
+
+
 def _norm_text(text: str) -> str:
     """规范化空白用于文本比对（产物 input_summary 与批次验收文本）。"""
     return " ".join((text or "").split())
+
+
+def _expand_case_summary(text):
+    """batch 验收 case: 前缀扩展为实际验收文本（与 ws_acceptance --case 查表
+    拼接同语义），供输入摘要比对——acceptance 产物 input_summary 记录的是
+    扩展后文本，若 expect 仍持 case: 原文比对必失配（-sv 批 case 验收
+    首次真机暴露）。非 case: 前缀或扩展失败原样返回（比对按原文兜底）。"""
+    t = (text or "").strip()
+    if not t.startswith("case:"):
+        return text
+    ids = [i.strip() for i in t[len("case:"):].split(",") if i.strip()]
+    if not ids:
+        return text
+    try:
+        data = yaml.safe_load(Path(_CASES_PATH).read_text(encoding="utf-8")) or {}
+        cases = data.get("cases") or {}
+        texts = []
+        for cid in ids:
+            val = cases.get(cid)
+            if val is None:
+                return text
+            v = (val.get("acceptance") if isinstance(val, dict) else val) or ""
+            texts.append(str(v).strip())
+        return " ".join(texts)
+    except Exception:
+        return text
 
 
 def _validate_acceptance_file(path, expect_summary):
@@ -316,8 +348,9 @@ def _validate_acceptance_file(path, expect_summary):
     if not summary:
         return None, "--acceptance-file 缺 input_summary（输入摘要缺失），拒绝 PASS"
     # 输入摘要与本批一致：验收文本为「无」/空（-s 批本无验收）时跳过比对，
-    # 真 -sv 批（验收非「无」）强制一致，防陈旧/错批产物
-    expect = _norm_text(expect_summary)
+    # 真 -sv 批（验收非「无」）强制一致，防陈旧/错批产物；case: 验收先
+    # 扩展为实际文本再比对（与 ws_acceptance --case 产物 input_summary 同源）
+    expect = _norm_text(_expand_case_summary(expect_summary))
     if expect and expect != "无" and _norm_text(summary) != expect:
         return None, ("--acceptance-file 输入摘要与本批验收文本不一致，拒绝 PASS"
                       "（陈旧/错批产物）")

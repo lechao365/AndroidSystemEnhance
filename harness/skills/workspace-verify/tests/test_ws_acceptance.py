@@ -179,8 +179,9 @@ class TestParseAcceptance(unittest.TestCase):
                          "2026-09-01 01:25:10.000")
 
     def test_logfresh_miss_in_window_fails(self):
-        # 窗内未命中 → fail（daemon 卡死而进程存活时，90s 窗内无新心跳；
-        # logcat -t 时间窗已把旧心跳过滤出窗，窗内输出不含锚点）
+        # 窗内未命中 → 轮询重取（每 5s）到 window 秒超时判红（daemon 卡死而
+        # 进程存活时，90s 窗内无新心跳；logcat -t 时间窗已把旧心跳过滤出窗，
+        # 窗内输出不含锚点）
         fake = mock.Mock()
         fake.stdout = "09-01 01:26:00 其他进程日志行\n"
 
@@ -191,12 +192,43 @@ class TestParseAcceptance(unittest.TestCase):
                 return "+0000", 0
             return "", 1
 
-        with mock.patch.object(wa.subprocess, "run", return_value=fake):
+        mono = mock.patch("ws_acceptance.time.monotonic",
+                          side_effect=[0] + [5 * i for i in range(1, 21)])
+        sleep = mock.patch("ws_acceptance.time.sleep")
+        with mono, sleep, mock.patch.object(wa.subprocess, "run",
+                                            return_value=fake):
             status, detail = wa.execute_tag(
                 'logfresh:"heartbeat, loop=|90"',
                 adb_exec=adb_exec, adb_logcat=None)
         self.assertEqual(status, "fail")
         self.assertIn("未命中", detail)
+
+    def test_logfresh_recovers_after_poll(self):
+        # 方向 8：首拉窗落在心跳恢复前/旧时钟域（reboot 后 daemon 恢复或
+        # clock_sync 时钟域切换）未命中 → 每 5s 重取，心跳出现后命中 pass；
+        # 时效语义保持（最终命中须在当前 window 滑动窗内）
+        def adb_exec(cmd):
+            if cmd == "date +%s":
+                return "1788226000", 0
+            if cmd == "date +%z":
+                return "+0000", 0
+            return "", 1
+
+        fake_miss = mock.Mock()
+        fake_miss.stdout = "09-01 01:25:40 其他进程日志行\n"
+        fake_hit = mock.Mock()
+        fake_hit.stdout = "09-01 01:26:30 heartbeat, loop=5\n"
+        mono = mock.patch("ws_acceptance.time.monotonic",
+                          side_effect=[0] + [5 * i for i in range(1, 21)])
+        sleep = mock.patch("ws_acceptance.time.sleep")
+        with mono, sleep, mock.patch.object(
+                wa.subprocess, "run",
+                side_effect=[fake_miss, fake_hit]):
+            status, detail = wa.execute_tag(
+                'logfresh:"heartbeat, loop=|90"',
+                adb_exec=adb_exec, adb_logcat=None)
+        self.assertEqual(status, "pass")
+        self.assertIn("命中", detail)
 
     def test_logfresh_syntax_error_fails(self):
         # 语法错误（非 锚点|秒数 两段）→ fail
@@ -1300,6 +1332,37 @@ class TestRunIdLifecycle(unittest.TestCase):
         # 方向 4：产物注明身份标识只认基镜像
         self.assertIn("只认基镜像", data["identity_note"])
         self.assertIn("增量推送不改变", data["identity_note"])
+
+    def test_cdp_run_id_injected_used(self):
+        # 方向 8：CDP_RUN_ID 注入时产物 run_id 用注入值——push/unit_test/
+        # acceptance 三产物同轮同 run_id（ws_report 一致核验依赖此）；
+        # hostcmd 基线路径随之唯一，轮次隔离由编排层每轮换 CDP_RUN_ID 维持
+        out_json = Path(tempfile.mkdtemp()) / "acc.json"
+
+        def fake_run_acceptance(acc, adb_exec, adb_logcat, ensure_boot=False,
+                                on_item=None, host_env=None):
+            return "pass", [{"tag": "boot", "status": "pass", "detail": "ok"}]
+
+        with mock.patch.dict("os.environ", {"CDP_RUN_ID": "shared-run-001"}), \
+                mock.patch.object(wa, "ac") as m_ac:
+            m_ac.ensure_connected.side_effect = ["ep", "ep"]
+            m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+            m_ac.parse_exec_output.return_value = ("1", 0)
+            m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
+            m_sub = mock.Mock()
+            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
+            m_sub.TimeoutExpired = subprocess.TimeoutExpired
+            with mock.patch.object(wa.subprocess, "run", m_sub):
+                with mock.patch.object(wa, "run_acceptance",
+                                       side_effect=fake_run_acceptance):
+                    with mock.patch.object(wa, "_device_serial",
+                                           return_value=("SN1",
+                                                         "getprop ro.serialno")):
+                        rc = wa.main(["run", "--acceptance", "boot",
+                                      "--result-file", str(out_json)])
+        self.assertEqual(rc, 0)
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertEqual(data["run_id"], "shared-run-001")
 
     def test_device_serial_all_empty_red(self):
         # 方向 3：产物写入路径上序列号三者皆空 → 判红返 1（不写产物）

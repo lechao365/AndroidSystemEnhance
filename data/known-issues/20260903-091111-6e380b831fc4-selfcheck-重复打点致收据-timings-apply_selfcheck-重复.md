@@ -6,9 +6,9 @@
 - severity: P1
 - blocking: False
 - blocking_reason: 
-- status: open
+- status: fixed
 - task: ws-report-timings-dedup
-- resolved_in: 
+- resolved_in: 9faa5632e2e8
 
 ## body
 

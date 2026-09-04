@@ -298,7 +298,12 @@ def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
         # 锚点即判红——log:/logfield 取末行不看时效，daemon 卡死而进程存活时
         # 旧心跳仍判绿（假绿精确条件：进程活着但采集链路死了）。
         # 时间窗文本按设备时区格式化后直接透传 build_logcat_cmd（-t <since>），
-        # 不解析时间戳（复用既有命令构造，PIT-5 同源防护）
+        # 不解析时间戳（复用既有命令构造，PIT-5 同源防护）。
+        # 方向 8：未命中每 5s 重取（重新取设备时间算滑动窗），到 window 秒
+        # 超时判红——reboot 后 daemon 恢复心跳/clock_sync 时钟域切换（PIT-5
+        # 回拨后校准）时，首拉窗可能落在心跳恢复前或旧时钟域，等一个心跳
+        # 周期即命中，避免 -sv 重启后首轮验收必判红；超时仍按 window 保证
+        # 时效语义（最终判红 = window 内确无锚点心跳，非等待放大判据）。
         parts = payload.split("|")
         if len(parts) != 2:
             return "fail", f"logfresh 语法错误（须 锚点|秒数）: {payload!r}"
@@ -307,33 +312,39 @@ def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
             window = int(window_s)
         except ValueError:
             return "fail", f"logfresh 秒数非数字: {window_s!r}"
-        body, code = adb_exec("date +%s")
-        if code != 0 or not body.strip().isdigit():
-            return "fail", "logfresh: 无法读取设备时钟（date +%s）"
-        since_epoch = int(body.strip()) - window
-        out, code = adb_exec("date +%z")
-        if code != 0:
-            return "fail", "logfresh: 无法读取设备时区（date +%z）"
-        m = re.match(r"([+-])(\d{2})(\d{2})", out.strip())
-        if not m:
-            return "fail", f"logfresh: 设备时区格式非法 {out.strip()!r}"
-        sign = 1 if m.group(1) == "+" else -1
-        offset = sign * (int(m.group(2)) * 3600 + int(m.group(3)) * 60)
-        tz = timezone(timedelta(seconds=offset))
-        dt = datetime.fromtimestamp(since_epoch, tz=tz)
-        since_text = dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        try:
-            r = subprocess.run(ac.build_logcat_cmd(None, 5000, since=since_text),
-                               capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", timeout=60)
-            out = r.stdout
-        except subprocess.TimeoutExpired:
-            return "fail", "logfresh: logcat 执行超时"
-        hit = anchor in out
-        return ("pass" if hit else "fail",
-                f"logfresh: 设备时钟回退 {window}s（窗起点 {since_text}），"
-                f"窗内{'命中' if hit else '未命中'} 锚点 {anchor!r}"
-                f"（取回 {len(out)} 字符）")
+        deadline = time.monotonic() + window
+        while True:
+            body, code = adb_exec("date +%s")
+            if code != 0 or not body.strip().isdigit():
+                return "fail", "logfresh: 无法读取设备时钟（date +%s）"
+            since_epoch = int(body.strip()) - window
+            out, code = adb_exec("date +%z")
+            if code != 0:
+                return "fail", "logfresh: 无法读取设备时区（date +%z）"
+            m = re.match(r"([+-])(\d{2})(\d{2})", out.strip())
+            if not m:
+                return "fail", f"logfresh: 设备时区格式非法 {out.strip()!r}"
+            sign = 1 if m.group(1) == "+" else -1
+            offset = sign * (int(m.group(2)) * 3600 + int(m.group(3)) * 60)
+            tz = timezone(timedelta(seconds=offset))
+            dt = datetime.fromtimestamp(since_epoch, tz=tz)
+            since_text = dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            try:
+                r = subprocess.run(ac.build_logcat_cmd(None, 5000, since=since_text),
+                                   capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", timeout=60)
+                out = r.stdout
+            except subprocess.TimeoutExpired:
+                return "fail", "logfresh: logcat 执行超时"
+            if anchor in out:
+                return ("pass",
+                        f"logfresh: 设备时钟回退 {window}s（窗起点 {since_text}），"
+                        f"窗内命中 锚点 {anchor!r}（取回 {len(out)} 字符）")
+            if time.monotonic() >= deadline:
+                return ("fail",
+                        f"logfresh: 设备时钟回退 {window}s（窗起点 {since_text}），"
+                        f"窗内未命中 锚点 {anchor!r}（取回 {len(out)} 字符）")
+            time.sleep(5)
     if kind == "prop":
         k, _, v = payload.partition("=")
         body, code = adb_exec(f"getprop {shlex.quote(k)}")
@@ -861,7 +872,11 @@ def main(argv=None):
 
     # 方向 1：run_id 提前到执行前生成，沿用到 hostcmd 环境与产物（不再收尾处
     # 新生成，保证 hostcmd 基线路径与产物 run_id 同源）
-    run_id = uuid.uuid4().hex
+    # 方向 8：CDP_RUN_ID 环境变量优先（编排层每轮注入唯一值），缺省回退
+    # uuid4——push/unit_test/acceptance 三产物须同轮同 run_id（ws_report
+    # 按 run_id 一致核验同批产物，各自 uuid4 必失配，-sv 真机全链路首次
+    # 暴露）；轮次隔离由编排层每轮换新 CDP_RUN_ID 维持
+    run_id = os.environ.get("CDP_RUN_ID") or uuid.uuid4().hex
     host_env = _hostcmd_env(run_id)
     t_start = time.monotonic()
     # 生命周期编排（方向 1/2/4）：--case 单标签且资产为 dict 形态时启用

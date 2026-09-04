@@ -144,6 +144,28 @@ class TestRunOne(unittest.TestCase):
         self.assertIn("PASS", detail)
         self.assertIn("42 tests", detail)
 
+    def test_pass_stats_failed_zero(self):
+        # 方向 8：成功路径（rc=0 且无 FAILED 行）failed 显式落 0——gtest
+        # 全过输出无「[  FAILED  ] N tests」汇总行，None 会被 ws_report
+        # 误判非全绿（-sv 真机单测产物首次暴露）
+        with mock.patch.object(wu, "adb_run", side_effect=[
+            ("", 0),  # push
+            ("", 0),  # chmod
+            ("[==========] 42 tests from 2 test suites ran. (100 ms total)\n"
+             "[  PASSED  ] 42 tests.\n", 0),
+        ]):
+            with tempfile.TemporaryDirectory() as d:
+                out = Path(d) / "out"
+                p = out / "target" / "product" / "rpi5" / "data" / "nativetest64" / "t1" / "t1"
+                p.parent.mkdir(parents=True)
+                p.write_text("x")
+                ok, detail, stats = wu.run_one(
+                    "ep", str(out), "rpi5", "t1", return_stats=True)
+        self.assertTrue(ok)
+        self.assertEqual(stats["rc"], 0)
+        self.assertEqual(stats["tests"], 42)
+        self.assertEqual(stats["failed"], 0)
+
     def test_fail_returns_not_ok_with_output(self):
         with mock.patch.object(wu, "adb_run", side_effect=[
             ("", 0),  # push
@@ -322,6 +344,22 @@ class TestMain(unittest.TestCase):
         self.assertEqual(data["targets"][0]["rc"], 0)
         self.assertEqual(data["targets"][0]["tests"], 42)
         self.assertEqual(data["targets"][0]["failed"], 0)
+
+    def test_cdp_run_id_injected_used(self):
+        # 方向 8：CDP_RUN_ID 注入时产物 run_id 用注入值（与 push/acceptance
+        # 三产物同轮同 run_id，ws_report 一致核验依赖此）
+        out_json = Path(self._tmp.name) / "unit-tests.json"
+        with mock.patch.dict("os.environ", {"CDP_RUN_ID": "shared-run-001"}), \
+                mock.patch.object(wu.ac, "ensure_connected", return_value="ep"), \
+                mock.patch.object(wu, "ensure_user", return_value=(True, "")), \
+                mock.patch.object(wu, "run_one", return_value=(
+                    True, "t1: PASS", {"name": "t1", "rc": 0,
+                                       "tests": 42, "failed": 0})):
+            rc = wu.main(["--test-targets", "t1",
+                          "--result-file", str(out_json)])
+        self.assertEqual(rc, 0)
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertEqual(data["run_id"], "shared-run-001")
 
     def test_result_file_reports_failed_target(self):
         # 方向 2：ensure_user 失败（无 run_one 统计）也进产物，rc=1

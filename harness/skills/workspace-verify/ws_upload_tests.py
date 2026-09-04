@@ -205,8 +205,13 @@ def _run_one_stats(ep, out, product, name, verbose=False, aosp_root=None,
         detail = f"{name}: PASS（{summary}）"
         if verbose:
             detail += f"\n{out_text}"
+        # 成功路径 failed 显式落 0：gtest 全过时输出无
+        # 「[  FAILED  ] N tests」汇总行，failed_count 保持 None——
+        # ws_report 按 failed==0 判全绿，None 会误判非全绿（-sv 真机
+        # 单测产物首次暴露）
         return True, detail, {"name": name, "rc": 0, "tests": tests,
-                              "failed": failed_count}
+                              "failed": 0 if failed_count is None
+                              else failed_count}
     detail = f"{name}: FAIL rc={rc}{('，有 FAILED 用例') if failed else ''}"
     detail += f"\n--- 输出摘录 ---\n{out_text[:2000]}"
     return False, detail, {"name": name, "rc": 1, "tests": tests,
@@ -326,7 +331,7 @@ def main(argv=None):
     # 原子写防半截文件被当证据
     if args.result_file:
         _atomic_write_json(args.result_file, {
-            "run_id": uuid.uuid4().hex,
+            "run_id": os.environ.get("CDP_RUN_ID") or uuid.uuid4().hex,
             "targets": target_stats,
         })
     print(f"\n设备侧单测{'全部通过' if all_ok else '存在失败'}：{len(targets)} 目标")

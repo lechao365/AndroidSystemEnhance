@@ -345,6 +345,16 @@ class TestMainOrchestration(unittest.TestCase):
             self.assertTrue(it["source"])
         self.assertTrue(data["run_id"])
 
+    def test_cdp_run_id_injected_used(self):
+        # 方向 8：CDP_RUN_ID 注入时产物 run_id 用注入值——push/unit_test/
+        # acceptance 三产物须同轮同 run_id（ws_report 按 run_id 一致核验
+        # 同批产物，各自 uuid4 必失配），缺省才回退 uuid4
+        with mock.patch.dict("os.environ", {"CDP_RUN_ID": "shared-run-001"}):
+            rc, _ = self._run()
+        self.assertEqual(rc, 0)
+        data = json.loads(self.result.read_text(encoding="utf-8"))
+        self.assertEqual(data["run_id"], "shared-run-001")
+
     def test_verify_push_marked_after_all_pushes_direction5(self):
         # 方向 5：verify_push 打点在实际推送循环完成后——mark 事件晚于
         # 全部 push 事件，且先于生效门禁重启
