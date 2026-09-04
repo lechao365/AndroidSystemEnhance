@@ -39,6 +39,7 @@ from cdp_parse import (SOFT_ERRORS, batch_id_from_text, parse_batch,  # noqa: E4
                        validate_batch)
 from cdp_paths import log_apply_dir  # noqa: E402
 from cdp_receipt import Receipt, append_trend, write_receipt  # noqa: E402
+from cdp_timing import _base_seg_name  # noqa: E402
 from commit_scope import format_scope, porcelain_to_name_status  # noqa: E402
 from content_tree import content_tree  # noqa: E402
 from paths import env_path  # noqa: E402
@@ -53,6 +54,45 @@ _VERIFY_PREFIX_SEGMENTS = frozenset((
     "verify_sync", "verify_build", "verify_push",
     "verify_unit_test", "verify_acceptance",
 ))
+
+# 阶段汇总归类（方向 1 增）：编辑阶段细分段 + gap 段（自报段之外的未打点
+# 活动即编辑与返工）归入 edit；自检自报段归 selfcheck；verify_* 五段归
+# verify；其余（precheck/report/finish/未知段）归 other。
+_EDIT_SEGMENTS = frozenset((
+    "edit", "edit_validate", "gen_manifest", "edit_plan", "edit_retry",
+))
+
+
+def _phase_summary(segments):
+    """由段表折叠阶段合计：{edit, selfcheck, verify, other} 四类秒数。
+
+    gap_before_* 派生段一律归入 edit（当前仅自报段产生 gap，而自报段之外
+    的未打点活动即编辑与返工；不折叠则 edit 段仅记短自报值、真实编辑耗时
+    散在多个 gap 段里，链路提速收益无从测量）。段名剥 #n 序号后归类
+    （apply_selfcheck#2 仍计入 selfcheck），未知段计入 other 不丢弃。
+    """
+    totals = {"edit": 0.0, "selfcheck": 0.0, "verify": 0.0, "other": 0.0}
+    for s in segments:
+        if not isinstance(s, dict) or not s.get("name"):
+            continue
+        name = s["name"]
+        try:
+            elapsed = float(s.get("elapsed_s", 0))
+        except (TypeError, ValueError):
+            elapsed = 0.0
+        if name.startswith("gap_before_"):
+            totals["edit"] += elapsed
+            continue
+        base = _base_seg_name(name)
+        if base in _EDIT_SEGMENTS:
+            totals["edit"] += elapsed
+        elif base == "apply_selfcheck":
+            totals["selfcheck"] += elapsed
+        elif base in _VERIFY_PREFIX_SEGMENTS:
+            totals["verify"] += elapsed
+        else:
+            totals["other"] += elapsed
+    return {k: round(v, 3) for k, v in totals.items()}
 
 
 def _mark_report(timings_file, batch_id):
@@ -155,6 +195,10 @@ def _resolve_timings(timings_file, batch_id, verify_mode="board"):
             "segments": segments,
             "missing": missing,
             "repeat_counts": repeat_counts,
+            # 阶段汇总（方向 1 增）：折叠 edit/selfcheck/verify/other 四类
+            # 合计秒数，gap 段归 edit——emit 一眼看出各阶段真实耗时，不再
+            # 被多个 gap 段稀释/掩盖编辑实耗（上批 edit 记 25s 实耗 857s）。
+            "phase_summary": _phase_summary(segments),
         }
         elapsed = None
         if isinstance(wall_start, (int, float)) and isinstance(wall_end, (int, float)):

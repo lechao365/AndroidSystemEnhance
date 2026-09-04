@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib" / "python"))
 import cdp_issue
 import cdp_paths
@@ -328,6 +330,9 @@ class TestIssue(unittest.TestCase):
 
 class TestBackfilledSeverity(unittest.TestCase):
     """回填后仓库真实 data/known-issues 全部条目 validate 无红（防堵 promote 门禁）。"""
+
+    # 需真实仓：CDP_PROJECT_ROOT 回落仓库真实 data/known-issues 校验（放行隔离）
+    pytestmark = pytest.mark.real_repo("校验仓库真实 known-issues 数据")
 
     def test_all_repo_issues_pass_validation(self):
         # 不设 CDP_PROJECT_ROOT：data_known_issues_dir() 回落仓库真实路径

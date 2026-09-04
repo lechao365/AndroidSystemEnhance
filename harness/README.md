@@ -81,6 +81,7 @@ export LC_HARNESS_WIN_BASH=1
 | `PATCHS_DIR` | code 归档根（相对项目根） | — |
 | `KERNEL_WS` | kernel workspace 根 | 环境变量 `KERNEL_WS` |
 | `AOSP_WS` | AOSP workspace 根 | 环境变量 `AOSP_WS` |
+| `LC_VERIFY_EXPECT_SERIAL` | 设备身份期望序列号（ws_adb_connect 连上即核对 `ro.serialno`，不符即拒；未设置跳过校验） | 环境变量 `LC_VERIFY_EXPECT_SERIAL` |
 
 ```bash
 export KERNEL_WS=~/workspace/rpi5-kernel-build/common

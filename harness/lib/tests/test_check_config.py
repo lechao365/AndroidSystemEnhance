@@ -34,6 +34,7 @@ PATHS_OK = (
     'PATCHS_DIR="code/rpi5"\n'
     'KERNEL_WS="${KERNEL_WS:-/home/u/ws/kernel}"\n'
     'AOSP_WS="${AOSP_WS:-/home/u/ws/aosp}"\n'
+    'LC_VERIFY_EXPECT_SERIAL="${LC_VERIFY_EXPECT_SERIAL:-}"\n'
 )
 
 BASELINE_NO_PATHS = "baselines: []\n"

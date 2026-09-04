@@ -22,6 +22,12 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+# 设备身份期望序列号经 paths.conf 配置位（LC_VERIFY_EXPECT_SERIAL）读取，
+# 支持同名环境变量覆盖；env_path 从 harness/lib 导入（与 ws_report 同源）
+sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
+from paths import env_path  # noqa: E402
 
 _EXEC_TAG_RE = re.compile(r"__LE_EXIT_CODE__=(\d+)\s*$", re.MULTILINE)
 
@@ -134,8 +140,12 @@ def _verify_identity(endpoint):
 
     返回 (ok, detail)。身份不符即拒（防连错设备/误连旧机）——设备序列号只认
     基镜像烧录固化值，增量推送不改变；期望未设置时跳过校验（返回 ok）。
+    期望来源（方向 1 接线）：同名环境变量优先（测试/临时覆盖），回落
+    paths.conf 配置位（LC_VERIFY_EXPECT_SERIAL，支持环境变量覆盖），
+    两者皆空即视为未设置跳过校验。
     """
-    expect = os.environ.get("LC_VERIFY_EXPECT_SERIAL", "").strip()
+    expect = (os.environ.get("LC_VERIFY_EXPECT_SERIAL")
+              or env_path("LC_VERIFY_EXPECT_SERIAL", "")).strip()
     if not expect:
         return True, ""
     out, rc = run_adb(["-s", endpoint, "shell", "getprop ro.serialno"], timeout=15)

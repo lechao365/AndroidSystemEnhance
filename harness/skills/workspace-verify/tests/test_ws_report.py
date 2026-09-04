@@ -1519,5 +1519,144 @@ class TestWsReport(unittest.TestCase):
         self.assertIn("- timings: ", content)
 
 
+class TestPhaseSummary(unittest.TestCase):
+    """阶段汇总（方向 1）：timings 折叠 edit/selfcheck/verify/other 四类。
+
+    gap_before_* 派生段一律归入 edit（自报段之外的未打点活动即编辑与返工）；
+    段名剥 #n 序号后归类（apply_selfcheck#2 仍计 selfcheck）；未知段入 other。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+        self._dir = Path(self._tmp.name) / "data" / "verify-results"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        os.environ.pop("CDP_PROJECT_ROOT")
+
+    def _write(self, content, suffix=".txt"):
+        f = tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False,
+                                        encoding="utf-8")
+        f.write(content)
+        f.close()
+        self.addCleanup(Path(f.name).unlink)
+        return f.name
+
+    def _ph(self, segments):
+        return ws_report._phase_summary(segments)
+
+    def test_gap_segments_fold_into_edit(self):
+        # gap 归 edit（关键：自报段之外的未打点活动即编辑与返工）
+        segs = [
+            {"name": "gap_before_edit", "elapsed_s": 857.0},
+            {"name": "edit", "elapsed_s": 25.0},
+            {"name": "gap_before_apply_selfcheck", "elapsed_s": 5.0},
+        ]
+        out = self._ph(segs)
+        self.assertEqual(out["edit"], 857.0 + 25.0 + 5.0)
+        self.assertEqual(out["selfcheck"], 0.0)
+
+    def test_edit_subsegments_and_rework_count(self):
+        # 编辑细分段（edit_validate/gen_manifest/edit_plan/edit_retry）全归 edit
+        segs = [
+            {"name": "edit_plan", "elapsed_s": 3.0},
+            {"name": "edit", "elapsed_s": 20.0},
+            {"name": "edit_validate", "elapsed_s": 2.0},
+            {"name": "edit_retry", "elapsed_s": 9.0},
+            {"name": "gen_manifest", "elapsed_s": 1.0},
+        ]
+        self.assertEqual(self._ph(segs)["edit"], 35.0)
+
+    def test_selfcheck_with_ordinal_suffix(self):
+        # 返工轮次段剥 #n 序号后仍归 selfcheck
+        segs = [
+            {"name": "apply_selfcheck", "elapsed_s": 11.0},
+            {"name": "apply_selfcheck#2", "elapsed_s": 13.0},
+        ]
+        out = self._ph(segs)
+        self.assertEqual(out["selfcheck"], 24.0)
+
+    def test_verify_prefix_all_verified(self):
+        segs = [
+            {"name": "verify_sync", "elapsed_s": 1.0},
+            {"name": "verify_build", "elapsed_s": 2.0},
+            {"name": "verify_push", "elapsed_s": 3.0},
+            {"name": "verify_unit_test", "elapsed_s": 4.0},
+            {"name": "verify_acceptance", "elapsed_s": 5.0},
+        ]
+        self.assertEqual(self._ph(segs)["verify"], 15.0)
+
+    def test_other_includes_precheck_report_finish(self):
+        segs = [
+            {"name": "precheck", "elapsed_s": 1.0},
+            {"name": "report", "elapsed_s": 2.0},
+            {"name": "finish", "elapsed_s": 3.0},
+        ]
+        out = self._ph(segs)
+        self.assertEqual(out["other"], 6.0)
+        self.assertEqual(out["edit"], 0.0)
+        self.assertEqual(out["verify"], 0.0)
+
+    def test_unknown_segment_kept_in_other(self):
+        # 未知段（表外名）计入 other 不丢弃（耗时原样可归因）
+        segs = [{"name": "mystery", "elapsed_s": 7.5}]
+        self.assertEqual(self._ph(segs)["other"], 7.5)
+
+    def test_invalid_elapsed_ignored(self):
+        # elapsed_s 非法（非数值）计 0 不崩；非 dict 项忽略不计数
+        segs = [
+            {"name": "edit", "elapsed_s": "oops"},
+            {"name": "apply_selfcheck"},
+            ["not_a_dict", 1.0],
+        ]
+        out = self._ph(segs)
+        self.assertEqual(out["edit"], 0.0)
+        self.assertEqual(out["selfcheck"], 0.0)
+        self.assertEqual(out["other"], 0.0)
+
+    def test_phase_summary_lands_in_receipt_timings(self):
+        # 集成：ws_report 落盘收据的 timings 字段含 phase_summary（阶段汇总
+        # 随收据可见，emit 从收据直读各阶段耗时）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        timings = json.dumps({
+            "batch_id": "abc123def456",
+            "start_wall": 1000.0,
+            "wall_end": 1030.0,
+            "marks": [{"name": "precheck", "wall": 1001.0},
+                      {"name": "edit", "wall": 1005.0},
+                      {"name": "edit_validate", "wall": 1009.0},
+                      {"name": "verify_sync", "wall": 1011.0},
+                      {"name": "verify_build", "wall": 1019.0},
+                      {"name": "apply_selfcheck", "wall": 1024.0,
+                       "dur_s": 3.0},
+                      {"name": "report", "wall": 1029.0}],
+        })
+        tfile = self._write(timings, ".json")
+        with mock.patch.object(ws_report, "content_tree", return_value="a" * 40), \
+                redirect_stdout(io.StringIO()):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--timings-file", tfile])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        m = re.search(r"- timings: (\{.*\})", details[0].read_text(encoding="utf-8"))
+        self.assertIsNotNone(m, "收据应含 timings 字段")
+        t = json.loads(m.group(1))
+        summary = t["phase_summary"]
+        # edit = edit(4) + edit_validate(4) + gap_before_apply_selfcheck(2)
+        self.assertEqual(summary["edit"], 10.0)
+        self.assertEqual(summary["selfcheck"], 3.0)   # apply_selfcheck dur_s
+        self.assertEqual(summary["verify"], 10.0)     # verify_sync(2)+verify_build(8)
+        self.assertGreater(summary["other"], 0.0)     # precheck+report+finish
+
+    def test_rounding(self):
+        segs = [{"name": "edit", "elapsed_s": 1.23456}]
+        self.assertEqual(self._ph(segs)["edit"], 1.235)
+
+
 if __name__ == "__main__":
     unittest.main()

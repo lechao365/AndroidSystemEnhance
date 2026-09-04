@@ -33,8 +33,9 @@ import yaml
 ROOT = Path(os.environ.get("CHECK_CONFIG_ROOT",
                            Path(__file__).resolve().parents[2]))
 
-# paths.conf 已知键（AGENTS.md：路径单一事实源，paths.py 按此三键读取）
-_PATHS_KEYS = ("PATCHS_DIR", "KERNEL_WS", "AOSP_WS")
+# paths.conf 已知键（AGENTS.md：路径单一事实源，paths.py 按此读取；
+# LC_VERIFY_EXPECT_SERIAL 为设备身份期望序列号配置位，方向 1 接入）
+_PATHS_KEYS = ("PATCHS_DIR", "KERNEL_WS", "AOSP_WS", "LC_VERIFY_EXPECT_SERIAL")
 # paths.conf 值默认值展开：${VAR:-default} → default（环境覆盖不影响
 # 文件一致性的判定基准，统一按文件面比较）
 _VAR_DEFAULT_RE = re.compile(r"\$\{\w+:-(.*?)\}")

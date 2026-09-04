@@ -8,6 +8,7 @@ import re
 import unittest
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -16,6 +17,9 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "selfcheck.yml"
 
 @unittest.skipUnless(WORKFLOW.exists(), "workflow 文件不存在（CI 未随仓检出）")
 class TestSelfcheckWorkflow(unittest.TestCase):
+    # 需真实仓：读仓库真实 .github/workflows/selfcheck.yml（放行隔离）
+    pytestmark = pytest.mark.real_repo("校验仓库真实 CI workflow")
+
     def setUp(self):
         self.raw = WORKFLOW.read_text(encoding="utf-8")
         self.doc = yaml.safe_load(self.raw)
