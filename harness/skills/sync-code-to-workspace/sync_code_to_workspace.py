@@ -882,6 +882,10 @@ def _verify_after_apply(orig_plan: str) -> bool:
 # Main
 # ═══════════════════════════════════════════════════════════════════════
 
+# dur_s 自报基准（方向 1）：模块级取值——import 成本归入脚本自报时长，
+# gap_before_verify_sync 收窄为纯 AI 编排活动（边界按进程边界切分）
+_T0 = time.monotonic()
+
 
 def _mark_stage(name, dur_s=None):
     """验证阶段自动打点：cdp_timing.py mark（batch 识别：CDP_BATCH_ID 环境变量
@@ -910,8 +914,9 @@ def _mark_stage(name, dur_s=None):
 
 
 def main():
-    # 方向 1：脚本自报实测时长基准（verify_sync 打点传 --dur-s）
-    _t0 = time.monotonic()
+    # 方向 1：脚本自报实测时长基准（verify_sync 打点传 --dur-s；基准在
+    # 模块级 _T0 取值，import 成本归脚本段）
+    _t0 = _T0
     harness_init("sync_code_to_workspace")
 
     parser = argparse.ArgumentParser(

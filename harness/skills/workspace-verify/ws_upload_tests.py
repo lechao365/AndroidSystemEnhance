@@ -35,6 +35,10 @@ import ws_adb_connect as ac  # noqa: E402
 # harness/config/verify-cases.yaml：test_targets 源（与 ws_acceptance 同路径解析）
 _CASES_PATH = Path(__file__).resolve().parents[2] / "config" / "verify-cases.yaml"
 
+# dur_s 自报基准（方向 1）：模块级取值——import 成本归入脚本自报时长，
+# gap 收窄为纯 AI 编排活动（边界按进程边界切分）
+_T0 = time.monotonic()
+
 
 def load_test_targets(cases_path):
     """从 verify-cases.yaml modules 段收集全部 test_targets（保持模块顺序）。
@@ -331,8 +335,9 @@ def main(argv=None):
                          "输出目录占用，不可复用该名）")
     args = ap.parse_args(argv)
 
-    # 方向 1：脚本自报实测时长基准（verify_unit_test 打点传 --dur-s）
-    _t0 = time.monotonic()
+    # 方向 1：脚本自报实测时长基准（verify_unit_test 打点传 --dur-s；基准在
+    # 模块级 _T0 取值，import 成本归脚本段）
+    _t0 = _T0
 
     if args.test_targets:
         targets = args.test_targets

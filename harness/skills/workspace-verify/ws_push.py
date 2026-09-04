@@ -57,6 +57,11 @@ _CONTEXT_RE = re.compile(r"^u:object_r:\S+:s0$")
 # 每次自检多花 15~28s 且随 xdist 分发波动
 _sleep = time.sleep
 
+# dur_s 自报基准（方向 1）：模块级取值——解释器启动后的 import 成本一并
+# 归入脚本自报时长，gap_before_verify_push 收窄为纯 AI 编排活动（编排与
+# 脚本成本的边界按进程边界切分）
+_T0 = time.monotonic()
+
 
 def load_push_map(cases_path, modules=None):
     """从 verify-cases.yaml modules 段收集 push 映射（保持模块顺序）。
@@ -323,8 +328,9 @@ def main(argv=None):
                          "输出目录占用，不可复用该名）")
     args = ap.parse_args(argv)
 
-    # 方向 1：脚本自报实测时长基准（verify_push 打点传 --dur-s）
-    _t0 = time.monotonic()
+    # 方向 1：脚本自报实测时长基准（verify_push 打点传 --dur-s；基准在
+    # 模块级 _T0 取值，import 成本归脚本段）
+    _t0 = _T0
 
     try:
         expect_ctx = _parse_expect_context(args.expect_context)
