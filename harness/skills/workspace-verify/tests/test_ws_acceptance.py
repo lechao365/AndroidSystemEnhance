@@ -849,7 +849,9 @@ class TestLogcatCacheAndTiming(unittest.TestCase):
         self.assertIn("log:KEY", data["input_summary"])
         self.assertIn("device_serial", data)
         self.assertIn("device_fingerprint", data)
-        self.assertLess(data["start_monotonic"], data["end_monotonic"])
+        # mark 进程内直调后验收可毫秒级完成（WSL2 单调钟 ~1ms 分辨率下
+        # start == end 合法），只断言时序不自相矛盾
+        self.assertLessEqual(data["start_monotonic"], data["end_monotonic"])
         self.assertIn("overall", data)
         self.assertIn("items", data)
 
