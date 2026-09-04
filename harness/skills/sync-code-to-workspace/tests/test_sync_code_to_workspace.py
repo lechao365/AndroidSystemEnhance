@@ -350,5 +350,32 @@ class TestMainCheckOnly(unittest.TestCase):
         self.assertEqual(self._run_main(), 3)
 
 
+class TestMarkStageDurS(unittest.TestCase):
+    """方向 1：_mark_stage 传 --dur-s 脚本自报实测秒数（段耗时取 dur_s，
+    相邻差额余量落 gap_before_<name>，脚本启动前 AI 活动不再污染段口径）。"""
+
+    def _capture(self, dur_s=None):
+        captured = {}
+
+        def fake_run(args, **kw):
+            captured["args"] = args
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(sw.subprocess, "run", side_effect=fake_run), \
+                mock.patch.dict("os.environ", {"CDP_BATCH_ID": "abc"},
+                                clear=True):
+            sw._mark_stage("verify_sync", dur_s=dur_s)
+        return captured["args"]
+
+    def test_dur_s_appended_as_flag(self):
+        args = self._capture(dur_s=13.9)
+        self.assertIn("--dur-s", args)
+        self.assertEqual(args[args.index("--dur-s") + 1], "13.9")
+
+    def test_no_dur_s_omits_flag(self):
+        args = self._capture(dur_s=None)
+        self.assertNotIn("--dur-s", args)
+
+
 if __name__ == "__main__":
     unittest.main()

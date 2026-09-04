@@ -10,7 +10,7 @@
   sync_code_to_workspace.py --auto                            # 单进程闭环（生成→全选→执行→校验）
 """
 
-import sys, os, subprocess, shutil, tempfile, argparse, atexit
+import sys, os, subprocess, shutil, tempfile, argparse, atexit, time
 from pathlib import Path
 from datetime import datetime
 from functools import lru_cache
@@ -883,16 +883,24 @@ def _verify_after_apply(orig_plan: str) -> bool:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _mark_stage(name):
+def _mark_stage(name, dur_s=None):
     """验证阶段自动打点：cdp_timing.py mark（batch 识别：CDP_BATCH_ID 环境变量
-    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。"""
+    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。
+
+    dur_s（方向 1）：调用方自测脚本内实测秒数，mark 段耗时取 dur_s，相邻差额
+    减去 dur_s 后的余量落 gap_before_<name>——脚本启动前的 AI 活动时间不再
+    污染段口径（上批 sync 段记 71.2s 而脚本自报 13.9s，段口径不可信则后续
+    提速无从测量）。
+    """
     timing = (Path(__file__).resolve().parents[1] / "cross-device"
               / "lib" / "python" / "cdp_timing.py")
     env = dict(os.environ)
     env["PYTHONPATH"] = str(timing.parent) + os.pathsep + env.get("PYTHONPATH", "")
+    args = [sys.executable, str(timing), "mark", "--name", name]
+    if dur_s is not None:
+        args += ["--dur-s", str(round(float(dur_s), 3))]
     try:
-        r = subprocess.run([sys.executable, str(timing), "mark", "--name", name],
-                           capture_output=True, text=True, encoding="utf-8",
+        r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=10, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         log_warn(f"打点 {name} 失败（不阻断）: {e}")
@@ -902,6 +910,8 @@ def _mark_stage(name):
 
 
 def main():
+    # 方向 1：脚本自报实测时长基准（verify_sync 打点传 --dur-s）
+    _t0 = time.monotonic()
     harness_init("sync_code_to_workspace")
 
     parser = argparse.ArgumentParser(
@@ -951,7 +961,7 @@ def main():
                       if l and l[0] in "+-"]
         if not plan_lines:
             log_info("auto: plan 为空，code 与 workspace 一致，无需同步")
-            _mark_stage("verify_sync")
+            _mark_stage("verify_sync", dur_s=time.monotonic() - _t0)
             harness_exit(0)
         step_begin("阶段 2: 执行同步计划")
         if not _apply_plan(plan_file):
@@ -962,8 +972,9 @@ def main():
         step_begin("阶段 3: 落盘校验")
         ok = _verify_after_apply(plan_file)
         step_end(ok)
-        # 脚本自动打点同步段（--auto 闭环完成即记；失败不阻断口径）
-        _mark_stage("verify_sync")
+        # 脚本自动打点同步段（--auto 闭环完成即记；失败不阻断口径）；
+        # 方向 1：传 --dur-s 脚本自报实测秒数（未归属时间落 gap_before_）
+        _mark_stage("verify_sync", dur_s=time.monotonic() - _t0)
         harness_exit(0 if ok else 1)
 
     mode = "apply" if args.apply else ("check-only" if args.check_only else "plan")

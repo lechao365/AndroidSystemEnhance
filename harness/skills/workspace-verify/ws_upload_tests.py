@@ -248,16 +248,24 @@ def _default_out():
     return posixpath.join(str(Path.home()), "workspace", "aosp", "out")
 
 
-def _mark_stage(name):
+def _mark_stage(name, dur_s=None):
     """验证阶段自动打点：cdp_timing.py mark（batch 识别：CDP_BATCH_ID 环境变量
-    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。"""
+    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。
+
+    dur_s（方向 1）：调用方自测脚本内实测秒数，mark 段耗时取 dur_s，相邻差额
+    减去 dur_s 后的余量落 gap_before_<name>——脚本启动前的 AI 活动时间不再
+    污染段口径（上批 sync 段记 71.2s 而脚本自报 13.9s，段口径不可信则后续
+    提速无从测量）。
+    """
     timing = (Path(__file__).resolve().parents[1] / "cross-device"
               / "lib" / "python" / "cdp_timing.py")
     env = dict(os.environ)
     env["PYTHONPATH"] = str(timing.parent) + os.pathsep + env.get("PYTHONPATH", "")
+    args = [sys.executable, str(timing), "mark", "--name", name]
+    if dur_s is not None:
+        args += ["--dur-s", str(round(float(dur_s), 3))]
     try:
-        r = subprocess.run([sys.executable, str(timing), "mark", "--name", name],
-                           capture_output=True, text=True, encoding="utf-8",
+        r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=10, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         print(f"warn: 打点 {name} 失败（不阻断）: {e}", file=sys.stderr)
@@ -284,6 +292,9 @@ def main(argv=None):
                     help="自描述单测产物 JSON 路径（原子写；--out 已被 AOSP "
                          "输出目录占用，不可复用该名）")
     args = ap.parse_args(argv)
+
+    # 方向 1：脚本自报实测时长基准（verify_unit_test 打点传 --dur-s）
+    _t0 = time.monotonic()
 
     if args.test_targets:
         targets = args.test_targets
@@ -335,8 +346,8 @@ def main(argv=None):
             "targets": target_stats,
         })
     print(f"\n设备侧单测{'全部通过' if all_ok else '存在失败'}：{len(targets)} 目标")
-    # 脚本自动打点单测段（失败不阻断）
-    _mark_stage("verify_unit_test")
+    # 脚本自动打点单测段（失败不阻断）；方向 1：传 --dur-s 脚本自报实测秒数
+    _mark_stage("verify_unit_test", dur_s=time.monotonic() - _t0)
     return 0 if all_ok else 1
 
 

@@ -293,25 +293,38 @@ class TestMainOrchestration(unittest.TestCase):
         return hashlib.sha256(p.read_bytes()).hexdigest()
 
     def _run(self, extra=None, dev_sha=None, dev_bytes=None, dev_ctx=CTX_OK,
-             reboot_ok=True, create=True):
+             reboot_ok=True, create=True, equal=False):
         dsts = ("/vendor/bin/app1", "/vendor/etc/init/app1.rc",
                 "/vendor/etc/lcview_events.json")
         if create:
             for dst in dsts:
                 make_out(self.out, dst)
         shas = {dst: self._local_sha(dst) for dst in dsts if create}
-        # 设备侧按 dst 返回真实/伪造指纹（None → 用本地真值 = 全绿）
+        # 方向 2 幂等：推送前先回读设备侧，与本地全等（sha+bytes）则跳过。
+        # fake 模拟设备侧状态迁移：推前旧指纹（非全等，走 push）→ 推后更新为
+        # 本地真值（回读全等）；equal=True 时初始即全等（全程 skipped）。
         def fake(ep, args, timeout=600):
             if args[0] == "push":
                 self.events.append(("push", args[2]))
                 return ("", 0)
             if args[0] == "shell":
                 cmd = args[1]
-                dst = cmd.split()[-1] if len(cmd.split()) > 1 else ""
+                parts = cmd.split()
+                dst = parts[-1] if len(parts) > 1 else ""
+                pushed_here = ("push", dst) in self.events
                 if cmd.startswith("sha256sum"):
-                    return (f"{dev_sha or shas.get(dst, '0' * 64)}  x", 0)
+                    if dev_sha is not None:
+                        return (f"{dev_sha}  x", 0)
+                    if pushed_here or equal:
+                        return (f"{shas.get(dst, '0' * 64)}  x", 0)
+                    local_sha = shas.get(dst, "0" * 64)
+                    return (f"{'1' + local_sha[1:]}  x", 0)
                 if cmd.startswith("stat"):
-                    return (str(dev_bytes if dev_bytes is not None else 100), 0)
+                    if dev_bytes is not None:
+                        return (str(dev_bytes), 0)
+                    if pushed_here or equal:
+                        return ("100", 0)
+                    return ("99", 0)
                 if cmd.startswith("ls"):
                     return (f"{dev_ctx} /x", 0)
             return ("", 0)
@@ -324,8 +337,8 @@ class TestMainOrchestration(unittest.TestCase):
                 mock.patch.object(wp, "reboot_and_wait",
                                   return_value=(reboot_ok, "启动完成")) as rb, \
                 mock.patch.object(wp, "_mark_stage",
-                                  side_effect=lambda n: self.events.append(
-                                      ("mark", n))):
+                                  side_effect=lambda n, dur_s=None:
+                                  self.events.append(("mark", n))):
             rc = wp.main(argv)
         return rc, rb
 
@@ -378,6 +391,41 @@ class TestMainOrchestration(unittest.TestCase):
         self.assertTrue(all(it["checks"]["sha256"] == "fail"
                             for it in data["items"]))
 
+    def test_idempotent_skip_when_device_equal_direction2(self):
+        # 方向 2：推送前回读与本地全等 → 跳过该项（无 push 事件）、且含 rc
+        # 的跳过项不计入重启判定（产物未写入无需重启）——全绿 rc 0
+        rc, rb = self._run(equal=True)
+        self.assertEqual(rc, 0)
+        rb.assert_not_called()
+        pushes = [e for e in self.events if e[0] == "push"]
+        self.assertEqual(pushes, [])
+        data = json.loads(self.result.read_text(encoding="utf-8"))
+        self.assertEqual(data["overall"], "pass")
+        self.assertTrue(data["items"])
+        self.assertTrue(all(it["pushed"] is False for it in data["items"]))
+        # 全等跳过仍做回读校验（context 判据不缺席），三项全绿
+        for it in data["items"]:
+            self.assertEqual(it["checks"],
+                             {"sha256": "pass", "bytes": "pass",
+                              "context": "pass"})
+
+    def test_equal_sha_but_bytes_mismatch_still_pushes_direction2(self):
+        # 方向 2：仅 sha 全等而 bytes 不等 → 不得跳过，按原路推（幂等须
+        # sha 与 bytes 双全等才成立）
+        rc, _ = self._run(dev_bytes=99)
+        self.assertEqual(rc, 1)
+        pushes = [e for e in self.events if e[0] == "push"]
+        self.assertEqual(len(pushes), 3)
+
+    def test_push_backoff_after_equal_skips_reboot_direction2(self):
+        # 方向 2：跳过项即使命中生效类（rc）也不触发重启——verify_push
+        # 打点后无 reboot 事件（上批约 214s 全等重启由此消除）
+        rc, rb = self._run(equal=True)
+        self.assertEqual(rc, 0)
+        rb.assert_not_called()
+        boots = [e for e in self.events if e[0] == "reboot"]
+        self.assertEqual(boots, [])
+
     def test_bytes_mismatch_is_red_direction2(self):
         rc, _ = self._run(dev_bytes=99)
         self.assertEqual(rc, 1)
@@ -425,6 +473,33 @@ class TestMainOrchestration(unittest.TestCase):
         # 参数错误（SystemExit），杜绝用参数绕过生效门禁
         with self.assertRaises(SystemExit):
             wp.main(["--no-reboot"])
+
+
+class TestMarkStageDurS(unittest.TestCase):
+    """方向 1：_mark_stage 传 --dur-s 脚本自报实测秒数（段耗时取 dur_s，
+    相邻差额余量落 gap_before_<name>，脚本启动前 AI 活动不再污染段口径）。"""
+
+    def _capture(self, dur_s=None):
+        captured = {}
+
+        def fake_run(args, **kw):
+            captured["args"] = args
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(wp.subprocess, "run", side_effect=fake_run), \
+                mock.patch.dict("os.environ", {"CDP_BATCH_ID": "abc"},
+                                clear=True):
+            wp._mark_stage("verify_push", dur_s=dur_s)
+        return captured["args"]
+
+    def test_dur_s_appended_as_flag(self):
+        args = self._capture(dur_s=12.3456)
+        self.assertIn("--dur-s", args)
+        self.assertEqual(args[args.index("--dur-s") + 1], "12.346")
+
+    def test_no_dur_s_omits_flag(self):
+        args = self._capture(dur_s=None)
+        self.assertNotIn("--dur-s", args)
 
 
 class TestAtomicWrite(unittest.TestCase):
