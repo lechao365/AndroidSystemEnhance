@@ -68,10 +68,12 @@ _EDIT_SEGMENTS = frozenset((
 def _phase_summary(segments):
     """由段表折叠阶段合计：{edit, selfcheck, verify, other} 四类秒数。
 
-    gap_before_* 派生段一律归入 edit（当前仅自报段产生 gap，而自报段之外
-    的未打点活动即编辑与返工；不折叠则 edit 段仅记短自报值、真实编辑耗时
-    散在多个 gap 段里，链路提速收益无从测量）。段名剥 #n 序号后归类
-    （apply_selfcheck#2 仍计入 selfcheck），未知段计入 other 不丢弃。
+    gap_before_* 派生段按后继段归类（verify 前缀归 verify，其余归 edit）：
+    verify 前的 gap 余量是验证环节的编排活动，归 verify；edit/apply_selfcheck
+    前的 gap 是自报段之外的未打点活动，即编辑与返工，仍归 edit（不折叠则
+    edit 段仅记短自报值、真实编辑耗时散在多个 gap 段里，链路提速收益无从
+    测量）。段名剥 #n 序号后归类（apply_selfcheck#2 仍计入 selfcheck），
+    未知段计入 other 不丢弃。
     """
     totals = {"edit": 0.0, "selfcheck": 0.0, "verify": 0.0, "other": 0.0}
     for s in segments:
@@ -83,7 +85,14 @@ def _phase_summary(segments):
         except (TypeError, ValueError):
             elapsed = 0.0
         if name.startswith("gap_before_"):
-            totals["edit"] += elapsed
+            # gap 归属按其后继段归类：gap_before_verify_* 的余量是验证环节
+            # 的编排活动，归 verify；其余（edit/apply_selfcheck 前）仍归 edit。
+            # 一律归 edit 曾把 verify 前 ~55s/批 记成编辑（phase 口径失真）。
+            target = _base_seg_name(name[len("gap_before_"):])
+            if target.startswith("verify_"):
+                totals["verify"] += elapsed
+            else:
+                totals["edit"] += elapsed
             continue
         base = _base_seg_name(name)
         if base in _EDIT_SEGMENTS:

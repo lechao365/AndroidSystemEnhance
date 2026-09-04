@@ -1518,6 +1518,23 @@ class TestWsReport(unittest.TestCase):
         content = details[0].read_text(encoding="utf-8")
         self.assertIn("- timings: ", content)
 
+    def test_phase_summary_verify_gap_counts_to_verify(self):
+        # gap_before_verify_* 派生段归 verify 相（此前一律归 edit，verify 前
+        # 55s 编排空转被记成编辑，收据 phase 口径失真）
+        segs = [{"name": "gap_before_verify_push", "elapsed_s": 13.334},
+                {"name": "gap_before_verify_sync", "elapsed_s": 19.886}]
+        self.assertEqual(ws_report._phase_summary(segs),
+                         {"edit": 0.0, "selfcheck": 0.0, "verify": 33.22,
+                          "other": 0.0})
+
+    def test_phase_summary_edit_side_gap_counts_to_edit(self):
+        # 编辑侧 gap（apply_selfcheck 前的返工/编辑活动）维持归 edit
+        segs = [{"name": "gap_before_apply_selfcheck", "elapsed_s": 481.35},
+                {"name": "gap_before_verify_unit_test", "elapsed_s": 21.826}]
+        got = ws_report._phase_summary(segs)
+        self.assertEqual(got["edit"], 481.35)
+        self.assertEqual(got["verify"], 21.826)
+
 
 class TestPhaseSummary(unittest.TestCase):
     """阶段汇总（方向 1）：timings 折叠 edit/selfcheck/verify/other 四类。
