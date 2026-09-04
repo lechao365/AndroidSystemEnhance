@@ -1132,12 +1132,17 @@ class TestResolveRunBatchId(unittest.TestCase):
 
     def test_no_file_no_env_uses_unique_timings_file(self):
         # 无 batch-file 无 env → log 目录唯一 timings 文件 stem
-        wa.cdp_timing.main(["start", "--batch", self.batch])
-        self.assertEqual(wa._resolve_run_batch_id(None), self.batch)
+        # （清掉宿主可能残留的 CDP_BATCH_ID，隔离环境隐式依赖）
+        with mock.patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("CDP_BATCH_ID", None)
+            wa.cdp_timing.main(["start", "--batch", self.batch])
+            self.assertEqual(wa._resolve_run_batch_id(None), self.batch)
 
     def test_nothing_resolvable_returns_none(self):
         # 三级皆缺 → None（调用方补零/mark 静默跳过，防误标其他批次）
-        self.assertIsNone(wa._resolve_run_batch_id(None))
+        with mock.patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("CDP_BATCH_ID", None)
+            self.assertIsNone(wa._resolve_run_batch_id(None))
 
 
 class TestWriteCases(unittest.TestCase):
