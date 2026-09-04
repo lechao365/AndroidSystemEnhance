@@ -24,12 +24,17 @@ class TestEnsureEditCloseMark(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self._old = os.environ.get("CDP_PROJECT_ROOT")
         os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+        # 隔离宿主可能残留的 CDP_BATCH_ID（其优先级压过测试构造的
+        # current-batch.json 指针，不清理则判定/断言全部失真）
+        self._old_batch = os.environ.pop("CDP_BATCH_ID", None)
 
     def tearDown(self):
         if self._old is None:
             os.environ.pop("CDP_PROJECT_ROOT", None)
         else:
             os.environ["CDP_PROJECT_ROOT"] = self._old
+        if self._old_batch is not None:
+            os.environ["CDP_BATCH_ID"] = self._old_batch
         self._tmp.cleanup()
 
     def _mk_timing(self, marks):
