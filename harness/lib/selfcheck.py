@@ -19,6 +19,7 @@ skipped=<n> 仅在 pytest_rc=0 且摘要无 skipped 时补 0。config_rc/contrac
 全部 *_rc 键判红（任一非零拒写收据）。退出码恒 0：拒写与否由 ws_report
 按 rc 判定，本脚本只负责如实采集（emit 侧可独立自测）。
 """
+import os
 import re
 import subprocess
 import sys
@@ -110,10 +111,63 @@ def _mark_selfcheck(dur_s=None):
         print(f"warn: apply_selfcheck 打点失败（不阻断）: {e}", file=sys.stderr)
 
 
+def _ensure_edit_close_mark():
+    """编辑收口自动补打（B1，根治 KI-20260902-001）。
+
+    mark edit 此前由 apply AI 自判"编辑完成"——-s 批实测漂移（edit mark
+    打在两轮自检之后，真实编辑散落 gap_before_apply_selfcheck），edit 段
+    口径跨批不可比。制度化：本函数在自检起跑前判定编辑是否已收口，未收口
+    则补打 mark edit（cdp_timing 同名 mark 自动 #N 序号）：
+      - marks 无 edit → 补打（AI 漏打）
+      - 末个 edit 在末个 apply_selfcheck 之后 → 补打（loop 轮修复编辑 /
+        -s 批漂移形态，把后续真实编辑重新归口为 edit#N）
+      - 其余（edit 已收口）→ 不动
+    batch 定位复用 cdp_timing 三级回落（CDP_BATCH_ID > current-batch.json
+    指针）；无活跃批（emit 侧独立自测）静默跳过。补打失败仅 warn 不阻断
+    （打点诊断数据，非自检结果本身）。
+    """
+    timing_dir = ROOT / "harness" / "skills" / "cross-device" / "lib" / "python"
+    if str(timing_dir) not in sys.path:
+        sys.path.insert(0, str(timing_dir))
+    try:
+        import cdp_timing
+        bid = os.environ.get("CDP_BATCH_ID", "").strip() or \
+            cdp_timing._read_current_batch()
+        if not bid:
+            return
+        data = cdp_timing._load(cdp_timing._timing_path(bid))
+        marks = (data or {}).get("marks") or []
+        edit_idx = [i for i, m in enumerate(marks) if m.get("name") == "edit"]
+        selfcheck_idx = [i for i, m in enumerate(marks)
+                         if m.get("name") == "apply_selfcheck"]
+        # 已收口：已有 edit 且（无自检 或 末个 edit 在末个 apply_selfcheck
+        # 之后——正常 AI 手打路径）→ 不补
+        if edit_idx and (not selfcheck_idx
+                         or edit_idx[-1] > selfcheck_idx[-1]):
+            return
+        # 未收口：无 edit（AI 漏打）或末个 edit 早于末个自检（loop 轮修复
+        # 编辑 / -s 批漂移形态）→ 补打，把后续真实编辑重新归口为 edit#N
+        timing = timing_dir / "cdp_timing.py"
+        cmd = [sys.executable, str(timing), "mark", "--batch", bid,
+               "--name", "edit"]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
+                                  cwd=ROOT, timeout=10)
+            if proc.returncode != 0:
+                print(f"warn: edit 收口补打失败（不阻断）: "
+                      f"{proc.stderr.strip()}", file=sys.stderr)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            print(f"warn: edit 收口补打失败（不阻断）: {e}", file=sys.stderr)
+    except Exception as e:  # 打点诊断数据，任何异常不得阻断自检
+        print(f"warn: edit 收口判定失败（不阻断）: {e}", file=sys.stderr)
+
+
 def main():
     # 自检整体墙钟实测（方向 3）：pytest 起跑前记 t0，四工具完成后 t1，
     # 差值经 _mark_selfcheck --dur-s 上报（自检段耗时不再被相邻差额吞并）
     _t0 = time.time()
+    _ensure_edit_close_mark()
     pytest_cmd = [sys.executable, "-m", "pytest", "harness", "-q",
                   "--durations=5"]
     # xdist 可导入时并行跑（-n auto 按 CPU 核数分流，apply 侧 586 项串行 30s
