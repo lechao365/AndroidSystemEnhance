@@ -215,6 +215,13 @@ def _exec_annotate(detail, code):
     return f"{detail}（adb 执行超时）" if code == -1 else detail
 
 
+def _clip_body(body, code):
+    """detail 截断口径：通过取头部 200 控收据体积；失败取尾部 400——错误
+    信息通常在输出末尾，头部截断会遮蔽 ERROR 尾行致取证困难（2026-09-05
+    recover seq 假红实拍：失败现场只见前 200 字符，根因行被吞）。"""
+    return body[-400:] if code != 0 else body[:200]
+
+
 def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
     """adb_exec(cmd)->(body, exit_code)；adb_logcat()->str。返回 (status, detail)。
 
@@ -359,7 +366,7 @@ def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
         # cmd 分支按设计是 shell 串（引号/管道语义需保留），不包裹
         body, code = adb_exec(payload)
         return ("pass" if code == 0 else "fail",
-                _exec_annotate(body.strip()[:200], code))
+                _exec_annotate(_clip_body(body.strip(), code), code))
     if kind == "hostcmd":
         # host 侧执行（不经 adb）：payload 为 shell 串，cwd 落在 workspace-verify，
         # 相对路径（如 cases/lcview_check.sh）以其为根，用例资产不再硬编码绝对路径；
@@ -373,7 +380,7 @@ def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
             r = subprocess.run(payload, **host_kwargs)
             body = (r.stdout + r.stderr).strip()
             return ("pass" if r.returncode == 0 else "fail",
-                    _exec_annotate(body[:200], r.returncode))
+                    _exec_annotate(_clip_body(body, r.returncode), r.returncode))
         except subprocess.TimeoutExpired:
             return "fail", "hostcmd 执行超时"
         except OSError as e:
