@@ -41,6 +41,15 @@ if [ -z "$CUR" ] || [ "$CUR" != "$BRANCH" ]; then
   err "error: 当前分支 $CUR 非 $BRANCH（含 detached HEAD），禁止提交"; exit 1
 fi
 
+# 方向 3：幂等把 core.hooksPath 指向仓内 .githooks（commit-msg 中文前缀
+# 校验），堵裸 git commit / 外部 skill 提交路径绕过脚本内校验的口子；
+# 每次启动重复设置同值无害（幂等），钩子文件随仓入库（hooksPath 为本机
+# .git/config 配置，不入库，故须每次启动确保接线）
+HOOKS_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)/.githooks"
+if [ -d "$HOOKS_DIR" ]; then
+  git config core.hooksPath "$HOOKS_DIR"
+fi
+
 if [ "$MODE" = "dry-run" ]; then
   out "== dry-run：改动预览（不执行 add/commit/push）=="
   out "== 工作树状态（status --porcelain）=="
@@ -52,9 +61,47 @@ if [ "$MODE" = "dry-run" ]; then
   exit 0
 fi
 
+# 发布内容与验证内容绑定（批次 261f10265269 方向 2）：实际提交面 vs 最新
+# 收据 commit_scope，不一致即拒（两侧同排除 data/verify-results/——收据随批
+# 入库且 scope 生成时排除自身目录）。无收据/旧收据缺字段 → warn 跳过（人工
+# push 场景不阻断）。normal（staged 暂存面）与 push-only（origin..HEAD 待推
+# 提交面）两种模式下均生效。
+check_commit_scope() {
+  local status_out
+  if [ "$1" = "staged" ]; then
+    status_out=$(git diff --cached --name-status --no-renames) || status_out=""
+  else
+    status_out=$(git diff --name-status --no-renames "origin/$BRANCH"..HEAD 2>/dev/null) || status_out=""
+    [ -n "$status_out" ] || return 0   # 无待推提交，无比对对象
+  fi
+  local latest_scope diffs
+  # commit_scope.py 依赖 cdp_receipt（cross-device lib）——脚本相对定位注入
+  # PYTHONPATH（真仓），内部亦有自身定位兜底注入
+  CDP_LIB="$SCRIPT_DIR/../cross-device/lib/python"
+  latest_scope=$(PYTHONPATH="$CDP_LIB" python3 harness/lib/commit_scope.py --latest-scope 2>/dev/null) || latest_scope=""
+  [ -n "$latest_scope" ] || {
+    echo "warn: 无收据 commit_scope（未走 ws_report 或旧收据），跳过提交面比对" >&2
+    return 0
+  }
+  diffs=$(printf '%s\n' "$status_out" | python3 harness/lib/commit_scope.py --check "$latest_scope") || true
+  if [ -n "$diffs" ]; then
+    err "error: 实际提交面与最新收据 commit_scope 不一致（发布内容与验证内容绑定），请核对或重写收据："
+    printf '%s\n' "$diffs" >&2
+    exit 1
+  fi
+}
+
 if [ "$MODE" = "normal" ]; then
   [ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || { err "error: 需 --message-file 且文件存在"; exit 3; }
   [ -n "$(git status --porcelain)" ] || { err "working tree clean"; exit 4; }
+  # 提交信息中文前缀校验（commit-message-format.md）：首行须为
+  # <中文type>(<scope>): <subject>，中文 type 词表限定；英文前缀（feat/fix 等）
+  # 一律拒绝，防提交风格漂移（曾出现 feat(harness) 英文前缀混入）
+  SUBJECT=$(head -1 "$MSG_FILE")
+  if ! printf '%s' "$SUBJECT" | grep -qE '^(新增|修复|重构|文档|构建|杂项)\([^)]*\): '; then
+    err "error: 提交信息首行须为 <中文type>(<scope>): <subject>（type 词表：新增/修复/重构/文档/构建/杂项），英文前缀拒绝。实际: $SUBJECT"
+    exit 1
+  fi
   # 基线声明护栏：提交标题声明 BL-xxx 时须已在登记表登记（防未登记基线混入；
   # 曾提交标题声明 BL-20260828-02 而登记表无此条目，提交后 promote 证据链断裂）
   # 仅对 subject 首行提取声明（commit-message-format.md 约定基线声明位于标题），
@@ -77,11 +124,63 @@ if [ "$MODE" = "normal" ]; then
       esac
     done
   fi
-  git add -A || { err "error: git add 失败"; exit 1; }
+  # 提交面收窄（防 git add -A 误吞运行态/本地产物）：已跟踪修改全收（add -u）；
+  # 未跟踪仅白名单命中项随批入库，名单外拒绝并列出（请删除、gitignore 或评审后扩名单）。
+  # 白名单 = 源码/证据目录前缀（case glob 跨 /，前缀锁定目录）：
+  # 运行态（harness/log 等）已被 gitignore 挡在 ls-files 之外，不会到这里的判定；
+  # 根目录散文件（临时 msg、tar 包等）不在名单，仍拒绝
+  git add -u || { err "error: git add（已跟踪改动）失败"; exit 1; }
+  UNTRACKED_ALLOW=(
+    'data/verify-results/*'
+    'data/baselines/*'
+    'data/known-issues/*'
+    'harness/*'
+    'code/*'
+    'docs/*'
+    '.github/*'
+    '.githooks/*'
+  )
+  REJECT=()
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    # --message-file 消息文件是提交输入而非提交对象，豁免白名单判定
+    if [ -n "$MSG_FILE" ] && [ "$f" -ef "$MSG_FILE" ]; then continue; fi
+    keep=""
+    for pat in "${UNTRACKED_ALLOW[@]}"; do
+      case "$f" in $pat) keep=1; break ;; esac
+    done
+    if [ -n "$keep" ]; then
+      git add -- "$f" || { err "error: git add $f 失败"; exit 1; }
+    else
+      REJECT+=("$f")
+    fi
+  done < <(git ls-files --others --exclude-standard)
+  if [ ${#REJECT[@]} -gt 0 ]; then
+    err "error: 未跟踪文件不在提交白名单（${UNTRACKED_ALLOW[*]}），不在本批提交面："
+    printf '  %s\n' "${REJECT[@]}" >&2
+    exit 1
+  fi
+  # 凭据扫描：暂存区新增行命中敏感赋值（含低熵 psk 形态，键词+赋值+值 4 字符起）即拒；
+  # 占位符白名单（placeholder/change_me/your_/xxxx/变量引用等）放行
+  # （BL-20260624-01 教训：wifi.conf 真实 psk 曾随批入库）
+  LEAK=$(git diff --cached -U0 | grep '^+' | grep -v '^+++' \
+    | grep -iE '\b(psk|password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)\b[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9/+=._-]{4,}' \
+    | grep -viE 'placeholder|change[-_]?me|replace[-_]?me|your[_-]|xxxx|todo|fixme|dummy|sample|example|\$\{' || true)
+  if [ -n "$LEAK" ]; then
+    err "error: 暂存区新增行疑似凭据（psk/password/secret/token/key 赋值，占位符除外），请核实或改用占位符："
+    printf '%s\n' "$LEAK" >&2
+    exit 1
+  fi
+  check_commit_scope staged
   git commit -F "$MSG_FILE" || { err "error: commit 失败"; exit 1; }
 fi
 
 # push 失败分类：non-fast-forward（远端领先）给出可恢复提示，其余给原始输出
+# push-only 模式在推送前同样做提交面比对（对 origin..HEAD 的待推提交，
+# 与 normal 模式共用 check_commit_scope——两种模式下均生效）
+if [ "$MODE" = "push-only" ]; then
+  check_commit_scope pushed
+fi
 if ! PUSH_OUTPUT=$(git push -u origin "$BRANCH" 2>&1); then
   case "$PUSH_OUTPUT" in
     *"non-fast-forward"*|*"fetch first"*|*"[rejected]"*)

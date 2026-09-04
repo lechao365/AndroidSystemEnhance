@@ -39,7 +39,13 @@ stages:
 - 编译/验收失败：本 skill 仅执行单次验证并落收据；跨轮重试/失败分析/修复编辑
   归 loop-engineering 会话管理（harness/skills/loop-engineering/SKILL.md）。
   无 loop 会话时由调用方 AI 自行决定是否重跑（重试纪律不内嵌本 skill）
-  -> 失败收据正文含失败现场：logcat/dmesg 摘录，交 loop/调用方分析
+   -> 失败收据正文含失败现场：logcat/dmesg 摘录，交 loop/调用方分析
+   - 失败取证（有界只读）：python3 harness/skills/workspace-verify/ws_forensics.py
+     --since-epoch <验证开始 epoch 秒> [--stdout-file f] [--stderr-file f]
+     （一次收齐 host stdout/stderr + logcat crash + getprop/df/ps +
+     尽力 dmesg/pstore + 仅本轮新增 tombstone；只读不改设备态，单文件
+     512KB/总量 4MB 双上限截断，manifest.json 如实记录截断/跳过；
+     产物 harness/log/forensics/run-<ts>/ 供收据正文引用与 AI 复盘）
 - adb 不可达 → 自动三级通道：ws_acceptance 验收编排 ensure 失败自动以
   rescue_enabled=True 重试一次（rescue 经 ws_serial 设 service.adb.tcp.port 5555
   + 重启 adbd + 取 wlan0 IPv4，副作用必打印；仅编排层失败路径触发）；
@@ -63,13 +69,12 @@ stages:
    - build：编译由执行者完成时触发（cdp_timing.py mark --name verify_build；
      batch 识别走 CDP_BATCH_ID 环境变量 > log 目录唯一 timings 文件，均缺
      静默跳过返 0，不阻断）
-   - push：ws_adb_connect.py ensure 连接成功自动 mark verify_push（推送
-     前置连接就绪即推送段终点，产物 adb push 紧随其后秒级）
+   - push：ws_push.py 推送循环完成自动 mark verify_push（实际推送完成后
+     打点；ensure 连接成功不再打点——连接就绪量不到推送）
    - unit_test：ws_upload_tests.py 执行完成自动 mark verify_unit_test
    - acceptance：ws_acceptance.py run 完成自动 mark verify_acceptance
-   loop 多轮时阶段名带轮次前缀 run_<n>_<stage>（如 run_2_verify_build）
-   区分重试轮（脚本自动 mark 缺轮次上下文时由执行者以 run_<n>_<stage>
-   触发 verify_build 段）。
+   重试轮沿用同段名 mark，不追加轮次前缀（段名保持稳定供复盘按段统计）；
+   脚本自动 mark 缺轮次上下文时由执行者触发对应段。
 1. 同步：python3 harness/skills/sync-code-to-workspace/sync_code_to_workspace.py --auto
    （同步源 = code 工作树当前状态；范围 = code/rpi5/{aosp,kernel}；
    data/verify-results、others/、rpi-zero2w 不参与同步）
@@ -90,43 +95,66 @@ stages:
    - 全程：INC-001 禁 make clean/clobber；BLD-009 CCACHE_DIR=out/ccache
    编译段打点（verify_build）：编译完成由执行者触发
    （cdp_timing.py mark --name verify_build，失败不阻断）
-4. adb 推送：python3 harness/skills/workspace-verify/ws_adb_connect.py ensure --rescue
-   （mDNS→静态 fallback→串口救援自接：推送前置必须连上设备，本步中止则步骤 5
-   不执行，不能等编排层兜底；成功输出 endpoint）
-   adb root && adb remount（INC-003 失败查 verifiedbootstate=orange；INC-005 需 userdebug）
-   → 按 modules.<模块>.push 映射 push 编译产物到对应分区路径（分区有别：
-   daemon 无 vendor 落 /system，HAL 有 vendor 落 /vendor，均含 bin 与 init 两处）
-→ 重启服务或 reboot
-     （boot.img 刷写只写第一分区 INC-004，且属人工确认门）
-   推送段打点（verify_push）：ws_adb_connect ensure 连接成功自动 mark，无需手动
+4. adb 推送：python3 harness/skills/workspace-verify/ws_push.py
+   [--modules <模块名...>]（默认推送 verify-cases.yaml modules 段全部
+   push 映射，映射即执行的唯一事实源，取代手敲 adb push；本步中止则
+   步骤 5 不执行，不能等编排层兜底）：
+   - 脚本内聚：ws_adb_connect ensure 连接 → adb root && adb remount
+     （INC-003 失败查 verifiedbootstate=orange；INC-005 需 userdebug）
+     → 按映射逐项推送（本地源 = AOSP out target/product/<product> 下
+     与 dst 同相对路径的编译产物）→ 逐项回读设备侧 SHA256/字节数/
+     SELinux 上下文与本地产物比对，任一不符判红 → 命中 sepolicy
+     （/selinux/）或 vintf（/vintf/）或 init rc（.rc 结尾）的项强制
+     reboot 并等待 sys.boot_completed 启动完成，跳过即判红（无跳过
+      开关）→ 落自描述产物 --result-file
+      harness/log/cross-device/push-<batch_id>.json（run_id + 逐项源/
+      目标路径 + 三项校验值 sha256/bytes/context，原子写；供步骤 6
+      PASS 核验，模式 B 可省略）
+   推送段打点（verify_push）：ws_push.py 推送循环完成后自动 mark
+   （实际推送完成后打点，含失败轮；ensure 连接成功不再打点）
+   判红（exit 1）不得回退手敲 adb push——须修产物/环境后重跑本脚本
+   （boot.img 刷写只写第一分区 INC-004，且属人工确认门，不在本脚本范围）
 4b. 设备侧单测执行（制度化，AGENTS.md 测试防护强制）：
-    python3 harness/skills/workspace-verify/ws_upload_tests.py
+    python3 harness/skills/workspace-verify/ws_upload_tests.py \
+      --result-file harness/log/cross-device/unit-tests-<batch_id>.json
     （从 verify-cases.yaml modules 段读 test_targets，覆盖 lcview/lciod 全部
     unit_test 与 hal_test；nativetest push 到设备运行 gtest 并汇总——
     仅编译不执行不达标，C++ 单测长期只编译不执行是 nextSeqFor 真 bug
-    未被发现的根因；任一失败须修复后重跑，全部通过才进步骤 5）
-   单测段打点（verify_unit_test）：脚本执行完成自动 mark，无需手动
-5. 验收：python3 harness/skills/workspace-verify/ws_acceptance.py run --case <用例标签>
-   （--case 为一等入口（默认 lcview-liveness），从 verify-cases.yaml cases 段取验收文本，
-   与 L19/L26 一致；手打验收文本（--acceptance）为兜底；
-   语法标签自动执行；overall=ai 的自由文本项由 AI 用 logcat/dmesg 现场判定并覆盖；
-   步骤 4 有 reboot 时必须加 --wait-ready——连接后轮询 sys.boot_completed 就绪，
-   未就绪按设备不可达退 1，且传 reboot 时刻（MM-DD HH:MM:SS.mmm）给 --log-since——
-   logcat 时间窗从该时刻起，避免命中上轮旧日志致假绿；--log-since 自动按设备
-   时钟/时区换算（本地 CST 时刻映射到设备 UTC 域，PIT-5 复发防护——直接传本地
-   时刻会让窗落在设备"未来"取回 0 字符判红，已复发三次，勿再人工换算）；
-模式 B 加 --ensure-boot——验收无 boot 标签时自动追加，兑现 L20 设备存活最低判据）
-   验收段打点（verify_acceptance）：脚本执行完成自动 mark，无需手动
+    未被发现的根因；任一失败须修复后重跑，全部通过才进步骤 5；
+    --result-file 写自描述单测产物（run_id + 每 target 返回码/用例数/失败数），
+    供步骤 6 PASS 核验，无批次时也可省略）
+    单测段打点（verify_unit_test）：脚本执行完成自动 mark，无需手动
+5. 验收：python3 harness/skills/workspace-verify/ws_acceptance.py run --case <用例标签> \
+      --result-file harness/log/cross-device/acceptance-<batch_id>.json
+    （--case 为一等入口（默认 lcview-liveness），从 verify-cases.yaml cases 段取验收文本，
+    与 L19/L26 一致；手打验收文本（--acceptance）为兜底；
+    语法标签自动执行；overall=ai 的自由文本项由 AI 用 logcat/dmesg 现场判定并覆盖；
+    步骤 4 有 reboot 时必须加 --wait-ready——连接后轮询 sys.boot_completed 就绪，
+    未就绪按设备不可达退 1，且传 reboot 时刻（MM-DD HH:MM:SS.mmm）给 --log-since——
+    logcat 时间窗从该时刻起，避免命中上轮旧日志致假绿；--log-since 自动按设备
+    时钟/时区换算（本地 CST 时刻映射到设备 UTC 域，PIT-5 复发防护——直接传本地
+    时刻会让窗落在设备"未来"取回 0 字符判红，已复发三次，勿再人工换算）；
+    模式 B 加 --ensure-boot——验收无 boot 标签时自动追加，兑现 L20 设备存活最低判据；
+    --result-file 写自描述验收产物（run_id/输入摘要/设备指纹/起止单调时间/
+    逐项结果/总判定），供步骤 6 PASS 核验）
+    验收段打点（verify_acceptance）：脚本执行完成自动 mark，无需手动
 6. 收据：python3 harness/skills/workspace-verify/ws_report.py \
-   --acceptance "<步骤 5 逐项结果 JSON>" \
+   --acceptance-file harness/log/cross-device/acceptance-<batch_id>.json \
+   --unit-test-file harness/log/cross-device/unit-tests-<batch_id>.json \
+   --push-file harness/log/cross-device/push-<batch_id>.json \
    --summary "<一句话>" --result <pass|fail|skip> --build <pass|fail|skip> --board <pass|fail|skip> \
    --case "<本次实际 --case 标签，逗号分隔（模式 B 逐字透传；模式 A 无则省略）>" \
    --body <正文文件> --batch-file <cdp> --target $(git rev-parse --short=12 HEAD) \
    [--metrics "<性能三指标 JSON 对象>"] \
    [--timings-file harness/log/cross-device/timings-<batch_id>.json]
    （--batch-file/--target 为模式 A 参数；--body 必传：CDP 原文 + 各阶段明细 +
-   失败现场摘录，自动脱敏；--acceptance 必传步骤 5 的逐项结果——-sv 批次缺它
-   ws_report 返 2 拒写收据，避免 promote 时 baseline 证据链有洞；
+   失败现场摘录，自动脱敏；PASS 必传 --acceptance-file（步骤 5 自描述验收产物）
+   与 --unit-test-file（步骤 4b 自描述单测产物）与 --push-file（步骤 4 自描述
+   推送产物）——ws_report 按 run_id 与输入摘要与本批一致、单调时间递增、
+   单测每 target 全绿、推送逐项 sha256/字节数/上下文三项校验值全绿核验，
+   缺失/不一致返 2 拒写，
+   避免 promote 时 baseline 证据链有洞（新鲜度由 run_id/输入摘要/单调时间表达，
+   不用固定墙钟，长编译/重试不误伤）；fail 可 --acceptance 直传现场；
    --metrics 为性能三指标结构化 JSON（lcview-perf 采集输出 METRICS 行），写入
    收据 metrics 字段 + trend 行尾，跨批可 diff——性能数字不再只散在正文；
    --timings-file 为模式 A 链路耗时打点（步骤 0 各阶段 mark 的原始文件，ws_report

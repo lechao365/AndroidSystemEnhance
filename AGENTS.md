@@ -57,7 +57,7 @@ harness 能力全部内聚在 `harness/` 目录（不依赖 LcHarness），使�
 
 ## 测试防护
 lcview / lciod 模块改动后必须通过单元测试编译验证 **且设备真跑**：
-- 编译：`make lechao_lcview_unit_test lechao_lcview_hal_test lechao_lciod_unit_test lechao_lciod_hal_test -j$(nproc)` 无编译错误。
+- 编译：`make lechao_lcview_unit_test lechao_lciod_unit_test lechao_lciod_hal_test -j$(nproc)` 无编译错误。
 - 设备执行（制度化，覆盖 lcview/lciod 全部 unit_test 与 hal_test）：
   `python3 harness/skills/workspace-verify/ws_upload_tests.py`（从 verify-cases.yaml
   modules 段读 test_targets，nativetest push 到设备运行 gtest 并汇总）。

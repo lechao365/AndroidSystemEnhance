@@ -2,11 +2,15 @@
 
 判定「上批已推送」（spec §5.2）：读最新详情 verified_commit →
 merge-base --is-ancestor(verified_commit, origin/dev) 且
-origin/dev HEAD（short=12） != verified_commit。
+origin/dev HEAD（short=12） != verified_commit；该祖先判定不成立时
+回落检查最新收据文件是否已被 origin/dev 跟踪（路径 blob 存在于
+origin/dev tree），是则视为已推送放行（squash/rebase 重写历史后
+verified_commit 不再可达于 origin/dev，但收据文件已入库仍应放行）。
 无收据（首轮）视为通过。--no-pull 用于干跑（不执行网络操作）。
 """
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -14,7 +18,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cdp_issue import read_index  # noqa: E402
 from cdp_paths import project_root  # noqa: E402
-from cdp_receipt import read_latest_receipt  # noqa: E402
+from cdp_receipt import latest_receipt_with_path  # noqa: E402
+
+# 中文 type 前缀词表与正则：与 .githooks/commit-msg、
+# harness/skills/git-works-push/git_works_push.sh 内校验同一（三处须成对修改）
+_COMMIT_PREFIX_RE = re.compile(r"^(新增|修复|重构|文档|构建|杂项)\([^)]*\): ")
 
 
 def known_issues_warns(root=None):
@@ -53,10 +61,40 @@ def lead_warns(root=None):
             "建议先 /publish-main-base 再继续产批"]
 
 
+def commit_prefix_warns(root=None):
+    """origin/dev 最新提交标题中文前缀核查（方向 4）：不符仅告警不阻断。
+
+    历史已有英文前缀提交（feat(harness) 等经外部 skill 路径混入，钩子接线
+    前的存量），追溯阻断会卡死产批，故只告警提示风格漂移；origin/dev 缺失
+    或 git 执行失败返空不崩（诊断数据非门禁）。
+    """
+    root = Path(root) if root else project_root()
+    r = _git(root, "log", "-1", "--format=%s", "origin/dev")
+    if r.returncode != 0:
+        return []
+    subject = r.stdout.strip()
+    if not subject or _COMMIT_PREFIX_RE.match(subject):
+        return []
+    return [f"origin/dev 最新提交标题非中文 type 前缀（词表：新增/修复/"
+            f"重构/文档/构建/杂项）: {subject[:40]}"]
+
+
 def _git(root, *args):
     return subprocess.run(["git", "-C", str(root), *args],
                           capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=120)
+
+
+def _receipt_tracked_by_origin(root: Path, receipt_path: Path) -> bool:
+    """最新收据文件是否已被 origin/dev 跟踪：该相对路径的 blob 存在于
+    origin/dev tree（git cat-file -e origin/dev:<rel> 成功）。
+    祖先判定不成立（squash/rebase 重写历史）时据此判定已推送。
+    """
+    try:
+        rel = receipt_path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return False
+    return _git(root, "cat-file", "-e", f"origin/dev:{rel}").returncode == 0
 
 
 def precheck(root=None, do_pull=True):
@@ -79,7 +117,10 @@ def precheck(root=None, do_pull=True):
     # 只依赖详情收据（latest），不依赖 trend.md——trend 是展示性文件，缺失/损坏
     # 不得让"上批已推送"闸门静默失效（严格生产者）；verified_commit 缺失（旧收据）
     # 时无法判定，保持放行兼容。
-    latest = read_latest_receipt(root / "data" / "verify-results")
+    latest_path, latest, receipt_errs = latest_receipt_with_path(root / "data" / "verify-results")
+    if receipt_errs:
+        # 方向 5：收据解析有错（非法整数/重复字段/schema 非 1）即拒，不再静默吞错
+        return False, f"最新收据解析错误: {'; '.join(receipt_errs)}", ""
     if latest and latest.verified_commit:
         # 先判可达性：verified_commit 本地不可达（gc 裁剪/浅克隆等）时
         # merge-base 返非 0 会造成"未推送"假拒批，放行并记录无法判定原因
@@ -91,6 +132,9 @@ def precheck(root=None, do_pull=True):
         origin_head12 = _git(root, "rev-parse", "--short=12",
                              "origin/dev").stdout.strip()
         if r.returncode != 0 or origin_head12 == latest.verified_commit:
+            # 祖先判定不成立 → 回落：收据文件已被 origin/dev 跟踪则视为已推送
+            if latest_path is not None and _receipt_tracked_by_origin(root, latest_path):
+                return True, "", ""
             return False, f"上批({latest.batch_id})未推送", ""
     return True, "", ""
 
@@ -101,8 +145,9 @@ def main(argv=None):
     args = ap.parse_args(argv)
     ok, reason, detail = precheck(do_pull=not args.no_pull)
     out = {"ok": ok, "reason": reason, "detail": detail[:100]}
-    # warns 合入两类：KIR-005 存量告警（issue_id 列表）+ 领先告警（文字串）
-    warns = known_issues_warns() + lead_warns()
+    # warns 合入三类：KIR-005 存量告警（issue_id 列表）+ 领先告警（文字串）
+    # + 提交前缀告警（方向 4，origin/dev 最新提交标题风格漂移提示）
+    warns = known_issues_warns() + lead_warns() + commit_prefix_warns()
     if warns:
         out["warns"] = warns
     print(json.dumps(out, ensure_ascii=False))

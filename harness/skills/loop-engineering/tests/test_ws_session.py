@@ -545,6 +545,12 @@ class TestRunStatus(unittest.TestCase):
         self.assertIn("--target 1a2b3c4d5e6f", text)    # 模式 A --target 取批次 base
         self.assertIn("ws_report.py", text)
         self.assertIn("done --session", text)
+        # 方向 4：先产自描述产物再传给报告——单测/验收产物落会话日志目录，
+        # PASS 经 --acceptance-file/--unit-test-file 按产物核验
+        self.assertIn(f"session-{s['id']}", text)
+        self.assertIn("--result-file", text)
+        self.assertIn("--acceptance-file", text)
+        self.assertIn("--unit-test-file", text)
 
     def test_run_guidance_mode_a_empty_acceptance(self):
         # 模式 A 批次验收为「无」：须拒绝（-sv 批次须有验收）

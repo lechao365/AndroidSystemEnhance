@@ -1,4 +1,5 @@
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -6,12 +7,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 from shell_env import bash_argv, find_bash, write_python3_shim  # noqa: E402
 
 BASH = find_bash()
 
 SCRIPT = Path(__file__).resolve().parents[1] / "git_works_push.sh"
+# 仓内钩子目录（git_works_push.sh 幂等接线的目标，方向 3）：
+# parents: [0]=tests [1]=git-works-push [2]=skills [3]=harness [4]=仓根
+HOOKS_DIR = Path(__file__).resolve().parents[4] / ".githooks"
+COMMIT_MSG_HOOK = HOOKS_DIR / "commit-msg"
 
 # ls-remote 空输出（exit 0）：触发 REMOTE_SHA 空值判定
 MOCK_GIT_EMPTY = """#!/usr/bin/env bash
@@ -76,11 +83,22 @@ class TestGitWorksPush(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._msg = Path(self._tmp.name) / "msg.txt"
-        self._msg.write_text("测试提交\n", encoding="utf-8")
+        self._msg.write_text("新增(cross-device): 测试提交\n", encoding="utf-8")
         self._baseline = Path(self._tmp.name) / "baseline-status.yaml"
         self._baseline.write_text(MOCK_BASELINE, encoding="utf-8")
+        # 收据目录隔离（发布内容与验证内容绑定，批次 261f10265269 方向 2）：
+        # check_commit_scope 读最新收据 commit_scope（cdp_paths 认
+        # CDP_PROJECT_ROOT），单测用 mock git 无真实收据——不隔离会读到
+        # 真实仓最新收据，其 commit_scope 与 mock 提交面不一致致假失败。
+        # 指向临时空目录 → --latest-scope 返空 → 走"无收据 warn 跳过"降级。
+        self._old_root = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
 
     def tearDown(self):
+        if self._old_root is None:
+            os.environ.pop("CDP_PROJECT_ROOT", None)
+        else:
+            os.environ["CDP_PROJECT_ROOT"] = self._old_root
         self._tmp.cleanup()
 
     def _env_with_mock_git(self, mock_git):
@@ -106,8 +124,10 @@ class TestGitWorksPush(unittest.TestCase):
         return subprocess.run(argv,
                               capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
 
+    @pytest.mark.slow_ok("脚本内 ls-remote 重试 3 次各 sleep 1s，真实子进程语义")
     def test_remote_sha_empty_exits_2(self):
         # ls-remote 空输出（exit 0）→ 空值判定触发，不落到「疑似推送未生效」误导文案
+        # （实测 ~3.05s 贴线，slow guard 显式豁免示范）
         r = self._run("--message-file", str(self._msg), mock_git=MOCK_GIT_EMPTY)
         self.assertEqual(r.returncode, 2)
         self.assertIn("远端 dev 引用无输出", r.stderr)
@@ -126,6 +146,26 @@ class TestGitWorksPush(unittest.TestCase):
         r = self._run("--message-file", str(msg), "--baseline-status", str(self._baseline))
         self.assertEqual(r.returncode, 1)
         self.assertIn("未在登记表登记", r.stderr)
+
+    def test_english_prefix_rejected_exits_1(self):
+        # 方向 6：英文前缀（feat/fix 等）提交信息一律拒绝，防提交风格漂移
+        for subject in ("feat(harness): 英文前缀提交\n",
+                        "fix: 无 scope 英文前缀\n",
+                        "feat(harness) 缺冒号\n"):
+            msg = Path(self._tmp.name) / "msg_en.txt"
+            msg.write_text(subject, encoding="utf-8")
+            r = self._run("--message-file", str(msg))
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("中文type", r.stderr)
+            self.assertIn("英文前缀拒绝", r.stderr)
+
+    def test_non_type_cn_prefix_rejected_exits_1(self):
+        # 中文但非词表 type（超出 新增/修复/重构/文档/构建/杂项）→ 拒绝
+        msg = Path(self._tmp.name) / "msg_bad_type.txt"
+        msg.write_text("优化(harness): 非词表 type\n", encoding="utf-8")
+        r = self._run("--message-file", str(msg))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("英文前缀拒绝", r.stderr)
 
     def test_baseline_registered_exits_0(self):
         # subject 首行声明已登记 BL → 正常提交
@@ -174,6 +214,247 @@ class TestGitWorksPush(unittest.TestCase):
         r = self._run("--push-only")
         self.assertEqual(r.returncode, 0)
         self.assertIn("pushed: dev", r.stdout)
+
+
+@unittest.skipUnless(BASH and shutil.which("git"), "需要 bash 与 git（真 git 验证钩子接线）")
+class TestCommitMsgHook(unittest.TestCase):
+    """方向 3：commit-msg 钩子（中文前缀校验）+ git_works_push.sh 幂等接线。
+
+    用真 git 在临时仓验证：脚本启动把 core.hooksPath 指向仓内 .githooks
+    （幂等），裸 git commit 路径同样被钩子拦截（此前脚本内校验只覆盖
+    git_works_push.sh 自身提交路径，可绕过）。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._repo = Path(self._tmp.name) / "repo"
+        self._repo.mkdir()
+        env = dict(os.environ)
+        env["GIT_AUTHOR_NAME"] = env["GIT_COMMITTER_NAME"] = "t"
+        env["GIT_AUTHOR_EMAIL"] = env["GIT_COMMITTER_EMAIL"] = "t@t"
+        self._env = env
+        r = subprocess.run(["git", "-c", "init.defaultBranch=dev", "init"],
+                           cwd=self._repo, capture_output=True, text=True,
+                           encoding="utf-8", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # 初始空提交（接线前，钩子未生效；--allow-empty 在空仓无 HEAD 会失败）
+        r = subprocess.run(["git", "commit", "--allow-empty", "-m", "init"],
+                           cwd=self._repo, capture_output=True, text=True,
+                           encoding="utf-8", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _git(self, *args):
+        return subprocess.run(["git", *args], cwd=self._repo,
+                              capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
+                              env=self._env)
+
+    def _run_script(self, *args):
+        argv = bash_argv(SCRIPT, list(args))
+        if argv is None:
+            self.skipTest("无 bash（find_bash 返 None）")
+        return subprocess.run(argv, cwd=self._repo, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace",
+                              env=self._env)
+
+    def test_hook_file_exists_and_executable(self):
+        # 钩子随仓入库且可执行（core.hooksPath 接线后按此文件触发）
+        self.assertTrue(COMMIT_MSG_HOOK.is_file())
+        self.assertTrue(os.access(COMMIT_MSG_HOOK, os.X_OK))
+
+    def test_hook_accepts_cn_prefix_and_rejects_english(self):
+        # 钩子与 git_works_push.sh 内校验同一词表：中文 type 过、英文前缀拒
+        good = Path(self._tmp.name) / "good.txt"
+        good.write_text("修复(harness): 中文前缀提交\n", encoding="utf-8")
+        r = subprocess.run(["bash", str(COMMIT_MSG_HOOK), str(good)],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        self.assertEqual(r.returncode, 0)
+        bad = Path(self._tmp.name) / "bad.txt"
+        bad.write_text("feat(harness): english prefix\n", encoding="utf-8")
+        r = subprocess.run(["bash", str(COMMIT_MSG_HOOK), str(bad)],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("英文前缀拒绝", r.stderr)
+
+    def test_script_sets_hooks_path_idempotent(self):
+        # git_works_push.sh 启动幂等设 core.hooksPath（dry-run 即完成接线：
+        # 设置在 dry-run 分支之前）；两次运行同值
+        for _ in range(2):
+            r = self._run_script("--dry-run")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            got = self._git("config", "core.hooksPath").stdout.strip()
+            self.assertTrue(got)
+            self.assertEqual(Path(got).resolve(), HOOKS_DIR.resolve())
+
+    def test_hook_blocks_bare_git_commit(self):
+        # 接线后裸 git commit 也过钩子（堵绕过口子）：英文前缀 commit 被拒、
+        # 中文前缀 commit 成功
+        r = self._run_script("--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        bad = self._repo / "msg_en.txt"
+        bad.write_text("feat(x): english prefix\n", encoding="utf-8")
+        r = self._git("commit", "--allow-empty", "-F", str(bad))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("英文前缀拒绝", r.stderr)
+        good = self._repo / "msg_cn.txt"
+        good.write_text("新增(harness): 中文前缀提交\n", encoding="utf-8")
+        r = self._git("commit", "--allow-empty", "-F", str(good))
+        self.assertEqual(r.returncode, 0)
+
+
+@unittest.skipUnless(BASH and shutil.which("git"),
+                     "需要 bash 与 git 解释器（Windows 环境跳过）")
+class TestCommitFaceNarrow(unittest.TestCase):
+    """提交面收窄 + 凭据扫描（真 git 仓）。
+
+    git add -A 收窄为 add -u + 未跟踪白名单（data/{verify-results,baselines,
+    known-issues}），名单外拒绝并列出；暂存新增行凭据扫描（低熵 psk 赋值
+    形态）命中即拒，占位符放行。push 无远端必失败（rc 2），但 commit 已在
+    push 前创建——rc 与 HEAD 内容共同断言。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._repo = Path(self._tmp.name) / "repo"
+        self._repo.mkdir()
+        env = dict(os.environ)
+        env["GIT_AUTHOR_NAME"] = env["GIT_COMMITTER_NAME"] = "t"
+        env["GIT_AUTHOR_EMAIL"] = env["GIT_COMMITTER_EMAIL"] = "t@t"
+        env["CDP_PROJECT_ROOT"] = str(self._repo)
+        self._env = env
+        r = subprocess.run(["git", "-c", "init.defaultBranch=dev", "init"],
+                           cwd=self._repo, capture_output=True, text=True,
+                           encoding="utf-8", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # 提交面比对（261f10265269 方向 2）依赖 harness/lib/commit_scope.py
+        # 相对路径调用，临时仓须有骨架；在 init 提交前拷入，c0 已含 → 后续
+        # 实际提交面不含它（不影响比对路径集）
+        lib = self._repo / "harness" / "lib"
+        lib.mkdir(parents=True)
+        shutil.copy(Path(__file__).resolve().parents[4] / "harness" / "lib"
+                    / "commit_scope.py", lib)
+        (self._repo / "f.txt").write_text("v1\n", encoding="utf-8")
+        (self._repo / "h.txt").write_text("h1\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "init")
+        self._base = self._git("rev-parse", "HEAD").stdout.strip()
+        self._msg = self._repo / "msg.txt"
+        self._msg.write_text("新增(test): 提交面收窄验证\n", encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _git(self, *args, check=True):
+        r = subprocess.run(["git", *args], cwd=self._repo,
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", env=self._env)
+        if check:
+            self.assertEqual(r.returncode, 0, r.stderr)
+        return r
+
+    def _run_script(self, *args):
+        argv = bash_argv(SCRIPT, list(args))
+        if argv is None:
+            self.skipTest("无 bash（find_bash 返 None）")
+        return subprocess.run(argv, cwd=self._repo, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace",
+                              env=self._env)
+
+    def test_untracked_outside_allowlist_rejected_and_listed(self):
+        # 方向 1：名单外未跟踪文件拒绝并列出，commit 不创建
+        (self._repo / "notes.txt").write_text("运行态产物\n", encoding="utf-8")
+        self._git("add", "-u")
+        r = self._run_script("--message-file", str(self._msg))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("白名单", r.stderr)
+        self.assertIn("notes.txt", r.stderr)
+        self.assertEqual(self._git("rev-parse", "HEAD").stdout.strip(), self._base)
+
+    def test_allowlist_receipt_and_tracked_changes_committed(self):
+        # 方向 1：已跟踪修改全收 + 白名单内未跟踪收据随批入库（push 失败 rc 2，
+        # 但 commit 已创建且含两处改动）
+        (self._repo / "f.txt").write_text("v2\n", encoding="utf-8")
+        receipt = self._repo / "data" / "verify-results"
+        receipt.mkdir(parents=True)
+        (receipt / "20260101-000000-ca64a314af81.md").write_text("r\n", encoding="utf-8")
+        r = self._run_script("--message-file", str(self._msg))
+        self.assertEqual(r.returncode, 2)  # 无 origin，push 失败；commit 已创建
+        show = self._git("show", "--name-only", "--format=").stdout
+        self.assertIn("f.txt", show)
+        self.assertIn("data/verify-results/20260101-000000-ca64a314af81.md", show)
+
+    def test_allowlist_source_dir_new_file_committed(self):
+        # 方向 1 补充：源码目录（harness/ 等）内新增未跟踪文件放行——
+        # 批次新增实现/测试文件必须能入库；根目录散文件仍被拦（见上例）
+        new_file = self._repo / "harness" / "skills" / "git-works-push" / "new_helper.sh"
+        new_file.parent.mkdir(parents=True, exist_ok=True)
+        new_file.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        r = self._run_script("--message-file", str(self._msg))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("harness/skills/git-works-push/new_helper.sh",
+                      self._git("show", "--name-only", "--format=").stdout)
+
+    def test_staged_low_entropy_psk_rejected(self):
+        # 方向 2：暂存新增行低熵 psk 赋值命中即拒（BL-20260624-01 教训）。
+        # 键名拼接构造：本测试文件自身过 git_works_push.sh 凭据扫描时，
+        # 源码行不得含完整 psk 赋值形态（fixture 假凭据，运行时拼出完整行）
+        psk_line = 'v1\nwifi.p' + 'sk="RealPass1234"\n'
+        (self._repo / "f.txt").write_text(psk_line, encoding="utf-8")
+        r = self._run_script("--message-file", str(self._msg))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("凭据", r.stderr)
+        self.assertIn("psk", r.stderr)
+        self.assertEqual(self._git("rev-parse", "HEAD").stdout.strip(), self._base)
+
+    def test_placeholder_psk_allowed(self):
+        # 方向 2：占位符白名单放行（push 失败 rc 2，commit 已创建且含占位行）
+        (self._repo / "f.txt").write_text('v1\npsk = "PLACEHOLDER_VALUE"\n', encoding="utf-8")
+        r = self._run_script("--message-file", str(self._msg))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("PLACEHOLDER_VALUE", self._git("show", "--format=", "HEAD").stdout)
+
+    def _write_scope_receipt(self, scope):
+        d = self._repo / "data" / "verify-results"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "20260101-000000-261f10265269.md"
+        p.write_text(f"- schema_version: 1\n- batch_id: 261f10265269\n"
+                     f"- commit_scope: {scope}\n- result: pass\n"
+                     f"\n## body\nx\n", encoding="utf-8")
+        return p
+
+    def test_commit_scope_mismatch_rejected(self):
+        # 方向 2：实际提交面与收据 commit_scope 不一致（多出 h.txt 修改）→
+        # 拒并列出差异，commit 不创建（收据自身目录两侧同滤）
+        (self._repo / "f.txt").write_text("v2\n", encoding="utf-8")
+        (self._repo / "h.txt").write_text("h2\n", encoding="utf-8")
+        self._write_scope_receipt("add=0 mod=1 del=0 | f.txt")
+        r = self._run_script("--message-file", str(self._msg))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("commit_scope", r.stderr)
+        self.assertIn("h.txt", r.stderr)
+        self.assertEqual(self._git("rev-parse", "HEAD").stdout.strip(), self._base)
+
+    def test_commit_scope_match_passes(self):
+        # 方向 2：一致 → 正常 commit（push 失败 rc 2）；收据目录自身豁免
+        (self._repo / "f.txt").write_text("v2\n", encoding="utf-8")
+        self._write_scope_receipt("add=0 mod=1 del=0 | f.txt")
+        r = self._run_script("--message-file", str(self._msg))
+        self.assertEqual(r.returncode, 2)
+        show = self._git("show", "--name-only", "--format=").stdout
+        self.assertIn("f.txt", show)
+        self.assertIn("data/verify-results/20260101-000000-261f10265269.md", show)
+
+    def test_commit_scope_absent_warns_and_passes(self):
+        # 无收据/旧收据缺 commit_scope → warn 跳过比对（人工 push 场景不阻断）
+        (self._repo / "f.txt").write_text("v2\n", encoding="utf-8")
+        r = self._run_script("--message-file", str(self._msg))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("跳过提交面比对", r.stderr)
 
 
 if __name__ == "__main__":

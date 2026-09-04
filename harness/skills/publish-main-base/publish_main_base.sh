@@ -29,7 +29,7 @@ MODE=""; MSG_FILE=""; BID=""; TASK=""; APPROVED_BY=""; EVIDENCE_SCOPE=""
 # check 模式失败分类输出（stderr；prepare/promote 亦输出，不影响既有行为与退出码）
 check_class() { echo "check_class=$1" >&2; }
 
-usage() { echo "usage: $0 --check [--task <id>] | --prepare [--task <id>] [--evidence-scope <scope>] | --promote --baseline-id <id> --message-file <f> [--task <id>] [--approved-by <id>] [--evidence-scope <scope>]"; exit 3; }
+usage() { echo "usage: $0 --check [--task <id>] | --prepare [--task <id>] [--evidence-scope <scope>] | --promote --baseline-id <id> --message-file <f> [--task <id>] [--approved-by <id>] [--evidence-scope <scope>] | --rollback --baseline-id <id>"; exit 3; }
 [ $# -ge 1 ] || usage
 case "$1" in
   --prepare) MODE="prepare"; shift ;;
@@ -48,8 +48,72 @@ case "$1" in
       esac
       shift
     done ;;
+  --rollback)
+    # 人工回滚入口：与 promote 失败点共用 rollback_promote（状态推导，见函数头注）
+    MODE="rollback"; shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --baseline-id) [ $# -ge 2 ] || usage; BID="$2"; shift ;;
+        *) usage ;;
+      esac
+      shift
+    done
+    [ -n "$BID" ] || usage ;;
   *) usage ;;
 esac
+
+# ── 晋升回滚（promote 失败点与人工 --rollback 共用同一实现）──────────────────
+# 状态文件（harness/log/cross-device/promote-<id>.head）记录 promote 进入时的 dev
+# HEAD 作为回滚基准；rollback 据此做状态推导，不再盲目回退：
+#   1) 登记已落（工作区 yaml 该条目 status=promoted）→ revert-candidate（尽力而为）
+#   2) 基准存在且 HEAD 恰前进一位（HEAD^ == 基准，即确有晋升元提交）→ 才 reset 丢弃；
+#      更早阶段失败时 HEAD 未前进，盲 reset HEAD^ 会误删合法提交，故跳过并提示人工核查
+promote_state_file() { echo "harness/log/cross-device/promote-$1.head"; }
+
+rollback_promote() {
+  git fetch origin -q || true
+  if [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ]; then
+    git reset --hard origin/main || exit 1
+  fi
+  git checkout dev || exit 1
+  # verified tag 一并回滚（本地 + 远端尽力而为），防残留假锚点阻断后续重试
+  git tag -d "verified/$BID" >/dev/null 2>&1 || true
+  git push origin ":refs/tags/verified/$BID" >/dev/null 2>&1 || true
+  # 推导一：登记已执行（工作区该条目已 promoted）才回退 candidate；
+  # revert-candidate 仅改工作区 yaml 不产生提交，不影响下方 HEAD 推导
+  if python3 - "$BID" <<'PYEOF'
+import sys, yaml
+try:
+    rows = (yaml.safe_load(open("harness/config/baseline-status.yaml", encoding="utf-8"))
+            or {}).get("baselines") or []
+except FileNotFoundError:
+    sys.exit(1)
+bid = sys.argv[1]
+sys.exit(0 if any(b.get("baseline_id") == bid and b.get("status") == "promoted"
+                  for b in rows) else 1)
+PYEOF
+  then
+    python3 harness/skills/publish-main-base/baseline_register.py revert-candidate \
+      --baseline-id "$BID" || echo "warn: baseline ${BID} 回退 candidate 失败，请人工处理"
+  fi
+  # 推导二：以 promote 前所记 HEAD 为基准，确有新增提交（HEAD^ == 基准）才丢弃
+  BASE_HEAD=""
+  [ -f "$(promote_state_file "$BID")" ] && BASE_HEAD=$(cat "$(promote_state_file "$BID")")
+  if [ -n "$BASE_HEAD" ] \
+     && [ "$(git rev-parse HEAD 2>/dev/null)" != "$BASE_HEAD" ] \
+     && [ "$(git rev-parse HEAD^ 2>/dev/null || true)" = "$BASE_HEAD" ]; then
+    git reset --hard "$BASE_HEAD" || exit 1
+  else
+    echo "info: 未检出晋升元提交（基准缺失或 HEAD 未按预期前进），跳过 dev reset，请人工核查"
+  fi
+  rm -f "$(promote_state_file "$BID")"
+}
+
+# 人工回滚直通：跳过工作树预检/收据校验（回滚现场允许脏树），直进直出
+if [ "$MODE" = "rollback" ]; then
+  rollback_promote
+  exit 0
+fi
 # 通用前置参数（prepare/check-only/promote 亦可指定）
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -67,6 +131,16 @@ if [ "$MODE" != "check-only" ]; then
     echo "error: 工作树非空（未提交改动将干扰 promote/登记提交），请先提交或 stash" >&2; exit 1; }
 fi
 
+# ── 项目根改道防线（方向 4）：CDP_PROJECT_ROOT 若已设且不等于 git 顶层目录即拒绝
+# （收据查找依赖 CDP_PROJECT_ROOT 定位 log_apply_dir，防环境变量把收据目录改道）
+if [ -n "${CDP_PROJECT_ROOT:-}" ]; then
+  TOP="$(git rev-parse --show-toplevel)"
+  if [ "$CDP_PROJECT_ROOT" != "$TOP" ]; then
+    echo "error: CDP_PROJECT_ROOT=$CDP_PROJECT_ROOT 不等于 git 顶层目录 $TOP，拒绝执行（防收据目录改道）" >&2
+    exit 1
+  fi
+fi
+
 # ── 前置校验（prepare/promote/check-only 共用；sha 统一 short=12 比较）─────────
 RECEIPT_INFO=$(python3 - <<'PYEOF'
 import os
@@ -74,14 +148,19 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path("harness/skills/cross-device/lib/python").resolve()))
 import cdp_receipt
-path, r = cdp_receipt.latest_receipt_with_path()
+path, r, receipt_errs = cdp_receipt.latest_receipt_with_path()
 if r is None:
+    sys.exit(1)
+# 方向 5：收据解析有错（非法整数/重复字段/schema 非 1）即拒，不再静默吞错
+if receipt_errs:
+    print("error: 最新收据解析错误: " + "; ".join(receipt_errs), file=sys.stderr)
     sys.exit(1)
 # 头注释约定相对项目根输出（脚本从项目根运行，relpath 相对 cwd），避免泄露 home 绝对路径
 print(os.path.relpath(path))
 print(r.result)
 print(r.verified_commit)
 print(r.verify_mode)
+print(r.verified_tree)
 PYEOF
 ) || true
 [ -n "$RECEIPT_INFO" ] || { check_class NO_RECEIPT; echo "error: 无 verify 收据" >&2; exit 1; }
@@ -89,6 +168,7 @@ LATEST=$(echo "$RECEIPT_INFO" | sed -n '1p')
 RESULT=$(echo "$RECEIPT_INFO" | sed -n '2p')
 VC=$(echo "$RECEIPT_INFO" | sed -n '3p')
 MODEV=$(echo "$RECEIPT_INFO" | sed -n '4p')
+VTREE=$(echo "$RECEIPT_INFO" | sed -n '5p')
 # 输出完整性校验：四行齐备，缺行说明收据查询输出异常（错误被 || true 吞没时兜底）
 [ -n "$LATEST" ] && [ -n "$RESULT" ] && [ -n "$VC" ] && [ -n "$MODEV" ] || {
   check_class NO_RECEIPT
@@ -244,8 +324,14 @@ PYEOF
 fi
 
 # ── promote ────────────────────────────────────────────────────────
+# 记录 promote 进入时的 dev HEAD 作为回滚基准（rollback_promote 状态推导依据）
+DEV_HEAD_BEFORE=$(git rev-parse HEAD)
+mkdir -p harness/log/cross-device
+printf '%s\n' "$DEV_HEAD_BEFORE" > "$(promote_state_file "$BID")"
 [ -n "$BID" ] || { echo "error: --baseline-id 必填" >&2; exit 3; }
 [ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || { echo "error: --message-file 缺失或不存在" >&2; exit 3; }
+# 方向 6：审批凭据外部化——--approved-by 必填（不再回落默认常量，防审批可自证）
+[ -n "$APPROVED_BY" ] || { echo "error: --promote 必须传 --approved-by（审批凭据外部化，不再回落默认常量）" >&2; exit 3; }
 # promote 不再强制 --task：known-issues 门禁在共用段已无条件执行（缺省推断；
 # 推断失败时门禁段 exit 1 拒绝），显式 --task 仅作白名单确认
 git fetch origin || { echo "error: fetch 失败" >&2; exit 1; }
@@ -262,7 +348,7 @@ if [ -z "$CODE_HEAD" ]; then
   PROMOTE_SCOPE="no-code-change"
 else
   # code/ 改动是否被最新 board 收据覆盖：merge-base --is-ancestor 判覆盖链
-  BOARD_OK=$(CODE_HEAD="$CODE_HEAD" python3 - <<'PYEOF'
+  BOARD_INFO=$(CODE_HEAD="$CODE_HEAD" python3 - <<'PYEOF'
 import os
 import subprocess
 import sys
@@ -272,16 +358,39 @@ import cdp_receipt
 p, r = cdp_receipt.latest_board_receipt()
 if not p or not r.verified_commit:
     print("0")
+    print("")
     sys.exit(0)
 r0 = subprocess.run(["git", "merge-base", "--is-ancestor",
                      os.environ["CODE_HEAD"], r.verified_commit],
                     capture_output=True)
 print("1" if r0.returncode == 0 else "0")
+print(r.verified_tree)
 PYEOF
   ) || true
+  BOARD_OK=$(echo "$BOARD_INFO" | sed -n '1p')
+  BOARD_VTREE=$(echo "$BOARD_INFO" | sed -n '2p')
   if [ "$BOARD_OK" != "1" ]; then
     check_class RECEIPT_FAIL
     echo "error: promote 要求 code/ 改动被最新 board 收据覆盖（board 收据缺失或 verified_commit 不覆盖 code 改动提交 $CODE_HEAD）" >&2
+    exit 1
+  fi
+  # 发布内容与验证内容绑定（批次 261f10265269 方向 3）：现有树等价断言比
+  # promote 时刻所打 tag（自身树恒等），证明不了该树曾被验证；此处比最新
+  # board 收据 verified_tree（验证时刻、排除统一集合后的内容树）与晋升内容
+  # 树（dev HEAD^{tree} 同一算法同一集合，content_tree.EXCLUDE_PATHS：登记
+  # yaml/docs/证据快照/清算目录/收据目录——否则 promote 自身写入会恒判红）
+  if [ -z "$BOARD_VTREE" ]; then
+    check_class RECEIPT_FAIL
+    echo "error: 最新 board 收据缺 verified_tree 字段（旧版 ws_report 产物），无法绑定发布与验证内容；请以当前工具重写收据" >&2
+    exit 1
+  fi
+  PROMOTE_TREE=$(python3 harness/lib/content_tree.py --tree HEAD) || {
+    echo "error: 晋升内容树计算失败" >&2; exit 1; }
+  if [ "$PROMOTE_TREE" != "$BOARD_VTREE" ]; then
+    echo "error: 收据 verified_tree 与晋升内容树不一致（发布内容≠验证内容）：" >&2
+    # 树对象不可解析（假树/被 gc）时 diff 失败——pipefail 下须容错，主结论已定
+    git diff --name-only "$BOARD_VTREE" "$PROMOTE_TREE" 2>/dev/null | sed 's/^/  /' >&2 \
+      || echo "  （树对象不可解析，无法列出差异路径）" >&2
     exit 1
   fi
 fi
@@ -290,24 +399,10 @@ if ! git diff --name-only origin/main...dev | grep -q '^docs/'; then
   echo "warn: dev 相对 origin/main 无 docs/ 改动（若本批应同步设计文档，请先 /sync-code-to-doc --base origin/main 并 commit 到 dev）"
 fi
 
-# checkout main 至 push main 间任一步失败的回滚：回 dev、丢弃晋升元提交，
-# baseline 改回 candidate（不能后移，squash 需它在 dev 上）。
+# checkout main 至 push main 间任一步失败回滚：调顶层 rollback_promote（与人工
+# --rollback 共用同一实现，状态推导见其函数头注——reset 仅在确有晋升元提交时执行）。
 # 关键：先清掉 main 上的 squash 暂存/提交（reset 到 origin/main，真正丢弃已 commit 的
 # squash，否则 push main 失败后 main 残留未登记 commit 会污染后续任何 push/重试）
-rollback_promote() {
-  git fetch origin -q || true
-  if [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ]; then
-    git reset --hard origin/main || exit 1
-  fi
-  git checkout dev || exit 1
-  # verified tag 一并回滚（本地 + 远端尽力而为），防残留假锚点阻断后续重试
-  git tag -d "verified/$BID" >/dev/null 2>&1 || true
-  git push origin ":refs/tags/verified/$BID" >/dev/null 2>&1 || true
-  # 先在晋升提交状态下回退 candidate（此时工作区 yaml 为 promoted），再 reset 丢弃晋升提交
-  python3 harness/skills/publish-main-base/baseline_register.py revert-candidate \
-    --baseline-id "$BID" || echo "warn: baseline ${BID} 回退 candidate 失败，请人工处理"
-  git reset --hard HEAD^ || exit 1
-}
 # verified tag 锚点：对 BH（最近内容提交）打注解 tag 并推送，供树等价断言与追溯；
 # 同名 tag 已存在即拒退 3（重复 promote / baseline_id 复用防线）
 if git rev-parse -q --verify "refs/tags/verified/$BID" >/dev/null 2>&1; then

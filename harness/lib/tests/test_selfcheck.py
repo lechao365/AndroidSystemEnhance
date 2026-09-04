@@ -1,6 +1,8 @@
 import contextlib
 import io
+import os
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -40,6 +42,8 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(1, "1 failed, 119 passed in 5.0s\n"),
             _FakeProc(2, "==== 共 3 处悬空引用（exit 1）====\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -56,6 +60,8 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(0, "121 passed, 3 skipped in 6.0s\n"),
             _FakeProc(0, "OK: 引用完整\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -71,6 +77,8 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
             _FakeProc(0, "OK: 引用完整\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -84,6 +92,8 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(2, "INTERNALERROR> Killed\n"),
             _FakeProc(0, "OK: 引用完整\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -100,6 +110,8 @@ class TestSelfcheck(unittest.TestCase):
             _FakeProc(0, "531 passed in 27.9s\n",
                       "warn: 某插件加载失败\nwarn: 忽略\n"),
             _FakeProc(0, "OK: 引用完整\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -116,6 +128,8 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(0, "\n", "warn: 某插件加载失败\n"),
             _FakeProc(0, "OK: 引用完整\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -131,6 +145,8 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
             _FakeProc(0, "OK: 引用完整\n", "warn: 非判定信息\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -159,6 +175,8 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
             _FakeProc(0, "OK: 引用完整\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         with mock.patch.dict(sys.modules, {"xdist": mock.Mock()}):
             seen = self._run_capture_cmd(fake)
@@ -172,6 +190,8 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
             _FakeProc(0, "OK: 引用完整\n"),
+        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         with mock.patch.dict(sys.modules, {"xdist": None}):
             seen = self._run_capture_cmd(fake)
@@ -188,6 +208,8 @@ class TestMarkSelfcheck(unittest.TestCase):
             fake = _fake_run([
                 _FakeProc(0, "531 passed in 27.9s\n"),
                 _FakeProc(0, "OK: 引用完整\n"),
+            _FakeProc(0, "OK: config 检查通过，无违规。\n"),
+            _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
             ])
             with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
                 with redirect_stdout(io.StringIO()):
@@ -221,6 +243,24 @@ class TestMarkSelfcheck(unittest.TestCase):
             with contextlib.redirect_stderr(err):
                 selfcheck._mark_selfcheck()  # 不抛异常即通过
         self.assertIn("打点失败（不阻断）", err.getvalue())
+
+
+class TestMarkSelfcheckDegraded(unittest.TestCase):
+    """方向 5：CI 无打点指针降级——CDP_PROJECT_ROOT 指空临时根（无 timings
+    文件、无 CDP_BATCH_ID）时自发 mark 走 cdp_timing warn 降级路径，
+    不抛异常、不阻断自检（真子进程，非 mock）。"""
+
+    def test_mark_selfcheck_no_pointer_no_raise(self):
+        root = tempfile.TemporaryDirectory()
+        try:
+            env = dict(os.environ)
+            env["CDP_PROJECT_ROOT"] = root.name
+            env.pop("CDP_BATCH_ID", None)
+            with mock.patch.dict(os.environ, env):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    selfcheck._mark_selfcheck()
+        finally:
+            root.cleanup()
 
 
 if __name__ == "__main__":

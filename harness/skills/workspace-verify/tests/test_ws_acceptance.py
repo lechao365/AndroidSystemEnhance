@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -522,6 +523,61 @@ class TestResolveAcceptance(unittest.TestCase):
         self.assertIsNone(acc)
         self.assertIn("无", err)
 
+    def test_batch_file_hostcmd_rejected(self):
+        # 方向 1：batch-file 分支取到验收后，含 hostcmd:/cmd: 标签即拒
+        # （禁批次自带宿主命令执行意图），令 main 退 2
+        for tag in ("hostcmd:whoami", "cmd:echo hi"):
+            with tempfile.TemporaryDirectory() as d:
+                p = Path(d) / "b.cdp"
+                p.write_text("-sv base:8c583f57f4e4\n意图: 测试\n"
+                             f"验收: {tag}\n方向: 测试\n", encoding="utf-8")
+                acc, err = wa.resolve_acceptance(self._args(batch_file=str(p)))
+            self.assertIsNone(acc)
+            self.assertIn("hostcmd:/cmd:", err)
+
+    def test_case_branch_unchanged_for_hostcmd(self):
+        # 方向 1：case 与 acceptance 两分支不变——yaml 用例值含 hostcmd: 不因
+        # batch-file 禁令被拒（禁宿主命令仅限批次自带通道）
+        with tempfile.TemporaryDirectory() as d:
+            y = Path(d) / "verify-cases.yaml"
+            y.write_text("cases:\n  my-case: \"hostcmd:'whoami' boot\"\n",
+                         encoding="utf-8")
+            acc, err = wa.resolve_acceptance(self._args(case="my-case"),
+                                             cases_path=y)
+        self.assertIsNone(err)
+        self.assertIn("hostcmd", acc)
+
+    def test_batch_file_case_unknown_id_rejected(self):
+        # 方向 3：batch-file 验收 case: id 未知 → err（main 退 2，任一未知判死）
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "b.cdp"
+            p.write_text("-sv base:8c583f57f4e4\n意图: 测试\n"
+                         "验收: case:no-such-case\n方向: 测试\n", encoding="utf-8")
+            acc, err = wa.resolve_acceptance(self._args(batch_file=str(p)))
+        self.assertIsNone(acc)
+        self.assertIn("不存在于", err)
+
+    def test_batch_file_case_known_id_ok(self):
+        # 方向 3：case id 存在于 verify-cases.yaml 则通过（真实 cases 表）
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "b.cdp"
+            p.write_text("-sv base:8c583f57f4e4\n意图: 测试\n"
+                         "验收: case:lcview-liveness\n方向: 测试\n", encoding="utf-8")
+            acc, err = wa.resolve_acceptance(self._args(batch_file=str(p)))
+        self.assertIsNone(err)
+        self.assertEqual(acc, "case:lcview-liveness")
+
+    def test_batch_file_manual_free_text_ok(self):
+        # 方向 3：manual 模式自由文本不查表，直接返回
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "b.cdp"
+            p.write_text("-sv base:8c583f57f4e4\n意图: 测试\n"
+                         "验收: manual:lcview 服务运行正常\n方向: 测试\n",
+                         encoding="utf-8")
+            acc, err = wa.resolve_acceptance(self._args(batch_file=str(p)))
+        self.assertIsNone(err)
+        self.assertEqual(acc, "manual:lcview 服务运行正常")
+
     def test_case_from_yaml(self):
         # --case 从 verify-cases.yaml cases 段取标签，值内可用引号
         with tempfile.TemporaryDirectory() as d:
@@ -615,8 +671,10 @@ class TestResolveAcceptance(unittest.TestCase):
         self.assertIn("--vid ${LCVIEW_USB_VID:-1256}", acc)
         self.assertIn("${LCVIEW_USB_PID:-25344}", acc)
         self.assertIn("--mode fresh --window 600", acc)
-        # ts 以 --baseline 显式限定（只判基线后新记录，全历史卫生检查在 warn）
-        self.assertIn("--mode ts --skew 600 --baseline /tmp/lcview_baseline.json", acc)
+        # ts 以 --baseline 显式限定（只判基线后新记录，全历史卫生检查在 warn）；
+        # 基线路径经 LCVIEW_BASELINE_FILE 环境变量透传（按轮次隔离，防跨轮串扰）
+        self.assertIn("--mode ts --skew 600 --baseline "
+                      "${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}", acc)
         # 不再有裸设备路径硬编码（env 兜底表达式）
         self.assertNotIn("/sys/bus/usb/devices/1-2/", acc)
 
@@ -636,12 +694,13 @@ class TestResolveAcceptance(unittest.TestCase):
 
     def test_all_asset_cases_parse_clean(self):
         # 方向 4：遍历 verify-cases.yaml 全部 cases——无残余（parse 不抛）
-        # 且无未剥转义引号残留
+        # 且无未剥转义引号残留（dict 生命周期形态经 _case_text 取 acceptance）
         data = yaml.safe_load(
             Path(wa._CASES_PATH).read_text(encoding="utf-8")) or {}
         cases = data.get("cases") or {}
         self.assertTrue(cases)
-        for name, acc in cases.items():
+        for name, val in cases.items():
+            acc = wa._case_text(val)
             tags = wa.parse_acceptance(acc)  # 残余非空会 raise ValueError
             self.assertTrue(tags, f"case {name} 解析为空")
             for t in tags:
@@ -738,6 +797,29 @@ class TestLogcatCacheAndTiming(unittest.TestCase):
         m_run = mock.patch.object(wa.subprocess, "run",
                                   side_effect=fake_run)
         return m_ac, m_run, logcat_calls
+
+    def test_main_writes_result_file(self):
+        # 方向 1/3：--result-file 原子写自描述验收产物（run_id/输入摘要/
+        # 设备序列号/设备指纹/起止单调时间/逐项结果/总判定），无 .tmp 残留
+        m_ac, m_run, _ = self._main_env(
+            "LcView: heartbeat, loop=0 overrun=0 dropped=0 readErr=0 KEY\n")
+        out_json = Path(tempfile.mkdtemp()) / "acceptance.json"
+        buf = io.StringIO()
+        with mock.patch.object(wa, "ac", m_ac), m_run:
+            with contextlib.redirect_stdout(buf):
+                rc = wa.main(["run", "--acceptance", "log:KEY",
+                              "--result-file", str(out_json)])
+        self.assertEqual(rc, 0)
+        self.assertTrue(out_json.is_file())
+        self.assertFalse(out_json.with_name(out_json.name + ".tmp").exists())
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertTrue(data["run_id"])
+        self.assertIn("log:KEY", data["input_summary"])
+        self.assertIn("device_serial", data)
+        self.assertIn("device_fingerprint", data)
+        self.assertLess(data["start_monotonic"], data["end_monotonic"])
+        self.assertIn("overall", data)
+        self.assertIn("items", data)
 
     def test_main_logcat_cache_same_key_pulled_once(self):
         # 方向 2：同批多标签只拉一次——log:KEY x2 同 key (None, since) 拉 1 次，
@@ -1093,6 +1175,365 @@ class TestConvertSince(unittest.TestCase):
                                                     self._dev(local_epoch))
         self.assertIsNone(err)
         self.assertTrue(since.startswith("2026-08-28 "))
+
+
+class TestDeviceSerial(unittest.TestCase):
+    """方向 3：设备身份标识回落——ro.serialno → ro.boot.serialno → eth0 MAC，
+    三者皆空判红。"""
+
+    def _exec(self, serialno="", boot_serialno="", mac="", mac_rc=0):
+        def adb_exec(cmd):
+            if cmd == "getprop ro.serialno":
+                return (serialno, 0)
+            if cmd == "getprop ro.boot.serialno":
+                return (boot_serialno, 0)
+            if cmd == "cat /sys/class/net/eth0/address":
+                return (mac, mac_rc)
+            return ("", 0)
+        return adb_exec
+
+    def test_ro_serialno_primary(self):
+        serial, src = wa._device_serial(self._exec(serialno="SN123"))
+        self.assertEqual(serial, "SN123")
+        self.assertEqual(src, "getprop ro.serialno")
+
+    def test_fallback_to_boot_serialno(self):
+        # ro.serialno 空 → 回落 ro.boot.serialno
+        serial, src = wa._device_serial(self._exec(boot_serialno="BSN456"))
+        self.assertEqual(serial, "BSN456")
+        self.assertEqual(src, "getprop ro.boot.serialno")
+
+    def test_fallback_to_eth0_mac(self):
+        # ro.serialno 与 ro.boot.serialno 皆空 → 回落 eth0 MAC（命令成功且非空）
+        serial, src = wa._device_serial(self._exec(mac="02:00:00:aa:bb:cc"))
+        self.assertEqual(serial, "02:00:00:aa:bb:cc")
+        self.assertEqual(src, "eth0 MAC")
+
+    def test_mac_requires_success_and_nonempty(self):
+        # eth0 MAC 命令失败或为空 → 不算（仍判空）
+        serial, _ = wa._device_serial(self._exec(mac="", mac_rc=1))
+        self.assertIsNone(serial)
+        serial, _ = wa._device_serial(self._exec(mac="", mac_rc=0))
+        self.assertIsNone(serial)
+
+    def test_all_empty_returns_none(self):
+        # 三者皆空 → None（调用方判红）
+        serial, src = wa._device_serial(self._exec())
+        self.assertIsNone(serial)
+        self.assertEqual(src, "")
+
+
+class TestHostcmdEnv(unittest.TestCase):
+    """方向 2：hostcmd 子进程按 run_id 导出轮次隔离基线文件环境变量。"""
+
+    def test_env_exports_baseline_paths_by_run_id(self):
+        env = wa._hostcmd_env("run12345678")
+        self.assertEqual(env["LCVIEW_BASELINE_FILE"],
+                         "/tmp/lcview_baseline_run12345678.json")
+        self.assertEqual(env["LCIOD_BASELINE_FILE"],
+                         "/tmp/lciod_baseline_run12345678.json")
+
+    def test_execute_tag_passes_host_env_to_subprocess(self):
+        # execute_tag 带 host_env 时，hostcmd 子进程 env 含轮次隔离基线路径
+        fake = mock.Mock()
+        fake.returncode = 0
+        fake.stdout = "ok"
+        fake.stderr = ""
+        host_env = wa._hostcmd_env("run999")
+        with mock.patch.object(wa.subprocess, "run", return_value=fake) as m:
+            status, _ = wa.execute_tag(
+                'hostcmd:"cases/lcview_check.sh --mode files"',
+                adb_exec=None, adb_logcat=None, host_env=host_env)
+        self.assertEqual(status, "pass")
+        self.assertEqual(m.call_args.kwargs["env"],
+                         host_env)
+
+    def test_execute_tag_host_env_none_keeps_default(self):
+        # host_env 为 None（独立 CLI/测试）→ 不传 env，行为不变（继承环境）
+        fake = mock.Mock()
+        fake.returncode = 0
+        fake.stdout = "ok"
+        fake.stderr = ""
+        with mock.patch.object(wa.subprocess, "run", return_value=fake) as m:
+            status, _ = wa.execute_tag('hostcmd:"echo ok"',
+                                       adb_exec=None, adb_logcat=None)
+        self.assertEqual(status, "pass")
+        self.assertNotIn("env", m.call_args.kwargs)
+
+
+class TestRunIdLifecycle(unittest.TestCase):
+    """方向 1：run_id 提前到执行前生成，沿用到 hostcmd 环境与产物。"""
+
+    def test_product_run_id_matches_hostcmd_env_run_id(self):
+        # 产物 run_id 与 hostcmd 基线环境变量同源（同一次执行生成一次）
+        out_json = Path(tempfile.mkdtemp()) / "acc.json"
+        captured = {}
+
+        def fake_run_acceptance(acc, adb_exec, adb_logcat, ensure_boot=False,
+                                on_item=None, host_env=None):
+            captured["host_env"] = host_env
+            return "pass", [{"tag": "boot", "status": "pass", "detail": "ok"}]
+
+        with mock.patch.object(wa, "ac") as m_ac:
+            m_ac.ensure_connected.side_effect = ["ep", "ep"]
+            m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+            m_ac.parse_exec_output.return_value = ("1", 0)
+            m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
+            m_sub = mock.Mock()
+            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
+            m_sub.TimeoutExpired = subprocess.TimeoutExpired
+            with mock.patch.object(wa.subprocess, "run", m_sub):
+                with mock.patch.object(wa, "run_acceptance",
+                                       side_effect=fake_run_acceptance):
+                    with mock.patch.object(wa, "_device_serial",
+                                           return_value=("SN1",
+                                                         "getprop ro.serialno")):
+                        rc = wa.main(["run", "--acceptance", "boot",
+                                      "--result-file", str(out_json)])
+        self.assertEqual(rc, 0)
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        env = captured["host_env"]
+        env_run_id = env["LCVIEW_BASELINE_FILE"].rsplit("_", 1)[-1].split(".")[0]
+        self.assertEqual(data["run_id"], env_run_id)
+        self.assertTrue(data["run_id"])
+        self.assertEqual(data["device_serial"], "SN1")
+        # 方向 4：产物注明身份标识只认基镜像
+        self.assertIn("只认基镜像", data["identity_note"])
+        self.assertIn("增量推送不改变", data["identity_note"])
+
+    def test_device_serial_all_empty_red(self):
+        # 方向 3：产物写入路径上序列号三者皆空 → 判红返 1（不写产物）
+        out_json = Path(tempfile.mkdtemp()) / "acc.json"
+        with mock.patch.object(wa, "ac") as m_ac:
+            m_ac.ensure_connected.side_effect = ["ep", "ep"]
+            m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+            m_ac.parse_exec_output.return_value = ("1", 0)
+            m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
+            m_sub = mock.Mock()
+            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
+            m_sub.TimeoutExpired = subprocess.TimeoutExpired
+            buf = io.StringIO()
+            with mock.patch.object(wa.subprocess, "run", m_sub):
+                with mock.patch.object(wa, "run_acceptance",
+                                       return_value=("pass", [])):
+                    with mock.patch.object(wa, "_device_serial",
+                                           return_value=(None, "")):
+                        with contextlib.redirect_stdout(buf):
+                            rc = wa.main(["run", "--acceptance", "boot",
+                                          "--result-file", str(out_json)])
+        self.assertEqual(rc, 1)
+        self.assertIn("判红", buf.getvalue())
+        self.assertFalse(out_json.exists())
+
+
+class TestRunCaseLifecycle(unittest.TestCase):
+    """方向 2/3/4：副作用用例生命周期编排（固定顺序/差分恢复/dirty/超时）。"""
+
+    @staticmethod
+    def _lc(setup=None, teardown=None, timeout=None):
+        d = {}
+        if setup is not None:
+            d["setup_snapshot"] = setup
+        if teardown is not None:
+            d["teardown"] = teardown
+        if timeout is not None:
+            d["timeout_s"] = timeout
+        return d
+
+    def test_fixed_order_fail_then_forensics_then_teardown(self):
+        # 方向 2 固定顺序：first_error → ws_forensics 取证 → teardown → 返回
+        events = []
+        fake_exec = lambda cmd: ("stopped", 1)
+        with mock.patch.object(wa, "_run_host_cmd", return_value=("1", 0)), \
+                mock.patch.object(wa, "_run_forensics",
+                               side_effect=lambda *a, **k:
+                                   events.append("forensics") or "/f"), \
+                mock.patch.object(wa, "_restore_state",
+                                  side_effect=lambda *a, **k:
+                                      events.append("teardown") or (False, "ok")):
+            overall, items, meta = wa.run_case_lifecycle(
+                "svc:no_such_svc", self._lc(
+                    setup=['adb shell "cat x"'],
+                    teardown=['adb shell "echo ${SNAPSHOT_0} > x"']),
+                fake_exec, lambda **k: "", ep="ep", host_env={})
+        self.assertEqual(overall, "fail")
+        self.assertEqual(events, ["forensics", "teardown"])
+        self.assertEqual(meta["forensics_dir"], "/f")
+        self.assertFalse(meta["device_dirty"])
+
+    def test_teardown_skipped_when_state_unchanged(self):
+        # 方向 3：状态未变（重读快照与初值同）→ teardown 命令不执行（不写设备）
+        reads = iter([("1\n", 0), ("1\n", 0), ("1\n", 0)])
+        executed = []
+        def fake_host(cmd, host_env=None):
+            if "echo" in cmd:
+                executed.append(cmd)
+                return "0", 0
+            return next(reads)
+        with mock.patch.object(wa, "_run_host_cmd", side_effect=fake_host):
+            dirty, detail = wa._restore_state(
+                ['adb shell "cat authorized"'],
+                ['adb shell "echo ${SNAPSHOT_0} > authorized"'], ["1"])
+        self.assertFalse(dirty)
+        self.assertEqual(executed, [])
+        self.assertIn("跳过", detail)
+
+    def test_teardown_restores_changed_state(self):
+        # 方向 3：状态变了 → teardown 执行且 ${SNAPSHOT_0} 展开为快照值 →
+        # 复核恢复 → 不脏（读序：重拍=0 已变 → teardown → 复核=1 已恢复）
+        reads = iter(["0\n", "1\n"])
+        executed = []
+        def fake_host(cmd, host_env=None):
+            if "echo" in cmd:
+                executed.append(cmd)
+                return "0", 0
+            return next(reads), 0
+        with mock.patch.object(wa, "_run_host_cmd", side_effect=fake_host):
+            dirty, detail = wa._restore_state(
+                ['adb shell "cat authorized"'],
+                ['adb shell "echo ${SNAPSHOT_0} > authorized"'], ["1"])
+        self.assertFalse(dirty)
+        self.assertEqual(len(executed), 1)
+        self.assertIn("echo 1 >", executed[0])
+
+    def test_teardown_command_failure_marks_dirty(self):
+        # 方向 3：teardown 命令 rc!=0 → device_dirty（读序：重拍=0 已变）
+        reads = iter(["0\n"])
+        def fake_host(cmd, host_env=None):
+            if "echo" in cmd:
+                return "boom", 1
+            return next(reads), 0
+        with mock.patch.object(wa, "_run_host_cmd", side_effect=fake_host):
+            dirty, detail = wa._restore_state(
+                ['adb shell "cat authorized"'],
+                ['adb shell "echo ${SNAPSHOT_0} > authorized"'], ["1"])
+        self.assertTrue(dirty)
+        self.assertIn("失败 rc=1", detail)
+
+    def test_teardown_still_dirty_after_restore(self):
+        # 方向 3：恢复后重读快照仍与初值不符 → device_dirty
+        # （读序列：重拍=0 已变更 → teardown → 复核拍=0 仍未恢复）
+        reads = iter(["0\n", "0\n"])
+        def fake_host(cmd, host_env=None):
+            if "echo" in cmd:
+                return "", 0
+            return next(reads), 0
+        with mock.patch.object(wa, "_run_host_cmd", side_effect=fake_host):
+            dirty, detail = wa._restore_state(
+                ['adb shell "cat authorized"'],
+                ['adb shell "echo ${SNAPSHOT_0} > authorized"'], ["1"])
+        self.assertTrue(dirty)
+        self.assertIn("仍与初值不符", detail)
+
+    def test_snapshot_failure_is_fail_and_dirty(self):
+        # 快照失败 = 状态不可知 → 判红 + dirty + 跳过 teardown（无初值可恢复）
+        with mock.patch.object(wa, "_run_host_cmd", return_value=("", 1)), \
+                mock.patch.object(wa, "_run_forensics", return_value=None):
+            overall, items, meta = wa.run_case_lifecycle(
+                "svc:a", self._lc(setup=['adb shell "cat x"'],
+                                  teardown=['adb shell "echo 0 > x"']),
+                lambda c: ("running", 0), lambda **k: "", ep="ep")
+        self.assertEqual(overall, "fail")
+        self.assertTrue(meta["device_dirty"])
+        self.assertIn("跳过 teardown", meta["teardown_detail"])
+
+    def test_timeout_interrupts_remaining_tags(self):
+        # 方向 4：deadline 中断剩余判据项并落 __timeout__ 标记项
+        def slow_tag(tag, *a, **k):
+            time.sleep(0.06)
+            return ("pass", "ok")
+        with mock.patch.object(wa, "execute_tag", side_effect=slow_tag):
+            overall, items = wa.run_acceptance(
+                "svc:a svc:b svc:c svc:d svc:e", lambda c: ("", 0),
+                lambda **k: "", deadline=time.monotonic() + 0.12)
+        # 超时即失败（判据未跑完），items 落 __timeout__ 标记项
+        self.assertEqual(overall, "fail")
+        self.assertLess(len(items), 5)
+        self.assertEqual(items[-1]["tag"], "__timeout__")
+
+    def test_timeout_walks_same_lifecycle_order(self):
+        # 方向 4：超时按同一顺序收尾（取证 + teardown 均执行）
+        lc = self._lc(setup=['adb shell "cat x"'],
+                      teardown=['adb shell "echo ${SNAPSHOT_0} > x"'],
+                      timeout=1)
+        events = []
+        def slow_tag(tag, *a, **k):
+            time.sleep(0.3)
+            return ("pass", "ok")
+        with mock.patch.object(wa, "_run_host_cmd", return_value=("1", 0)), \
+                mock.patch.object(wa, "execute_tag", side_effect=slow_tag), \
+                mock.patch.object(wa, "_run_forensics",
+                                  side_effect=lambda *a, **k:
+                                      events.append("forensics") or "/f"), \
+                mock.patch.object(wa, "_restore_state",
+                                  side_effect=lambda *a, **k:
+                                      events.append("teardown") or (False, "ok")):
+            overall, items, meta = wa.run_case_lifecycle(
+                "svc:a svc:b svc:c svc:d svc:e", lc, lambda c: ("", 0),
+                lambda **k: "", ep="ep")
+        self.assertTrue(meta["timed_out"])
+        self.assertEqual(events, ["forensics", "teardown"])
+
+    def test_pass_without_error_no_forensics(self):
+        # 全过 → 不取证（取证只对 first_error），teardown 仍执行（差分守门）
+        events = []
+        with mock.patch.object(wa, "_run_host_cmd", return_value=("1", 0)), \
+                mock.patch.object(wa, "_run_forensics",
+                               side_effect=lambda *a, **k:
+                                   events.append("forensics") or "/f"), \
+                mock.patch.object(wa, "_restore_state",
+                                  side_effect=lambda *a, **k:
+                                      events.append("teardown") or (False, "ok")):
+            overall, items, meta = wa.run_case_lifecycle(
+                "svc:a", self._lc(setup=['adb shell "cat x"'],
+                                  teardown=['adb shell "echo ${SNAPSHOT_0} > x"']),
+                lambda c: ("running", 0), lambda **k: "", ep="ep")
+        self.assertEqual(overall, "pass")
+        self.assertEqual(events, ["teardown"])
+
+
+class TestLoadLifecycle(unittest.TestCase):
+    """方向 1：cases 段 dict 生命周期形态（str 旧形态兼容）。"""
+
+    def test_dict_form_loads(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "verify-cases.yaml"
+            cfg.write_text(
+                "cases:\n"
+                "  x:\n"
+                "    acceptance: 'svc:a'\n"
+                "    setup_snapshot: ['c1']\n"
+                "    teardown: ['c2']\n"
+                "    timeout_s: 60\n",
+                encoding="utf-8")
+            lc = wa._load_lifecycle(str(cfg), "x")
+        self.assertEqual(lc["timeout_s"], 60)
+        self.assertEqual(lc["setup_snapshot"], ["c1"])
+        self.assertEqual(lc["teardown"], ["c2"])
+
+    def test_str_form_returns_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "verify-cases.yaml"
+            cfg.write_text("cases:\n  x: 'svc:a'\n", encoding="utf-8")
+            self.assertIsNone(wa._load_lifecycle(str(cfg), "x"))
+
+    def test_dict_missing_acceptance_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "verify-cases.yaml"
+            cfg.write_text("cases:\n  x:\n    timeout_s: 60\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                wa._load_lifecycle(str(cfg), "x")
+
+    def test_unknown_label_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "verify-cases.yaml"
+            cfg.write_text("cases: {}\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                wa._load_lifecycle(str(cfg), "no-such")
+
+    def test_case_text_dict_extracts_acceptance(self):
+        self.assertEqual(wa._case_text({"acceptance": "svc:a"}), "svc:a")
+        self.assertEqual(wa._case_text("svc:a"), "svc:a")
 
 
 if __name__ == "__main__":

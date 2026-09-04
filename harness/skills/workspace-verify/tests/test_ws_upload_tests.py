@@ -2,6 +2,7 @@
 # 关键场景：yaml test_targets 读取、nativetest 二进制定位、push+执行
 # 汇总 pass/fail、二进制缺失判红、设备不可达退 1。
 
+import json
 import os
 import sys
 import tempfile
@@ -195,12 +196,65 @@ class TestRunOne(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("编译产物缺失", detail)
 
+    def test_zero_cases_rejected(self):
+        # 方向 5：汇总行解析到但用例数为 0 → 判红（无用例被执行禁止报绿）
+        with mock.patch.object(wu, "adb_run", side_effect=[
+            ("", 0),  # push
+            ("", 0),  # chmod
+            ("[==========] 0 tests from 0 test suites ran. (1 ms total)\n", 0),
+        ]):
+            with tempfile.TemporaryDirectory() as d:
+                out = Path(d) / "out"
+                p = out / "target" / "product" / "rpi5" / "data" / "nativetest64" / "t1" / "t1"
+                p.parent.mkdir(parents=True)
+                p.write_text("x")
+                ok, detail = wu.run_one("ep", str(out), "rpi5", "t1")
+        self.assertFalse(ok)
+        self.assertIn("用例数为 0", detail)
+
+    def test_missing_summary_rejected(self):
+        # 方向 5：汇总行解析不到 → 判红（无法证明用例真实执行）
+        with mock.patch.object(wu, "adb_run", side_effect=[
+            ("", 0),  # push
+            ("", 0),  # chmod
+            ("[ RUN      ] t1.T1\n[       OK ] t1.T1 (1 ms)\n", 0),
+        ]):
+            with tempfile.TemporaryDirectory() as d:
+                out = Path(d) / "out"
+                p = out / "target" / "product" / "rpi5" / "data" / "nativetest64" / "t1" / "t1"
+                p.parent.mkdir(parents=True)
+                p.write_text("x")
+                ok, detail = wu.run_one("ep", str(out), "rpi5", "t1")
+        self.assertFalse(ok)
+        self.assertIn("用例数解析不到", detail)
+
 
 class TestMain(unittest.TestCase):
+    """wu.main 完整编排（含 _mark_stage 自动打点）：须隔离 CDP_PROJECT_ROOT。
+
+    _mark_stage 无显式 batch 时按 current-batch.json 回落定位批次（cdp_timing
+    方向 3），不隔离会打到真实当前批次打点文件（selfcheck 全仓 pytest 时
+    污染当批 timings）。打点非本类验证目标，隔离到临时目录即可。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old_root = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+
+    def tearDown(self):
+        if self._old_root is None:
+            os.environ.pop("CDP_PROJECT_ROOT", None)
+        else:
+            os.environ["CDP_PROJECT_ROOT"] = self._old_root
+        self._tmp.cleanup()
+
     def test_all_pass_returns_0(self):
         with mock.patch.object(wu.ac, "ensure_connected", return_value="ep") as ec, \
                 mock.patch.object(wu, "ensure_user", return_value=(True, "")), \
-                mock.patch.object(wu, "run_one", return_value=(True, "t1: PASS")):
+                mock.patch.object(wu, "run_one", return_value=(
+                    True, "t1: PASS", {"name": "t1", "rc": 0,
+                                       "tests": 42, "failed": 0})):
             rc = wu.main(["--test-targets", "t1"])
         self.assertEqual(rc, 0)
         ec.assert_called_once()
@@ -208,14 +262,18 @@ class TestMain(unittest.TestCase):
     def test_fail_returns_1(self):
         with mock.patch.object(wu.ac, "ensure_connected", return_value="ep"), \
                 mock.patch.object(wu, "ensure_user", return_value=(True, "")), \
-                mock.patch.object(wu, "run_one", return_value=(False, "t1: FAIL")):
+                mock.patch.object(wu, "run_one", return_value=(
+                    False, "t1: FAIL", {"name": "t1", "rc": 1,
+                                        "tests": 42, "failed": 3})):
             rc = wu.main(["--test-targets", "t1"])
         self.assertEqual(rc, 1)
 
     def test_ensure_user_failure_marks_fail(self):
         with mock.patch.object(wu.ac, "ensure_connected", return_value="ep"), \
                 mock.patch.object(wu, "ensure_user", return_value=(False, "adb root 失败")), \
-                mock.patch.object(wu, "run_one", return_value=(True, "t1: PASS")):
+                mock.patch.object(wu, "run_one", return_value=(
+                    True, "t1: PASS", {"name": "t1", "rc": 0,
+                                       "tests": 42, "failed": 0})):
             rc = wu.main(["--test-targets", "t1"])
         self.assertEqual(rc, 1)
 
@@ -223,6 +281,63 @@ class TestMain(unittest.TestCase):
         with mock.patch.object(wu.ac, "ensure_connected", return_value=""):
             rc = wu.main(["--test-targets", "t1"])
         self.assertEqual(rc, 1)
+
+    def test_exception_in_run_one_still_restores_shell_user(self):
+        # 方向 5：run_one 中途抛异常（adb 异常等）→ finally 仍恢复 shell 用户，
+        # 防止 adbd 残留 root 态污染后续 verify 环节
+        calls = []
+
+        def fake_ensure_user(ep, need_root):
+            calls.append(need_root)
+            return (True, "")
+
+        with mock.patch.object(wu.ac, "ensure_connected", return_value="ep"), \
+                mock.patch.object(wu, "ensure_user",
+                                  side_effect=fake_ensure_user), \
+                mock.patch.object(wu, "run_one",
+                                  side_effect=RuntimeError("adb boom")):
+            with self.assertRaises(RuntimeError):
+                wu.main(["--test-targets", "t1"])
+        # 异常传播后仍执行了 shell 用户恢复（need_root=False）
+        self.assertIn(False, calls)
+        self.assertEqual(calls[-1], False)
+
+    def test_result_file_written(self):
+        # 方向 2/3：--result-file 原子写自描述单测产物（run_id + 每 target
+        # 返回码/用例数/失败数），无 .tmp 残留
+        out_json = Path(self._tmp.name) / "unit-tests.json"
+        with mock.patch.object(wu.ac, "ensure_connected", return_value="ep"), \
+                mock.patch.object(wu, "ensure_user", return_value=(True, "")), \
+                mock.patch.object(wu, "run_one", return_value=(
+                    True, "t1: PASS", {"name": "t1", "rc": 0,
+                                       "tests": 42, "failed": 0})):
+            rc = wu.main(["--test-targets", "t1",
+                          "--result-file", str(out_json)])
+        self.assertEqual(rc, 0)
+        self.assertTrue(out_json.is_file())
+        self.assertFalse(out_json.with_name(out_json.name + ".tmp").exists())
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertTrue(data["run_id"])
+        self.assertEqual(data["targets"][0]["name"], "t1")
+        self.assertEqual(data["targets"][0]["rc"], 0)
+        self.assertEqual(data["targets"][0]["tests"], 42)
+        self.assertEqual(data["targets"][0]["failed"], 0)
+
+    def test_result_file_reports_failed_target(self):
+        # 方向 2：ensure_user 失败（无 run_one 统计）也进产物，rc=1
+        out_json = Path(self._tmp.name) / "unit-tests.json"
+        with mock.patch.object(wu.ac, "ensure_connected", return_value="ep"), \
+                mock.patch.object(wu, "ensure_user", return_value=(False, "adb root 失败")), \
+                mock.patch.object(wu, "run_one", return_value=(
+                    True, "t1: PASS", {"name": "t1", "rc": 0,
+                                       "tests": 42, "failed": 0})):
+            rc = wu.main(["--test-targets", "t1",
+                          "--result-file", str(out_json)])
+        self.assertEqual(rc, 1)
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertEqual(data["targets"][0]["name"], "t1")
+        self.assertEqual(data["targets"][0]["rc"], 1)
+        self.assertIsNone(data["targets"][0]["tests"])
 
 
 class TestEnsureUser(unittest.TestCase):

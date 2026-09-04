@@ -44,6 +44,12 @@ class TestSyncModifyToMainBase(unittest.TestCase):
                         self.root / "harness" / "skills" / "cross-device" / "lib" / "python")
         shutil.copytree(REAL_SKILL_DIR,
                         self.root / "harness" / "skills" / "publish-main-base")
+        # content_tree.py（promote 绑定比对）与 commit_scope.py 相对路径调用，
+        # 临时根须有 harness/lib/
+        lib_dst = self.root / "harness" / "lib"
+        lib_dst.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO_ROOT / "harness" / "lib" / "content_tree.py", lib_dst)
+        shutil.copy(REPO_ROOT / "harness" / "lib" / "commit_scope.py", lib_dst)
         cfg = self.root / "harness" / "config"
         cfg.mkdir(parents=True, exist_ok=True)
         (cfg / "baseline-status.yaml").write_text("baselines: []\n", encoding="utf-8")
@@ -92,13 +98,23 @@ class TestSyncModifyToMainBase(unittest.TestCase):
 
     def _write_receipt(self, verified_commit, build="pass", push_board="pass",
                        batch_id="000000000001", result="pass", verify_mode="board",
-                       cases=""):
+                       cases="", verified_tree=None):
         d = self.root / "data" / "verify-results"
         d.mkdir(parents=True, exist_ok=True)
         p = d / f"20260831-100000-{batch_id}.md"
+        # verified_tree 默认按当前工作树实算（content_tree CLI，排除统一集合），
+        # 与 promote 侧 --tree HEAD 同算法——正常流程两树一致；绑定拒绝用例
+        # 经参数注入假树
+        if verified_tree is None:
+            r = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "harness" / "lib" / "content_tree.py")],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=self.root, env=self._env)
+            verified_tree = r.stdout.strip() if r.returncode == 0 else ""
         p.write_text(
             f"- schema_version: 1\n- batch_id: {batch_id}\n"
             f"- batch_base: edd5748dc3c6\n- verified_commit: {verified_commit}\n"
+            f"- verified_tree: {verified_tree}\n"
             f"- verify_mode: {verify_mode}\n- result: {result}\n- build: {build}\n"
             f"- push_board: {push_board}\n- acceptance: t\n- elapsed_s: 1\n"
             f"- summary: fixture\n- metrics: \n- timings: \n- cases: {cases}\n"
@@ -131,6 +147,123 @@ class TestSyncModifyToMainBase(unittest.TestCase):
             blocking_reason="r" if blocking else "", status=status, task=task,
             batch_id="000000000001")
 
+    # ── 方向 3：rollback 状态推导（人工 --rollback 与失败点共用实现）────────
+    BID_RB = "BL-20260903-01"
+
+    def _write_promoted_yaml(self, status="promoted"):
+        (self.root / "harness" / "config" / "baseline-status.yaml").write_text(
+            "baselines:\n"
+            f"- baseline_id: {self.BID_RB}\n"
+            f"  status: {status}\n"
+            "  source_commit: 0123456789ab\n", encoding="utf-8")
+
+    def _state_file(self):
+        p = self.root / "harness" / "log" / "cross-device" / f"promote-{self.BID_RB}.head"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def test_rollback_drops_meta_commit_based_on_recorded_head(self):
+        # 基准（promote 进入时 HEAD）已记状态文件；元提交恰前进一位 → 才 reset：
+        # HEAD 回基准、revert-candidate 生效后随 reset 一并丢弃、状态文件清理
+        self._write_promoted_yaml("candidate")
+        self._git("add", "-A")
+        self._git("commit", "-m", "构建(baseline): 登记")
+        base = self._git("rev-parse", "HEAD").stdout.strip()
+        self._write_promoted_yaml("promoted")   # promote 登记后随元提交入库
+        (self.root / "c.txt").write_text("3\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "构建(baseline): 晋升元提交")
+        self._state_file().write_text(base + "\n", encoding="utf-8")
+        r = self._run("--rollback", "--baseline-id", self.BID_RB)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._git("rev-parse", "HEAD").stdout.strip(), base)
+        self.assertFalse((self.root / "c.txt").exists())
+        self.assertFalse(self._state_file().exists())
+
+    def test_rollback_without_meta_commit_skips_reset_but_reverts(self):
+        # 元提交未建（HEAD==基准）：不 reset（防误删）；登记已落（promoted）
+        # 仍回退 candidate（revert 仅改工作区 yaml，不产生提交）
+        base = self._git("rev-parse", "HEAD").stdout.strip()
+        self._write_promoted_yaml("promoted")
+        self._state_file().write_text(base + "\n", encoding="utf-8")
+        r = self._run("--rollback", "--baseline-id", self.BID_RB)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._git("rev-parse", "HEAD").stdout.strip(), base)
+        data = yaml.safe_load(
+            (self.root / "harness" / "config" / "baseline-status.yaml")
+            .read_text(encoding="utf-8"))
+        self.assertEqual(data["baselines"][0]["status"], "candidate")
+        self.assertFalse(self._state_file().exists())
+
+    def test_rollback_without_state_file_skips_reset(self):
+        # 基准缺失（状态文件丢失/人工环境）：不 reset，提示人工核查，rc 0
+        self._write_promoted_yaml("candidate")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(t): 无状态文件的额外提交")
+        head = self._git("rev-parse", "HEAD").stdout.strip()
+        r = self._run("--rollback", "--baseline-id", self.BID_RB)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._git("rev-parse", "HEAD").stdout.strip(), head)
+        self.assertIn("跳过 dev reset", r.stdout + r.stderr)
+
+    def test_rollback_candidate_status_skips_revert(self):
+        # 推导一：登记未落（candidate）→ 不调 revert-candidate（无 reverted 输出）
+        base = self._git("rev-parse", "HEAD").stdout.strip()
+        self._write_promoted_yaml("candidate")
+        self._state_file().write_text(base + "\n", encoding="utf-8")
+        r = self._run("--rollback", "--baseline-id", self.BID_RB)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("reverted-candidate", r.stdout + r.stderr)
+
+    # ── 方向 3（261f10265269）：promote 绑定 verified_tree（一致过路径由
+    # test_promote_passes_code_covered_by_board_receipt 显式覆盖）──────────
+    # ── 方向 3（261f10265269）：promote 绑定 verified_tree。流程对齐
+    # test_promote_passes（board 收据 verified_commit=code_head、yaml 与收据
+    # 随后入库），BOARD_OK 先过才达绑定比对；一致过路径由该用例显式覆盖。
+    # 注：code/ 无改动的 promote 走豁免分支，不触发绑定比对（见零改动用例）
+    def _board_chain(self, verified_tree):
+        self._setup_remote()
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
+        (self.root / "code").mkdir()
+        (self.root / "code" / "foo.txt").write_text("x\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): code 改动")
+        self._git("push", "origin", "dev")
+        code_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        self._write_receipt(code_head, batch_id="000000000001",
+                            cases="lcview-liveness", verify_mode="board",
+                            verified_tree=verified_tree)
+        (self.root / "harness" / "config" / "baseline-status.yaml").write_text(
+            "baselines:\n"
+            f"  - baseline_id: BL-TEST-01\n"
+            f"    status: candidate\n"
+            f"    source_commit: {code_head}\n"
+            f"    sync_manifest: data/verify-results/20260831-100000-000000000001.md\n"
+            f"    build_result: PASS\n"
+            f"    package_result: PASS\n"
+            f"    board_verify: PASS\n"
+            f"    evidence:\n"
+            f"      ki_gate: pass\n",
+            encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): board 收据与 candidate 入库")
+        self._git("push", "origin", "dev")
+
+    def test_promote_rejects_board_tree_mismatch(self):
+        # 收据 verified_tree 与晋升内容树不一致（发布内容≠验证内容）→ 拒并列差异
+        self._board_chain("0" * 40)
+        r = self._promote()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("verified_tree 与晋升内容树不一致", r.stderr)
+
+    def test_promote_rejects_missing_verified_tree(self):
+        # 旧版收据缺 verified_tree → 无法证明绑定，拒（提示以当前工具重写）
+        self._board_chain("")
+        r = self._promote()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("缺 verified_tree", r.stderr)
+
     # ── 方向 4：真 git 仓两例（父等于 / 不等 VC）──────────────────────────
     def test_check_parent_equals_vc_passes(self):
         # 父(c1) == verified_commit(c1) → 前置校验通过
@@ -138,6 +271,23 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("前置校验通过", r.stdout)
         self.assertIn(f"PARENT={self.parent_vc}", r.stdout)
+
+    def test_rejects_mismatched_cdp_project_root(self):
+        # 方向 4：CDP_PROJECT_ROOT 已设且不等于 git 顶层目录 → 收据查找前拒绝，
+        # 防收据目录被环境变量改道（CDP_PROJECT_ROOT=root 时正常放行）
+        r_ok = self._run("--check-only")
+        self.assertEqual(r_ok.returncode, 0, r_ok.stderr)
+        env = dict(self._env)
+        env["CDP_PROJECT_ROOT"] = str(self.root / "elsewhere")
+        r = subprocess.run(
+            [BASH, str(self.root / "harness" / "skills" / "publish-main-base"
+                       / "publish_main_base.sh"), "--check-only"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=self.root, env=env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("CDP_PROJECT_ROOT", r.stderr)
+        self.assertIn("git 顶层目录", r.stderr)
+        self.assertIn("拒绝执行", r.stderr)
 
     def test_check_outputs_need_verify_class(self):
         # 父(c1) != verified_commit（伪造）→ NEED_VERIFY（编排进验证路径）
@@ -244,19 +394,17 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         cfg = self.root / "harness" / "config" / "baseline-status.yaml"
         return yaml.safe_load(cfg.read_text(encoding="utf-8"))["baselines"][0]
 
-    def test_add_candidate_empty_build_registers_fail(self):
-        # 收据 build/push_board 为空 → 登记为 FAIL（空值非合法 skip 证据）
+    def test_add_candidate_empty_build_rejected(self):
+        # 方向 4：收据 build/push_board 为空（记 FAIL）→ Python 层拒登记
+        # （防绕过 shell 直调登记；基线证据须 pass/skip）
         self._write_receipt(self.parent_vc, build="", push_board="",
                             batch_id="000000000003", cases="lcview-liveness")
         r = self._run_register("add-candidate", "--source-commit", "abc123def456",
                                "--evidence-scope", "lcview-liveness",
                                "--receipt-path",
                                "data/verify-results/20260831-100000-000000000003.md")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        b = self._registered_evidence()
-        self.assertEqual(b["build_result"], "FAIL")
-        self.assertEqual(b["package_result"], "FAIL")
-        self.assertEqual(b["board_verify"], "FAIL")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("拒绝登记", r.stderr)
 
     def test_add_candidate_explicit_skip_still_skip(self):
         # 显式 skip（-s 批次收据）保持 SKIP，不受空值从严影响
@@ -349,7 +497,24 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         msg = Path(self._remote_tmp.name) / "promote-msg.txt"
         msg.write_text("构建(baseline): BL-TEST-01 基线晋升\n", encoding="utf-8")
         return self._run("--promote", "--baseline-id", "BL-TEST-01",
-                         "--message-file", str(msg), "--task", "t1", *extra)
+                         "--message-file", str(msg), "--task", "t1",
+                         "--approved-by", "t", *extra)
+
+    def test_promote_requires_approved_by(self):
+        # 方向 6：--promote 缺 --approved-by → exit 3（审批凭据外部化，
+        # 不再回落默认常量）
+        self._setup_remote()
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
+        self._candidate_yaml()
+        self._receipt_commit_c3(verify_mode="skip")
+        msg = Path(self._remote_tmp.name) / "promote-msg.txt"
+        msg.write_text("构建(baseline): BL-TEST-01 基线晋升\n", encoding="utf-8")
+        r = self._run("--promote", "--baseline-id", "BL-TEST-01",
+                      "--message-file", str(msg))
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("--approved-by", r.stderr)
+        self.assertIn("审批凭据外部化", r.stderr)
 
     def test_promote_rejects_non_board_receipt(self):
         # 方向 2 board 拒：仅 skip 收据（board 收据不覆盖 code/ 改动）→ RECEIPT_FAIL
@@ -551,7 +716,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         msg = Path(self._remote_tmp.name) / "promote-msg.txt"
         msg.write_text("构建(baseline): BL-TEST-01 基线晋升\n", encoding="utf-8")
         r = self._run("--promote", "--baseline-id", "BL-TEST-01",
-                      "--message-file", str(msg))
+                      "--message-file", str(msg), "--approved-by", "t")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("known-issues 门禁通过（task=t1", r.stderr)
         self.assertIn("promote 完成", r.stdout)

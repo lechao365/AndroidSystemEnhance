@@ -1,9 +1,14 @@
+import contextlib
+import io
+import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib" / "python"))
 import cdp_validate_patch as cv
@@ -188,7 +193,23 @@ class TestValidatePatch(unittest.TestCase):
 
 
 class TestValidateAgainst(unittest.TestCase):
-    """--against：对每个 diff 额外跑 git apply --check 语义校验。"""
+    """--against：对每个 diff 额外跑 git apply --check 语义校验。
+
+    cv.main 返回前自发 mark edit_validate（cdp_timing current-batch.json
+    回落），须隔离 CDP_PROJECT_ROOT 防打到真实当前批次打点文件。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old_root = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+
+    def tearDown(self):
+        if self._old_root is None:
+            os.environ.pop("CDP_PROJECT_ROOT", None)
+        else:
+            os.environ["CDP_PROJECT_ROOT"] = self._old_root
+        self._tmp.cleanup()
 
     def _git_repo(self, content="int y;\n"):
         root = Path(tempfile.mkdtemp())
@@ -244,10 +265,54 @@ index 1111111..2222222 100644
 --- a/foo.c
 +++ b/foo.c
 @@ -1 +1,2 @@
- different;
+  different;
 +int z;
 """)
         self.assertEqual(cv.main([d]), 0)
+
+
+class TestEditValidateMark(unittest.TestCase):
+    """方向 3：cdp_validate_patch main 返回前自发 mark edit_validate。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old_root = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+        self.batch = "abc123def456"
+        f = tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False,
+                                        encoding="utf-8", newline="\n")
+        f.write(GOOD)
+        f.close()
+        self._diff = f.name
+        self.addCleanup(Path(self._diff).unlink)
+
+    def tearDown(self):
+        if self._old_root is None:
+            os.environ.pop("CDP_PROJECT_ROOT", None)
+        else:
+            os.environ["CDP_PROJECT_ROOT"] = self._old_root
+        self._tmp.cleanup()
+
+    def test_main_marks_edit_validate(self):
+        # start 建 current-batch.json → cv.main 收尾自发 mark edit_validate
+        # （照 selfcheck._mark_selfcheck 子进程调法，batch 识别走回落）
+        import cdp_timing
+        from cdp_paths import log_apply_dir
+        cdp_timing.main(["start", "--batch", self.batch])
+        self.assertEqual(cv.main([self._diff]), 0)
+        data = json.loads((log_apply_dir() / f"timings-{self.batch}.json")
+                          .read_text(encoding="utf-8"))
+        self.assertEqual(data["marks"][-1]["name"], "edit_validate")
+
+    def test_main_mark_failure_not_block(self):
+        # 发点子进程异常（OSError）仅 stderr warn，不改 main 返回码
+        err = io.StringIO()
+        with mock.patch.object(subprocess, "run",
+                               side_effect=OSError("boom")), \
+                contextlib.redirect_stderr(err):
+            rc = cv.main([self._diff])
+        self.assertEqual(rc, 0)
+        self.assertIn("warn", err.getvalue())
 
 
 if __name__ == "__main__":

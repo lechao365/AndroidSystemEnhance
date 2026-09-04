@@ -185,9 +185,13 @@ def main(argv=None):
         # 人工传值须为其子集否则拒（防过度声称：不得声称未实测的用例范围）
         evidence_scope = (args.evidence_scope or "").strip()
         try:
-            r = read_receipt(args.receipt_path)
+            r, receipt_errs = read_receipt(args.receipt_path)
         except (OSError, UnicodeDecodeError) as e:
             print(f"error: 读取收据失败 {args.receipt_path}: {e}", file=sys.stderr)
+            return 1
+        if receipt_errs:
+            print(f"error: 收据解析错误 {args.receipt_path}: "
+                  f"{'; '.join(receipt_errs)}", file=sys.stderr)
             return 1
         receipt_cases = {c.strip() for c in (r.cases or "").split(",") if c.strip()}
         if not evidence_scope:
@@ -205,10 +209,39 @@ def main(argv=None):
                       f"（{sorted(receipt_cases) or '无'}），过度声称拒绝登记: {extra}",
                       file=sys.stderr)
                 return 1
-        # build/package 共用收据 build 阶段，board_verify 取 push_board，均大写（不再伪造 PASS）
+        # build 取收据 build 阶段，board_verify 取 push_board，均大写（不再伪造 PASS）
         # 空值（""/None/纯空白）记 FAIL 不记 SKIP——空值不是合法 skip 证据，证据链从严
         build_result = ((r.build or "").strip() or "FAIL").upper()
+        # package：当前无打包生产者，无打包证据记 UNKNOWN（方向 1 停止把
+        # build_result 复制给 package_result，杜绝伪造打包证据）
+        package_result = "UNKNOWN"
         board_verify = ((r.push_board or "").strip() or "FAIL").upper()
+        # 方向 4：Python 层登记防线——防绕过 shell 直调登记（publish_main_base.sh
+        # prepare 有门禁，直调 add-candidate 须同样从严）
+        # 非法枚举：verify_mode/result 白名单
+        if r.verify_mode not in ("board", "skip", "none"):
+            print(f"error: 收据 verify_mode 非法（{r.verify_mode!r}），拒绝登记",
+                  file=sys.stderr)
+            return 1
+        if r.result not in ("pass", "fail", "skip"):
+            print(f"error: 收据 result 非法（{r.result!r}），拒绝登记",
+                  file=sys.stderr)
+            return 1
+        # 缺必需字段：batch_id/verified_commit/build/push_board 必填
+        missing = [k for k, v in (("batch_id", r.batch_id),
+                                  ("verified_commit", r.verified_commit),
+                                  ("build", r.build),
+                                  ("push_board", r.push_board))
+                   if not (v or "").strip()]
+        if missing:
+            print(f"error: 收据缺必需字段 {', '.join(missing)}，拒绝登记",
+                  file=sys.stderr)
+            return 1
+        # 拒 FAIL：build/board_verify 为 FAIL 不可登记为基线（证据须 pass/skip）
+        if build_result == "FAIL" or board_verify == "FAIL":
+            print("error: 收据 build/board_verify 为 FAIL，拒绝登记"
+                  "（基线证据须 pass/skip）", file=sys.stderr)
+            return 1
         # ki_gate：known-issues 门禁结论（拒批已在脚本层 exit，缺参视为 not-run）
         ki_gate = (args.ki_gate or "").strip() or "not-run"
         # known_issues_carried：带病项记账（缺参记空；只记录不阻断，硬阻断会死锁）
@@ -221,12 +254,12 @@ def main(argv=None):
                 if b.get("sync_manifest") != args.receipt_path:
                     b["sync_manifest"] = args.receipt_path
                     b["build_result"] = build_result
-                    b["package_result"] = build_result
+                    b["package_result"] = package_result
                     b["board_verify"] = board_verify
                     b["evidence_scope"] = evidence_scope
                     b["evidence"] = {
                         "build_result": build_result,
-                        "package_result": build_result,
+                        "package_result": package_result,
                         "board_verify": board_verify,
                         "sync_manifest": args.receipt_path,
                         "ki_gate": ki_gate,
@@ -246,12 +279,12 @@ def main(argv=None):
             "source_commit": args.source_commit,
             "sync_manifest": args.receipt_path,
             "build_result": build_result,
-            "package_result": build_result,
+            "package_result": package_result,
             "board_verify": board_verify,
             "evidence_scope": evidence_scope,
             "evidence": {
                 "build_result": build_result,
-                "package_result": build_result,
+                "package_result": package_result,
                 "board_verify": board_verify,
                 "sync_manifest": args.receipt_path,
                 "ki_gate": ki_gate,
@@ -277,6 +310,12 @@ def main(argv=None):
                     print(f"error: 收据文件不存在，无法生成证据快照: {receipt}",
                           file=sys.stderr)
                     return 1
+                # 方向 6：审批凭据外部化——promote 空审批人即拒（在写快照前校验，
+                # 防快照污染），不再回落默认常量（防审批可自证）
+                if not args.approved_by:
+                    print("error: promote 必须传 --approved-by"
+                          "（审批凭据外部化，不再回落默认常量）", file=sys.stderr)
+                    return 1
                 snapshot_name = f"{args.baseline_id}-{receipt.name}"
                 if not snapshot_name.endswith(".md"):
                     snapshot_name += ".md"
@@ -287,6 +326,12 @@ def main(argv=None):
                     return 1
                 snapshot_path.write_text(receipt.read_text(encoding="utf-8"),
                                          encoding="utf-8")
+                # 方向 2：package_result=UNKNOWN 仅告警放行不新增阻断——当前无
+                # 打包生产者，硬门禁会锁死发布通道
+                if b.get("package_result") == "UNKNOWN":
+                    print(f"warn: baseline {args.baseline_id} package_result=UNKNOWN"
+                          "（当前无打包生产者，无打包证据；仅告警放行，不新增阻断）",
+                          file=sys.stderr)
                 # promote 允许透传/改写 evidence_scope（如零改动豁免时改写 no-code-change）
                 scope = (args.evidence_scope or "").strip()
                 if scope:
@@ -294,7 +339,7 @@ def main(argv=None):
                     if isinstance(b.get("evidence"), dict):
                         b["evidence"]["evidence_scope"] = scope
                 b["status"] = "promoted"
-                b["approved_by"] = args.approved_by or "lechao"
+                b["approved_by"] = args.approved_by
                 b["approved_at"] = datetime.datetime.now(
                     datetime.timezone(datetime.timedelta(hours=8))
                 ).strftime("%Y-%m-%dT%H:%M:%S+08:00")

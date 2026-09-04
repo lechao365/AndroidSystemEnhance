@@ -120,7 +120,7 @@ manifest.yaml 条目示例：
   > **路径以 `harness/config/paths.conf` 为单一事实源**（`KERNEL_WS` / `AOSP_WS`，支持环境变量覆盖）：
   > kernel 全量 = `${KERNEL_WS}/{source 去掉 rpi5-kernel-build/common/ 前缀}`，
   > aosp 全量 = `${AOSP_WS}/{source 去掉 aosp/ 前缀}`。禁止硬编码 `/home/lechao/...` 绝对路径。
-- **others 段（source: null）**：`code/others/` 不依赖 workspace（`SRC-003`），code 即全量文件，直接读 code
+- **others 段（source: null）**：`code/*/others/` 不依赖 workspace（`SRC-003`），code 即全量文件，直接读 code
 - **删除文件（无 deletions 段）**：manifest 无 `deletions` 段；删除文件以报告 `[D]` 状态为准，全量上下文取 git 历史：
   `git show <删除前 commit>:<相对路径>` 或 `git log --oneline -- <path>` 定位最后版本
 

@@ -7,7 +7,7 @@ import cdp_parse as cp
 
 VALID_SV = """-sv base:1a2b3c4d5e6f
 意图: 修复 lcview 空指针
-验收: svc:lechao_lcview
+验收: case:lcview-liveness
 方向: 检查 service.cpp 入口
 """
 
@@ -24,7 +24,7 @@ class TestParse(unittest.TestCase):
         self.assertEqual(b.mode, "sv")
         self.assertEqual(b.base, "1a2b3c4d5e6f")
         self.assertIn("lcview", b.intent)
-        self.assertIn("svc:", b.acceptance)
+        self.assertIn("case:", b.acceptance)
 
     def test_parse_s(self):
         b = cp.parse_batch(VALID_S)
@@ -102,7 +102,35 @@ class TestParse(unittest.TestCase):
         self.assertEqual(code, 16)
 
     def test_sv_acceptance_rule(self):
-        text = VALID_SV.replace("svc:lechao_lcview", "无")
+        text = VALID_SV.replace("case:lcview-liveness", "无")
+        code, _ = cp.validate_batch(text, role="emit")
+        self.assertEqual(code, 17)
+
+    def test_s_case_id_invalid_rejected(self):
+        # 方向 2：case id 限小写字母数字与连字符，违规返 17
+        for bad in ("case:LCVIEW", "case:lc view", "case:",
+                    "case:lcview_liveness", "case:-lcview", "case:lcview-"):
+            text = VALID_SV.replace("case:lcview-liveness", bad)
+            code, _ = cp.validate_batch(text, role="emit")
+            self.assertEqual(code, 17, bad)
+
+    def test_sv_case_id_valid_ok(self):
+        # 方向 2：case:<id>,<id>... 合法语法返 0（多个逗号分隔）
+        text = VALID_SV.replace("case:lcview-liveness",
+                                "case:lcview-liveness,lcview-pipeline")
+        code, _ = cp.validate_batch(text, role="emit")
+        self.assertEqual(code, 0)
+
+    def test_sv_manual_free_text_valid(self):
+        # 方向 2：manual 模式保留自由文本（唯一自由文本通道）返 0
+        text = VALID_SV.replace("case:lcview-liveness",
+                                "manual:lcview 服务运行正常")
+        code, _ = cp.validate_batch(text, role="emit")
+        self.assertEqual(code, 0)
+
+    def test_sv_bare_text_rejected(self):
+        # 方向 2：自由文本仅留 manual 模式，裸表达式（svc: 等）返 17
+        text = VALID_SV.replace("case:lcview-liveness", "svc:lechao_lcview")
         code, _ = cp.validate_batch(text, role="emit")
         self.assertEqual(code, 17)
 
@@ -113,7 +141,7 @@ class TestParse(unittest.TestCase):
 
     def test_apply_role_softens_only_17(self):
         # validate_batch 恒返回原始码 17（降级由 main 统一处理）
-        text = VALID_SV.replace("svc:lechao_lcview", "无")
+        text = VALID_SV.replace("case:lcview-liveness", "无")
         code, _ = cp.validate_batch(text, role="apply")
         self.assertEqual(code, 17)
 
@@ -122,7 +150,7 @@ class TestParse(unittest.TestCase):
         import io
         import tempfile
         from contextlib import redirect_stdout
-        text = VALID_SV.replace("svc:lechao_lcview", "无")
+        text = VALID_SV.replace("case:lcview-liveness", "无")
         f = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
                                         encoding="utf-8")
         f.write(text)
@@ -131,7 +159,7 @@ class TestParse(unittest.TestCase):
         self.addCleanup(Path(path).unlink)
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = cp.main(["--role", "apply", path])
+            rc = cp.main(["--role", "apply", "--expect-base", "1a2b3c4d5e6f", path])
         self.assertEqual(rc, 0)
         self.assertIn("warn:", buf.getvalue())
         self.assertNotIn("error:", buf.getvalue())
@@ -168,6 +196,34 @@ class TestParse(unittest.TestCase):
                                   "ffffffffffff", path]), 18)
         self.assertEqual(cp.main(["--role", "apply", "--expect-base",
                                   "1a2b3c4d5e6f", path]), 0)
+
+    def test_cli_apply_missing_expect_base_exit_18(self):
+        # 方向 4：apply 角色未传 --expect-base → 18（不再静默跳过 base 校验）
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        f = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
+                                        encoding="utf-8")
+        f.write(VALID_SV)
+        f.close()
+        path = f.name
+        self.addCleanup(Path(path).unlink)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cp.main(["--role", "apply", path])
+        self.assertEqual(rc, 18)
+        self.assertIn("--expect-base", buf.getvalue())
+
+    def test_cli_emit_without_expect_base_ok(self):
+        # 方向 4：emit 角色未传 --expect-base 不强制（仅 apply 强制）
+        import tempfile
+        f = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
+                                        encoding="utf-8")
+        f.write(VALID_SV)
+        f.close()
+        path = f.name
+        self.addCleanup(Path(path).unlink)
+        self.assertEqual(cp.main(["--role", "emit", path]), 0)
 
 
 if __name__ == "__main__":

@@ -243,7 +243,7 @@ def apply_done(session, receipt_path, stage=None, error_line=None,
         raise RuntimeError(
             f"会话已终结（{session['exit_attribution']}），拒绝重复记账")
     try:
-        r = read_receipt(receipt_path)
+        r, _receipt_errs = read_receipt(receipt_path)
     except (OSError, UnicodeDecodeError) as exc:
         raise RuntimeError(f"收据读取失败 {receipt_path}: {exc}") from exc
 
@@ -438,7 +438,15 @@ def _resolve_acceptance_for_run(session):
             raise RuntimeError(
                 f"用例标签 {', '.join(missing)} 不存在于 verify-cases.yaml"
                 f"（可选: {', '.join(sorted(cases)) or '无'}）")
-        return "--case", session["case"], " ".join(cases[c] for c in labels), ""
+        def _case_text(v):
+            # 与 ws_acceptance._case_text 同款：cases 值 dict 形态
+            # （生命周期资产）取 acceptance 键，str 旧形态原样
+            if isinstance(v, dict):
+                return (v.get("acceptance") or "").strip()
+            return v
+
+        return ("--case", session["case"],
+                " ".join(_case_text(cases[c]) for c in labels), "")
     raise RuntimeError("会话缺验收源（模式 A 须 --batch-file；模式 B 须 --case）")
 
 
@@ -449,15 +457,28 @@ def run_guidance(session):
             f"会话已终结（{session['exit_attribution']}），不得再生成新轮指引")
     flag, val, acc, base = _resolve_acceptance_for_run(session)
     vdir = "harness/skills/workspace-verify"
+    # 方向 4：先产自描述产物再传给报告——单测/验收/推送产物落在本会话日志目录，
+    # ws_report PASS 路径（--acceptance-file/--unit-test-file/--push-file）
+    # 按产物核验
+    logdir = sessions_root() / f"session-{session['id']}"
+    ut_file = logdir / "unit-tests.json"
+    acc_file = logdir / "acceptance.json"
+    push_file = logdir / "push.json"
     return "\n".join([
         f"[第 {session['total_attempts'] + 1} 轮] 按 workspace-verify SKILL 工作流执行:",
-        "  1. code->workspace 同步 + 影响面判定 + 编译 + adb 推送（SKILL 步骤 1-4）",
-        f"  2. python3 {vdir}/ws_upload_tests.py（上板真跑 C++ 单测：lcview/lciod "
-        "unit_test+hal_test 先推后跑，有失败即本轮失败）",
+        f"  1. code->workspace 同步 + 影响面判定 + 编译 + adb 推送（SKILL 步骤 1-4，"
+        f"ws_push.py --result-file {push_file}）",
+        f"  2. python3 {vdir}/ws_upload_tests.py --result-file {ut_file}"
+        "（上板真跑 C++ 单测：lcview/lciod unit_test+hal_test 先推后跑，"
+        "有失败即本轮失败）",
         f"  3. python3 {vdir}/ws_acceptance.py run {flag} {val}"
+        f" --result-file {acc_file}"
         " [--ensure-boot 无 boot 标签时自动追加] [--wait-ready --log-since ... 有 reboot 时]",
         f"  4. python3 {vdir}/ws_report.py --result <pass|fail> --build ... --board ..."
-        f" --acceptance <逐项 JSON> [--batch-file {session.get('batch_file') or '<批次>'}]"
+        f" --acceptance-file {acc_file} --unit-test-file {ut_file}"
+        f" --push-file {push_file}（pass 必需按产物核验；"
+        "fail 可 --acceptance 直传现场）"
+        f" [--batch-file {session.get('batch_file') or '<批次>'}]"
         f" --target {session.get('target') or base or '<12hex>'} --body <正文文件>"
         + (f" --case {session.get('case')}" if session.get("case") else ""),
         f"  5. python3 {ws_session_cli_path()} done --session <session.json>"

@@ -16,11 +16,11 @@ baselines:
   source_commit: a1b2c3d4
   sync_manifest: output/log/lc_harness_sync_code_to_patchs/artifacts/20260622-213209-manifest.yaml
   build_result: PASS
-  package_result: PASS
+  package_result: UNKNOWN
   board_verify: PASS
   evidence:
     build_result: PASS
-    package_result: PASS
+    package_result: UNKNOWN
     board_verify: PASS
     sync_manifest: output/log/lc_harness_sync_code_to_patchs/artifacts/20260622-213209-manifest.yaml
   approved_by: lechao
@@ -32,11 +32,11 @@ baselines:
   source_commit: f8de5aa
   sync_manifest: output/log/lc_harness_sync_code_to_patchs/artifacts/20260624-073624-manifest.yaml
   build_result: PASS
-  package_result: PASS
+  package_result: UNKNOWN
   board_verify: PASS
   evidence:
     build_result: PASS
-    package_result: PASS
+    package_result: UNKNOWN
     board_verify: PASS
     sync_manifest: output/log/lc_harness_sync_code_to_patchs/artifacts/20260624-073624-manifest.yaml
   approved_by: lechao
@@ -51,11 +51,11 @@ baselines:
   evidence_note: sync_manifest 收据 20260828-111825-fdc2e9820a41.md 已老化丢失（2026-08-31
     检测），证据链断链，不可作为 promote 证据引用
   build_result: PASS
-  package_result: PASS
+  package_result: UNKNOWN
   board_verify: PASS
   evidence:
     build_result: PASS
-    package_result: PASS
+    package_result: UNKNOWN
     board_verify: PASS
     sync_manifest: data/verify-results/20260828-111825-fdc2e9820a41.md
   approved_by: lechao
@@ -66,12 +66,12 @@ baselines:
   source_commit: aac3745ca218
   sync_manifest: data/verify-results/20260830-203409-manual-2608302034.md
   build_result: PASS
-  package_result: PASS
+  package_result: UNKNOWN
   board_verify: PASS
   evidence_scope: lcview-liveness
   evidence:
     build_result: PASS
-    package_result: PASS
+    package_result: UNKNOWN
     board_verify: PASS
     sync_manifest: data/verify-results/20260830-203409-manual-2608302034.md
     evidence_scope: lcview-liveness
@@ -83,12 +83,12 @@ baselines:
   source_commit: 0b927e29d571
   sync_manifest: data/verify-results/20260831-172924-manual-2608311729.md
   build_result: PASS
-  package_result: PASS
+  package_result: UNKNOWN
   board_verify: PASS
   evidence_scope: lcview-liveness,lcview-transfer,lcview-pipeline,lcview-perf
   evidence:
     build_result: PASS
-    package_result: PASS
+    package_result: UNKNOWN
     board_verify: PASS
     sync_manifest: data/verify-results/20260831-172924-manual-2608311729.md
     ki_gate: pass
@@ -101,12 +101,12 @@ baselines:
   source_commit: bc4a5c830a64
   sync_manifest: data/verify-results/20260901-093950-4cbc6c1fcc01.md
   build_result: PASS
-  package_result: PASS
+  package_result: UNKNOWN
   board_verify: PASS
   evidence_scope: lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-transfer
   evidence:
     build_result: PASS
-    package_result: PASS
+    package_result: UNKNOWN
     board_verify: PASS
     sync_manifest: data/verify-results/20260901-093950-4cbc6c1fcc01.md
     ki_gate: inferred
@@ -119,12 +119,12 @@ baselines:
   source_commit: 952c913d622f
   sync_manifest: data/verify-results/20260901-151032-ffc3da1ebcb4.md
   build_result: SKIP
-  package_result: SKIP
+  package_result: UNKNOWN
   board_verify: PASS
   evidence_scope: lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-transfer
   evidence:
     build_result: SKIP
-    package_result: SKIP
+    package_result: UNKNOWN
     board_verify: PASS
     sync_manifest: data/verify-results/20260901-151032-ffc3da1ebcb4.md
     ki_gate: pass
@@ -151,12 +151,12 @@ baselines:
   source_commit: 27b8a3656161
   sync_manifest: data/verify-results/20260902-093052-7833c640079a.md
   build_result: SKIP
-  package_result: SKIP
+  package_result: UNKNOWN
   board_verify: PASS
   evidence_scope: lcview-liveness,lcview-sepolicy-label
   evidence:
     build_result: SKIP
-    package_result: SKIP
+    package_result: UNKNOWN
     board_verify: PASS
     sync_manifest: data/verify-results/20260902-093052-7833c640079a.md
     ki_gate: empty-registry
@@ -174,12 +174,12 @@ baselines:
   source_commit: 19f85748f9ed
   sync_manifest: data/verify-results/20260902-093052-7833c640079a.md
   build_result: SKIP
-  package_result: SKIP
+  package_result: UNKNOWN
   board_verify: PASS
   evidence_scope: no-code-change
   evidence:
     build_result: SKIP
-    package_result: SKIP
+    package_result: UNKNOWN
     board_verify: PASS
     sync_manifest: data/verify-results/20260902-093052-7833c640079a.md
     ki_gate: empty-registry
@@ -188,3 +188,26 @@ baselines:
     known_issues_closed: []
   approved_by: lechao
   approved_at: '2026-09-02T14:27:30+08:00'
+- baseline_id: BL-20260904-01
+  status: promoted
+  source_branch: dev
+  source_commit: cf9de6f33801
+  sync_manifest: data/verify-results/20260902-093052-7833c640079a.md
+  build_result: SKIP
+  package_result: UNKNOWN
+  board_verify: PASS
+  evidence_scope: no-code-change
+  evidence:
+    build_result: SKIP
+    package_result: UNKNOWN
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260902-093052-7833c640079a.md
+    ki_gate: pass
+    evidence_scope: no-code-change
+    known_issues_carried: KI-20260903-001
+    known_issues_closed:
+    - issue_id: KI-20260903-002
+      resolved_in: b25da0641366
+      title: baseline_register promote 未传审批人时回落默认常量并自动填时间，审批可自证
+  approved_by: lechao
+  approved_at: '2026-09-04T12:31:41+08:00'

@@ -123,6 +123,26 @@ def validate_diff(path):
     return (not errs), errs
 
 
+def _mark_edit_validate():
+    """自发 edit_validate 打点：diff 校验完成即 mark，供收据 edit 段细分。
+
+    照 selfcheck._mark_selfcheck 的子进程调法（batch 识别走 cdp_timing
+    current-batch.json 三级回落）；发点失败仅 stderr 提示，不改返回码
+    （打点诊断数据，非校验结果本身）。
+    """
+    timing = Path(__file__).resolve().parent / "cdp_timing.py"
+    try:
+        proc = subprocess.run([sys.executable, str(timing), "mark",
+                               "--name", "edit_validate"],
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=10)
+        if proc.returncode != 0:
+            print(f"warn: edit_validate 打点失败（不阻断）: {proc.stderr.strip()}",
+                  file=sys.stderr)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"warn: edit_validate 打点失败（不阻断）: {e}", file=sys.stderr)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=".diff 格式校验")
     ap.add_argument("files", nargs="+", help="diff 文件路径")
@@ -145,6 +165,7 @@ def main(argv=None):
             print(f"{f}: error: {e}")
         if not ok:
             bad += 1
+    _mark_edit_validate()
     return 1 if bad else 0
 
 

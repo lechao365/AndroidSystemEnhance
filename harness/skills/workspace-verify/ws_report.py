@@ -4,7 +4,9 @@
   模式 A（apply 拉起，随批次）:
     ws_report.py --batch-file <cdp> [--target <12hex起点HEAD>] \
         --result pass|fail|skip --build ... --board ... \
-        --acceptance "<逐项结果>" --elapsed <秒> --summary "<一句话>" \
+        --acceptance-file "<自描述验收产物 JSON>" --unit-test-file "<自描述单测产物 JSON>" \
+        --push-file "<自描述推送产物 JSON>" \
+        --elapsed <秒> --summary "<一句话>" \
         [--body <正文文件>（CDP 原文+失败现场，必传见 SKILL）]
    模式 B（独立触发）:
     ws_report.py --target <12hex|dev|main> [--prefix manual|revert] \
@@ -37,10 +39,60 @@ from cdp_parse import (SOFT_ERRORS, batch_id_from_text, parse_batch,  # noqa: E4
                        validate_batch)
 from cdp_paths import log_apply_dir  # noqa: E402
 from cdp_receipt import Receipt, append_trend, write_receipt  # noqa: E402
+from cdp_timing import _base_seg_name  # noqa: E402
+from commit_scope import format_scope, porcelain_to_name_status  # noqa: E402
+from content_tree import content_tree  # noqa: E402
 from paths import env_path  # noqa: E402
 
 
 _HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
+
+# 链路已知段中带 verify 前缀的五段（verify_sync/build/push/unit_test/acceptance）：
+# none 模式（-s/文档批）无 verify 环节，missing 判定按 verify_mode 取应有段集时
+# 从 KNOWN_SEGMENTS 去掉这五段，避免 -s 批永远报 verify 段缺失（方向 1 收窄）。
+_VERIFY_PREFIX_SEGMENTS = frozenset((
+    "verify_sync", "verify_build", "verify_push",
+    "verify_unit_test", "verify_acceptance",
+))
+
+# 阶段汇总归类（方向 1 增）：编辑阶段细分段 + gap 段（自报段之外的未打点
+# 活动即编辑与返工）归入 edit；自检自报段归 selfcheck；verify_* 五段归
+# verify；其余（precheck/report/finish/未知段）归 other。
+_EDIT_SEGMENTS = frozenset((
+    "edit", "edit_validate", "gen_manifest", "edit_plan", "edit_retry",
+))
+
+
+def _phase_summary(segments):
+    """由段表折叠阶段合计：{edit, selfcheck, verify, other} 四类秒数。
+
+    gap_before_* 派生段一律归入 edit（当前仅自报段产生 gap，而自报段之外
+    的未打点活动即编辑与返工；不折叠则 edit 段仅记短自报值、真实编辑耗时
+    散在多个 gap 段里，链路提速收益无从测量）。段名剥 #n 序号后归类
+    （apply_selfcheck#2 仍计入 selfcheck），未知段计入 other 不丢弃。
+    """
+    totals = {"edit": 0.0, "selfcheck": 0.0, "verify": 0.0, "other": 0.0}
+    for s in segments:
+        if not isinstance(s, dict) or not s.get("name"):
+            continue
+        name = s["name"]
+        try:
+            elapsed = float(s.get("elapsed_s", 0))
+        except (TypeError, ValueError):
+            elapsed = 0.0
+        if name.startswith("gap_before_"):
+            totals["edit"] += elapsed
+            continue
+        base = _base_seg_name(name)
+        if base in _EDIT_SEGMENTS:
+            totals["edit"] += elapsed
+        elif base == "apply_selfcheck":
+            totals["selfcheck"] += elapsed
+        elif base in _VERIFY_PREFIX_SEGMENTS:
+            totals["verify"] += elapsed
+        else:
+            totals["other"] += elapsed
+    return {k: round(v, 3) for k, v in totals.items()}
 
 
 def _mark_report(timings_file, batch_id):
@@ -78,7 +130,7 @@ def _mark_report(timings_file, batch_id):
         print(f"warn: report 打点失败（不阻断）: {e}", file=sys.stderr)
 
 
-def _resolve_timings(timings_file, batch_id):
+def _resolve_timings(timings_file, batch_id, verify_mode="board"):
     """解析链路耗时打点，返回 (timings_json_str, elapsed_int|None)。
 
     显式 --timings-file 优先；未传时自动探测 log_apply_dir() 下
@@ -87,6 +139,8 @@ def _resolve_timings(timings_file, batch_id):
     缺失/非法仅 warn 降级（timings 置空，elapsed 不推导），不阻断主流程。
     elapsed 从 wall_end 减 wall_start 取整（start/mark 结构 wall_end 缺省
     按当前时刻兜底），供 --elapsed 缺省时填写 elapsed_s（显式传参优先）。
+    missing 判定按 verify_mode 取应有段集：none 模式（-s/文档批）无 verify
+    环节，去掉 verify_* 五段；board 模式（上板验证批）为全表（方向 1 收窄）。
     """
     if not timings_file and batch_id:
         probe = log_apply_dir() / f"timings-{batch_id}.json"
@@ -98,7 +152,8 @@ def _resolve_timings(timings_file, batch_id):
               "timings 置空", file=sys.stderr)
         return "", None
     try:
-        from cdp_timing import compute_segments
+        from cdp_timing import CONDITIONAL_SEGMENTS, KNOWN_SEGMENTS, \
+            _base_seg_name, compute_segments
         t = json.loads(Path(timings_file).read_text(encoding="utf-8"))
         if not isinstance(t, dict):
             raise ValueError("非 JSON 对象")
@@ -110,11 +165,40 @@ def _resolve_timings(timings_file, batch_id):
             raise ValueError("缺 segments/marks（非 cdp_timing 打点结构）")
         wall_start = t.get("start_wall") or t.get("wall_start")
         wall_end = t.get("wall_end") or time.time()
+        # 缺段可见性：应有段集在两种模式下均先减 CONDITIONAL_SEGMENTS
+        # （edit_validate/gen_manifest/edit_plan/edit_retry 未产出不判缺），
+        # none 模式再减 verify_* 五段（无 verify 环节）；缺失者以 missing 键
+        # 写入收据 timings（emit 一眼看出哪些链路段没打点）；多余段
+        # （finish/push 等表外名）不删，耗时原样保留可归因。
+        # 段名归一（方向 4）：重复轮次段（apply_selfcheck#2 等）剥 #n 序号后
+        # 与应有段集比对，gap_before_* 派生段忽略（不参与应有段判定）。
+        names = {_base_seg_name(s.get("name")) for s in segments
+                 if isinstance(s, dict) and s.get("name")}
+        names.discard("")
+        expected = KNOWN_SEGMENTS - CONDITIONAL_SEGMENTS
+        if verify_mode == "none":
+            expected = expected - _VERIFY_PREFIX_SEGMENTS
+        missing = sorted(expected - names)
+        # 返工轮次可数（方向 5）：各段（剥序号后）出现次数大于一的汇总，
+        # emit 一眼看出哪些链路段返工过（edit×2 = 编辑自愈 1 轮）。
+        counts: dict[str, int] = {}
+        for s in segments:
+            base = _base_seg_name(s.get("name")) \
+                if isinstance(s, dict) and s.get("name") else ""
+            if base:
+                counts[base] = counts.get(base, 0) + 1
+        repeat_counts = {k: v for k, v in counts.items() if v > 1}
         out = {
             "batch_id": t.get("batch_id", ""),
             "wall_start": wall_start,
             "wall_end": wall_end,
             "segments": segments,
+            "missing": missing,
+            "repeat_counts": repeat_counts,
+            # 阶段汇总（方向 1 增）：折叠 edit/selfcheck/verify/other 四类
+            # 合计秒数，gap 段归 edit——emit 一眼看出各阶段真实耗时，不再
+            # 被多个 gap 段稀释/掩盖编辑实耗（上批 edit 记 25s 实耗 857s）。
+            "phase_summary": _phase_summary(segments),
         }
         elapsed = None
         if isinstance(wall_start, (int, float)) and isinstance(wall_end, (int, float)):
@@ -123,6 +207,27 @@ def _resolve_timings(timings_file, batch_id):
     except (OSError, json.JSONDecodeError, ValueError) as e:
         print(f"warn: --timings-file 读取失败，timings 置空: {e}", file=sys.stderr)
         return "", None
+
+
+def _trend_timing(timings_json, elapsed):
+    """由收据 timings 提取 trend 行尾 timing JSON：{elapsed_s, segs（段名→秒数）}。
+
+    timings 为空（无打点）或非法时返回空串（append_trend 不追加）；有打点
+    则恒带 elapsed_s 与 segs 两键（segs 可能为空映射），供 emit 从 trend
+    直读各批耗时瓶颈。
+    """
+    if not timings_json:
+        return ""
+    segs = {}
+    try:
+        t = json.loads(timings_json)
+        for s in t.get("segments") or []:
+            if isinstance(s, dict) and s.get("name"):
+                segs[s["name"]] = round(float(s.get("elapsed_s", 0)), 3)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return ""
+    return json.dumps({"elapsed_s": elapsed, "segs": segs},
+                      ensure_ascii=False, separators=(",", ":"))
 
 
 def _resolve_cases(cases_arg, batch_id):
@@ -183,6 +288,114 @@ def _validate_acceptance_pass(acceptance):
     return data, None
 
 
+def _norm_text(text: str) -> str:
+    """规范化空白用于文本比对（产物 input_summary 与批次验收文本）。"""
+    return " ".join((text or "").split())
+
+
+def _validate_acceptance_file(path, expect_summary):
+    """result=pass 时验收证据门禁（方向 1/3）：只接受自描述验收产物文件。
+
+    校验：文件存在且为合法 JSON、run_id 非空、input_summary 与本批验收文本
+    一致、单调时间表达新鲜度（start<end，不用固定墙钟，长编译/重试不误伤）、
+    overall=pass 且无 fail 项。返回 (parsed, err)：err 非 None 拒写。
+    """
+    if not (path or "").strip():
+        return None, "result=pass 必须传 --acceptance-file（自描述验收产物 JSON 路径）"
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as e:
+        return None, f"--acceptance-file 读取失败（{e}）"
+    except (ValueError, json.JSONDecodeError) as e:
+        return None, f"--acceptance-file 须为合法 JSON（解析失败: {e}）"
+    if not isinstance(data, dict):
+        return None, "--acceptance-file 须为 JSON 对象（自描述验收产物）"
+    if not (data.get("run_id") or "").strip():
+        return None, "--acceptance-file 缺 run_id（产物身份缺失），拒绝 PASS"
+    summary = (data.get("input_summary") or "").strip()
+    if not summary:
+        return None, "--acceptance-file 缺 input_summary（输入摘要缺失），拒绝 PASS"
+    # 输入摘要与本批一致：验收文本为「无」/空（-s 批本无验收）时跳过比对，
+    # 真 -sv 批（验收非「无」）强制一致，防陈旧/错批产物
+    expect = _norm_text(expect_summary)
+    if expect and expect != "无" and _norm_text(summary) != expect:
+        return None, ("--acceptance-file 输入摘要与本批验收文本不一致，拒绝 PASS"
+                      "（陈旧/错批产物）")
+    # 单调时间表达新鲜度（方向 3）：start<end，不用固定墙钟判新旧
+    st, en = data.get("start_monotonic"), data.get("end_monotonic")
+    if not isinstance(st, (int, float)) or not isinstance(en, (int, float)) \
+            or not st < en:
+        return None, "--acceptance-file 单调时间异常（start/end 缺失或未递增），拒绝 PASS"
+    # 方向 6：复用既有判定（overall=pass 且无 fail 项），内嵌经校验的 JSON
+    parsed, err = _validate_acceptance_pass(json.dumps(data, ensure_ascii=False))
+    if err:
+        return None, err
+    return data, None
+
+
+def _validate_unit_test_file(path, acceptance_run_id):
+    """result=pass 时单测证据门禁（方向 2）：产物 run_id 与验收产物一致，
+    且每个 target 全绿（rc==0 且 failed==0）。返回 (data, err)。"""
+    if not (path or "").strip():
+        return None, "result=pass 必须传 --unit-test-file（自描述单测产物 JSON 路径）"
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as e:
+        return None, f"--unit-test-file 读取失败（{e}）"
+    except (ValueError, json.JSONDecodeError) as e:
+        return None, f"--unit-test-file 须为合法 JSON（解析失败: {e}）"
+    if not isinstance(data, dict) or "targets" not in data:
+        return None, "--unit-test-file 须为 JSON 对象且含 targets（自描述单测产物）"
+    rid = (data.get("run_id") or "").strip()
+    if not rid:
+        return None, "--unit-test-file 缺 run_id，拒绝 PASS"
+    if acceptance_run_id and rid != acceptance_run_id:
+        return None, "--unit-test-file run_id 与验收产物不一致（非同批产物），拒绝 PASS"
+    for t in data.get("targets") or []:
+        if not isinstance(t, dict):
+            return None, "--unit-test-file 含非法 target 项，拒绝 PASS"
+        if t.get("rc") != 0 or t.get("failed") != 0:
+            return None, (f"--unit-test-file target {t.get('name')!r} 非全绿"
+                          f"（rc={t.get('rc')} failed={t.get('failed')}），拒绝 PASS")
+    return data, None
+
+
+def _validate_push_file(path, acceptance_run_id):
+    """result=pass 时推送证据门禁（方向 1）：ws_push.py 自描述推送产物
+    此前无人核验（推送判红可被 PASS 收据绕过），本门禁核验产物 run_id
+    与验收产物一致（同批）且逐项 sha256/字节数/上下文三项校验值全绿，
+    overall=pass。任一不符或缺失即拒绝 PASS。返回 (data, err)。"""
+    if not (path or "").strip():
+        return None, "result=pass 必须传 --push-file（自描述推送产物 JSON 路径）"
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as e:
+        return None, f"--push-file 读取失败（{e}）"
+    except (ValueError, json.JSONDecodeError) as e:
+        return None, f"--push-file 须为合法 JSON（解析失败: {e}）"
+    if not isinstance(data, dict) or "items" not in data:
+        return None, "--push-file 须为 JSON 对象且含 items（自描述推送产物）"
+    rid = (data.get("run_id") or "").strip()
+    if not rid:
+        return None, "--push-file 缺 run_id，拒绝 PASS"
+    if acceptance_run_id and rid != acceptance_run_id:
+        return None, "--push-file run_id 与验收产物不一致（非同批产物），拒绝 PASS"
+    items = data.get("items") or []
+    if not items:
+        return None, "--push-file items 为空（无任何推送项证据），拒绝 PASS"
+    for it in items:
+        if not isinstance(it, dict):
+            return None, "--push-file 含非法推送项，拒绝 PASS"
+        checks = it.get("checks") or {}
+        bad = [k for k in ("sha256", "bytes", "context") if checks.get(k) != "pass"]
+        if bad:
+            return None, (f"--push-file 推送项 {it.get('dst')!r} 校验值非全绿"
+                          f"（{', '.join(bad)} 不符），拒绝 PASS")
+    if data.get("overall") != "pass":
+        return None, "--push-file overall 非 pass（推送存在失败），拒绝 PASS"
+    return data, None
+
+
 def _resolve_target(target: str):
     """把 --target 解析为 12hex commit，返回 (resolved, err)。
 
@@ -228,6 +441,19 @@ def main(argv=None):
     ap.add_argument("--build", choices=["pass", "fail", "skip"], default="skip")
     ap.add_argument("--board", choices=["pass", "fail", "skip"], default="skip")
     ap.add_argument("--acceptance", default="")
+    ap.add_argument("--acceptance-file", default="",
+                    help="自描述验收产物 JSON 路径（PASS 只接受此来源；run_id/"
+                         "输入摘要/单调时间校验，缺失或不一致即拒 PASS）")
+    ap.add_argument("--unit-test-file", default="",
+                    help="自描述单测产物 JSON 路径（PASS 必需；run_id 与验收产物"
+                         "一致且每个 target 全绿）")
+    ap.add_argument("--push-file", default="",
+                    help="自描述推送产物 JSON 路径（ws_push.py --result-file 落盘；"
+                         "PASS 必需；run_id 与验收产物一致且逐项 sha256/字节/上下文"
+                         "三项校验值全绿）")
+    ap.add_argument("--device-dirty", action="store_true",
+                    help="teardown 失败（恢复不了本轮改变的设备态）时显式标记"
+                         "（PASS 路径亦可从验收产物 device_dirty 自动透传）")
     ap.add_argument("--elapsed", type=int, default=None,
                     help="耗时秒数；缺省从 timings 的 wall_end-wall_start 推导"
                          "（推导不出则 0），显式传参优先")
@@ -280,10 +506,11 @@ def main(argv=None):
             if not softened:
                 return 2
         b = parse_batch(text)
-        if b.mode == "sv" and not args.acceptance:
+        if b.mode == "sv" and not args.acceptance and not args.acceptance_file:
             # -sv 批次必须带验收逐项证据，否则 promote 时 baseline 证据链有洞
-            print("error: 模式 A -sv 批次必须传 --acceptance（步骤 5 逐项验收结果），"
-                  "否则 baseline 证据链有洞", file=sys.stderr)
+            # （PASS 走产物文件 --acceptance-file，fail 仍可用 --acceptance 直传）
+            print("error: 模式 A -sv 批次必须传 --acceptance/--acceptance-file"
+                  "（步骤 5 逐项验收结果），否则 baseline 证据链有洞", file=sys.stderr)
             return 2
         batch_id = batch_id_from_text(text)
         batch_base = b.base
@@ -313,7 +540,8 @@ def main(argv=None):
     # log_apply_dir()/timings-<batch_id>.json（cdp_paths 绝对路径与
     # cdp_timing 写入同源，认 CDP_PROJECT_ROOT）；
     # --elapsed 缺省从 timings 的 wall_end-wall_start 推导（显式传参优先）
-    args.timings, derived_elapsed = _resolve_timings(args.timings_file, batch_id)
+    args.timings, derived_elapsed = _resolve_timings(args.timings_file, batch_id,
+                                                     verify_mode)
     if args.elapsed is None and derived_elapsed is not None:
         args.elapsed = derived_elapsed
     if args.elapsed is None:
@@ -332,16 +560,42 @@ def main(argv=None):
               "prepare evidence-scope 推导死锁，拒绝写收据", file=sys.stderr)
         return 2
 
-    # 验收证据门禁：result=pass 必须带逐项验收 JSON 且整体通过，否则拒写
-    # （堵手填假绿混过 promote）；通过后单行化落盘——header 逐行 key-value，
-    # 多行 JSON 会被 from_text 只读首行截断，单行化保证 apply_done 能读全
+    # 验收证据门禁：result=pass 只接受自描述验收产物文件（--acceptance-file），
+    # 校验 run_id/输入摘要/单调时间且整体通过，否则拒写；单测产物（--unit-test-file）
+    # 为必需且 run_id 一致、每 target 全绿；推送产物（--push-file）为必需且
+    # run_id 一致、逐项 sha256/字节数/上下文三项校验值全绿（方向 1：ws_push
+    # 产物入判定，推送判红不得被 PASS 收据绕过）。通过后单行化落盘——header 逐行
+    # key-value，多行 JSON 会被 from_text 只读首行截断，单行化保证 apply_done
+    # 能读全（方向 6：收据内嵌经校验的 acceptance JSON，保 _acceptance_passed 不断）
     if args.result == "pass":
-        parsed, acc_err = _validate_acceptance_pass(args.acceptance)
+        if args.acceptance:
+            print("error: result=pass 已改为只接受 --acceptance-file"
+                  "（自描述验收产物），--acceptance 直传 JSON 已废弃", file=sys.stderr)
+            return 2
+        parsed, acc_err = _validate_acceptance_file(args.acceptance_file,
+                                                    b.acceptance if args.batch_file else "")
         if acc_err:
             print(f"error: {acc_err}", file=sys.stderr)
             return 2
+        ures, ut_err = _validate_unit_test_file(args.unit_test_file,
+                                                (parsed or {}).get("run_id"))
+        if ut_err:
+            print(f"error: {ut_err}", file=sys.stderr)
+            return 2
+        pres, push_err = _validate_push_file(args.push_file,
+                                             (parsed or {}).get("run_id"))
+        if push_err:
+            print(f"error: {push_err}", file=sys.stderr)
+            return 2
         args.acceptance = json.dumps(parsed, ensure_ascii=False,
                                      separators=(",", ":"))
+        # 方向 3：验收产物标 device_dirty（teardown 恢复失败）→ 自动透传收据
+        if (parsed or {}).get("device_dirty") is True:
+            args.device_dirty = True
+
+    if args.device_dirty:
+        print("warn: device_dirty=true（teardown 恢复失败，设备态不可信），"
+              "已在收据 header 标注", file=sys.stderr)
 
     # 自检证据（-s 批次必带，堵零验证通道）：对照 -sv 缺 --acceptance 返 2 的既有约束，
     # result=skip 而 selfcheck 为空即拒写。自检门禁以退出码为主判据（方向 1-5）：
@@ -354,17 +608,22 @@ def main(argv=None):
               file=sys.stderr)
         return 2
     if args.selfcheck.strip():
-        rcs = {}
+        # 全 rc 键扫描（方向 4）：config_rc/contract_rc 接入后任意 *_rc 非
+        # 零即拒写——固定两键白名单会让新增 rc 的判红静默失效
+        found = {}
+        for m in re.finditer(r"\b(\w+_rc)=(\d+)\b", args.selfcheck):
+            found.setdefault(m.group(1), int(m.group(2)))
+        # 必查键（既有契约）：pytest/refs 两 rc 不可缺席（缺失=自检不可信）
         for key in ("pytest_rc", "refs_rc"):
-            m = re.search(rf"{re.escape(key)}=(\d+)", args.selfcheck)
-            if not m:
+            if key not in found:
                 print(f"error: --selfcheck 缺 {key}（退出码为主判据，文本匹配仅冗余）",
                       file=sys.stderr)
                 return 2
-            rcs[key] = int(m.group(1))
-        if rcs["pytest_rc"] != 0 or rcs["refs_rc"] != 0:
-            print(f"error: --selfcheck 存在非零退出码（pytest_rc={rcs['pytest_rc']} "
-                  f"refs_rc={rcs['refs_rc']}），自检未通过拒绝写收据", file=sys.stderr)
+        bad = {k: v for k, v in found.items() if v != 0}
+        if bad:
+            detail = " ".join(f"{k}={v}" for k, v in sorted(bad.items()))
+            print(f"error: --selfcheck 存在非零退出码（{detail}），"
+                  "自检未通过拒绝写收据", file=sys.stderr)
             return 2
         # 冗余文本防线（rc 全 0 后的补充）：rc 为 0 而文本仍含 failed 非零/
         # 悬空引用字样即矛盾——两工具已败却报 rc=0，拒写防伪造。
@@ -393,6 +652,23 @@ def main(argv=None):
     # "531 passed in 27.9s | skipped=0 | OK: ..."，保证 skipped 计数随收据显式落地
     args.selfcheck = " | ".join(l for l in args.selfcheck.splitlines() if l.strip())
 
+    # 发布内容与验证内容绑定（批次 261f10265269 方向 1）：verified_tree 为
+    # 落盘时刻排除统一集合后的内容树（git 树对象 id，可复算）；commit_scope
+    # 为该时刻 porcelain 清单加摘要。均排除收据目录（自引用豁免）；git 不可
+    # 用/空仓等异常时 warn 置空，不阻断收据写入（收据主产物，树为增强证据）
+    verified_tree, commit_scope = "", ""
+    try:
+        verified_tree = content_tree()
+        status_out = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", check=True)
+        commit_scope = format_scope([
+            porcelain_to_name_status(l)
+            for l in status_out.stdout.splitlines() if l.strip()])
+    except (subprocess.CalledProcessError, OSError, RuntimeError) as e:
+        print(f"warn: verified_tree/commit_scope 计算失败（置空不阻断）: {e}",
+              file=sys.stderr)
+
     r = Receipt(batch_id=batch_id, batch_base=batch_base,
                 verified_commit=verified,
                 verify_mode=verify_mode, result=args.result,
@@ -400,12 +676,15 @@ def main(argv=None):
                 acceptance=args.acceptance, elapsed_s=args.elapsed,
                 summary=args.summary, metrics=args.metrics,
                 timings=args.timings, cases=args.case,
-                selfcheck=args.selfcheck)
+                selfcheck=args.selfcheck,
+                verified_tree=verified_tree, commit_scope=commit_scope,
+                device_dirty="true" if args.device_dirty else "")
     path = write_receipt(r, body or args.summary)
     append_trend(time.strftime("%Y-%m-%d %H:%M:%S"), batch_id, args.result,
                  f"build={args.build} board={args.board} "
                  f"acc={args.acceptance.splitlines()[0][:40] if args.acceptance else '-'}",
-                 args.summary[:40], args.metrics)
+                 args.summary[:40], args.metrics,
+                 timing=_trend_timing(args.timings, args.elapsed))
     print(f"receipt: {path}")
     print(f"batch_id: {batch_id}")
     return 0

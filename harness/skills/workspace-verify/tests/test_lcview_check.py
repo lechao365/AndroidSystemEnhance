@@ -2,6 +2,7 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cases"))
 import lcview_check as lc
 
 LOGS_DIR = lc.LOGS_DIR
+
+
+class TestDefaultBaseline(unittest.TestCase):
+    """方向 4：基线文件按轮次隔离——LCVIEW_BASELINE_FILE 环境变量覆盖默认路径。"""
+
+    def test_env_overrides_default(self):
+        with mock.patch.dict(os.environ,
+                             {"LCVIEW_BASELINE_FILE": "/tmp/lcview_baseline_r1.json"}):
+            self.assertEqual(lc._default_baseline(),
+                             "/tmp/lcview_baseline_r1.json")
+
+    def test_unset_falls_back(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(lc._default_baseline(), "/tmp/lcview_baseline.json")
 
 
 def _args(**kw):

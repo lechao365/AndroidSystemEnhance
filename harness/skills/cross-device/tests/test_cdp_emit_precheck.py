@@ -56,6 +56,21 @@ class TestEmitPrecheck(unittest.TestCase):
                                 verify_mode="board", result="pass")
         cdp_receipt.write_receipt(r, "test fixture")
 
+    def test_bad_receipt_rejected(self):
+        # 方向 5：最新收据解析有错（非法整数等）即拒，不再静默吞错
+        d = cdp_receipt.data_verify_results_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        bad = d / "20991231-235959-bad000000000.md"
+        bad.write_text("- schema_version: 1\n- batch_id: bad000000000\n"
+                       "- elapsed_s: 12x\n- verified_commit: deadbeefdead\n"
+                       "## body\n\nx\n", encoding="utf-8")
+        self._commit_all()
+        self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        ok, reason, detail = cdp_emit_precheck.precheck(self.root, do_pull=False)
+        self.assertFalse(ok)
+        self.assertIn("解析错误", reason)
+        self.assertIn("elapsed_s", reason)
+
     # ── 分支 1：verified_commit 可达且已被 origin/dev 前进覆盖 → 放行 ──
     def test_reachable_pushed_pass(self):
         sha = self._head12()
@@ -94,6 +109,21 @@ class TestEmitPrecheck(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("未推送", reason)
         self.assertIn("333333333333", reason)
+
+    # ── 分支 4：祖先判定不成立但收据文件被 origin/dev 跟踪 → 放行 ──
+    def test_unpushed_by_ancestry_but_receipt_tracked_pass(self):
+        # 祖先判定不成立（origin/dev 停在 verified_commit，equality 分支）时
+        # 回落检查最新收据文件是否已被 origin/dev 跟踪：收据随 commit 入库
+        # （squash/rebase 重写历史后 verified_commit 不再可达），被跟踪则视为
+        # 已推送放行
+        sha = self._head12()
+        self._write_receipt("444444444444", sha)
+        self._commit_all()  # 收据入库提交 → data/verify-results 被 dev 跟踪
+        self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        ok, reason, detail = cdp_emit_precheck.precheck(self.root, do_pull=False)
+        self.assertTrue(ok, reason)
+        self.assertEqual(reason, "")
+        self.assertEqual(detail, "")
 
     # ── KIR-005 存量告警：open/scheduled 条数阈值 8，只告警不阻断 ──
     def _write_index(self, n_open, extra_status=()):
@@ -148,6 +178,28 @@ class TestEmitPrecheck(unittest.TestCase):
         # 无 origin/main（新仓未推 main）→ rev-list 报错返空不崩
         self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
         self.assertEqual(cdp_emit_precheck.lead_warns(self.root), [])
+
+    # ── 提交前缀告警（方向 4）：origin/dev 最新提交标题非中文 type 前缀 ──
+    def test_commit_prefix_english_alerts(self):
+        # 英文前缀（feat(harness) 等存量经绕过路径混入）→ 告警不阻断
+        self._git("commit", "--allow-empty", "-m", "feat(harness): legacy style")
+        self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        warns = cdp_emit_precheck.commit_prefix_warns(self.root)
+        self.assertEqual(len(warns), 1)
+        self.assertIn("非中文 type 前缀", warns[0])
+        self.assertIn("feat(harness)", warns[0])
+
+    def test_commit_prefix_cn_no_warning(self):
+        # 中文词表 type 前缀（新增/修复/重构/文档/构建/杂项）→ 无告警
+        for subject in ("修复(harness): 中文前缀提交",
+                        "新增(cross-device): 补推送证据核验"):
+            self._git("commit", "--allow-empty", "-m", subject)
+            self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+            self.assertEqual(cdp_emit_precheck.commit_prefix_warns(self.root), [])
+
+    def test_commit_prefix_origin_missing_no_crash(self):
+        # origin/dev 缺失（git log 报 unknown revision）→ 返空不崩
+        self.assertEqual(cdp_emit_precheck.commit_prefix_warns(self.root), [])
 
 
 if __name__ == "__main__":

@@ -24,7 +24,18 @@ import sys
 import time
 from pathlib import Path
 
+# 设备身份期望序列号经 paths.conf 配置位（LC_VERIFY_EXPECT_SERIAL）读取，
+# 支持同名环境变量覆盖；env_path 从 harness/lib 导入（与 ws_report 同源）
+sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
+from paths import env_path  # noqa: E402
+
 _EXEC_TAG_RE = re.compile(r"__LE_EXIT_CODE__=(\d+)\s*$", re.MULTILINE)
+
+# 可注入睡眠点（方向 5，与 ws_push._sleep 同款）：clock_sync 的 root 重启
+# adbd settle 与修正前 settle 两处 2s 实时等待经此下发；单测 patch 本符号
+# 消除真实等待——三个时钟同步用例曾各真等 2s，在 slow guard 3s 阈值下
+# 逃过守卫（贴近阈值的等待混入自检）
+_sleep = time.sleep
 
 
 def adb_bin():
@@ -124,12 +135,37 @@ def ensure_ready(timeout=180, poll_interval=5):
     return False
 
 
+def _verify_identity(endpoint):
+    """设备身份校验（方向 5）：LC_VERIFY_EXPECT_SERIAL 设置时核对设备序列号。
+
+    返回 (ok, detail)。身份不符即拒（防连错设备/误连旧机）——设备序列号只认
+    基镜像烧录固化值，增量推送不改变；期望未设置时跳过校验（返回 ok）。
+    期望来源（方向 1 接线）：同名环境变量优先（测试/临时覆盖），回落
+    paths.conf 配置位（LC_VERIFY_EXPECT_SERIAL，支持环境变量覆盖），
+    两者皆空即视为未设置跳过校验。
+    """
+    expect = (os.environ.get("LC_VERIFY_EXPECT_SERIAL")
+              or env_path("LC_VERIFY_EXPECT_SERIAL", "")).strip()
+    if not expect:
+        return True, ""
+    out, rc = run_adb(["-s", endpoint, "shell", "getprop ro.serialno"], timeout=15)
+    serial = out.strip()
+    if rc != 0 or not serial:
+        return False, f"无法读取设备序列号（endpoint={endpoint} rc={rc}）"
+    if serial != expect:
+        return False, (f"设备身份不符：期望 {expect}，实际 {serial}"
+                       f"（endpoint={endpoint}）")
+    return True, ""
+
+
 def ensure_connected(rescue_enabled=False):
     """mDNS 优先逐个尝试，失败回退静态；皆败后经串口救援（第三级通道）。
 
     返回在线 endpoint 或 None。rescue 会重启设备 adbd（副作用），默认关闭，
     须调用方显式开（ensure --rescue）；触发时必须打印 detail；rescue 返回
     端点后再 connect 复核在线才算成功。
+    方向 5：连上后核对设备身份（LC_VERIFY_EXPECT_SERIAL），不符即拒——
+    mDNS 多候选逐拒，静态/救援路径不符直接返 None。
     """
     for ep in mdns_discover():
         try:
@@ -137,8 +173,13 @@ def ensure_connected(rescue_enabled=False):
                            encoding="utf-8", errors="replace", timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             continue
-        if _is_online(ep):
-            return ep
+        if not _is_online(ep):
+            continue
+        ok, detail = _verify_identity(ep)
+        if not ok:
+            print(f"[identity] {detail}（拒绝该端点，继续尝试）")
+            continue
+        return ep
     ep = host_port()
     try:
         subprocess.run(build_connect_cmd(ep), capture_output=True,
@@ -146,6 +187,10 @@ def ensure_connected(rescue_enabled=False):
     except (OSError, subprocess.TimeoutExpired):
         ep = None
     if ep and _is_online(ep):
+        ok, detail = _verify_identity(ep)
+        if not ok:
+            print(f"[identity] {detail}（静态端点身份不符拒绝）")
+            return None
         return ep
     if not rescue_enabled:
         return None
@@ -162,6 +207,11 @@ def ensure_connected(rescue_enabled=False):
         return None
     if not _is_online(ep_rescued):
         print(f"[rescue] 连接 {ep_rescued} 后复核不在线（adbd 未就绪）")
+        return None
+    # 救援通道返回路径同样过身份校验（方向 5）
+    ok, detail = _verify_identity(ep_rescued)
+    if not ok:
+        print(f"[identity] {detail}（救援通道端点身份不符拒绝）")
         return None
     return ep_rescued
 
@@ -221,7 +271,7 @@ def clock_sync(endpoint=None, max_skew=120):
                        encoding="utf-8", errors="replace", timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return False, "adb root 执行失败"
-    time.sleep(2)
+    _sleep(2)
     try:
         subprocess.run(build_connect_cmd(endpoint), capture_output=True,
                        text=True, encoding="utf-8", errors="replace",
@@ -313,7 +363,7 @@ def rescue(serial_host=None, serial_port=None, adb_port="5555"):
                 return None, "boot_loop", "adbd 重启失败且串口反复输出相同启动日志（boot loop）"
             return None, "half_brick", f"adbd 未起 exit={code}: {body.strip()[:120]!r}"
         # adbd 重启后 settle（照 clock_sync），否则立刻取 IP 会假半砖
-        time.sleep(2)
+        _sleep(2)
         # 重启 adbd 后取 wlan0 IPv4（复用 ws_serial 的 IPv4 过滤）
         ip = None
         try:
@@ -360,25 +410,6 @@ def _ensure_failure_detail() -> list:
     return parts
 
 
-def _mark_stage(name):
-    """验证阶段自动打点：cdp_timing.py mark（batch 识别：CDP_BATCH_ID 环境变量
-    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。"""
-    timing = (Path(__file__).resolve().parents[1] / "cross-device"
-              / "lib" / "python" / "cdp_timing.py")
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(timing.parent) + os.pathsep + env.get("PYTHONPATH", "")
-    try:
-        r = subprocess.run([sys.executable, str(timing), "mark", "--name", name],
-                           capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=10, env=env)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        print(f"warn: 打点 {name} 失败（不阻断）: {e}", file=sys.stderr)
-        return
-    if r.returncode != 0:
-        print(f"warn: 打点 {name} 失败（不阻断）: {r.stderr.strip()}",
-              file=sys.stderr)
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(description="adb 连接工具（mDNS→静态 fallback）")
     sub = ap.add_subparsers(dest="action", required=True)
@@ -406,9 +437,8 @@ def main(argv=None):
     if args.action == "ensure":
         ep = ensure_connected(rescue_enabled=args.rescue)
         if ep:
-            # 推送前置连接成功即自动打点推送段（产物 adb push 紧随其后秒级，
-            # 连接就绪即推送段终点；脚本自动 mark，失败不阻断）
-            _mark_stage("verify_push")
+            # 方向 5：verify_push 打点已移至 ws_push.py 实际推送循环完成后
+            # （此前连接成功即打，量不到推送），本 CLI 只负责连接并输出 endpoint
             print(ep)
         else:
             print(json.dumps(

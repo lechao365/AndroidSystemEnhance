@@ -15,7 +15,7 @@ stages:
 
 **核心语义**：`code/rpi5/` 是 workspace 定制改动的**已知良好基线**（真相源）。本工作流实现 code → workspace 单向同步，把 workspace 拉回与 code 仓 dev/main HEAD 一致。
 
-> **与 source-code-modify.md 的关系**：本工作流是该规则"workspace 是源头"原则的**受控例外**——当 workspace 处于不可用的坏状态时，允许反向把 code 状态写回 workspace。不改变日常归档流程，仅作灾难恢复。
+> **与 source-code-modify.md 的关系**：本工作流是 code → workspace 单向同步的灾难恢复路径——当 workspace 处于不可用的坏状态时，允许把 code 状态写回 workspace。不改变日常开发流程，仅作灾难恢复。
 
 ## Trigger（触发条件）
 
@@ -86,7 +86,6 @@ stages:
 
 ## Related policy IDs（关联规则 ID）
 
-- `SRC-001`：workspace 是日常源码真相源（本 workflow 是受控例外）
 - `SRC-002`：code 单向受控归档（本 workflow 不写 code，只读 code 基线）
 - `SRC-004`：code（dev/main HEAD）为恢复真相源；未验证的 dev 改动不得宣称为基线
 
@@ -210,7 +209,7 @@ AI 汇报各类执行数量 + 校验结果。若校验失败，列出 RESIDUAL/N
 ## 不做的事（YAGNI）
 
 - 不自动 `git add`/`git commit`
-- 不处理 `code/others/`（仅 kernel/aosp，`SRC-003`）
+- 不处理 `code/*/others/`（仅 kernel/aosp，`SRC-003`）
 - 不做反向 patch（用 `git checkout` 更可靠）
 - 不做多平台（仅 rpi5，未来扩展另立）
 

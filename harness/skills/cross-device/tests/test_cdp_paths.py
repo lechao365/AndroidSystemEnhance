@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib" / "python"))
 import cdp_paths
 
@@ -39,6 +41,7 @@ class TestCdpPaths(unittest.TestCase):
         d = cdp_paths.log_apply_dir()
         self.assertTrue(d.is_dir())
 
+    @pytest.mark.real_repo("回落包目录探测脚本路径（只读真实仓）")
     def test_cdp_parse_script_path_resolution(self):
         # 未设 CDP_PROJECT_ROOT 时基于包目录探测（只读校验，不 mkdir）。
         # 注：cdp_parse.py 由 Task 1.1 创建，此处只校验路径解析（父目录即本模块所在目录）。

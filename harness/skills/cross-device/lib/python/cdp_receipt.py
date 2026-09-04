@@ -20,53 +20,76 @@ _TREND_KEEP = 200
 # 据此记 FAIL 不记 SKIP；与 cdp_issue._FIELD_RE 同款）
 _FIELD_RE = re.compile(r"^- (\w+): (.*)$", re.MULTILINE)
 
+# 字段与默认值单一声明（方向 4：消除 _FIELDS 与 __init__ 双写漂移；
+# __init__/header_lines/from_text 共用）
 _FIELDS = [
-    "schema_version", "batch_id", "batch_base", "verified_commit",
-    "verify_mode", "result", "build", "push_board", "acceptance",
-    "elapsed_s", "summary", "metrics", "timings", "cases", "selfcheck",
+    ("schema_version", 1),
+    ("batch_id", ""),
+    ("batch_base", ""),
+    ("verified_commit", ""),
+    ("verify_mode", "board"),
+    ("result", "fail"),
+    ("build", "skip"),
+    ("push_board", "skip"),
+    ("acceptance", ""),
+    ("elapsed_s", 0),
+    ("summary", ""),
+    ("metrics", ""),
+    ("timings", ""),
+    ("cases", ""),
+    ("selfcheck", ""),
+    # 方向 3：teardown 失败（恢复不了本轮改变的状态）时 ws_report 标 "true"；
+    # 空 = 未涉及或已恢复（旧收据无此行 → from_text 默认空，向后兼容）
+    ("device_dirty", ""),
+    # 方向 1（批次 261f10265269）：发布内容与验证内容绑定——
+    # verified_tree：落盘时刻排除统一集合（content_tree.EXCLUDE_PATHS）后的
+    # git 树对象 id（内容寻址可复算）；commit_scope：该时刻 porcelain 文件
+    # 清单加摘要（排除收据目录）。旧收据无此两行 → from_text 默认空，兼容
+    ("verified_tree", ""),
+    ("commit_scope", ""),
 ]
 
 
 class Receipt:
-    def __init__(self, schema_version=1, batch_id="", batch_base="",
-                 verified_commit="", verify_mode="board", result="fail",
-                 build="skip", push_board="skip", acceptance="", elapsed_s=0,
-                 summary="", metrics="", timings="", cases="", selfcheck=""):
-        self.schema_version = schema_version
-        self.batch_id = batch_id
-        self.batch_base = batch_base
-        self.verified_commit = verified_commit
-        self.verify_mode = verify_mode
-        self.result = result
-        self.build = build
-        self.push_board = push_board
-        self.acceptance = acceptance
-        self.elapsed_s = elapsed_s
-        self.summary = summary
-        self.metrics = metrics
-        self.timings = timings
-        self.cases = cases
-        self.selfcheck = selfcheck
+    def __init__(self, **kwargs):
+        # 方向 4：字段与默认值单一声明（_FIELDS），构造按名取参
+        for name, default in _FIELDS:
+            setattr(self, name, kwargs.get(name, default))
 
     @classmethod
     def from_text(cls, text):
+        """解析头部返回 (Receipt, parse_errors)。
+
+        方向 1：非法整数不再静默回落默认值，记入 parse_errors；
+        方向 2：同名重复字段记错（防后行覆盖前行造成假绿），保留首个值；
+        方向 3：schema_version 非 1 记错，不按 1 解析（契约失效交调用方拒）。
+        """
         # 只解析 "## body" 之前的头部，防止正文中的 "- key: value" 行污染字段
         header = text.split("\n## body", 1)[0]
         r = cls()
+        errors: list[str] = []
+        seen: set[str] = set()
         for m in _FIELD_RE.finditer(header):
             key, val = m.group(1), m.group(2)
-            if hasattr(r, key):
-                if key in ("schema_version", "elapsed_s"):
-                    try:
-                        setattr(r, key, int(val))
-                    except ValueError:
-                        pass  # 非法数值回落默认值，不崩
-                else:
-                    setattr(r, key, val)
-        return r
+            if not hasattr(r, key):
+                continue
+            if key in seen:
+                errors.append(f"重复字段 {key}: {val!r}")
+                continue
+            seen.add(key)
+            if key in ("schema_version", "elapsed_s"):
+                try:
+                    setattr(r, key, int(val))
+                except ValueError:
+                    errors.append(f"{key} 非法整数: {val!r}")
+            else:
+                setattr(r, key, val)
+        if r.schema_version != 1:
+            errors.append(f"schema_version 非 1（实际 {r.schema_version!r}），不按 1 解析")
+        return r, errors
 
     def header_lines(self):
-        return "\n".join(f"- {f}: {getattr(self, f)}" for f in _FIELDS)
+        return "\n".join(f"- {name}: {getattr(self, name)}" for name, _ in _FIELDS)
 
 
 def _detail_files(verify_dir: Path):
@@ -97,22 +120,27 @@ def write_receipt(receipt, body_text):
 
 
 def read_receipt(path):
+    """读收据返回 (Receipt, parse_errors)；errors 非空表示头部解析有错。"""
     return Receipt.from_text(Path(path).read_text(encoding="utf-8"))
 
 
 def read_latest_receipt(verify_dir=None):
-    """读最新详情（排除 trend.md）。无收据返回 None。"""
-    _, r = latest_receipt_with_path(verify_dir)
-    return r
+    """读最新详情（排除 trend.md），返回 (Receipt, parse_errors)；无收据返回
+    (None, [])。"""
+    _, r, errs = latest_receipt_with_path(verify_dir)
+    return r, errs
 
 
 def latest_receipt_with_path(verify_dir=None):
-    """读最新详情（排除 trend.md），返回 (路径, Receipt)；无收据返回 (None, None)。"""
+    """读最新详情（排除 trend.md），返回 (路径, Receipt, parse_errors)；
+    无收据返回 (None, None, [])。"""
     d = verify_dir or data_verify_results_dir()
     files = _detail_files(d)
     if not files:
-        return (None, None)
-    return (files[-1], read_receipt(files[-1]))
+        return (None, None, [])
+    path = files[-1]
+    r, errs = read_receipt(path)
+    return (path, r, errs)
 
 
 def latest_board_receipt(verify_dir=None):
@@ -124,19 +152,28 @@ def latest_board_receipt(verify_dir=None):
     """
     d = verify_dir or data_verify_results_dir()
     for f in reversed(_detail_files(d)):
-        r = read_receipt(f)
+        r, _ = read_receipt(f)
         if r.verify_mode == "board":
             return (f, r)
     return (None, None)
 
 
-def append_trend(timestamp, batch_id, result, stage, summary, metrics=""):
+def append_trend(timestamp, batch_id, result, stage, summary, metrics="",
+                 timing=None):
+    """趋势行追加：行尾可带 metrics 与 timing 两段 JSON（竖线分隔，跨批可 diff）。
+
+    timing 为链路耗时摘要 JSON（如 {"elapsed_s": 27, "segs": {...}}，由
+    ws_report 传参），非空时在 metrics 之后再追加一段，供 emit 从 trend
+    快速查看各批耗时，无需回读收据 timings。
+    """
     d = data_verify_results_dir()
     trend = d / "trend.md"
     line = f"{timestamp} {batch_id} {result} {stage} {summary}"
     if metrics:
         # 结构化指标以 JSON 追加行尾（跨批可 diff；emit 消费只读行尾提示不受影响）
         line += f" | {metrics}"
+    if timing:
+        line += f" | {timing}"
     # 原子写：读全量 → 追加新行 → 截断保留 _TREND_KEEP 行 → replace（避免先 append
     # 再整体重写的非原子读-写，中断会留下半写/丢行态）
     lines = trend.read_text(encoding="utf-8").splitlines() if trend.exists() else []
@@ -182,23 +219,83 @@ def _referred_receipt_names(verify_dir: Path):
     return names
 
 
+def _recent_nonpass_names(verify_dir: Path, keep: int = 20) -> set:
+    """result 非 pass 的最近 keep 份收据文件名集合（方向 5）。
+
+    fail/skip/revert 收据是失败归因与 -s 自检证据，不得因配额老化静默
+    丢失；按文件名升序取末 keep 份中 result != "pass" 的。解析出错或读
+    失败按非 pass 护（证据内容不明时保守不删）。
+    """
+    names = set()
+    for f in _detail_files(verify_dir)[-keep:]:
+        try:
+            r, errs = Receipt.from_text(f.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            names.add(f.name)
+            continue
+        if errs or r.result != "pass":
+            names.add(f.name)
+    return names
+
+
+def _receipt_batch_id(path):
+    """从收据文件提取 batch_id；解析失败返 None（调用方保守跳过）。"""
+    try:
+        m = re.search(r"^-\s+batch_id:\s*(\S+)",
+                      path.read_text(encoding="utf-8", errors="replace"),
+                      re.MULTILINE)
+        return m.group(1) if m else None
+    except OSError:
+        return None
+
+
 def prune_details(verify_dir=None):
     """详情老化保留 _DETAIL_KEEP 份（trend.md 不计入配额）。
 
-    被 baseline-status.yaml 引用的收据跳过删除（证据链保护）：已被 promote
-    引用或即将引用的收据是基线证据，不得因配额被老化删除。
+    同 batch_id 只留最新一份（方向 4）：重检重推的中间态收据先去重、
+    不占配额（被 baseline-status.yaml 引用的文件仍按名保留）。
+    两类证据链保护（跳过删除）：
+    - 被 baseline-status.yaml 引用的收据：已被 promote 引用或即将引用的
+      收据是基线证据；
+    - result 非 pass 的最近 20 份收据（方向 5）：失败归因与 -s 自检证据。
     """
     d = verify_dir or data_verify_results_dir()
     files = _detail_files(d)
     referred = _referred_receipt_names(d)
     if referred is None:
         return  # 引用解析失败（yaml 不可读）：保守不删任何文件
+    # 同 batch_id 去重（方向 4）：每组保文件名最新一份；解析失败/被引用
+    # 的文件保守跳过。去重后重取文件列表再进配额老化。
+    by_batch = {}
+    for f in files:
+        by_batch.setdefault(_receipt_batch_id(f), []).append(f)
+    dedup_removed = 0
+    for fs in by_batch.values():
+        for old in fs[:-1]:
+            if old.name in referred or _receipt_batch_id(old) is None:
+                continue
+            old.unlink()
+            dedup_removed += 1
+    if dedup_removed:
+        print(f"info: 同 batch_id 中间态收据去重 {dedup_removed} 份（只留最新）",
+              file=sys.stderr)
+        files = _detail_files(d)
+    guarded = _recent_nonpass_names(d)
     keep = 0
+    referred_kept = 0
+    nonpass_kept = 0
     for old in files[: max(0, len(files) - _DETAIL_KEEP)]:
-        if old.name in referred:
+        if old.name in referred or old.name in guarded:
             keep += 1
+            if old.name in referred:
+                referred_kept += 1
+            if old.name in guarded and old.name not in referred:
+                nonpass_kept += 1
             continue
         old.unlink()
-    if keep:
-        print(f"info: {keep} 份被 baseline-status.yaml 引用的收据跳过老化（证据链保护）",
+    if referred_kept:
+        print(f"info: {referred_kept} 份被 baseline-status.yaml 引用的收据跳过老化（证据链保护）",
+              file=sys.stderr)
+    if nonpass_kept:
+        print(f"info: {nonpass_kept} 份 result 非 pass 的近期收据跳过老化（归因证据保护）",
               file=sys.stderr)

@@ -18,7 +18,7 @@
 | 三标签 | 必填各占一段，且不得重复（重复标签报 11 结构错误，emit/apply 均 blocking）；标签顺序不强制 |
 | 预算 | 总字符 50~500（含首行） |
 | batch_id | 规范化文本（剥 BOM/strip/去空行/LF，逐行删净行内空白）sha256 前 12 位 |
-| 验收标签 | 推荐格式（非强制）：`svc:<svc>` 服务运行 / `log:<kw>` logcat 命中 / `prop:<k>=<v>` / `file:<path>` 存在 / `cmd:<无空格 shell>` exit 0 / `boot` boot_completed；允许自由文本由 AI 判断；含空格/引号命令走 `--case <标签>`（批次内禁引号，此类用例在 verify-cases.yaml 集中维护） |
+| 验收语法 | `-sv` 验收必须为 `case:<id>[,<id>...]`（id 限小写字母数字与连字符，多个用逗号分隔，逐个查 verify-cases.yaml cases 段，任一未知判死）或 `manual:<自由文本>`（**仅 manual 模式保留自由文本**）；用例 id 在 verify-cases.yaml 集中维护，批次内不再书写 svc/log/prop/file 等验收表达式 |
 
 ## 退出码
 
