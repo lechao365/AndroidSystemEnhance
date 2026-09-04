@@ -5,6 +5,7 @@
 import hashlib
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -306,6 +307,7 @@ class TestIdempotentPush(unittest.TestCase):
 
     def _mk_binary(self, content=b"x"):
         d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
         p = (Path(d) / "out" / "target" / "product" / "rpi5"
              / "data" / "nativetest64" / "t1" / "t1")
         p.parent.mkdir(parents=True)
@@ -360,6 +362,7 @@ class TestIdempotentPush(unittest.TestCase):
         cmds = [c.args[1][0] for c in m.call_args_list]
         self.assertIn("push", cmds)
         self.assertTrue(ok)
+        self.assertEqual(stats["pushed"], True)
 
 
 class TestMain(unittest.TestCase):
