@@ -207,6 +207,67 @@ class TestScanAospModified(unittest.TestCase):
         le.assert_called_once()
 
 
+class TestScanExtraAosp(unittest.TestCase):
+    """方向 3：逐工程 git status 线程池并发、汇总后统一写盘（行为不变，
+    仅执行方式由串行改并发）。"""
+
+    def _setup(self, projs=("device/x",)):
+        ws = Path(tempfile.mkdtemp())
+        (ws / ".repo").mkdir()
+        (ws / ".repo" / "project.list").write_text(
+            "\n".join(projs) + "\n", encoding="utf-8")
+        bases = {}
+        for proj in projs:
+            proj_ws = ws / proj
+            proj_ws.mkdir(parents=True)
+            _git(proj_ws, "init", "-q")
+            _git(proj_ws, "config", "user.email", "t@t")
+            _git(proj_ws, "config", "user.name", "t")
+            (proj_ws / "base.txt").write_text("base", encoding="utf-8")
+            _git(proj_ws, "add", "base.txt")
+            _git(proj_ws, "commit", "-qm", "init")
+            (proj_ws / "extra.txt").write_text("extra", encoding="utf-8")
+            bases[proj] = _git(proj_ws, "rev-parse", "HEAD")
+        return ws, projs, bases
+
+    def test_concurrent_scan_writes_extra_rows(self):
+        ws, projs, bases = self._setup()
+        out = Path(tempfile.mkdtemp()) / "plan.tsv"
+        out.write_text("", encoding="utf-8")
+        with mock.patch.object(sw, "_aosp_ws", return_value=str(ws)), \
+                mock.patch.object(sw, "_patch_root", return_value=str(ws)), \
+                mock.patch.object(sw, "_coverage_aosp_project",
+                                  return_value=set()), \
+                mock.patch.object(sw, "_find_upstream_base",
+                                  side_effect=lambda cwd=Path("."),
+                                  _b=bases: _b.get(
+                                      str(cwd).replace(str(ws) + "/", ""),
+                                      _b.get("device/x"))):
+            m, e = sw._scan_extra_aosp(str(out))
+        self.assertEqual(e, 0)
+        text = out.read_text(encoding="utf-8")
+        self.assertIn(f"EXTRA-NEW-UNTRACKED\taosp:{projs[0]}\textra.txt", text)
+
+    def test_multi_project_rows_all_land(self):
+        # 多工程并发：各行都落盘且不交错丢行（统一写盘语义）
+        ws, projs, bases = self._setup(projs=("device/a", "device/b"))
+        out = Path(tempfile.mkdtemp()) / "plan.tsv"
+        out.write_text("", encoding="utf-8")
+        with mock.patch.object(sw, "_aosp_ws", return_value=str(ws)), \
+                mock.patch.object(sw, "_patch_root", return_value=str(ws)), \
+                mock.patch.object(sw, "_coverage_aosp_project",
+                                  return_value=set()), \
+                mock.patch.object(sw, "_find_upstream_base",
+                                  side_effect=lambda cwd=Path("."),
+                                  _b=bases: _b.get(
+                                      str(cwd).replace(str(ws) + "/", ""))):
+            m, e = sw._scan_extra_aosp(str(out))
+        self.assertEqual(e, 0)
+        text = out.read_text(encoding="utf-8")
+        for proj in projs:
+            self.assertIn(f"EXTRA-NEW-UNTRACKED\taosp:{proj}\textra.txt", text)
+
+
 class TestScanKernelModified(unittest.TestCase):
     """Bug 6：git diff 失败不得静默当作空 diff（误标缺失 code 定制）。"""
 

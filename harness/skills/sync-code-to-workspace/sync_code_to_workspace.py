@@ -14,6 +14,7 @@ import sys, os, subprocess, shutil, tempfile, argparse, atexit
 from pathlib import Path
 from datetime import datetime
 from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 from harness.lib.harness_lib import (
@@ -423,30 +424,24 @@ def _scan_aosp_new(out: str) -> tuple[int, int]:
     return (g_match, 0)
 
 
-def _scan_extra_aosp(out: str) -> tuple[int, int]:
-    """扫描 aosp 未归档改动。返回 (match_count, error_count)。"""
-    proj_list = Path(_aosp_ws()) / ".repo" / "project.list"
-    if not proj_list.is_file():
-        log_error(f"aosp: .repo/project.list 不存在: {proj_list}，无法扫描 aosp extra")
-        return (0, 1)
-    projects = [l.strip() for l in proj_list.read_text(encoding="utf-8").splitlines() if l.strip()]
-
-    errors = 0
-    for proj in projects:
+def _extra_aosp_worker(proj: str) -> tuple[list[str], int]:
+    """单工程 extra 扫描（方向 3 线程池 worker）。返回 (写入行, error_count)，
+    不直接写盘——并发写同一 out 会交错，汇总后由主线程统一写。"""
+    rows: list[str] = []
+    try:
         proj_ws = Path(_aosp_ws()) / proj
         if not (proj_ws / ".git").is_dir():
-            continue
+            return rows, 0
         r = _git_run(["status", "--porcelain"], proj_ws)
         if r.returncode != 0:
             log_error(f"aosp:{proj}: git status --porcelain 失败: {r.stderr.strip()}")
-            errors += 1
-            continue
+            return rows, 1
         if not r.stdout.strip():
-            continue
+            return rows, 0
         base = _find_upstream_base(cwd=proj_ws)
         if not base:
-            errors += 1
-            continue
+            log_warn(f"aosp:{proj}: 无法确定 upstream base")
+            return rows, 1
         covered = _coverage_aosp_project(proj)
         ws_changes: set[str] = set()
         ws_changes.update(_git_lines("diff", base, "--name-only", cwd=proj_ws))
@@ -456,14 +451,38 @@ def _scan_extra_aosp(out: str) -> tuple[int, int]:
             if not f or _is_excluded(f):
                 continue
             if _git_check("cat-file", "-e", f"{base}:{f}", cwd=proj_ws):
-                with open(out, "a", encoding="utf-8") as of:
-                    of.write(f"+\tEXTRA-MODIFIED\taosp:{proj}\t{f}\tsync\t未归档的 upstream 文件改动\n")
+                rows.append(f"+\tEXTRA-MODIFIED\taosp:{proj}\t{f}\tsync\t未归档的 upstream 文件改动\n")
             elif _git_check("ls-files", "--error-unmatch", f, cwd=proj_ws):
-                with open(out, "a", encoding="utf-8") as of:
-                    of.write(f"+\tEXTRA-NEW-TRACKED\taosp:{proj}\t{f}\tdelete\t未归档 tracked 新文件（code 已删，删除对齐）\n")
+                rows.append(f"+\tEXTRA-NEW-TRACKED\taosp:{proj}\t{f}\tdelete\t未归档 tracked 新文件（code 已删，删除对齐）\n")
             else:
-                with open(out, "a", encoding="utf-8") as of:
-                    of.write(f"+\tEXTRA-NEW-UNTRACKED\taosp:{proj}\t{f}\tdelete\t未归档 untracked 新文件（code 已删，删除对齐）\n")
+                rows.append(f"+\tEXTRA-NEW-UNTRACKED\taosp:{proj}\t{f}\tdelete\t未归档 untracked 新文件（code 已删，删除对齐）\n")
+    except Exception as e:  # worker 异常不得让整批并发任务崩（归 error 计数）
+        log_error(f"aosp:{proj}: 扫描异常: {e}")
+        return rows, 1
+    return rows, 0
+
+
+def _scan_extra_aosp(out: str) -> tuple[int, int]:
+    """扫描 aosp 未归档改动。返回 (match_count, error_count)。"""
+    proj_list = Path(_aosp_ws()) / ".repo" / "project.list"
+    if not proj_list.is_file():
+        log_error(f"aosp: .repo/project.list 不存在: {proj_list}，无法扫描 aosp extra")
+        return (0, 1)
+    projects = [l.strip() for l in proj_list.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+    # 方向 3：逐工程 git status 串行改线程池并发（上批 sync 75.2s 主因 git
+    # 子进程启动开销），汇总后统一写盘防并发写交错；第二遍全扫
+    # （_scan_extra_aosp_non_repo）不动——其承担 NEW-DIFF 检测。
+    all_rows: list[str] = []
+    errors = 0
+    with ThreadPoolExecutor() as pool:
+        futures = [pool.submit(_extra_aosp_worker, proj) for proj in projects]
+        for fut in futures:
+            rows, err = fut.result()
+            all_rows.extend(rows)
+            errors += err
+    with open(out, "a", encoding="utf-8") as of:
+        of.writelines(all_rows)
 
     _scan_extra_aosp_non_repo(out)
     return (0, errors)

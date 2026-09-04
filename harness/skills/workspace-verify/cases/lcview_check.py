@@ -108,6 +108,8 @@ def pull_logs(tmp):
 
     ls 的 rc 必须判（adb 超时 -1 透传，不得当"无日志文件"假绿）；pull 失败
     不得静默跳过（拉不全的"全部"不可信），同样返 -1 透传。
+    方向 1：逐文件 adb pull 改单进程目录 pull（files/valid_json/schema/
+    baseline/ts 五项各约 9.5s 皆因逐文件全量拉取），ls 预检与 -1 透传保留。
     """
     out, rc = adb(["shell", f"ls {LOGS_DIR}"])
     if rc == -1:
@@ -116,13 +118,17 @@ def pull_logs(tmp):
         # ls 自身失败（目录不存在等）：无文件可拉，按无日志处理
         return []
     files = [f for f in out.split() if f.endswith(".jsonl")]
+    if not files:
+        return []
+    dest = os.path.join(tmp, "logs")
+    _, prc = adb(["pull", LOGS_DIR, dest])
+    if prc != 0:
+        return -1
     pulled = []
     for f in files:
-        local = os.path.join(tmp, f)
-        _, prc = adb(["pull", f"{LOGS_DIR}/{f}", local])
-        if prc != 0:
-            return -1
-        pulled.append(local)
+        local = os.path.join(dest, f)
+        if os.path.exists(local):
+            pulled.append(local)
     return pulled
 
 

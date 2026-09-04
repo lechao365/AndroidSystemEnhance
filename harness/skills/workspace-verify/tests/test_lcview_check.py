@@ -81,6 +81,29 @@ class TestEnsureConnected(unittest.TestCase):
         ex.assert_called_once_with(2)
 
 
+class TestWrapperThin(unittest.TestCase):
+    """方向 2：wrapper 瘦身为纯 exec python3——connect/root/sleep 已由 py 内
+    ensure_connected 承担（含 root already-running 快路径），wrapper 不再
+    重复（重复会多耗一次 root 重连）。"""
+
+    def _sh(self, py_path):
+        return Path(py_path).with_suffix(".sh").read_text(encoding="utf-8")
+
+    def test_lcview_wrapper_is_pure_exec(self):
+        sh = self._sh(lc.__file__)
+        self.assertIn("exec python3", sh)
+        self.assertNotIn("adb -s", sh)
+        self.assertNotIn("sleep 2", sh)
+
+    def test_lciod_wrapper_is_pure_exec(self):
+        import importlib
+        lci = importlib.import_module("lciod_check")
+        sh = self._sh(lci.__file__)
+        self.assertIn("exec python3", sh)
+        self.assertNotIn("adb -s", sh)
+        self.assertNotIn("sleep 2", sh)
+
+
 def _args(**kw):
     a = argparse.Namespace()
     a.window = kw.get("window", 600)
@@ -169,8 +192,17 @@ class FakeAdb:
             return ("", 0)
         if args[0] == "pull":
             remote, local = args[1], args[2]
-            if self.pull_rc == 0:
-                Path(local).write_text(self.files.get(remote, ""), encoding="utf-8")
+            if self.pull_rc != 0:
+                return ("", self.pull_rc)
+            if remote == LOGS_DIR:
+                # 目录 pull（方向 1）：一次拉 logs 下全部文件到 local/ 下
+                Path(local).mkdir(parents=True, exist_ok=True)
+                for rpath, content in self.files.items():
+                    if rpath.startswith(LOGS_DIR + "/"):
+                        Path(local, Path(rpath).name).write_text(
+                            content, encoding="utf-8")
+                return ("", 0)
+            Path(local).write_text(self.files.get(remote, ""), encoding="utf-8")
             return ("", self.pull_rc)
         return ("", 0)
 
@@ -208,6 +240,19 @@ class TestPullLogs(unittest.TestCase):
         self.assertEqual(len(pulled), 2)
         for p in pulled:
             self.assertTrue(Path(p).is_file())
+
+    def test_single_dir_pull(self):
+        # 方向 1：逐文件 pull 改单进程目录 pull——只发一次 pull 且目标为
+        # logs 目录（files/valid_json/schema/baseline/ts 五项各约 9.5s 皆因
+        # 逐文件全量拉取）；ls 预检与 -1 透传保留（由本类前两用例覆盖）
+        fake = FakeAdb(files={f"{LOGS_DIR}/a.jsonl": "x",
+                              f"{LOGS_DIR}/b.jsonl": "y"})
+        with mock.patch.object(lc, "adb", fake):
+            pulled = lc.pull_logs(self._tmp.name)
+        pulls = [c for c in fake.calls if c[0] == "pull"]
+        self.assertEqual(len(pulls), 1, "目录 pull 应只发一次 pull")
+        self.assertEqual(pulls[0][1], LOGS_DIR)
+        self.assertEqual(len(pulled), 2)
 
 
 class TestModeFiles(unittest.TestCase):
