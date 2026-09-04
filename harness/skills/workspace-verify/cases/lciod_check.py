@@ -80,7 +80,14 @@ def ensure_connected():
         print(f"ERROR: 设备不可达（mDNS 与静态 {ADB_TARGET} 均失败）")
         sys.exit(2)
     _EP = ep
-    run_adb(["-s", ep, "root"])
+    out, rc = run_adb(["-s", ep, "root"])
+    if rc != 0:
+        print(f"ERROR: 设备 {ADB_TARGET} adb root 失败 rc={rc}: {out.strip()}")
+        sys.exit(2)
+    if "already running" in out:
+        # adbd 已在 root：快路径跳过 sleep+重连（对齐 ws_upload_tests
+        # ensure_user，真实切换才重启 adbd）
+        return
     time.sleep(2)
     ep = ws_connected()
     if not ep:

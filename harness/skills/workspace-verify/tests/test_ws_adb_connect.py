@@ -297,6 +297,49 @@ class TestEnsureConnectedRescueLevel(unittest.TestCase):
                 ac.main(["ensure", "--rescue"])
         self.assertEqual(ec.call_args.kwargs.get("rescue_enabled"), True)
 
+    def test_fast_path_online_device_returns(self):
+        # 方向 2：adb devices 在线预检快路径命中（已连接在线设备）→ 过身份
+        # 校验直接返回，不触发 mDNS 逐候选 connect 重连（提速点：
+        # verify_acceptance_connect 六次累计 961s 占全批 31.4%）
+        with mock.patch.object(ac, "_adb_devices_online",
+                               return_value=["10.0.0.5:5555"]), \
+                mock.patch.object(ac, "_is_online", return_value=True), \
+                mock.patch.object(ac, "_verify_identity",
+                                  return_value=(True, "")) as vid, \
+                mock.patch.object(ac, "mdns_discover") as mdns:
+            ep = ac.ensure_connected()
+        self.assertEqual(ep, "10.0.0.5:5555")
+        vid.assert_called_once()
+        mdns.assert_not_called()
+
+    def test_fast_path_identity_mismatch_falls_through(self):
+        # 快路径设备身份不符逐拒（防连错设备），回落 mDNS 继续尝试
+        with mock.patch.object(ac, "_adb_devices_online",
+                               return_value=["10.0.0.5:5555"]), \
+                mock.patch.object(ac, "_is_online", return_value=True), \
+                mock.patch.object(ac, "_verify_identity",
+                                  side_effect=[(False, "身份不符"),
+                                               (True, "")]), \
+                mock.patch.object(ac, "mdns_discover",
+                                  return_value=["10.0.0.6:5555"]), \
+                mock.patch.object(ac, "host_port",
+                                  return_value="rp5.local:5555"), \
+                mock.patch.object(ac.subprocess, "run"):
+            ep = ac.ensure_connected()
+        self.assertEqual(ep, "10.0.0.6:5555")
+
+    def test_fast_path_empty_falls_through(self):
+        # 快路径无在线设备 → 走原 mDNS 路径（行为不变）
+        with mock.patch.object(ac, "_adb_devices_online", return_value=[]), \
+                mock.patch.object(ac, "mdns_discover",
+                                  return_value=["10.0.0.6:5555"]), \
+                mock.patch.object(ac, "_is_online", return_value=True), \
+                mock.patch.object(ac, "_verify_identity",
+                                  return_value=(True, "")), \
+                mock.patch.object(ac.subprocess, "run"):
+            ep = ac.ensure_connected()
+        self.assertEqual(ep, "10.0.0.6:5555")
+
 
 class TestClockSync(unittest.TestCase):
     def _fake(self, rc, stdout):

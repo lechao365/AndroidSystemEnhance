@@ -31,6 +31,54 @@ class TestDefaultBaseline(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(lc._default_baseline(), "/tmp/lciod_baseline.json")
 
+
+class TestEnsureConnected(unittest.TestCase):
+    """方向 3：ensure_connected 的 root already-running 快路径（对齐
+    ws_upload_tests ensure_user）——adbd 已在 root 时跳过 sleep+重连。"""
+
+    def test_root_already_running_skips_reconnect(self):
+        # adb root 输出 already running → 不二次连（ws_connected 仅首连一次）
+        calls = []
+
+        def fake_ws():
+            calls.append("ws")
+            return "10.0.0.5:5555"
+
+        with mock.patch.object(lc, "run_adb",
+                               return_value=("already running\n", 0)) as ra, \
+                mock.patch.object(lc, "ws_connected", side_effect=fake_ws), \
+                mock.patch.object(lc.time, "sleep"):
+            lc.ensure_connected()
+        ra.assert_called_once()
+        self.assertEqual(len(calls), 1, "already running 不得二次重连")
+
+    def test_root_switch_reconnects(self):
+        # adb root 真实切换（重启 adbd）→ sleep 后重连探活（原行为保留）
+        calls = []
+
+        def fake_ws():
+            calls.append("ws")
+            return "10.0.0.5:5555"
+
+        with mock.patch.object(lc, "run_adb",
+                               return_value=("restarting adbd...\n", 0)) as ra, \
+                mock.patch.object(lc, "ws_connected", side_effect=fake_ws), \
+                mock.patch.object(lc.time, "sleep") as sl:
+            lc.ensure_connected()
+        ra.assert_called_once()
+        self.assertEqual(len(calls), 2, "真实切换须首连 + root 后重连")
+        sl.assert_called_once()
+
+    def test_root_failure_exits(self):
+        # adb root 失败 rc!=0 → 直接退出（不进入快路径/重连）
+        with mock.patch.object(lc, "run_adb", return_value=("denied", 1)), \
+                mock.patch.object(lc, "ws_connected",
+                                  return_value="10.0.0.5:5555"), \
+                mock.patch.object(lc.time, "sleep"), \
+                mock.patch.object(lc.sys, "exit") as ex:
+            lc.ensure_connected()
+        ex.assert_called_once_with(2)
+
 # 与 lciod_probe.c 输出同构的合法单行样本（vendor 含空格验证引号解析）
 VALID_LINE = (
     'device minor=0 path=/dev/vendor_lechao_usbd0 vid=0x04e8 pid=0x6344 '

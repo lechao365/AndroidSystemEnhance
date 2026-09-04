@@ -90,7 +90,12 @@ def _phase_summary(segments):
             totals["edit"] += elapsed
         elif base == "apply_selfcheck":
             totals["selfcheck"] += elapsed
-        elif base in _VERIFY_PREFIX_SEGMENTS:
+        elif base.startswith("verify_"):
+            # verify 一类：verify_* 全部前缀段（含 verify_acceptance_connect/
+            # verify_acceptance_acc_N/verify_acceptance_clock_sync 等派生段
+            # 与 verify_start 等编排段）均并入 verify，避免 case 级/连接/时钟
+            # 校准段漏分类落入 other 致提速收益无从测量（-sv 真机首次暴露：
+            # 上批 other 占 54.6% 而其中 1412s 实为验收）
             totals["verify"] += elapsed
         else:
             totals["other"] += elapsed

@@ -158,15 +158,42 @@ def _verify_identity(endpoint):
     return True, ""
 
 
+def _adb_devices_online():
+    """adb devices 在线预检（方向 2）：返回当前已连接且在线的 endpoint 列表。
+
+    已连接的 adb 设备（state=device）直接可用，免 mDNS 逐候选 connect 的
+    重连开销；返回空列表（adb 不可用/无在线设备）时由调用方回落后续路径。
+    """
+    try:
+        r = subprocess.run([adb_bin(), "devices"], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [ep for ep, st in parse_devices(r.stdout).items() if st == "device"]
+
+
 def ensure_connected(rescue_enabled=False):
-    """mDNS 优先逐个尝试，失败回退静态；皆败后经串口救援（第三级通道）。
+    """在线预检快路径 → mDNS 优先逐个尝试，失败回退静态；皆败后经串口救援
+    （第三级通道）。
 
     返回在线 endpoint 或 None。rescue 会重启设备 adbd（副作用），默认关闭，
     须调用方显式开（ensure --rescue）；触发时必须打印 detail；rescue 返回
     端点后再 connect 复核在线才算成功。
     方向 5：连上后核对设备身份（LC_VERIFY_EXPECT_SERIAL），不符即拒——
-    mDNS 多候选逐拒，静态/救援路径不符直接返 None。
+    快路径/mDNS 多候选逐拒，静态/救援路径不符直接返 None。
+    方向 2：先查 adb devices 已连接在线设备（快路径），命中即过身份校验
+    返回，未命中/全拒再走 mDNS/静态/rescue——已连接设备免逐候选 connect
+    重连（verify_acceptance_connect 六次累计 961s 占全批 31.4% 的提速点）。
     """
+    for ep in _adb_devices_online():
+        if not _is_online(ep):
+            continue
+        ok, detail = _verify_identity(ep)
+        if not ok:
+            print(f"[identity] {detail}（拒绝该端点，继续尝试）")
+            continue
+        return ep
     for ep in mdns_discover():
         try:
             subprocess.run(build_connect_cmd(ep), capture_output=True,

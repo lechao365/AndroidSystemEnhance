@@ -1587,6 +1587,22 @@ class TestPhaseSummary(unittest.TestCase):
         ]
         self.assertEqual(self._ph(segs)["verify"], 15.0)
 
+    def test_verify_acceptance_derived_segments_fold_into_verify(self):
+        # 方向 2：verify_acceptance 前缀派生段（连接/case 级/时钟校准）与
+        # verify_start 等编排段并入 verify 一类，不漏分类入 other（-sv 真机
+        # 首次暴露：上批 other 占 54.6% 而其中 1412s 实为验收，提速收益无
+        # 从测量）
+        segs = [
+            {"name": "verify_acceptance_connect", "elapsed_s": 200.0},
+            {"name": "verify_acceptance_clock_sync", "elapsed_s": 5.0},
+            {"name": "verify_acceptance_acc_1", "elapsed_s": 3.0},
+            {"name": "verify_acceptance_acc_30#2", "elapsed_s": 4.0},
+            {"name": "verify_start", "elapsed_s": 1.0},
+        ]
+        out = self._ph(segs)
+        self.assertEqual(out["verify"], 200.0 + 5.0 + 3.0 + 4.0 + 1.0)
+        self.assertEqual(out["other"], 0.0)
+
     def test_other_includes_precheck_report_finish(self):
         segs = [
             {"name": "precheck", "elapsed_s": 1.0},
