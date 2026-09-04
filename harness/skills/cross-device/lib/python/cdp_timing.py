@@ -28,6 +28,7 @@ selfcheck、编排空转、收据写盘），不细分无法归因。定位耗�
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -56,6 +57,28 @@ KNOWN_SEGMENTS = frozenset([
 CONDITIONAL_SEGMENTS = frozenset([
     "edit_validate", "gen_manifest", "edit_plan", "edit_retry",
 ])
+
+# gap_before_<name> 落段的余量阈值（秒）：mark 带 dur_s 时，相邻差额减去
+# dur_s 后的未打点活动余量小于该值即不落段（避免计时精度/AI 空转噪声污染
+# 归因，方向 2 定）。
+GAP_THRESHOLD = 1.0
+
+# 同名 mark 重复次数后缀（方向 4）：第 n 次同名段名为 name#n（首次无序号），
+# 返工轮次可数。gap_before_* 为派生段，剥序号判定（missing/段名表校验）时
+# 一律忽略。
+_SUFFIX_RE = re.compile(r"#\d+$")
+
+
+def _base_seg_name(name: str) -> str:
+    """剥段名序号后缀（name#n → name）；gap_before_* 派生段返回空串（忽略）。
+
+    供段名表校验（mark 是否已知）、ws_report missing 判定与重复次数汇总
+    共用：返工轮次段（apply_selfcheck#2 等）剥序号后与常量表比对，gap 段
+    不参与应有段判定。
+    """
+    if name.startswith("gap_before_"):
+        return ""
+    return _SUFFIX_RE.sub("", name)
 
 
 def _timing_path(batch_id: str) -> Path:
@@ -153,10 +176,19 @@ def _wall() -> float:
 
 
 def compute_segments(data) -> list[dict]:
-    """由 start_wall + marks + 当前时刻计算相邻段耗时（ws_report 落收据复用）。
+    """由 start_wall + marks + 当前时刻计算段耗时（ws_report 落收据复用）。
 
     首段 = 首个 mark - start_wall；末段 = 当前时刻 - 末个 mark；
     无 mark 或 start_wall 缺失时返回空列表（不崩，调用方按缺打点处理）。
+
+    归因修正（方向 2）：mark 带 dur_s（自测真实耗时）时该段耗时取 dur_s，
+    相邻差额（interval）减去 dur_s 后的余量是段前未被 mark 覆盖的未打点
+    活动（如自检前的编排空转），另落 gap_before_<name> 段，余量小于
+    GAP_THRESHOLD 不落段；无 dur_s 或 dur_s 非法（非数值/越界）时回退旧
+    算法（整段差额归后一个 mark 名）。gap 段在 name 段之前（时间序）。
+
+    同名段名（方向 4）：同一 mark 名第 n 次出现时段名为 name#n（首次不加
+    序号），返工轮次在收据段表可见可数；mark 记录本身 name 不变。
     """
     start = data.get("start_wall")
     marks = data.get("marks") or []
@@ -164,8 +196,21 @@ def compute_segments(data) -> list[dict]:
         return []
     segs = []
     prev = start
+    seen: dict[str, int] = {}
     for m in marks:
-        segs.append({"name": m["name"], "elapsed_s": round(m["wall"] - prev, 3)})
+        name = m["name"]
+        seen[name] = seen.get(name, 0) + 1
+        seg_name = name if seen[name] == 1 else f"{name}#{seen[name]}"
+        interval = m["wall"] - prev
+        dur = m.get("dur_s")
+        if isinstance(dur, (int, float)) and 0 <= dur <= interval:
+            gap = interval - dur
+            if gap >= GAP_THRESHOLD:
+                segs.append({"name": f"gap_before_{seg_name}",
+                             "elapsed_s": round(gap, 3)})
+            segs.append({"name": seg_name, "elapsed_s": round(dur, 3)})
+        else:
+            segs.append({"name": seg_name, "elapsed_s": round(interval, 3)})
         prev = m["wall"]
     segs.append({"name": "finish", "elapsed_s": round(_wall() - prev, 3)})
     return segs
@@ -185,12 +230,15 @@ def _cmd_start(batch_id: str) -> int:
     return 0
 
 
-def _cmd_mark(path: Path, name: str, zero: bool = False) -> int:
+def _cmd_mark(path: Path, name: str, zero: bool = False, dur_s=None) -> int:
     """mark：追加一个时间戳；未 start 返 3（AI 漏 start 可发现）。
 
     zero=True 记零 mark：wall 取最近 mark（无 mark 则 start_wall）同一时刻——
     跳过段（如无编译/无上板时的 sync/build/push/unit_test）以 0 耗时占位，
     收据 timings 段完整可归因（缺段 vs 0 耗时语义不同：缺段=去向不明）。
+
+    dur_s（方向 1）：调用方自测该段的真实墙钟耗时，写入 mark 记录供
+    compute_segments 归因（该段耗时取 dur_s，差额余量落 gap_before_<name>）。
     """
     data = _load(path)
     if data is None:
@@ -204,8 +252,12 @@ def _cmd_mark(path: Path, name: str, zero: bool = False) -> int:
             return 3
     else:
         wall = _wall()
-    data.setdefault("marks", []).append({"name": name, "wall": wall})
-    if name not in KNOWN_SEGMENTS:
+    mark = {"name": name, "wall": wall}
+    if dur_s is not None:
+        mark["dur_s"] = round(float(dur_s), 3)
+    data.setdefault("marks", []).append(mark)
+    # 段名表校验剥序号（方向 4）：AI 显式传 name#n 时按基础名比对
+    if _base_seg_name(name) not in KNOWN_SEGMENTS:
         print(f"warn: 段名 {name!r} 不在常量表 "
               f"（{', '.join(sorted(KNOWN_SEGMENTS))}），仅告警不阻断",
               file=sys.stderr)
@@ -251,6 +303,9 @@ def main(argv=None) -> int:
     p_mark.add_argument("--batch", default=None, help="12 位 batch_id（缺省从打点目录取最新）")
     p_mark.add_argument("--zero", action="store_true",
                         help="记零 mark：wall 取最近 mark 同刻（跳过段占位，段耗时 0）")
+    p_mark.add_argument("--dur-s", type=float, default=None,
+                        help="自测真实耗时秒数（写入 mark，compute_segments 归因："
+                             "该段耗时取 dur_s，差额余量落 gap_before_<name>；与 --zero 互斥）")
 
     p_finish = sub.add_parser("finish", help="计算段耗时并落盘")
     p_finish.add_argument("--file", default=None, help="打点文件路径（缺省取最新）")
@@ -284,7 +339,11 @@ def main(argv=None) -> int:
             return 3
 
     if args.cmd == "mark":
-        return _cmd_mark(path, args.name, zero=args.zero)
+        if args.zero and args.dur_s is not None:
+            print("error: --zero 与 --dur-s 互斥（零 mark 段耗时恒 0，"
+                  "无自测耗时可报）", file=sys.stderr)
+            return 2
+        return _cmd_mark(path, args.name, zero=args.zero, dur_s=args.dur_s)
     if args.cmd == "finish":
         return _cmd_finish(path)
     return 2

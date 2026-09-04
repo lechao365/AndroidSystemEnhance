@@ -295,6 +295,111 @@ class TestCdpTiming(unittest.TestCase):
         self.assertEqual(data["marks"][0]["name"], "unknown_stage",
                          "表外名仍记录，仅告警")
 
+    # ── 方向 1：mark --dur-s 自报自测真实耗时 ─────────────────────────
+    def test_mark_dur_s_written(self):
+        # mark 带 --dur-s 时写入 mark 记录（compute_segments 归因读取）
+        self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
+        self.assertEqual(
+            cdp_timing.main(["mark", "--batch", self.batch, "--name",
+                             "apply_selfcheck", "--dur-s", "18.25"]), 0)
+        data = json.loads(self._path().read_text(encoding="utf-8"))
+        self.assertEqual(data["marks"][0]["name"], "apply_selfcheck")
+        self.assertAlmostEqual(data["marks"][0]["dur_s"], 18.25)
+
+    def test_mark_dur_s_with_zero_mutex(self):
+        # --zero 与 --dur-s 互斥（零 mark 段耗时恒 0，无自测耗时可报）
+        self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = cdp_timing.main(["mark", "--batch", self.batch, "--name",
+                                  "verify_build", "--zero", "--dur-s", "1.0"])
+        self.assertEqual(rc, 2)
+        self.assertIn("互斥", err.getvalue())
+
+    # ── 方向 2：compute_segments 归因（dur_s 覆盖 + gap_before 余量）──
+    def test_compute_segments_dur_s_attribution(self):
+        # mark 带 dur_s：该段耗时取 dur_s，相邻差额余量落 gap_before_<name>
+        # （余量 >= 阈值 1.0）；gap 段在 name 段前（时间序）
+        data = {
+            "batch_id": self.batch,
+            "start_wall": 1000.0,
+            "marks": [
+                {"name": "a", "wall": 1005.5},
+                {"name": "apply_selfcheck", "wall": 1030.0, "dur_s": 18.0},
+            ],
+        }
+        segs = cdp_timing.compute_segments(data)
+        self.assertEqual([s["name"] for s in segs],
+                         ["a", "gap_before_apply_selfcheck", "apply_selfcheck",
+                          "finish"])
+        self.assertAlmostEqual(segs[0]["elapsed_s"], 5.5)
+        self.assertAlmostEqual(segs[1]["elapsed_s"], 6.5)
+        self.assertAlmostEqual(segs[2]["elapsed_s"], 18.0)
+
+    def test_compute_segments_dur_s_small_gap_skipped(self):
+        # 余量小于阈值不落 gap 段（gap=0.5 < 1.0，防计时噪声污染归因）
+        data = {
+            "batch_id": self.batch,
+            "start_wall": 1000.0,
+            "marks": [
+                {"name": "a", "wall": 1001.0},
+                {"name": "b", "wall": 1007.5, "dur_s": 6.0},
+            ],
+        }
+        segs = cdp_timing.compute_segments(data)
+        self.assertEqual([s["name"] for s in segs], ["a", "b", "finish"])
+        self.assertAlmostEqual(segs[1]["elapsed_s"], 6.0)
+
+    def test_compute_segments_dur_s_invalid_falls_back(self):
+        # dur_s 越界（> interval）或非数值：回退旧算法（整段差额归该段）
+        data = {
+            "batch_id": self.batch,
+            "start_wall": 1000.0,
+            "marks": [
+                {"name": "a", "wall": 1001.0},
+                {"name": "b", "wall": 1007.0, "dur_s": 99.0},
+                {"name": "c", "wall": 1012.0, "dur_s": "oops"},
+            ],
+        }
+        segs = cdp_timing.compute_segments(data)
+        self.assertEqual([s["name"] for s in segs], ["a", "b", "c", "finish"])
+        self.assertAlmostEqual(segs[1]["elapsed_s"], 6.0)
+        self.assertAlmostEqual(segs[2]["elapsed_s"], 5.0)
+
+    # ── 方向 4：同名段名 #n + 剥序号校验 + gap 段忽略 ─────────────────
+    def test_compute_segments_duplicate_name_numbered(self):
+        # 同名 mark 第 n 次段名 name#n（首次不加序号），返工轮次可数
+        data = {
+            "batch_id": self.batch,
+            "start_wall": 1000.0,
+            "marks": [
+                {"name": "edit", "wall": 1002.0},
+                {"name": "edit", "wall": 1004.0},
+                {"name": "edit", "wall": 1007.0},
+            ],
+        }
+        segs = cdp_timing.compute_segments(data)
+        self.assertEqual([s["name"] for s in segs],
+                         ["edit", "edit#2", "edit#3", "finish"])
+
+    def test_base_seg_name(self):
+        # 剥序号 + gap 段忽略（段名表校验/ws_report missing 判定共用）
+        self.assertEqual(cdp_timing._base_seg_name("apply_selfcheck"),
+                         "apply_selfcheck")
+        self.assertEqual(cdp_timing._base_seg_name("edit#2"), "edit")
+        self.assertEqual(cdp_timing._base_seg_name("gap_before_edit"), "")
+        self.assertEqual(cdp_timing._base_seg_name("gap_before_edit#2"), "")
+
+    def test_mark_suffixed_name_no_warn(self):
+        # 段名表校验剥序号：显式传 name#n 按基础名比对（表内不告警）
+        self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = cdp_timing.main(["mark", "--batch", self.batch, "--name",
+                                  "apply_selfcheck#2"])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("warn", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

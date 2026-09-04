@@ -561,6 +561,48 @@ class TestWsReport(unittest.TestCase):
         self.assertIn('"precheck"', last)
         self.assertIn('"edit"', last)
 
+    def test_timings_repeat_counts_and_gap_ignored_in_missing(self):
+        # 方向 4/5：同名段（edit×2 → edit#2）剥序号后不误判缺 edit，
+        # gap_before_* 派生段不参与应有段判定；repeat_counts 汇总出现次数
+        # 大于一的段（返工轮次可数）；apply_selfcheck 带 dur_s 归因后
+        # 差额余量落 gap 段
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        timings = json.dumps({
+            "batch_id": "abc123def456",
+            "start_wall": 1000.0,
+            "wall_end": 1048.0,
+            "marks": [
+                {"name": "precheck", "wall": 1001.5},
+                {"name": "edit", "wall": 1005.0},
+                {"name": "edit", "wall": 1020.0},
+                {"name": "apply_selfcheck", "wall": 1040.0, "dur_s": 18.0},
+            ],
+        })
+        tfile = self._write(timings, ".json")
+        with redirect_stdout(io.StringIO()):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--timings-file", tfile])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        m = re.search(r"- timings: (\{.*\})", content)
+        self.assertIsNotNone(m, "收据头须含 timings JSON")
+        t = json.loads(m.group(1))
+        # repeat_counts：edit 出现两次（edit + edit#2 剥序号），其余单次
+        self.assertEqual(t["repeat_counts"], {"edit": 2})
+        # missing（none 模式去条件段 + verify_*）：precheck/edit/apply_selfcheck
+        # 已打（edit#2 剥序号覆盖 edit），report 由 ws_report 自发 mark →
+        # 无缺段；gap 段不参与判定（若剥序号失效 edit#2 会被误判缺 edit）
+        self.assertEqual(t["missing"], [])
+        # gap 段与序号段在 segments 里可见（耗时原样保留可归因）
+        names = [s["name"] for s in t["segments"]]
+        self.assertIn("edit#2", names)
+        self.assertIn("gap_before_apply_selfcheck", names)
+
     def test_mode_a_timings_file_missing_warns_not_block(self):
         # --timings-file 缺失/非法：warn 降级（timings 置空），收据仍落盘不阻断
         # （诊断数据非验收证据，区别于 --acceptance 的返 2）

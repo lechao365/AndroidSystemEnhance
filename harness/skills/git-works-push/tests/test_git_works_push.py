@@ -86,8 +86,19 @@ class TestGitWorksPush(unittest.TestCase):
         self._msg.write_text("新增(cross-device): 测试提交\n", encoding="utf-8")
         self._baseline = Path(self._tmp.name) / "baseline-status.yaml"
         self._baseline.write_text(MOCK_BASELINE, encoding="utf-8")
+        # 收据目录隔离（发布内容与验证内容绑定，批次 261f10265269 方向 2）：
+        # check_commit_scope 读最新收据 commit_scope（cdp_paths 认
+        # CDP_PROJECT_ROOT），单测用 mock git 无真实收据——不隔离会读到
+        # 真实仓最新收据，其 commit_scope 与 mock 提交面不一致致假失败。
+        # 指向临时空目录 → --latest-scope 返空 → 走"无收据 warn 跳过"降级。
+        self._old_root = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
 
     def tearDown(self):
+        if self._old_root is None:
+            os.environ.pop("CDP_PROJECT_ROOT", None)
+        else:
+            os.environ["CDP_PROJECT_ROOT"] = self._old_root
         self._tmp.cleanup()
 
     def _env_with_mock_git(self, mock_git):

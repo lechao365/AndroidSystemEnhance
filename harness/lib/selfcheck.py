@@ -22,6 +22,7 @@ skipped=<n> 仅在 pytest_rc=0 且摘要无 skipped 时补 0。config_rc/contrac
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -81,20 +82,25 @@ def last_stdout_line(stdout):
     return lines[-1] if lines else ""
 
 
-def _mark_selfcheck():
+def _mark_selfcheck(dur_s=None):
     """自发 apply_selfcheck 打点：自检完成即 mark，供收据兜底段归因。
 
     15 笔 -s 收据兜底段在 0.26~361.9s 间乱跳而自检恒 11s 档——收据在
     push 之前落盘，兜底段实为"末个 mark 到算段时刻"，含自检与编排空转，
     不细分无法归因。自发 mark 后该段收窄为"自检完成→算段时刻"。
+    dur_s（方向 3）：调用方实测自检整体墙钟，经 cdp_timing --dur-s 上报，
+    compute_segments 归因时 apply_selfcheck 段耗时取实测值（不再被相邻
+    差额吞并/夸大），编排空转余量落 gap_before_apply_selfcheck。
     batch 识别复用 cdp_timing mark 三级回落（显式 --batch > 环境变量
     CDP_BATCH_ID > log 目录唯一 timings 文件）；发点失败不阻断（打点
     诊断数据，非自检结果本身）。
     """
     timing = ROOT / "harness" / "skills" / "cross-device" / "lib" / "python" / "cdp_timing.py"
+    cmd = [sys.executable, str(timing), "mark", "--name", "apply_selfcheck"]
+    if dur_s is not None:
+        cmd += ["--dur-s", f"{dur_s:.3f}"]
     try:
-        proc = subprocess.run([sys.executable, str(timing), "mark",
-                               "--name", "apply_selfcheck"],
+        proc = subprocess.run(cmd,
                               capture_output=True, text=True, encoding="utf-8",
                               errors="replace", cwd=ROOT, timeout=10)
         if proc.returncode != 0:
@@ -105,6 +111,9 @@ def _mark_selfcheck():
 
 
 def main():
+    # 自检整体墙钟实测（方向 3）：pytest 起跑前记 t0，四工具完成后 t1，
+    # 差值经 _mark_selfcheck --dur-s 上报（自检段耗时不再被相邻差额吞并）
+    _t0 = time.time()
     pytest_cmd = [sys.executable, "-m", "pytest", "harness", "-q",
                   "--durations=5"]
     # xdist 可导入时并行跑（-n auto 按 CPU 核数分流，apply 侧 586 项串行 30s
@@ -156,7 +165,7 @@ def main():
     if ctr_last:
         parts.append(ctr_last)
     print(" | ".join(parts))
-    _mark_selfcheck()
+    _mark_selfcheck(dur_s=time.time() - _t0)
     return 0
 
 

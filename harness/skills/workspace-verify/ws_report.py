@@ -113,7 +113,7 @@ def _resolve_timings(timings_file, batch_id, verify_mode="board"):
         return "", None
     try:
         from cdp_timing import CONDITIONAL_SEGMENTS, KNOWN_SEGMENTS, \
-            compute_segments
+            _base_seg_name, compute_segments
         t = json.loads(Path(timings_file).read_text(encoding="utf-8"))
         if not isinstance(t, dict):
             raise ValueError("非 JSON 对象")
@@ -130,18 +130,31 @@ def _resolve_timings(timings_file, batch_id, verify_mode="board"):
         # none 模式再减 verify_* 五段（无 verify 环节）；缺失者以 missing 键
         # 写入收据 timings（emit 一眼看出哪些链路段没打点）；多余段
         # （finish/push 等表外名）不删，耗时原样保留可归因。
-        names = {s.get("name") for s in segments
+        # 段名归一（方向 4）：重复轮次段（apply_selfcheck#2 等）剥 #n 序号后
+        # 与应有段集比对，gap_before_* 派生段忽略（不参与应有段判定）。
+        names = {_base_seg_name(s.get("name")) for s in segments
                  if isinstance(s, dict) and s.get("name")}
+        names.discard("")
         expected = KNOWN_SEGMENTS - CONDITIONAL_SEGMENTS
         if verify_mode == "none":
             expected = expected - _VERIFY_PREFIX_SEGMENTS
         missing = sorted(expected - names)
+        # 返工轮次可数（方向 5）：各段（剥序号后）出现次数大于一的汇总，
+        # emit 一眼看出哪些链路段返工过（edit×2 = 编辑自愈 1 轮）。
+        counts: dict[str, int] = {}
+        for s in segments:
+            base = _base_seg_name(s.get("name")) \
+                if isinstance(s, dict) and s.get("name") else ""
+            if base:
+                counts[base] = counts.get(base, 0) + 1
+        repeat_counts = {k: v for k, v in counts.items() if v > 1}
         out = {
             "batch_id": t.get("batch_id", ""),
             "wall_start": wall_start,
             "wall_end": wall_end,
             "segments": segments,
             "missing": missing,
+            "repeat_counts": repeat_counts,
         }
         elapsed = None
         if isinstance(wall_start, (int, float)) and isinstance(wall_end, (int, float)):
