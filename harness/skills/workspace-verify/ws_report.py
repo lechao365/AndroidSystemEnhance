@@ -596,11 +596,10 @@ def main(argv=None):
     # 链路耗时打点解析（B5）整体后移至收据尾部工作完成后、Receipt 构造前：
     # 此前紧随 report mark 执行，compute_segments 在算段时刻定格 finish 段，
     # 其后的尾部真实开销（content_tree 全树 git add -A，drvfs IO 慢/git
-    # status/Receipt 构造）散落 finish 兜底段不可归因；后移后 finish 段
-    # 收窄为纯算段时刻、report_post 段覆盖尾部开销（见 content_tree 前的
-    # report_post 自发 mark）。args.timings 消费点（Receipt timings 字段、
-    # _trend_timing）均在后移点之后，顺序合法；验收证据门禁段不依赖
-    # timings/elapsed，无需随移。
+    # status 等）不落任何段不可归因；后移并在尾部工作完成后自发 report_post
+    # mark，report_post 段覆盖尾部开销、finish 段收窄为纯算段时刻。
+    # args.timings 消费点（Receipt timings 字段、_trend_timing）均在后移点
+    # 之后，顺序合法；验收证据门禁段不依赖 timings/elapsed，无需随移。
 
     # cases 补全：显式 --case 优先，未传自动探测 cases-<batch_id>.json
     # （ws_acceptance 验收后写入本次实跑标签，与 timings 探测同源）
@@ -712,10 +711,6 @@ def main(argv=None):
     # 为该时刻 porcelain 清单加摘要。均排除收据目录（自引用豁免）；git 不可
     # 用/空仓等异常时 warn 置空，不阻断收据写入（收据主产物，树为增强证据）
     verified_tree, commit_scope = "", ""
-    # 尾部工作起点自发 mark（B5）：report mark 之后至收据落盘的尾部工作
-    # （content_tree/commit_scope/Receipt/write_receipt/append_trend）此前
-    # 散落 finish 兜底段不可归因，content_tree 前直写 report_post 收编
-    _append_direct_mark(args.timings_file, batch_id, "report_post")
     try:
         verified_tree = content_tree()
         status_out = subprocess.run(
@@ -727,6 +722,13 @@ def main(argv=None):
     except (subprocess.CalledProcessError, OSError, RuntimeError) as e:
         print(f"warn: verified_tree/commit_scope 计算失败（置空不阻断）: {e}",
               file=sys.stderr)
+
+    # 尾部工作收口自发 mark（B5）：段归因方向是"前一 mark → 本 mark"（mark
+    # 打在阶段末），故 report_post 直写须在尾部工作（content_tree 全树
+    # git add -A，drvfs IO 慢/git status 等）完成之后——report_post 段 =
+    # report mark → 此处，覆盖门禁段之后的全部尾部开销；finish 段收窄为
+    # 纯算段时刻
+    _append_direct_mark(args.timings_file, batch_id, "report_post")
 
     # 链路耗时打点解析（B5 后移落位）：显式 --timings-file 优先，未传自动
     # 探测 log_apply_dir()/timings-<batch_id>.json（cdp_paths 绝对路径与
