@@ -514,5 +514,43 @@ class TestEnsureIdentityCheck(unittest.TestCase):
         self.assertIsNone(ep)
 
 
+class TestEnsureConnectedBudget(unittest.TestCase):
+    """A2：ensure_connected 连接预算——失败轮编排层先做带预算的廉价探测，
+    预算耗尽快速失败（env_fail 归因），不进三级发现链长等待。默认
+    budget_s=None 行为完全不变。"""
+
+    def test_budget_exhausted_fails_fast(self):
+        # 预算已耗尽（budget_s=0 即 deadline 已过）→ 不进入 mDNS 等任何
+        # 后续发现级，返回 None 快速失败
+        with mock.patch.object(ac, "_adb_devices_online", return_value=[]), \
+                mock.patch.object(ac, "mdns_discover",
+                                  side_effect=AssertionError("不应进入 mDNS")):
+            self.assertIsNone(ac.ensure_connected(budget_s=0))
+
+    def test_budget_none_walks_discovery(self):
+        # 不传预算 → 现行为不变：快路径未命中后仍进 mDNS 发现；
+        # mDNS 空 + 静态 host_port=None + rescue 默认关 → 返回 None
+        with mock.patch.object(ac, "_adb_devices_online", return_value=[]), \
+                mock.patch.object(ac, "mdns_discover", return_value=[]) as md, \
+                mock.patch.object(ac, "host_port", return_value=None), \
+                mock.patch.object(ac.subprocess, "run"):
+            self.assertIsNone(ac.ensure_connected())
+        md.assert_called_once()
+
+    def test_ensure_cli_budget_passthrough(self):
+        # ensure --budget N 透传 ensure_connected（budget_s=N）；
+        # 缺省无 --budget → budget_s=None（默认行为零变化）
+        with mock.patch.object(ac, "ensure_connected") as ec, \
+                mock.patch.object(ac, "_ensure_failure_detail",
+                                  return_value=[]):
+            ac.main(["ensure", "--budget", "60"])
+        self.assertEqual(ec.call_args.kwargs.get("budget_s"), 60)
+        with mock.patch.object(ac, "ensure_connected") as ec_default, \
+                mock.patch.object(ac, "_ensure_failure_detail",
+                                  return_value=[]):
+            ac.main(["ensure"])
+        self.assertIsNone(ec_default.call_args.kwargs.get("budget_s"))
+
+
 if __name__ == "__main__":
     unittest.main()
