@@ -16,6 +16,7 @@
 # ============================================================
 
 import argparse
+import hashlib
 import json
 import os
 import posixpath
@@ -153,6 +154,29 @@ def _atomic_write_json(path, data):
     os.replace(tmp, p)
 
 
+def device_binary_fingerprint(ep, name):
+    """回读设备侧测试二进制指纹：SHA256 + 字节数（幂等推送比对基准）。
+
+    两项独立 exec（任一失败不掩盖其余）；sha256/bytes 任一缺失返回 None
+    （回读不可信不得跳过推送，对齐 ws_push.readback_device 口径）。
+    """
+    out, rc = adb_run(ep, ["shell", f"sha256sum /data/local/tmp/{name}"],
+                      timeout=60)
+    sha = None
+    if rc == 0:
+        parts = out.strip().split()
+        if parts and re.fullmatch(r"[0-9a-f]{64}", parts[0]):
+            sha = parts[0]
+    out, rc = adb_run(ep, ["shell", f"stat -c %s /data/local/tmp/{name}"],
+                      timeout=60)
+    nbytes = None
+    if rc == 0 and out.strip().isdigit():
+        nbytes = int(out.strip())
+    if not sha or nbytes is None:
+        return None
+    return {"sha256": sha, "bytes": nbytes}
+
+
 def _run_one_stats(ep, out, product, name, verbose=False, aosp_root=None,
                    src_rel=None):
     """push + 执行单个 nativetest，返回 (ok, detail, stats)。
@@ -169,14 +193,27 @@ def _run_one_stats(ep, out, product, name, verbose=False, aosp_root=None,
         return False, (f"{name}: 编译产物陈旧（早于源码 {src_rel}，可能未含新用例）"
                        "——须重新编译后再推送，禁止用旧二进制报绿"), {
                            "name": name, "rc": 1, "tests": None, "failed": None}
-    _, rc = adb_run(ep, ["push", binary, f"/data/local/tmp/{name}"], timeout=300)
-    if rc != 0:
-        return False, f"{name}: adb push 失败 rc={rc}", {
-            "name": name, "rc": 1, "tests": None, "failed": None}
+    # 幂等推送（方向 A5）：推送前回读设备侧 SHA256+字节，与本地全等则跳过
+    # push（二进制未变不重推，对齐 ws_push 幂等口径）；回读缺失（任一
+    # 不可得）按原路推——回读不可信不得跳过。pushed 入 stats 供归因。
+    local_bytes = Path(binary).read_bytes()
+    local_sha = hashlib.sha256(local_bytes).hexdigest()
+    device = device_binary_fingerprint(ep, name)
+    pushed = not (device is not None
+                  and device["sha256"] == local_sha
+                  and device["bytes"] == len(local_bytes))
+    if pushed:
+        _, rc = adb_run(ep, ["push", binary, f"/data/local/tmp/{name}"],
+                        timeout=300)
+        if rc != 0:
+            return False, f"{name}: adb push 失败 rc={rc}", {
+                "name": name, "rc": 1, "tests": None, "failed": None,
+                "pushed": True}
     _, rc = adb_run(ep, ["shell", f"chmod +x /data/local/tmp/{name}"], timeout=60)
     if rc != 0:
         return False, f"{name}: chmod 失败 rc={rc}", {
-            "name": name, "rc": 1, "tests": None, "failed": None}
+            "name": name, "rc": 1, "tests": None, "failed": None,
+            "pushed": pushed}
     out_text, rc = adb_run(ep, ["shell", f"/data/local/tmp/{name}"], timeout=600)
     failed = re.search(r"\[  FAILED  \]", out_text)
     summary = None
@@ -198,10 +235,11 @@ def _run_one_stats(ep, out, product, name, verbose=False, aosp_root=None,
             return False, (f"{name}: FAIL 用例数解析不到（缺 gtest 汇总行"
                            "「[==========] N tests ... ran」），须确认实跑用例数"), {
                                "name": name, "rc": 1, "tests": tests,
-                               "failed": failed_count}
+                               "failed": failed_count, "pushed": pushed}
         if int(m.group(1)) == 0:
             return False, f"{name}: FAIL 实跑用例数为 0（无用例被执行，禁止报绿）", {
-                "name": name, "rc": 1, "tests": tests, "failed": failed_count}
+                "name": name, "rc": 1, "tests": tests, "failed": failed_count,
+                "pushed": pushed}
         detail = f"{name}: PASS（{summary}）"
         if verbose:
             detail += f"\n{out_text}"
@@ -211,11 +249,11 @@ def _run_one_stats(ep, out, product, name, verbose=False, aosp_root=None,
         # 单测产物首次暴露）
         return True, detail, {"name": name, "rc": 0, "tests": tests,
                               "failed": 0 if failed_count is None
-                              else failed_count}
+                              else failed_count, "pushed": pushed}
     detail = f"{name}: FAIL rc={rc}{('，有 FAILED 用例') if failed else ''}"
     detail += f"\n--- 输出摘录 ---\n{out_text[:2000]}"
     return False, detail, {"name": name, "rc": 1, "tests": tests,
-                           "failed": failed_count}
+                           "failed": failed_count, "pushed": pushed}
 
 
 def run_one(ep, out, product, name, verbose=False, aosp_root=None, src_rel=None,

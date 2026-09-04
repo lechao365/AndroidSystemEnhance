@@ -2,6 +2,7 @@
 # 关键场景：yaml test_targets 读取、nativetest 二进制定位、push+执行
 # 汇总 pass/fail、二进制缺失判红、设备不可达退 1。
 
+import hashlib
 import json
 import os
 import sys
@@ -130,6 +131,8 @@ class TestBinaryIsStale(unittest.TestCase):
 class TestRunOne(unittest.TestCase):
     def test_pass_returns_ok(self):
         with mock.patch.object(wu, "adb_run", side_effect=[
+            ("", 1),  # readback sha 失败（幂等跳过不生效）
+            ("", 1),  # readback bytes 失败
             ("", 0),  # push
             ("", 0),  # chmod
             ("[==========] 42 tests from 2 test suites ran. (100 ms total)\n", 0),
@@ -149,6 +152,8 @@ class TestRunOne(unittest.TestCase):
         # 全过输出无「[  FAILED  ] N tests」汇总行，None 会被 ws_report
         # 误判非全绿（-sv 真机单测产物首次暴露）
         with mock.patch.object(wu, "adb_run", side_effect=[
+            ("", 1),  # readback sha 失败（幂等跳过不生效）
+            ("", 1),  # readback bytes 失败
             ("", 0),  # push
             ("", 0),  # chmod
             ("[==========] 42 tests from 2 test suites ran. (100 ms total)\n"
@@ -168,6 +173,8 @@ class TestRunOne(unittest.TestCase):
 
     def test_fail_returns_not_ok_with_output(self):
         with mock.patch.object(wu, "adb_run", side_effect=[
+            ("", 1),  # readback sha 失败（幂等跳过不生效）
+            ("", 1),  # readback bytes 失败
             ("", 0),  # push
             ("", 0),  # chmod
             ("[  FAILED  ] t1.T_Broken\n", 1),
@@ -221,6 +228,8 @@ class TestRunOne(unittest.TestCase):
     def test_zero_cases_rejected(self):
         # 方向 5：汇总行解析到但用例数为 0 → 判红（无用例被执行禁止报绿）
         with mock.patch.object(wu, "adb_run", side_effect=[
+            ("", 1),  # readback sha 失败（幂等跳过不生效）
+            ("", 1),  # readback bytes 失败
             ("", 0),  # push
             ("", 0),  # chmod
             ("[==========] 0 tests from 0 test suites ran. (1 ms total)\n", 0),
@@ -237,6 +246,8 @@ class TestRunOne(unittest.TestCase):
     def test_missing_summary_rejected(self):
         # 方向 5：汇总行解析不到 → 判红（无法证明用例真实执行）
         with mock.patch.object(wu, "adb_run", side_effect=[
+            ("", 1),  # readback sha 失败（幂等跳过不生效）
+            ("", 1),  # readback bytes 失败
             ("", 0),  # push
             ("", 0),  # chmod
             ("[ RUN      ] t1.T1\n[       OK ] t1.T1 (1 ms)\n", 0),
@@ -249,6 +260,106 @@ class TestRunOne(unittest.TestCase):
                 ok, detail = wu.run_one("ep", str(out), "rpi5", "t1")
         self.assertFalse(ok)
         self.assertIn("用例数解析不到", detail)
+
+
+class TestDeviceBinaryFingerprint(unittest.TestCase):
+    """幂等推送比对基准：设备侧 sha256+bytes 回读，任一缺失返回 None
+    （回读不可信不得跳过推送，对齐 ws_push.readback_device 口径）。"""
+
+    def test_reads_sha_and_bytes(self):
+        # sha 用合法 64 位十六进制（实现对 sha256sum 输出做格式校验，
+        # 回读非 {0-9a-f}{64} 视为不可信 → None）
+        sha = hashlib.sha256(b"x").hexdigest()
+        with mock.patch.object(wu, "adb_run", side_effect=[
+            (f"{sha}  /data/local/tmp/t1", 0),
+            ("4096", 0),
+        ]) as m:
+            fp = wu.device_binary_fingerprint("ep", "t1")
+        self.assertEqual(fp, {"sha256": sha, "bytes": 4096})
+        self.assertEqual(m.call_args_list[0].args[1],
+                         ["shell", "sha256sum /data/local/tmp/t1"])
+        self.assertEqual(m.call_args_list[1].args[1],
+                         ["shell", "stat -c %s /data/local/tmp/t1"])
+
+    def test_missing_sha_returns_none(self):
+        with mock.patch.object(wu, "adb_run", side_effect=[
+            ("", 1),  # sha256sum 失败
+            ("4096", 0),
+        ]):
+            self.assertIsNone(wu.device_binary_fingerprint("ep", "t1"))
+
+    def test_missing_bytes_returns_none(self):
+        sha = hashlib.sha256(b"x").hexdigest()
+        with mock.patch.object(wu, "adb_run", side_effect=[
+            (f"{sha}  /data/local/tmp/t1", 0),
+            ("", 1),  # stat 失败
+        ]):
+            self.assertIsNone(wu.device_binary_fingerprint("ep", "t1"))
+
+
+class TestIdempotentPush(unittest.TestCase):
+    """方向 A5：推送前回读设备侧指纹，与本地全等跳过 adb push（二进制
+    未变不重推）；sha 等字节不等不跳；回读缺失照推。"""
+
+    GTEST_OK = ("[==========] 42 tests from 2 test suites ran. "
+                "(100 ms total)\n")
+
+    def _mk_binary(self, content=b"x"):
+        d = tempfile.mkdtemp()
+        p = (Path(d) / "out" / "target" / "product" / "rpi5"
+             / "data" / "nativetest64" / "t1" / "t1")
+        p.parent.mkdir(parents=True)
+        p.write_bytes(content)
+        return str(Path(d) / "out"), d
+
+    def test_identical_skips_push(self):
+        content = b"same-bytes"
+        out, _ = self._mk_binary(content)
+        sha = hashlib.sha256(content).hexdigest()
+        with mock.patch.object(wu, "adb_run", side_effect=[
+            (f"{sha}  /data/local/tmp/t1", 0),  # readback sha
+            (str(len(content)), 0),             # readback bytes
+            ("", 0),                            # chmod
+            (self.GTEST_OK, 0),                 # gtest
+        ]) as m:
+            ok, detail, stats = wu.run_one("ep", out, "rpi5", "t1",
+                                           return_stats=True)
+        cmds = [c.args[1][0] for c in m.call_args_list]
+        self.assertNotIn("push", cmds)
+        self.assertTrue(ok)
+        self.assertIn("PASS", detail)
+
+    def test_same_sha_diff_bytes_still_pushes(self):
+        content = b"same-bytes"
+        out, _ = self._mk_binary(content)
+        sha = hashlib.sha256(content).hexdigest()
+        with mock.patch.object(wu, "adb_run", side_effect=[
+            (f"{sha}  /data/local/tmp/t1", 0),  # readback sha 全等
+            ("1", 0),                           # bytes 不等
+            ("", 0),                            # push
+            ("", 0),                            # chmod
+            (self.GTEST_OK, 0),                 # gtest
+        ]) as m:
+            ok, detail, stats = wu.run_one("ep", out, "rpi5", "t1",
+                                           return_stats=True)
+        cmds = [c.args[1][0] for c in m.call_args_list]
+        self.assertIn("push", cmds)
+        self.assertEqual(stats["pushed"], True)
+
+    def test_readback_missing_still_pushes(self):
+        out, _ = self._mk_binary()
+        with mock.patch.object(wu, "adb_run", side_effect=[
+            ("", 1),        # readback sha 失败
+            ("", 1),        # readback bytes 失败
+            ("", 0),        # push
+            ("", 0),        # chmod
+            (self.GTEST_OK, 0),
+        ]) as m:
+            ok, detail, stats = wu.run_one("ep", out, "rpi5", "t1",
+                                           return_stats=True)
+        cmds = [c.args[1][0] for c in m.call_args_list]
+        self.assertIn("push", cmds)
+        self.assertTrue(ok)
 
 
 class TestMain(unittest.TestCase):
