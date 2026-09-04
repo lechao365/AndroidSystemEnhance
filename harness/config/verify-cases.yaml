@@ -2,6 +2,16 @@
 # 背景：CDP 批次正文禁引号，含空格/引号的验收命令无法在批次内书写；
 #       此类用例在此集中维护，批次经 --case <标签> 引用，验收判据不再人眼搬运。
 # 结构：cases: { <标签>: <验收文本> }，验收文本可为任意标签组合（值内可用引号）。
+#
+# ── 用例两级策略（B6 契约化，emit 产批按此选择验收 case 集合）────────
+# 快速回归组（-sv 常态回归批默认）：lcview-liveness, lcview-pipeline,
+#   lcview-trigger, lciod-liveness, lciod-trigger（5 case，健康态 ~38-64s；
+#   覆盖存活/数据面/触发全链路）
+# 发布全量组（publish-main-base 前全量验收批）：全部 11 case（~120-190s）；
+#   perf/recover-daemon/transfer 含 IO 副作用或心跳周期绑架，不入常态轮次
+#   （见各 case 注释），发布前必须全量跑一轮
+# 批次方向涉及其它 case 的专项修复时按需追加（如 sepolicy 改动加
+#   lcview-sepolicy-label）
 cases:
   # sepolicy 类型改名回归点（去 hal 残留）：设备节点标签须命中新类型
   # lechao_lcview_device（file_contexts 重打标，reboot 后生效），且近窗
