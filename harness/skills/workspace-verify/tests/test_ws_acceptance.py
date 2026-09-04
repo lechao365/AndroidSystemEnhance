@@ -1087,6 +1087,59 @@ class TestBackfillZeroMarks(unittest.TestCase):
         self.assertEqual(data["marks"], [])
 
 
+class TestResolveRunBatchId(unittest.TestCase):
+    """main 内 batch_id 解析三级回落（显式 batch-file > CDP_BATCH_ID >
+    唯一 timings 文件）：--case 模式未解析出 batch_id 时回落识别，否则
+    _backfill_zero_marks 直接 return，verify_build 等标准段永远 missing
+    （0904 三批 missing=[verify_build] 的根因）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+        self.batch = "abc123def456"
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("CDP_PROJECT_ROOT", None)
+        else:
+            os.environ["CDP_PROJECT_ROOT"] = self._old
+        self._tmp.cleanup()
+
+    def test_batch_file_text_wins(self):
+        # batch-file 可解析 → 显式值优先（batch_id_from_text 的解析正确性
+        # 属 cdp_parse 既有职责，此处 mock 隔离，只验证回落优先级；
+        # 文件须真实存在——read_text 先于解析执行，缺文件即回落）
+        p = Path(self._tmp.name) / "batch.txt"
+        p.write_text("placeholder", encoding="utf-8")
+        with mock.patch.object(wa, "batch_id_from_text",
+                               return_value=self.batch):
+            self.assertEqual(wa._resolve_run_batch_id(str(p)), self.batch)
+
+    def test_batch_file_empty_parse_falls_back_to_env(self):
+        # batch-file 解析成功但返回空串 → 继续回落（不因文件存在而中断）
+        p = Path(self._tmp.name) / "batch.txt"
+        p.write_text("placeholder", encoding="utf-8")
+        with mock.patch.dict("os.environ", {"CDP_BATCH_ID": self.batch}), \
+             mock.patch.object(wa, "batch_id_from_text", return_value=""):
+            self.assertEqual(wa._resolve_run_batch_id(str(p)), self.batch)
+
+    def test_batch_file_unreadable_falls_back_to_env(self):
+        # batch-file 读取失败 → 回落 CDP_BATCH_ID（与 _mark_stage 同口径）
+        with mock.patch.dict("os.environ", {"CDP_BATCH_ID": self.batch}):
+            self.assertEqual(wa._resolve_run_batch_id("/no/such/file.txt"),
+                             self.batch)
+
+    def test_no_file_no_env_uses_unique_timings_file(self):
+        # 无 batch-file 无 env → log 目录唯一 timings 文件 stem
+        wa.cdp_timing.main(["start", "--batch", self.batch])
+        self.assertEqual(wa._resolve_run_batch_id(None), self.batch)
+
+    def test_nothing_resolvable_returns_none(self):
+        # 三级皆缺 → None（调用方补零/mark 静默跳过，防误标其他批次）
+        self.assertIsNone(wa._resolve_run_batch_id(None))
+
+
 class TestWriteCases(unittest.TestCase):
     """方向 1：本次实跑 case 标签落盘 cases-<batch_id>.json（三级回落识别 batch）。"""
 

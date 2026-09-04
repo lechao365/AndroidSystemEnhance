@@ -681,8 +681,8 @@ def _backfill_zero_marks(batch_id):
     """标准四段缺失时补零 mark（跳过段记 0 耗时，收据段完整可归因）。
 
     上一批收据只有 verify_start 与 verify_acceptance 两段即因四段跳过时
-    未发 mark；验收是最末验证阶段，由它兜底补齐。batch_id 缺失（非
-    batch-file 模式）时跳过——自动识别不可靠时不写，防误标其他批次。
+    未发 mark；验收是最末验证阶段，由它兜底补齐。batch_id 缺失（三级
+    回落皆不可得）时跳过——自动识别不可靠时不写，防误标其他批次。
     """
     if not batch_id:
         return
@@ -696,6 +696,26 @@ def _backfill_zero_marks(batch_id):
         if seg not in have:
             cdp_timing.main(["mark", "--batch", batch_id, "--name", seg,
                              "--zero"])
+
+
+def _resolve_run_batch_id(batch_file):
+    """main 内 batch_id 解析三级回落：batch-file 显式解析 > CDP_BATCH_ID >
+    log 目录唯一 timings 文件（复用 _resolve_batch_id 口径）。
+
+    --case/--acceptance 模式此前 batch_id 恒 None，_backfill_zero_marks
+    直接 return——标准段跳过时 verify_build 永远 missing（0904 三批实证）。
+    回落识别后补零/mark 必落本批打点文件；多打点文件时 _resolve_batch_id
+    静默跳过，防误标其他批次。读取失败按未提供处理（回落继续）。
+    """
+    if batch_file:
+        try:
+            bid = batch_id_from_text(
+                Path(batch_file).read_text(encoding="utf-8"))
+            if bid:
+                return bid
+        except (OSError, UnicodeDecodeError):
+            pass
+    return _resolve_batch_id(None)
 
 
 def _hostcmd_env(run_id):
@@ -774,15 +794,11 @@ def main(argv=None):
                   file=sys.stderr)
             return 2
 
-    # 模式 A（batch-file）显式解析 batch_id：内部分段/case 级/补零 mark
-    # 全部落本批打点文件（多打点文件时自动识别静默跳过，缺段无法归因）
-    batch_id = None
-    if args.batch_file:
-        try:
-            batch_id = batch_id_from_text(
-                Path(args.batch_file).read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError):
-            batch_id = None
+    # batch_id 解析三级回落（batch-file > CDP_BATCH_ID > 唯一 timings 文件）：
+    # --case 模式此前恒 None 致 _backfill_zero_marks 直接 return，标准段
+    # 跳过时 verify_build 永远 missing（0904 三批实证）；回落识别与
+    # _mark_stage 同口径，多打点文件时静默跳过防误标其他批次
+    batch_id = _resolve_run_batch_id(args.batch_file)
 
     ep = ac.ensure_connected()
     if not ep:
