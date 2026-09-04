@@ -65,6 +65,8 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
    （同名重复 mark 自动 #N 序号，分方向耗时在收据 segments 逐项可见；
     全部方向完成后再打 edit 收口）
 编辑完成打点（必做）：cdp_timing.py mark --batch <batch_id> --name edit
+   （loop 收敛轮的修复编辑同契约：开始前 mark edit_plan，完成由 selfcheck
+    自动收口为 edit#N，无需手动 mark edit）
 5. 分流：
    - -sv → 显式执行 /loop-engineering（模式 A）：
       打点（必做）：cdp_timing.py mark --batch <batch_id> --name verify_start

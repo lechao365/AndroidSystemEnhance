@@ -82,6 +82,13 @@ stages:
 4. 失败轮：读收据失败现场（logcat/dmesg/串口摘录）-> 分析 -> 修复编辑 code/
    （改 .diff 跑 cdp_validate_patch.py；改 code/rpi5 跑 gen_manifest.py 护栏）
    -> 重跑步骤 2-3
+   修复编辑打点（C3，与 B1 selfcheck 收口联动）：编辑开始前 mark
+   edit_plan（同名自动 #N 序号）标记修复编辑起点；编辑完成无需手动收口
+   ——selfcheck 开跑前自动补打 edit（同名 #N），修复编辑耗时计入 edit 相
+   （此前散落 gap/other 不可归因）
+   重跑前先做带预算连接探测（A2）：python3 harness/skills/workspace-verify/
+   ws_adb_connect.py ensure --budget 60 —— 预算内不在线按 env_fail 归因
+   （砖机三分法）进入下一轮 patience，不进入验收长等待
 5. 终结：status 确认归因 ->
    python3 harness/skills/loop-engineering/ws_session.py diagnose --session <json>
    -> task_unsolvable/cost_cap_exceeded 时 AI 用 ws_report 以末轮同参重写终态
