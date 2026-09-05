@@ -123,7 +123,8 @@ class TestWsPackage(unittest.TestCase):
 
     def test_sudo_unavailable_refuses(self):
         # 方向 4：sudo -n true 探测失败（需密码/无权限）→ 如实记因不执行，
-        # 打包脚本不被调用（防非 tty 卡死或错报）
+        # 打包脚本不被调用（防非 tty 卡死或错报）；error 补指引指向 BLD-013
+        # 人工打包路径（opencode 会话 NoNewPrivileges 使 sudo 恒被内核拒绝）
         rc, ev, run_mock = self._run(sudo_rc=1)
         self.assertEqual(rc, 1)
         self.assertFalse(ev["sudo_n"])
@@ -131,6 +132,10 @@ class TestWsPackage(unittest.TestCase):
         self.assertIsNone(ev["script_rc"])
         self.assertIn("sudo", ev["error"])
         self.assertIn("拒绝执行", ev["error"])
+        # 指引（方向 3）：指向 BLD-013 与会话外人工执行
+        self.assertIn("BLD-013", ev["error"])
+        self.assertIn("会话外普通终端", ev["error"])
+        self.assertIn("build-reference.md", ev["error"])
         # 仅探测调用（sudo），打包脚本（bash <script>）未被调用
         scripts = [c for c in run_mock.call_args_list
                    if list(c.args[0])[:1] == ["bash"]]
@@ -138,6 +143,7 @@ class TestWsPackage(unittest.TestCase):
         data = json.loads(self.evidence.read_text(encoding="utf-8"))
         self.assertFalse(data["sudo_n"])
         self.assertIn("sudo", data["error"])
+        self.assertIn("BLD-013", data["error"])
 
     def test_sudo_probe_success_proceeds(self):
         # sudo 探测通过（sudo_rc=0）→ 正常走打包，证据 sudo_n=True

@@ -203,6 +203,29 @@ stages:
      board+pass 空 cases 由 ws_report 源头拒写（返 2）兜底，发现缺 cases 时
      只写新收据引用旧批次（如 -s 自检批 + 说明），禁止编辑旧收据补字段
      （2026-09-02 BL-20260902-01 发布被迫回填 7833c640079a 的教训）。
+
+### 人工打包步骤（opencode 会话内 sudo 不可用，BLD-013）
+
+opencode 会话（systemd user unit 设 `NoNewPrivileges=true`）内 sudo 恒被内核
+拒绝，ws_package 的 `sudo -n true` 探测会如实记因（`sudo_n=false`）不执行，
+收据 package 字段内嵌证据 `script_rc=null` → baseline 记 UNKNOWN。要拿到
+package_result=PASS，须在**会话外普通终端**人工执行打包：
+
+1. 会话外普通终端（普通 WSL2 shell，非 opencode）运行 ws_package，落默认证据位
+   （证据文件名按 batch_id 命名，供会话内 ws_report 自动探测）：
+   ```bash
+   export CDP_BATCH_ID=<batch_id>
+   python3 harness/skills/workspace-verify/ws_package.py
+   # → harness/log/workspace-verify/package-<batch_id>.json（script_rc=0）
+   ```
+   （也可直接跑 `harness/scripts/mk_rpi5_full_image.sh -mode 0`，但须按 BLD-007
+   sudo 显式传 TARGET_PRODUCT/ANDROID_PRODUCT_OUT，且证据须按 ws_package 格式落盘）
+2. 回会话内重跑 ws_report（或重跑 verify 链 report 步）：未传 --package-file 时
+   自动探测 `harness/log/workspace-verify/package-<batch_id>.json`，把打包证据
+   内嵌收据 package 字段随收据入库——**证据链不受影响**（证据内嵌是收据侧的
+   单点动作，与打包执行位置无关，同 batch 同 run_id 可追溯）。
+3. baseline_register 从收据 package 字段取证据 → script_rc=0 记 PASS → promote
+   硬门禁放行。
 ## 退出码
 - 0 验证完成（含 fail 收据落盘）；1 设备不可达或验收 fail；2 参数错误或验收 ai
 

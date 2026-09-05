@@ -168,7 +168,11 @@ def run_package(mode=0, evidence_file=None, timeout=900, aosp_ws=None,
     if not sudo_ok:
         evidence["error"] = ("sudo 非交互探测失败（sudo -n true 不可用，需密码/"
                              f"无权限）：{sudo_detail or '未知原因'}，拒绝执行防"
-                             "非 tty 卡死或错报")
+                             "非 tty 卡死或错报。提示：若在 opencode 会话内，"
+                             "systemd user unit 的 NoNewPrivileges 标志使 sudo "
+                             "恒被内核拒绝（BLD-013，配 NOPASSWD 亦无效），须在"
+                             "会话外普通终端人工执行打包（见 "
+                             "harness/reference/build-reference.md）")
         return _finish(1)
 
     # 真跑：显式传 TARGET_PRODUCT/ANDROID_PRODUCT_OUT（BLD-007 调用方侧），

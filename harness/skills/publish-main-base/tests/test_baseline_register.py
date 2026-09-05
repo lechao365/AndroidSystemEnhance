@@ -297,6 +297,35 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(br.load()["baselines"][0]["package_result"], "UNKNOWN")
 
+    def test_add_candidate_sudo_n_false_warns_manual_path(self):
+        # 方向 5：UNKNOWN 且证据 sudo_n=false（opencode 会话 NoNewPrivileges
+        # 使 sudo 恒被内核拒绝）→ 告警指向人工打包路径（BLD-013），登记不阻断
+        rp = self._make_receipt(build="pass", board="pass",
+                                cases="lcview-liveness")
+        ev_dir = self._root / "harness" / "log" / "workspace-verify"
+        ev_dir.mkdir(parents=True)
+        (ev_dir / "package-batch-test.json").write_text(
+            json.dumps({"run_id": "r", "script_rc": None, "sudo_n": False,
+                        "error": "sudo 非交互探测失败"}), encoding="utf-8")
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 0)
+        self.assertEqual(br.load()["baselines"][0]["package_result"], "UNKNOWN")
+        self.assertIn("sudo_n=false", out)
+        self.assertIn("BLD-013", out)
+        self.assertIn("会话外普通终端", out)
+
+    def test_add_candidate_sudo_n_false_no_warn_on_pass(self):
+        # sudo_n=false 但证据 script_rc=0（PASS）→ 不告警（打包已成功，无需人工路径）
+        rp = self._make_receipt_pkg(rc=0)
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 0)
+        self.assertEqual(br.load()["baselines"][0]["package_result"], "PASS")
+        self.assertNotIn("sudo_n=false", out)
+
     def test_add_candidate_no_code_change_skips_package(self):
         # 方向 2：evidence_scope=no-code-change（打包豁免）→ 记 SKIP，
         # 无打包证据也不记 UNKNOWN

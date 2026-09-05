@@ -300,6 +300,14 @@ def main(argv=None):
         pkg_rc = pkg_evidence.get("script_rc") if pkg_evidence else None
         package_result = _package_result_from_evidence(pkg_evidence,
                                                        evidence_scope)
+        # 方向 5：UNKNOWN 且证据 sudo_n=false → 告警指向人工打包路径（BLD-013：
+        # opencode 会话 NoNewPrivileges 使 sudo 恒被内核拒绝，会话内无法打包）
+        if package_result == "UNKNOWN" and isinstance(pkg_evidence, dict) \
+                and pkg_evidence.get("sudo_n") is False:
+            print("warn: package_result=UNKNOWN 且打包证据 sudo_n=false（会话内 "
+                  "sudo 被 NoNewPrivileges 拒绝，BLD-013）：须在 opencode 会话外"
+                  "普通终端人工执行打包后重登记（见 harness/reference/"
+                  "build-reference.md）", file=sys.stderr)
         board_verify = ((r.push_board or "").strip() or "FAIL").upper()
         # 方向 4：Python 层登记防线——防绕过 shell 直调登记（publish_main_base.sh
         # prepare 有门禁，直调 add-candidate 须同样从严）

@@ -36,6 +36,13 @@ sync-code-to-doc**——不复制任何子 skill 的实现逻辑。
   （mode 0 仅打包，前置校验三镜像齐备，BLD-007 sudo 显式传
   TARGET_PRODUCT/ANDROID_PRODUCT_OUT，自描述证据落
   harness/log/workspace-verify/package-<batch_id>.json）
+  **拿 PASS 的路径**：opencode 会话内 sudo 恒被内核拒绝（BLD-013，
+  NoNewPrivileges 继承不可撤销），须在**会话外普通终端**人工执行
+  `CDP_BATCH_ID=<batch_id> python3 harness/skills/workspace-verify/ws_package.py`
+  落默认证据位（script_rc=0），回会话内 ws_report 自动探测把证据内嵌收据
+  package 字段随收据入库，baseline_register 从收据取证据记 PASS
+  （详见 workspace-verify SKILL「人工打包步骤」；收据 package 字段缺失即
+  UNKNOWN，promote 一致性校验将阻断）
 ## Human confirmation gates（人工确认门）
 - 阶段 2 验证 fail 轮的**修改方案须人工确认**（涉及业务代码改动，用户对改动负责）；
   确认后修复 → 重验 pass 后**二次确认**才进 promote
