@@ -16,6 +16,7 @@
 # ============================================================
 
 import argparse
+import hashlib
 import json
 import os
 import posixpath
@@ -33,6 +34,10 @@ import ws_adb_connect as ac  # noqa: E402
 
 # harness/config/verify-cases.yaml：test_targets 源（与 ws_acceptance 同路径解析）
 _CASES_PATH = Path(__file__).resolve().parents[2] / "config" / "verify-cases.yaml"
+
+# dur_s 自报基准（方向 1）：模块级取值——import 成本归入脚本自报时长，
+# gap 收窄为纯 AI 编排活动（边界按进程边界切分）
+_T0 = time.monotonic()
 
 
 def load_test_targets(cases_path):
@@ -153,6 +158,29 @@ def _atomic_write_json(path, data):
     os.replace(tmp, p)
 
 
+def device_binary_fingerprint(ep, name):
+    """回读设备侧测试二进制指纹：SHA256 + 字节数（幂等推送比对基准）。
+
+    两项独立 exec（任一失败不掩盖其余）；sha256/bytes 任一缺失返回 None
+    （回读不可信不得跳过推送，对齐 ws_push.readback_device 口径）。
+    """
+    out, rc = adb_run(ep, ["shell", f"sha256sum /data/local/tmp/{name}"],
+                      timeout=60)
+    sha = None
+    if rc == 0:
+        parts = out.strip().split()
+        if parts and re.fullmatch(r"[0-9a-f]{64}", parts[0]):
+            sha = parts[0]
+    out, rc = adb_run(ep, ["shell", f"stat -c %s /data/local/tmp/{name}"],
+                      timeout=60)
+    nbytes = None
+    if rc == 0 and out.strip().isdigit():
+        nbytes = int(out.strip())
+    if not sha or nbytes is None:
+        return None
+    return {"sha256": sha, "bytes": nbytes}
+
+
 def _run_one_stats(ep, out, product, name, verbose=False, aosp_root=None,
                    src_rel=None):
     """push + 执行单个 nativetest，返回 (ok, detail, stats)。
@@ -169,14 +197,27 @@ def _run_one_stats(ep, out, product, name, verbose=False, aosp_root=None,
         return False, (f"{name}: 编译产物陈旧（早于源码 {src_rel}，可能未含新用例）"
                        "——须重新编译后再推送，禁止用旧二进制报绿"), {
                            "name": name, "rc": 1, "tests": None, "failed": None}
-    _, rc = adb_run(ep, ["push", binary, f"/data/local/tmp/{name}"], timeout=300)
-    if rc != 0:
-        return False, f"{name}: adb push 失败 rc={rc}", {
-            "name": name, "rc": 1, "tests": None, "failed": None}
+    # 幂等推送（方向 A5）：推送前回读设备侧 SHA256+字节，与本地全等则跳过
+    # push（二进制未变不重推，对齐 ws_push 幂等口径）；回读缺失（任一
+    # 不可得）按原路推——回读不可信不得跳过。pushed 入 stats 供归因。
+    local_bytes = Path(binary).read_bytes()
+    local_sha = hashlib.sha256(local_bytes).hexdigest()
+    device = device_binary_fingerprint(ep, name)
+    pushed = not (device is not None
+                  and device["sha256"] == local_sha
+                  and device["bytes"] == len(local_bytes))
+    if pushed:
+        _, rc = adb_run(ep, ["push", binary, f"/data/local/tmp/{name}"],
+                        timeout=300)
+        if rc != 0:
+            return False, f"{name}: adb push 失败 rc={rc}", {
+                "name": name, "rc": 1, "tests": None, "failed": None,
+                "pushed": True}
     _, rc = adb_run(ep, ["shell", f"chmod +x /data/local/tmp/{name}"], timeout=60)
     if rc != 0:
         return False, f"{name}: chmod 失败 rc={rc}", {
-            "name": name, "rc": 1, "tests": None, "failed": None}
+            "name": name, "rc": 1, "tests": None, "failed": None,
+            "pushed": pushed}
     out_text, rc = adb_run(ep, ["shell", f"/data/local/tmp/{name}"], timeout=600)
     failed = re.search(r"\[  FAILED  \]", out_text)
     summary = None
@@ -198,19 +239,25 @@ def _run_one_stats(ep, out, product, name, verbose=False, aosp_root=None,
             return False, (f"{name}: FAIL 用例数解析不到（缺 gtest 汇总行"
                            "「[==========] N tests ... ran」），须确认实跑用例数"), {
                                "name": name, "rc": 1, "tests": tests,
-                               "failed": failed_count}
+                               "failed": failed_count, "pushed": pushed}
         if int(m.group(1)) == 0:
             return False, f"{name}: FAIL 实跑用例数为 0（无用例被执行，禁止报绿）", {
-                "name": name, "rc": 1, "tests": tests, "failed": failed_count}
+                "name": name, "rc": 1, "tests": tests, "failed": failed_count,
+                "pushed": pushed}
         detail = f"{name}: PASS（{summary}）"
         if verbose:
             detail += f"\n{out_text}"
+        # 成功路径 failed 显式落 0：gtest 全过时输出无
+        # 「[  FAILED  ] N tests」汇总行，failed_count 保持 None——
+        # ws_report 按 failed==0 判全绿，None 会误判非全绿（-sv 真机
+        # 单测产物首次暴露）
         return True, detail, {"name": name, "rc": 0, "tests": tests,
-                              "failed": failed_count}
+                              "failed": 0 if failed_count is None
+                              else failed_count, "pushed": pushed}
     detail = f"{name}: FAIL rc={rc}{('，有 FAILED 用例') if failed else ''}"
     detail += f"\n--- 输出摘录 ---\n{out_text[:2000]}"
     return False, detail, {"name": name, "rc": 1, "tests": tests,
-                           "failed": failed_count}
+                           "failed": failed_count, "pushed": pushed}
 
 
 def run_one(ep, out, product, name, verbose=False, aosp_root=None, src_rel=None,
@@ -243,16 +290,24 @@ def _default_out():
     return posixpath.join(str(Path.home()), "workspace", "aosp", "out")
 
 
-def _mark_stage(name):
+def _mark_stage(name, dur_s=None):
     """验证阶段自动打点：cdp_timing.py mark（batch 识别：CDP_BATCH_ID 环境变量
-    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。"""
+    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。
+
+    dur_s（方向 1）：调用方自测脚本内实测秒数，mark 段耗时取 dur_s，相邻差额
+    减去 dur_s 后的余量落 gap_before_<name>——脚本启动前的 AI 活动时间不再
+    污染段口径（上批 sync 段记 71.2s 而脚本自报 13.9s，段口径不可信则后续
+    提速无从测量）。
+    """
     timing = (Path(__file__).resolve().parents[1] / "cross-device"
               / "lib" / "python" / "cdp_timing.py")
     env = dict(os.environ)
     env["PYTHONPATH"] = str(timing.parent) + os.pathsep + env.get("PYTHONPATH", "")
+    args = [sys.executable, str(timing), "mark", "--name", name]
+    if dur_s is not None:
+        args += ["--dur-s", str(round(float(dur_s), 3))]
     try:
-        r = subprocess.run([sys.executable, str(timing), "mark", "--name", name],
-                           capture_output=True, text=True, encoding="utf-8",
+        r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=10, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         print(f"warn: 打点 {name} 失败（不阻断）: {e}", file=sys.stderr)
@@ -279,6 +334,10 @@ def main(argv=None):
                     help="自描述单测产物 JSON 路径（原子写；--out 已被 AOSP "
                          "输出目录占用，不可复用该名）")
     args = ap.parse_args(argv)
+
+    # 方向 1：脚本自报实测时长基准（verify_unit_test 打点传 --dur-s；基准在
+    # 模块级 _T0 取值，import 成本归脚本段）
+    _t0 = _T0
 
     if args.test_targets:
         targets = args.test_targets
@@ -326,12 +385,12 @@ def main(argv=None):
     # 原子写防半截文件被当证据
     if args.result_file:
         _atomic_write_json(args.result_file, {
-            "run_id": uuid.uuid4().hex,
+            "run_id": os.environ.get("CDP_RUN_ID") or uuid.uuid4().hex,
             "targets": target_stats,
         })
     print(f"\n设备侧单测{'全部通过' if all_ok else '存在失败'}：{len(targets)} 目标")
-    # 脚本自动打点单测段（失败不阻断）
-    _mark_stage("verify_unit_test")
+    # 脚本自动打点单测段（失败不阻断）；方向 1：传 --dur-s 脚本自报实测秒数
+    _mark_stage("verify_unit_test", dur_s=time.monotonic() - _t0)
     return 0 if all_ok else 1
 
 

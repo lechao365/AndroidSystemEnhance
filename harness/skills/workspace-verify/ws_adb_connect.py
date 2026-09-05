@@ -8,7 +8,9 @@ LC_VERIFY_ADB_HOST/PORT 覆盖）。
 就绪判定：ensure_ready 每 5s 轮询 sys.boot_completed 到 1（timeout=180）。
 
 CLI:
-  ws_adb_connect.py ensure [--rescue]          # 连接并输出 endpoint（失败 exit 1；--rescue 显式启用串口救援）
+  ws_adb_connect.py ensure [--rescue] [--budget N]  # 连接并输出 endpoint
+                                   # （失败 exit 1；--rescue 显式启用串口救援；
+                                   # --budget N 连接预算秒数，耗尽快速失败）
   ws_adb_connect.py ready                      # 轮询 sys.boot_completed 就绪（超时 exit 1）
   ws_adb_connect.py clock [--max-skew 120]     # 设备时钟偏差超阈值则 root 修正（exit 1 失败）
   ws_adb_connect.py devices                    # adb devices 原样输出
@@ -158,16 +160,59 @@ def _verify_identity(endpoint):
     return True, ""
 
 
-def ensure_connected(rescue_enabled=False):
-    """mDNS 优先逐个尝试，失败回退静态；皆败后经串口救援（第三级通道）。
+def _adb_devices_online():
+    """adb devices 在线预检（方向 2）：返回当前已连接且在线的 endpoint 列表。
+
+    已连接的 adb 设备（state=device）直接可用，免 mDNS 逐候选 connect 的
+    重连开销；返回空列表（adb 不可用/无在线设备）时由调用方回落后续路径。
+    """
+    try:
+        r = subprocess.run([adb_bin(), "devices"], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [ep for ep, st in parse_devices(r.stdout).items() if st == "device"]
+
+
+def ensure_connected(rescue_enabled=False, budget_s=None):
+    """在线预检快路径 → mDNS 优先逐个尝试，失败回退静态；皆败后经串口救援
+    （第三级通道）。
 
     返回在线 endpoint 或 None。rescue 会重启设备 adbd（副作用），默认关闭，
     须调用方显式开（ensure --rescue）；触发时必须打印 detail；rescue 返回
     端点后再 connect 复核在线才算成功。
     方向 5：连上后核对设备身份（LC_VERIFY_EXPECT_SERIAL），不符即拒——
-    mDNS 多候选逐拒，静态/救援路径不符直接返 None。
+    快路径/mDNS 多候选逐拒，静态/救援路径不符直接返 None。
+    方向 2：先查 adb devices 已连接在线设备（快路径），命中即过身份校验
+    返回，未命中/全拒再走 mDNS/静态/rescue——已连接设备免逐候选 connect
+    重连（verify_acceptance_connect 六次累计 961s 占全批 31.4% 的提速点）。
+    budget_s（A2）：连接预算秒数——失败轮编排层先做带预算的廉价探测，
+    预算耗尽（monotonic 起算）即打印 [budget] 并返回 None 快速失败，不进
+    入后续发现级（mDNS/静态/rescue）；None 时无预算，行为与旧版一致。
     """
+    deadline = time.monotonic() + budget_s if budget_s is not None else None
+
+    def _budget_left():
+        return deadline is None or time.monotonic() < deadline
+
+    # 快路径为廉价预检不设卫（预算耗尽也值得先查一次已连接设备）
+    for ep in _adb_devices_online():
+        if not _is_online(ep):
+            continue
+        ok, detail = _verify_identity(ep)
+        if not ok:
+            print(f"[identity] {detail}（拒绝该端点，继续尝试）")
+            continue
+        return ep
+    if not _budget_left():
+        print(f"[budget] 连接预算耗尽（{budget_s}s），快速失败")
+        return None
     for ep in mdns_discover():
+        # 逐候选检查预算，避免单级内 mDNS connect/复核长等吞掉剩余预算
+        if not _budget_left():
+            print(f"[budget] 连接预算耗尽（{budget_s}s），快速失败")
+            return None
         try:
             subprocess.run(build_connect_cmd(ep), capture_output=True,
                            encoding="utf-8", errors="replace", timeout=10)
@@ -180,6 +225,9 @@ def ensure_connected(rescue_enabled=False):
             print(f"[identity] {detail}（拒绝该端点，继续尝试）")
             continue
         return ep
+    if not _budget_left():
+        print(f"[budget] 连接预算耗尽（{budget_s}s），快速失败")
+        return None
     ep = host_port()
     try:
         subprocess.run(build_connect_cmd(ep), capture_output=True,
@@ -192,6 +240,9 @@ def ensure_connected(rescue_enabled=False):
             print(f"[identity] {detail}（静态端点身份不符拒绝）")
             return None
         return ep
+    if not _budget_left():
+        print(f"[budget] 连接预算耗尽（{budget_s}s），快速失败")
+        return None
     if not rescue_enabled:
         return None
     ep_rescued, state, detail = rescue()
@@ -417,6 +468,8 @@ def main(argv=None):
     p_ensure.add_argument("--rescue", action="store_true",
                           help="mDNS 与静态皆败后启用串口救援（重启设备 adbd，"
                                "副作用，默认不触发）")
+    p_ensure.add_argument("--budget", type=int, default=None,
+                          help="连接预算秒数（A2 快速失败；缺省无预算）")
     p_ready = sub.add_parser("ready")
     p_ready.add_argument("--timeout", type=int, default=180,
                          help="就绪等待上限（秒），覆盖默认 180")
@@ -435,7 +488,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.action == "ensure":
-        ep = ensure_connected(rescue_enabled=args.rescue)
+        ep = ensure_connected(rescue_enabled=args.rescue,
+                              budget_s=args.budget)
         if ep:
             # 方向 5：verify_push 打点已移至 ws_push.py 实际推送循环完成后
             # （此前连接成功即打，量不到推送），本 CLI 只负责连接并输出 endpoint

@@ -17,6 +17,10 @@ class TestCdpTiming(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self._old = os.environ.get("CDP_PROJECT_ROOT")
         os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+        # 隔离宿主 CDP_BATCH_ID 残留（防御惯例，见 test_stage_mark.py）：
+        # 避免宿主环境变量把自动 mark 隐式指到本套件之外的打点文件
+        self._old_batch = os.environ.get("CDP_BATCH_ID")
+        os.environ.pop("CDP_BATCH_ID", None)
         self.batch = "abc123def456"
 
     def tearDown(self):
@@ -24,6 +28,10 @@ class TestCdpTiming(unittest.TestCase):
             os.environ.pop("CDP_PROJECT_ROOT", None)
         else:
             os.environ["CDP_PROJECT_ROOT"] = self._old
+        if self._old_batch is None:
+            os.environ.pop("CDP_BATCH_ID", None)
+        else:
+            os.environ["CDP_BATCH_ID"] = self._old_batch
         self._tmp.cleanup()
 
     def _path(self):
@@ -261,11 +269,11 @@ class TestCdpTiming(unittest.TestCase):
             self.assertIn(seg, cdp_timing.KNOWN_SEGMENTS)
 
     def test_conditional_segments_defined(self):
-        # 方向 1：CONDITIONAL_SEGMENTS 含 4 个条件段（未产出不判缺），
+        # 方向 1：CONDITIONAL_SEGMENTS 含条件段（未产出不判缺），
         # 且为 KNOWN_SEGMENTS 子集（表内 mark 不告警）
         self.assertEqual(cdp_timing.CONDITIONAL_SEGMENTS,
                          frozenset({"edit_validate", "gen_manifest",
-                                    "edit_plan", "edit_retry"}))
+                                    "edit_plan", "edit_retry", "edit_item"}))
         self.assertLessEqual(cdp_timing.CONDITIONAL_SEGMENTS,
                              cdp_timing.KNOWN_SEGMENTS)
 
@@ -399,6 +407,29 @@ class TestCdpTiming(unittest.TestCase):
                                   "apply_selfcheck#2"])
         self.assertEqual(rc, 0)
         self.assertNotIn("warn", err.getvalue())
+
+    # ── B2：edit_item 分方向编辑打点段 ─────────────────────────────────
+    def test_edit_item_in_known_and_conditional(self):
+        # B2：分方向编辑打点段（同名自动 #N 序号）；条件段（未打不判缺）
+        self.assertIn("edit_item", cdp_timing.KNOWN_SEGMENTS)
+        self.assertIn("edit_item", cdp_timing.CONDITIONAL_SEGMENTS)
+
+    def test_edit_item_repeat_marks_get_suffix_segments(self):
+        # 同名 edit_item 重复 mark → edit_item / edit_item#2 / edit_item#3
+        cdp_timing.main(["start", "--batch", self.batch])
+        for _ in range(3):
+            cdp_timing.main(["mark", "--batch", self.batch, "--name",
+                             "edit_item"])
+        data = json.loads(self._path().read_text(encoding="utf-8"))
+        names = [s["name"] for s in cdp_timing.compute_segments(data)]
+        self.assertEqual([n for n in names if n.startswith("edit_item")],
+                         ["edit_item", "edit_item#2", "edit_item#3"])
+
+    # ── B5：report_post 尾部工作段 ─────────────────────────────────────
+    def test_report_post_in_known_segments(self):
+        # B5：report 尾部工作（content_tree/收据落盘/trend）段，非条件段
+        self.assertIn("report_post", cdp_timing.KNOWN_SEGMENTS)
+        self.assertNotIn("report_post", cdp_timing.CONDITIONAL_SEGMENTS)
 
 
 if __name__ == "__main__":

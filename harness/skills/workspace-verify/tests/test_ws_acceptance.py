@@ -179,8 +179,9 @@ class TestParseAcceptance(unittest.TestCase):
                          "2026-09-01 01:25:10.000")
 
     def test_logfresh_miss_in_window_fails(self):
-        # 窗内未命中 → fail（daemon 卡死而进程存活时，90s 窗内无新心跳；
-        # logcat -t 时间窗已把旧心跳过滤出窗，窗内输出不含锚点）
+        # 窗内未命中 → 轮询重取（每 5s）到 window 秒超时判红（daemon 卡死而
+        # 进程存活时，90s 窗内无新心跳；logcat -t 时间窗已把旧心跳过滤出窗，
+        # 窗内输出不含锚点）
         fake = mock.Mock()
         fake.stdout = "09-01 01:26:00 其他进程日志行\n"
 
@@ -191,12 +192,43 @@ class TestParseAcceptance(unittest.TestCase):
                 return "+0000", 0
             return "", 1
 
-        with mock.patch.object(wa.subprocess, "run", return_value=fake):
+        mono = mock.patch("ws_acceptance.time.monotonic",
+                          side_effect=[0] + [5 * i for i in range(1, 21)])
+        sleep = mock.patch("ws_acceptance.time.sleep")
+        with mono, sleep, mock.patch.object(wa.subprocess, "run",
+                                            return_value=fake):
             status, detail = wa.execute_tag(
                 'logfresh:"heartbeat, loop=|90"',
                 adb_exec=adb_exec, adb_logcat=None)
         self.assertEqual(status, "fail")
         self.assertIn("未命中", detail)
+
+    def test_logfresh_recovers_after_poll(self):
+        # 方向 8：首拉窗落在心跳恢复前/旧时钟域（reboot 后 daemon 恢复或
+        # clock_sync 时钟域切换）未命中 → 每 5s 重取，心跳出现后命中 pass；
+        # 时效语义保持（最终命中须在当前 window 滑动窗内）
+        def adb_exec(cmd):
+            if cmd == "date +%s":
+                return "1788226000", 0
+            if cmd == "date +%z":
+                return "+0000", 0
+            return "", 1
+
+        fake_miss = mock.Mock()
+        fake_miss.stdout = "09-01 01:25:40 其他进程日志行\n"
+        fake_hit = mock.Mock()
+        fake_hit.stdout = "09-01 01:26:30 heartbeat, loop=5\n"
+        mono = mock.patch("ws_acceptance.time.monotonic",
+                          side_effect=[0] + [5 * i for i in range(1, 21)])
+        sleep = mock.patch("ws_acceptance.time.sleep")
+        with mono, sleep, mock.patch.object(
+                wa.subprocess, "run",
+                side_effect=[fake_miss, fake_hit]):
+            status, detail = wa.execute_tag(
+                'logfresh:"heartbeat, loop=|90"',
+                adb_exec=adb_exec, adb_logcat=None)
+        self.assertEqual(status, "pass")
+        self.assertIn("命中", detail)
 
     def test_logfresh_syntax_error_fails(self):
         # 语法错误（非 锚点|秒数 两段）→ fail
@@ -817,7 +849,9 @@ class TestLogcatCacheAndTiming(unittest.TestCase):
         self.assertIn("log:KEY", data["input_summary"])
         self.assertIn("device_serial", data)
         self.assertIn("device_fingerprint", data)
-        self.assertLess(data["start_monotonic"], data["end_monotonic"])
+        # mark 进程内直调后验收可毫秒级完成（WSL2 单调钟 ~1ms 分辨率下
+        # start == end 合法），只断言时序不自相矛盾
+        self.assertLessEqual(data["start_monotonic"], data["end_monotonic"])
         self.assertIn("overall", data)
         self.assertIn("items", data)
 
@@ -1053,6 +1087,94 @@ class TestBackfillZeroMarks(unittest.TestCase):
         wa._backfill_zero_marks(None)
         data = json.loads(self._timing().read_text(encoding="utf-8"))
         self.assertEqual(data["marks"], [])
+
+
+class TestResolveRunBatchId(unittest.TestCase):
+    """main 内 batch_id 解析三级回落（显式 batch-file > CDP_BATCH_ID >
+    唯一 timings 文件）：--case 模式未解析出 batch_id 时回落识别，否则
+    _backfill_zero_marks 直接 return，verify_build 等标准段永远 missing
+    （0904 三批 missing=[verify_build] 的根因）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+        self.batch = "abc123def456"
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("CDP_PROJECT_ROOT", None)
+        else:
+            os.environ["CDP_PROJECT_ROOT"] = self._old
+        self._tmp.cleanup()
+
+    def test_batch_file_text_wins(self):
+        # batch-file 可解析 → 显式值优先（batch_id_from_text 的解析正确性
+        # 属 cdp_parse 既有职责，此处 mock 隔离，只验证回落优先级；
+        # 文件须真实存在——read_text 先于解析执行，缺文件即回落）
+        p = Path(self._tmp.name) / "batch.txt"
+        p.write_text("placeholder", encoding="utf-8")
+        with mock.patch.object(wa, "batch_id_from_text",
+                               return_value=self.batch):
+            self.assertEqual(wa._resolve_run_batch_id(str(p)), self.batch)
+
+    def test_batch_file_empty_parse_falls_back_to_env(self):
+        # batch-file 解析成功但返回空串 → 继续回落（不因文件存在而中断）
+        p = Path(self._tmp.name) / "batch.txt"
+        p.write_text("placeholder", encoding="utf-8")
+        with mock.patch.dict("os.environ", {"CDP_BATCH_ID": self.batch}), \
+             mock.patch.object(wa, "batch_id_from_text", return_value=""):
+            self.assertEqual(wa._resolve_run_batch_id(str(p)), self.batch)
+
+    def test_batch_file_unreadable_falls_back_to_env(self):
+        # batch-file 读取失败 → 回落 CDP_BATCH_ID（与 _mark_stage 同口径）
+        with mock.patch.dict("os.environ", {"CDP_BATCH_ID": self.batch}):
+            self.assertEqual(wa._resolve_run_batch_id("/no/such/file.txt"),
+                             self.batch)
+
+    def test_no_file_no_env_uses_unique_timings_file(self):
+        # 无 batch-file 无 env → log 目录唯一 timings 文件 stem
+        # （清掉宿主可能残留的 CDP_BATCH_ID，隔离环境隐式依赖）
+        with mock.patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("CDP_BATCH_ID", None)
+            wa.cdp_timing.main(["start", "--batch", self.batch])
+            self.assertEqual(wa._resolve_run_batch_id(None), self.batch)
+
+    def test_nothing_resolvable_returns_none(self):
+        # 三级皆缺 → None（调用方补零/mark 静默跳过，防误标其他批次）
+        with mock.patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("CDP_BATCH_ID", None)
+            self.assertIsNone(wa._resolve_run_batch_id(None))
+
+
+class TestMarkStageInProcess(unittest.TestCase):
+    """验收段每项一发 mark（30+ 次）：_mark_stage 改进程内直调
+    cdp_timing.main（_backfill_zero_marks 同款先例），消除逐项子进程
+    启动开销（0.1~0.3s × 30+ 在验收段内串行叠加）。"""
+
+    def test_calls_cdp_timing_main_in_process(self):
+        with mock.patch.object(wa.cdp_timing, "main",
+                               return_value=0) as m:
+            wa._mark_stage("verify_acceptance_acc_3", "batch001")
+        m.assert_called_once()
+        args = m.call_args.args[0]
+        self.assertEqual(args, ["mark", "--name", "verify_acceptance_acc_3",
+                                "--batch", "batch001"])
+
+    def test_zero_flag_passthrough(self):
+        with mock.patch.object(wa.cdp_timing, "main", return_value=0) as m:
+            wa._mark_stage("verify_sync", "batch001", zero=True)
+        self.assertIn("--zero", m.call_args.args[0])
+
+    def test_nonzero_rc_warns_not_raises(self):
+        # cdp_timing 返回非 0 → 仅 warn 不阻断（失败不阻断口径语义不变）
+        with mock.patch.object(wa.cdp_timing, "main", return_value=3):
+            wa._mark_stage("verify_acceptance", None)
+
+    def test_exception_warns_not_raises(self):
+        with mock.patch.object(wa.cdp_timing, "main",
+                               side_effect=RuntimeError("boom")):
+            wa._mark_stage("verify_acceptance", None)
 
 
 class TestWriteCases(unittest.TestCase):
@@ -1300,6 +1422,37 @@ class TestRunIdLifecycle(unittest.TestCase):
         # 方向 4：产物注明身份标识只认基镜像
         self.assertIn("只认基镜像", data["identity_note"])
         self.assertIn("增量推送不改变", data["identity_note"])
+
+    def test_cdp_run_id_injected_used(self):
+        # 方向 8：CDP_RUN_ID 注入时产物 run_id 用注入值——push/unit_test/
+        # acceptance 三产物同轮同 run_id（ws_report 一致核验依赖此）；
+        # hostcmd 基线路径随之唯一，轮次隔离由编排层每轮换 CDP_RUN_ID 维持
+        out_json = Path(tempfile.mkdtemp()) / "acc.json"
+
+        def fake_run_acceptance(acc, adb_exec, adb_logcat, ensure_boot=False,
+                                on_item=None, host_env=None):
+            return "pass", [{"tag": "boot", "status": "pass", "detail": "ok"}]
+
+        with mock.patch.dict("os.environ", {"CDP_RUN_ID": "shared-run-001"}), \
+                mock.patch.object(wa, "ac") as m_ac:
+            m_ac.ensure_connected.side_effect = ["ep", "ep"]
+            m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+            m_ac.parse_exec_output.return_value = ("1", 0)
+            m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
+            m_sub = mock.Mock()
+            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
+            m_sub.TimeoutExpired = subprocess.TimeoutExpired
+            with mock.patch.object(wa.subprocess, "run", m_sub):
+                with mock.patch.object(wa, "run_acceptance",
+                                       side_effect=fake_run_acceptance):
+                    with mock.patch.object(wa, "_device_serial",
+                                           return_value=("SN1",
+                                                         "getprop ro.serialno")):
+                        rc = wa.main(["run", "--acceptance", "boot",
+                                      "--result-file", str(out_json)])
+        self.assertEqual(rc, 0)
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertEqual(data["run_id"], "shared-run-001")
 
     def test_device_serial_all_empty_red(self):
         # 方向 3：产物写入路径上序列号三者皆空 → 判红返 1（不写产物）

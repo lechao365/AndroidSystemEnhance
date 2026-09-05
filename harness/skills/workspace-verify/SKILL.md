@@ -75,6 +75,10 @@ stages:
    - acceptance：ws_acceptance.py run 完成自动 mark verify_acceptance
    重试轮沿用同段名 mark，不追加轮次前缀（段名保持稳定供复盘按段统计）；
    脚本自动 mark 缺轮次上下文时由执行者触发对应段。
+0b. 链式入口（推荐，减编排往返）：三步确定性环节可单脚本串联——
+    python3 harness/skills/workspace-verify/ws_verify_chain.py --result-file <chain.json>
+    逐段 stdout 透传、rc 逐段门禁、失败即停（JSON 标注停在何步）；成功后
+    直跳步骤 4b/5。失败时按原分步工作流重跑定位，各段打点口径不变。
 1. 同步：python3 harness/skills/sync-code-to-workspace/sync_code_to_workspace.py --auto
    （同步源 = code 工作树当前状态；范围 = code/rpi5/{aosp,kernel}；
    data/verify-results、others/、rpi-zero2w 不参与同步）

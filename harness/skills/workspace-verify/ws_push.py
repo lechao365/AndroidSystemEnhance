@@ -57,6 +57,11 @@ _CONTEXT_RE = re.compile(r"^u:object_r:\S+:s0$")
 # 每次自检多花 15~28s 且随 xdist 分发波动
 _sleep = time.sleep
 
+# dur_s 自报基准（方向 1）：模块级取值——解释器启动后的 import 成本一并
+# 归入脚本自报时长，gap_before_verify_push 收窄为纯 AI 编排活动（编排与
+# 脚本成本的边界按进程边界切分）
+_T0 = time.monotonic()
+
 
 def load_push_map(cases_path, modules=None):
     """从 verify-cases.yaml modules 段收集 push 映射（保持模块顺序）。
@@ -265,16 +270,24 @@ def _atomic_write_json(path, data):
     os.replace(tmp, p)
 
 
-def _mark_stage(name):
+def _mark_stage(name, dur_s=None):
     """验证阶段自动打点：cdp_timing.py mark（batch 识别：CDP_BATCH_ID 环境变量
-    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。"""
+    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。
+
+    dur_s（方向 1）：调用方自测脚本内实测秒数，mark 段耗时取 dur_s，相邻差额
+    减去 dur_s 后的余量落 gap_before_<name>——脚本启动前的 AI 活动时间不再
+    污染段口径（上批 sync 段记 71.2s 而脚本自报 13.9s，段口径不可信则后续
+    提速无从测量）。
+    """
     timing = (Path(__file__).resolve().parents[1] / "cross-device"
               / "lib" / "python" / "cdp_timing.py")
     env = dict(os.environ)
     env["PYTHONPATH"] = str(timing.parent) + os.pathsep + env.get("PYTHONPATH", "")
+    args = [sys.executable, str(timing), "mark", "--name", name]
+    if dur_s is not None:
+        args += ["--dur-s", str(round(float(dur_s), 3))]
     try:
-        r = subprocess.run([sys.executable, str(timing), "mark", "--name", name],
-                           capture_output=True, text=True, encoding="utf-8",
+        r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=10, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         print(f"warn: 打点 {name} 失败（不阻断）: {e}", file=sys.stderr)
@@ -315,6 +328,10 @@ def main(argv=None):
                          "输出目录占用，不可复用该名）")
     args = ap.parse_args(argv)
 
+    # 方向 1：脚本自报实测时长基准（verify_push 打点传 --dur-s；基准在
+    # 模块级 _T0 取值，import 成本归脚本段）
+    _t0 = _T0
+
     try:
         expect_ctx = _parse_expect_context(args.expect_context)
     except ValueError as e:
@@ -353,35 +370,52 @@ def main(argv=None):
                                       f"{args.product}{dst}）"})
             print(f"  [FAIL] {item['module']} -> {dst}: 编译产物缺失")
             continue
-        _, rc = adb_run(ep, ["push", source, dst], timeout=300)
-        if rc != 0:
-            all_ok = False
-            results.append({"module": item["module"], "source": source, "dst": dst,
-                            "push_ok": False,
-                            "checks": {"sha256": "fail", "bytes": "fail",
-                                       "context": "fail"},
-                            "detail": f"adb push 失败 rc={rc}"})
-            print(f"  [FAIL] {item['module']} -> {dst}: adb push 失败 rc={rc}")
-            continue
+        # 方向 2 幂等：推送前先回读设备侧，与本地 SHA256+字节全等则跳过
+        # 该项（不计入重启判定——产物未写入，重启无意义）；回读失败
+        # （sha256/bytes 任一缺失）仍按原路推。上批 push 226.3s 中约 214s
+        # 是全等产物触发的强制重启，幂等跳过直接消除该段。
+        local = local_fingerprint(source)
         device = readback_device(ep, dst)
-        ok, checks, detail, local = verify_item(source, device,
-                                                expect_ctx.get(dst))
+        if (device["sha256"] and device["bytes"] is not None
+                and device["sha256"] == local["sha256"]
+                and device["bytes"] == local["bytes"]):
+            pushed = False
+        else:
+            pushed = True
+        if pushed:
+            _, rc = adb_run(ep, ["push", source, dst], timeout=300)
+            if rc != 0:
+                all_ok = False
+                results.append({"module": item["module"], "source": source, "dst": dst,
+                                "push_ok": False, "pushed": True,
+                                "checks": {"sha256": "fail", "bytes": "fail",
+                                           "context": "fail"},
+                                "detail": f"adb push 失败 rc={rc}"})
+                print(f"  [FAIL] {item['module']} -> {dst}: adb push 失败 rc={rc}")
+                continue
+            device = readback_device(ep, dst)
+        ok, checks, detail, _ = verify_item(source, device,
+                                            expect_ctx.get(dst))
         all_ok = all_ok and ok
         results.append({"module": item["module"], "source": source, "dst": dst,
-                        "push_ok": True, "local": local, "device": device,
-                        "checks": checks, "detail": detail})
-        print(f"  [{'OK' if ok else 'FAIL'}] {item['module']} -> {dst}: {detail}"
+                        "push_ok": True, "pushed": pushed, "local": local,
+                        "device": device, "checks": checks, "detail": detail})
+        tag = "SKIP" if not pushed else ("OK" if ok else "FAIL")
+        print(f"  [{tag}] {item['module']} -> {dst}: {detail}"
               f"（sha256={checks['sha256']} bytes={checks['bytes']} "
               f"context={checks['context']}）")
 
     # verify_push 打点：实际推送循环完成后（方向 5；此前在 ensure 连接成功
-    # 即打，量不到推送）。含失败——失败也是推送环节的终点。
-    _mark_stage("verify_push")
+    # 即打，量不到推送）。含失败——失败也是推送环节的终点。方向 1：传
+    # --dur-s 脚本自报实测秒数（脚本启动至今，未归属时间落 gap_before_）。
+    _mark_stage("verify_push", dur_s=time.monotonic() - _t0)
 
-    # 生效门禁（方向 4）：命中 sepolicy/vintf/rc 且推送成功 → 强制重启并
+    # 生效门禁（方向 4）：命中 sepolicy/vintf/rc 且实际推送成功 → 强制重启并
     # 等待启动完成；跳过即判红（无跳过开关），重启/就绪失败判红。
+    # 方向 2：跳过项（与设备全等未推送）不计入重启判定——产物未写入无需重启。
     reboot_info = None
-    if any(r["push_ok"] and needs_reboot(r["dst"]) for r in results):
+    if any(r["push_ok"] and r.get("pushed", True) and needs_reboot(r["dst"])
+           for r in results):
         ok_boot, detail = reboot_and_wait(ep)
         reboot_info = {"required": True, "ok": ok_boot, "detail": detail}
         print(f"  生效门禁: 强制重启 {'通过' if ok_boot else '判红'}——{detail}")
@@ -399,7 +433,7 @@ def _write_result(path, ep, results, reboot_info, overall):
     if not path:
         return
     _atomic_write_json(path, {
-        "run_id": uuid.uuid4().hex,
+        "run_id": os.environ.get("CDP_RUN_ID") or uuid.uuid4().hex,
         "endpoint": ep,
         "items": results,
         "reboot": reboot_info,

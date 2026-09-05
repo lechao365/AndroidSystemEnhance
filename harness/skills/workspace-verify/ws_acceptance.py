@@ -215,6 +215,13 @@ def _exec_annotate(detail, code):
     return f"{detail}（adb 执行超时）" if code == -1 else detail
 
 
+def _clip_body(body, code):
+    """detail 截断口径：通过取头部 200 控收据体积；失败取尾部 400——错误
+    信息通常在输出末尾，头部截断会遮蔽 ERROR 尾行致取证困难（2026-09-05
+    recover seq 假红实拍：失败现场只见前 200 字符，根因行被吞）。"""
+    return body[-400:] if code != 0 else body[:200]
+
+
 def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
     """adb_exec(cmd)->(body, exit_code)；adb_logcat()->str。返回 (status, detail)。
 
@@ -298,7 +305,12 @@ def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
         # 锚点即判红——log:/logfield 取末行不看时效，daemon 卡死而进程存活时
         # 旧心跳仍判绿（假绿精确条件：进程活着但采集链路死了）。
         # 时间窗文本按设备时区格式化后直接透传 build_logcat_cmd（-t <since>），
-        # 不解析时间戳（复用既有命令构造，PIT-5 同源防护）
+        # 不解析时间戳（复用既有命令构造，PIT-5 同源防护）。
+        # 方向 8：未命中每 5s 重取（重新取设备时间算滑动窗），到 window 秒
+        # 超时判红——reboot 后 daemon 恢复心跳/clock_sync 时钟域切换（PIT-5
+        # 回拨后校准）时，首拉窗可能落在心跳恢复前或旧时钟域，等一个心跳
+        # 周期即命中，避免 -sv 重启后首轮验收必判红；超时仍按 window 保证
+        # 时效语义（最终判红 = window 内确无锚点心跳，非等待放大判据）。
         parts = payload.split("|")
         if len(parts) != 2:
             return "fail", f"logfresh 语法错误（须 锚点|秒数）: {payload!r}"
@@ -307,33 +319,39 @@ def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
             window = int(window_s)
         except ValueError:
             return "fail", f"logfresh 秒数非数字: {window_s!r}"
-        body, code = adb_exec("date +%s")
-        if code != 0 or not body.strip().isdigit():
-            return "fail", "logfresh: 无法读取设备时钟（date +%s）"
-        since_epoch = int(body.strip()) - window
-        out, code = adb_exec("date +%z")
-        if code != 0:
-            return "fail", "logfresh: 无法读取设备时区（date +%z）"
-        m = re.match(r"([+-])(\d{2})(\d{2})", out.strip())
-        if not m:
-            return "fail", f"logfresh: 设备时区格式非法 {out.strip()!r}"
-        sign = 1 if m.group(1) == "+" else -1
-        offset = sign * (int(m.group(2)) * 3600 + int(m.group(3)) * 60)
-        tz = timezone(timedelta(seconds=offset))
-        dt = datetime.fromtimestamp(since_epoch, tz=tz)
-        since_text = dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        try:
-            r = subprocess.run(ac.build_logcat_cmd(None, 5000, since=since_text),
-                               capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", timeout=60)
-            out = r.stdout
-        except subprocess.TimeoutExpired:
-            return "fail", "logfresh: logcat 执行超时"
-        hit = anchor in out
-        return ("pass" if hit else "fail",
-                f"logfresh: 设备时钟回退 {window}s（窗起点 {since_text}），"
-                f"窗内{'命中' if hit else '未命中'} 锚点 {anchor!r}"
-                f"（取回 {len(out)} 字符）")
+        deadline = time.monotonic() + window
+        while True:
+            body, code = adb_exec("date +%s")
+            if code != 0 or not body.strip().isdigit():
+                return "fail", "logfresh: 无法读取设备时钟（date +%s）"
+            since_epoch = int(body.strip()) - window
+            out, code = adb_exec("date +%z")
+            if code != 0:
+                return "fail", "logfresh: 无法读取设备时区（date +%z）"
+            m = re.match(r"([+-])(\d{2})(\d{2})", out.strip())
+            if not m:
+                return "fail", f"logfresh: 设备时区格式非法 {out.strip()!r}"
+            sign = 1 if m.group(1) == "+" else -1
+            offset = sign * (int(m.group(2)) * 3600 + int(m.group(3)) * 60)
+            tz = timezone(timedelta(seconds=offset))
+            dt = datetime.fromtimestamp(since_epoch, tz=tz)
+            since_text = dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            try:
+                r = subprocess.run(ac.build_logcat_cmd(None, 5000, since=since_text),
+                                   capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", timeout=60)
+                out = r.stdout
+            except subprocess.TimeoutExpired:
+                return "fail", "logfresh: logcat 执行超时"
+            if anchor in out:
+                return ("pass",
+                        f"logfresh: 设备时钟回退 {window}s（窗起点 {since_text}），"
+                        f"窗内命中 锚点 {anchor!r}（取回 {len(out)} 字符）")
+            if time.monotonic() >= deadline:
+                return ("fail",
+                        f"logfresh: 设备时钟回退 {window}s（窗起点 {since_text}），"
+                        f"窗内未命中 锚点 {anchor!r}（取回 {len(out)} 字符）")
+            time.sleep(5)
     if kind == "prop":
         k, _, v = payload.partition("=")
         body, code = adb_exec(f"getprop {shlex.quote(k)}")
@@ -348,7 +366,7 @@ def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
         # cmd 分支按设计是 shell 串（引号/管道语义需保留），不包裹
         body, code = adb_exec(payload)
         return ("pass" if code == 0 else "fail",
-                _exec_annotate(body.strip()[:200], code))
+                _exec_annotate(_clip_body(body.strip(), code), code))
     if kind == "hostcmd":
         # host 侧执行（不经 adb）：payload 为 shell 串，cwd 落在 workspace-verify，
         # 相对路径（如 cases/lcview_check.sh）以其为根，用例资产不再硬编码绝对路径；
@@ -362,7 +380,7 @@ def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
             r = subprocess.run(payload, **host_kwargs)
             body = (r.stdout + r.stderr).strip()
             return ("pass" if r.returncode == 0 else "fail",
-                    _exec_annotate(body[:200], r.returncode))
+                    _exec_annotate(_clip_body(body, r.returncode), r.returncode))
         except subprocess.TimeoutExpired:
             return "fail", "hostcmd 执行超时"
         except OSError as e:
@@ -594,29 +612,25 @@ def run_case_lifecycle(acceptance_text, lifecycle, adb_exec, adb_logcat,
 
 
 def _mark_stage(name, batch_id=None, zero=False):
-    """验证阶段自动打点：cdp_timing.py mark（batch 识别：显式 batch_id >
-    环境变量 CDP_BATCH_ID > log 目录唯一 timings 文件；均缺时静默跳过返 0，
-    失败不阻断口径）。batch_id 显式传参解决多打点文件时自动识别静默跳过
-    （batch-file 模式从批次内容解析，mark 必然落到本批打点文件）。
-    zero=True 记零 mark（跳过段占位，段耗时 0）。"""
-    timing = (Path(__file__).resolve().parents[1] / "cross-device"
-              / "lib" / "python" / "cdp_timing.py")
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(timing.parent) + os.pathsep + env.get("PYTHONPATH", "")
-    cmd = [sys.executable, str(timing), "mark", "--name", name]
+    """验证阶段自动打点：进程内直调 cdp_timing.main mark（batch 识别：显式
+    batch_id > 环境变量 CDP_BATCH_ID > log 目录唯一 timings 文件；均缺时
+    静默跳过返 0，失败不阻断口径）。验收段每项一发 mark（30+ 次），子进程
+    版每次 0.1~0.3s 启动开销串行叠加，进程内直调消除（_backfill_zero_marks
+    同款先例）。zero=True 记零 mark（跳过段占位，段耗时 0）。"""
+    args = ["mark", "--name", name]
     if batch_id:
-        cmd += ["--batch", batch_id]
+        args += ["--batch", batch_id]
     if zero:
-        cmd += ["--zero"]
+        args += ["--zero"]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=10, env=env)
-    except (OSError, subprocess.TimeoutExpired) as e:
+        rc = cdp_timing.main(args)
+    except SystemExit as e:
+        rc = e.code
+    except Exception as e:
         print(f"warn: 打点 {name} 失败（不阻断）: {e}", file=sys.stderr)
         return
-    if r.returncode != 0:
-        print(f"warn: 打点 {name} 失败（不阻断）: {r.stderr.strip()}",
-              file=sys.stderr)
+    if rc not in (0, None):
+        print(f"warn: 打点 {name} rc={rc}（不阻断）", file=sys.stderr)
 
 
 def _resolve_batch_id(batch_id):
@@ -670,8 +684,8 @@ def _backfill_zero_marks(batch_id):
     """标准四段缺失时补零 mark（跳过段记 0 耗时，收据段完整可归因）。
 
     上一批收据只有 verify_start 与 verify_acceptance 两段即因四段跳过时
-    未发 mark；验收是最末验证阶段，由它兜底补齐。batch_id 缺失（非
-    batch-file 模式）时跳过——自动识别不可靠时不写，防误标其他批次。
+    未发 mark；验收是最末验证阶段，由它兜底补齐。batch_id 缺失（三级
+    回落皆不可得）时跳过——自动识别不可靠时不写，防误标其他批次。
     """
     if not batch_id:
         return
@@ -685,6 +699,26 @@ def _backfill_zero_marks(batch_id):
         if seg not in have:
             cdp_timing.main(["mark", "--batch", batch_id, "--name", seg,
                              "--zero"])
+
+
+def _resolve_run_batch_id(batch_file):
+    """main 内 batch_id 解析三级回落：batch-file 显式解析 > CDP_BATCH_ID >
+    log 目录唯一 timings 文件（复用 _resolve_batch_id 口径）。
+
+    --case/--acceptance 模式此前 batch_id 恒 None，_backfill_zero_marks
+    直接 return——标准段跳过时 verify_build 永远 missing（0904 三批实证）。
+    回落识别后补零/mark 必落本批打点文件；多打点文件时 _resolve_batch_id
+    静默跳过，防误标其他批次。读取失败按未提供处理（回落继续）。
+    """
+    if batch_file:
+        try:
+            bid = batch_id_from_text(
+                Path(batch_file).read_text(encoding="utf-8"))
+            if bid:
+                return bid
+        except (OSError, UnicodeDecodeError):
+            pass
+    return _resolve_batch_id(None)
 
 
 def _hostcmd_env(run_id):
@@ -763,15 +797,11 @@ def main(argv=None):
                   file=sys.stderr)
             return 2
 
-    # 模式 A（batch-file）显式解析 batch_id：内部分段/case 级/补零 mark
-    # 全部落本批打点文件（多打点文件时自动识别静默跳过，缺段无法归因）
-    batch_id = None
-    if args.batch_file:
-        try:
-            batch_id = batch_id_from_text(
-                Path(args.batch_file).read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError):
-            batch_id = None
+    # batch_id 解析三级回落（batch-file > CDP_BATCH_ID > 唯一 timings 文件）：
+    # --case 模式此前恒 None 致 _backfill_zero_marks 直接 return，标准段
+    # 跳过时 verify_build 永远 missing（0904 三批实证）；回落识别与
+    # _mark_stage 同口径，多打点文件时静默跳过防误标其他批次
+    batch_id = _resolve_run_batch_id(args.batch_file)
 
     ep = ac.ensure_connected()
     if not ep:
@@ -861,7 +891,11 @@ def main(argv=None):
 
     # 方向 1：run_id 提前到执行前生成，沿用到 hostcmd 环境与产物（不再收尾处
     # 新生成，保证 hostcmd 基线路径与产物 run_id 同源）
-    run_id = uuid.uuid4().hex
+    # 方向 8：CDP_RUN_ID 环境变量优先（编排层每轮注入唯一值），缺省回退
+    # uuid4——push/unit_test/acceptance 三产物须同轮同 run_id（ws_report
+    # 按 run_id 一致核验同批产物，各自 uuid4 必失配，-sv 真机全链路首次
+    # 暴露）；轮次隔离由编排层每轮换新 CDP_RUN_ID 维持
+    run_id = os.environ.get("CDP_RUN_ID") or uuid.uuid4().hex
     host_env = _hostcmd_env(run_id)
     t_start = time.monotonic()
     # 生命周期编排（方向 1/2/4）：--case 单标签且资产为 dict 形态时启用

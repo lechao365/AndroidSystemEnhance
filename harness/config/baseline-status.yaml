@@ -211,3 +211,29 @@ baselines:
       title: baseline_register promote 未传审批人时回落默认常量并自动填时间，审批可自证
   approved_by: lechao
   approved_at: '2026-09-04T12:31:41+08:00'
+- baseline_id: BL-20260905-01
+  status: promoted
+  source_branch: dev
+  source_commit: dd82d3f32900
+  sync_manifest: data/verify-results/20260905-070016-manual-2609050700.md
+  build_result: SKIP
+  package_result: UNKNOWN
+  board_verify: PASS
+  evidence_scope: no-code-change
+  evidence:
+    build_result: SKIP
+    package_result: UNKNOWN
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260905-070016-manual-2609050700.md
+    ki_gate: empty-registry
+    evidence_scope: no-code-change
+    known_issues_carried: ''
+    known_issues_closed:
+    - issue_id: KI-20260902-001
+      resolved_in: 42accb5
+      title: cdp_timing start 时机由 apply 自定致 edit 段耗时失真
+    - issue_id: KI-20260903-001
+      resolved_in: 9faa5632e2e8
+      title: selfcheck 每批可能跑多次致收据 timings 同名 apply_selfcheck 重复出现
+  approved_by: lechao
+  approved_at: '2026-09-05T08:28:04+08:00'

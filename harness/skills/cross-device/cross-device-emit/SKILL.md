@@ -44,7 +44,10 @@ stages:
 3. 产批：-s/-sv + base + 意图/验收/方向，总字符 450~500 为目标区间（硬上限 500）；
    不足 450 说明描述不清或应合并后续批次（backlog 见底时允许低于 450）；每批 6-7 个变更点；
    base 自动取 precheck 后 origin/dev HEAD 前 12 位
-   （git rev-parse --short=12 origin/dev，勿手算）；复杂任务拆多轮，每轮注明后续轮次
+   （git rev-parse --short=12 origin/dev，勿手算）；复杂任务拆多轮，每轮注明后续轮次；
+   验收 case 按两级策略选（B6）：常态回归取快速回归组 5 case（lcview-liveness,
+   lcview-pipeline, lcview-trigger, lciod-liveness, lciod-trigger）；发布全量批取
+   全部；专项修复按需追加——见 verify-cases.yaml 顶部注释与 cdp-contract
 4. selfcheck：python3 harness/skills/cross-device/lib/python/cdp_parse.py
    --role emit <批次临时文件>（必须 exit 0）；另须确认批次正文不含
    单双引号字符（' 与 "），如有则改述为描述性说法

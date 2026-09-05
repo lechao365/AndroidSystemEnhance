@@ -242,8 +242,10 @@ class TestEnsureConnectedRescueLevel(unittest.TestCase):
 
     def test_third_level_rescue_connects(self):
         # mDNS 与静态皆败 → rescue 取端点 → connect 复核在线（第三级通道，
-        # rescue_enabled 由调用方显式开）
-        with mock.patch.object(ac, "mdns_discover", return_value=[]):
+        # rescue_enabled 由调用方显式开）；配置未设（env_path 空）时
+        # 身份校验跳过，rescue 端点直接可用
+        with mock.patch.object(ac, "env_path", return_value=""), \
+                mock.patch.object(ac, "mdns_discover", return_value=[]):
             with mock.patch.object(ac, "host_port", return_value="rp5.local:5555"):
                 with mock.patch.object(ac, "rescue",
                                        return_value=("10.9.9.9:5555", "ok",
@@ -294,6 +296,49 @@ class TestEnsureConnectedRescueLevel(unittest.TestCase):
             with mock.patch.object(ac, "_ensure_failure_detail", return_value=[]):
                 ac.main(["ensure", "--rescue"])
         self.assertEqual(ec.call_args.kwargs.get("rescue_enabled"), True)
+
+    def test_fast_path_online_device_returns(self):
+        # 方向 2：adb devices 在线预检快路径命中（已连接在线设备）→ 过身份
+        # 校验直接返回，不触发 mDNS 逐候选 connect 重连（提速点：
+        # verify_acceptance_connect 六次累计 961s 占全批 31.4%）
+        with mock.patch.object(ac, "_adb_devices_online",
+                               return_value=["10.0.0.5:5555"]), \
+                mock.patch.object(ac, "_is_online", return_value=True), \
+                mock.patch.object(ac, "_verify_identity",
+                                  return_value=(True, "")) as vid, \
+                mock.patch.object(ac, "mdns_discover") as mdns:
+            ep = ac.ensure_connected()
+        self.assertEqual(ep, "10.0.0.5:5555")
+        vid.assert_called_once()
+        mdns.assert_not_called()
+
+    def test_fast_path_identity_mismatch_falls_through(self):
+        # 快路径设备身份不符逐拒（防连错设备），回落 mDNS 继续尝试
+        with mock.patch.object(ac, "_adb_devices_online",
+                               return_value=["10.0.0.5:5555"]), \
+                mock.patch.object(ac, "_is_online", return_value=True), \
+                mock.patch.object(ac, "_verify_identity",
+                                  side_effect=[(False, "身份不符"),
+                                               (True, "")]), \
+                mock.patch.object(ac, "mdns_discover",
+                                  return_value=["10.0.0.6:5555"]), \
+                mock.patch.object(ac, "host_port",
+                                  return_value="rp5.local:5555"), \
+                mock.patch.object(ac.subprocess, "run"):
+            ep = ac.ensure_connected()
+        self.assertEqual(ep, "10.0.0.6:5555")
+
+    def test_fast_path_empty_falls_through(self):
+        # 快路径无在线设备 → 走原 mDNS 路径（行为不变）
+        with mock.patch.object(ac, "_adb_devices_online", return_value=[]), \
+                mock.patch.object(ac, "mdns_discover",
+                                  return_value=["10.0.0.6:5555"]), \
+                mock.patch.object(ac, "_is_online", return_value=True), \
+                mock.patch.object(ac, "_verify_identity",
+                                  return_value=(True, "")), \
+                mock.patch.object(ac.subprocess, "run"):
+            ep = ac.ensure_connected()
+        self.assertEqual(ep, "10.0.0.6:5555")
 
 
 class TestClockSync(unittest.TestCase):
@@ -388,7 +433,10 @@ class TestVerifyIdentity(unittest.TestCase):
     """方向 5：设备身份校验——LC_VERIFY_EXPECT_SERIAL 设置时核对序列号，不符即拒。"""
 
     def test_unset_expect_skips(self):
-        with mock.patch.dict("os.environ", {}, clear=True):
+        # 期望来源含 paths.conf 配置位（env_path，支持环境变量覆盖）：
+        # 配置未设（env 与 env_path 皆空）才跳过校验
+        with mock.patch.dict("os.environ", {}, clear=True), \
+                mock.patch.object(ac, "env_path", return_value=""):
             ok, detail = ac._verify_identity("10.0.0.5:5555")
         self.assertTrue(ok)
 
@@ -464,6 +512,44 @@ class TestEnsureIdentityCheck(unittest.TestCase):
                                   return_value=(False, "身份不符")):
             ep = ac.ensure_connected(rescue_enabled=True)
         self.assertIsNone(ep)
+
+
+class TestEnsureConnectedBudget(unittest.TestCase):
+    """A2：ensure_connected 连接预算——失败轮编排层先做带预算的廉价探测，
+    预算耗尽快速失败（env_fail 归因），不进三级发现链长等待。默认
+    budget_s=None 行为完全不变。"""
+
+    def test_budget_exhausted_fails_fast(self):
+        # 预算已耗尽（budget_s=0 即 deadline 已过）→ 不进入 mDNS 等任何
+        # 后续发现级，返回 None 快速失败
+        with mock.patch.object(ac, "_adb_devices_online", return_value=[]), \
+                mock.patch.object(ac, "mdns_discover",
+                                  side_effect=AssertionError("不应进入 mDNS")):
+            self.assertIsNone(ac.ensure_connected(budget_s=0))
+
+    def test_budget_none_walks_discovery(self):
+        # 不传预算 → 现行为不变：快路径未命中后仍进 mDNS 发现；
+        # mDNS 空 + 静态 host_port=None + rescue 默认关 → 返回 None
+        with mock.patch.object(ac, "_adb_devices_online", return_value=[]), \
+                mock.patch.object(ac, "mdns_discover", return_value=[]) as md, \
+                mock.patch.object(ac, "host_port", return_value=None), \
+                mock.patch.object(ac.subprocess, "run"):
+            self.assertIsNone(ac.ensure_connected())
+        md.assert_called_once()
+
+    def test_ensure_cli_budget_passthrough(self):
+        # ensure --budget N 透传 ensure_connected（budget_s=N）；
+        # 缺省无 --budget → budget_s=None（默认行为零变化）
+        with mock.patch.object(ac, "ensure_connected") as ec, \
+                mock.patch.object(ac, "_ensure_failure_detail",
+                                  return_value=[]):
+            ac.main(["ensure", "--budget", "60"])
+        self.assertEqual(ec.call_args.kwargs.get("budget_s"), 60)
+        with mock.patch.object(ac, "ensure_connected") as ec_default, \
+                mock.patch.object(ac, "_ensure_failure_detail",
+                                  return_value=[]):
+            ac.main(["ensure"])
+        self.assertIsNone(ec_default.call_args.kwargs.get("budget_s"))
 
 
 if __name__ == "__main__":

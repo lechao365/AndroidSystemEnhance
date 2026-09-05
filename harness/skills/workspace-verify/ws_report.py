@@ -32,6 +32,8 @@ import sys
 import time
 from pathlib import Path
 
+import yaml
+
 # 本文件位于 harness/skills/workspace-verify/，parents[1] = harness/skills
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "lib" / "python"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
@@ -55,21 +57,26 @@ _VERIFY_PREFIX_SEGMENTS = frozenset((
     "verify_unit_test", "verify_acceptance",
 ))
 
-# 阶段汇总归类（方向 1 增）：编辑阶段细分段 + gap 段（自报段之外的未打点
-# 活动即编辑与返工）归入 edit；自检自报段归 selfcheck；verify_* 五段归
-# verify；其余（precheck/report/finish/未知段）归 other。
+# 阶段汇总归类（方向 1 增）：编辑阶段细分段 + 编辑/自检侧 gap 段（自报段
+# 之外的未打点活动即编辑与返工）归入 edit（verify 前缀 gap 归 verify，见
+# _phase_summary）；自检自报段归 selfcheck；verify_* 五段归 verify；
+# 其余（precheck/report/finish/未知段）归 other。
+# edit_item：分方向编辑打点段（B2，同名 #N 剥序号后归 edit 相）。
 _EDIT_SEGMENTS = frozenset((
     "edit", "edit_validate", "gen_manifest", "edit_plan", "edit_retry",
+    "edit_item",
 ))
 
 
 def _phase_summary(segments):
     """由段表折叠阶段合计：{edit, selfcheck, verify, other} 四类秒数。
 
-    gap_before_* 派生段一律归入 edit（当前仅自报段产生 gap，而自报段之外
-    的未打点活动即编辑与返工；不折叠则 edit 段仅记短自报值、真实编辑耗时
-    散在多个 gap 段里，链路提速收益无从测量）。段名剥 #n 序号后归类
-    （apply_selfcheck#2 仍计入 selfcheck），未知段计入 other 不丢弃。
+    gap_before_* 派生段按后继段归类（verify 前缀归 verify，其余归 edit）：
+    verify 前的 gap 余量是验证环节的编排活动，归 verify；edit/apply_selfcheck
+    前的 gap 是自报段之外的未打点活动，即编辑与返工，仍归 edit（不折叠则
+    edit 段仅记短自报值、真实编辑耗时散在多个 gap 段里，链路提速收益无从
+    测量）。段名剥 #n 序号后归类（apply_selfcheck#2 仍计入 selfcheck），
+    未知段计入 other 不丢弃。
     """
     totals = {"edit": 0.0, "selfcheck": 0.0, "verify": 0.0, "other": 0.0}
     for s in segments:
@@ -81,28 +88,35 @@ def _phase_summary(segments):
         except (TypeError, ValueError):
             elapsed = 0.0
         if name.startswith("gap_before_"):
-            totals["edit"] += elapsed
+            # gap 归属按其后继段归类：gap_before_verify_* 的余量是验证环节
+            # 的编排活动，归 verify；其余（edit/apply_selfcheck 前）仍归 edit。
+            # 一律归 edit 曾把 verify 前 ~55s/批 记成编辑（phase 口径失真）。
+            target = _base_seg_name(name[len("gap_before_"):])
+            if target.startswith("verify_"):
+                totals["verify"] += elapsed
+            else:
+                totals["edit"] += elapsed
             continue
         base = _base_seg_name(name)
         if base in _EDIT_SEGMENTS:
             totals["edit"] += elapsed
         elif base == "apply_selfcheck":
             totals["selfcheck"] += elapsed
-        elif base in _VERIFY_PREFIX_SEGMENTS:
+        elif base.startswith("verify_"):
+            # verify 一类：verify_* 全部前缀段（含 verify_acceptance_connect/
+            # verify_acceptance_acc_N/verify_acceptance_clock_sync 等派生段
+            # 与 verify_start 等编排段）均并入 verify，避免 case 级/连接/时钟
+            # 校准段漏分类落入 other 致提速收益无从测量（-sv 真机首次暴露：
+            # 上批 other 占 54.6% 而其中 1412s 实为验收）
             totals["verify"] += elapsed
         else:
             totals["other"] += elapsed
     return {k: round(v, 3) for k, v in totals.items()}
 
 
-def _mark_report(timings_file, batch_id):
-    """自发 report 打点：解析打点前 mark 本批"收据解析+落盘"起点。
+def _append_direct_mark(timings_file, batch_id, name):
+    """直写自发 mark 到打点文件（B5 参数化共享 helper）。
 
-    兜底段语义：compute_segments 末段名 finish（与 finish 子命令同名
-    两义——前者是"末个 mark 到算段时刻"的兜底段，后者是归档子命令），
-    其耗时 = 末个 mark 到算段时刻，含自检与编排空转。15 笔 -s 收据兜底段
-    在 0.26~361.9s 间乱跳而自检恒 11s 档即因此（收据在 push 之前落盘）。
-    自发 mark report 后兜底段收窄为"report → 算段时刻"= 纯写收据耗时。
     目标文件与 timings 探测同源：显式 --timings-file 优先，未传自动探测
     log_apply_dir()/timings-<batch_id>.json；文件缺失/非法仅 warn 不阻断
     （打点诊断数据，非收据证据本身）。直接编辑文件（cdp_timing mark 仅
@@ -120,14 +134,26 @@ def _mark_report(timings_file, batch_id):
         data = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError("非 JSON 对象")
-        data.setdefault("marks", []).append(
-            {"name": "report", "wall": time.time()})
+        data.setdefault("marks", []).append({"name": name, "wall": time.time()})
         tmp = p.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
                        encoding="utf-8")
         tmp.replace(p)
     except (OSError, json.JSONDecodeError, ValueError) as e:
-        print(f"warn: report 打点失败（不阻断）: {e}", file=sys.stderr)
+        print(f"warn: {name} 打点失败（不阻断）: {e}", file=sys.stderr)
+
+
+def _mark_report(timings_file, batch_id):
+    """自发 report 打点：解析打点前 mark 本批"收据解析+落盘"起点。
+
+    兜底段语义：compute_segments 末段名 finish（与 finish 子命令同名
+    两义——前者是"末个 mark 到算段时刻"的兜底段，后者是归档子命令），
+    其耗时 = 末个 mark 到算段时刻，含自检与编排空转。15 笔 -s 收据兜底段
+    在 0.26~361.9s 间乱跳而自检恒 11s 档即因此（收据在 push 之前落盘）。
+    自发 mark report 后兜底段收窄为"report → 算段时刻"= 纯写收据耗时。
+    直写实现委托 _append_direct_mark（B5 参数化，report_post 同源复用）。
+    """
+    _append_direct_mark(timings_file, batch_id, "report")
 
 
 def _resolve_timings(timings_file, batch_id, verify_mode="board"):
@@ -166,9 +192,9 @@ def _resolve_timings(timings_file, batch_id, verify_mode="board"):
         wall_start = t.get("start_wall") or t.get("wall_start")
         wall_end = t.get("wall_end") or time.time()
         # 缺段可见性：应有段集在两种模式下均先减 CONDITIONAL_SEGMENTS
-        # （edit_validate/gen_manifest/edit_plan/edit_retry 未产出不判缺），
-        # none 模式再减 verify_* 五段（无 verify 环节）；缺失者以 missing 键
-        # 写入收据 timings（emit 一眼看出哪些链路段没打点）；多余段
+        # （edit_validate/gen_manifest/edit_plan/edit_retry/edit_item 未产出
+        # 不判缺），none 模式再减 verify_* 五段（无 verify 环节）；缺失者以
+        # missing 键写入收据 timings（emit 一眼看出哪些链路段没打点）；多余段
         # （finish/push 等表外名）不删，耗时原样保留可归因。
         # 段名归一（方向 4）：重复轮次段（apply_selfcheck#2 等）剥 #n 序号后
         # 与应有段集比对，gap_before_* 派生段忽略（不参与应有段判定）。
@@ -288,9 +314,39 @@ def _validate_acceptance_pass(acceptance):
     return data, None
 
 
+# verify-cases.yaml：case 验收文本扩展源（与 ws_acceptance 同路径解析）
+_CASES_PATH = Path(__file__).resolve().parents[2] / "config" / "verify-cases.yaml"
+
+
 def _norm_text(text: str) -> str:
     """规范化空白用于文本比对（产物 input_summary 与批次验收文本）。"""
     return " ".join((text or "").split())
+
+
+def _expand_case_summary(text):
+    """batch 验收 case: 前缀扩展为实际验收文本（与 ws_acceptance --case 查表
+    拼接同语义），供输入摘要比对——acceptance 产物 input_summary 记录的是
+    扩展后文本，若 expect 仍持 case: 原文比对必失配（-sv 批 case 验收
+    首次真机暴露）。非 case: 前缀或扩展失败原样返回（比对按原文兜底）。"""
+    t = (text or "").strip()
+    if not t.startswith("case:"):
+        return text
+    ids = [i.strip() for i in t[len("case:"):].split(",") if i.strip()]
+    if not ids:
+        return text
+    try:
+        data = yaml.safe_load(Path(_CASES_PATH).read_text(encoding="utf-8")) or {}
+        cases = data.get("cases") or {}
+        texts = []
+        for cid in ids:
+            val = cases.get(cid)
+            if val is None:
+                return text
+            v = (val.get("acceptance") if isinstance(val, dict) else val) or ""
+            texts.append(str(v).strip())
+        return " ".join(texts)
+    except Exception:
+        return text
 
 
 def _validate_acceptance_file(path, expect_summary):
@@ -316,8 +372,9 @@ def _validate_acceptance_file(path, expect_summary):
     if not summary:
         return None, "--acceptance-file 缺 input_summary（输入摘要缺失），拒绝 PASS"
     # 输入摘要与本批一致：验收文本为「无」/空（-s 批本无验收）时跳过比对，
-    # 真 -sv 批（验收非「无」）强制一致，防陈旧/错批产物
-    expect = _norm_text(expect_summary)
+    # 真 -sv 批（验收非「无」）强制一致，防陈旧/错批产物；case: 验收先
+    # 扩展为实际文本再比对（与 ws_acceptance --case 产物 input_summary 同源）
+    expect = _norm_text(_expand_case_summary(expect_summary))
     if expect and expect != "无" and _norm_text(summary) != expect:
         return None, ("--acceptance-file 输入摘要与本批验收文本不一致，拒绝 PASS"
                       "（陈旧/错批产物）")
@@ -536,16 +593,13 @@ def main(argv=None):
     # 自发 report 打点：解析打点前 mark 本批收据解析+落盘起点，使兜底段
     # （末个 mark 到算段时刻）收窄为纯写收据耗时（自检/编排空转不再混入）
     _mark_report(args.timings_file, batch_id)
-    # 链路耗时打点：显式 --timings-file 优先，未传自动探测
-    # log_apply_dir()/timings-<batch_id>.json（cdp_paths 绝对路径与
-    # cdp_timing 写入同源，认 CDP_PROJECT_ROOT）；
-    # --elapsed 缺省从 timings 的 wall_end-wall_start 推导（显式传参优先）
-    args.timings, derived_elapsed = _resolve_timings(args.timings_file, batch_id,
-                                                     verify_mode)
-    if args.elapsed is None and derived_elapsed is not None:
-        args.elapsed = derived_elapsed
-    if args.elapsed is None:
-        args.elapsed = 0
+    # 链路耗时打点解析（B5）整体后移至收据尾部工作完成后、Receipt 构造前：
+    # 此前紧随 report mark 执行，compute_segments 在算段时刻定格 finish 段，
+    # 其后的尾部真实开销（content_tree 全树 git add -A，drvfs IO 慢/git
+    # status 等）不落任何段不可归因；后移并在尾部工作完成后自发 report_post
+    # mark，report_post 段覆盖尾部开销、finish 段收窄为纯算段时刻。
+    # args.timings 消费点（Receipt timings 字段、_trend_timing）均在后移点
+    # 之后，顺序合法；验收证据门禁段不依赖 timings/elapsed，无需随移。
 
     # cases 补全：显式 --case 优先，未传自动探测 cases-<batch_id>.json
     # （ws_acceptance 验收后写入本次实跑标签，与 timings 探测同源）
@@ -668,6 +722,25 @@ def main(argv=None):
     except (subprocess.CalledProcessError, OSError, RuntimeError) as e:
         print(f"warn: verified_tree/commit_scope 计算失败（置空不阻断）: {e}",
               file=sys.stderr)
+
+    # 尾部工作收口自发 mark（B5）：段归因方向是"前一 mark → 本 mark"（mark
+    # 打在阶段末），故 report_post 直写须在尾部工作（content_tree 全树
+    # git add -A，drvfs IO 慢/git status 等）完成之后——report_post 段 =
+    # report mark → 此处，覆盖门禁段之后的全部尾部开销；finish 段收窄为
+    # 纯算段时刻
+    _append_direct_mark(args.timings_file, batch_id, "report_post")
+
+    # 链路耗时打点解析（B5 后移落位）：显式 --timings-file 优先，未传自动
+    # 探测 log_apply_dir()/timings-<batch_id>.json（cdp_paths 绝对路径与
+    # cdp_timing 写入同源，认 CDP_PROJECT_ROOT）；--elapsed 缺省从 timings
+    # 的 wall_end-wall_start 推导（显式传参优先）。此刻 report_post 已直写，
+    # compute_segments 的 finish 定格在尾部工作之后
+    args.timings, derived_elapsed = _resolve_timings(args.timings_file, batch_id,
+                                                     verify_mode)
+    if args.elapsed is None and derived_elapsed is not None:
+        args.elapsed = derived_elapsed
+    if args.elapsed is None:
+        args.elapsed = 0
 
     r = Receipt(batch_id=batch_id, batch_base=batch_base,
                 verified_commit=verified,

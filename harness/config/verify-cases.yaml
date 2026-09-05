@@ -2,7 +2,121 @@
 # 背景：CDP 批次正文禁引号，含空格/引号的验收命令无法在批次内书写；
 #       此类用例在此集中维护，批次经 --case <标签> 引用，验收判据不再人眼搬运。
 # 结构：cases: { <标签>: <验收文本> }，验收文本可为任意标签组合（值内可用引号）。
+#
+# ── 用例两级策略（B6 契约化，emit 产批按此选择验收 case 集合）────────
+# 快速回归组（-sv 常态回归批默认）：lcview-liveness, lcview-pipeline,
+#   lcview-trigger, lciod-liveness, lciod-trigger（5 case，健康态 ~38-64s；
+#   覆盖存活/数据面/触发全链路）
+# 发布全量组（publish-main-base 前全量验收批）：全部 11 case（~120-190s）；
+#   perf/recover-daemon/transfer 含 IO 副作用或心跳周期绑架，不入常态轮次
+#   （见各 case 注释），发布前必须全量跑一轮
+# 批次方向涉及其它 case 的专项修复时按需追加（如 sepolicy 改动加
+#   lcview-sepolicy-label）
 cases:
+  # sepolicy 类型改名回归点（去 hal 残留）：设备节点标签须命中新类型
+  # lechao_lcview_device（file_contexts 重打标，reboot 后生效），且近窗
+  # logcat 无 avc denied 命中 lechao_lcview（sepolicy 规则与标签一致）。
+  # cmd 判据 exit 0 即 pass：grep -q 命中新类型 && avc denied 无 lechao_lcview。
+  lcview-sepolicy-label: 'cmd:"ls -Z /dev/vendor_lechao_lcview | grep -q lechao_lcview_device:s0 && ! logcat -d -t 5000 | grep -E \"avc: denied .*lechao_lcview\" | grep -q ." boot'
+
+  # 性能采集（脚本化统一负载，只报数不设门禁）：dd 读块设备 64MB（与性能基线
+  # 负载一致，消除 4MB 用例负载失真）→ 事件吞吐 / 平均落盘延迟 / daemon RSS，
+  # METRICS JSON 行供 ws_report --metrics 结构化存档（跨批可 diff）。
+  # 直读采样：内核 total_records 经 sysfs 只读节点
+  # （/sys/class/lcview/vendor_lechao_lcview/lcview_stats，lcview_main.c 导出；
+  #  设备节点有单打开限制 HAL 常驻，ioctl 直读返 EBUSY）+ JSONL 行数经 wc -l
+  # 按 100ms 采样——不依赖心跳（心跳每 30 loop 约 28s 才更新，远粗于 2.5s 的
+  # dd 负载窗，曾致 drain 恒为一个心跳周期、延迟随负载机械失真）。
+  # dd 读负载有 IO 副作用，不并入 liveness，按需触发或随批次方向单独跑。
+  lcview-perf: 'hostcmd:"cases/lcview_check.sh --mode perf --load-mb 64"'
+
+  # 重启恢复用例（补齐"无重启恢复用例"空洞）：kill daemon 进程 →
+  # init 自动拉起 + 心跳恢复（kill 后出现新心跳行）；额外断言 dd 触发的
+  # 新事件落盘（delta --event 4）与轮转 seq 递增（重启后 FileWriter
+  # 从目录续接 seq，写更高 _p{seq}，不重复写 _p0）。kill 有副作用（服务重启，
+  # init 自动恢复），单独用例不并入 liveness。
+  # 注：lcview-recover-hal 已移除——HAL 源码/模块/服务全部删除，设备上不存在
+  #   HAL 进程可 kill，用例语义失效；lcview_recover.sh 现仅支持 daemon 分支，
+  #   hal 分支已删除
+  # kill 有副作用但 init 自动恢复（daemon 重启自愈，无可登记的持久态变更
+  # 面），仅登记 timeout_s（生命周期字段可单用，setup_snapshot/teardown 缺省
+  # 即无快照/无恢复）
+  lcview-recover-daemon:
+    acceptance: 'hostcmd:"cases/lcview_recover.sh daemon"'
+    timeout_s: 180
+
+  # L1 被动数据管道主用例（原 cases/lcview_pipeline.yaml 收敛于此，critical 项）：
+  # 事件落盘 → JSONL 合法 → schema 匹配。hostcmd 在 workspace-verify
+  # 目录执行，相对路径以其为根（不硬编码绝对路径）。
+  # 注：fresh/ts 已移入 lcview-trigger probe 之后——事件驱动模型下 USB 常驻
+  # 无活动不产生新事件，静止态跑 fresh/ts 永不能过（曾实测 fresh 超窗 29069s）
+  lcview-pipeline: 'hostcmd:"cases/lcview_check.sh --mode files" hostcmd:"cases/lcview_check.sh --mode valid_json" hostcmd:"cases/lcview_check.sh --mode schema"'
+
+  # L2 传输触发（事件 4/5 覆盖）：照 trigger 写法——baseline → 真实 USB 动作
+  # → delta 断言对应事件增量。
+  # 事件 4/5（usb_transport_start/end）：经 adb shell 对 U 盘块设备 dd 读写数 MB
+  # 产生真实传输（dd 是设备侧资源，hostcmd 直接写 /dev/block 会静默失败）；
+  #   LCVIEW_BLOCK_DEV（读，默认 /dev/block/sda 只读到 /dev/null，无破坏面）
+  #   / LCVIEW_BLOCK_DEV_WRITE（写，删默认值——写 dd 会覆盖目标分区数据，
+  #   路径必须显式给出）可 env 覆盖（上板先查 /dev/block 下 U 盘节点）。
+  # 写 dd 前置守卫（方向 1/2）：LCVIEW_ALLOW_DESTRUCTIVE_WRITE 须为 YES 且
+  #   LCVIEW_BLOCK_DEV_WRITE 显式给出，缺一即判红不执行（错误信息明示
+  #   覆盖目标分区数据）；读 dd 只读到 /dev/null，不在本次收紧范围。
+  # dd 失败即判红——不再 || true 吞失败（触发手段不可用须暴露，delta 兜底
+  # 是双保险非替代）。基线文件按轮次隔离：${LCVIEW_BASELINE_FILE:-...} 经
+  # 环境变量透传（轮次编排层按轮设置唯一路径，防跨轮基线串扰）。
+  # conserve 置于读 dd 之后（静止确认 + 自造负载两段式）：先两拍增量归零
+  # 确认窗口起点无积压（前序外部 dd 事件已排干），再自造负载
+  # （--conserve-load-mb 4）采样——起点无积压则负向（落盘>产生）为真异常判红，
+  # 重复落盘/计数异常可检测；外部 dd 事件几秒内全部落盘，静止确认段先排干，
+  # 自带负载保证负载窗口 produced>0，守恒有数据可校验。
+  # 注：usb_reset（事件 7）曾用 USBDEVFS_RESET（usbreset）实测——复位成功但
+  #   打点在 USBD 设备栈路径（vendor_lechao_usbd-stats.c），xhci host 模式
+  #   不经过，无 id 7 打点（副作用 rate_degraded 出现），归入暂无触发手段。
+  # 副作用字段同 lcview-trigger（authorized 切换 + dd 写）：dd 写不可逆，
+  # teardown 无法撤销（由 LCVIEW_ALLOW_DESTRUCTIVE_WRITE 守卫变量把守），
+  # 快照/恢复只登记 authorized（可恢复状态面）
+  lcview-transfer:
+    acceptance: 'hostcmd:"cases/lcview_check.sh --mode baseline --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"cases/lcview_check.sh --mode conserve --conserve-load-mb 4" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 4 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"{ [ \"${LCVIEW_ALLOW_DESTRUCTIVE_WRITE:-}\" = YES ] && [ -n \"${LCVIEW_BLOCK_DEV_WRITE:-}\" ]; } || { echo \"拒绝: 此命令会覆盖目标分区数据,须 LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES 且显式设置 LCVIEW_BLOCK_DEV_WRITE\" >&2; exit 1; } && adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE} bs=1M count=1\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 5 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}"'
+    setup_snapshot:
+      - 'adb shell "cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
+    teardown:
+      - 'adb shell "echo ${SNAPSHOT_0} > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
+    timeout_s: 300
+
+# L1 两条 warn 项另立（no_invalid 非阻断 + ts 全历史卫生检查），勿混主用例致假 fail。
+  # 注1：ts 无 baseline 时判全历史——校准回拨前未来记录（PIT-5）在此暴露，
+  #   属卫生检查而非链路判据（trigger 的 ts 以 baseline 限定只判新记录）。
+  # 注2：ts 前插 dd 读 U 盘产载（同 lcview-transfer 触发手段）——ts 判据
+  #   要求"最新记录与设备时钟偏差 < skew"，静止态无新事件必超窗（事件驱动
+  #   模型），组内产载使用例自洽，不再依赖外部验收顺序。
+  lcview-pipeline-warn: 'hostcmd:"cases/lcview_check.sh --mode invalid" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode ts --skew 600"'
+
+  # L2 触发型全链路（原 cases/lcview_trigger.yaml 收敛于此，requires 拓扑保序）：
+  # adb root（显式，写 authorized 需 root，不依赖 baseline 内部 root 的隐式顺序）
+  # → baseline → authorize_off → disconnect 增量 → authorize_on → probe 增量+vid/pid
+  # → fresh/ts（probe 产生新事件后跑，时间敏感判据须设备时钟可信——
+  # ws_acceptance 检测到 ts/fresh 自动 clock_sync 校准；ts 以 --baseline 限定
+  # 只判基线后的新记录，全历史卫生检查在 lcview-pipeline-warn）；
+  # USB 设备路径与 vid/pid 可 env 覆盖（LCVIEW_USB_DEV / LCVIEW_USB_VID /
+  # LCVIEW_USB_PID / LCVIEW_USB_EVENT_DISCONNECT / LCVIEW_USB_EVENT_PROBE），
+  # hostcmd 在 host 侧展开（adb shell 命令也经 hostcmd 保证 host env 生效）；
+  # authorized 切换经 grep 断言 cat 输出值（echo 成功但值未变即假绿——cmd 判据
+  # 只看 exit code 兜不住，写失败/写被忽略须判红）
+  # 副作用用例生命周期字段（2026-09-03 定，ws_acceptance run_case_lifecycle）：
+  # setup_snapshot = 用例开始前快照命令列表（hostcmd 同语义）；teardown =
+  # 恢复命令模板（${SNAPSHOT_i} 替换为 setup 快照值）；timeout_s = 用例
+  # 墙钟上限（超时中断剩余判据项并走同一收尾顺序：取证 → teardown → 收据）。
+  # teardown 只恢复本轮实际改变的状态：恢复前重读快照对比，未改变即跳过；
+  # 恢复失败/恢复后仍不符 → 产物与收据标 device_dirty。
+  lcview-trigger:
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lcview_check.sh --mode baseline --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"adb shell \"echo 0 > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized\" | grep -q \"^0$\"" hostcmd:"sleep 3 && cases/lcview_check.sh --mode delta --event ${LCVIEW_USB_EVENT_DISCONNECT:-9} --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"adb shell \"echo 1 > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized\" | grep -q \"^1$\"" hostcmd:"sleep 5 && cases/lcview_check.sh --mode delta --event ${LCVIEW_USB_EVENT_PROBE:-8} --vid ${LCVIEW_USB_VID:-1256} --pid ${LCVIEW_USB_PID:-25344} --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"cases/lcview_check.sh --mode fresh --window 600" hostcmd:"cases/lcview_check.sh --mode ts --skew 600 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}"'
+    setup_snapshot:
+      - 'adb shell "cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
+    teardown:
+      - 'adb shell "echo ${SNAPSHOT_0} > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
+    timeout_s: 300
+
   # lcview 存活综合用例：daemon 直读内核（HAL 停用）+ 持续心跳日志 + boot 完成
   # 注意1：不用 file:/data/vendor/lechao_lcview —— 目录 0750 system:system，
   #       adb shell（shell 用户）无权列目录，file: 判据必然假红。
@@ -44,117 +158,6 @@ cases:
   #       新进程首心跳未到（锚点未命中）时每 5s 重取，90s 超时判红，不回落
   #       全量筛（回落即旧进程行重新混入假绿）。
   lcview-liveness: 'svc:lechao_lcview log:"heartbeat, loop=" logfield:"heartbeat, loop=|overrun|=|0|lechao_lcview" logfield:"heartbeat, loop=|dropped|=|0|lechao_lcview" logfield:"heartbeat, loop=|drop_invalidwrite|=|0|lechao_lcview" logfield:"heartbeat, loop=|invalid_records|=|0|lechao_lcview" logfield:"heartbeat, loop=|readErr|=|0|lechao_lcview" logfresh:"heartbeat, loop=|90" boot'
-  # sepolicy 类型改名回归点（去 hal 残留）：设备节点标签须命中新类型
-  # lechao_lcview_device（file_contexts 重打标，reboot 后生效），且近窗
-  # logcat 无 avc denied 命中 lechao_lcview（sepolicy 规则与标签一致）。
-  # cmd 判据 exit 0 即 pass：grep -q 命中新类型 && avc denied 无 lechao_lcview。
-  lcview-sepolicy-label: 'cmd:"ls -Z /dev/vendor_lechao_lcview | grep -q lechao_lcview_device:s0 && ! logcat -d -t 5000 | grep -E \"avc: denied .*lechao_lcview\" | grep -q ." boot'
-
-  # 性能采集（脚本化统一负载，只报数不设门禁）：dd 读块设备 64MB（与性能基线
-  # 负载一致，消除 4MB 用例负载失真）→ 事件吞吐 / 平均落盘延迟 / daemon RSS，
-  # METRICS JSON 行供 ws_report --metrics 结构化存档（跨批可 diff）。
-  # 直读采样：内核 total_records 经 sysfs 只读节点
-  # （/sys/class/lcview/vendor_lechao_lcview/lcview_stats，lcview_main.c 导出；
-  #  设备节点有单打开限制 HAL 常驻，ioctl 直读返 EBUSY）+ JSONL 行数经 wc -l
-  # 按 100ms 采样——不依赖心跳（心跳每 30 loop 约 28s 才更新，远粗于 2.5s 的
-  # dd 负载窗，曾致 drain 恒为一个心跳周期、延迟随负载机械失真）。
-  # dd 读负载有 IO 副作用，不并入 liveness，按需触发或随批次方向单独跑。
-  lcview-perf: 'hostcmd:"cases/lcview_check.sh --mode perf --load-mb 64"'
-
-  # 重启恢复用例（补齐"无重启恢复用例"空洞）：kill daemon 进程 →
-  # init 自动拉起 + 心跳恢复（kill 后出现新心跳行）；额外断言 dd 触发的
-  # 新事件落盘（delta --event 4）与轮转 seq 递增（重启后 FileWriter
-  # 从目录续接 seq，写更高 _p{seq}，不重复写 _p0）。kill 有副作用（服务重启，
-  # init 自动恢复），单独用例不并入 liveness。
-  # 注：lcview-recover-hal 已移除——HAL 源码/模块/服务全部删除，设备上不存在
-  #   HAL 进程可 kill，用例语义失效；lcview_recover.sh 现仅支持 daemon 分支，
-  #   hal 分支已删除
-  # kill 有副作用但 init 自动恢复（daemon 重启自愈，无可登记的持久态变更
-  # 面），仅登记 timeout_s（生命周期字段可单用，setup_snapshot/teardown 缺省
-  # 即无快照/无恢复）
-  lcview-recover-daemon:
-    acceptance: 'hostcmd:"cases/lcview_recover.sh daemon"'
-    timeout_s: 180
-
-  # L1 被动数据管道主用例（原 cases/lcview_pipeline.yaml 收敛于此，critical 项）：
-  # 事件落盘 → JSONL 合法 → schema 匹配。hostcmd 在 workspace-verify
-  # 目录执行，相对路径以其为根（不硬编码绝对路径）。
-  # 注：fresh/ts 已移入 lcview-trigger probe 之后——事件驱动模型下 USB 常驻
-  # 无活动不产生新事件，静止态跑 fresh/ts 永不能过（曾实测 fresh 超窗 29069s）
-  lcview-pipeline: 'hostcmd:"cases/lcview_check.sh --mode files" hostcmd:"cases/lcview_check.sh --mode valid_json" hostcmd:"cases/lcview_check.sh --mode schema"'
-
-# L1 两条 warn 项另立（no_invalid 非阻断 + ts 全历史卫生检查），勿混主用例致假 fail。
-  # 注1：ts 无 baseline 时判全历史——校准回拨前未来记录（PIT-5）在此暴露，
-  #   属卫生检查而非链路判据（trigger 的 ts 以 baseline 限定只判新记录）。
-  # 注2：ts 前插 dd 读 U 盘产载（同 lcview-transfer 触发手段）——ts 判据
-  #   要求"最新记录与设备时钟偏差 < skew"，静止态无新事件必超窗（事件驱动
-  #   模型），组内产载使用例自洽，不再依赖外部验收顺序。
-  lcview-pipeline-warn: 'hostcmd:"cases/lcview_check.sh --mode invalid" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode ts --skew 600"'
-
-  # L2 触发型全链路（原 cases/lcview_trigger.yaml 收敛于此，requires 拓扑保序）：
-  # adb root（显式，写 authorized 需 root，不依赖 baseline 内部 root 的隐式顺序）
-  # → baseline → authorize_off → disconnect 增量 → authorize_on → probe 增量+vid/pid
-  # → fresh/ts（probe 产生新事件后跑，时间敏感判据须设备时钟可信——
-  # ws_acceptance 检测到 ts/fresh 自动 clock_sync 校准；ts 以 --baseline 限定
-  # 只判基线后的新记录，全历史卫生检查在 lcview-pipeline-warn）；
-  # USB 设备路径与 vid/pid 可 env 覆盖（LCVIEW_USB_DEV / LCVIEW_USB_VID /
-  # LCVIEW_USB_PID / LCVIEW_USB_EVENT_DISCONNECT / LCVIEW_USB_EVENT_PROBE），
-  # hostcmd 在 host 侧展开（adb shell 命令也经 hostcmd 保证 host env 生效）；
-  # authorized 切换经 grep 断言 cat 输出值（echo 成功但值未变即假绿——cmd 判据
-  # 只看 exit code 兜不住，写失败/写被忽略须判红）
-  # 副作用用例生命周期字段（2026-09-03 定，ws_acceptance run_case_lifecycle）：
-  # setup_snapshot = 用例开始前快照命令列表（hostcmd 同语义）；teardown =
-  # 恢复命令模板（${SNAPSHOT_i} 替换为 setup 快照值）；timeout_s = 用例
-  # 墙钟上限（超时中断剩余判据项并走同一收尾顺序：取证 → teardown → 收据）。
-  # teardown 只恢复本轮实际改变的状态：恢复前重读快照对比，未改变即跳过；
-  # 恢复失败/恢复后仍不符 → 产物与收据标 device_dirty。
-  lcview-trigger:
-    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && adb root >/dev/null 2>&1 && sleep 2 && python3 ws_adb_connect.py ensure >/dev/null" hostcmd:"cases/lcview_check.sh --mode baseline --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"adb shell \"echo 0 > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized\" | grep -q \"^0$\"" hostcmd:"sleep 3 && cases/lcview_check.sh --mode delta --event ${LCVIEW_USB_EVENT_DISCONNECT:-9} --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"adb shell \"echo 1 > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized\" | grep -q \"^1$\"" hostcmd:"sleep 5 && cases/lcview_check.sh --mode delta --event ${LCVIEW_USB_EVENT_PROBE:-8} --vid ${LCVIEW_USB_VID:-1256} --pid ${LCVIEW_USB_PID:-25344} --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"cases/lcview_check.sh --mode fresh --window 600" hostcmd:"cases/lcview_check.sh --mode ts --skew 600 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}"'
-    setup_snapshot:
-      - 'adb shell "cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
-    teardown:
-      - 'adb shell "echo ${SNAPSHOT_0} > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
-    timeout_s: 300
-
-  # L2 传输触发（事件 4/5 覆盖）：照 trigger 写法——baseline → 真实 USB 动作
-  # → delta 断言对应事件增量。
-  # 事件 4/5（usb_transport_start/end）：经 adb shell 对 U 盘块设备 dd 读写数 MB
-  # 产生真实传输（dd 是设备侧资源，hostcmd 直接写 /dev/block 会静默失败）；
-  #   LCVIEW_BLOCK_DEV（读，默认 /dev/block/sda 只读到 /dev/null，无破坏面）
-  #   / LCVIEW_BLOCK_DEV_WRITE（写，删默认值——写 dd 会覆盖目标分区数据，
-  #   路径必须显式给出）可 env 覆盖（上板先查 /dev/block 下 U 盘节点）。
-  # 写 dd 前置守卫（方向 1/2）：LCVIEW_ALLOW_DESTRUCTIVE_WRITE 须为 YES 且
-  #   LCVIEW_BLOCK_DEV_WRITE 显式给出，缺一即判红不执行（错误信息明示
-  #   覆盖目标分区数据）；读 dd 只读到 /dev/null，不在本次收紧范围。
-  # dd 失败即判红——不再 || true 吞失败（触发手段不可用须暴露，delta 兜底
-  # 是双保险非替代）。基线文件按轮次隔离：${LCVIEW_BASELINE_FILE:-...} 经
-  # 环境变量透传（轮次编排层按轮设置唯一路径，防跨轮基线串扰）。
-  # conserve 置于读 dd 之后（静止确认 + 自造负载两段式）：先两拍增量归零
-  # 确认窗口起点无积压（前序外部 dd 事件已排干），再自造负载
-  # （--conserve-load-mb 4）采样——起点无积压则负向（落盘>产生）为真异常判红，
-  # 重复落盘/计数异常可检测；外部 dd 事件几秒内全部落盘，静止确认段先排干，
-  # 自带负载保证负载窗口 produced>0，守恒有数据可校验。
-  # 注：usb_reset（事件 7）曾用 USBDEVFS_RESET（usbreset）实测——复位成功但
-  #   打点在 USBD 设备栈路径（vendor_lechao_usbd-stats.c），xhci host 模式
-  #   不经过，无 id 7 打点（副作用 rate_degraded 出现），归入暂无触发手段。
-  # 副作用字段同 lcview-trigger（authorized 切换 + dd 写）：dd 写不可逆，
-  # teardown 无法撤销（由 LCVIEW_ALLOW_DESTRUCTIVE_WRITE 守卫变量把守），
-  # 快照/恢复只登记 authorized（可恢复状态面）
-  lcview-transfer:
-    acceptance: 'hostcmd:"cases/lcview_check.sh --mode baseline --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"cases/lcview_check.sh --mode conserve --conserve-load-mb 4" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 4 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"{ [ \"${LCVIEW_ALLOW_DESTRUCTIVE_WRITE:-}\" = YES ] && [ -n \"${LCVIEW_BLOCK_DEV_WRITE:-}\" ]; } || { echo \"拒绝: 此命令会覆盖目标分区数据,须 LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES 且显式设置 LCVIEW_BLOCK_DEV_WRITE\" >&2; exit 1; } && adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE} bs=1M count=1\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 5 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}"'
-    setup_snapshot:
-      - 'adb shell "cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
-    teardown:
-      - 'adb shell "echo ${SNAPSHOT_0} > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
-    timeout_s: 300
-
-  # lciod 存活综合用例：HAL/Daemon 服务 + 监控线程持续日志 + boot 完成。
-  # 注意：log 判据选监控线程统计日志（"monitor: minor="，每 10s 打印），
-  # 不用启动注册日志（非 reboot 场景已被 logcat 5000 行缓冲滚出，假红）。
-  # 注：HAL 无 lcview 式心跳字段（overrun 等），logfield 断言不适用；
-  #     HAL 死亡由 init 自动重启（rc 非 oneshot），svc 判据兜底。
-  lciod-liveness: 'svc:lechao_lciod_hal svc:lechao_lciod log:"monitor: minor=" boot'
-
   # L1 数据管道主用例：lciod_probe（GET_STATS ioctl 取数工具，
   # /system/bin）→ host 侧字段齐全性/数值合法性/abi_version 校验。
   # 防假绿：零设备判红（probe 空输出 exit 0，host 判红）、缺字段判红
@@ -171,12 +174,19 @@ cases:
   # 写 dd 守卫与轮次隔离基线（LCIOD_BASELINE_FILE）语义同 lcview-transfer。
   # 副作用字段同 lcview-trigger（authorized 切换 + dd 读写）
   lciod-trigger:
-    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && adb root >/dev/null 2>&1 && sleep 2 && python3 ws_adb_connect.py ensure >/dev/null" hostcmd:"cases/lciod_check.sh --mode baseline --reset --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode delta --expect read_bytes read_cmds --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}" hostcmd:"{ [ \"${LCVIEW_ALLOW_DESTRUCTIVE_WRITE:-}\" = YES ] && [ -n \"${LCVIEW_BLOCK_DEV_WRITE:-}\" ]; } || { echo \"拒绝: 此命令会覆盖目标分区数据,须 LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES 且显式设置 LCVIEW_BLOCK_DEV_WRITE\" >&2; exit 1; } && adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE} bs=1M count=1\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode delta --expect write_bytes write_cmds --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}"'
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lciod_check.sh --mode baseline --reset --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode delta --expect read_bytes read_cmds --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}" hostcmd:"{ [ \"${LCVIEW_ALLOW_DESTRUCTIVE_WRITE:-}\" = YES ] && [ -n \"${LCVIEW_BLOCK_DEV_WRITE:-}\" ]; } || { echo \"拒绝: 此命令会覆盖目标分区数据,须 LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES 且显式设置 LCVIEW_BLOCK_DEV_WRITE\" >&2; exit 1; } && adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE} bs=1M count=1\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode delta --expect write_bytes write_cmds --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}"'
     setup_snapshot:
       - 'adb shell "cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
     teardown:
       - 'adb shell "echo ${SNAPSHOT_0} > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
     timeout_s: 300
+
+  # lciod 存活综合用例：HAL/Daemon 服务 + 监控线程持续日志 + boot 完成。
+  # 注意：log 判据选监控线程统计日志（"monitor: minor="，每 10s 打印），
+  # 不用启动注册日志（非 reboot 场景已被 logcat 5000 行缓冲滚出，假红）。
+  # 注：HAL 无 lcview 式心跳字段（overrun 等），logfield 断言不适用；
+  #     HAL 死亡由 init 自动重启（rc 非 oneshot），svc 判据兜底。
+  lciod-liveness: 'svc:lechao_lciod_hal svc:lechao_lciod log:"monitor: minor=" boot'
 
 
   # 事件覆盖登记（驱动级覆盖盘点，2026-08-27 修订）：

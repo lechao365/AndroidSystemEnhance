@@ -1470,8 +1470,10 @@ class TestWsReport(unittest.TestCase):
         data = json.loads(Path(tfile).read_text(encoding="utf-8"))
         names = [m["name"] for m in data["marks"]]
         self.assertIn("report", names)
-        self.assertEqual(names[-1], "report", "report 须为末个 mark")
-        # 收据 timings 段含 report 与兜底段（finish = report 到算段时刻）
+        # B5 收编后 report_post（content_tree 前直写）成为末个 mark，
+        # report 退居次位（尾部工作区间 report → report_post 可归因）
+        self.assertEqual(names[-1], "report_post", "report_post 须为末个 mark")
+        # 收据 timings 段含 report 与兜底段（finish 后移后收窄为纯算段时刻）
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         content = details[0].read_text(encoding="utf-8")
         self.assertIn('"name": "report"', content)
@@ -1502,7 +1504,8 @@ class TestWsReport(unittest.TestCase):
         self.assertEqual(rc, 0)
         data = json.loads(tfile.read_text(encoding="utf-8"))
         names = [m["name"] for m in data["marks"]]
-        self.assertEqual(names, ["precheck", "report"])
+        # B5 收编后自发 report_post 尾随（content_tree 前直写，尾部工作可归因）
+        self.assertEqual(names, ["precheck", "report", "report_post"])
 
     def test_report_mark_no_timing_skips(self):
         # 无打点文件（未 start）时自发 report mark 静默跳过不阻断
@@ -1518,11 +1521,60 @@ class TestWsReport(unittest.TestCase):
         content = details[0].read_text(encoding="utf-8")
         self.assertIn("- timings: ", content)
 
+    # ── B5：report_post 尾部工作收编（content_tree 前直写 mark + 解析后移）──
+    def test_mode_a_report_post_mark_recorded(self):
+        # B5：ws_report 执行后在打点文件留 report_post mark（尾部工作
+        # content_tree/收据落盘/trend 可归因）——report_post 在 report 之后
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        timings = json.dumps({
+            "batch_id": "abc123def456",
+            "start_wall": 1000.0,
+            "marks": [{"name": "precheck", "wall": 1001.5},
+                      {"name": "edit", "wall": 1005.0}],
+        })
+        tfile = self._write(timings, ".json")
+        with redirect_stdout(io.StringIO()):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--timings-file", tfile])
+        self.assertEqual(rc, 0)
+        data = json.loads(Path(tfile).read_text(encoding="utf-8"))
+        names = [m["name"] for m in data["marks"]]
+        self.assertIn("report", names)
+        self.assertIn("report_post", names)
+        self.assertGreater(names.index("report_post"), names.index("report"),
+                           "report_post 须在 report 之后（尾部工作区间）")
+        # 解析后移（B5）：timings 段计算定格在尾部工作 mark 之后，report_post
+        # 段进收据（此前 content_tree 等尾部开销散落 finish 兜底段不可归因）
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn('"name": "report_post"', content)
+
+    def test_phase_summary_verify_gap_counts_to_verify(self):
+        # gap_before_verify_* 派生段归 verify 相（此前一律归 edit，verify 前
+        # 55s 编排空转被记成编辑，收据 phase 口径失真）
+        segs = [{"name": "gap_before_verify_push", "elapsed_s": 13.334},
+                {"name": "gap_before_verify_sync", "elapsed_s": 19.886}]
+        self.assertEqual(ws_report._phase_summary(segs),
+                         {"edit": 0.0, "selfcheck": 0.0, "verify": 33.22,
+                          "other": 0.0})
+
+    def test_phase_summary_edit_side_gap_counts_to_edit(self):
+        # 编辑侧 gap（apply_selfcheck 前的返工/编辑活动）维持归 edit
+        segs = [{"name": "gap_before_apply_selfcheck", "elapsed_s": 481.35},
+                {"name": "gap_before_verify_unit_test", "elapsed_s": 21.826}]
+        got = ws_report._phase_summary(segs)
+        self.assertEqual(got["edit"], 481.35)
+        self.assertEqual(got["verify"], 21.826)
+
 
 class TestPhaseSummary(unittest.TestCase):
     """阶段汇总（方向 1）：timings 折叠 edit/selfcheck/verify/other 四类。
 
-    gap_before_* 派生段一律归入 edit（自报段之外的未打点活动即编辑与返工）；
+    gap_before_* 派生段按后继段归类（verify 前缀归 verify，其余归 edit）；
     段名剥 #n 序号后归类（apply_selfcheck#2 仍计 selfcheck）；未知段入 other。
     """
 
@@ -1547,7 +1599,7 @@ class TestPhaseSummary(unittest.TestCase):
         return ws_report._phase_summary(segments)
 
     def test_gap_segments_fold_into_edit(self):
-        # gap 归 edit（关键：自报段之外的未打点活动即编辑与返工）
+        # 编辑/自检侧 gap 归 edit（verify 前缀 gap 归 verify，另见专项用例）
         segs = [
             {"name": "gap_before_edit", "elapsed_s": 857.0},
             {"name": "edit", "elapsed_s": 25.0},
@@ -1568,6 +1620,13 @@ class TestPhaseSummary(unittest.TestCase):
         ]
         self.assertEqual(self._ph(segs)["edit"], 35.0)
 
+    def test_phase_summary_edit_item_counts_to_edit(self):
+        # B2：edit_item 分方向段归 edit 相（同名 #N 剥序号后归类）
+        segs = [{"name": "edit_item", "elapsed_s": 120.5},
+                {"name": "edit_item#2", "elapsed_s": 80.3}]
+        got = self._ph(segs)
+        self.assertEqual(got["edit"], 200.8)
+
     def test_selfcheck_with_ordinal_suffix(self):
         # 返工轮次段剥 #n 序号后仍归 selfcheck
         segs = [
@@ -1586,6 +1645,22 @@ class TestPhaseSummary(unittest.TestCase):
             {"name": "verify_acceptance", "elapsed_s": 5.0},
         ]
         self.assertEqual(self._ph(segs)["verify"], 15.0)
+
+    def test_verify_acceptance_derived_segments_fold_into_verify(self):
+        # 方向 2：verify_acceptance 前缀派生段（连接/case 级/时钟校准）与
+        # verify_start 等编排段并入 verify 一类，不漏分类入 other（-sv 真机
+        # 首次暴露：上批 other 占 54.6% 而其中 1412s 实为验收，提速收益无
+        # 从测量）
+        segs = [
+            {"name": "verify_acceptance_connect", "elapsed_s": 200.0},
+            {"name": "verify_acceptance_clock_sync", "elapsed_s": 5.0},
+            {"name": "verify_acceptance_acc_1", "elapsed_s": 3.0},
+            {"name": "verify_acceptance_acc_30#2", "elapsed_s": 4.0},
+            {"name": "verify_start", "elapsed_s": 1.0},
+        ]
+        out = self._ph(segs)
+        self.assertEqual(out["verify"], 200.0 + 5.0 + 3.0 + 4.0 + 1.0)
+        self.assertEqual(out["other"], 0.0)
 
     def test_other_includes_precheck_report_finish(self):
         segs = [

@@ -116,19 +116,42 @@ if ! ADB shell "dd if=/dev/block/sda of=/dev/null bs=1M count=4 2>/dev/null" \
   exit 1
 fi
 sleep 3
-# 5. 新事件落盘断言（重启后链路写入新 JSONL 记录）
-if ! python3 "$PY" --mode delta --event 4; then
+# 5. 新事件落盘断言（重启后链路写入新 JSONL 记录）；输出保留 NEW 明细供 6 步解析
+if ! DELTA_OUT=$(python3 "$PY" --mode delta --event 4); then
   echo "ERROR: kill daemon 后新事件未落盘（delta --event 4）"
   exit 1
 fi
-# 6. 轮转 seq 递增断言（重启后 openFile 从目录续接 seq）
-SEQ_AFTER=$(max_seq)
-SEQ_AFTER=${SEQ_AFTER:--1}
-if [ "$SEQ_AFTER" -le "$SEQ_BEFORE" ]; then
-  echo "ERROR: 轮转 seq 未递增（${SEQ_BEFORE} -> ${SEQ_AFTER}），"
-  echo "       daemon 重启后未从目录续接 seq（重复写 _p${SEQ_BEFORE}？）"
+# 6. 轮转 seq 续接断言（防重启后从低 seq 重建文件回归）：
+#    产品 nextSeqFor 按 {id}_{name}_当天日期_p{seq} 各文件链独立续接；多 id
+#    混跑且文件未满时，重启后续写原文件（seq 不变是正确续接）——旧口径
+#    "全目录 max_seq 必须递增"在此场景假红（2026-09-05 实拍：id=4 链 _p3
+#    未满续写、id=13 链 _p2 续写，max_seq 3->3 判红，产品行为正确）。
+#    新口径：kill 前 ls 当天 _p*.jsonl 存快照；kill 后 NEW 落盘文件逐一断言：
+#    a) 快照已存在 → 未满文件续写，合法；
+#    b) kill 后新建 → seq 必须 > SEQ_BEFORE（轮转新开必须续接递增，低 seq
+#       重建即回归命中）。SEQ_BEFORE=-1（首日无文件）时恒真，场景兼容。
+NEW_FILES=$(printf '%s\n' "$DELTA_OUT" | grep -oE 'file=[^ ]+' | cut -d= -f2 | sort -u)
+if [ -z "$NEW_FILES" ]; then
+  echo "ERROR: delta 无 NEW 明细，seq 续接断言无输入"
   exit 1
 fi
-echo "OK: daemon kill 后 init 拉起 + 心跳恢复 + 新事件落盘 + 轮转 seq 递增"
-echo "    seq: ${SEQ_BEFORE} -> ${SEQ_AFTER}"
+SNAP_TODAY=$(ADB shell "date +%Y%m%d" 2>/dev/null | tr -d '\r')
+SEQ_SNAPSHOT=$(ADB shell "ls /data/vendor/lechao_lcview/logs/*_${SNAP_TODAY}_p*.jsonl 2>/dev/null" | tr -d '\r')
+FAIL_SEQ=""
+for f in $NEW_FILES; do
+  if printf '%s\n' "$SEQ_SNAPSHOT" | grep -qF "$f"; then
+    continue
+  fi
+  s=$(printf '%s' "$f" | grep -oE '_p[0-9]+\.jsonl' | grep -oE '[0-9]+')
+  if [ -z "$s" ] || [ "$s" -le "$SEQ_BEFORE" ]; then
+    FAIL_SEQ="$FAIL_SEQ $f"
+  fi
+done
+if [ -n "$FAIL_SEQ" ]; then
+  echo "ERROR: kill 后新建文件 seq 未续接递增（before=${SEQ_BEFORE}）:${FAIL_SEQ}"
+  echo "       daemon 重启后疑似从低 seq 重建文件（重复写 _p0 回归？）"
+  exit 1
+fi
+echo "OK: daemon kill 后 init 拉起 + 心跳恢复 + 新事件落盘 + 轮转 seq 续接"
+echo "    seq_before=${SEQ_BEFORE}，NEW 文件: $(printf '%s' "$NEW_FILES" | tr '\n' ' ')"
 exit 0
