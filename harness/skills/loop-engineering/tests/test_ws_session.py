@@ -741,5 +741,126 @@ class TestCli(unittest.TestCase):
         self.assertIn("cross-device/lib/python", src)
 
 
+class TestRunStateDone(unittest.TestCase):
+    """方向 5：done --run-file 取链式运行态 stage/rc，替换 AI 代理值。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+        from cdp_receipt import Receipt, write_receipt
+        self._Receipt = Receipt
+        self._write_receipt = write_receipt
+        self._s = ws_session.create_session(goal="g", target="dev", case="c")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+        os.environ.pop("CDP_PROJECT_ROOT")
+
+    def _receipt(self, result):
+        acc = ('{"overall":"pass","items":[]}' if result == "pass"
+               else '{"items":[{"status":"fail","detail":"init.svc.x=stopped"}]}')
+        return self._write_receipt(
+            self._Receipt(batch_id=f"b{uuid.uuid4().hex[:6]}", result=result,
+                          build="pass" if result == "pass" else "fail",
+                          push_board="pass" if result == "pass" else "fail",
+                          acceptance=acc, summary="t"),
+            "body")
+
+    @staticmethod
+    def _run_json(path, steps, overall="fail", exit_rc=None):
+        data = {"run_id": "r1", "overall": overall, "steps": steps,
+                "skipped": []}
+        if exit_rc is not None:
+            data["exit_rc"] = exit_rc
+        Path(path).write_text(json.dumps(data), encoding="utf-8")
+        return path
+
+    def test_fail_stage_from_first_bad_step(self):
+        rp = self._receipt("fail")
+        run = self._run_json(Path(self._tmp.name) / "r.json", [
+            {"name": "sync", "rc": 0, "canceled": False},
+            {"name": "push", "rc": 1, "canceled": False},
+        ])
+        s, _ = ws_session.apply_done(self._s, rp, run_state=json.loads(
+            Path(run).read_text(encoding="utf-8")))
+        self.assertEqual(s["runs"][0]["stage"], "push")
+        self.assertEqual(s["runs"][0]["verify_exit"], 1)
+
+    def test_real_rc_replaces_proxy(self):
+        # 运行态 exit_rc=3（锁占用）等非 0/1 真实退出码原样入账，
+        # 不再被收据 pass/fail 代理 0/1 覆盖
+        rp = self._receipt("fail")
+        s, _ = ws_session.apply_done(self._s, rp, run_state={
+            "overall": "fail", "exit_rc": 3,
+            "steps": [{"name": "sync", "rc": 0, "canceled": False}]})
+        self.assertEqual(s["runs"][0]["verify_exit"], 3)
+
+    def test_pass_takes_last_executed_step(self):
+        rp = self._receipt("pass")
+        s, _ = ws_session.apply_done(self._s, rp, run_state={
+            "overall": "pass", "exit_rc": 0,
+            "steps": [{"name": "sync", "rc": 0, "canceled": False},
+                      {"name": "acceptance", "rc": 0, "canceled": False},
+                      {"name": "report", "rc": 0, "canceled": False}]})
+        self.assertEqual(s["runs"][0]["stage"], "report")
+        self.assertEqual(s["runs"][0]["verify_exit"], 0)
+        self.assertEqual(s["exit_attribution"], "pass")
+
+    def test_canceled_step_is_stage(self):
+        rp = self._receipt("fail")
+        s, _ = ws_session.apply_done(self._s, rp, run_state={
+            "overall": "fail", "exit_rc": 1,
+            "steps": [{"name": "unit_test", "rc": None, "canceled": True}]})
+        self.assertEqual(s["runs"][0]["stage"], "unit_test")
+
+    def test_run_state_overrides_stage_arg(self):
+        # 同传 --stage 与 --run-file：运行态优先（--stage 仅无运行态时回落）
+        rp = self._receipt("fail")
+        s, _ = ws_session.apply_done(self._s, rp, stage="acceptance",
+                                     run_state={
+                                         "overall": "fail", "exit_rc": 1,
+                                         "steps": [{"name": "push", "rc": 2,
+                                                    "canceled": False}]})
+        self.assertEqual(s["runs"][0]["stage"], "push")
+
+    def test_cli_done_run_file(self):
+        # CLI 闭环：done --run-file 从文件读运行态并记账
+        rp = self._receipt("fail")
+        run = self._run_json(Path(self._tmp.name) / "run.json", [
+            {"name": "connect", "rc": 0, "canceled": False},
+            {"name": "push", "rc": 1, "canceled": False}])
+        sp = Path(self._tmp.name) / "session.json"
+        ws_session.save_session(self._s, str(sp))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_session.main(["done", "--session", str(sp),
+                                  "--receipt", str(rp), "--run-file", str(run)])
+        self.assertEqual(rc, 0)
+        s = ws_session.load_session(str(sp))
+        self.assertEqual(s["runs"][0]["stage"], "push")
+
+    def test_cli_done_bad_run_file_rc1(self):
+        # 运行态文件损坏：报错返 1，不记账（不耗轮次）
+        rp = self._receipt("fail")
+        bad = Path(self._tmp.name) / "bad.json"
+        bad.write_text("{not json", encoding="utf-8")
+        sp = Path(self._tmp.name) / "session.json"
+        ws_session.save_session(self._s, str(sp))
+        err = io.StringIO()
+        from contextlib import redirect_stderr
+        with redirect_stderr(err), redirect_stdout(io.StringIO()):
+            rc = ws_session.main(["done", "--session", str(sp),
+                                  "--receipt", str(rp), "--run-file", str(bad)])
+        self.assertEqual(rc, 1)
+        s = ws_session.load_session(str(sp))
+        self.assertEqual(s["total_attempts"], 0)
+
+    def test_stage_rc_fallback_without_exit_rc(self):
+        # 产物缺 exit_rc（旧 chain.json）：按 overall 推导 0/1，stage 兼容取末步
+        stage, rc = ws_session._stage_rc_from_run_state(
+            {"overall": "fail", "steps": [{"name": "sync", "rc": 0}]})
+        self.assertEqual((stage, rc), ("sync", 1))
+
+
 if __name__ == "__main__":
     unittest.main()

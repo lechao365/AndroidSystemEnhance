@@ -74,9 +74,13 @@ stages:
    timings 可看出各段耗时；未 start 则跳过，warn 不阻断）
 3. 收据落盘后记账：
    python3 harness/skills/loop-engineering/ws_session.py done --session <json>
-     --receipt <收据路径> [--stage sync|build|unit_test|push|acceptance]
+     --receipt <收据路径> --run-file <链式运行态 JSON>
+     [--stage sync|build|unit_test|push|acceptance]
      [--error-line "<首错误行>"] [--attribution env_fail|framework_error]
-   （AI 职责：砖机三分法证据齐全时显式 env_fail；harness 脚本 traceback 时
+   （--run-file 传 ws_verify_chain 运行态 harness/log/workspace-verify/runs/
+   <run_id>.json 或 chain.json——stage/verify_exit 取运行态真实值（首个失败
+   步/编排器真实退出码），替换 AI 代理值；--stage 仅无运行态时回落。
+   AI 职责：砖机三分法证据齐全时显式 env_fail；harness 脚本 traceback 时
    显式 framework_error 并停环；每轮把修复动作摘要写进 session.json 的
    runs[].fix_action）
 4. 失败轮：读收据失败现场（logcat/dmesg/串口摘录）-> 分析 -> 修复编辑 code/

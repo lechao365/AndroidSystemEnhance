@@ -33,6 +33,9 @@ stages:
 - data/verify-results/<时间戳>-<batch_id>.md + trend.md（只落盘，不 commit——由 git-works-push 随批统一提交）
 - 收据 header `timings` 字段：模式 A 打点（apply 侧 start 后，verify 内部
   sync/build/push/unit_test/acceptance 各段，cdp_timing.py mark；缺失仅 warn 不阻断）
+- harness/log/workspace-verify/runs/<run_id>.json：链式编排运行态（仅编排器
+  ws_verify_chain 写，子脚本/AI 只读不写；记每步真实 rc/起止 epoch/canceled
+  与 skipped 记账；ws_session done --run-file 取运行态 stage/rc 真相源）
 - harness/log/workspace-verify/ 运行日志（gitignore）
 ## Failure / recovery（失败/恢复）
 - code→workspace 同步失败：verify 中止，收据 result=fail（build=fail board=skip）
@@ -75,10 +78,25 @@ stages:
    - acceptance：ws_acceptance.py run 完成自动 mark verify_acceptance
    重试轮沿用同段名 mark，不追加轮次前缀（段名保持稳定供复盘按段统计）；
    脚本自动 mark 缺轮次上下文时由执行者触发对应段。
-0b. 链式入口（推荐，减编排往返）：三步确定性环节可单脚本串联——
-    python3 harness/skills/workspace-verify/ws_verify_chain.py --result-file <chain.json>
-    逐段 stdout 透传、rc 逐段门禁、失败即停（JSON 标注停在何步）；成功后
-    直跳步骤 4b/5。失败时按原分步工作流重跑定位，各段打点口径不变。
+0b. 链式入口（推荐，减编排往返）：全链确定性环节单脚本串联——
+    python3 harness/skills/workspace-verify/ws_verify_chain.py \
+      --batch-file <cdp> [--case <标签>] [--wait-ready --log-since <reboot 时刻>] \
+      [--result-file <chain.json>]
+    六步串联：sync→connect→push→unit_test→acceptance→report，逐段 stdout
+    透传、rc 逐段门禁、失败即停（JSON 标注停在何步）；acceptance/report
+    参数由 --batch-file/--case/--wait-ready/--log-since 确定性构造，report
+    收据参数（result/build/board/summary）由前序真实 rc 机械派生（AI 不手填）；
+    编排器自动注入 CDP_RUN_ID 使 push/unit_test/acceptance 产物同批同 run_id
+    （PASS 同批核验依赖）；运行态恒落 harness/log/workspace-verify/runs/
+    <run_id>.json（仅编排器写：每步真实 rc/起止/canceled/skipped）。
+    并发安全：编排进出经 ws_lock 加解 workspace/device 两把文件锁（占用
+    exit 3）；每步子进程独立进程组，单步超时 killpg 有界 teardown
+    （TERM→宽限 10s→KILL），被杀步 rc=None + canceled=true。
+    退出码：0 全链过 / 1 某步失败 / 2 参数错误 / 3 编排锁被占用。
+    loop 会话记账取运行态真实值：ws_session.py done --session <json>
+    --receipt <收据> --run-file <runs/<run_id>.json 或 chain.json>
+    （stage/verify_exit 取运行态真实 rc，替换 AI 代理值；--stage 仅无
+    运行态时回落）。失败时按原分步工作流重跑定位，各段打点口径不变。
 1. 同步：python3 harness/skills/sync-code-to-workspace/sync_code_to_workspace.py --auto
    （同步源 = code 工作树当前状态；范围 = code/rpi5/{aosp,kernel}；
    data/verify-results、others/、rpi-zero2w 不参与同步）

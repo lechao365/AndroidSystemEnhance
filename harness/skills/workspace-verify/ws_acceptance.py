@@ -174,7 +174,10 @@ def resolve_acceptance(args, cases_path=_CASES_PATH):
                           "（禁止批次自带宿主命令，验收走 case/manual 契约）")
         if b.acceptance.startswith("case:"):
             # 方向 3：case id 逐个查 verify-cases.yaml cases 段，任一未知即拒
-            # （main 退 2）；manual 模式自由文本不查表
+            # （main 退 2）；manual 模式自由文本不查表。
+            # KIR-002 当批修（2026-09-05）：查表后须展开为验收文本（镜像
+            # --case 分支语义）——此前返回原串 "case:a,b"，执行器无 case: kind
+            # 落自由文本 ai 项 → rc 2（三批 -sv 实证，收据 cases 源同步堵洞）
             ids = [i.strip() for i in b.acceptance[len("case:"):].split(",")
                    if i.strip()]
             try:
@@ -187,6 +190,11 @@ def resolve_acceptance(args, cases_path=_CASES_PATH):
                 opts = ", ".join(sorted(cases)) or "无"
                 return None, (f"验收 case id {', '.join(missing)} 不存在于 "
                               f"verify-cases.yaml cases 段（可选: {opts}）")
+            try:
+                return " ".join(_case_text(cases[i]) for i in ids), None
+            except ValueError as e:
+                return None, str(e)
+        # 非 case: 批次验收（manual:/自由标签文本）原样返回（不查表）
         return b.acceptance, None
     if args.case:
         try:
@@ -648,6 +656,23 @@ def _resolve_batch_id(batch_id):
     return None
 
 
+def _batch_case_labels(batch_file):
+    """批次验收为 case: 前缀时提取 id 串（--case 缺省时的实跑标签源）。
+
+    KIR-002 当批修配套：--batch-file 模式下 args.case 为空，实跑标签须
+    从批次验收行提取，否则 cases-<batch_id>.json 缺失 → report PASS 探测
+    空 cases 拒写。非 case: 前缀/批次不可读均返空串（静默降级不阻断）。
+    """
+    if not batch_file:
+        return ""
+    try:
+        b = parse_batch(Path(batch_file).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return ""
+    acc = (b.acceptance or "").strip()
+    return acc[len("case:"):].strip() if acc.startswith("case:") else ""
+
+
 def _write_cases(batch_id, cases_text):
     """本次实跑 case 标签落盘：log_apply_dir()/cases-<batch_id>.json。
 
@@ -965,9 +990,10 @@ def main(argv=None):
                       "device_dirty": device_dirty,
                       "teardown_detail": teardown_detail},
                      ensure_ascii=False, indent=2))
-    # 本次实跑 case 标签落盘（--case 原样写入 cases-<batch_id>.json，
-    # 供 ws_report 自动探测补全，防 board pass 收据 cases 空致 prepare 死锁）
-    _write_cases(batch_id, args.case or "")
+    # 本次实跑 case 标签落盘（--case 优先；--batch-file 模式从批次验收行
+    # case: 前缀提取，供 ws_report 自动探测补全，防 board pass 收据 cases
+    # 空致 prepare 死锁）
+    _write_cases(batch_id, args.case or _batch_case_labels(args.batch_file))
     # 标准四段缺失补零（跳过段记 0，收据段完整可归因）+ 验收总段打点
     # （失败不阻断，结果 pass/fail 均记）
     _backfill_zero_marks(batch_id)

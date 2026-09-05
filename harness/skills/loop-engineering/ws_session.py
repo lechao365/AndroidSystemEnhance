@@ -9,7 +9,8 @@ CLI:
   start    --goal <文本> (--batch-file <cdp> | --target <12hex|dev|main> --case <标签>)
            [--max-patience 3] [--max-total 10]
   run      --session <json>                          # 输出本轮 verify 执行指引
-  done     --session <json> --receipt <路径> [--stage <sync|build|unit_test|push|acceptance>]
+  done     --session <json> --receipt <路径> [--run-file <链式运行态 JSON>]
+           [--stage <sync|build|unit_test|push|acceptance>]
            [--error-line <首错误行>] [--attribution env_fail|framework_error]
   status   --session <json>
   diagnose --session <json>
@@ -231,13 +232,37 @@ def _acceptance_passed(acceptance):
     return True, ""
 
 
+def _stage_rc_from_run_state(run_state):
+    """从链式运行态 JSON 提取 (stage, exit_rc)（方向 5：运行态替换 AI 代理值）。
+
+    stage = 首个失败步（rc 非 0 或 canceled）；全过取末执行步。
+    exit_rc 取编排器真实退出码（exit_rc），缺失按 overall 推导（0/1）。
+    兼容步骤键 name（chain 产物）/ stage（运行态语义别名）。
+    """
+    steps = run_state.get("steps") or []
+    stage = ""
+    for s in steps:
+        if s.get("canceled") or (s.get("rc") is not None and s["rc"] != 0):
+            stage = s.get("name") or s.get("stage") or ""
+            break
+    if not stage and steps:
+        stage = steps[-1].get("name") or steps[-1].get("stage") or ""
+    rc = run_state.get("exit_rc")
+    if rc is None:
+        rc = 0 if run_state.get("overall") == "pass" else 1
+    return stage, int(rc)
+
+
 def apply_done(session, receipt_path, stage=None, error_line=None,
-               attribution=None):
+               attribution=None, run_state=None):
     """记账一轮：读收据快照 -> 指纹比对 -> 双层计数 -> 归因/退出判定。
 
     返回 (session, guidance)。attempt 推进唯一锚（spec §4.2/§6）。
     attribution: 显式覆盖（仅 env_fail / framework_error 合法），
     缺省按收据 result 推导（pass -> pass / fail -> task_fail）。
+    run_state: 链式运行态 JSON dict（ws_verify_chain 产物）；传入后
+    stage 与 verify_exit 取运行态真实值（首个失败步/编排器真实退出码），
+    替换 AI 手填 --stage 与收据代理 0/1；缺省回落旧口径。
     """
     if session.get("exit_attribution"):
         raise RuntimeError(
@@ -257,8 +282,14 @@ def apply_done(session, receipt_path, stage=None, error_line=None,
     prev_fail = next((run for run in reversed(session["runs"])
                       if run["result"] == "fail"), None)
     first_err = error_line or extract_first_fail_line(r.acceptance)
-    # verify_exit 是 pass/fail 代理（0/1），非真实子进程退出码（spec §4.1/§4.3）
-    verify_exit = 0 if r.result == "pass" else 1
+    if run_state is not None:
+        # 运行态优先：stage/verify_exit 取链式运行态真实值（方向 5），
+        # 替换 AI 手填 --stage 与收据 pass/fail 代理 0/1
+        stage, verify_exit = _stage_rc_from_run_state(run_state)
+    else:
+        # verify_exit 是 pass/fail 代理（0/1），非真实子进程退出码
+        # （spec §4.1/§4.3）；仅无链式运行态时回落此口径
+        verify_exit = 0 if r.result == "pass" else 1
     fp = compute_fingerprint(stage, verify_exit, first_err)
     frozen = bool(prev_fail and prev_fail["fingerprint"] == fp)
 
@@ -544,8 +575,14 @@ def main(argv=None):
     p_done = sub.add_parser("done", help="记账一轮（收据落盘后调用）")
     p_done.add_argument("--session", required=True)
     p_done.add_argument("--receipt", required=True)
+    p_done.add_argument("--run-file", default=None,
+                        help="链式运行态 JSON（ws_verify_chain 产物 "
+                             "harness/log/workspace-verify/runs/<run_id>.json 或"
+                             " --result-file 副本）；传入后 stage/verify_exit 取"
+                             "运行态真实值（方向 5），--stage 仅无运行态时回落")
     p_done.add_argument("--stage", choices=["sync", "build", "unit_test", "push",
-                                            "acceptance"])
+                                            "acceptance"],
+                        help="回落阶段（无 --run-file 时 AI 手填）")
     p_done.add_argument("--error-line", default=None,
                         help="首错误行（缺省从收据 acceptance 提取首个 fail detail）")
     p_done.add_argument("--attribution", choices=["env_fail", "framework_error"])
@@ -614,10 +651,20 @@ def main(argv=None):
             print(f"error: 会话已终结（{s['exit_attribution']}），拒绝重复记账",
                   file=sys.stderr)
             return 1
+        run_state = None
+        if args.run_file:
+            try:
+                run_state = json.loads(
+                    Path(args.run_file).read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                print(f"error: 运行态读取失败 {args.run_file}: {exc}",
+                      file=sys.stderr)
+                return 1
         try:
             s, guidance = apply_done(s, args.receipt, stage=args.stage,
                                      error_line=args.error_line,
-                                     attribution=args.attribution)
+                                     attribution=args.attribution,
+                                     run_state=run_state)
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
