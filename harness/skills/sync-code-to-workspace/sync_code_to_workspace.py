@@ -25,7 +25,7 @@ from harness.lib.paths import (
     path as profile_path, env_path as core_env_path,
     log_dir as core_log_dir,
 )
-from harness.config.git_workspace_util import is_excluded, is_excluded_dir
+from harness.lib.git_workspace_util import is_excluded, is_excluded_dir
 
 # ── 路径惰性求值（首次调用时求值并缓存） ──────────────────
 # 此前 PATCH_ROOT/KERNEL_WS 等在 import 期求值，产生副作用且无法适配

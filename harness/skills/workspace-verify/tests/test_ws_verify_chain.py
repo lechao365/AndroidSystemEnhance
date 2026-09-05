@@ -115,7 +115,8 @@ class TestChain(unittest.TestCase):
             self.assertIn(flag, rep)
 
     def test_fail_stops_chain(self):
-        # push 失败（rc=1）：后续 unit_test/acceptance/report 不执行
+        # push 失败（rc=1）：余下验证步不执行；report 仍跑落 fail 收据
+        # （A1 修订：失败轮次也有收据，loop done --receipt 记账不卡死）
         ctor, _ = _fake_popen(0)
 
         def run(argv, **kw):
@@ -125,28 +126,61 @@ class TestChain(unittest.TestCase):
 
         ctor.side_effect = run
         with mock.patch.object(wc.subprocess, "Popen", ctor), \
-                mock.patch.object(wc, "_RUNS_DIR", self.runs):
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
             rc, result = wc.run_chain(batch_file=str(self.batch),
                                       use_locks=False)
         self.assertEqual(rc, 1)
         self.assertEqual(result["overall"], "fail")
         self.assertEqual([s["name"] for s in result["steps"]],
-                         ["sync", "connect", "push"])
-        self.assertEqual([s["rc"] for s in result["steps"]], [0, 0, 1])
-        self.assertEqual(result["skipped"],
-                         ["unit_test", "acceptance", "report"])
+                         ["sync", "connect", "push", "report"])
+        self.assertEqual([s["rc"] for s in result["steps"]], [0, 0, 1, 0])
+        self.assertEqual(result["skipped"], ["unit_test", "acceptance"])
+        self.assertIn("unit_test", result["skip_reasons"])
+        self.assertIn("链已停", result["skip_reasons"]["unit_test"])
+
+    def test_fail_report_derives_fail_receipt_args(self):
+        # A1：fail 收据参数由真实 rc 机械派生（result=fail/board=fail，
+        # _derive_report_args fail 分支不再死代码）
+        ctor, _ = _fake_popen(0)
+
+        def run(argv, **kw):
+            if os.path.basename(argv[1]) == "ws_push.py":
+                return mock.Mock(wait=mock.Mock(return_value=1))
+            return mock.Mock(wait=mock.Mock(return_value=0))
+
+        ctor.side_effect = run
+        calls = []
+        ctor.side_effect = lambda argv, **kw: (
+            calls.append(argv),
+            mock.Mock(wait=mock.Mock(
+                return_value=1 if os.path.basename(argv[1]) == "ws_push.py" else 0)))[1]
+        with mock.patch.object(wc.subprocess, "Popen", ctor), \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(batch_file=str(self.batch),
+                                      use_locks=False)
+        rep = " ".join(calls[-1])
+        self.assertIn("--result fail", rep)
+        self.assertIn("--board fail", rep)
+        self.assertIn("链停于 push", rep)
 
     def test_timeout_kills_process_group_and_marks_canceled(self):
-        # 单步超时：killpg TERM→KILL 有界 teardown，被杀步 rc=None + canceled
+        # 单步超时：killpg TERM→KILL 有界 teardown，被杀步 rc=None + canceled；
+        # A1 后 report 步仍执行（fail 收据落盘）→ wait 序列多一段 report
         proc = mock.Mock()
         te = subprocess.TimeoutExpired(cmd="x", timeout=0.1)
-        proc.wait = mock.Mock(side_effect=[te, te, te, 0])  # 超时/宽限/KILL 段/兜底
+        proc.wait = mock.Mock(side_effect=[te, te, te, 0, 0])  # 超时/宽限/KILL 段/report
         ctor = mock.Mock(return_value=proc)
         kills = []
         with mock.patch.object(wc.subprocess, "Popen", ctor), \
                 mock.patch.object(wc.os, "killpg",
                                   side_effect=lambda pid, sig: kills.append(sig)), \
-                mock.patch.object(wc, "_RUNS_DIR", self.runs):
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
             rc, result = wc.run_chain(batch_file=str(self.batch),
                                       use_locks=False)
         self.assertEqual(rc, 1)
@@ -156,9 +190,9 @@ class TestChain(unittest.TestCase):
         self.assertEqual(killed["name"], "sync")
         self.assertIsNone(killed["rc"])
         self.assertTrue(killed["canceled"])
+        # A1 后 report 步执行落 fail 收据（不在 skipped 内）
         self.assertEqual(result["skipped"],
-                         ["connect", "push", "unit_test", "acceptance",
-                          "report"])
+                         ["connect", "push", "unit_test", "acceptance"])
 
     def test_run_state_json_written(self):
         # 运行态落盘（仅编排器写）：runs/<run_id>.json 记真实 rc/起止/canceled
@@ -179,10 +213,13 @@ class TestChain(unittest.TestCase):
 
     def test_lock_held_returns_3_no_run_json(self):
         # 编排锁被占用：exit 3，不执行任何步骤，运行态不落盘
+        # （预跑线程仍会启动但被 mock——LockHeld 提前返回不等它收割）
         with mock.patch.object(wc.ws_lock, "verify_locks",
                                side_effect=wc.ws_lock.LockHeld("占用")), \
                 mock.patch.object(wc.subprocess, "Popen") as ctor, \
-                mock.patch.object(wc, "_RUNS_DIR", self.runs):
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
             rc, result = wc.run_chain(batch_file=str(self.batch))
         self.assertEqual(rc, 3)
         self.assertEqual(result["exit_rc"], 3)

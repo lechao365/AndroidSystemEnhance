@@ -25,12 +25,24 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# 运行日志：harness/log/git-works-push/<时间戳>.log（/harness/log/ 已 gitignore，不入库）
+# 运行日志：harness/log/git-works-push/git-works-push-<日>.log（日粒度
+# 追加，/harness/log/ 已 gitignore 不入库）。秒级时间戳文件名会让每次
+# push 都新开文件、目录无限膨胀难追溯——同日多次 push 追加同文件，每行
+# 前缀时间戳保证逐条时间归因；留存由 harness/lib/log_prune.py 清理
 LOG_DIR="$SCRIPT_DIR/../../log/git-works-push"
 mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/$(date +%Y%m%d-%H%M%S).log"
-out() { echo "$@" | tee -a "$LOG_FILE"; }
-err() { echo "$@" | tee -a "$LOG_FILE" >&2; }
+LOG_FILE="$LOG_DIR/git-works-push-$(date +%Y%m%d).log"
+out() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG_FILE"; }
+err() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG_FILE" >&2; }
+
+# push 段细分自发打点（A-1/B-1：脚本自发替代 AI 手动 mark push；细分
+# commit/remote 两步，157s 级 push 段内部耗时不再不可归因）。失败静默
+# 不阻断（打点诊断数据）。CDP_TIMING_T0 在脚本启动时取值供 push 总耗时。
+CDP_TIMING_T0=$(date +%s.%N)
+cdp_mark() {
+  python3 "$SCRIPT_DIR/../cross-device/lib/python/cdp_timing.py" mark "$@" \
+    >/dev/null 2>&1 || true
+}
 
 # 永不推 main 守卫
 if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
@@ -173,6 +185,7 @@ if [ "$MODE" = "normal" ]; then
   fi
   check_commit_scope staged
   git commit -F "$MSG_FILE" || { err "error: commit 失败"; exit 1; }
+  cdp_mark --name push_commit
 fi
 
 # push 失败分类：non-fast-forward（远端领先）给出可恢复提示，其余给原始输出
@@ -181,7 +194,10 @@ fi
 if [ "$MODE" = "push-only" ]; then
   check_commit_scope pushed
 fi
+PUSH_T0=$(date +%s.%N)
+push_dur() { awk -v a="$1" -v b="$(date +%s.%N)" 'BEGIN{printf "%.3f", b-a}'; }
 if ! PUSH_OUTPUT=$(git push -u origin "$BRANCH" 2>&1); then
+  cdp_mark --name push_remote --dur-s "$(push_dur "$PUSH_T0")"
   case "$PUSH_OUTPUT" in
     *"non-fast-forward"*|*"fetch first"*|*"[rejected]"*)
       err "error: push 被拒（远端 $BRANCH 领先，non-fast-forward）。请 git pull --rebase origin $BRANCH 后重试，或确认本地后 --push-only"
@@ -193,6 +209,7 @@ if ! PUSH_OUTPUT=$(git push -u origin "$BRANCH" 2>&1); then
   esac
   exit 2
 fi
+cdp_mark --name push_remote --dur-s "$(push_dur "$PUSH_T0")"
 
 # 推送后核对远端 sha；慢网络/服务端 hook 未完成时 ls-remote 可能短暂滞后，重试 3 次
 LOCAL_SHA=$(git rev-parse HEAD)
@@ -210,4 +227,5 @@ if [ "$REMOTE_SHA" != "$LOCAL_SHA" ]; then
   err "error: 远端 $BRANCH（$REMOTE_SHA）与本地 HEAD（$LOCAL_SHA）不符，疑似推送未生效"; exit 2
 fi
 out "pushed: $BRANCH $(git rev-parse --short HEAD)"
+cdp_mark --name push --dur-s "$(push_dur "$CDP_TIMING_T0")"
 exit 0

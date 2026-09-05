@@ -22,7 +22,8 @@ stages:
 ## Human confirmation gates（人工确认门）
 - 零确认（产出批次文本，不落盘不提交）
 ## Outputs / artifacts（输出/产物）
-- 纯文本 CDP 批次（stdout，用户拷贝）；临时文件 harness/log/cross-device-emit/（gitignore）
+- 纯文本 CDP 批次（stdout，用户拷贝）；临时文件 harness/log/cross-device-emit/（gitignore），
+  批次临时文件命名与 apply 侧统一：batch-YYYYMMDD-HHMMSS.cdp
 ## Failure / recovery（失败/恢复）
 - precheck 不过：按 reason 处理（pull 失败网络/树脏/上批未推拒产）
 - selfcheck 不过：AI 修批次后重跑
@@ -42,6 +43,7 @@ stages:
      复盘/下批据此给针对性修复方向）
    - 相关 docs/ 章节
 3. 产批：-s/-sv + base + 意图/验收/方向，总字符 450~500 为目标区间（硬上限 500）；
+   base 直接取步骤 1 precheck JSON 输出的 base 字段（origin/dev HEAD 前 12 位）；
    不足 450 说明描述不清或应合并后续批次（backlog 见底时允许低于 450）；每批 6-7 个变更点；
    base 自动取 precheck 后 origin/dev HEAD 前 12 位
    （git rev-parse --short=12 origin/dev，勿手算）；复杂任务拆多轮，每轮注明后续轮次；

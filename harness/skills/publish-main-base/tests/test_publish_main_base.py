@@ -55,14 +55,21 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         shutil.copytree(REAL_SKILL_DIR,
                         self.root / "harness" / "skills" / "publish-main-base")
         # content_tree.py（promote 绑定比对）与 commit_scope.py 相对路径调用，
-        # 临时根须有 harness/lib/
+        # 临时根须有 harness/lib/；cdp_paths.py（批次四上移）为 cdp_receipt
+        # 经垫片 import 的主实现，同须拷入
         lib_dst = self.root / "harness" / "lib"
         lib_dst.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO_ROOT / "harness" / "lib" / "content_tree.py", lib_dst)
         shutil.copy(REPO_ROOT / "harness" / "lib" / "commit_scope.py", lib_dst)
+        shutil.copy(REPO_ROOT / "harness" / "lib" / "cdp_paths.py", lib_dst)
         cfg = self.root / "harness" / "config"
         cfg.mkdir(parents=True, exist_ok=True)
         (cfg / "baseline-status.yaml").write_text("baselines: []\n", encoding="utf-8")
+        # 对齐真实仓 git 卫生：骨架 .py 首次 import 会生成 __pycache__，
+        # 无 .gitignore 时 git add -A 把 pyc 提交进内容树 → 树绑定比对
+        # 出现 pyc 差异假失败
+        (self.root / ".gitignore").write_text("__pycache__/\n*.pyc\n",
+                                              encoding="utf-8")
         # verify-cases.yaml 为发布全量组门禁基准（cases_coverage 模块相对路径读取），
         # fixture 须拷入临时根 harness/config/ 才能走通 prepare/promote
         shutil.copy(REPO_ROOT / "harness" / "config" / "verify-cases.yaml",

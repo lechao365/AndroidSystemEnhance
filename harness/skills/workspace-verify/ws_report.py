@@ -50,12 +50,13 @@ from paths import env_path  # noqa: E402
 
 _HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
 
-# 链路已知段中带 verify 前缀的五段（verify_sync/build/push/unit_test/acceptance）：
-# none 模式（-s/文档批）无 verify 环节，missing 判定按 verify_mode 取应有段集时
-# 从 KNOWN_SEGMENTS 去掉这五段，避免 -s 批永远报 verify 段缺失（方向 1 收窄）。
+# 链路已知段中带 verify 前缀的六段（verify_sync/build/push/unit_test/
+# acceptance/start）：none 模式（-s/文档批）无 verify 环节，missing 判定
+# 按 verify_mode 取应有段集时从 KNOWN_SEGMENTS 去掉这些段，避免 -s 批
+# 永远报 verify 段缺失（方向 1 收窄；verify_start 为链起跑编排段，一并列）。
 _VERIFY_PREFIX_SEGMENTS = frozenset((
     "verify_sync", "verify_build", "verify_push",
-    "verify_unit_test", "verify_acceptance",
+    "verify_unit_test", "verify_acceptance", "verify_start",
 ))
 
 # 阶段汇总归类（方向 1 增）：编辑阶段细分段 + 编辑/自检侧 gap 段（自报段
@@ -118,30 +119,14 @@ def _phase_summary(segments):
 def _append_direct_mark(timings_file, batch_id, name):
     """直写自发 mark 到打点文件（B5 参数化共享 helper）。
 
-    目标文件与 timings 探测同源：显式 --timings-file 优先，未传自动探测
-    log_apply_dir()/timings-<batch_id>.json；文件缺失/非法仅 warn 不阻断
-    （打点诊断数据，非收据证据本身）。直接编辑文件（cdp_timing mark 仅
-    支持 --batch 定位，无法覆盖显式 --timings-file 场景）。
+    实现委托 cdp_timing.emit_mark（B8/C-1 收敛：显式 timings_file 优先 >
+    batch_id > CDP_BATCH_ID > current-batch.json；原子写 tmp 带 pid 防并发
+    竞态；文件缺失/非法仅 warn 不阻断——打点诊断数据，非收据证据本身）。
     """
-    target = timings_file
-    if not target and batch_id:
-        probe = log_apply_dir() / f"timings-{batch_id}.json"
-        if probe.is_file():
-            target = str(probe)
-    if not target:
-        return
-    try:
-        p = Path(target)
-        data = json.loads(p.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError("非 JSON 对象")
-        data.setdefault("marks", []).append({"name": name, "wall": time.time()})
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-                       encoding="utf-8")
-        tmp.replace(p)
-    except (OSError, json.JSONDecodeError, ValueError) as e:
-        print(f"warn: {name} 打点失败（不阻断）: {e}", file=sys.stderr)
+    import cdp_timing
+    if not cdp_timing.emit_mark(name, timings_file=timings_file,
+                                batch_id=batch_id):
+        print(f"warn: {name} 打点失败（不阻断）", file=sys.stderr)
 
 
 def _mark_report(timings_file, batch_id):

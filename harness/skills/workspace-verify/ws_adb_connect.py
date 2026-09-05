@@ -196,10 +196,11 @@ def ensure_connected(rescue_enabled=False, budget_s=None):
     def _budget_left():
         return deadline is None or time.monotonic() < deadline
 
-    # 快路径为廉价预检不设卫（预算耗尽也值得先查一次已连接设备）
+    # 快路径为廉价预检不设卫（预算耗尽也值得先查一次已连接设备）。
+    # _adb_devices_online 刚经 adb devices 确认 state=device（B1：免再跑
+    # _is_online 轮询重复查询——其存在的 offline 重试语义面向重启后场景，
+    # 快路径刚查完无重启窗口），命中后直接身份校验即返回
     for ep in _adb_devices_online():
-        if not _is_online(ep):
-            continue
         ok, detail = _verify_identity(ep)
         if not ok:
             print(f"[identity] {detail}（拒绝该端点，继续尝试）")

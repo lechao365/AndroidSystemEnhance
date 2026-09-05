@@ -50,6 +50,12 @@ class TestSyncModifyIntegration(unittest.TestCase):
         dst_cdp.mkdir(parents=True)
         for f in ("cdp_receipt.py", "cdp_paths.py", "cdp_issue.py"):
             shutil.copy(str(CDP_PY / f), str(dst_cdp / f))
+        # cdp_paths 垫片（批次四上移）经 harness.lib.cdp_paths 引主实现，
+        # 临时根 harness/lib/ 须拷入主实现模块
+        dst_lib = self.work / "harness/lib"
+        dst_lib.mkdir(parents=True, exist_ok=True)
+        shutil.copy(str(HARNESS / "lib" / "cdp_paths.py"),
+                    str(dst_lib / "cdp_paths.py"))
         cfg = self.work / "harness/config"
         cfg.mkdir(parents=True)
         (cfg / "baseline-status.yaml").write_text(

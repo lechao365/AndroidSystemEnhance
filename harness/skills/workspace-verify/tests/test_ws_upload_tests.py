@@ -561,30 +561,27 @@ class TestDefaultOut(unittest.TestCase):
 
 
 class TestMarkStageDurS(unittest.TestCase):
-    """方向 1：_mark_stage 传 --dur-s 脚本自报实测秒数（段耗时取 dur_s，
-    相邻差额余量落 gap_before_<name>，脚本启动前 AI 活动不再污染段口径）。"""
+    """方向 1：_mark_stage 传 dur_s 脚本自报实测秒数（段耗时取 dur_s，
+    相邻差额余量落 gap_before_<name>，脚本启动前 AI 活动不再污染段口径）。
+    B8 后 _mark_stage 进程内直调 cdp_timing.emit_mark（消子进程开销），
+    以 mock emit_mark 断言传参。"""
 
     def _capture(self, dur_s=None):
-        captured = {}
-
-        def fake_run(args, **kw):
-            captured["args"] = args
-            return mock.Mock(returncode=0, stdout="", stderr="")
-
-        with mock.patch.object(wu.subprocess, "run", side_effect=fake_run), \
-                mock.patch.dict("os.environ", {"CDP_BATCH_ID": "abc"},
-                                clear=True):
+        fake_ct = mock.Mock()
+        fake_ct.emit_mark.return_value = True
+        with mock.patch.dict("sys.modules", {"cdp_timing": fake_ct}):
             wu._mark_stage("verify_unit_test", dur_s=dur_s)
-        return captured["args"]
+        return fake_ct.emit_mark.call_args
 
     def test_dur_s_appended_as_flag(self):
-        args = self._capture(dur_s=8.04)
-        self.assertIn("--dur-s", args)
-        self.assertEqual(args[args.index("--dur-s") + 1], "8.04")
+        args, kwargs = self._capture(dur_s=8.04)
+        self.assertEqual(args, ("verify_unit_test",))
+        self.assertAlmostEqual(kwargs["dur_s"], 8.04, places=2)
 
     def test_no_dur_s_omits_flag(self):
-        args = self._capture(dur_s=None)
-        self.assertNotIn("--dur-s", args)
+        args, kwargs = self._capture(dur_s=None)
+        self.assertEqual(args, ("verify_unit_test",))
+        self.assertIsNone(kwargs.get("dur_s"))
 
 
 if __name__ == "__main__":

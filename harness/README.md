@@ -9,10 +9,12 @@
 harness/
 ├── lib/
 │   ├── harness_lib.py      # 精简运行时库（初始化/退出/日志/步骤）
-│   └── paths.py            # 路径工具（paths.conf + 环境变量覆盖）
+│   ├── paths.py            # 路径工具（paths.conf + 环境变量覆盖）
+│   ├── git_workspace_util.py   # workspace 扫描排除正则（sync 脚本共享，迁自 config）
+│   ├── cdp_paths.py            # cross-device 共享路径解析 + 原子写原语（上移自 skills）
+│   └── verify_common.py        # workspace-verify 共享基础（原子写 JSON/batch 回落）
 ├── config/
 │   ├── paths.conf          # 路径配置（PATCHS_DIR / KERNEL_WS / AOSP_WS）
-│   ├── git_workspace_util.py   # workspace 扫描排除正则（sync 脚本共享）
 │   ├── baseline-status.yaml    # baseline 状态登记表
 │   ├── baseline-evidence-template.yaml
 │   ├── known-issues-template.md    # 已知问题登记模板（头字段集与 cdp_issue._FIELDS 一致）

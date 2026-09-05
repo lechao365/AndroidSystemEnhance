@@ -139,6 +139,35 @@ class TestParse(unittest.TestCase):
         code, _ = cp.validate_batch(text, role="emit")
         self.assertEqual(code, 17)
 
+    # ── 批次六 C1：引号防呆（EXIT_QUOTE=19，仅 emit 角色校验）─────────
+
+    def test_emit_quote_single_is_red(self):
+        # 正文含单引号：emit 角色拒批（exit 19），apply 侧传输层会展开吞字
+        quoted = VALID_SV.replace("修复 lcview 空指针", "修复 'lcview' 空指针")
+        code, errs = cp.validate_batch(quoted, role="emit")
+        self.assertEqual(code, cp.EXIT_QUOTE, errs)
+        code, _ = cp.validate_batch(quoted, role="apply")
+        self.assertEqual(code, cp.EXIT_OK)
+
+    def test_emit_quote_double_is_red(self):
+        quoted = VALID_S.replace("README 映射表说明", 'README "映射表" 说明')
+        code, errs = cp.validate_batch(quoted, role="emit")
+        self.assertEqual(code, cp.EXIT_QUOTE, errs)
+
+    def test_emit_quote_free_in_any_tag_is_red(self):
+        # 三段正文任一段含引号均拒（manual 自由文本同样受限）
+        quoted = VALID_SV.replace("检查 service.cpp 入口",
+                                  "检查 service.cpp 入口（含\"timeout\"）")
+        code, errs = cp.validate_batch(quoted, role="emit")
+        self.assertEqual(code, cp.EXIT_QUOTE, errs)
+
+    def test_apply_role_ignores_quote(self):
+        # apply 角色不校验引号（文本已产生，拒批只断链；残留由 heredoc
+        # 写入法兜底）
+        quoted = VALID_SV.replace("空指针", '"空"指针')
+        code, _ = cp.validate_batch(quoted, role="apply")
+        self.assertEqual(code, cp.EXIT_OK)
+
     def test_apply_role_softens_only_17(self):
         # validate_batch 恒返回原始码 17（降级由 main 统一处理）
         text = VALID_SV.replace("case:lcview-liveness", "无")
@@ -224,6 +253,83 @@ class TestParse(unittest.TestCase):
         path = f.name
         self.addCleanup(Path(path).unlink)
         self.assertEqual(cp.main(["--role", "emit", path]), 0)
+
+    def test_cli_apply_pass_emits_precheck_mark(self):
+        # A-1：apply 角色通过后解析器自发 mark precheck（脚本自发替代 AI
+        # 手打，B-1 实测已证伪手动依赖）；emit 角色不打点
+        import io
+        import os
+        import tempfile
+        from contextlib import redirect_stdout
+        from unittest import mock
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        old_root = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = tmp.name
+        old_batch = os.environ.pop("CDP_BATCH_ID", None)
+
+        def _restore():
+            if old_root is None:
+                os.environ.pop("CDP_PROJECT_ROOT", None)
+            else:
+                os.environ["CDP_PROJECT_ROOT"] = old_root
+            if old_batch is not None:
+                os.environ["CDP_BATCH_ID"] = old_batch
+        self.addCleanup(_restore)
+
+        # 构造活跃批打点文件（start），apply 通过后 mark 应追加 precheck
+        import cdp_timing
+        cdp_timing.main(["start", "--batch", "1a2b3c4d5e6f".replace("", "")[:0] + "abc123def456"])
+        f = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
+                                        encoding="utf-8")
+        f.write(VALID_SV)
+        f.close()
+        path = f.name
+        self.addCleanup(Path(path).unlink)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cp.main(["--role", "apply", "--expect-base",
+                          "1a2b3c4d5e6f", path])
+        self.assertEqual(rc, 0)
+        marks = cdp_timing.read_marks("abc123def456")
+        self.assertEqual([m["name"] for m in marks], ["precheck"])
+
+    def test_cli_emit_pass_no_precheck_mark(self):
+        # emit 角色通过后不打点（emit 侧无活跃 apply 批）
+        import io
+        import os
+        import tempfile
+        from contextlib import redirect_stdout
+        from unittest import mock
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        old_root = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = tmp.name
+        old_batch = os.environ.pop("CDP_BATCH_ID", None)
+
+        def _restore():
+            if old_root is None:
+                os.environ.pop("CDP_PROJECT_ROOT", None)
+            else:
+                os.environ["CDP_PROJECT_ROOT"] = old_root
+            if old_batch is not None:
+                os.environ["CDP_BATCH_ID"] = old_batch
+        self.addCleanup(_restore)
+
+        import cdp_timing
+        cdp_timing.main(["start", "--batch", "abc123def456"])
+        f = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
+                                        encoding="utf-8")
+        f.write(VALID_SV)
+        f.close()
+        path = f.name
+        self.addCleanup(Path(path).unlink)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cp.main(["--role", "emit", path])
+        self.assertEqual(rc, 0)
+        marks = cdp_timing.read_marks("abc123def456")
+        self.assertEqual(marks, [])
 
 
 if __name__ == "__main__":

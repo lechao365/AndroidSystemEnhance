@@ -126,20 +126,18 @@ def validate_diff(path):
 def _mark_edit_validate():
     """自发 edit_validate 打点：diff 校验完成即 mark，供收据 edit 段细分。
 
-    照 selfcheck._mark_selfcheck 的子进程调法（batch 识别走 cdp_timing
-    current-batch.json 三级回落）；发点失败仅 stderr 提示，不改返回码
-    （打点诊断数据，非校验结果本身）。
+    进程内直调 emit_mark（B8/C-1 打点胶水收敛，与 selfcheck 同款；batch
+    识别走 CDP_BATCH_ID/current-batch.json 回落）；发点失败仅 stderr 提示，
+    不改返回码（打点诊断数据，非校验结果本身）。
     """
-    timing = Path(__file__).resolve().parent / "cdp_timing.py"
+    timing_dir = Path(__file__).resolve().parent
+    if str(timing_dir) not in sys.path:
+        sys.path.insert(0, str(timing_dir))
     try:
-        proc = subprocess.run([sys.executable, str(timing), "mark",
-                               "--name", "edit_validate"],
-                              capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=10)
-        if proc.returncode != 0:
-            print(f"warn: edit_validate 打点失败（不阻断）: {proc.stderr.strip()}",
-                  file=sys.stderr)
-    except (OSError, subprocess.TimeoutExpired) as e:
+        import cdp_timing
+        if not cdp_timing.emit_mark("edit_validate"):
+            print("warn: edit_validate 打点失败（不阻断）", file=sys.stderr)
+    except Exception as e:
         print(f"warn: edit_validate 打点失败（不阻断）: {e}", file=sys.stderr)
 
 

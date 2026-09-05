@@ -39,6 +39,21 @@ PATHS_OK = (
 
 BASELINE_NO_PATHS = "baselines: []\n"
 
+# doc-sync-mapping 最小合法形态（批次六 D8 治理面；fixture 缺失会被
+# config 检查判"读取失败"红）
+DOCSYNC_OK = (
+    "version: 1\n"
+    "routes:\n"
+    "  - match: '**/LcView/**'\n"
+    "    docs: ['docs/01-x']\n"
+    "    mode: fixed\n"
+    "    priority: 100\n"
+    "  - match: '**'\n"
+    "    docs: []\n"
+    "    mode: ai-pending\n"
+    "    priority: 0\n"
+)
+
 
 class CheckConfigTestBase(unittest.TestCase):
     def setUp(self):
@@ -51,6 +66,8 @@ class CheckConfigTestBase(unittest.TestCase):
         (cfg / "paths.conf").write_text(PATHS_OK, encoding="utf-8")
         (cfg / "baseline-status.yaml").write_text(BASELINE_NO_PATHS,
                                                   encoding="utf-8")
+        (cfg / "doc-sync-mapping.yaml").write_text(DOCSYNC_OK,
+                                                   encoding="utf-8")
 
     def tearDown(self):
         os.environ.pop("CHECK_CONFIG_ROOT", None)
@@ -123,6 +140,67 @@ class TestConfigMode(CheckConfigTestBase):
             r = self._run()
             self.assertEqual(r.returncode, 1, bad)
             self.assertIn("timeout_s 须为正整数", r.stdout, bad)
+
+    # ── 批次六 D7：modules 白名单 / push dst 必填 / cases None ──────────
+
+    def test_module_unknown_key_is_red(self):
+        # 拼错键（test_taget）原被消费方静默忽略——白名单判红
+        self._rewrite_cases(YAML_OK.replace(
+            "    test_targets: [u1]\n",
+            "    test_taget: [u1]\n    test_targets: [u1]\n"))
+        r = self._run()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("modules.m1 含未知键: test_taget", r.stdout)
+
+    def test_push_missing_dst_is_red(self):
+        # 原 `or []` 空迭代静默放行；批次六判红
+        self._rewrite_cases(YAML_OK.replace("        dst: [/vendor/bin/b1]\n",
+                                            "        module: b1\n"))
+        r = self._run()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("modules.m1.push 缺 dst", r.stdout)
+
+    def test_case_none_value_is_red(self):
+        # `cases.c3:` YAML 空值原当 str 旧形态放行——判红
+        self._rewrite_cases(YAML_OK + "  c3:\n")
+        r = self._run()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("cases.c3 值为空", r.stdout)
+
+    # ── 批次六 D8：doc-sync-mapping 治理 ───────────────────────────────
+
+    def _rewrite_docsync(self, text):
+        (self.root / "harness" / "config" / "doc-sync-mapping.yaml").write_text(
+            text, encoding="utf-8")
+
+    def test_docsync_bad_mode_is_red(self):
+        self._rewrite_docsync(DOCSYNC_OK.replace("mode: fixed", "mode: fixd"))
+        r = self._run()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("routes[0].mode 非法: 'fixd'", r.stdout)
+
+    def test_docsync_fixed_without_priority_is_red(self):
+        # fixed 按 priority 降序分发，缺了排序漂移——判红
+        self._rewrite_docsync(DOCSYNC_OK.replace("    priority: 100\n", ""))
+        r = self._run()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("routes[0]（fixed）缺 priority", r.stdout)
+
+    def test_docsync_duplicate_key_is_red(self):
+        # safe_load 默认静默取后值；重复键须判红（ai-pending 兜底条
+        # docs 空列表合法，不触发 docs 检查）
+        self._rewrite_docsync(DOCSYNC_OK.replace(
+            "    mode: fixed\n", "    mode: fixed\n    mode: fixed\n"))
+        r = self._run()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("doc-sync-mapping.yaml 重复键: 'mode'", r.stdout)
+
+    def test_docsync_unknown_key_is_red(self):
+        self._rewrite_docsync(DOCSYNC_OK.replace(
+            "    priority: 100\n", "    priority: 100\n    tgt: x\n"))
+        r = self._run()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("routes[0] 含未知键: tgt", r.stdout)
 
     def test_paths_unknown_and_missing_keys_are_red(self):
         cfg = self.root / "harness" / "config" / "paths.conf"

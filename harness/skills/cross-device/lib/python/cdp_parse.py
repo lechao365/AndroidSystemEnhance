@@ -8,7 +8,8 @@
 退出码: 0 通过 / 3 参数错误·文件不可读或非 UTF-8 / 11 结构错误(含未知行) / 12 空批 / 14 三标签缺失
        / 15 base 非法 / 16 预算超限(>500 或 <50) / 17 验收规则违规 / 18 base 不匹配
 角色差异: validate_batch 恒返回原始判定码；降级（apply 仅对 17 → WARN）由
-main() 依据 SOFT_ERRORS + role 统一处理（16 双角色 blocking）。
+main() 依据 SOFT_ERRORS + role 统一处理（16/18 双角色 blocking；19 引号
+违规仅 emit 角色校验）。
 """
 import hashlib
 import re
@@ -33,6 +34,7 @@ EXIT_BAD_BASE = 15
 EXIT_BUDGET = 16
 EXIT_ACCEPTANCE = 17
 EXIT_BASE_MISMATCH = 18
+EXIT_QUOTE = 19
 
 # 仅 17 在 apply 角色降级（spec §4.3）；16 不降级
 SOFT_ERRORS = {EXIT_ACCEPTANCE}
@@ -119,6 +121,15 @@ def validate_batch(text: str, role: str = "emit"):
     if not (MIN_CHARS <= n <= MAX_CHARS):
         return EXIT_BUDGET, [f"预算 {MIN_CHARS}~{MAX_CHARS} 字符，实际 {n}"]
 
+    # 批次六 C1 引号防呆：批次正文禁单双引号（' 与 "）——apply 侧写
+    # 临时文件方式不受 emit 控制，正文含引号会被 shell 展开吞字致批次
+    # 结构损坏（收据 batch_base 空根因）。仅 emit 角色拒（19）：批次
+    # 尚未交付，修正成本为零；apply 角色不拒（文本已产生，拒批只断链
+    # 不修复，残留引号由既有 heredoc 写入法兜底）。
+    if role == "emit" and ("'" in norm or '"' in norm):
+        return EXIT_QUOTE, ["批次正文含单/双引号字符（' 或 \"）——"
+                            "传输层会展开吞字，须改用中文标点或去引号"]
+
     if b.mode == "sv":
         if not b.acceptance or b.acceptance == "无":
             return EXIT_ACCEPTANCE, ["-sv 批次验收必须非空且不得为「无」"]
@@ -161,6 +172,21 @@ def check_acceptance_syntax(acc: str) -> str | None:
         return None
     return ("验收必须为 case:<id>[,<id>...]（id 限小写字母数字与连字符，"
             "多个用逗号分隔）或 manual:<自由文本>")
+
+
+def _emit_precheck_mark():
+    """apply 角色 precheck 通过后自发 mark（A-1/B-1：脚本自发替代 AI 手打）。
+
+    SKILL.md 旧规要求 AI 在 precheck 通过后手动 mark precheck——实测漂移
+    （与 edit_item 漏打同根因），收敛到解析器自身：apply 角色 exit 0 前进
+    程内直调 emit_mark。emit 角色不打点（emit 侧无活跃 apply 批）；失败
+    静默不阻断校验主流程（打点诊断数据）。
+    """
+    try:
+        import cdp_timing  # 延迟导入：cdp_timing 顶层 import cdp_parse，顶层互导成环
+        cdp_timing.emit_mark("precheck")
+    except Exception:
+        pass
 
 
 def main(argv=None):
@@ -213,6 +239,8 @@ def main(argv=None):
     b = parse_batch(text)
     print(f"batch_id: {batch_id_from_text(text)}")
     print(f"mode: {b.mode} base: {b.base}")
+    if role == "apply":
+        _emit_precheck_mark()
     return EXIT_OK
 
 

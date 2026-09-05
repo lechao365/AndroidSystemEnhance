@@ -642,18 +642,14 @@ def _mark_stage(name, batch_id=None, zero=False):
 
 
 def _resolve_batch_id(batch_id):
-    """batch 识别三级回落：显式 batch_id > 环境变量 CDP_BATCH_ID >
-    log 目录唯一 timings 文件（复用 _mark_stage/cdp_timing 同款口径，
-    多打点文件时静默跳过防误标其他批次）。返回 batch_id 或 None。"""
-    if batch_id:
-        return batch_id
-    env_id = os.environ.get("CDP_BATCH_ID", "").strip()
-    if env_id:
-        return env_id
-    files = sorted(cdp_paths.log_apply_dir().glob("timings-*.json"))
-    if len(files) == 1:
-        return files[0].stem[len("timings-"):]
-    return None
+    """batch 识别回落：显式 batch_id > 环境变量 CDP_BATCH_ID >
+    current-batch.json 指针 > log 目录唯一 timings 文件（多文件静默跳过
+    防误标其他批次）——薄壳委托 verify_common.resolve_batch_id_fallback
+    （批次四 B6 统一口径：与 cdp_timing mark 落点/产物命名同源）。
+    返回 batch_id 或 None。"""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
+    from verify_common import resolve_batch_id_fallback
+    return resolve_batch_id_fallback(batch_id)
 
 
 def _batch_case_labels(batch_file):
@@ -982,10 +978,10 @@ def main(argv=None):
         }
         p = Path(args.result_file)
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_name(p.name + ".tmp")
-        tmp.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n",
-                       encoding="utf-8")
-        os.replace(tmp, p)
+        # 统一原子写原语（批次四收敛：tmp 带 pid 防并发互写）
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
+        from verify_common import atomic_write_json
+        atomic_write_json(p, result)
     print(json.dumps({"overall": overall, "items": items,
                       "device_dirty": device_dirty,
                       "teardown_detail": teardown_detail},

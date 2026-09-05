@@ -149,13 +149,11 @@ def ensure_user(ep, need_root):
 
 
 def _atomic_write_json(path, data):
-    """原子写 JSON 产物（方向 3）：先写临时文件再 os.replace，防半截文件被当证据。"""
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-                   encoding="utf-8")
-    os.replace(tmp, p)
+    """原子写 JSON 产物：薄壳委托 verify_common（批次四收敛，统一 tmp 带
+    pid 原语；签名与调用点不变，防半截文件被当证据）。"""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
+    from verify_common import atomic_write_json
+    atomic_write_json(path, data)
 
 
 def device_binary_fingerprint(ep, name):
@@ -291,30 +289,22 @@ def _default_out():
 
 
 def _mark_stage(name, dur_s=None):
-    """验证阶段自动打点：cdp_timing.py mark（batch 识别：CDP_BATCH_ID 环境变量
-    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。
+    """验证阶段自动打点：进程内直调 emit_mark（对齐 ws_acceptance 先例，
+    消除逐段子进程 spawn 的 0.1~0.3s 启动开销；batch 识别：CDP_BATCH_ID
+    环境变量 > current-batch.json；均缺时静默跳过，失败不阻断口径）。
 
     dur_s（方向 1）：调用方自测脚本内实测秒数，mark 段耗时取 dur_s，相邻差额
     减去 dur_s 后的余量落 gap_before_<name>——脚本启动前的 AI 活动时间不再
     污染段口径（上批 sync 段记 71.2s 而脚本自报 13.9s，段口径不可信则后续
     提速无从测量）。
     """
-    timing = (Path(__file__).resolve().parents[1] / "cross-device"
-              / "lib" / "python" / "cdp_timing.py")
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(timing.parent) + os.pathsep + env.get("PYTHONPATH", "")
-    args = [sys.executable, str(timing), "mark", "--name", name]
-    if dur_s is not None:
-        args += ["--dur-s", str(round(float(dur_s), 3))]
-    try:
-        r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=10, env=env)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        print(f"warn: 打点 {name} 失败（不阻断）: {e}", file=sys.stderr)
-        return
-    if r.returncode != 0:
-        print(f"warn: 打点 {name} 失败（不阻断）: {r.stderr.strip()}",
-              file=sys.stderr)
+    timing_dir = (Path(__file__).resolve().parents[1] / "cross-device"
+                  / "lib" / "python")
+    if str(timing_dir) not in sys.path:
+        sys.path.insert(0, str(timing_dir))
+    import cdp_timing
+    if not cdp_timing.emit_mark(name, dur_s=dur_s):
+        print(f"warn: 打点 {name} 失败（不阻断）", file=sys.stderr)
 
 
 def main(argv=None):

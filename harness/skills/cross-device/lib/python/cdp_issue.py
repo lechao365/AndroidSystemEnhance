@@ -13,7 +13,7 @@ import datetime
 import re
 from pathlib import Path
 
-from cdp_paths import data_known_issues_dir
+from cdp_paths import atomic_write_text, data_known_issues_dir
 
 # 多行模式：^$ 锚定每一行（缺 MULTILINE 会导致 from_text 全默认值）
 # 值用 (.*) 允许空值（如 resolved_in 未解决时留空），空值头字段也能被解析
@@ -115,7 +115,7 @@ def write_issue(issue, body_text, slug=""):
         path = d / f"{ts}-{issue.batch_id}-{slug}-{n}.md"
         n += 1
     content = issue.header_lines() + "\n\n## body\n\n" + body_text.strip() + "\n"
-    path.write_text(content, encoding="utf-8")
+    atomic_write_text(path, content)  # 原子写（P1-2：半写 issue 损坏记录）
     sync_index(d)
     return path
 
@@ -180,7 +180,7 @@ def set_status(path, new_status, issues_dir=None):
     new_header = _FIELD_RE.sub(
         lambda m: f"- status: {new_status}" if m.group(1) == "status" else m.group(0),
         header)
-    p.write_text(new_header + sep + body, encoding="utf-8")
+    atomic_write_text(p, new_header + sep + body)  # 原子写（P1-2）
     sync_index(issues_dir)
     return p
 
@@ -207,15 +207,20 @@ def read_index(issues_dir=None):
 
 
 def sync_index(issues_dir=None):
-    """按文件集重建 index.md（一行一条: issue_id origin blocking task status）。"""
+    """按文件集重建 index.md（一行一条: issue_id origin blocking task status）。
+
+    原子写（P1-3）：index 是详情文件的投影（真相源为各 .md），并发写时
+    last-writer-wins 不再产出半写 index 堵死门禁；双向一致性漂移由
+    validate_issue 事后检出。
+    """
     d = issues_dir or data_known_issues_dir()
     lines = []
     for p in issue_files(d):
         issue = read_issue(p)
         lines.append(f"{issue.issue_id} {issue.origin} "
                      f"{str(issue.blocking).lower()} {issue.task} {issue.status}")
-    (d / "index.md").write_text("\n".join(lines) + ("\n" if lines else ""),
-                                encoding="utf-8")
+    atomic_write_text(d / "index.md",
+                      "\n".join(lines) + ("\n" if lines else ""))
 
 
 def validate_issue(path, issues_dir=None):

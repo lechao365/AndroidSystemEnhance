@@ -85,6 +85,17 @@ def _git(root, *args):
                           encoding="utf-8", errors="replace", timeout=120)
 
 
+def origin_base(root=None):
+    """origin/dev HEAD 前 12 位 hex（批次 base 字段来源，批次六 P2-25）。
+
+    emit 产批写 base:<12hex> 直接取 precheck 输出，省一次 rev-parse
+    探测与手抄漂移；origin/dev 缺失返 None（调用方按缺省处理）。
+    """
+    root = Path(root) if root else project_root()
+    r = _git(root, "rev-parse", "--short=12", "origin/dev")
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
 def _receipt_tracked_by_origin(root: Path, receipt_path: Path) -> bool:
     """最新收据文件是否已被 origin/dev 跟踪：该相对路径的 blob 存在于
     origin/dev tree（git cat-file -e origin/dev:<rel> 成功）。
@@ -145,6 +156,12 @@ def main(argv=None):
     args = ap.parse_args(argv)
     ok, reason, detail = precheck(do_pull=not args.no_pull)
     out = {"ok": ok, "reason": reason, "detail": detail[:100]}
+    # 批次六 P2-25：ok 时输出 base（origin/dev HEAD 前 12 位），emit 产批
+    # 首行 base:<12hex> 直接取此值，省一次 rev-parse 与手抄漂移
+    if ok:
+        base = origin_base()
+        if base:
+            out["base"] = base
     # warns 合入三类：KIR-005 存量告警（issue_id 列表）+ 领先告警（文字串）
     # + 提交前缀告警（方向 4，origin/dev 最新提交标题风格漂移提示）
     warns = known_issues_warns() + lead_warns() + commit_prefix_warns()

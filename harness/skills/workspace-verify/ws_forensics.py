@@ -92,13 +92,11 @@ class _Budget:
 
 
 def _atomic_write_json(path, data):
-    """原子写 manifest：先写临时文件再 os.replace，防半截 manifest 被当证据。"""
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-                   encoding="utf-8")
-    os.replace(tmp, p)
+    """原子写 manifest：薄壳委托 verify_common（批次四收敛，统一 tmp 带
+    pid 原语；签名与调用点不变，防半截 manifest 被当证据）。"""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
+    from verify_common import atomic_write_json
+    atomic_write_json(path, data)
 
 
 def _read_host_file(path):

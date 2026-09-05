@@ -5,7 +5,9 @@
 # 设计目的：各步间原为 AI 编排往返（收据 gap_before_verify_* 多段 ~55s/批）。
 #   本脚本把确定性步骤串联为单次执行：
 #     sync → connect → push → unit_test → acceptance → report
-#   逐段透传 stdout、rc 逐段门禁、失败即停（后续步骤不执行），
+#   逐段透传 stdout、rc 逐段门禁、失败停链（余下验证步记 skipped，report
+#   步仍执行——fail 收据由前序真实 rc 机械派生落盘，loop done --receipt
+#   契约要求失败轮次也有收据记账，A1 修订），
 #   末尾输出自描述 JSON（run_id/逐段真实 rc 与起止/overall/skipped/canceled）。
 #   acceptance/report 参数由 --batch-file/--case/--wait-ready/--log-since
 #   确定性构造；report 收据参数（result/build/board/summary）由前序步骤
@@ -17,15 +19,16 @@
 #   文件锁（finally 成对释放；占用 exit 3，等待策略归调用方）。
 # 进程隔离：每步子进程 start_new_session 独立进程组；单步超时 killpg
 #   有界 teardown（TERM→宽限 10s→KILL），被杀步骤 rc=None + canceled=true。
-# 打点：各子脚本自发 mark（verify_sync/push/unit_test/acceptance 口径不变）；
+# 打点：链起止自发 verify_start/verify_end（batch 归属明确时）；各子脚本
+#   自发 mark（verify_sync/push/unit_test/acceptance 口径不变）；
 #   connect/report 不打点（连接量不到、收据即终点）。
 # 子步骤产物共享 run_id：编排器把 run_id 注入 CDP_RUN_ID 环境变量，push/
 #   unit_test/acceptance 产物同批同 run_id（ws_report PASS 同批核验依赖）。
 # 用法：python3 ws_verify_chain.py [--product rpi5] [--out <aosp out>]
 #   [--result-file <json>] [--batch-file <cdp>] [--case <标签>]
 #   [--wait-ready] [--log-since <ts>] [--build pass|fail|skip]
-# 退出码：0 全链过 / 1 某步失败（JSON 标注停在哪步）/ 2 参数错误 /
-#   3 编排锁被占用（workspace/device 互斥）
+# 退出码：0 全链过 / 1 某步失败（JSON 标注停在哪步；fail 收据仍落盘）/
+#   2 参数错误 / 3 编排锁被占用（workspace/device 互斥）
 # ============================================================
 
 import argparse
@@ -34,6 +37,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from contextlib import nullcontext
@@ -44,7 +48,9 @@ _SYNC = _SCRIPT_DIR.parent / "sync-code-to-workspace" / "sync_code_to_workspace.
 # 复用仓内共享库：cdp_parse（batch_id 解析，与 ws_report 同路径注入方式）
 # _SCRIPT_DIR=harness/skills/workspace-verify（目录）：parents[0]=skills
 sys.path.insert(0, str(_SCRIPT_DIR.parents[0] / "cross-device" / "lib" / "python"))
+sys.path.insert(0, str(_SCRIPT_DIR.parents[1] / "lib"))
 from cdp_parse import batch_id_from_text  # noqa: E402
+from verify_common import atomic_write_json as _atomic_write_json_impl  # noqa: E402
 
 import ws_lock  # noqa: E402
 
@@ -71,13 +77,9 @@ _CROSS_DEVICE_LOG = _SCRIPT_DIR.parents[1] / "log" / "cross-device"
 
 
 def _atomic_write_json(path, data):
-    """原子写 JSON：先落 tmp 再 os.replace，避免半写产物污染证据链。"""
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-                   encoding="utf-8")
-    os.replace(tmp, p)
+    """原子写 JSON：薄壳委托 verify_common.atomic_write_json（批次四收敛，
+    统一 tmp 带 pid 原语；签名与调用点不变，防半写产物污染证据链）。"""
+    _atomic_write_json_impl(path, data)
 
 
 def _run_step(argv, timeout):
@@ -153,13 +155,23 @@ def _run_selfcheck(timeout=600):
     """跑 harness/lib/selfcheck.py 取自检摘要文本（board 收据强制入收据，方向 4）。
 
     rc 全 0 与否由 ws_report 扫描 *_rc 键判定——本函数只负责把真实输出
-    原样带入收据，不自评不吞错。
+    原样带入收据，不自评不吞错。异常兜底（B3/C2）：selfcheck 进程挂死
+    （TimeoutExpired）或启动失败（OSError）时返回带 error 标注的文本交
+    ws_report 的 *_rc 扫描判红，不沿编排栈上抛破坏链的自描述 JSON 输出
+    与退出码语义。
     """
-    proc = subprocess.run(
-        [sys.executable, str(_SCRIPT_DIR.parents[1] / "lib" / "selfcheck.py")],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=timeout)
-    return ((proc.stdout or "") + (proc.stderr or "")).strip()
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(_SCRIPT_DIR.parents[1] / "lib" / "selfcheck.py")],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout)
+        return ((proc.stdout or "") + (proc.stderr or "")).strip()
+    except subprocess.TimeoutExpired:
+        return (f"error: selfcheck 超时（>{timeout}s）pytest_rc=124 | "
+                "refs_rc=1 | config_rc=1 | contract_rc=1")
+    except OSError as e:
+        return (f"error: selfcheck 启动失败: {e} pytest_rc=1 | refs_rc=1 | "
+                "config_rc=1 | contract_rc=1")
 
 
 def _build_report_argv(chain_args, derive):
@@ -219,6 +231,39 @@ def _derive_report_args(steps, overall):
             "summary": summary}
 
 
+# selfcheck 预跑 join 上限（秒）：selfcheck 内部对 pytest/治理工具各有
+# 超时兜底（900s/120s），join 再放宽一层防线程悬挂拖死链
+_SELFCHECK_JOIN_TIMEOUT_S = 1200
+
+
+def _start_selfcheck_preflight():
+    """锁外预跑 selfcheck（B3）：返回 (thread, result_dict)。
+
+    selfcheck 是纯文件系统检查（pytest harness + 治理扫描），不触碰
+    workspace/设备态，与锁内 sync/connect/push 等步骤并行无资源冲突；
+    改锁内同步串行（report 前固定 +30s，且拉长 workspace/device 双锁
+    互斥窗口）为后台并行，report 步 join 收割。batch_file 缺失（report
+    必 skipped）时不启动。daemon=True：LockHeld 提前返回等场景主进程
+    退出不挂。
+    """
+    result = {}
+
+    def _worker():
+        result["text"] = _run_selfcheck()
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    return t, result
+
+
+def _join_selfcheck_preflight(thread, result):
+    """收割预跑结果：join 超限/空结果时同步兜底重跑（保证收据有值）。"""
+    if thread is not None:
+        thread.join(timeout=_SELFCHECK_JOIN_TIMEOUT_S)
+    text = (result.get("text") or "").strip()
+    return text if text else _run_selfcheck()
+
+
 def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
               case=None, wait_ready=False, log_since=None, build=None,
               timeouts=None, use_locks=True):
@@ -255,12 +300,18 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
         timings = _CROSS_DEVICE_LOG / f"timings-{batch_id}.json" if batch_id else None
         chain_args["timings_file"] = str(timings) if timings and timings.is_file() else None
 
+    # 锁外预跑 selfcheck（B3）：与锁等待/前序步骤并行，report 步收割
+    selfcheck_thread = selfcheck_result = None
+    if batch_file:
+        selfcheck_thread, selfcheck_result = _start_selfcheck_preflight()
+
     try:
         # 锁获取在 with 进入点发生（生成器上下文），LockHeld 统一走 rc 3 处理
         with (ws_lock.verify_locks() if use_locks else nullcontext()):
             return _run_chain_locked(run_id, batch_id, product, out,
                                      result_file, batch_file, build,
-                                     timeout_map, chain_args)
+                                     timeout_map, chain_args,
+                                     selfcheck_thread, selfcheck_result)
     except ws_lock.LockHeld as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 3, {"run_id": run_id, "batch_id": batch_id, "overall": "fail",
@@ -269,12 +320,34 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
                    "error": str(exc)}
 
 
+def _chain_mark(name, batch_id):
+    """verify 链起止自发 mark（verify_start/verify_end，B1：脚本自发替代
+    AI 手打——旧 SKILL 手动 mark verify_start/verify_end 实测漂移且不在
+    段名常量表）。仅当批次归属明确（batch_id 解析成功）时打点，防把链段
+    打到 current-batch.json 回落的无关批次上；失败静默不阻断编排。"""
+    if not batch_id:
+        return
+    try:
+        import cdp_timing
+        cdp_timing.emit_mark(name, batch_id=batch_id)
+    except Exception:
+        pass
+
+
 def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
-                      build, timeout_map, chain_args):
-    """锁内编排主体：逐步执行 + 运行态落盘（仅编排器写）。"""
+                      build, timeout_map, chain_args,
+                      selfcheck_thread=None, selfcheck_result=None):
+    """锁内编排主体：逐步执行 + 运行态落盘（仅编排器写）。
+
+    失败停链语义（A1 修订）：某步失败/取消后，其余验证步记 skipped，
+    但 report 步仍执行——fail 收据由前序真实 rc 机械派生落盘（loop done
+    --receipt 契约要求失败轮次也有收据记账；report 源缺失时仍 skipped）。
+    """
     steps, skipped, skip_reasons = [], [], {}
     overall, canceled_any = "pass", False
+    fail_stop = False
     started_at = time.time()
+    _chain_mark("verify_start", batch_id)
     for name in _CHAIN_STEPS:
         # 无验收源/无收据源：确定性跳过（记账留痕，不算失败）
         if name == "acceptance" and not (chain_args.get("case") or batch_file):
@@ -285,12 +358,19 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
             skipped.append(name)
             skip_reasons[name] = "缺 --batch-file（模式 A 收据需批次源）"
             continue
+        if fail_stop and name != "report":
+            # 链已停：余下验证步记 skipped；report 豁免（fail 收据落盘）
+            skipped.append(name)
+            skip_reasons[name] = "链已停（前序步骤失败，收据仍落盘）"
+            continue
         if name == "report":
             derive = _derive_report_args(steps, overall)
             if build:  # 显式传参优先（AI 对 build 段的判定不可替代时使用）
                 derive["build"] = build
-            # board 收据强制自检证据：链内直跑 selfcheck（确定性，不经 AI）
-            chain_args["selfcheck"] = _run_selfcheck()
+            # board 收据强制自检证据：锁外预跑收割（B3；异常兜底见
+            # _run_selfcheck——挂死/启动失败返回带 error 标注文本判红）
+            chain_args["selfcheck"] = _join_selfcheck_preflight(
+                selfcheck_thread, selfcheck_result)
             argv = _build_report_argv(chain_args, derive)
         else:
             argv = _build_argv(name, product, out, chain_args)
@@ -303,10 +383,8 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
         canceled_any = canceled_any or canceled
         if canceled or rc is None or rc != 0:
             overall = "fail"
-            done = {s["name"] for s in steps}
-            skipped += [n for n in _CHAIN_STEPS
-                        if n not in done and n not in skipped]
-            break
+            fail_stop = True  # 不 break：report 步仍执行落 fail 收据（A1）
+    _chain_mark("verify_end", batch_id)
     ended_at = time.time()
     exit_rc = 0 if overall == "pass" else 1
     result = {"run_id": run_id, "batch_id": batch_id,

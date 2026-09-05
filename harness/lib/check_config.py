@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """check_config.py — 配置与契约治理检查（接入 selfcheck 判红链）。
 
-两种模式（互斥，默认 config）：
+三种模式（--all 与单模式互斥，默认 config）：
   check_config.py             # config 校验（方向 1/2）：
     - verify-cases.yaml modules 段：每模块齐备 targets/test_targets/push
       三键（非空列表），targets 跨模块唯一，push 目标（dst 嵌套列表展开）
@@ -19,8 +19,13 @@
       harness/skills/<name>/SKILL.md；豁免清单见 _EXEMPT_COMMANDS
     - harness/skills/* 实际集合遍历：每个 skill 目录须有 SKILL.md
     - 按实际文件集合核对，不固化数量（新增/删除文件自动纳入检查面）
+  check_config.py --all       # config+contract 单进程双模式（B2，selfcheck
+    提速：消两次 Python 启动与两遍 yaml 导入/全量扫描）。输出两段结论 +
+    末尾两行机器可读 rc（config_rc=<n> / contract_rc=<n>，供 selfcheck
+    分别判红）；单模式输出格式不变。
 
-退出码：0 全过 / 1 有违规（明细列 stdout，末行结论供 selfcheck 摘要拼接）。
+退出码：0 全过 / 1 有违规（--all 时任一段违规即 1；明细列 stdout，
+结论行供 selfcheck 摘要拼接）。
 ROOT 可经 CHECK_CONFIG_ROOT 环境变量注入（单测隔离）。
 """
 import os
@@ -44,6 +49,16 @@ _VAR_DEFAULT_RE = re.compile(r"\$\{\w+:-(.*?)\}")
 
 # cases 段 dict 形态允许的键（生命周期资产，方向 1）
 _CASE_DICT_KEYS = {"acceptance", "setup_snapshot", "teardown", "timeout_s"}
+
+# modules 段已知键白名单（批次六 D7）：拼错键（如 test_taget）会静默被
+# 消费方忽略、用例行为与登记脱节——未知键直接判红
+_MODULE_KEYS = {"targets", "test_targets", "push", "test_src",
+                "test_targets_run_as_root"}
+
+# doc-sync-mapping.yaml route 合法 mode 与键（批次六 D8：映射规则治理，
+# 拼错 mode/缺 priority 会让 /sync-code-to-doc 分发静默漂移）
+_DOC_SYNC_MODES = {"fixed", "ai-diff", "ai-pending"}
+_DOC_SYNC_KEYS = {"match", "docs", "mode", "priority", "note"}
 
 # 契约豁免清单（方向 3）：
 #   opencode-server —— opencode 内建服务入口，不对应 harness skill；
@@ -83,6 +98,12 @@ def check_verify_cases(root):
             v = mod.get(key)
             if not isinstance(v, list) or not v:
                 _fail(errors, f"modules.{name} 缺 {key}（须非空列表）")
+        # 批次六 D7：未知键判红（白名单防拼写静默脱管）
+        unknown_keys = set(mod) - _MODULE_KEYS
+        if unknown_keys:
+            _fail(errors, f"modules.{name} 含未知键: "
+                          f"{', '.join(sorted(unknown_keys))}"
+                          f"（已知: {', '.join(sorted(_MODULE_KEYS))}）")
         for t in mod.get("targets") or []:
             if t in seen_targets:
                 _fail(errors, f"targets 重复: {t!r}（modules.{seen_targets[t]}"
@@ -93,7 +114,13 @@ def check_verify_cases(root):
             if not isinstance(entry, dict):
                 _fail(errors, f"modules.{name}.push 含非法项（须映射）")
                 continue
-            for dst in entry.get("dst") or []:
+            # 批次六 D7：dst 必填（原 `or []` 空迭代静默放行，缺 dst 的
+            # push 项会被消费方跳过而不被发现）
+            dst_list = entry.get("dst")
+            if not isinstance(dst_list, list) or not dst_list:
+                _fail(errors, f"modules.{name}.push 缺 dst（须非空路径列表）")
+                continue
+            for dst in dst_list:
                 if not isinstance(dst, str) or not dst.startswith("/"):
                     _fail(errors, f"push 目标须绝对路径: {dst!r}"
                                   f"（modules.{name}.{entry.get('module')}）")
@@ -102,6 +129,12 @@ def check_verify_cases(root):
         _fail(errors, "cases 段缺失或为空")
         cases = {}
     for name, val in cases.items():
+        if val is None:
+            # 批次六 D7：`cases.xxx:`（YAML 空值）原被当非 dict 放行，
+            # 用例无 acceptance 等生命周期定义却占位——判红
+            _fail(errors, f"cases.{name} 值为空（None）——须 dict 形态"
+                          "（含 acceptance）或 str 旧形态")
+            continue
         if not isinstance(val, dict):
             continue  # str 旧形态放行（无生命周期）
         unknown = set(val) - _CASE_DICT_KEYS
@@ -215,31 +248,113 @@ def check_contract(root):
     return errors
 
 
+class _DupKeyLoader(yaml.SafeLoader):
+    """拦截 YAML 重复映射键：safe_load 默认静默取后值，doc-sync-mapping
+    实测出现过 mode 键重复——重复即判红（构造函数入违观数组）。"""
+    _dup_hits = []
+
+    def construct_mapping(self, node, deep=False):
+        self.flatten_mapping(node)
+        seen = set()
+        for k_node, _ in node.value:
+            key = self.construct_object(k_node, deep=deep)
+            if key in seen:
+                self._dup_hits.append(str(key))
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
+def check_doc_sync_mapping(root):
+    """doc-sync-mapping.yaml 映射规则治理（批次六 D8），返回违规列表。
+
+    检查面：YAML 重复键（含嵌套，_DupKeyLoader 拦截）；routes 段存在且
+    为列表；每 route 键白名单（match/docs/mode/priority/note）；match
+    非空字符串；docs 须字符串列表；mode ∈ {fixed, ai-diff, ai-pending}；
+    fixed/ai-diff 须 priority 数字（分发按 priority 降序，缺了排序漂移）。
+    """
+    errors = []
+    path = root / "harness" / "config" / "doc-sync-mapping.yaml"
+    try:
+        _DupKeyLoader._dup_hits = []
+        data = yaml.load(path.read_text(encoding="utf-8"),
+                         Loader=_DupKeyLoader) or {}
+    except (OSError, yaml.YAMLError) as e:
+        return [f"doc-sync-mapping.yaml 读取失败: {e}"]
+    for k in _DupKeyLoader._dup_hits:
+        _fail(errors, f"doc-sync-mapping.yaml 重复键: {k!r}（后值静默覆盖，须删一）")
+    routes = data.get("routes")
+    if not isinstance(routes, list) or not routes:
+        _fail(errors, "doc-sync-mapping.yaml routes 段缺失或为空")
+        return errors
+    for i, route in enumerate(routes):
+        label = f"routes[{i}]"
+        if not isinstance(route, dict):
+            _fail(errors, f"doc-sync-mapping.yaml {label} 须为映射")
+            continue
+        unknown = set(route) - _DOC_SYNC_KEYS
+        if unknown:
+            _fail(errors, f"doc-sync-mapping.yaml {label} 含未知键: "
+                          f"{', '.join(sorted(unknown))}（仅许 "
+                          f"{', '.join(sorted(_DOC_SYNC_KEYS))}）")
+        match = route.get("match")
+        if not isinstance(match, str) or not match.strip():
+            _fail(errors, f"doc-sync-mapping.yaml {label} 缺 match 或非字符串")
+        docs = route.get("docs")
+        if not isinstance(docs, list) or \
+                any(not isinstance(d, str) for d in docs):
+            _fail(errors, f"doc-sync-mapping.yaml {label}.docs 须为字符串列表")
+        mode = route.get("mode")
+        if mode not in _DOC_SYNC_MODES:
+            _fail(errors, f"doc-sync-mapping.yaml {label}.mode 非法: "
+                          f"{mode!r}（须 {'/'.join(sorted(_DOC_SYNC_MODES))}）")
+        if mode in ("fixed", "ai-diff"):
+            prio = route.get("priority")
+            if not isinstance(prio, (int, float)) or isinstance(prio, bool):
+                _fail(errors, f"doc-sync-mapping.yaml {label}（{mode}）"
+                              "缺 priority 或非数字")
+    return errors
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     contract = "--contract" in argv
     if contract:
         argv.remove("--contract")
-    if argv:
-        print(f"error: 未知参数 {argv}", file=sys.stderr)
+    all_mode = "--all" in argv
+    if all_mode:
+        argv.remove("--all")
+    if argv or (contract and all_mode):
+        print(f"error: 未知参数 {argv}（--all 与 --contract 互斥）",
+              file=sys.stderr)
         return 2
-    if contract:
-        errors = check_contract(ROOT)
-        label = "contract"
-    else:
-        errors = []
+
+    def _emit(label, errors):
+        """单段检查输出：违规明细 + 结论行；返回 rc。"""
+        for e in errors:
+            print(f"[VIOLATION] {e}")
+        if errors:
+            print(f"==== {label}: 共 {len(errors)} 处违规（判红）====")
+            return 1
+        print(f"OK: {label} 检查通过，无违规。")
+        return 0
+
+    if all_mode:
         path_values, perr = _parse_paths_conf(ROOT)
-        errors += perr
-        errors += check_verify_cases(ROOT)
-        errors += check_paths_vs_baseline(ROOT, path_values)
-        label = "config"
-    for e in errors:
-        print(f"[VIOLATION] {e}")
-    if errors:
-        print(f"==== {label}: 共 {len(errors)} 处违规（判红）====")
-        return 1
-    print(f"OK: {label} 检查通过，无违规。")
-    return 0
+        cfg_rc = _emit("config", perr + check_verify_cases(ROOT)
+                       + check_paths_vs_baseline(ROOT, path_values)
+                       + check_doc_sync_mapping(ROOT))
+        ctr_rc = _emit("contract", check_contract(ROOT))
+        # 机器可读 rc 行（selfcheck --all 解析分判红；人类结论行在上）
+        print(f"config_rc={cfg_rc}")
+        print(f"contract_rc={ctr_rc}")
+        return 1 if cfg_rc or ctr_rc else 0
+
+    if contract:
+        return _emit("contract", check_contract(ROOT))
+    path_values, perr = _parse_paths_conf(ROOT)
+    return _emit("config", perr + check_verify_cases(ROOT)
+                 + check_paths_vs_baseline(ROOT, path_values)
+                 + check_doc_sync_mapping(ROOT))
 
 
 if __name__ == "__main__":

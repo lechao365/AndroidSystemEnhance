@@ -469,6 +469,27 @@ class TestReceipt(unittest.TestCase):
         self.assertEqual(got.verify_mode, "board")
         self.assertTrue(any("schema_version 非 1" in e for e in errs))
 
+    def test_write_receipt_atomic_no_half_written(self):
+        # P1-2：write_receipt 走原子写（tmp 带 pid + replace），写后无
+        # .tmp 残留，半写文件不可能以 latest 身份进入 promote 判定
+        r = _mk_receipt()
+        p = cdp_receipt.write_receipt(r, "body")
+        leftovers = list(self._dir.glob("*.tmp"))
+        self.assertEqual(leftovers, [])
+        got, errs = cdp_receipt.read_receipt(p)
+        self.assertEqual(errs, [])
+        self.assertTrue(p.is_file())
+
+    def test_append_trend_atomic_no_tmp_leftover(self):
+        # append_trend 走统一原子原语后同样无 .tmp 残留（口径统一 P1-2）
+        cdp_receipt.append_trend("20260905-120000", "abc123def456",
+                                 "pass", "board", "ok")
+        cdp_receipt.append_trend("20260905-120001", "abc123def456",
+                                 "pass", "board", "ok2")
+        leftovers = list(self._dir.glob("*.tmp"))
+        self.assertEqual(leftovers, [])
+        self.assertEqual(len(cdp_receipt.read_trend_last(self._dir)) > 0, True)
+
 
 if __name__ == "__main__":
     unittest.main()

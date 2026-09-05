@@ -270,10 +270,14 @@ class TestCdpTiming(unittest.TestCase):
 
     def test_conditional_segments_defined(self):
         # 方向 1：CONDITIONAL_SEGMENTS 含条件段（未产出不判缺），
-        # 且为 KNOWN_SEGMENTS 子集（表内 mark 不告警）
+        # 且为 KNOWN_SEGMENTS 子集（表内 mark 不告警）。
+        # push/push_commit/push_remote/verify_end：收据落盘后段（-sv 收据
+        # timings 天然不含，missing 判定排除防假 missing，B2 契约同步）。
         self.assertEqual(cdp_timing.CONDITIONAL_SEGMENTS,
                          frozenset({"edit_validate", "gen_manifest",
-                                    "edit_plan", "edit_retry", "edit_item"}))
+                                    "edit_plan", "edit_retry", "edit_item",
+                                    "push", "push_commit", "push_remote",
+                                    "verify_end"}))
         self.assertLessEqual(cdp_timing.CONDITIONAL_SEGMENTS,
                              cdp_timing.KNOWN_SEGMENTS)
 
@@ -345,7 +349,9 @@ class TestCdpTiming(unittest.TestCase):
         self.assertAlmostEqual(segs[2]["elapsed_s"], 18.0)
 
     def test_compute_segments_dur_s_small_gap_skipped(self):
-        # 余量小于阈值不落 gap 段（gap=0.5 < 1.0，防计时噪声污染归因）
+        # 余量小于阈值不落 gap 段（gap=0.5 < 1.0，防计时噪声污染归因）；
+        # B5 后被吞余量累计进末尾 unattributed 段（归因完整性可校验：
+        # segments 求和与总时长不再静默差一截）
         data = {
             "batch_id": self.batch,
             "start_wall": 1000.0,
@@ -355,8 +361,40 @@ class TestCdpTiming(unittest.TestCase):
             ],
         }
         segs = cdp_timing.compute_segments(data)
-        self.assertEqual([s["name"] for s in segs], ["a", "b", "finish"])
+        self.assertEqual([s["name"] for s in segs],
+                         ["a", "b", "finish", "unattributed"])
         self.assertAlmostEqual(segs[1]["elapsed_s"], 6.0)
+        self.assertAlmostEqual(segs[3]["elapsed_s"], 0.5)
+
+    def test_compute_segments_no_eaten_gap_no_unattributed(self):
+        # 无被吞余量（小 gap 未出现）→ 不出 unattributed 段（不冗余）
+        data = {
+            "batch_id": self.batch,
+            "start_wall": 1000.0,
+            "marks": [
+                {"name": "a", "wall": 1001.0},
+                {"name": "b", "wall": 1007.5, "dur_s": 6.5},
+            ],
+        }
+        segs = cdp_timing.compute_segments(data)
+        self.assertEqual([s["name"] for s in segs], ["a", "b", "finish"])
+
+    def test_compute_segments_monotonic_axis(self):
+        # B4：start 带 start_mono 且 marks 带 mono → 单调轴（wall 刻意
+        # 回拨也不影响段耗时）
+        data = {
+            "batch_id": self.batch,
+            "start_wall": 1000.0,
+            "start_mono": 500.0,
+            "marks": [
+                {"name": "a", "wall": 999.0, "mono": 501.0},   # wall 回拨
+                {"name": "b", "wall": 1002.0, "mono": 504.0},
+            ],
+        }
+        segs = cdp_timing.compute_segments(data)
+        self.assertEqual([s["name"] for s in segs], ["a", "b", "finish"])
+        self.assertAlmostEqual(segs[0]["elapsed_s"], 1.0)  # 501-500
+        self.assertAlmostEqual(segs[1]["elapsed_s"], 3.0)  # 504-501
 
     def test_compute_segments_dur_s_invalid_falls_back(self):
         # dur_s 越界（> interval）或非数值：回退旧算法（整段差额归该段）
@@ -430,6 +468,127 @@ class TestCdpTiming(unittest.TestCase):
         # B5：report 尾部工作（content_tree/收据落盘/trend）段，非条件段
         self.assertIn("report_post", cdp_timing.KNOWN_SEGMENTS)
         self.assertNotIn("report_post", cdp_timing.CONDITIONAL_SEGMENTS)
+
+    # ── B2 契约同步：verify_start 表内 / push 系与 verify_end 条件段 ────
+    def test_verify_start_in_known_not_conditional(self):
+        # verify_start 在收据落盘前发生（链起跑），-sv 收据应有该段
+        self.assertIn("verify_start", cdp_timing.KNOWN_SEGMENTS)
+        self.assertNotIn("verify_start", cdp_timing.CONDITIONAL_SEGMENTS)
+
+    def test_push_stages_conditional_no_warn(self):
+        # push/push_commit/push_remote/verify_end 在收据后发生（条件段），
+        # 表内 mark 不告警
+        cdp_timing.main(["start", "--batch", self.batch])
+        for name in ("push", "push_commit", "push_remote", "verify_end"):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = cdp_timing.main(["mark", "--batch", self.batch,
+                                      "--name", name])
+            self.assertEqual(rc, 0)
+            self.assertNotIn("warn", err.getvalue())
+
+    # ── B8：公开 API（emit_mark/resolve_batch_id/read_marks） ──────────
+    def test_emit_mark_in_process_and_public_api(self):
+        # emit_mark 进程内直调等价 CLI mark（无活跃批返 False 不抛）
+        self.assertFalse(cdp_timing.emit_mark("apply_selfcheck"))
+        cdp_timing.main(["start", "--batch", self.batch])
+        self.assertTrue(cdp_timing.emit_mark("apply_selfcheck", dur_s=1.5))
+        marks = cdp_timing.read_marks(self.batch)
+        self.assertEqual(marks[-1]["name"], "apply_selfcheck")
+        self.assertEqual(marks[-1]["dur_s"], 1.5)
+        # resolve_batch_id 与 current-batch.json 指针同源
+        self.assertEqual(cdp_timing.resolve_batch_id(), self.batch)
+
+    def test_emit_mark_explicit_timings_file(self):
+        # 显式 timings_file 定位（ws_report _append_direct_mark 委托路径）：
+        # 目标文件不经 current-batch.json 指针
+        target = cdp_paths.log_apply_dir() / "timings-deadbeef1234.json"
+        cdp_timing.main(["start", "--batch", self.batch])  # current 指向本批
+        cdp_timing._save(target, {"batch_id": "deadbeef1234", "marks": [],
+                                  "start_wall": 1.0})
+        self.assertTrue(cdp_timing.emit_mark(
+            "report", timings_file=str(target)))
+        marks = cdp_timing.read_marks("deadbeef1234")
+        self.assertEqual([m["name"] for m in marks], ["report"])
+
+    def test_emit_mark_quiet_no_stdout(self):
+        # emit_mark 静默：stdout 不打 mark 行（ws_report stdout 敏感）
+        cdp_timing.main(["start", "--batch", self.batch])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertTrue(cdp_timing.emit_mark("report"))
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_start_rejects_invalid_batch_id(self):
+        # P2-1：batch_id 写时校验（12 位小写 hex），非法值拒（防路径注入）
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = cdp_timing.main(["start", "--batch", "../../x"])
+        self.assertEqual(rc, 2)
+        self.assertIn("batch_id 非法", err.getvalue())
+
+    def test_mark_rejects_invalid_batch_id(self):
+        cdp_timing.main(["start", "--batch", self.batch])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = cdp_timing.main(["mark", "--batch", "../evil",
+                                  "--name", "edit"])
+        self.assertEqual(rc, 0)
+        self.assertIn("batch_id 非法", err.getvalue())  # warn 跳过不写错路径
+        self.assertFalse((cdp_paths.log_apply_dir().parent.parent.parent
+                          / "evil.json").exists())
+
+    def test_load_rejects_corrupt_structure(self):
+        # P2-11：marks 非 list / 顶层非对象 → _load 返 None（mark 按"未 start"
+        # 处理返 3，不 AttributeError 裸栈崩溃）
+        p = self._path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('{"batch_id": "x", "marks": {}}', encoding="utf-8")
+        self.assertIsNone(cdp_timing._load(p))
+        p.write_text('["not", "an", "object"]', encoding="utf-8")
+        self.assertIsNone(cdp_timing._load(p))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = cdp_timing.main(["mark", "--batch", self.batch, "--name", "edit"])
+        self.assertEqual(rc, 3)
+
+    def test_save_no_fixed_tmp_leftover(self):
+        # B3/P1-2：_save 走 atomic_write_text（tmp 带 pid），无固定 .json.tmp 残留
+        cdp_timing.main(["start", "--batch", self.batch])
+        cdp_timing.main(["mark", "--batch", self.batch, "--name", "edit"])
+        leftovers = list(cdp_paths.log_apply_dir().glob("*.json.tmp"))
+        self.assertEqual(leftovers, [])
+
+    # ── P1：中断批次归档补 aborted 终算 ─────────────────────────────────
+    def test_archive_backfills_aborted_status(self):
+        # 无 wall_end 的中断打点归档时补 status=aborted + 按已有 marks 终算
+        # segments（emit 不再看到空 segments 黑盒）
+        stale = "deadbeef0999"
+        cdp_timing.main(["start", "--batch", stale])
+        cdp_timing.main(["mark", "--batch", stale, "--name", "edit"])
+        cdp_timing.main(["start", "--batch", self.batch])  # 触发归档
+        archived = (cdp_paths.log_apply_dir() / "archive"
+                    / f"timings-{stale}.json")
+        self.assertTrue(archived.is_file())
+        data = json.loads(archived.read_text(encoding="utf-8"))
+        self.assertEqual(data.get("status"), "aborted")
+        self.assertIsNotNone(data.get("wall_end"))
+        names = [s["name"] for s in data.get("segments") or []]
+        self.assertIn("edit", names)
+
+    def test_archive_keeps_finished_file_untouched(self):
+        # 已 finish（有 wall_end）的归档文件原样移动，不补写不改内容
+        stale = "deadbeef0888"
+        cdp_timing.main(["start", "--batch", stale])
+        cdp_timing.main(["finish", "--batch", stale])
+        before = json.loads((cdp_paths.log_apply_dir()
+                             / f"timings-{stale}.json").read_text(encoding="utf-8"))
+        cdp_timing.main(["start", "--batch", self.batch])
+        archived = (cdp_paths.log_apply_dir() / "archive"
+                    / f"timings-{stale}.json")
+        after = json.loads(archived.read_text(encoding="utf-8"))
+        self.assertNotIn("status", after)
+        self.assertEqual(after["wall_end"], before["wall_end"])
 
 
 if __name__ == "__main__":

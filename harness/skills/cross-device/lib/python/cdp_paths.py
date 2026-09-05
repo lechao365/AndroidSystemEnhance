@@ -1,58 +1,30 @@
-"""cross-device pack 共享路径解析。
+"""兼容垫片（批次四 A5）：cdp_paths 实现已上移 harness/lib/cdp_paths.py。
 
-规则：CDP_PROJECT_ROOT 环境变量可覆盖项目根；默认自动探测——本文件位于
-harness/skills/cross-device/lib/python/，向上回退 3 级（parents[2]）即
-cross-device 包目录，parents[4] 为项目根。仓内状态目录统一为
-<project_root>/data/verify-results/（仅 apply 侧写；emit 侧只读传入显式路径）。
+本文件占住 cdp_paths 模块名：cdp_timing/cdp_receipt/cdp_parse 等 CLI 与
+测试以 sys.path 同目录方式 `import cdp_paths`，经本垫片 re-export 主实现
+全部公开符号，行为不变。新代码请直接
+`from harness.lib.cdp_paths import ...`（或经 harness.lib 包引用）。
+
+cdp_parse_script（cross-device 协议专属路径）依赖本包物理位置，保留于此
+不随主实现上移。
 """
-import os
-from pathlib import Path
+import sys as _sys
+from pathlib import Path as _Path
 
-_PACK_DIR = Path(__file__).resolve().parents[2]  # .../cross-device
+_REPO_ROOT = _Path(__file__).resolve().parents[5]
+if str(_REPO_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_REPO_ROOT))
 
-
-def project_root() -> Path:
-    root = os.environ.get("CDP_PROJECT_ROOT")
-    if root:
-        return Path(root)
-    return _PACK_DIR.parents[2]  # cross-device -> skills -> harness -> 项目根
-
-
-def data_verify_results_dir() -> Path:
-    """apply 侧写收据用（会 mkdir）；emit 侧勿调用（用 project_root()/"data"/"verify-results" 只读）。"""
-    d = project_root() / "data" / "verify-results"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+from harness.lib.cdp_paths import (  # noqa: E402,F401
+    atomic_write_text,
+    data_baselines_dir,
+    data_known_issues_dir,
+    data_verify_results_dir,
+    log_apply_dir,
+    project_root,
+)
 
 
-def data_baselines_dir() -> Path:
-    """证据快照目录（会 mkdir）：data/baselines。
-
-    promote 阶段把 verify 收据副本固化为 <baseline_id>-<收据名>.md，
-    随登记 yaml 一并提交入库，作为晋升证据链的落盘快照。
-    """
-    d = project_root() / "data" / "baselines"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def data_known_issues_dir() -> Path:
-    """已知问题登记目录（会 mkdir）；与收据同源，仅 apply 侧写。"""
-    d = project_root() / "data" / "known-issues"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def log_apply_dir() -> Path:
-    """cross-device 工作态目录（会 mkdir）：批次临时文件、链路耗时打点文件。
-
-    gitignore 工作态（不入库）；打点文件 timings-<batch_id>.json 由 cdp_timing.py
-    start 创建、finish 落盘，最终数据经 ws_report --timings-file 并入收据持久化。
-    """
-    d = project_root() / "harness" / "log" / "cross-device"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def cdp_parse_script() -> Path:
-    return _PACK_DIR / "lib" / "python" / "cdp_parse.py"
+def cdp_parse_script() -> _Path:
+    """cdp_parse.py 路径（cross-device 协议专属，锚定本包目录）。"""
+    return _Path(__file__).resolve().parent / "cdp_parse.py"

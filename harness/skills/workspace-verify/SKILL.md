@@ -169,7 +169,6 @@ stages:
    --acceptance-file harness/log/cross-device/acceptance-<batch_id>.json \
    --unit-test-file harness/log/cross-device/unit-tests-<batch_id>.json \
    --push-file harness/log/cross-device/push-<batch_id>.json \
-   [--push-file harness/log/cross-device/push-<batch_id>.json] \
    [--package-file harness/log/workspace-verify/package-<batch_id>.json] \
    --summary "<一句话>" --result <pass|fail|skip> --build <pass|fail|skip> --board <pass|fail|skip> \
    --case "<本次实际 --case 标签，逗号分隔（模式 B 逐字透传；模式 A 无则省略）>" \

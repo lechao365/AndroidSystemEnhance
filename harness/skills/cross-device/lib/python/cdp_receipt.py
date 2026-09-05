@@ -11,7 +11,8 @@ from pathlib import Path
 
 import yaml
 
-from cdp_paths import data_verify_results_dir, project_root
+from cdp_paths import (atomic_write_text, data_verify_results_dir,  # noqa: E402
+                       project_root)
 
 _DETAIL_KEEP = 50
 _TREND_KEEP = 200
@@ -120,7 +121,10 @@ def write_receipt(receipt, body_text):
         ts = (base + datetime.timedelta(seconds=n)).strftime("%Y%m%d-%H%M%S")
         path = d / f"{ts}-{receipt.batch_id}.md"
     content = receipt.header_lines() + "\n\n## body\n\n" + body_text.strip() + "\n"
-    path.write_text(content, encoding="utf-8")
+    # 原子写（P1-2）：半写收据曾可按文件名 latest 身份进入 promote/loop
+    # 判定（emit precheck 解析半文件即恒拒批，需人工清理）——与全仓
+    # "防半截文件被当证据"纪律对齐
+    atomic_write_text(path, content)
     prune_details(d)
     return path
 
@@ -184,12 +188,10 @@ def append_trend(timestamp, batch_id, result, stage, summary, metrics="",
     if timing:
         line += f" | {timing}"
     # 原子写：读全量 → 追加新行 → 截断保留 _TREND_KEEP 行 → replace（避免先 append
-    # 再整体重写的非原子读-写，中断会留下半写/丢行态）
+    # 再整体重写的非原子读-写，中断会留下半写/丢行态；写侧走统一原子原语）
     lines = trend.read_text(encoding="utf-8").splitlines() if trend.exists() else []
     lines.append(line)
-    tmp = trend.with_suffix(".md.tmp")
-    tmp.write_text("\n".join(lines[-_TREND_KEEP:]) + "\n", encoding="utf-8")
-    tmp.replace(trend)
+    atomic_write_text(trend, "\n".join(lines[-_TREND_KEEP:]) + "\n")
 
 
 def read_trend_last(verify_dir=None):

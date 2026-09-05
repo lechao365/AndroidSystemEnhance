@@ -51,13 +51,11 @@ _OUTPUT_RE = "RaspberryVanillaAOSP15-*-rpi5.img"
 
 
 def _atomic_write_json(path, data):
-    """原子写 JSON：先落 tmp 再 os.replace，避免半写产物污染证据链。"""
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-                   encoding="utf-8")
-    os.replace(tmp, p)
+    """原子写 JSON：薄壳委托 verify_common（批次四收敛，统一 tmp 带 pid
+    原语；签名与调用点不变，避免半写产物污染证据链）。"""
+    sys.path.insert(0, str(_SCRIPT_DIR.parents[1] / "lib"))
+    from verify_common import atomic_write_json
+    atomic_write_json(path, data)
 
 
 def _sha256(path):
@@ -70,13 +68,28 @@ def _sha256(path):
 
 
 def _resolve_batch_id():
-    """batch_id 三级回落精简版：CDP_BATCH_ID env > 唯一打点文件（同 ws_acceptance）。"""
+    """batch_id 识别统一口径（B6）：CDP_BATCH_ID env > current-batch.json
+    指针 > 打点目录 mtime 最新（兜底），与 cdp_timing 三级回落同源。
+
+    旧实现 glob 字典序取 [0] 依赖"工作态只留当前批"的归档纪律——start
+    中断未归档时会认错批；mtime 最新对多文件残留无歧义。
+    """
     bid = os.environ.get("CDP_BATCH_ID", "").strip()
     if bid:
         return bid
-    files = sorted(_CROSS_DEVICE_LOG.glob("timings-*.json"))
-    if len(files) == 1:
-        return files[0].stem[len("timings-"):]
+    try:
+        sys.path.insert(0, str(_SCRIPT_DIR.parents[1] / "cross-device"
+                               / "lib" / "python"))
+        import cdp_timing
+        bid = cdp_timing._read_current_batch()
+        if bid:
+            return bid
+    except Exception:
+        pass
+    files = sorted(_CROSS_DEVICE_LOG.glob("timings-*.json"),
+                   key=lambda p: p.stat().st_mtime)
+    if files:
+        return files[-1].stem[len("timings-"):]
     return None
 
 
