@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -234,6 +235,37 @@ class TestCheckSkillRefs(unittest.TestCase):
         self.assertIn("harness/skills/demo/SKILL.md", rels)
         self.assertNotIn("docs/superpowers/plans/x.md", rels)
         self.assertNotIn("harness/log/run.log.md", rels)
+
+    def test_root_empty_env_falls_back_to_default(self):
+        # 方向 5：CHECK_REFS_ROOT 空串时回落默认值（Path("") 解析为 "." 会
+        # 漂移扫描根，须 strip 后判空）
+        code = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import check_skill_refs as c\n"
+            "default = Path(c.__file__).resolve().parents[2]\n"
+            "sys.exit(0 if c.ROOT == default else 1)\n"
+        )
+        env = dict(os.environ)
+        env["CHECK_REFS_ROOT"] = ""
+        r = subprocess.run(
+            [sys.executable, "-c", code,
+             str(Path(__file__).resolve().parents[1])],
+            capture_output=True, text=True, encoding="utf-8", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_basename_index_excludes_git_and_exempt(self):
+        # 方向 6：basename 索引排除 .git 与 EXEMPT_RELS（docs/superpowers、
+        # harness/log）目录——同名文件仅存在于这些目录时索引计 0，裸文件名
+        # 零命中判悬空（防"引用不存在的文件"被误判为"多义跳过"）
+        ckr._INDEX_CACHE.clear()
+        self._mk("harness/skills/demo/SKILL.md", "见 `only-in-excluded.conf`\n")
+        self._mk(".git/objects/pack/only-in-excluded.conf", "x\n")
+        self._mk("harness/log/only-in-excluded.conf", "x\n")
+        self._mk("docs/superpowers/plans/only-in-excluded.conf", "x\n")
+        self.assertEqual(self._scan("harness/skills/demo/SKILL.md"),
+                         ["only-in-excluded.conf"])
 
 
 if __name__ == "__main__":

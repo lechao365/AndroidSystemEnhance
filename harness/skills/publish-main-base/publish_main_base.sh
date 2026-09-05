@@ -277,10 +277,14 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path("harness/skills/cross-device/lib/python").resolve()))
 import cdp_receipt
-p, _ = cdp_receipt.latest_board_receipt()
+p, _, rerrs = cdp_receipt.latest_board_receipt()
+if rerrs:
+    print("error: 最新 board 收据头部解析有错（拒绝据其做 evidence 锚点）: "
+          + "; ".join(rerrs), file=sys.stderr)
+    sys.exit(1)
 print(os.path.relpath(p) if p else "")
 PYEOF
-  ) || true
+  )
   [ -n "$EVIDENCE_RECEIPT" ] || EVIDENCE_RECEIPT="$LATEST"
   # evidence-scope 可选：缺省交 baseline_register add-candidate 从 board 收据 cases
   # 推导（人工传值仅可为收据实测范围子集，防过度声称）
@@ -355,7 +359,11 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path("harness/skills/cross-device/lib/python").resolve()))
 import cdp_receipt
-p, r = cdp_receipt.latest_board_receipt()
+p, r, rerrs = cdp_receipt.latest_board_receipt()
+if rerrs:
+    print("ERR_PARSE")
+    print("")
+    sys.exit(0)
 if not p or not r.verified_commit:
     print("0")
     print("")
@@ -369,6 +377,11 @@ PYEOF
   ) || true
   BOARD_OK=$(echo "$BOARD_INFO" | sed -n '1p')
   BOARD_VTREE=$(echo "$BOARD_INFO" | sed -n '2p')
+  if [ "$BOARD_OK" = "ERR_PARSE" ]; then
+    check_class RECEIPT_FAIL
+    echo "error: 最新 board 收据头部解析有错（拒绝据其做覆盖判定与树绑定），须修复收据后重试" >&2
+    exit 1
+  fi
   if [ "$BOARD_OK" != "1" ]; then
     check_class RECEIPT_FAIL
     echo "error: promote 要求 code/ 改动被最新 board 收据覆盖（board 收据缺失或 verified_commit 不覆盖 code 改动提交 $CODE_HEAD）" >&2

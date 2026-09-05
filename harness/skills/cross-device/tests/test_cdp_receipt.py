@@ -439,19 +439,35 @@ class TestReceipt(unittest.TestCase):
         r_last = _mk_receipt("ccc333333333", "pass")
         r_last.verify_mode = "manual"
         cdp_receipt.write_receipt(r_last, "manual 批")
-        path, got = cdp_receipt.latest_board_receipt(self._dir)
+        path, got, errs = cdp_receipt.latest_board_receipt(self._dir)
         self.assertTrue(path.name.endswith("-bbb222222222.md"))
         self.assertEqual(got.batch_id, "bbb222222222")
         self.assertEqual(got.verify_mode, "board")
+        self.assertEqual(errs, [])
 
     def test_latest_board_receipt_none_when_no_board(self):
-        # 全无 board 收据 → (None, None)
+        # 全无 board 收据 → (None, None, [])
         r = _mk_receipt("aaa111111111", "skip")
         r.verify_mode = "skip"
         cdp_receipt.write_receipt(r, "skip 批")
-        path, got = cdp_receipt.latest_board_receipt(self._dir)
+        path, got, errs = cdp_receipt.latest_board_receipt(self._dir)
         self.assertIsNone(path)
         self.assertIsNone(got)
+        self.assertEqual(errs, [])
+
+    def test_latest_board_receipt_surfaces_parse_errors(self):
+        # 方向 1（损坏收据两处消费口径）：board 收据头部解析有错（schema_version
+        # 非 1 等）时 parse_errors 须随返回值上抛，不再被 latest_board_receipt
+        # 丢弃——publish 侧据此即拒，不据损坏收据做覆盖判定与树绑定
+        r = _mk_receipt("bbb222222222", "pass")
+        p = cdp_receipt.write_receipt(r, "board 批")
+        text = p.read_text(encoding="utf-8").replace(
+            "- schema_version: 1", "- schema_version: 99")
+        p.write_text(text, encoding="utf-8")
+        path, got, errs = cdp_receipt.latest_board_receipt(self._dir)
+        self.assertEqual(path, p)
+        self.assertEqual(got.verify_mode, "board")
+        self.assertTrue(any("schema_version 非 1" in e for e in errs))
 
 
 if __name__ == "__main__":

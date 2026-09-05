@@ -291,6 +291,19 @@ class TestDoneLogic(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             ws_session.apply_done(self._s, "/nonexistent/receipt.md")
 
+    def test_done_receipt_parse_errors_rejected(self):
+        # 方向 2（损坏收据消费口径）：收据头部解析有错（schema_version 非 1）
+        # → 拒绝记账，不得据损坏收据记 pass 推进会话/终态 pass
+        rp = self._receipt("pass", acceptance='{"overall":"pass","items":[]}')
+        text = Path(rp).read_text(encoding="utf-8").replace(
+            "- schema_version: 1", "- schema_version: 99")
+        Path(rp).write_text(text, encoding="utf-8")
+        with self.assertRaises(RuntimeError) as cm:
+            ws_session.apply_done(self._s, rp, stage="acceptance")
+        self.assertIn("解析有错", str(cm.exception))
+        self.assertIsNone(self._s["exit_attribution"])
+        self.assertEqual(self._s["total_attempts"], 0)
+
     def test_done_pass_acceptance_overall_fail_rejected(self):
         # 收据 result=pass 但 acceptance overall=fail → 拒记账（防手填假绿
         # 推进会话/终态 pass）

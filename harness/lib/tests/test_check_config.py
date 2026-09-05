@@ -156,6 +156,25 @@ class TestConfigMode(CheckConfigTestBase):
         r = self._run()
         self.assertEqual(r.returncode, 0, r.stdout)
 
+    def test_root_empty_env_falls_back_to_default(self):
+        # 方向 5：CHECK_CONFIG_ROOT 空串时回落默认值（Path("") 解析为 "."
+        # 会漂移检查根，须 strip 后判空）
+        code = (
+            "import importlib.util, sys\n"
+            "from pathlib import Path\n"
+            "spec = importlib.util.spec_from_file_location('cc', sys.argv[1])\n"
+            "m = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(m)\n"
+            "default = Path(m.__file__).resolve().parents[2]\n"
+            "sys.exit(0 if m.ROOT == default else 1)\n"
+        )
+        env = dict(os.environ)
+        env["CHECK_CONFIG_ROOT"] = ""
+        r = subprocess.run([sys.executable, "-c", code, str(SCRIPT)],
+                           capture_output=True, text=True,
+                           encoding="utf-8", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
 
 class TestContractMode(CheckConfigTestBase):
     """方向 3：command/skill 契约按实际集合遍历（fixture 数量任意）。"""

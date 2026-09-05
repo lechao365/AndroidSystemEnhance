@@ -154,14 +154,17 @@ def latest_board_receipt(verify_dir=None):
 
     evidence-scope 推导锚点：登记时须以上板验证收据为准——最新收据可能
     是 -s skip 或非 board 的文档批，其 cases 不代表真实上板证据范围。
-    返回 (路径, Receipt)；无 board 收据返回 (None, None)。
+    返回 (路径, Receipt, parse_errors)；无 board 收据返回 (None, None, [])。
+    parse_errors 不再丢弃（损坏收据的 result/verify_mode/verified_tree 字段
+    不可信，据其做覆盖判定与树绑定会掩盖证据断裂）——调用方（publish 侧）
+    解析有错即拒，由本函数如实上抛。
     """
     d = verify_dir or data_verify_results_dir()
     for f in reversed(_detail_files(d)):
-        r, _ = read_receipt(f)
+        r, rerrs = read_receipt(f)
         if r.verify_mode == "board":
-            return (f, r)
-    return (None, None)
+            return (f, r, rerrs)
+    return (None, None, [])
 
 
 def append_trend(timestamp, batch_id, result, stage, summary, metrics="",

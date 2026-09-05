@@ -164,6 +164,11 @@ def _ensure_edit_close_mark():
 
 
 def main():
+    # 方向 4：重配标准输出为 utf-8（对齐 harness_lib.harness_init），防 GBK
+    # 终端把摘要中的中文/非 ASCII 替换成 � 致自检结论行打印失败或被误判
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
     # 自检整体墙钟实测（方向 3）：pytest 起跑前记 t0，四工具完成后 t1，
     # 差值经 _mark_selfcheck --dur-s 上报（自检段耗时不再被相邻差额吞并）
     _t0 = time.time()

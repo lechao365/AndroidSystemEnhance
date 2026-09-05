@@ -137,6 +137,14 @@ class TestSyncModifyToMainBase(unittest.TestCase):
             f"\n## body\n\nfixture\n", encoding="utf-8")
         return p
 
+    def _corrupt_receipt(self, batch_id="000000000001"):
+        """把收据头部 schema_version 改为 99（解析有错），返回路径。"""
+        p = self.root / "data" / "verify-results" / f"20260831-100000-{batch_id}.md"
+        text = p.read_text(encoding="utf-8").replace(
+            "- schema_version: 1", "- schema_version: 99")
+        p.write_text(text, encoding="utf-8")
+        return p
+
     def _run(self, *args):
         script = self.root / "harness" / "skills" / "publish-main-base" / "publish_main_base.sh"
         # PATH 前置 python3 shim（Windows 无 python3 命令，脚本内调用经 shim
@@ -632,6 +640,76 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertIn("000000000001", b["sync_manifest"])
         self.assertEqual(b["build_result"], "PASS")
         self.assertEqual(b["board_verify"], "PASS")
+
+    def test_prepare_rejects_board_receipt_parse_errors(self):
+        # 方向 1（损坏收据消费口径）：最新收据为正常 skip，最新 board 收据头部
+        # 解析有错 → prepare 拒绝据其做 evidence 锚点（parse_errors 随返回值
+        # 上抛，publish 侧有错即拒，不再丢弃后据损坏收据登记）
+        self._setup_remote()
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
+        self._write_receipt(self.parent_vc, batch_id="000000000001",
+                            cases="lcview-liveness", verify_mode="board")
+        self._corrupt_receipt("000000000001")
+        self._write_receipt(self.head_vc, batch_id="000000000002",
+                            cases="", verify_mode="skip")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): 损坏 board 收据与 skip 收据双落")
+        self._git("push", "origin", "dev")
+        r = self._run("--prepare", "--task", "t1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("最新 board 收据头部解析有错", r.stderr)
+        self.assertNotIn("000000000001", r.stdout)  # 未据损坏收据登记
+
+    def test_promote_rejects_board_receipt_parse_errors(self):
+        # 方向 1：最新收据为正常 skip，最新 board 收据损坏 → promote 拒绝据其
+        # 做覆盖判定与树绑定（RECEIPT_FAIL，parse_errors 不再被丢弃）
+        self._setup_remote()
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
+        (self.root / "code").mkdir()
+        (self.root / "code" / "foo.txt").write_text("x\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): code 改动")
+        self._git("push", "origin", "dev")
+        code_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        self._write_receipt(code_head, batch_id="000000000001",
+                            cases=_FULL_CASES, verify_mode="board",
+                            package=PKG_JSON)
+        (self.root / "harness" / "config" / "baseline-status.yaml").write_text(
+            "baselines:\n"
+            f"  - baseline_id: BL-TEST-01\n"
+            f"    status: candidate\n"
+            f"    source_commit: {code_head}\n"
+            f"    sync_manifest: data/verify-results/20260831-100000-000000000001.md\n"
+            f"    build_result: PASS\n"
+            f"    package_result: PASS\n"
+            f"    board_verify: PASS\n"
+            f"    evidence:\n"
+            f"      ki_gate: pass\n",
+            encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): board 收据与 candidate 入库")
+        self._git("push", "origin", "dev")
+        board_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        # 损坏 board 收据（batch_id 更大 → latest_board_receipt 取到它）
+        self._write_receipt(board_head, batch_id="000000000099",
+                            cases=_FULL_CASES, verify_mode="board")
+        self._corrupt_receipt("000000000099")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): 损坏 board 收据入库")
+        self._git("push", "origin", "dev")
+        corrupt_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        # 最新收据 = 正常 skip（verified_commit=corrupt_head 过前置 PARENT 校验）
+        self._write_receipt(corrupt_head, batch_id="000000000100",
+                            cases="", verify_mode="skip")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): skip 收据入库")
+        self._git("push", "origin", "dev")
+        r = self._promote()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("check_class=RECEIPT_FAIL", r.stderr)
+        self.assertIn("解析有错", r.stderr)
 
     def test_promote_passes_code_covered_by_board_receipt(self):
         # 缺陷修复：code/ 改动已被较早 board 收据覆盖，仅最新收据被 -s skip

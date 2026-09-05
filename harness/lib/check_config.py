@@ -30,8 +30,10 @@ from pathlib import Path
 
 import yaml
 
-ROOT = Path(os.environ.get("CHECK_CONFIG_ROOT",
-                           Path(__file__).resolve().parents[2]))
+# CHECK_CONFIG_ROOT 为空串时视为未设置：Path("") 会解析成当前目录（.）致
+# 检查根漂移，取值须 strip 后判空再回落默认值。
+_CFG_ROOT = os.environ.get("CHECK_CONFIG_ROOT", "").strip()
+ROOT = Path(_CFG_ROOT) if _CFG_ROOT else Path(__file__).resolve().parents[2]
 
 # paths.conf 已知键（AGENTS.md：路径单一事实源，paths.py 按此读取；
 # LC_VERIFY_EXPECT_SERIAL 为设备身份期望序列号配置位，方向 1 接入）

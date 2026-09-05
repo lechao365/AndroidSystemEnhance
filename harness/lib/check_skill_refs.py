@@ -45,7 +45,10 @@ from pathlib import Path
 
 # 仓库根：parents[2] 恢复真扫描根（parents[1] 为 harness/，ROOT/harness/skills
 # 会解析成 harness/harness/skills 致扫描恒空、检查假通过——方向 2 修复）。
-ROOT = Path(os.environ.get("CHECK_REFS_ROOT", Path(__file__).resolve().parents[2]))
+# CHECK_REFS_ROOT 为空串时视为未设置：Path("") 会解析成当前目录（.）致扫描根
+# 漂移，取值须 strip 后判空再回落默认值。
+_REF_ROOT = os.environ.get("CHECK_REFS_ROOT", "").strip()
+ROOT = Path(_REF_ROOT) if _REF_ROOT else Path(__file__).resolve().parents[2]
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 # TOKEN_RE 不得跨行（方向 1）：行内反引号 token，排除换行防跨行误配
@@ -128,15 +131,26 @@ _INDEX_CACHE: dict[str, dict[str, int]] = {}
 
 
 def _basename_count(name: str) -> int:
-    """仓内 basename 为 name 的文件数（方向 3 裸文件名唯一匹配判定）。"""
+    """仓内 basename 为 name 的文件数（方向 3 裸文件名唯一匹配判定）。
+
+    索引须排除 .git 与 EXEMPT_RELS 目录（docs/superpowers、harness/log）：
+    这些目录含大量非仓库资产的同名文件（日志产物/历史计划），纳入索引会
+    把"引用不存在的文件"误判为"多义跳过"（防误报变漏网）。
+    """
     root = ROOT.resolve()
     key = str(root)
     idx = _INDEX_CACHE.get(key)
     if idx is None:
         idx = {}
+        exempt = tuple(root / r for r in EXEMPT_RELS)
         for f in root.rglob("*"):
-            if f.is_file():
-                idx[f.name] = idx.get(f.name, 0) + 1
+            if not f.is_file():
+                continue
+            if ".git" in f.parts:
+                continue
+            if any(f.is_relative_to(ex) for ex in exempt):
+                continue
+            idx[f.name] = idx.get(f.name, 0) + 1
         _INDEX_CACHE[key] = idx
     return idx.get(name, 0)
 

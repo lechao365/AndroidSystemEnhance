@@ -268,9 +268,15 @@ def apply_done(session, receipt_path, stage=None, error_line=None,
         raise RuntimeError(
             f"会话已终结（{session['exit_attribution']}），拒绝重复记账")
     try:
-        r, _receipt_errs = read_receipt(receipt_path)
+        r, rerrs = read_receipt(receipt_path)
     except (OSError, UnicodeDecodeError) as exc:
         raise RuntimeError(f"收据读取失败 {receipt_path}: {exc}") from exc
+    if rerrs:
+        # 头部解析有错（损坏收据）：result/acceptance 字段不可信，拒绝记账——
+        # 否则损坏收据记 pass 可推进会话/终态 pass（与 publish 侧解析有错即拒
+        # 同口径，防两处消费口径不一致）
+        raise RuntimeError(
+            f"收据头部解析有错 {receipt_path}: {'; '.join(rerrs)}，拒绝记账")
 
     if r.result == "pass":
         # 验收证据门禁：收据 result=pass 时 acceptance overall 须也为 pass
