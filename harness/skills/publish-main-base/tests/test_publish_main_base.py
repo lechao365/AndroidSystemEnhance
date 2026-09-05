@@ -20,6 +20,10 @@ import cdp_issue  # noqa: E402 （fixture 进程内构造登记，路径经 CDP_
 
 BASH = find_bash()
 
+# 收据内嵌 ws_package 打包证据（script_rc=0 → PASS，promote 一致性校验须与
+# 基线 package_result=PASS 一致；gitignore 域文件证据已不可作为晋升凭据）
+PKG_JSON = '{"run_id":"r","script_rc":0}'
+
 
 @unittest.skipUnless(BASH and shutil.which("git"),
                      "需要 bash 与 git 解释器（Windows 环境跳过）")
@@ -98,7 +102,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
 
     def _write_receipt(self, verified_commit, build="pass", push_board="pass",
                        batch_id="000000000001", result="pass", verify_mode="board",
-                       cases="", verified_tree=None):
+                       cases="", verified_tree=None, package=""):
         d = self.root / "data" / "verify-results"
         d.mkdir(parents=True, exist_ok=True)
         p = d / f"20260831-100000-{batch_id}.md"
@@ -111,6 +115,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 cwd=self.root, env=self._env)
             verified_tree = r.stdout.strip() if r.returncode == 0 else ""
+        pkg_line = f"- package: {package}\n" if package else ""
         p.write_text(
             f"- schema_version: 1\n- batch_id: {batch_id}\n"
             f"- batch_base: edd5748dc3c6\n- verified_commit: {verified_commit}\n"
@@ -118,6 +123,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
             f"- verify_mode: {verify_mode}\n- result: {result}\n- build: {build}\n"
             f"- push_board: {push_board}\n- acceptance: t\n- elapsed_s: 1\n"
             f"- summary: fixture\n- metrics: \n- timings: \n- cases: {cases}\n"
+            f"{pkg_line}"
             f"\n## body\n\nfixture\n", encoding="utf-8")
         return p
 
@@ -507,7 +513,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
                                              blocking=False), "现场")
         self._candidate_yaml()
-        self._receipt_commit_c3(verify_mode="skip")
+        self._receipt_commit_c3(verify_mode="skip", package=PKG_JSON)
         msg = Path(self._remote_tmp.name) / "promote-msg.txt"
         msg.write_text("构建(baseline): BL-TEST-01 基线晋升\n", encoding="utf-8")
         r = self._run("--promote", "--baseline-id", "BL-TEST-01",
@@ -521,7 +527,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self._setup_remote()
         (self.root / "code").mkdir()
         (self.root / "code" / "foo.txt").write_text("x\n", encoding="utf-8")
-        self._receipt_commit_c3(verify_mode="skip")
+        self._receipt_commit_c3(verify_mode="skip", package=PKG_JSON)
         r = self._promote()
         self.assertEqual(r.returncode, 1)
         self.assertIn("check_class=RECEIPT_FAIL", r.stderr)
@@ -559,7 +565,8 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self._git("push", "origin", "dev")
         code_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
         self._write_receipt(code_head, batch_id="000000000002",
-                            cases="lcview-liveness", verify_mode="board")
+                            cases="lcview-liveness", verify_mode="board",
+                            package=PKG_JSON)
         self._git("add", "-A")
         self._git("commit", "-m", "修复(test): 收据入库四")
         self._git("push", "origin", "dev")
@@ -631,7 +638,8 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         code_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
         # board 收据覆盖 code 改动提交（candidate yaml 一并入库，promote 要求树净）
         self._write_receipt(code_head, batch_id="000000000001",
-                            cases="lcview-liveness", verify_mode="board")
+                            cases="lcview-liveness", verify_mode="board",
+                            package=PKG_JSON)
         (self.root / "harness" / "config" / "baseline-status.yaml").write_text(
             "baselines:\n"
             f"  - baseline_id: BL-TEST-01\n"
@@ -663,7 +671,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         # 方向 2 零改动豁免：verify_mode=skip 但无 code/ 改动 → warn 豁免 + e2e promote 完成
         self._setup_remote()
         self._candidate_yaml()
-        self._receipt_commit_c3(verify_mode="skip")
+        self._receipt_commit_c3(verify_mode="skip", package=PKG_JSON)
         r = self._promote()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("无 code/ 改动，豁免放行", r.stdout)
@@ -689,7 +697,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         # 不被 code 收紧误拦）→ verify-tree 失败，rollback 一并删除本地与
         # 远端 verified tag（方向 4），退 1
         self._setup_remote()
-        self._receipt_commit_c3()
+        self._receipt_commit_c3(package=PKG_JSON)
         self._candidate_yaml()
         (self.root / "data" / "evil.txt").write_text("x\n", encoding="utf-8")
         self._git("add", "-A")
@@ -710,7 +718,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         # 清算删除目录）→ verify-tree 排除后仍等价，promote 放行；
         # 且清算目录随晋升提交入库（git add -A data/known-issues）
         self._setup_remote()
-        self._receipt_commit_c3(verify_mode="skip")
+        self._receipt_commit_c3(verify_mode="skip", package=PKG_JSON)
         self._candidate_yaml()
         # 合法登记（活项，门禁不拒）：随收据提交后的 meta 提交夹带入 dev
         cdp_issue.write_issue(cdp_issue.Issue(
@@ -774,7 +782,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
                                              blocking=False), "现场")
         self._candidate_yaml()
-        self._receipt_commit_c3(verify_mode="skip")
+        self._receipt_commit_c3(verify_mode="skip", package=PKG_JSON)
         msg = Path(self._remote_tmp.name) / "promote-msg.txt"
         msg.write_text("构建(baseline): BL-TEST-01 基线晋升\n", encoding="utf-8")
         r = self._run("--promote", "--baseline-id", "BL-TEST-01",

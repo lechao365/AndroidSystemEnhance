@@ -1572,6 +1572,123 @@ class TestWsReport(unittest.TestCase):
         self.assertEqual(got["verify"], 21.826)
 
 
+    # ── 方向 1/2：收据 package 字段内嵌 ws_package 打包证据 ─────────────
+    def _write_pkg(self, run_id="pkg123", script_rc=0, **extra):
+        d = {"run_id": run_id, "batch_id": "batch-1", "script_rc": script_rc,
+             "images_ok": True, "sudo_n": True}
+        d.update(extra)
+        return self._write(json.dumps(d, ensure_ascii=False), ".json")
+
+    def test_package_probe_dir_matches_ws_package_evidence_dir(self):
+        # 防回归（方向 1）：自动探测目录须与 ws_package 默认落盘域同源
+        # harness/log/workspace-verify/——上批 parents[1] 误指
+        # harness/skills/log/workspace-verify 致探测漏（收据 package 未内嵌）
+        expect = (Path(ws_report.__file__).resolve().parents[2]
+                  / "log" / "workspace-verify")
+        self.assertEqual(ws_report._PACKAGE_EVIDENCE_DIR, expect)
+        self.assertEqual(ws_report._PACKAGE_EVIDENCE_DIR.parent.name, "log")
+        self.assertEqual(ws_report._PACKAGE_EVIDENCE_DIR.parent.parent.name,
+                         "harness")
+
+    def test_package_file_embedded_singlelined(self):
+        # 显式 --package-file（ws_package 打包证据 JSON）→ 内嵌收据 package
+        # 字段（单行），随收据入库可追溯（不再只落 gitignore 域）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        pkg = self._write_pkg(script_rc=0)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--package-file", pkg])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        pkg_line = [l for l in content.splitlines()
+                    if l.startswith("- package: ")][0]
+        self.assertNotIn("\n", pkg_line)
+        self.assertIn('"script_rc":0', pkg_line)
+        self.assertIn('"run_id":"pkg123"', pkg_line)
+        # 往返可读：Receipt.package 为内嵌证据 JSON 串
+        from cdp_receipt import read_receipt
+        got, _ = read_receipt(details[0])
+        self.assertIn('"script_rc":0', got.package)
+        self.assertNotIn("\n", got.package)
+
+    def test_package_auto_probe_hit(self):
+        # 未传 --package-file：按 batch_id 自动探测 package-<batch_id>.json
+        #（ws_package 默认落盘路径）→ 内嵌收据 package 字段
+        from cdp_parse import batch_id_from_text
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        bid = batch_id_from_text(Path(batch).read_text(encoding="utf-8"))
+        probe_dir = Path(self._tmp.name) / "log" / "workspace-verify"
+        probe_dir.mkdir(parents=True)
+        probe = probe_dir / f"package-{bid}.json"
+        probe.write_text(json.dumps({"run_id": "r", "script_rc": 0}),
+                         encoding="utf-8")
+        with mock.patch.object(ws_report, "_PACKAGE_EVIDENCE_DIR", probe_dir), \
+                redirect_stdout(io.StringIO()):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn('"script_rc":0', content)
+
+    def test_package_auto_probe_miss_warns_not_block(self):
+        # 探测不到 package-<batch_id>.json：warn 降级，package 字段空，收据照常
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        self.assertIn("未探测到", err.getvalue())
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- package: ", content)
+
+    def test_package_file_invalid_rejected(self):
+        # 显式 --package-file 非合法 JSON → 返 2 拒写（打包证据不可信即拒）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        bad = self._write("not-json", ".json")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--package-file", bad])
+        self.assertEqual(rc, 2)
+        self.assertIn("须为合法 JSON", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_package_file_missing_run_id_rejected(self):
+        # 显式 --package-file 缺 run_id（产物身份缺失）→ 返 2 拒写
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        bad = self._write(json.dumps({"script_rc": 0}), ".json")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--package-file", bad])
+        self.assertEqual(rc, 2)
+        self.assertIn("缺 run_id", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+
 class TestPhaseSummary(unittest.TestCase):
     """阶段汇总（方向 1）：timings 折叠 edit/selfcheck/verify/other 四类。
 
@@ -1732,6 +1849,7 @@ class TestPhaseSummary(unittest.TestCase):
     def test_rounding(self):
         segs = [{"name": "edit", "elapsed_s": 1.23456}]
         self.assertEqual(self._ph(segs)["edit"], 1.235)
+
 
 
 if __name__ == "__main__":

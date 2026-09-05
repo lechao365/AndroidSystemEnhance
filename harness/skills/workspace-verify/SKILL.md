@@ -37,8 +37,10 @@ stages:
   ws_verify_chain 写，子脚本/AI 只读不写；记每步真实 rc/起止 epoch/canceled
   与 skipped 记账；ws_session done --run-file 取运行态 stage/rc 真相源）
 - harness/log/workspace-verify/package-<batch_id>.json：打包自描述证据
-  （ws_package 生产，baseline_register package_result 证据源：三镜像路径/
-  sha256/字节、脚本 rc、BLD-007 合规标记与耗时，原子写；失败如实记因不产假证据）
+  （ws_package 生产，收据 package 字段内嵌源：三镜像路径/sha256/字节、
+  脚本 rc、BLD-007 合规标记、sudo -n 探测结果与耗时，原子写；失败如实
+  记因不产假证据；ws_report 未传 --package-file 时按 batch_id 自动探测
+  该文件内嵌收据 package 字段，随收据入库可追溯）
 - harness/log/workspace-verify/ 运行日志（gitignore）
 ## Failure / recovery（失败/恢复）
 - code→workspace 同步失败：verify 中止，收据 result=fail（build=fail board=skip）
@@ -167,6 +169,8 @@ stages:
    --acceptance-file harness/log/cross-device/acceptance-<batch_id>.json \
    --unit-test-file harness/log/cross-device/unit-tests-<batch_id>.json \
    --push-file harness/log/cross-device/push-<batch_id>.json \
+   [--push-file harness/log/cross-device/push-<batch_id>.json] \
+   [--package-file harness/log/workspace-verify/package-<batch_id>.json] \
    --summary "<一句话>" --result <pass|fail|skip> --build <pass|fail|skip> --board <pass|fail|skip> \
    --case "<本次实际 --case 标签，逗号分隔（模式 B 逐字透传；模式 A 无则省略）>" \
    --body <正文文件> --batch-file <cdp> --target $(git rev-parse --short=12 HEAD) \

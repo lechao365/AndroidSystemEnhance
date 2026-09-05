@@ -43,17 +43,22 @@ class TestWsPackage(unittest.TestCase):
         os.environ.pop("CDP_BATCH_ID", None)
         os.environ.pop("CDP_RUN_ID", None)
 
-    def _run(self, run=True, script_rc=0, **kw):
+    def _run(self, run=True, script_rc=0, sudo_rc=0, **kw):
         kw.setdefault("aosp_ws", str(self.aosp))
         if "evidence_file" in kw and kw["evidence_file"] is None:
             kw.pop("evidence_file")  # 显式 None：交给 run_package 缺省命名
         else:
             kw.setdefault("evidence_file", str(self.evidence))
+
+        def _fake(args, *a, **k):
+            # 两次调用区分：sudo -n true 探测 vs 打包脚本执行（方向 4）
+            if list(args) == ["sudo", "-n", "true"]:
+                return mock.Mock(returncode=sudo_rc, stdout="", stderr="")
+            return mock.Mock(returncode=script_rc, stdout="ok", stderr="")
+
         with mock.patch.object(wp, "_SCRIPT", self.script), \
                 mock.patch.object(wp.subprocess, "run",
-                                  return_value=mock.Mock(
-                                      returncode=script_rc,
-                                      stdout="ok", stderr="")) as run_mock:
+                                  side_effect=_fake) as run_mock:
             rc, ev = wp.run_package(run=run, **kw)
         return rc, ev, run_mock
 
@@ -115,6 +120,33 @@ class TestWsPackage(unittest.TestCase):
         self.assertEqual(ev["script_rc"], 3)
         self.assertIn("rc=3", ev["error"])
         self.assertIn("output_tail", ev)
+
+    def test_sudo_unavailable_refuses(self):
+        # 方向 4：sudo -n true 探测失败（需密码/无权限）→ 如实记因不执行，
+        # 打包脚本不被调用（防非 tty 卡死或错报）
+        rc, ev, run_mock = self._run(sudo_rc=1)
+        self.assertEqual(rc, 1)
+        self.assertFalse(ev["sudo_n"])
+        self.assertFalse(ev["ran"])
+        self.assertIsNone(ev["script_rc"])
+        self.assertIn("sudo", ev["error"])
+        self.assertIn("拒绝执行", ev["error"])
+        # 仅探测调用（sudo），打包脚本（bash <script>）未被调用
+        scripts = [c for c in run_mock.call_args_list
+                   if list(c.args[0])[:1] == ["bash"]]
+        self.assertEqual(scripts, [])
+        data = json.loads(self.evidence.read_text(encoding="utf-8"))
+        self.assertFalse(data["sudo_n"])
+        self.assertIn("sudo", data["error"])
+
+    def test_sudo_probe_success_proceeds(self):
+        # sudo 探测通过（sudo_rc=0）→ 正常走打包，证据 sudo_n=True
+        img = self.product_out / "RaspberryVanillaAOSP15-20260905-rpi5.img"
+        img.write_bytes(b"\x01" * 8)
+        rc, ev, _ = self._run(sudo_rc=0, script_rc=0)
+        self.assertEqual(rc, 0)
+        self.assertTrue(ev["sudo_n"])
+        self.assertEqual(ev["script_rc"], 0)
 
     def test_missing_aosp_ws(self):
         # AOSP_WS 未配置（paths.env_path 返空）：如实记因不执行

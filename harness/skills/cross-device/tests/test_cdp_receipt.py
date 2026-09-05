@@ -57,6 +57,23 @@ class TestReceipt(unittest.TestCase):
         self.assertEqual(got.result, "pass")
         self.assertEqual(got.batch_id, "abc123def456")
 
+    def test_package_field_roundtrip(self):
+        # package 字段（内嵌 ws_package 打包证据单行 JSON）写读往返：旧收据
+        # 无此字段 → from_text 默认空串，兼容
+        r = _mk_receipt()
+        r.package = '{"run_id":"r1","script_rc":0,"images_ok":true}'
+        p = cdp_receipt.write_receipt(r, "body")
+        got, errs = cdp_receipt.read_receipt(p)
+        self.assertEqual(errs, [])
+        self.assertEqual(got.package, '{"run_id":"r1","script_rc":0,"images_ok":true}')
+        # 旧收据（无 package 行）读入 package 为空串
+        old = p.with_name("old-" + p.name)
+        old.write_text("- schema_version: 1\n- batch_id: old000000000\n"
+                       "## body\n\nx\n", encoding="utf-8")
+        old_r, old_errs = cdp_receipt.read_receipt(old)
+        self.assertEqual(old_errs, [])
+        self.assertEqual(old_r.package, "")
+
     def test_latest_returns_most_recent(self):
         cdp_receipt.write_receipt(_mk_receipt("aaa111111111", "fail"), "x")
         cdp_receipt.write_receipt(_mk_receipt("bbb222222222", "pass"), "y")

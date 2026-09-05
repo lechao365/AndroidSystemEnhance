@@ -47,6 +47,12 @@ _FIELDS = [
     # 清单加摘要（排除收据目录）。旧收据无此两行 → from_text 默认空，兼容
     ("verified_tree", ""),
     ("commit_scope", ""),
+    # package（ws_package 打包证据）：内嵌 ws_package 自描述证据 JSON 单行
+    # 串（script_rc/镜像 sha256/字节/耗时等），随收据入库可追溯——此前证据
+    # 落 harness/log 属 gitignore 域，基线记 package_result PASS 无可追溯
+    # 凭据。旧收据无此行 → from_text 默认空，baseline_register 按兼容语义
+    # （回退 --package-evidence/batch_id 探测）处理。
+    ("package", ""),
 ]
 
 

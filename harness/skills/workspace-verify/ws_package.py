@@ -8,8 +8,11 @@
 #   落自描述证据 JSON（镜像路径/sha256/字节、脚本 rc、耗时、原因），
 #   原子写。镜像缺失或 sudo 环境不可用等失败一律如实记因，不产假证据
 #   （证据 rc 非 0 → baseline_register 记 UNKNOWN，不声称 PASS）。
-# 证据消费方：baseline_register.py add-candidate（--package-evidence 或
-#   按 batch_id 探测本文件产物 package-<batch_id>.json）。
+#   真跑前先做 sudo -n true 非交互探测（sudo_n 字段）：免密可用才执行，
+#   不可用如实记因不执行——防非 tty 卡死（脚本内 sudo 提示密码）或错报。
+# 证据消费方：baseline_register.py add-candidate（收据 package 字段优先，
+#   保留 --package-evidence 与按 batch_id 探测兜底）；ws_report 把证据内嵌
+#   收据 package 字段随收据入库可追溯。
 # 用法：python3 ws_package.py [--mode 0] [--evidence-file <json>] [--timeout 900]
 # 退出码：0 打包成功（script_rc==0）/ 1 失败（证据已如实落盘）/ 2 参数错误
 # ============================================================
@@ -92,7 +95,7 @@ def run_package(mode=0, evidence_file=None, timeout=900, aosp_ws=None,
     evidence = {"run_id": run_id, "batch_id": batch_id, "mode": mode,
                 "script": str(_SCRIPT), "images": [], "images_ok": False,
                 "packaged_img": None, "script_rc": None, "ran": False,
-                "sudo_bld007": False, "error": ""}
+                "sudo_bld007": False, "sudo_n": False, "error": ""}
 
     def _finish(rc):
         evidence["started_at"] = started_at
@@ -145,6 +148,28 @@ def run_package(mode=0, evidence_file=None, timeout=900, aosp_ws=None,
         return _finish(1)
     if not run:
         return _finish(0)
+
+    # 非交互 sudo 前置探测（本批意图 4）：sudo -n true 免密可用才执行打包；
+    # 不可用（需密码/无权限/超时）如实记因不执行——打包脚本内 sudo 在非
+    # tty 下提示输密码会挂死整链，或把 sudo 失败误包装成打包失败/成功错报。
+    sudo_ok = False
+    sudo_detail = ""
+    try:
+        sp = subprocess.run(["sudo", "-n", "true"], capture_output=True,
+                            text=True, encoding="utf-8", errors="replace",
+                            timeout=30)
+        sudo_ok = sp.returncode == 0
+        sudo_detail = (sp.stderr or "").strip()[-200:]
+    except subprocess.TimeoutExpired:
+        sudo_detail = "sudo -n true 超时（>30s）"
+    except OSError as e:
+        sudo_detail = f"sudo 不可执行: {e}"
+    evidence["sudo_n"] = sudo_ok
+    if not sudo_ok:
+        evidence["error"] = ("sudo 非交互探测失败（sudo -n true 不可用，需密码/"
+                             f"无权限）：{sudo_detail or '未知原因'}，拒绝执行防"
+                             "非 tty 卡死或错报")
+        return _finish(1)
 
     # 真跑：显式传 TARGET_PRODUCT/ANDROID_PRODUCT_OUT（BLD-007 调用方侧），
     # mode 0 仅打包（不编译），输出捕获尾段供失败归因

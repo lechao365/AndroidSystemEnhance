@@ -66,6 +66,46 @@ def _load_package_evidence(path):
     return data if isinstance(data, dict) else None
 
 
+def _receipt_package(r):
+    """解析收据 package 字段内嵌的 ws_package 打包证据 dict。
+
+    收据 package 字段由 ws_report 内嵌 ws_package 自描述证据单行 JSON 串
+    （随收据入库可追溯，本批意图 1）；空/非法/非对象返 None（如实不声称）。
+    """
+    text = (getattr(r, "package", "") or "").strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _package_result_from_evidence(pkg_evidence, evidence_scope):
+    """由打包证据机械推导 package_result（方向 2 同源口径）：
+    证据 script_rc==0 记 PASS；evidence_scope=no-code-change 记 SKIP（无代码
+    改动打包豁免）；其余（无证据/证据 rc 非 0/不可读）留 UNKNOWN 不声称。
+    """
+    pkg_rc = pkg_evidence.get("script_rc") if pkg_evidence else None
+    if pkg_rc == 0:
+        return "PASS"
+    if (evidence_scope or "").strip() == "no-code-change":
+        return "SKIP"
+    return "UNKNOWN"
+
+
+def _derive_package_result(receipt, evidence_scope):
+    """promote 一致性校验：由收据内嵌打包证据推导期望 package_result。
+
+    与 add-candidate 同源口径（_package_result_from_evidence），仅证据源固定
+    为收据 package 字段（入库证据）——基线记 PASS 而收据无内嵌打包证据
+    （gitignore 域不可追溯）即推导 UNKNOWN，与基线不一致即阻断（方向 3）。
+    """
+    return _package_result_from_evidence(_receipt_package(receipt),
+                                         evidence_scope)
+
+
 def next_id(data, today):
     existing = [b.get("baseline_id") for b in data.get("baselines", [])]
     n = 1
@@ -101,7 +141,8 @@ def main(argv=None):
     ap.add_argument("--evidence-scope", help="证据范围标签（如 lcview-liveness）；"
                         "缺省从收据 cases 推导，人工传值须为其子集（防过度声称）")
     ap.add_argument("--package-evidence",
-                    help="ws_package 打包证据 JSON 路径（缺省按收据 batch_id 探测 "
+                    help="ws_package 打包证据 JSON 路径（兜底：收据 package 字段内嵌"
+                         "证据优先，缺省按收据 batch_id 探测 "
                          "harness/log/workspace-verify/package-<batch_id>.json）")
     ap.add_argument("--known-issues-carried",
                     help="带病登记 issue_id 列表（逗号分隔，写入 evidence 的 "
@@ -241,20 +282,24 @@ def main(argv=None):
         # build 取收据 build 阶段，board_verify 取 push_board，均大写（不再伪造 PASS）
         # 空值（""/None/纯空白）记 FAIL 不记 SKIP——空值不是合法 skip 证据，证据链从严
         build_result = ((r.build or "").strip() or "FAIL").upper()
-        # package（方向 2，批次 ff33f92060ac）：由 ws_package 打包证据机械推导——
-        # 证据 script_rc==0 记 PASS；evidence_scope=no-code-change 记 SKIP（无
-        # 代码改动打包豁免）；其余（无证据/证据 rc 非 0/不可读）留 UNKNOWN 不声称。
+        # package（方向 2，批次 ff33f92060ac；本批意图 2 改源）：由 ws_package
+        # 打包证据机械推导。证据源优先级：收据 package 字段内嵌证据（随收据
+        # 入库可追溯，主源）> --package-evidence 显式路径（兜底）> 按 batch_id
+        # 探测 harness/log（gitignore 域，最末兜底）。script_rc==0 记 PASS；
+        # evidence_scope=no-code-change 记 SKIP（无代码改动打包豁免）；
+        # 其余（无证据/证据 rc 非 0/不可读）留 UNKNOWN 不声称。
         # 不再把 build_result 复制给 package_result，杜绝伪造打包证据
-        pkg_evidence_path = ((args.package_evidence or "").strip()
-                             or _package_evidence_path(r.batch_id))
-        pkg_evidence = _load_package_evidence(pkg_evidence_path)
-        pkg_rc = pkg_evidence.get("script_rc") if pkg_evidence else None
-        if pkg_rc == 0:
-            package_result = "PASS"
-        elif evidence_scope == "no-code-change":
-            package_result = "SKIP"
+        receipt_pkg = _receipt_package(r)
+        if receipt_pkg is not None:
+            pkg_evidence = receipt_pkg
+            pkg_evidence_path = args.receipt_path  # 证据内嵌收据，载体即收据
         else:
-            package_result = "UNKNOWN"
+            pkg_evidence_path = ((args.package_evidence or "").strip()
+                                 or _package_evidence_path(r.batch_id))
+            pkg_evidence = _load_package_evidence(pkg_evidence_path)
+        pkg_rc = pkg_evidence.get("script_rc") if pkg_evidence else None
+        package_result = _package_result_from_evidence(pkg_evidence,
+                                                       evidence_scope)
         board_verify = ((r.push_board or "").strip() or "FAIL").upper()
         # 方向 4：Python 层登记防线——防绕过 shell 直调登记（publish_main_base.sh
         # prepare 有门禁，直调 add-candidate 须同样从严）
@@ -368,8 +413,6 @@ def main(argv=None):
                     print(f"error: 证据快照已存在，拒绝覆盖: {snapshot_path}",
                           file=sys.stderr)
                     return 1
-                snapshot_path.write_text(receipt.read_text(encoding="utf-8"),
-                                         encoding="utf-8")
                 # promote 允许透传/改写 evidence_scope（如零改动豁免时改写 no-code-change）；
                 # 改写为 no-code-change 时 package_result 由 UNKNOWN 同步改 SKIP
                 # （无代码改动打包豁免，方向 2 同源推导）
@@ -395,6 +438,25 @@ def main(argv=None):
                           f"打包证据；evidence_scope=no-code-change 不受限）",
                           file=sys.stderr)
                     return 1
+                # 方向 3（本批意图 3）promote 一致性校验：收据 package 字段（内嵌
+                # 打包证据，随收据入库可追溯）推导的 package_result 须与基线
+                # package_result 一致，不一致即阻断——堵"基线记 PASS 而收据无
+                # 内嵌打包证据"（gitignore 域证据不可追溯）或登记/晋升间人为
+                # 改写漂移。两 package 门禁均须在写快照前（门禁失败不落污染快照）
+                r_pkg, pkg_errs = read_receipt(receipt)
+                if pkg_errs:
+                    print(f"error: promote 一致性校验：收据解析错误 {receipt}: "
+                          f"{'; '.join(pkg_errs)}", file=sys.stderr)
+                    return 1
+                expected_pkg = _derive_package_result(r_pkg, scope_now)
+                if expected_pkg != pkg_now:
+                    print(f"error: promote 一致性校验：收据 package 证据推导 "
+                          f"{expected_pkg}，与基线 package_result={pkg_now} 不一致"
+                          f"（收据内嵌打包证据缺失或与登记不符），阻断晋升",
+                          file=sys.stderr)
+                    return 1
+                snapshot_path.write_text(receipt.read_text(encoding="utf-8"),
+                                         encoding="utf-8")
                 b["status"] = "promoted"
                 b["approved_by"] = args.approved_by
                 b["approved_at"] = datetime.datetime.now(

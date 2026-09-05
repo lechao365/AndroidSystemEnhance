@@ -6,6 +6,7 @@
         --result pass|fail|skip --build ... --board ... \
         --acceptance-file "<自描述验收产物 JSON>" --unit-test-file "<自描述单测产物 JSON>" \
         --push-file "<自描述推送产物 JSON>" \
+        [--package-file "<ws_package 打包证据 JSON>"（内嵌收据 package 字段）] \
         --elapsed <秒> --summary "<一句话>" \
         [--body <正文文件>（CDP 原文+失败现场，必传见 SKILL）]
    模式 B（独立触发）:
@@ -285,6 +286,65 @@ def _resolve_cases(cases_arg, batch_id):
         return cases_arg
 
 
+# ws_package 打包证据默认落盘域（gitignore，与 ws_package._EVIDENCE_DIR 同源：
+# harness/log/workspace-verify/——本文件在 harness/skills/workspace-verify/，
+# parents[2] = harness）
+_PACKAGE_EVIDENCE_DIR = (Path(__file__).resolve().parents[2]
+                         / "log" / "workspace-verify")
+
+
+def _resolve_package(package_arg, batch_id):
+    """解析收据 package 字段内嵌的 ws_package 打包证据（单行 JSON 串）。
+
+    显式 --package-file 优先；未传时自动探测
+    harness/log/workspace-verify/package-<batch_id>.json（ws_package 默认
+    落盘路径，与 baseline_register 旧探测同源）。证据内嵌随收据入库可追溯，
+    不再依赖 gitignore 域文件（本批意图 1）。
+    返回 (package_json_str, err)：显式路径缺失/非法返 err（调用方拒写）；
+    自动探测缺失/非法仅 warn 降级返空（打包证据非本批必产，不阻断主流程）。
+    """
+    target = (package_arg or "").strip()
+    explicit = bool(target)
+    if not target and batch_id:
+        probe = _PACKAGE_EVIDENCE_DIR / f"package-{batch_id}.json"
+        if probe.is_file():
+            target = str(probe)
+        else:
+            print(f"warn: 未传 --package-file 且未探测到 "
+                  f"package-{batch_id}.json（打包证据缺省不内嵌）",
+                  file=sys.stderr)
+            return "", None
+    if not target:
+        return "", None
+    try:
+        data = json.loads(Path(target).read_text(encoding="utf-8"))
+    except OSError as e:
+        msg = f"--package-file 读取失败（{e}）"
+        if explicit:
+            return "", msg
+        print(f"warn: {msg}（打包证据缺省不内嵌）", file=sys.stderr)
+        return "", None
+    except (ValueError, json.JSONDecodeError) as e:
+        msg = f"--package-file 须为合法 JSON（解析失败: {e}）"
+        if explicit:
+            return "", msg
+        print(f"warn: {msg}（打包证据缺省不内嵌）", file=sys.stderr)
+        return "", None
+    if not isinstance(data, dict):
+        msg = "--package-file 须为 JSON 对象（ws_package 打包证据）"
+        if explicit:
+            return "", msg
+        print(f"warn: {msg}（打包证据缺省不内嵌）", file=sys.stderr)
+        return "", None
+    if not (data.get("run_id") or "").strip():
+        msg = "--package-file 缺 run_id（打包产物身份缺失），拒绝内嵌"
+        if explicit:
+            return "", msg
+        print(f"warn: {msg}（打包证据缺省不内嵌）", file=sys.stderr)
+        return "", None
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":")), None
+
+
 def _validate_acceptance_pass(acceptance):
     """result=pass 时验收证据门禁：解析 acceptance JSON，overall 须为 pass 且
     无 fail 项，否则拒写（堵手填假绿混过 promote——仅查有无不看内容是洞）。
@@ -508,6 +568,10 @@ def main(argv=None):
                     help="自描述推送产物 JSON 路径（ws_push.py --result-file 落盘；"
                          "PASS 必需；run_id 与验收产物一致且逐项 sha256/字节/上下文"
                          "三项校验值全绿）")
+    ap.add_argument("--package-file", default="",
+                    help="ws_package 打包证据 JSON 路径（内嵌收据 package 字段随收据"
+                         "入库可追溯；缺省按 batch_id 探测 "
+                         "harness/log/workspace-verify/package-<batch_id>.json）")
     ap.add_argument("--device-dirty", action="store_true",
                     help="teardown 失败（恢复不了本轮改变的设备态）时显式标记"
                          "（PASS 路径亦可从验收产物 device_dirty 自动透传）")
@@ -651,6 +715,16 @@ def main(argv=None):
         print("warn: device_dirty=true（teardown 恢复失败，设备态不可信），"
               "已在收据 header 标注", file=sys.stderr)
 
+    # 打包证据内嵌（本批意图 1）：显式 --package-file 优先，缺省按 batch_id
+    # 探测 harness/log/workspace-verify/package-<batch_id>.json（ws_package
+    # 默认落盘），证据单行化写入收据 package 字段随收据入库可追溯——基线
+    # package_result 不再依赖 gitignore 域文件。显式路径缺失/非法返 2 拒写；
+    # 探测缺失/非法仅 warn 降级（打包证据非本批必产，不阻断主流程）。
+    args.package, pkg_err = _resolve_package(args.package_file, batch_id)
+    if pkg_err:
+        print(f"error: {pkg_err}", file=sys.stderr)
+        return 2
+
     # 自检证据（-s 批次必带，堵零验证通道）：对照 -sv 缺 --acceptance 返 2 的既有约束，
     # result=skip 而 selfcheck 为空即拒写。方向 4（批次 ff33f92060ac）：board 模式
     # （-sv 模式 A / 模式 B 上板）同样强制——上板批自检 rc 须入收据，此前仅 skip
@@ -754,6 +828,7 @@ def main(argv=None):
                 summary=args.summary, metrics=args.metrics,
                 timings=args.timings, cases=args.case,
                 selfcheck=args.selfcheck,
+                package=args.package,
                 verified_tree=verified_tree, commit_scope=commit_scope,
                 device_dirty="true" if args.device_dirty else "")
     path = write_receipt(r, body or args.summary)
