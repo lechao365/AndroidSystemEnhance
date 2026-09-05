@@ -1367,7 +1367,8 @@ class TestWsReport(unittest.TestCase):
                                  "--board", "pass", "--summary", "liveness",
                                  "--acceptance-file",
                                  self._write_acc(summary="svc:lechao_lcview"),
-                                 "--unit-test-file", self._write_ut(), "--push-file", self._write_push()])
+                                 "--unit-test-file", self._write_ut(), "--push-file", self._write_push(),
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         self.assertIn(f"自动探测到 cases 文件: {ws_report.log_apply_dir()}/cases-{bid}.json",
                       err.getvalue())

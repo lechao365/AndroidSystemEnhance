@@ -149,6 +149,19 @@ def _build_argv(name, product, out, chain_args):
     return cmd
 
 
+def _run_selfcheck(timeout=600):
+    """跑 harness/lib/selfcheck.py 取自检摘要文本（board 收据强制入收据，方向 4）。
+
+    rc 全 0 与否由 ws_report 扫描 *_rc 键判定——本函数只负责把真实输出
+    原样带入收据，不自评不吞错。
+    """
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPT_DIR.parents[1] / "lib" / "selfcheck.py")],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=timeout)
+    return ((proc.stdout or "") + (proc.stderr or "")).strip()
+
+
 def _build_report_argv(chain_args, derive):
     """report 步骤 argv：收据参数由前序真实结果机械派生（derive dict）。"""
     cmd = [sys.executable, str(_SCRIPT_DIR / "ws_report.py"),
@@ -162,6 +175,9 @@ def _build_report_argv(chain_args, derive):
                       ("timings_file", "--timings-file")):
         if chain_args.get(key):
             cmd += [flag, chain_args[key]]
+    # board 收据强制自检证据（ws_report 方向 4 门禁；rc 全 0 与否由其扫描判定）
+    if chain_args.get("selfcheck"):
+        cmd += ["--selfcheck", chain_args["selfcheck"]]
     if chain_args.get("case"):
         cmd += ["--case", chain_args["case"]]
     return cmd
@@ -273,6 +289,8 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
             derive = _derive_report_args(steps, overall)
             if build:  # 显式传参优先（AI 对 build 段的判定不可替代时使用）
                 derive["build"] = build
+            # board 收据强制自检证据：链内直跑 selfcheck（确定性，不经 AI）
+            chain_args["selfcheck"] = _run_selfcheck()
             argv = _build_report_argv(chain_args, derive)
         else:
             argv = _build_argv(name, product, out, chain_args)

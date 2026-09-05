@@ -36,6 +36,9 @@ stages:
 - harness/log/workspace-verify/runs/<run_id>.json：链式编排运行态（仅编排器
   ws_verify_chain 写，子脚本/AI 只读不写；记每步真实 rc/起止 epoch/canceled
   与 skipped 记账；ws_session done --run-file 取运行态 stage/rc 真相源）
+- harness/log/workspace-verify/package-<batch_id>.json：打包自描述证据
+  （ws_package 生产，baseline_register package_result 证据源：三镜像路径/
+  sha256/字节、脚本 rc、BLD-007 合规标记与耗时，原子写；失败如实记因不产假证据）
 - harness/log/workspace-verify/ 运行日志（gitignore）
 ## Failure / recovery（失败/恢复）
 - code→workspace 同步失败：verify 中止，收据 result=fail（build=fail board=skip）
@@ -167,8 +170,9 @@ stages:
    --summary "<一句话>" --result <pass|fail|skip> --build <pass|fail|skip> --board <pass|fail|skip> \
    --case "<本次实际 --case 标签，逗号分隔（模式 B 逐字透传；模式 A 无则省略）>" \
    --body <正文文件> --batch-file <cdp> --target $(git rev-parse --short=12 HEAD) \
-   [--metrics "<性能三指标 JSON 对象>"] \
-   [--timings-file harness/log/cross-device/timings-<batch_id>.json]
+   --metrics "<性能三指标 JSON 对象>"] \
+   [--timings-file harness/log/cross-device/timings-<batch_id>.json] \
+   --selfcheck "<自检摘要（pytest_rc/refs_rc/config_rc/contract_rc 全 rc 键）>"
    （--batch-file/--target 为模式 A 参数；--body 必传：CDP 原文 + 各阶段明细 +
    失败现场摘录，自动脱敏；PASS 必传 --acceptance-file（步骤 5 自描述验收产物）
    与 --unit-test-file（步骤 4b 自描述单测产物）与 --push-file（步骤 4 自描述
@@ -177,6 +181,9 @@ stages:
    缺失/不一致返 2 拒写，
    避免 promote 时 baseline 证据链有洞（新鲜度由 run_id/输入摘要/单调时间表达，
    不用固定墙钟，长编译/重试不误伤）；fail 可 --acceptance 直传现场；
+   --selfcheck 自检 rc 证据：result=skip 或 board 模式（-sv 模式 A/模式 B 上板）
+   必传且 rc 全 0，缺失返 2（上板批自检 rc 须入收据，方向 4）；链式编排由
+   ws_verify_chain report 步自动跑 selfcheck 注入，无需手传；
    --metrics 为性能三指标结构化 JSON（lcview-perf 采集输出 METRICS 行），写入
    收据 metrics 字段 + trend 行尾，跨批可 diff——性能数字不再只散在正文；
    --timings-file 为模式 A 链路耗时打点（步骤 0 各阶段 mark 的原始文件，ws_report

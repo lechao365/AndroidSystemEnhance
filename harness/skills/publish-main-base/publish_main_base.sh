@@ -393,6 +393,23 @@ PYEOF
       || echo "  （树对象不可解析，无法列出差异路径）" >&2
     exit 1
   fi
+  # 方向 3（批次 ff33f92060ac）promote 硬门禁（末位总闸）：动过 code 且
+  # package_result 非 PASS 即阻断（ws_package 打包证据 rc=0 才记 PASS；
+  # no-code-change 走上面豁免分支不受限）。替换旧"UNKNOWN 仅告警"口径
+  PKG_RESULT=$(BID="$BID" python3 - <<'PYEOF'
+import os
+import yaml
+data = yaml.safe_load(open("harness/config/baseline-status.yaml", encoding="utf-8")) or {}
+row = next((b for b in data.get("baselines", [])
+            if b.get("baseline_id") == os.environ.get("BID")), None)
+print(((row or {}).get("package_result") or "UNKNOWN").upper())
+PYEOF
+) || PKG_RESULT="UNKNOWN"
+if [ "$PKG_RESULT" != "PASS" ]; then
+  check_class RECEIPT_FAIL
+  echo "error: promote 硬门禁：dev 相对 origin/main 动过 code（$CODE_HEAD）且 package_result=$PKG_RESULT 非 PASS（须 ws_package 打包证据；no-code-change 豁免不受限）" >&2
+  exit 1
+fi
 fi
 # 文档同步遗漏提示（warn 不阻断）：dev 相对 origin/main 无 docs/ 改动时提示
 if ! git diff --name-only origin/main...dev | grep -q '^docs/'; then

@@ -652,13 +652,17 @@ def main(argv=None):
               "已在收据 header 标注", file=sys.stderr)
 
     # 自检证据（-s 批次必带，堵零验证通道）：对照 -sv 缺 --acceptance 返 2 的既有约束，
-    # result=skip 而 selfcheck 为空即拒写。自检门禁以退出码为主判据（方向 1-5）：
+    # result=skip 而 selfcheck 为空即拒写。方向 4（批次 ff33f92060ac）：board 模式
+    # （-sv 模式 A / 模式 B 上板）同样强制——上板批自检 rc 须入收据，此前仅 skip
+    # 模式要求致上板批自检 rc 不入收据。自检门禁以退出码为主判据（方向 1-5）：
     #   - 缺 pytest_rc/refs_rc 任一即返 2（rc 不可见则自检不可信）
     #   - 任一 rc 非零即返 2（pytest 崩溃/悬空引用均带 rc，文本可能无 failed/skipped）
     # failed 文本匹配与 skipped 计数保留作冗余（rc 全 0 后的补充防线）
-    if args.result == "skip" and not args.selfcheck.strip():
-        print("error: result=skip 必须传 --selfcheck（自检摘要：pytest harness -q 与 "
-              "check_skill_refs 输出，含 pytest_rc/refs_rc），否则零验证通道敞开",
+    if (args.result == "skip" or verify_mode == "board") \
+            and not args.selfcheck.strip():
+        print("error: result=skip 或 board 模式必须传 --selfcheck（自检摘要：pytest "
+              "harness -q 与 check_skill_refs 输出，含 pytest_rc/refs_rc）——"
+              "上板批自检 rc 须入收据（方向 4），否则零验证通道敞开",
               file=sys.stderr)
         return 2
     if args.selfcheck.strip():

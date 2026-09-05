@@ -25,6 +25,9 @@ _BATCH = ("-sv base:%s\n"
           "验收: case:lcview-liveness\n"
           "方向: 1) 测试。\n")
 
+_SELFCHECK_OK = ("pytest_rc=0 | 900 passed | skipped=0 | refs_rc=0 | OK | "
+                 "config_rc=0 | OK | contract_rc=0 | OK")
+
 
 def _fake_popen(rc=0):
     """Popen 打桩：wait 返 rc（不捕获 argv stdout）。"""
@@ -54,7 +57,10 @@ class TestChain(unittest.TestCase):
         ctor, proc = _fake_popen(popen_rc)
         kw.setdefault("batch_file", str(self.batch))
         with mock.patch.object(wc.subprocess, "Popen", ctor), \
-                mock.patch.object(wc, "_RUNS_DIR", self.runs):
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            kw.setdefault("use_locks", False)
             rc, result = wc.run_chain(**kw)
         return rc, result, proc.wait.call_args_list
 
@@ -82,9 +88,11 @@ class TestChain(unittest.TestCase):
         ctor.side_effect = lambda argv, **kw: (calls.append(argv),
                                                mock.Mock(wait=mock.Mock(return_value=0)))[1]
         with mock.patch.object(wc.subprocess, "Popen", ctor), \
-                mock.patch.object(wc, "_RUNS_DIR", self.runs):
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
             rc, result = wc.run_chain(batch_file=str(self.batch),
-                                      case="lcview-liveness")
+                                      case="lcview-liveness", use_locks=False)
         self.assertEqual(rc, 0)
         by_name = {s["name"]: c for s, c in zip(result["steps"], calls)}
         self.assertIn("ensure", by_name["connect"])
@@ -102,6 +110,7 @@ class TestChain(unittest.TestCase):
         self.assertIn("--summary 全链通过", rep)
         self.assertIn("--batch-file", rep)
         self.assertIn("--body", rep)
+        self.assertIn("--selfcheck", rep)
         for flag in ("--push-file", "--unit-test-file", "--acceptance-file"):
             self.assertIn(flag, rep)
 
@@ -117,7 +126,8 @@ class TestChain(unittest.TestCase):
         ctor.side_effect = run
         with mock.patch.object(wc.subprocess, "Popen", ctor), \
                 mock.patch.object(wc, "_RUNS_DIR", self.runs):
-            rc, result = wc.run_chain(batch_file=str(self.batch))
+            rc, result = wc.run_chain(batch_file=str(self.batch),
+                                      use_locks=False)
         self.assertEqual(rc, 1)
         self.assertEqual(result["overall"], "fail")
         self.assertEqual([s["name"] for s in result["steps"]],
@@ -137,7 +147,8 @@ class TestChain(unittest.TestCase):
                 mock.patch.object(wc.os, "killpg",
                                   side_effect=lambda pid, sig: kills.append(sig)), \
                 mock.patch.object(wc, "_RUNS_DIR", self.runs):
-            rc, result = wc.run_chain(batch_file=str(self.batch))
+            rc, result = wc.run_chain(batch_file=str(self.batch),
+                                      use_locks=False)
         self.assertEqual(rc, 1)
         self.assertEqual(kills, [signal.SIGTERM, signal.SIGKILL])
         self.assertTrue(result["canceled"])
@@ -196,8 +207,11 @@ class TestChain(unittest.TestCase):
         ctor.side_effect = lambda argv, **kw: (calls.append(argv),
                                                mock.Mock(wait=mock.Mock(return_value=0)))[1]
         with mock.patch.object(wc.subprocess, "Popen", ctor), \
-                mock.patch.object(wc, "_RUNS_DIR", self.runs):
-            rc, result = wc.run_chain(case="lcview-liveness")
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(case="lcview-liveness",
+                                      use_locks=False)
         self.assertEqual(rc, 0)
         self.assertEqual([s["name"] for s in result["steps"]],
                          ["sync", "connect", "push", "unit_test",
@@ -254,8 +268,11 @@ class TestDeriveReportArgs(unittest.TestCase):
         ctor.side_effect = lambda argv, **kw: (calls.append(argv),
                                                mock.Mock(wait=mock.Mock(return_value=0)))[1]
         with mock.patch.object(wc.subprocess, "Popen", ctor), \
-                mock.patch.object(wc, "_RUNS_DIR", self.runs):
-            rc, _ = wc.run_chain(batch_file=str(self.batch), build="fail")
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, _ = wc.run_chain(batch_file=str(self.batch), build="fail",
+                             use_locks=False)
         self.assertEqual(rc, 0)
         rep = next(" ".join(c) for c in calls if "ws_report.py" in c[1])
         self.assertIn("--build fail", rep)

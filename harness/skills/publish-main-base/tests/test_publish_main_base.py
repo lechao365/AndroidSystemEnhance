@@ -527,6 +527,68 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertIn("check_class=RECEIPT_FAIL", r.stderr)
         self.assertIn("被最新 board 收据覆盖", r.stderr)
 
+    def _candidate_yaml_pkg(self, package_result):
+        """candidate 登记模板（可变 package_result，供方向 3 门禁两态用例）。"""
+        (self.root / "harness" / "config" / "baseline-status.yaml").write_text(
+            "baselines:\n"
+            "  - baseline_id: BL-TEST-01\n"
+            "    status: candidate\n"
+            f"    source_commit: {self.head_vc}\n"
+            "    sync_manifest: data/verify-results/20260831-100000-000000000002.md\n"
+            "    build_result: PASS\n"
+            f"    package_result: {package_result}\n"
+            "    board_verify: PASS\n"
+            "    evidence:\n"
+            "      ki_gate: pass\n",
+            encoding="utf-8")
+
+    def _commit_meta(self):
+        # 登记元提交（构建(baseline): 前缀，内容提交回溯会跳过）——candidate
+        # yaml 写入工作树后须入库保持树净（promote 前置拒绝脏树）
+        self._git("add", "-A")
+        self._git("commit", "-m", "构建(baseline): BL-TEST-01 登记元提交")
+        self._git("push", "origin", "dev")
+
+    def _code_change_with_board_receipt(self):
+        """code/ 改动 c3 + board 收据入库 c4（verified_commit=c3，覆盖链成立）。"""
+        self._setup_remote()
+        (self.root / "code").mkdir()
+        (self.root / "code" / "foo.txt").write_text("x\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): 代码改动三")
+        self._git("push", "origin", "dev")
+        code_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        self._write_receipt(code_head, batch_id="000000000002",
+                            cases="lcview-liveness", verify_mode="board")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): 收据入库四")
+        self._git("push", "origin", "dev")
+
+    def test_promote_package_gate_blocks_unknown(self):
+        # 方向 3（批次 ff33f92060ac）promote 硬门禁：动过 code（覆盖链/树绑定
+        # 均成立）且 package_result=UNKNOWN 非 PASS → RECEIPT_FAIL 阻断
+        self._code_change_with_board_receipt()
+        self._candidate_yaml_pkg("UNKNOWN")
+        self._commit_meta()
+        r = self._promote()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("check_class=RECEIPT_FAIL", r.stderr)
+        self.assertIn("promote 硬门禁", r.stderr)
+        self.assertIn("package_result=UNKNOWN", r.stderr)
+        self.assertIn("no-code-change 豁免不受限", r.stderr)
+
+    def test_promote_package_gate_passes_with_pass(self):
+        # 方向 3 正常路径：动过 code 且 package_result=PASS → 门禁放行，
+        # promote 完成（同时证明覆盖链/树绑定 fixture 与门禁位置正确）
+        self._code_change_with_board_receipt()
+        self._candidate_yaml_pkg("PASS")
+        self._commit_meta()
+        r = self._promote()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("promote 完成", r.stdout)
+        self.assertIn("verified/BL-TEST-01",
+                      self._git("tag", "-l", "verified/BL-TEST-01").stdout)
+
     def test_prepare_evidence_anchor_uses_latest_board_receipt(self):
         # 缺陷修复：最新收据为 -s skip（cases 空），evidence 锚点须回溯最新
         # board 收据——candidate 的 evidence_scope/sync_manifest/build/board_verify

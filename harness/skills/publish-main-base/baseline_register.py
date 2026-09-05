@@ -6,6 +6,7 @@ save() 手工保留 yaml 头部注释块（PyYAML 往返不保留注释）。
 """
 import argparse
 import datetime
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -20,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "l
 from cdp_receipt import read_receipt  # noqa: E402
 from cdp_issue import (closed_issue_details, delete_closed,
                        issue_files, read_index, read_issue, validate_issue)  # noqa: E402
-from cdp_paths import data_baselines_dir  # noqa: E402
+from cdp_paths import data_baselines_dir, project_root  # noqa: E402
 
 
 def load():
@@ -43,6 +44,26 @@ def save(data):
             break
     body = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
     CONFIG.write_text("".join(header) + body, encoding="utf-8")
+
+
+def _package_evidence_path(batch_id):
+    """按 batch_id 探测 ws_package 打包证据（harness/log/workspace-verify/）。"""
+    if not batch_id:
+        return None
+    p = (project_root() / "harness" / "log" / "workspace-verify"
+         / f"package-{batch_id}.json")
+    return p if p.is_file() else None
+
+
+def _load_package_evidence(path):
+    """读打包证据 JSON dict；缺失/不可读/非对象均返 None（如实不声称）。"""
+    if not path:
+        return None
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def next_id(data, today):
@@ -79,6 +100,9 @@ def main(argv=None):
     ap.add_argument("--ki-gate", help="known-issues 门禁结论 pass/not-run，写入 evidence")
     ap.add_argument("--evidence-scope", help="证据范围标签（如 lcview-liveness）；"
                         "缺省从收据 cases 推导，人工传值须为其子集（防过度声称）")
+    ap.add_argument("--package-evidence",
+                    help="ws_package 打包证据 JSON 路径（缺省按收据 batch_id 探测 "
+                         "harness/log/workspace-verify/package-<batch_id>.json）")
     ap.add_argument("--known-issues-carried",
                     help="带病登记 issue_id 列表（逗号分隔，写入 evidence 的 "
                          "known_issues_carried；缺参记空，只记录不阻断）")
@@ -201,6 +225,11 @@ def main(argv=None):
                       file=sys.stderr)
                 return 1
             evidence_scope = ",".join(sorted(receipt_cases))
+        elif evidence_scope == "no-code-change":
+            # 豁免标记非 case 标签：不参与"收据 cases 子集"声称校验（批次
+            # ff33f92060ac 方向 2——no-code-change 批据此可登记为 candidate，
+            # package_result 由同源推导记 SKIP）
+            pass
         else:
             manual = {c.strip() for c in evidence_scope.split(",") if c.strip()}
             if not manual.issubset(receipt_cases):
@@ -212,9 +241,20 @@ def main(argv=None):
         # build 取收据 build 阶段，board_verify 取 push_board，均大写（不再伪造 PASS）
         # 空值（""/None/纯空白）记 FAIL 不记 SKIP——空值不是合法 skip 证据，证据链从严
         build_result = ((r.build or "").strip() or "FAIL").upper()
-        # package：当前无打包生产者，无打包证据记 UNKNOWN（方向 1 停止把
-        # build_result 复制给 package_result，杜绝伪造打包证据）
-        package_result = "UNKNOWN"
+        # package（方向 2，批次 ff33f92060ac）：由 ws_package 打包证据机械推导——
+        # 证据 script_rc==0 记 PASS；evidence_scope=no-code-change 记 SKIP（无
+        # 代码改动打包豁免）；其余（无证据/证据 rc 非 0/不可读）留 UNKNOWN 不声称。
+        # 不再把 build_result 复制给 package_result，杜绝伪造打包证据
+        pkg_evidence_path = ((args.package_evidence or "").strip()
+                             or _package_evidence_path(r.batch_id))
+        pkg_evidence = _load_package_evidence(pkg_evidence_path)
+        pkg_rc = pkg_evidence.get("script_rc") if pkg_evidence else None
+        if pkg_rc == 0:
+            package_result = "PASS"
+        elif evidence_scope == "no-code-change":
+            package_result = "SKIP"
+        else:
+            package_result = "UNKNOWN"
         board_verify = ((r.push_board or "").strip() or "FAIL").upper()
         # 方向 4：Python 层登记防线——防绕过 shell 直调登记（publish_main_base.sh
         # prepare 有门禁，直调 add-candidate 须同样从严）
@@ -265,6 +305,8 @@ def main(argv=None):
                         "ki_gate": ki_gate,
                         "evidence_scope": evidence_scope,
                         "known_issues_carried": known_issues_carried,
+                        "package_evidence": str(pkg_evidence_path or ""),
+                        "package_rc": pkg_rc,
                     }
                     save(data)
                     print(f"candidate 复用并更新收据: {b['baseline_id']}（source_commit={args.source_commit}）")
@@ -290,6 +332,8 @@ def main(argv=None):
                 "ki_gate": ki_gate,
                 "evidence_scope": evidence_scope,
                 "known_issues_carried": known_issues_carried,
+                "package_evidence": str(pkg_evidence_path or ""),
+                "package_rc": pkg_rc,
             },
         })
         save(data)
@@ -326,18 +370,31 @@ def main(argv=None):
                     return 1
                 snapshot_path.write_text(receipt.read_text(encoding="utf-8"),
                                          encoding="utf-8")
-                # 方向 2：package_result=UNKNOWN 仅告警放行不新增阻断——当前无
-                # 打包生产者，硬门禁会锁死发布通道
-                if b.get("package_result") == "UNKNOWN":
-                    print(f"warn: baseline {args.baseline_id} package_result=UNKNOWN"
-                          "（当前无打包生产者，无打包证据；仅告警放行，不新增阻断）",
-                          file=sys.stderr)
-                # promote 允许透传/改写 evidence_scope（如零改动豁免时改写 no-code-change）
+                # promote 允许透传/改写 evidence_scope（如零改动豁免时改写 no-code-change）；
+                # 改写为 no-code-change 时 package_result 由 UNKNOWN 同步改 SKIP
+                # （无代码改动打包豁免，方向 2 同源推导）
                 scope = (args.evidence_scope or "").strip()
                 if scope:
                     b["evidence_scope"] = scope
                     if isinstance(b.get("evidence"), dict):
                         b["evidence"]["evidence_scope"] = scope
+                    if (scope == "no-code-change"
+                            and b.get("package_result") == "UNKNOWN"):
+                        b["package_result"] = "SKIP"
+                        if isinstance(b.get("evidence"), dict):
+                            b["evidence"]["package_result"] = "SKIP"
+                # 方向 3（批次 ff33f92060ac）promote 硬门禁：package_result 非 PASS
+                # 即阻断，仅 evidence_scope=no-code-change（无代码改动）豁免不受限。
+                # 打包生产者 ws_package 已就位，替换旧"UNKNOWN 仅告警"口径——
+                # 动过 code 的基线必须携带真实打包证据（rc=0）才可晋升
+                pkg_now = (b.get("package_result") or "UNKNOWN").upper()
+                scope_now = (b.get("evidence_scope") or "").strip()
+                if pkg_now != "PASS" and scope_now != "no-code-change":
+                    print(f"error: promote 硬门禁：baseline {args.baseline_id} "
+                          f"package_result={pkg_now} 非 PASS（动过 code 须 ws_package "
+                          f"打包证据；evidence_scope=no-code-change 不受限）",
+                          file=sys.stderr)
+                    return 1
                 b["status"] = "promoted"
                 b["approved_by"] = args.approved_by
                 b["approved_at"] = datetime.datetime.now(

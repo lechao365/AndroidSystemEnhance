@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import sys
 import tempfile
@@ -37,6 +38,15 @@ class TestBaselineRegister(unittest.TestCase):
                     push_board=board, acceptance="ok", elapsed_s=10,
                     summary="test", cases=cases)
         return str(write_receipt(r, "body"))
+
+    def _write_pkg_evidence(self, rc=0, batch_id="batch-test"):
+        """登记前落 ws_package 打包证据（方向 3 门禁生效后 promote 须 PASS，
+        或走 no-code-change 豁免；本 helper 供不关注 package 语义的用例补证据）。"""
+        ev_dir = self._root / "harness" / "log" / "workspace-verify"
+        ev_dir.mkdir(parents=True, exist_ok=True)
+        (ev_dir / f"package-{batch_id}.json").write_text(
+            json.dumps({"run_id": "r", "batch_id": batch_id,
+                        "script_rc": rc}), encoding="utf-8")
 
     def _run(self, *args):
         buf = io.StringIO()
@@ -211,6 +221,7 @@ class TestBaselineRegister(unittest.TestCase):
     def test_promote_requires_candidate(self):
         # 非 candidate 状态 promote 必须拒绝（门禁可信）
         rp = self._make_receipt()
+        self._write_pkg_evidence()
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
@@ -222,6 +233,7 @@ class TestBaselineRegister(unittest.TestCase):
     def test_promote_creates_evidence_snapshot(self):
         # promote 落盘证据快照：data/baselines/<id>-<收据名>.md，内容与收据一致
         rp = self._make_receipt()
+        self._write_pkg_evidence()
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
@@ -233,9 +245,10 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(snapshot.read_text(encoding="utf-8"),
                          Path(rp).read_text(encoding="utf-8"))
 
-    def test_promote_unknown_package_warns_not_blocks(self):
-        # 方向 2：promote 遇 package_result=UNKNOWN 仅告警放行，不新增阻断
-        # （当前无打包生产者，硬门禁会锁死发布通道）
+    def test_promote_unknown_package_blocked(self):
+        # 方向 3（批次 ff33f92060ac）promote 硬门禁：package_result 非 PASS 且
+        # evidence_scope 非 no-code-change 即阻断（ws_package 打包生产者已就位，
+        # 替换旧"UNKNOWN 仅告警"口径），拒绝后 status 保持 candidate
         rp = self._make_receipt()
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
@@ -244,15 +257,103 @@ class TestBaselineRegister(unittest.TestCase):
         bid = b["baseline_id"]
         rc, out = self._run("promote", "--baseline-id", bid,
                             "--approved-by", "lechao")
+        self.assertEqual(rc, 1)
+        self.assertIn("promote 硬门禁", out)
+        self.assertEqual(br.load()["baselines"][0]["status"], "candidate")
+
+    def test_add_candidate_package_pass_from_evidence(self):
+        # 方向 2：ws_package 证据 script_rc=0 → package_result 记 PASS
+        # （按收据 batch_id 探测 log/workspace-verify/package-<batch_id>.json）
+        rp = self._make_receipt(build="pass", board="pass",
+                                cases="lcview-liveness")
+        ev_dir = self._root / "harness" / "log" / "workspace-verify"
+        ev_dir.mkdir(parents=True)
+        (ev_dir / "package-batch-test.json").write_text(
+            json.dumps({"run_id": "r", "batch_id": "batch-test",
+                        "script_rc": 0}), encoding="utf-8")
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 0)
+        b = br.load()["baselines"][0]
+        self.assertEqual(b["package_result"], "PASS")
+        self.assertEqual(b["evidence"]["package_result"], "PASS")
+        self.assertEqual(b["evidence"]["package_rc"], 0)
+        self.assertIn("package-batch-test.json",
+                      b["evidence"]["package_evidence"])
+
+    def test_add_candidate_package_nonzero_rc_stays_unknown(self):
+        # 证据 rc 非 0（打包失败如实记录）：不声称 PASS，留 UNKNOWN
+        rp = self._make_receipt(build="pass", board="pass",
+                                cases="lcview-liveness")
+        ev_dir = self._root / "harness" / "log" / "workspace-verify"
+        ev_dir.mkdir(parents=True)
+        (ev_dir / "package-batch-test.json").write_text(
+            json.dumps({"run_id": "r", "script_rc": 1,
+                        "error": "镜像缺失: vendor.img"}), encoding="utf-8")
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 0)
+        self.assertEqual(br.load()["baselines"][0]["package_result"], "UNKNOWN")
+
+    def test_add_candidate_no_code_change_skips_package(self):
+        # 方向 2：evidence_scope=no-code-change（打包豁免）→ 记 SKIP，
+        # 无打包证据也不记 UNKNOWN
+        rp = self._make_receipt(build="pass", board="pass", cases="")
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--source-commit", "abc123",
+                                   "--evidence-scope", "no-code-change")[0], 0)
+        b = br.load()["baselines"][0]
+        self.assertEqual(b["package_result"], "SKIP")
+        self.assertEqual(b["evidence"]["package_result"], "SKIP")
+
+    def test_add_candidate_package_evidence_explicit_override(self):
+        # --package-evidence 显式路径优先于 batch_id 探测
+        rp = self._make_receipt(build="pass", board="pass",
+                                cases="lcview-liveness")
+        ev = self._root / "custom-package.json"
+        ev.write_text(json.dumps({"script_rc": 0}), encoding="utf-8")
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness",
+                            "--package-evidence", str(ev))
+        self.assertEqual(rc, 0)
+        self.assertEqual(br.load()["baselines"][0]["package_result"], "PASS")
+
+    def test_promote_no_code_change_unknown_allowed_and_skips_package(self):
+        # no-code-change 不受限（方向 3 豁免）：UNKNOWN 经 scope 改写为 SKIP 后放行
+        rp = self._make_receipt(build="pass", board="pass", cases="")
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--source-commit", "abc123",
+                                   "--evidence-scope", "no-code-change")[0], 0)
+        bid = br.load()["baselines"][0]["baseline_id"]
+        rc, out = self._run("promote", "--baseline-id", bid,
+                            "--approved-by", "lechao")
         self.assertEqual(rc, 0)
         self.assertIn("promoted:", out)
-        self.assertIn("package_result=UNKNOWN", out)
-        self.assertIn("仅告警放行", out)
+        b = br.load()["baselines"][0]
+        self.assertEqual(b["package_result"], "SKIP")
+        self.assertEqual(b["evidence"]["package_result"], "SKIP")
+
+    def test_promote_evidence_scope_rewrite_updates_package_skip(self):
+        # promote 时 scope 改写为 no-code-change：UNKNOWN 同步改 SKIP（同源推导）
+        rp = self._make_receipt()
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        bid = br.load()["baselines"][0]["baseline_id"]
+        rc, _ = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao",
+                          "--evidence-scope", "no-code-change")
+        self.assertEqual(rc, 0)
+        b = br.load()["baselines"][0]
+        self.assertEqual(b["evidence_scope"], "no-code-change")
+        self.assertEqual(b["package_result"], "SKIP")
 
     def test_promote_missing_approved_by_rejected(self):
         # 方向 6：promote 空审批人即拒（不再回落默认常量，审批凭据外部化），
         # 拒绝后 status 保持 candidate、不产生快照
         rp = self._make_receipt()
+        self._write_pkg_evidence()
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
@@ -266,6 +367,7 @@ class TestBaselineRegister(unittest.TestCase):
     def test_promote_duplicate_snapshot_rejected(self):
         # 重复 promote（revert 后再 promote）：快照已存在即拒，不得覆盖历史证据
         rp = self._make_receipt()
+        self._write_pkg_evidence()
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
@@ -282,6 +384,7 @@ class TestBaselineRegister(unittest.TestCase):
     def test_promote_rewrites_evidence_scope(self):
         # promote 透传 --evidence-scope：改写条目与 evidence 中的范围（如 no-code-change）
         rp = self._make_receipt()
+        self._write_pkg_evidence()
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
@@ -315,6 +418,7 @@ class TestBaselineRegister(unittest.TestCase):
         from cdp_issue import issue_files, read_index
         self._write_issue_files()
         rp = self._make_receipt()
+        self._write_pkg_evidence()
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
@@ -342,6 +446,7 @@ class TestBaselineRegister(unittest.TestCase):
         # 无快照删证据），promote 照常完成且终态文件保留
         self._write_issue_files()
         rp = self._make_receipt()
+        self._write_pkg_evidence()
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         b = br.load()["baselines"][0]
@@ -368,6 +473,7 @@ class TestBaselineRegister(unittest.TestCase):
         from unittest import mock
         self._write_issue_files()
         rp = self._make_receipt()
+        self._write_pkg_evidence()
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
@@ -394,6 +500,7 @@ class TestBaselineRegister(unittest.TestCase):
     def test_revert_candidate_requires_promoted(self):
         # 仅 promoted 可 revert-candidate：直接对 candidate revert 必须拒绝
         rp = self._make_receipt()
+        self._write_pkg_evidence()
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
