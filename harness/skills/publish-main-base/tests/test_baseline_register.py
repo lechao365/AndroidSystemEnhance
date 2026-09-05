@@ -64,6 +64,13 @@ class TestBaselineRegister(unittest.TestCase):
             rc = br.main(list(args))
         return rc, buf.getvalue() + err.getvalue()
 
+    def _patch_no_code_changes(self, changes):
+        """mock no-code-change 机器核对（方向 1）：本文件单测无真实 git 仓，
+        _code_changes_since_main 恒 None，no-code-change promote 须注入核验结果。"""
+        from unittest import mock
+        return mock.patch("baseline_register._code_changes_since_main",
+                          return_value=changes)
+
     def test_add_candidate_reads_receipt(self):
         # candidate 必须实读收据：build=build、board_verify=push_board，均大写；
         # package 无打包证据记 UNKNOWN（不再把 build_result 复制给 package_result）
@@ -317,8 +324,9 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "no-code-change")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
-        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao",
-                            "--evidence-scope", "no-code-change")
+        with self._patch_no_code_changes([]):
+            rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao",
+                                "--evidence-scope", "no-code-change")
         self.assertEqual(rc, 0, out)
         self.assertIn("promoted:", out)
 
@@ -492,8 +500,9 @@ class TestBaselineRegister(unittest.TestCase):
                                    "--source-commit", "abc123",
                                    "--evidence-scope", "no-code-change")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
-        rc, out = self._run("promote", "--baseline-id", bid,
-                            "--approved-by", "lechao")
+        with self._patch_no_code_changes([]):
+            rc, out = self._run("promote", "--baseline-id", bid,
+                                "--approved-by", "lechao")
         self.assertEqual(rc, 0)
         self.assertIn("promoted:", out)
         b = br.load()["baselines"][0]
@@ -506,8 +515,9 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
-        rc, _ = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao",
-                          "--evidence-scope", "no-code-change")
+        with self._patch_no_code_changes([]):
+            rc, _ = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao",
+                              "--evidence-scope", "no-code-change")
         self.assertEqual(rc, 0)
         b = br.load()["baselines"][0]
         self.assertEqual(b["evidence_scope"], "no-code-change")
@@ -550,12 +560,73 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
-        rc, _ = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao",
-                          "--evidence-scope", "no-code-change")
+        with self._patch_no_code_changes([]):
+            rc, _ = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao",
+                              "--evidence-scope", "no-code-change")
         self.assertEqual(rc, 0)
         b = br.load()["baselines"][0]
         self.assertEqual(b["evidence_scope"], "no-code-change")
         self.assertEqual(b["evidence"]["evidence_scope"], "no-code-change")
+
+    # ── 方向 1（本批意图 1）：no-code-change 机器核对（Python 层对称防绕过）──
+    def test_promote_no_code_change_blocks_on_code_changes(self):
+        # 机器核对：直调 promote 伪造 no-code-change 但 code/ 有改动 → 拒并列提交
+        rp = self._make_receipt()
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        bid = br.load()["baselines"][0]["baseline_id"]
+        with self._patch_no_code_changes(["abc123 fix: 动过 code",
+                                          "def456 新增(module): 又一个改动"]):
+            rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao",
+                                "--evidence-scope", "no-code-change")
+        self.assertEqual(rc, 1)
+        self.assertIn("机器核对", out)
+        self.assertIn("code/ 实际 diff 不符", out)
+        self.assertIn("abc123 fix: 动过 code", out)
+        self.assertIn("def456 新增(module): 又一个改动", out)
+        self.assertEqual(br.load()["baselines"][0]["status"], "candidate")
+
+    def test_promote_no_code_change_fail_closed_without_origin(self):
+        # 无法核对（缺 origin/main 引用 → git 失败返 None）按 fail-closed 拒绝豁免
+        rp = self._make_receipt()
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        bid = br.load()["baselines"][0]["baseline_id"]
+        with self._patch_no_code_changes(None):
+            rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao",
+                                "--evidence-scope", "no-code-change")
+        self.assertEqual(rc, 1)
+        self.assertIn("无法核对 code/ 改动", out)
+        self.assertIn("拒绝 no-code-change 豁免", out)
+
+    # ── 方向 2（本批意图 2）：promote 改写 evidence_scope 过收据 cases 子集校验 ──
+    def test_promote_scope_rewrite_oversell_blocked(self):
+        # 改写 scope 声称未实测用例范围（超出收据 cases）→ 拒（防晋升一步过度声称）
+        rp = self._make_receipt_pkg(cases="lcview-liveness,lcview-transfer")
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        bid = br.load()["baselines"][0]["baseline_id"]
+        rc, out = self._run("promote", "--baseline-id", bid,
+                            "--approved-by", "lechao",
+                            "--evidence-scope", "lcview-liveness,lcview-perf")
+        self.assertEqual(rc, 1)
+        self.assertIn("超出收据实测 cases", out)
+        self.assertIn("lcview-perf", out)
+        self.assertEqual(br.load()["baselines"][0]["status"], "candidate")
+
+    def test_promote_scope_rewrite_subset_ok(self):
+        # 改写 scope 为收据 cases 子集（收窄声明）→ 子集校验通过，全量覆盖晋升成功
+        rp = self._make_receipt_pkg()
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        bid = br.load()["baselines"][0]["baseline_id"]
+        rc, out = self._run("promote", "--baseline-id", bid,
+                            "--approved-by", "lechao",
+                            "--evidence-scope", "lcview-transfer")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("promoted:", out)
+        self.assertEqual(br.load()["baselines"][0]["evidence_scope"],
+                         "lcview-transfer")
 
     # ── 方向 1/2：promote 清算终态条目（KIR-006 promote 清算）────────────
     def _write_issue_files(self):

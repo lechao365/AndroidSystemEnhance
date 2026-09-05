@@ -139,6 +139,24 @@ def _derive_package_result(receipt, evidence_scope):
                                          evidence_scope)
 
 
+def _code_changes_since_main():
+    """dev 相对 origin/main 的 code/ 改动提交列表（no-code-change 机器核对用）。
+
+    no-code-change 豁免声称"无代码改动"，须机器核对而非采信参数：shell 层
+    （publish_main_base.sh）已由 git log 推导，Python 层做对称校验堵直调
+    baseline_register promote 伪造豁免。复用本文件既有的 subprocess git
+    能力（verify-tree 已用 git diff/rev-parse），不新引依赖。
+    git log 失败（缺 origin/main 引用等）返回 None = 无法核对，调用方须
+    fail-closed 拒绝豁免（宁可误拒不可放行）。
+    """
+    r = subprocess.run(
+        ["git", "log", "--format=%h %s", "origin/main...HEAD", "--", "code/"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode != 0:
+        return None
+    return [ln for ln in r.stdout.splitlines() if ln.strip()]
+
+
 def next_id(data, today):
     existing = [b.get("baseline_id") for b in data.get("baselines", [])]
     n = 1
@@ -480,6 +498,27 @@ def main(argv=None):
                 # 动过 code 的基线必须携带真实打包证据（rc=0）才可晋升
                 pkg_now = (b.get("package_result") or "UNKNOWN").upper()
                 scope_now = (b.get("evidence_scope") or "").strip()
+                # 方向 1（本批意图 1）：promote no-code-change 机器核对——Python
+                # 层对称校验（shell 层已由 git log 推导而 Python 层不原样采信参数，
+                # 防直调 promote 一次同时豁免打包硬门禁与全量组门禁）。最终生效
+                # scope 为 no-code-change 时，核对 dev 相对 origin/main 的 code/
+                # 改动：有改动即拒并列改动提交；无法核对（缺 origin/main 引用）
+                # 按 fail-closed 拒绝豁免
+                if scope_now == "no-code-change":
+                    code_changes = _code_changes_since_main()
+                    if code_changes is None:
+                        print("error: promote 机器核对：无法核对 code/ 改动"
+                              "（缺 origin/main 引用），拒绝 no-code-change 豁免",
+                              file=sys.stderr)
+                        return 1
+                    if code_changes:
+                        print(f"error: promote 机器核对：evidence_scope=no-code-change"
+                              f" 与 code/ 实际 diff 不符，存在 "
+                              f"{len(code_changes)} 个改动提交，拒绝豁免:",
+                              file=sys.stderr)
+                        for c in code_changes:
+                            print(f"  {c}", file=sys.stderr)
+                        return 1
                 if pkg_now != "PASS" and scope_now != "no-code-change":
                     print(f"error: promote 硬门禁：baseline {args.baseline_id} "
                           f"package_result={pkg_now} 非 PASS（动过 code 须 ws_package "
@@ -496,6 +535,21 @@ def main(argv=None):
                     print(f"error: promote 一致性校验：收据解析错误 {receipt}: "
                           f"{'; '.join(pkg_errs)}", file=sys.stderr)
                     return 1
+                # 方向 2（本批意图 2）：promote 改写 evidence_scope 同样过 prepare
+                # 已有的收据 cases 子集校验——晋升一步不得声称未实测的用例范围
+                #（add-candidate 有此防线，promote 分支此前直接赋值不校验）。
+                # no-code-change 为豁免标记（非 case 标签），方向 1 已机器核对
+                if scope_now and scope_now != "no-code-change":
+                    pkg_receipt_cases = {c.strip() for c in
+                                         (r_pkg.cases or "").split(",") if c.strip()}
+                    manual = {c.strip() for c in
+                              scope_now.split(",") if c.strip()}
+                    if manual and not manual.issubset(pkg_receipt_cases):
+                        extra = ", ".join(sorted(manual - pkg_receipt_cases))
+                        print(f"error: promote 改写 evidence_scope 超出收据实测 "
+                              f"cases（{sorted(pkg_receipt_cases) or '无'}），"
+                              f"过度声称拒绝: {extra}", file=sys.stderr)
+                        return 1
                 expected_pkg = _derive_package_result(r_pkg, scope_now)
                 if expected_pkg != pkg_now:
                     print(f"error: promote 一致性校验：收据 package 证据推导 "
