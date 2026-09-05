@@ -54,6 +54,10 @@ class TestSyncModifyIntegration(unittest.TestCase):
         cfg.mkdir(parents=True)
         (cfg / "baseline-status.yaml").write_text(
             "# baseline 状态登记\nbaselines: []\n", encoding="utf-8")
+        # verify-cases.yaml 为发布全量组门禁基准（cases_coverage 模块相对路径读取），
+        # fixture 须拷入临时根 harness/config/ 才能走通 prepare/promote
+        shutil.copy(str(HARNESS / "config" / "verify-cases.yaml"),
+                    str(cfg / "verify-cases.yaml"))
 
     def tearDown(self):
         self._tmp.cleanup()

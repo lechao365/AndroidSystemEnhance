@@ -437,8 +437,8 @@ python3 harness/skills/publish-main-base/baseline_register.py promote \
   || { echo "error: baseline 晋升登记失败（检查 $BID 是否为 candidate）" >&2; exit 1; }
 # 晋升登记随 dev 提交（squash 时一并进入 main；重建 dev 后仍在——reset --hard 前）
 # 证据快照目录 data/baselines/ 一并 add（promote 已生成 <id>-<收据名>.md 快照）
-# data/known-issues/ 一并 add -A（promote 清算删除的终态条目须随晋升提交入库，
-# 否则删除游离在工作树；verify-tree 已排除该目录，清算不破坏树等价断言）
+# data/known-issues/ 一并 add -A（promote 归档不删文件，批内新登记问题须随晋升
+# 提交入库；verify-tree 已排除该目录，登记变更不破坏树等价断言）
 git add harness/config/baseline-status.yaml
 if [ -d data/baselines ]; then git add data/baselines; fi
 if [ -d data/known-issues ]; then git add -A data/known-issues; fi

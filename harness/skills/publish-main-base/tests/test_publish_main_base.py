@@ -24,6 +24,12 @@ BASH = find_bash()
 # 基线 package_result=PASS 一致；gitignore 域文件证据已不可作为晋升凭据）
 PKG_JSON = '{"run_id":"r","script_rc":0}'
 
+# 发布全量组门禁基准 = 真实 verify-cases.yaml cases 段全部 case（动过 code 的
+# board 收据晋升须全量覆盖；测试随配置同源，防漂移）
+sys.path.insert(0, str(REAL_SKILL_DIR))
+import baseline_register as br  # noqa: E402
+_FULL_CASES = ",".join(br.verify_case_ids())
+
 
 @unittest.skipUnless(BASH and shutil.which("git"),
                      "需要 bash 与 git 解释器（Windows 环境跳过）")
@@ -57,6 +63,10 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         cfg = self.root / "harness" / "config"
         cfg.mkdir(parents=True, exist_ok=True)
         (cfg / "baseline-status.yaml").write_text("baselines: []\n", encoding="utf-8")
+        # verify-cases.yaml 为发布全量组门禁基准（cases_coverage 模块相对路径读取），
+        # fixture 须拷入临时根 harness/config/ 才能走通 prepare/promote
+        shutil.copy(REPO_ROOT / "harness" / "config" / "verify-cases.yaml",
+                    cfg / "verify-cases.yaml")
         # 真 git 仓：c1（内容）→ c2（内容，HEAD）
         self._git("init")
         self._git("symbolic-ref", "HEAD", "refs/heads/dev")
@@ -565,7 +575,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self._git("push", "origin", "dev")
         code_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
         self._write_receipt(code_head, batch_id="000000000002",
-                            cases="lcview-liveness", verify_mode="board",
+                            cases=_FULL_CASES, verify_mode="board",
                             package=PKG_JSON)
         self._git("add", "-A")
         self._git("commit", "-m", "修复(test): 收据入库四")
@@ -638,7 +648,7 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         code_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
         # board 收据覆盖 code 改动提交（candidate yaml 一并入库，promote 要求树净）
         self._write_receipt(code_head, batch_id="000000000001",
-                            cases="lcview-liveness", verify_mode="board",
+                            cases=_FULL_CASES, verify_mode="board",
                             package=PKG_JSON)
         (self.root / "harness" / "config" / "baseline-status.yaml").write_text(
             "baselines:\n"

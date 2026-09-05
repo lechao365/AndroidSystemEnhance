@@ -16,16 +16,49 @@ import yaml
 # 本文件位于 harness/skills/publish-main-base/，parents[2] = harness
 CONFIG = Path(__file__).resolve().parents[2] / "config" / "baseline-status.yaml"
 
+# 发布全量组门禁基准：verify-cases.yaml cases 段全部 case（发布前须全量验收）
+VERIFY_CASES_PATH = (Path(__file__).resolve().parents[2] / "config"
+                     / "verify-cases.yaml")
+
 # 仿 ws_report.py：引入 cross-device 共享收据模块，candidate 实读真实 verify 收据
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "lib" / "python"))
 from cdp_receipt import read_receipt  # noqa: E402
-from cdp_issue import (closed_issue_details, delete_closed,
+from cdp_issue import (closed_issue_details,
                        issue_files, read_index, read_issue, validate_issue)  # noqa: E402
 from cdp_paths import data_baselines_dir, project_root  # noqa: E402
 
 
 def load():
     return yaml.safe_load(CONFIG.read_text(encoding="utf-8")) or {}
+
+
+def verify_case_ids(cases_path=None):
+    """verify-cases.yaml cases 段全部 case id（发布全量组门禁基准）。"""
+    path = Path(cases_path) if cases_path else VERIFY_CASES_PATH
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as e:
+        raise ValueError(f"verify-cases.yaml 读取失败: {e}") from e
+    return list((data.get("cases") or {}).keys())
+
+
+def cases_coverage(receipt_cases, cases_path=None):
+    """发布全量组覆盖核对：返回 (result, missing, run_count)。
+
+    result: 'full'（覆盖 verify-cases.yaml 全部 case）/ 'partial'（有缺项）/
+    'missing'（收据无 cases = 无上板验收证据）。两级策略由此从注释契约升级为
+    机器核对：少跑不能背书基线。
+    """
+    all_ids = verify_case_ids(cases_path)
+    got = {c.strip() for c in (receipt_cases or "").split(",") if c.strip()}
+    missing = [c for c in all_ids if c not in got]
+    if not got:
+        result = "missing"
+    elif missing:
+        result = "partial"
+    else:
+        result = "full"
+    return result, missing, len(got)
 
 
 def save(data):
@@ -222,8 +255,8 @@ def main(argv=None):
             return 1
         # 排除项：登记 yaml（promote 元提交必然改动）与 docs/（文档同步提交）
         # 与 data/baselines/（promote 生成的证据快照目录，随晋升提交入库）
-        # 与 data/known-issues/（promote 清算删除目录，随晋升提交入库——
-        # 不排除则清算删除让树等价断言必红回滚）
+        # 与 data/known-issues/（保留目录——promote 归档不删文件，批内新登记
+        # 问题随晋升提交入库；不排除则登记变更让树等价断言必红回滚）
         excludes = ("harness/config/baseline-status.yaml", "docs/",
                     "data/baselines/", "data/known-issues/")
         diffs = [ln for ln in r.stdout.splitlines()
@@ -259,6 +292,11 @@ def main(argv=None):
                   f"{'; '.join(receipt_errs)}", file=sys.stderr)
             return 1
         receipt_cases = {c.strip() for c in (r.cases or "").split(",") if c.strip()}
+        # 方向 2（本批意图 2）：evidence 自描述——记录发布全量组覆盖核对结果
+        # 与实跑 case 数（含缺失名单），复核不需要重读 verify-cases.yaml
+        cov_result, cov_missing, cov_run_count = cases_coverage(r.cases)
+        cov_record = {"result": cov_result, "missing": cov_missing,
+                      "run_count": cov_run_count}
         if not evidence_scope:
             if not receipt_cases:
                 print("error: add-candidate 缺 --evidence-scope 且收据无 cases 字段"
@@ -360,6 +398,7 @@ def main(argv=None):
                         "known_issues_carried": known_issues_carried,
                         "package_evidence": str(pkg_evidence_path or ""),
                         "package_rc": pkg_rc,
+                        "cases_coverage": cov_record,
                     }
                     save(data)
                     print(f"candidate 复用并更新收据: {b['baseline_id']}（source_commit={args.source_commit}）")
@@ -387,6 +426,7 @@ def main(argv=None):
                 "known_issues_carried": known_issues_carried,
                 "package_evidence": str(pkg_evidence_path or ""),
                 "package_rc": pkg_rc,
+                "cases_coverage": cov_record,
             },
         })
         save(data)
@@ -463,6 +503,20 @@ def main(argv=None):
                           f"（收据内嵌打包证据缺失或与登记不符），阻断晋升",
                           file=sys.stderr)
                     return 1
+                # 方向 1（本批意图 1）promote 发布全量组门禁：sync_manifest 收据
+                # cases 须覆盖 verify-cases.yaml cases 段全部 case，缺项即阻断并
+                # 列出缺失名——两级策略从注释契约升级为机器核对（少跑不能背书
+                # 基线，如 BL-20260905-01 自称全量 11 实录 10 缺 lcview-trigger）。
+                # no-code-change（无代码改动）豁免，与 package 硬门禁同口径；
+                # 门禁在写快照前（失败不落污染快照）
+                pkg_cov_result, pkg_cov_missing, pkg_cov_run = cases_coverage(r_pkg.cases)
+                if pkg_cov_result != "full" and scope_now != "no-code-change":
+                    print(f"error: promote 发布全量组门禁：收据 cases 未覆盖 "
+                          f"verify-cases.yaml 全部 {len(verify_case_ids())} case"
+                          f"（实跑 {pkg_cov_run}），缺失: "
+                          f"{', '.join(pkg_cov_missing) or '无'}（发布前须全量验收；"
+                          f"evidence_scope=no-code-change 不受限）", file=sys.stderr)
+                    return 1
                 snapshot_path.write_text(receipt.read_text(encoding="utf-8"),
                                          encoding="utf-8")
                 b["status"] = "promoted"
@@ -470,28 +524,28 @@ def main(argv=None):
                 b["approved_at"] = datetime.datetime.now(
                     datetime.timezone(datetime.timedelta(hours=8))
                 ).strftime("%Y-%m-%dT%H:%M:%S+08:00")
-                # promote 清算（KIR-006）：晋升前先把终态条目清单（status 属
-                # fixed 或 wontfix，不看 blocking）记入 evidence.known_issues_closed
-                # 再 save——快照与清单先入档，随后 delete_closed 删文件（终态
-                # 记录随清单入档，删除不销毁证据链）；删失败仅 warn 不回滚快照。
-                # 清单存明细列表（issue_id/resolved_in/title），只存 id 在删文件
-                # 后无从辨认；evidence 非字典写不成清单时跳过清算删除并告警
-                #（无清单入档即删 = 无快照删证据）
+                # 方向 3（本批意图 3）：promote 不再删除 status=fixed 的
+                # known-issues 记录（KIR-006 清算删除废止），改归档进基线文档
+                # （证据快照）新增段落，逐条记 id/标题/修复提交——终态记录随
+                # 文档留存可追溯，registry 不再清零。evidence.known_issues_closed
+                # 仍入档供 yaml 复核（明细含 resolved_in/title），文件保留。
                 closed_details = closed_issue_details()
                 evidence = b.get("evidence")
                 if isinstance(evidence, dict):
                     evidence["known_issues_closed"] = closed_details
-                    save(data)
-                    try:
-                        delete_closed([d["issue_id"] for d in closed_details])
-                    except OSError as e:
-                        print(f"warn: 终态条目清算删除失败（快照与清单已入档不回滚）: "
-                              f"{e}", file=sys.stderr)
                 else:
                     print(f"warn: evidence 非字典（{type(evidence).__name__}），"
-                          "写不成 known_issues_closed 清单，跳过清算删除"
-                          "（无清单入档即删 = 无快照删证据）", file=sys.stderr)
-                    save(data)
+                          "写不成 known_issues_closed 清单（归档仍入基线文档）",
+                          file=sys.stderr)
+                if closed_details:
+                    archive_lines = ["", "## 已修复问题归档", ""]
+                    archive_lines += [
+                        f"- {d['issue_id']} | {d['title']} | "
+                        f"修复提交: {d['resolved_in'] or '未记'}"
+                        for d in closed_details]
+                    with snapshot_path.open("a", encoding="utf-8") as fh:
+                        fh.write("\n".join(archive_lines) + "\n")
+                save(data)
                 print(f"promoted: {args.baseline_id}（快照: {snapshot_path}）")
                 return 0
         print(f"error: 未找到 baseline {args.baseline_id}")
