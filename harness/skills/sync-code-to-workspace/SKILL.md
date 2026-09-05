@@ -78,7 +78,7 @@ stages:
 | workspace 不存在 | 报错退出 |
 | 无法确定 upstream base | 报错退出（脚本输出当前分支与 `git branch --set-upstream-to=` 修复建议），不再猜测任意 remote |
 | code 为空 | 报错退出 |
-| `.diff` 损坏（`git apply --check` 失败） | 标记 BROKEN-DIFF，该条 return 1 停止执行 |
+| .diff 损坏（`git apply --check` 失败） | 标记 BROKEN-DIFF，该条 return 1 停止执行 |
 | apply 失败 | **立即停止**，退出码非 0（避免半完成状态） |
 | EXTRA 命中编译产物 | 不列入 EXTRA（排除规则） |
 | workspace 有 staged 改动 | 仅警告不阻断 |

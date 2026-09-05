@@ -13,9 +13,18 @@
   4. .py/.sh/.yaml/.conf 内路径字符串（引号包裹的仓库内路径）
   5. .opencode/command/*.md 的 `@harness/...` 与 `!` 脚本引用
 
-排除项：
+    排除项：
   - tests/ 目录（测试 mock 常故意构造失效链接场景，不属文档引用）
   - 格式模板占位符（含中文 / "..." / "<>" 等，如 `[file:行](路径#L行)`）
+
+裸文件名（无斜杠，方向 3 收紧）：按 basename 在仓内唯一匹配即校验存在
+（唯一匹配 → 有效）；多义（多个同名文件无法确定目标）跳过防误报；零命中
+（引用不存在的文件）判悬空防漏网——此前无斜杠一律跳过致 harness-paths.conf
+类悬空漏网未被发现。
+退出码：1（存在悬空引用即判红，--report 落清单可跟踪；0 表示引用完整）；
+无 --path 且默认扫描目标为空（扫描根缺失/被全豁免）亦判红防假通过。
+  此前 ROOT 解析错误致真扫描根失效、且围栏/示例/占位被误报，检查长期假通过
+  （2026-09-02 方向 1/2/3 收紧误报后清零并恢复判红）。
 
 用法：
   python3 harness/lib/check_skill_refs.py            # 全量检查
@@ -88,8 +97,10 @@ def path_like(p: str) -> bool:
         # 含空格的 token（多为描述文字，非路径）跳过
         return False
     if "/" not in p:
-        # 不含斜杠的裸文件名（无法确定所在目录，多为误报）跳过
-        return False
+        # 无斜杠裸文件名：路径无法按目录解析，改由 scan_file._add 按
+        # basename 仓内唯一匹配校验（方向 3）；此处仅放行带扩展名的文件
+        # 名 token，无扩展名裸词视为描述文字非路径（EXT_HINT 统一兜底）。
+        return EXT_HINT.search(p) is not None
     if p.startswith(_DEVICE_ROOT):
         # Android 设备根绝对路径（如 /vendor/etc/...，文档引用设备侧文件）跳过
         return False
@@ -109,6 +120,25 @@ def path_like(p: str) -> bool:
 
 def strip_anchor(p: str) -> str:
     return p.split("#")[0]
+
+
+# basename 索引缓存（key=ROOT 绝对路径）：同 ROOT 静态扫描复用，
+# 防每个裸文件名 token 都全仓 rglob 一次导致扫描变慢
+_INDEX_CACHE: dict[str, dict[str, int]] = {}
+
+
+def _basename_count(name: str) -> int:
+    """仓内 basename 为 name 的文件数（方向 3 裸文件名唯一匹配判定）。"""
+    root = ROOT.resolve()
+    key = str(root)
+    idx = _INDEX_CACHE.get(key)
+    if idx is None:
+        idx = {}
+        for f in root.rglob("*"):
+            if f.is_file():
+                idx[f.name] = idx.get(f.name, 0) + 1
+        _INDEX_CACHE[key] = idx
+    return idx.get(name, 0)
 
 
 def resolve(base_dir: Path, p: str) -> bool:
@@ -132,7 +162,16 @@ def scan_file(f: Path) -> list[str]:
         if p in seen:
             return
         seen.add(p)
-        if path_like(p) and not resolve(f.parent, p):
+        if not path_like(p):
+            return
+        if "/" not in p:
+            # 方向 3：无斜杠裸文件名按 basename 仓内唯一匹配校验——
+            # 唯一匹配（仓内确有该文件）即有效；多义（多个同名无法确定
+            # 目标）跳过防误报；零命中（引用不存在的文件）判悬空防漏网。
+            if _basename_count(p) == 0:
+                misses.append(p)
+            return
+        if not resolve(f.parent, p):
             misses.append(p)
 
     for m in LINK_RE.finditer(txt):
@@ -205,7 +244,14 @@ def main() -> int:
 
     # 收集全部悬空（文件集 + .opencode/command @ 引用）
     dangling: list[tuple[Path, list[str]]] = []
-    for f in iter_scan_targets(args.path):
+    targets = iter_scan_targets(args.path)
+    if not args.path and not targets:
+        # 方向 5：无 --path 且默认扫描目标为空（扫描根缺失/被全豁免）即判红，
+        # 防扫描根失效假通过（parents[1] 时代 ROOT 解析错误致扫描恒空的历史教训）
+        print("error: 无 --path 且默认扫描目标为空（扫描根缺失或全豁免），判红",
+              file=sys.stderr)
+        return 1
+    for f in targets:
         misses = scan_file(f)
         if misses:
             dangling.append((f, misses))

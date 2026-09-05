@@ -94,12 +94,12 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 
 > 对应 `mk_rpi5_full_image.sh` 第 160~283 行。
 
-编译环境通过 `harness-paths.conf` 或环境变量指定（详见 `path-management.md`）。以下命令模板可直接复制执行。
+编译环境通过 `harness/config/paths.conf` 或环境变量指定（详见 `harness/README.md` 的路径配置段）。以下命令模板可直接复制执行。
 
 ### 1.1 设置环境变量
 
 ```bash
-# 从 harness-paths.conf 读取的默认路径（可被对应环境变量覆盖）
+# 从 harness/config/paths.conf 读取的默认路径（可被对应环境变量覆盖）
 export KERNEL_SRC="${KERNEL_SRC:-$HOME/workspace/rpi5-kernel-build/common}"
 export KERNEL_OUT="${KERNEL_OUT:-$HOME/workspace/rpi5-kernel-build/out/android_rpi5}"
 export CLANG_BIN="${CLANG_BIN:-$HOME/workspace/rpi5-kernel-build/prebuilts/clang/host/linux-x86/clang-r522817/bin}"

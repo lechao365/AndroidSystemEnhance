@@ -131,6 +131,24 @@ class TestCheckSkillRefs(unittest.TestCase):
                          Path(ckr.__file__).resolve().parents[2])
         self.assertTrue((self._orig_root / "harness" / "skills").is_dir())
         self.assertTrue((self._orig_root / "docs").is_dir())
+        # 方向 5：不 mock ROOT 的默认扫描目标数大于零（防扫描根失效假通过）
+        old_root = ckr.ROOT
+        ckr.ROOT = self._orig_root
+        try:
+            targets = ckr.iter_scan_targets(None)
+        finally:
+            ckr.ROOT = old_root
+        self.assertGreater(len(targets), 0)
+
+    def test_no_path_empty_targets_red(self):
+        # 方向 5：无 --path 且默认扫描目标为空（扫描根缺失/被全豁免）→ 判红
+        old_argv = sys.argv
+        sys.argv = ["check_skill_refs"]
+        try:
+            rc = ckr.main()
+        finally:
+            sys.argv = old_argv
+        self.assertEqual(rc, 1)
 
     def test_report_writes_dangling_manifest(self):
         # 方向 3：--report 把悬空引用清单落盘（可跟踪、随批提交供清零追踪）；
@@ -167,9 +185,30 @@ class TestCheckSkillRefs(unittest.TestCase):
         self._mk("harness/skills/demo/SKILL.md", "见 `my doc file.md` 说明\n")
         self.assertEqual(self._scan("harness/skills/demo/SKILL.md"), [])
 
-    def test_bare_filename_skipped(self):
-        # 方向 2：不含斜杠的裸文件名（无法定位所在目录）跳过
-        self._mk("harness/skills/demo/SKILL.md", "见 `manifest.yaml` 与 `run.py`\n")
+    def test_bare_filename_zero_hit_reported(self):
+        # 方向 3：裸文件名 basename 仓内零命中 → 引用不存在的文件判悬空
+        # （此前无斜杠一律跳过致 harness-paths.conf 类悬空漏网）
+        self._mk("harness/skills/demo/SKILL.md",
+                 "见 `harness-paths.conf` 与 `path-management.md`\n")
+        self.assertEqual(self._scan("harness/skills/demo/SKILL.md"),
+                         ["harness-paths.conf", "path-management.md"])
+
+    def test_bare_filename_unique_match_valid(self):
+        # 方向 3：裸文件名 basename 仓内唯一匹配 → 存在即有效
+        self._mk("harness/skills/demo/SKILL.md", "见 `manifest.yaml`\n")
+        self._mk("harness/skills/demo/manifest.yaml", "x\n")
+        self.assertEqual(self._scan("harness/skills/demo/SKILL.md"), [])
+
+    def test_bare_filename_ambiguous_skipped(self):
+        # 方向 3：裸文件名 basename 多义（多个同名文件无法确定目标）跳过防误报
+        self._mk("harness/skills/a/SKILL.md", "见 `run.py`\n")
+        self._mk("harness/skills/a/run.py", "x\n")
+        self._mk("harness/skills/b/run.py", "x\n")
+        self.assertEqual(self._scan("harness/skills/a/SKILL.md"), [])
+
+    def test_bare_filename_no_ext_skipped(self):
+        # 方向 3：无扩展名的裸词（描述文字，非文件名）跳过
+        self._mk("harness/skills/demo/SKILL.md", "见 `manifest` 说明\n")
         self.assertEqual(self._scan("harness/skills/demo/SKILL.md"), [])
 
     def test_angle_bracket_placeholder_skipped(self):
