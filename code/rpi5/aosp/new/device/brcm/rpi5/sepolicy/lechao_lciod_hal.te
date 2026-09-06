@@ -1,6 +1,11 @@
 # lechao_lciod_hal —— IO 控制器的 HAL 守护进程
-#   这是一个 vendor 端守护进程（位于 /vendor/bin），直接操作内核驱动节点
-#   与 lechao_lciod（system 端）通过 vndbinder 通信
+#   这是一个 vendor 端守护进程（位于 /vendor/bin），直接操作内核驱动节点。
+#   与 lechao_lciod（system 端）通过 AIDL 跨分区通信：HAL 注册到 vendor
+#   servicemanager（/dev/vndbinder，vndbinder_use 覆盖），system 端经
+#   /dev/binder 发起调用（LCD-001：原注释"通过 vndbinder 通信"描述不准）
+#   【2026-09-06 S6 清理】删除 binder_call(lechao_lciod_hal, servicemanager)
+#   ——vendor 域不应 call system servicemanager，注册走 vndservicemanager
+#   已由 vndbinder_use 覆盖（设备 Permissive 下 avc denied=0 佐证冗余）
 
 # 声明 lechao_lciod_hal 为 SELinux domain
 type lechao_lciod_hal, domain;
@@ -18,8 +23,8 @@ init_daemon_domain(lechao_lciod_hal)
 # 允许使用 vendor binder —— 与 system 端的 iod 跨 partition 通信
 #   为什么必须：iod（system）和 iod_hal（vendor）在不同进程空间，需跨 hidl/binder 通信
 vndbinder_use(lechao_lciod_hal)
-# 允许 HAL 与 servicemanager 进行 binder 通信（注册服务需要 call + transfer）
-binder_call(lechao_lciod_hal, servicemanager)
+# （LCD-014①：原 binder_call(lechao_lciod_hal, servicemanager) 已删——
+#   见文件头注释；vndservicemanager 交互由 vndbinder_use 内部覆盖）
 
 # 允许 HAL 打开/读写/控制设备节点 /dev/vendor_lechao_usbd*
 #   chr_file = 字符设备，ioctl = 控制命令（如：配置 IO 引脚、读取数据）
