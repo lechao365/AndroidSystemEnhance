@@ -171,6 +171,7 @@ ndk::ScopedAStatus IoHalImpl::getStats(int32_t in_deviceMinor, IoStats* _aidl_re
     _aidl_return->probeCount = raw.probe_count;
     _aidl_return->disconnectCount = raw.disconnect_count;
     _aidl_return->degradeCount = raw.degrade_count;
+    _aidl_return->eventDropCount = raw.event_drop_count;  /* LCD-012：ABI v2 字段透出 */
     _aidl_return->lastTransportLatencyNs = raw.last_transport_latency_ns;
     _aidl_return->currentRate = raw.current_rate;
     _aidl_return->lastEventTsNs = raw.last_event_ts_ns;

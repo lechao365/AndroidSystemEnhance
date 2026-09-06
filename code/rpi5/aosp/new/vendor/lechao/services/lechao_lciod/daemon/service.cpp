@@ -73,8 +73,7 @@ uint64_t ComputeKbRate(uint64_t bytes, uint64_t ns) {
 /* --- 字段投影纯函数（声明见 service.h，独立于 binder 环境可单测） --- */
 
 void ProjectSystemIoStats(const aidl::vendor::lechao::lciod::IoStats& vstats,
-                          aidl::system::lechao::lciod::IoStats* out) {
-    out->vid = vstats.vid;
+                          aidl::system::lechao::lciod::IoStats* out) {    out->vid = vstats.vid;
     out->pid = vstats.pid;
     out->vendor = vstats.vendor;
     out->product = vstats.product;
@@ -92,6 +91,7 @@ void ProjectSystemIoStats(const aidl::vendor::lechao::lciod::IoStats& vstats,
     out->probeCount = vstats.probeCount;
     out->disconnectCount = vstats.disconnectCount;
     out->degradeCount = vstats.degradeCount;
+    out->eventDropCount = vstats.eventDropCount;  /* LCD-012：事件丢弃数透出 */
     out->lastTransportLatencyNs = vstats.lastTransportLatencyNs;
     out->lastEventTsNs = vstats.lastEventTsNs;
     out->lastEventType = vstats.lastEventType;
@@ -257,7 +257,14 @@ void IoServiceImpl::start_monitor() {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             tick++;
             hal = hal_client_.get();
-            if (!hal) { LC_ALOGW("monitor: HAL not connected, skipping cycle"); continue; }
+            if (!hal) {
+                /* LCD-007：日志节流（200 tick 一次 = 10s 一条）——HAL 故障
+                 * 期间每 50ms 一条 WARNING 会以 1200 条/分钟淹没 logcat，
+                 * 掩盖其他关键日志（与 hal_client 重连失败节流同策略） */
+                if (tick % 200 == 0)
+                    LC_ALOGW("monitor: HAL not connected, skipping cycle (tick=%d)", tick);
+                continue;
+            }
 
             /* 每 200 tick（10s）刷新设备列表 */
             if (tick % 200 == 0) {
@@ -315,10 +322,11 @@ void IoServiceImpl::start_monitor() {
                     uint64_t write_rate = ComputeKbRate(stats.writeBytes, stats.writeNs);
 
                     ALOGI("monitor: minor=%d read_rate=%llu KB/s, write_rate=%llu KB/s, "
-                          "rx_pkts=%lld, tx_pkts=%lld",
+                          "rx_pkts=%lld, tx_pkts=%lld, event_drop=%lld",
                           minor,
                           (unsigned long long)read_rate, (unsigned long long)write_rate,
-                          (long long)stats.readCmds, (long long)stats.writeCmds);
+                          (long long)stats.readCmds, (long long)stats.writeCmds,
+                          (long long)stats.eventDropCount);
                 }
             }
         }

@@ -36,6 +36,8 @@ parcelable IoStats {
     long probeCount;       /* 设备探测（接入）次数 */
     long disconnectCount;  /* 设备断开次数 */
     long degradeCount;     /* 速率降级事件次数 */
+    long eventDropCount;   /* 内核事件环溢出丢弃的事件总数（ABI v2 新增，
+                              事件为单播排空语义，丢弃数是数据完整性判据） */
 
     /* --- 性能指标 --- */
     long lastTransportLatencyNs; /* 最近一次传输延迟（纳秒） */

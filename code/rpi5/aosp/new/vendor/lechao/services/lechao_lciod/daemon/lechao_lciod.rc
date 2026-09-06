@@ -12,13 +12,14 @@
 # 启动条件: sys.boot_completed=1（系统启动完成后触发）
 # 用户/组: system（系统级服务，可访问 AIDL service_manager）
 # 接口声明: 注册为 system.lechao.lciod.IIoService/default
-# oneshot 表示一次性执行，init 不会在进程退出后自动重启
+# LCD-005：非 oneshot——进程异常退出（crash/OOM）后 init 自动重启，
+#   服务从 servicemanager 消失的时间窗收敛到秒级（oneshot 下须等
+#   下次 reboot，上层全部拿到 null binder）
 service lechao_lciod /system/bin/lechao_lciod
     class main
     user system
     group system
     interface aidl system.lechao.lciod.IIoService/default
-    oneshot
 
 # 系统启动完成时启动 IO Daemon
 # 延迟启动的原因：

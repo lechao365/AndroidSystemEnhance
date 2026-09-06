@@ -45,6 +45,7 @@ parcelable IoStats {
   long probeCount;
   long disconnectCount;
   long degradeCount;
+  long eventDropCount;
   long lastTransportLatencyNs;
   long currentRate;
   long lastEventTsNs;

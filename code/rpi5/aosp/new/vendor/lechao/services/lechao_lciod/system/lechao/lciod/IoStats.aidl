@@ -9,6 +9,7 @@
  *   readBytes/NS/Cmds          — 读方向统计（直传）
  *   writeBytes/NS/Cmds         — 写方向统计（直传）
  *   errorCount~degradeCount    — 错误/异常/生命周期计数器（直传）
+ *   eventDropCount             — 内核事件环溢出丢弃总数（直传，LCD-012）
  *   lastTransportLatencyNs     — 最近传输延迟（直传）
  *   lastEventTsNs              — 最近事件时间戳（直传）
  *   lastEventType              — 最近事件类型（直传）
@@ -48,6 +49,8 @@ parcelable IoStats {
     long probeCount;       /* 设备探测次数 */
     long disconnectCount;  /* 设备断开次数 */
     long degradeCount;     /* 速率降级次数 */
+    long eventDropCount;   /* 内核事件环溢出丢弃的事件总数（LCD-012：
+                              与 vendor IoStats 同步透出，数据完整性可见） */
 
     /* --- 性能指标 --- */
     long lastTransportLatencyNs; /* 最近一次传输延迟（纳秒） */
