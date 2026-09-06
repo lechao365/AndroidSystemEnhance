@@ -87,7 +87,8 @@ struct lcview_builder *lcview_builder_new(uint16_t event_id, uint8_t level)
 
     b = kmalloc(sizeof(*b), GFP_ATOMIC);
     if (!b) {
-        pr_err(PREFIX "kmalloc failed for event_id=%u\n", event_id);
+        /* KRN-014：GFP_ATOMIC 失败在内存压力下可高频出现，限频防日志风暴 */
+        pr_err_ratelimited(PREFIX "kmalloc failed for event_id=%u\n", event_id);
         return NULL;
     }
 
@@ -141,6 +142,15 @@ static int builder_write_field(struct lcview_builder *b,
         return -ENOSPC;
     }
 
+    /*
+     * KRN-015：field_count 为 uint8_t，commit 时写入 record 头。
+     * 达到 255 后继续 add 会回绕到 0，头与数据不一致导致用户态解析错乱。
+     * 4KB builder 实际装不下 255 个最小字段（1B type + 最小值），
+     * data_offset 检查通常先触发，此检查兜底防御。
+     */
+    if (b->field_count >= 255)
+        return -ENOSPC;
+
     b->buf[b->data_offset] = type;
     b->data_offset += 1;
     memcpy(b->buf + b->data_offset, val, val_len);
@@ -189,6 +199,9 @@ int lcview_builder_add_str(struct lcview_builder *b, const char *val)
                len, (size_t)(LCVIEW_BUILDER_MAX_SIZE - b->data_offset));
         return -ENOSPC;
     }
+    /* KRN-015：field_count uint8_t 回绕防御（同 builder_write_field） */
+    if (b->field_count >= 255)
+        return -ENOSPC;
 
     b->buf[b->data_offset] = LCVIEW_TYPE_STRING;
     b->data_offset += 1;
@@ -229,6 +242,9 @@ int lcview_builder_add_binary(struct lcview_builder *b,
         LC_DBG("binary overflow: len=%u\n", len);
         return -ENOSPC;
     }
+    /* KRN-015：field_count uint8_t 回绕防御（同 builder_write_field） */
+    if (b->field_count >= 255)
+        return -ENOSPC;
 
     b->buf[b->data_offset] = LCVIEW_TYPE_BINARY;
     b->data_offset += 1;

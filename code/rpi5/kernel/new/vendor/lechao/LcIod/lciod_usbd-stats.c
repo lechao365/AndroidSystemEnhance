@@ -174,8 +174,10 @@ static inline bool vendor_lechao_usbd_update_degrade_context_locked(
  * 每个 helper 函数将特定事件类型发射到 LcView ring buffer。
  * 这些事件被用户态 lcview_daemon 读取并用于全系统时序分析。
  *
- * 调用上下文：spin_unlock 后调用，可睡眠（lcview_builder_start 使用 GFP_ATOMIC）。
- * 如果 builder_start 失败（如 ring buffer 满），事件被静默丢弃。
+ * 调用上下文：spin_unlock 后调用，仍处于 SCSI 中断/原子上下文——不可睡眠
+ * （lcview_builder_start 使用 GFP_ATOMIC 即为此）。KRN-017：原注释
+ * "可睡眠"错误，调用方不得在此路径使用 GFP_KERNEL 等可睡眠分配。
+ * 如果 builder_start 失败（如内存不足），事件被静默丢弃（ratelimited 日志）。
  */
 
 /*
@@ -190,6 +192,7 @@ static void lcview_trace_transport_start(struct vendor_lechao_usbd_device *rate_
                                          struct scsi_cmnd *srb, int device_index)
 {
     struct lcview_builder *b;
+    int rc;
     int dir;
 
     if (!srb)
@@ -200,10 +203,12 @@ static void lcview_trace_transport_start(struct vendor_lechao_usbd_device *rate_
     b = lcview_builder_start(LCVIEW_EVENT_USB_TRANSPORT_START, LCVIEW_LEVEL_DEBUG);
     if (!b)
         return;
-    lcview_builder_add_int(b, (int64_t)device_index);
-    lcview_builder_add_int(b, (int64_t)dir);
-    lcview_builder_add_int(b, (int64_t)scsi_bufflen(srb));
-    if (lcview_builder_commit(b, &lcview_ring))
+    rc  = lcview_builder_add_int(b, (int64_t)device_index);
+    rc |= lcview_builder_add_int(b, (int64_t)dir);
+    rc |= lcview_builder_add_int(b, (int64_t)scsi_bufflen(srb));
+    /* KRN-016：add 失败聚合处理——任一字段缺失都会使用户态
+     * 按 schema 解析错位，整体丢弃事件而非发射残缺记录。*/
+    if (rc || lcview_builder_commit(b, &lcview_ring))
         lcview_builder_cancel(b);
 }
 
@@ -216,6 +221,7 @@ static void lcview_trace_transport_end(struct vendor_lechao_usbd_device *rate_de
                                        u64 bytes, u64 elapsed_ns, int was_error)
 {
     struct lcview_builder *b;
+    int rc;
     int dir;
 
     if (!srb)
@@ -226,12 +232,14 @@ static void lcview_trace_transport_end(struct vendor_lechao_usbd_device *rate_de
     b = lcview_builder_start(LCVIEW_EVENT_USB_TRANSPORT_END, LCVIEW_LEVEL_INFO);
     if (!b)
         return;
-    lcview_builder_add_int(b, (int64_t)device_index);
-    lcview_builder_add_int(b, (int64_t)dir);
-    lcview_builder_add_int(b, (int64_t)bytes);
-    lcview_builder_add_int(b, (int64_t)elapsed_ns);
-    lcview_builder_add_int(b, (int64_t)was_error);
-    if (lcview_builder_commit(b, &lcview_ring))
+    rc  = lcview_builder_add_int(b, (int64_t)device_index);
+    rc |= lcview_builder_add_int(b, (int64_t)dir);
+    rc |= lcview_builder_add_int(b, (int64_t)bytes);
+    rc |= lcview_builder_add_int(b, (int64_t)elapsed_ns);
+    rc |= lcview_builder_add_int(b, (int64_t)was_error);
+    /* KRN-016：add 失败聚合处理——任一字段缺失都会使用户态
+     * 按 schema 解析错位，整体丢弃事件而非发射残缺记录。*/
+    if (rc || lcview_builder_commit(b, &lcview_ring))
         lcview_builder_cancel(b);
 }
 
@@ -243,14 +251,17 @@ static void lcview_trace_transport_error(struct vendor_lechao_usbd_device *rate_
                                          int device_index, int dir, int result)
 {
     struct lcview_builder *b;
+    int rc;
 
     b = lcview_builder_start(LCVIEW_EVENT_USB_TRANSPORT_ERROR, LCVIEW_LEVEL_WARN);
     if (!b)
         return;
-    lcview_builder_add_int(b, (int64_t)device_index);
-    lcview_builder_add_int(b, (int64_t)dir);
-    lcview_builder_add_int(b, (int64_t)result);
-    if (lcview_builder_commit(b, &lcview_ring))
+    rc  = lcview_builder_add_int(b, (int64_t)device_index);
+    rc |= lcview_builder_add_int(b, (int64_t)dir);
+    rc |= lcview_builder_add_int(b, (int64_t)result);
+    /* KRN-016：add 失败聚合处理——任一字段缺失都会使用户态
+     * 按 schema 解析错位，整体丢弃事件而非发射残缺记录。*/
+    if (rc || lcview_builder_commit(b, &lcview_ring))
         lcview_builder_cancel(b);
 }
 
@@ -262,12 +273,15 @@ static void lcview_trace_reset(struct vendor_lechao_usbd_device *rate_dev,
                                int device_index)
 {
     struct lcview_builder *b;
+    int rc;
 
     b = lcview_builder_start(LCVIEW_EVENT_USB_RESET, LCVIEW_LEVEL_WARN);
     if (!b)
         return;
-    lcview_builder_add_int(b, (int64_t)device_index);
-    if (lcview_builder_commit(b, &lcview_ring))
+    rc  = lcview_builder_add_int(b, (int64_t)device_index);
+    /* KRN-016：add 失败聚合处理——任一字段缺失都会使用户态
+     * 按 schema 解析错位，整体丢弃事件而非发射残缺记录。*/
+    if (rc || lcview_builder_commit(b, &lcview_ring))
         lcview_builder_cancel(b);
 }
 
@@ -279,13 +293,16 @@ static void lcview_trace_stall(struct vendor_lechao_usbd_device *rate_dev,
                                int device_index, int status)
 {
     struct lcview_builder *b;
+    int rc;
 
     b = lcview_builder_start(LCVIEW_EVENT_USB_STALL, LCVIEW_LEVEL_WARN);
     if (!b)
         return;
-    lcview_builder_add_int(b, (int64_t)device_index);
-    lcview_builder_add_int(b, (int64_t)status);
-    if (lcview_builder_commit(b, &lcview_ring))
+    rc  = lcview_builder_add_int(b, (int64_t)device_index);
+    rc |= lcview_builder_add_int(b, (int64_t)status);
+    /* KRN-016：add 失败聚合处理——任一字段缺失都会使用户态
+     * 按 schema 解析错位，整体丢弃事件而非发射残缺记录。*/
+    if (rc || lcview_builder_commit(b, &lcview_ring))
         lcview_builder_cancel(b);
 }
 
@@ -297,13 +314,16 @@ static void lcview_trace_timeout(struct vendor_lechao_usbd_device *rate_dev,
                                  int device_index, int status)
 {
     struct lcview_builder *b;
+    int rc;
 
     b = lcview_builder_start(LCVIEW_EVENT_USB_TIMEOUT, LCVIEW_LEVEL_WARN);
     if (!b)
         return;
-    lcview_builder_add_int(b, (int64_t)device_index);
-    lcview_builder_add_int(b, (int64_t)status);
-    if (lcview_builder_commit(b, &lcview_ring))
+    rc  = lcview_builder_add_int(b, (int64_t)device_index);
+    rc |= lcview_builder_add_int(b, (int64_t)status);
+    /* KRN-016：add 失败聚合处理——任一字段缺失都会使用户态
+     * 按 schema 解析错位，整体丢弃事件而非发射残缺记录。*/
+    if (rc || lcview_builder_commit(b, &lcview_ring))
         lcview_builder_cancel(b);
 }
 
@@ -315,13 +335,16 @@ static void lcview_trace_data_corrupt(struct vendor_lechao_usbd_device *rate_dev
                                       int device_index, int status)
 {
     struct lcview_builder *b;
+    int rc;
 
     b = lcview_builder_start(LCVIEW_EVENT_USB_DATA_CORRUPT, LCVIEW_LEVEL_WARN);
     if (!b)
         return;
-    lcview_builder_add_int(b, (int64_t)device_index);
-    lcview_builder_add_int(b, (int64_t)status);
-    if (lcview_builder_commit(b, &lcview_ring))
+    rc  = lcview_builder_add_int(b, (int64_t)device_index);
+    rc |= lcview_builder_add_int(b, (int64_t)status);
+    /* KRN-016：add 失败聚合处理——任一字段缺失都会使用户态
+     * 按 schema 解析错位，整体丢弃事件而非发射残缺记录。*/
+    if (rc || lcview_builder_commit(b, &lcview_ring))
         lcview_builder_cancel(b);
 }
 
@@ -333,13 +356,16 @@ static void lcview_trace_rate_degraded(struct vendor_lechao_usbd_device *rate_de
                                        int device_index, u64 latency_ns)
 {
     struct lcview_builder *b;
+    int rc;
 
     b = lcview_builder_start(LCVIEW_EVENT_USB_RATE_DEGRADED, LCVIEW_LEVEL_WARN);
     if (!b)
         return;
-    lcview_builder_add_int(b, (int64_t)device_index);
-    lcview_builder_add_int(b, (int64_t)latency_ns);
-    if (lcview_builder_commit(b, &lcview_ring))
+    rc  = lcview_builder_add_int(b, (int64_t)device_index);
+    rc |= lcview_builder_add_int(b, (int64_t)latency_ns);
+    /* KRN-016：add 失败聚合处理——任一字段缺失都会使用户态
+     * 按 schema 解析错位，整体丢弃事件而非发射残缺记录。*/
+    if (rc || lcview_builder_commit(b, &lcview_ring))
         lcview_builder_cancel(b);
 }
 

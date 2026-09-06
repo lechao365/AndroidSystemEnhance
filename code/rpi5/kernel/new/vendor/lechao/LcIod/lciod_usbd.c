@@ -237,10 +237,15 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
         bool empty = (dev->event_head == dev->event_tail);
         bool shutdown = READ_ONCE(dev->event_shutdown);
         spin_unlock_irqrestore(&dev->event_lock, flags);
-        if (shutdown)
-            return 0;
+        /*
+         * KRN-004：先判 empty 再判 shutdown，与阻塞路径 drain 语义对齐。
+         * 原实现 shutdown 先于 empty 检查——非空 ring 的尾部事件被丢弃
+         * （epoll 用户看到 EPOLLIN|EPOLLHUP 后先 read 得 0 误判 EOF，
+         * 拔盘瞬间事件全丢）。现：空环 → shutdown ? 0(EOF) : -EAGAIN；
+         * 非空 → 落到下面循环取事件（wait 条件立即满足不阻塞）。
+         */
         if (empty)
-            return -EAGAIN;
+            return shutdown ? 0 : -EAGAIN;
         /* ring 非空：落到下面的循环（首次 wait 不会真正阻塞） */
     }
 

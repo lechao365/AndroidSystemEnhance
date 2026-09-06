@@ -279,8 +279,9 @@ int lcview_ring_write(struct lcview_ring *ring,
 
     if (total > avail) {
         spin_unlock_irqrestore(&ring->lock, flags);
-        pr_err(PREFIX "ring full, write failed (total=%u avail=%u)\n",
-               total, avail);
+        /* KRN-014：满环在 I/O 洪水时可每条命令触发，限频防止日志风暴 */
+        pr_err_ratelimited(PREFIX "ring full, write failed (total=%u avail=%u)\n",
+                           total, avail);
         return -ENOSPC;
     }
 
