@@ -28,8 +28,16 @@ done
 # 运行日志：harness/log/git-works-push/git-works-push-<日>.log（日粒度
 # 追加，/harness/log/ 已 gitignore 不入库）。秒级时间戳文件名会让每次
 # push 都新开文件、目录无限膨胀难追溯——同日多次 push 追加同文件，每行
-# 前缀时间戳保证逐条时间归因；留存由 harness/lib/log_prune.py 清理
-LOG_DIR="$SCRIPT_DIR/../../log/git-works-push"
+# 前缀时间戳保证逐条时间归因；留存由 harness/lib/log_prune.py 清理。
+# 目录锚定被操作仓库根（CDP_PROJECT_ROOT 优先，与 cdp_timing 打点根
+# 同源；否则 git 工作树根）：脚本被测试 fixture 复用（cwd/CDP_PROJECT_ROOT
+# 指临时仓）时日志随操作对象落盘，防污染真仓日志目录
+if [ -n "${CDP_PROJECT_ROOT:-}" ]; then
+  ROOT="$CDP_PROJECT_ROOT"
+else
+  ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+fi
+LOG_DIR="$ROOT/harness/log/git-works-push"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/git-works-push-$(date +%Y%m%d).log"
 out() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG_FILE"; }

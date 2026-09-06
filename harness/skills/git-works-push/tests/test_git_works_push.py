@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -229,6 +230,12 @@ class TestCommitMsgHook(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self._repo = Path(self._tmp.name) / "repo"
         self._repo.mkdir()
+        # 日志/打点根与被操作仓库对齐（与 TestGitWorksPush 同款样板）：
+        # git_works_push.sh LOG_DIR 按 CDP_PROJECT_ROOT 优先锚定，须指
+        # 临时仓防污染真仓（conftest 默认隔离指 pytest tmp_path，与本类
+        # 自建 repo 子目录不同——显式覆盖）
+        self._old_root = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = str(self._repo)
         env = dict(os.environ)
         env["GIT_AUTHOR_NAME"] = env["GIT_COMMITTER_NAME"] = "t"
         env["GIT_AUTHOR_EMAIL"] = env["GIT_COMMITTER_EMAIL"] = "t@t"
@@ -244,6 +251,10 @@ class TestCommitMsgHook(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def tearDown(self):
+        if self._old_root is None:
+            os.environ.pop("CDP_PROJECT_ROOT", None)
+        else:
+            os.environ["CDP_PROJECT_ROOT"] = self._old_root
         self._tmp.cleanup()
 
     def _git(self, *args):
@@ -305,6 +316,19 @@ class TestCommitMsgHook(unittest.TestCase):
         good.write_text("新增(harness): 中文前缀提交\n", encoding="utf-8")
         r = self._git("commit", "--allow-empty", "-F", str(good))
         self.assertEqual(r.returncode, 0)
+
+    def test_log_lands_in_fixture_repo_daily_file(self):
+        # 批次五 + 隔离修复：运行日志落被操作仓库（CDP_PROJECT_ROOT，即
+        # 临时仓）harness/log/git-works-push/，日粒度文件名 + 行时间戳
+        # 前缀；不得锚定脚本位置（真仓）——防测试污染真仓日志目录
+        r = self._run_script("--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        log_dir = self._repo / "harness" / "log" / "git-works-push"
+        today = datetime.now().strftime("%Y%m%d")
+        log_file = log_dir / f"git-works-push-{today}.log"
+        self.assertTrue(log_file.is_file(), f"缺日志文件 {log_file}")
+        first = log_file.read_text(encoding="utf-8").splitlines()[0]
+        self.assertRegex(first, r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
 
 
 @unittest.skipUnless(BASH and shutil.which("git"),
