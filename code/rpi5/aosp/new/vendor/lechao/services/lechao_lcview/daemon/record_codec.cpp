@@ -66,8 +66,12 @@ FieldDecodeResult decodeRecordField(const uint8_t** ptr, const uint8_t* end,
         }
         valueLen = flen;
     } else {
-        if ((size_t)(end - p) < valueLen)
+        if ((size_t)(end - p) < valueLen) {
+            // LCV-08：定长字段截断也显式填充 type——调用方不依赖 NSDMI
+            // 隐式 0 值恰好落对分支（契约自描述，防后续维护踩坑）
+            out->type = type;
             return FieldDecodeResult::kTruncated;
+        }
     }
 
     out->type = type;

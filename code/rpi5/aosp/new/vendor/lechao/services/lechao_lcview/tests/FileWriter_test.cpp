@@ -891,7 +891,9 @@ TEST(FileWriterDropCountTest, FormatOob_Counts) {
 }
 
 TEST(FileWriterDropCountTest, WriteRecord_BadData_CountsFormat) {
-    // writeRecord 传坏数据：formatOob + formatEmpty 各 +1（越界返回空 → 空丢弃）
+    // writeRecord 传坏数据：越界返回空 → 仅计 formatOob。
+    // LCV-18：同一次丢弃不再计 2 次（原 formatOob+formatEmpty 双计使
+    // 心跳 dropped 求和虚高一倍），formatEmpty 保留字段但无自增路径
     TempDir dir;
     FileWriterConfig cfg;
     cfg.logDir = dir.path();
@@ -902,7 +904,7 @@ TEST(FileWriterDropCountTest, WriteRecord_BadData_CountsFormat) {
 
     writer.writeRecord(schema, &hdr, fields.data(), fields.size());
     EXPECT_EQ(writer.dropCounters().formatOob, 1);
-    EXPECT_EQ(writer.dropCounters().formatEmpty, 1);
+    EXPECT_EQ(writer.dropCounters().formatEmpty, 0);
     SUCCEED();
 }
 

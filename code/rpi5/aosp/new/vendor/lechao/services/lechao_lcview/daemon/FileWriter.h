@@ -154,10 +154,13 @@ private:
     // invalid 当前文件已写入字节数（CXX-002：构造时 stat 从持久层恢复，
     // 写成功累计，轮转归零——供轮转阈值判定与失败恢复 rollback 基准）
     size_t mInvalidSize = 0;
-    // DROP 分类累计计数（六条 DROP 路径，进 daemon 心跳）
+    // DROP 分类累计计数（六条 DROP 路径，进 daemon 心跳）。
+    // formatEmpty 保留供心跳格式兼容，当前无自增路径（LCV-18：
+    // 空行唯一来源 OOB 已计 formatOob，不再重复计数）
     DropCounters mDrops;
     // 写路径耗时统计（方向 3，见 WriteTimings）
     WriteTimings mTimings;
-    // 距上次 enforceRetention 实际扫描的写入次数（方向 4 降频）
+    // 距上次 enforceRetention 实际扫描的写入次数（方向 4 降频）；
+    // 构造时初始化为满阈值（LCV-13：启动首扫清理历史超限数据）
     size_t mWritesSinceRetention = 0;
 };

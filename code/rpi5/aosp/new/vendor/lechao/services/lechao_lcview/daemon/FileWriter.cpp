@@ -71,11 +71,17 @@ static bool mkdirRecursive(const std::string& path, mode_t mode)
 // uploaded 目录为将来"已上传标记"预留，当前未使用
 FileWriter::FileWriter(const FileWriterConfig& cfg) : mCfg(cfg)
 {
-    // 确保日志根目录存在
-    mkdirRecursive(mCfg.logDir, 0755);
+    // LCV-13：计数器置满——启动后首次 enforceRetention 即全量扫描，
+    // 清理上次运行遗留的超限数据（否则静默期内永不清理）
+    mWritesSinceRetention = cfg.retentionScanEveryWrites;
+    // LCV-15：目录创建失败必须可见（仅靠后续 openFailed 间接可见时，
+    // 首条心跳前无直接信号）；权限 0750 与 rc 文件策略一致
+    if (!mkdirRecursive(mCfg.logDir, 0750))
+        ALOGE("FileWriter: cannot create log dir %s", mCfg.logDir.c_str());
     // 创建 uploaded 子目录（标记已上传到远程存储的文件）
     std::string uploadedDir = mCfg.logDir + "/uploaded";
-    mkdirRecursive(uploadedDir, 0755);
+    if (!mkdirRecursive(uploadedDir, 0750))
+        ALOGE("FileWriter: cannot create uploaded dir %s", uploadedDir.c_str());
 
     // 追加模式打开 invalid_records.log，不覆盖已有内容
     mInvalidFilename = mCfg.logDir + "/invalid_records.log";
@@ -199,10 +205,15 @@ void FileWriter::openFile(uint16_t eventId, const EventSchema& schema)
         return;
     }
 
-    // 追加模式下文件可能已有内容：stat 恢复 currentSize，兑现轮转约束
+    // 追加模式下文件可能已有内容：stat 恢复 currentSize，兑现轮转约束。
+    // LCV-11：stat 失败必须可见（静默保持 0 会让该文件轮转约束失效，
+    // 可超限近一倍且无任何信号）
     struct stat st;
     if (stat(fs.currentFilename.c_str(), &st) == 0)
         fs.currentSize = static_cast<size_t>(st.st_size);
+    else
+        ALOGE("FileWriter: openFile: stat %s failed: %s (rotation constraint degraded)",
+              fs.currentFilename.c_str(), strerror(errno));
 
     LC_ALOGD("FileWriter: opened file: %s (restored size=%zu)",
              fs.currentFilename.c_str(), fs.currentSize);
@@ -331,7 +342,9 @@ static void appendFieldValue(std::ostringstream& oss, const DecodedField& df)
         if (std::isnan(val) || std::isinf(val))
             oss << "null";
         else
-            oss << val;
+            // LCV-20：默认 6 位有效数字截断 float 精度（约 7.2 位），
+            // 提升至 9 位保真输出（对整型/字符串输出无影响）
+            oss << std::setprecision(9) << val;
         break;
     }
     case LCVIEW_TYPE_STRING: {
@@ -515,8 +528,11 @@ void FileWriter::writeRecord(const EventSchema& schema,
             std::chrono::steady_clock::now() - tFormatStart).count());
 
     if (line.empty()) {
+        // LCV-18：空串唯一来源是 formatJsonLine 的 OOB 路径（已计
+        // formatOob），此处不再重复计 formatEmpty（同一次丢弃计 2 次
+        // 使心跳 dropped 求和虚高一倍）。formatEmpty 字段保留供心跳
+        // 格式兼容，当前无自增路径
         ALOGE("FileWriter: writeRecord: formatJsonLine returned empty for event %u, DROPPING", schema.id);
-        mDrops.formatEmpty++;
         return;
     }
 
@@ -732,12 +748,19 @@ std::vector<FileWriter::LogFile> FileWriter::scanLogFiles()
         return files;
     }
 
-    // 遍历日志目录，收集所有 .jsonl 和 .log 文件
+    // 遍历日志目录，收集所有 .jsonl 和 .log 文件。
+    // LCV-10：精确后缀匹配（原子串包含会把 foo.jsonl.bak / x.log.old
+    // 等文件误入淘汰候选——目录虽由 daemon 自管，人工排障放置的
+    // 中间文件不应被静默删除）
     struct dirent* entry;
     while ((entry = readdir(dir)) != nullptr) {
         std::string name(entry->d_name);
-        if (name.find(".jsonl") == std::string::npos &&
-            name.find(".log") == std::string::npos)
+        const std::string kJsonl = ".jsonl", kLog = ".log";
+        bool isJsonl = name.size() >= kJsonl.size() &&
+            name.compare(name.size() - kJsonl.size(), kJsonl.size(), kJsonl) == 0;
+        bool isLog = name.size() >= kLog.size() &&
+            name.compare(name.size() - kLog.size(), kLog.size(), kLog) == 0;
+        if (!isJsonl && !isLog)
             continue;
 
         std::string fullPath = mCfg.logDir + "/" + name;
@@ -804,7 +827,9 @@ void FileWriter::enforceRetention()
     // 方向 4 降频：每轮主循环全目录 opendir+stat 成本高（空批也扫），
     // 改为按写入计数触发——未达阈值直接跳过，避免无数据时反复扫描。
     // retentionScanEveryWrites == 0 表示关闭降频（每次调用都扫描，
-    // 单测显式调用 enforceRetention 断言扫描行为的场景使用）
+    // 单测显式调用 enforceRetention 断言扫描行为的场景使用）。
+    // LCV-13：构造时把计数器初始化为满阈值——启动后首次调用即执行
+    // 全量扫描，清理上次运行遗留的超限数据（静默期内永不清理的空洞）
     if (mCfg.retentionScanEveryWrites > 0 &&
         mWritesSinceRetention < mCfg.retentionScanEveryWrites) {
         return;

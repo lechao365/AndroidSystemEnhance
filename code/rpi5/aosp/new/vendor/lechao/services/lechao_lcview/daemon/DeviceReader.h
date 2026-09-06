@@ -64,9 +64,17 @@ public:
     uint32_t getTotalRecords() override;
     void close() override;
 
+    // LCV-16/17：诊断计数（心跳可见性，失败返 0 与真实 0 可区分）
+    uint64_t ioctlErr() const { return mIoctlErr; }
+    uint64_t eofCount() const { return mEofCount; }
+
 private:
     int mFd = -1;
     int mEpfd = -1;
+    // LCV-16/17：ioctl 失败与 EOF 计数（失败返 0 与真实 0 在心跳中
+    // 不可区分的根因修复——心跳输出 ioctl_err/eof 字段供判红）
+    uint64_t mIoctlErr = 0;
+    uint64_t mEofCount = 0;
 };
 
 }  // namespace lcview

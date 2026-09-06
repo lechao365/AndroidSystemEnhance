@@ -91,6 +91,14 @@ bool SchemaParser::parseEventDef(const Json::Value& ev, EventSchema* out)
         return false;
     }
     const Json::Value& fields = ev["fields"];
+    // LCV-19：字段数上限 255（wire 头 field_count 为 uint8_t，超限时
+    // 该事件所有记录永远 invalid 且根因难定位——配置期直接拒绝）
+    if (fields.size() > 255) {
+        LOG(ERROR) << "SchemaParser: event " << out->id
+                   << " has " << fields.size()
+                   << " fields (max 255, wire hdr field_count is uint8)";
+        return false;
+    }
 
     for (const auto& f : fields) {
         FieldDef fd;

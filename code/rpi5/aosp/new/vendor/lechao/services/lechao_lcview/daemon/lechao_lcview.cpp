@@ -56,17 +56,20 @@ static void signalHandler(int) {
 // 返回原始读字节数；n<0 表示致命读错误（已打日志并累计 readErr，
 // 调用方须退出主循环交 init 重启）
 static ssize_t readOnce(EpollDeviceReader& reader, uint8_t* buf, size_t bufSize,
-                        int timeoutMs, size_t& offset, int& readOk,
-                        int& readEmpty, int& readErr,
+                        int timeoutMs, size_t& offset, uint64_t& readOk,
+                        uint64_t& readEmpty, uint64_t& readErr,
                         std::chrono::steady_clock::time_point& dataArrivedAt)
 {
     ssize_t n = reader.waitAndRead(buf, offset, bufSize, timeoutMs);
     if (n < 0) {
         // CXX-004: 致命读错误 4 步退出（日志 → 调用方 exit 交 init 重启），
-        // 禁止静默 return 僵尸态（采集链路中断须可见）
+        // 禁止静默 return 僵尸态（采集链路中断须可见）。
+        // LCV-12：先保存 errno 再用（strerror 允许修改 errno，实参
+        // 求值顺序未指定，两次读取点可能不一致）
+        int saved = errno;
         readErr++;
         ALOGE("lechao_lcview: read error, errno=%d (%s), buffered=%zu, "
-              "exiting for init restart", errno, strerror(errno), offset);
+              "exiting for init restart", saved, strerror(saved), offset);
         return n;
     }
     if (n > 0) {
@@ -89,8 +92,9 @@ static ssize_t readOnce(EpollDeviceReader& reader, uint8_t* buf, size_t bufSize,
 // 采集链路死了 jsonl 归零、三个零值字段仍全 0，须 invalid 累计兜底）；
 // 写路径指标（方向 3）：formatJsonLine 与 writeRecord 平均微秒/条，
 // 作微优化的可判定指标（drain 被攒包策略钉死，对写路径不敏感）
-static void emitHeartbeat(int loopCount, EpollDeviceReader& reader,
-                          FileWriter& writer, int64_t& overrunAccum, int readErr,
+static void emitHeartbeat(uint64_t loopCount, EpollDeviceReader& reader,
+                          FileWriter& writer, int64_t& overrunAccum,
+                          uint64_t readErr,
                           long long jsonlRecords, long long invalidRecords)
 {
     uint32_t ov = reader.getOverrun();
@@ -102,15 +106,20 @@ static void emitHeartbeat(int loopCount, EpollDeviceReader& reader,
     const FileWriter::WriteTimings& wt = writer.writeTimings();
     uint64_t avgFormatUs = wt.formatCount ? wt.formatTotalUs / wt.formatCount : 0;
     uint64_t avgWriteUs = wt.writeCount ? wt.writeTotalUs / wt.writeCount : 0;
-    ALOGI("lechao_lcview: heartbeat, loop=%d, overrun=%lld, dropped=%llu, "
-          "readErr=%d, total_records=%u, jsonl_records=%lld, "
-          "invalid_records=%lld, "
+    // LCV-16/17：ioctl 失败与 EOF 计数（失败返 0 与真实 0 在心跳可区分）
+    ALOGI("lechao_lcview: heartbeat, loop=%llu, overrun=%lld, dropped=%llu, "
+          "readErr=%llu, total_records=%u, jsonl_records=%lld, "
+          "invalid_records=%lld, ioctl_err=%llu, eof=%llu, "
           "drop_open=%llu drop_format=%llu drop_oob=%llu "
           "drop_reopen=%llu drop_retry=%llu drop_invalid=%llu "
           "drop_invalidwrite=%llu, "
           "avg_format_us=%llu avg_write_us=%llu",
-          loopCount, static_cast<long long>(overrunAccum), dropped,
-          readErr, reader.getTotalRecords(), jsonlRecords, invalidRecords,
+          static_cast<unsigned long long>(loopCount),
+          static_cast<long long>(overrunAccum), dropped,
+          static_cast<unsigned long long>(readErr),
+          reader.getTotalRecords(), jsonlRecords, invalidRecords,
+          static_cast<unsigned long long>(reader.ioctlErr()),
+          static_cast<unsigned long long>(reader.eofCount()),
           static_cast<unsigned long long>(dc.openFailed),
           static_cast<unsigned long long>(dc.formatEmpty),
           static_cast<unsigned long long>(dc.formatOob),
@@ -130,7 +139,7 @@ static void emitHeartbeat(int loopCount, EpollDeviceReader& reader,
 static void flushSegment(EpollDeviceReader& reader, SchemaParser& schema,
                          FileWriter& writer, const uint8_t* buf, size_t& offset,
                          std::chrono::steady_clock::time_point& dataArrivedAt,
-                         int& flushCount, long long& jsonlRecords,
+                         uint64_t& flushCount, long long& jsonlRecords,
                          long long& invalidRecords, ssize_t n,
                          size_t bufSize)
 {
@@ -166,8 +175,10 @@ static void flushSegment(EpollDeviceReader& reader, SchemaParser& schema,
 static int runMainLoop(EpollDeviceReader& reader, SchemaParser& schema,
                        FileWriter& writer)
 {
-    int loopCount = 0;
-    int readOk = 0, readEmpty = 0, readErr = 0, flushCount = 0;
+    // LCV-14：高频计数器改 uint64_t（int 有符号溢出是 UB，重载下
+    // epoll 立返 loop 计数快速膨胀，周级即溢出）
+    uint64_t loopCount = 0;
+    uint64_t readOk = 0, readEmpty = 0, readErr = 0, flushCount = 0;
     int64_t overrunAccum = 0;
     // JSONL 落盘累计条数（守恒校验基准：内核 total_records ≈ overrun + 落盘条数）
     long long jsonlRecords = 0;
@@ -200,17 +211,25 @@ static int runMainLoop(EpollDeviceReader& reader, SchemaParser& schema,
         }
 
         if (::lechao::debugVerbose()) {
-            ALOGI("lechao_lcview: tick loop=%d buffered=%zu readOk=%d "
-                  "readEmpty=%d readErr=%d flush=%d",
-                  loopCount, offset, readOk, readEmpty, readErr, flushCount);
+            ALOGI("lechao_lcview: tick loop=%llu buffered=%zu readOk=%llu "
+                  "readEmpty=%llu readErr=%llu flush=%llu",
+                  static_cast<unsigned long long>(loopCount), offset,
+                  static_cast<unsigned long long>(readOk),
+                  static_cast<unsigned long long>(readEmpty),
+                  static_cast<unsigned long long>(readErr),
+                  static_cast<unsigned long long>(flushCount));
         }
 
         flushSegment(reader, schema, writer, buf, offset, dataArrivedAt,
                      flushCount, jsonlRecords, invalidRecords, n, kBufSize);
     }
 
-    ALOGI("lechao_lcview: exiting, readOk=%d readEmpty=%d readErr=%d flush=%d",
-          readOk, readEmpty, readErr, flushCount);
+    ALOGI("lechao_lcview: exiting, readOk=%llu readEmpty=%llu readErr=%llu "
+          "flush=%llu",
+          static_cast<unsigned long long>(readOk),
+          static_cast<unsigned long long>(readEmpty),
+          static_cast<unsigned long long>(readErr),
+          static_cast<unsigned long long>(flushCount));
     return 0;
 }
 
