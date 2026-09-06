@@ -9,13 +9,16 @@
 harness/
 ├── lib/
 │   ├── harness_lib.py      # 精简运行时库（初始化/退出/日志/步骤）
-│   └── paths.py            # 路径工具（paths.conf + 环境变量覆盖）
+│   ├── paths.py            # 路径工具（paths.conf + 环境变量覆盖）
+│   ├── git_workspace_util.py   # workspace 扫描排除正则（sync 脚本共享，迁自 config）
+│   ├── cdp_paths.py            # cross-device 共享路径解析 + 原子写原语（上移自 skills）
+│   └── verify_common.py        # workspace-verify 共享基础（原子写 JSON/batch 回落）
 ├── config/
 │   ├── paths.conf          # 路径配置（PATCHS_DIR / KERNEL_WS / AOSP_WS）
-│   ├── git_workspace_util.py   # workspace 扫描排除正则（sync 脚本共享）
 │   ├── baseline-status.yaml    # baseline 状态登记表
 │   ├── baseline-evidence-template.yaml
 │   ├── known-issues-template.md    # 已知问题登记模板（头字段集与 cdp_issue._FIELDS 一致）
+│   ├── verify-cases.yaml       # 上板验证用例登记（modules targets/test_targets/push + cases 生命周期）
 │   └── doc-sync-mapping.yaml   # code→文档映射规则
 ├── skills/
 │   ├── sync-code-to-workspace/      # code→workspace 同步（dev/main HEAD 真相源）
@@ -23,23 +26,25 @@ harness/
 │   ├── cross-device/                 # 跨设备批次（emit 生成 / apply 执行）
 │   ├── workspace-verify/             # code→workspace 同步 + 增量编译 + 上板验证 + verify 收据
 │   ├── git-works-push/               # dev 分支 commit + push（收据随批入库）
+│   ├── loop-engineering/             # 验证收敛会话管理（patience/total 计数、失败指纹归因、修复重试）
 │   ├── publish-main-base/          # 一键基线发布编排器（自检→loop 验证→文档→promote）
 │   └── revert-modify-from-main-base/ # dev 持续 NG 人工回退到 main 基线
 ├── rules/
 │   ├── source-code-modify.md   # SRC-001~004：源码改动优先级/归档纪律
 │   ├── cxx-coding-rules.md     # CXX-001~004：C/C++ 编码规范
+│   ├── known-issues.md         # KIR-001~007：缺陷归属判定有序判据与准入场景表
 │   └── plantuml.md             # DOC-002：PlantUML 画图约束
 ├── reference/
 │   └── build-reference.md      # RPI5 编译参考（源自 harness/scripts/mk_rpi5_full_image.sh）
 ├── scripts/
 │   ├── mk_rpi5_full_image.sh   # RPI5 一键编译打包
 │   └── apply_preset_bugs.py    # 预设 bug 注入/回退（LE 验证用）
-└── log/                        # 运行时产物（plan/verify/构建报告等）
+└── log/                        # 运行时产物目录（plan/verify/构建报告等；可安全清理，不入库）
 ```
 
 ## 快速使用
 
-八个工作流命令（opencode 原生命令，见 `.opencode/command/`）：
+十个工作流命令（opencode 原生命令，见 `.opencode/command/`）：
 
 | 命令 | 用途 |
 |------|------|
@@ -49,8 +54,10 @@ harness/
 | `/cross-device-apply` | 解析 CDP 批次编辑 code/dev，-sv 拉起验证后推送（仅 apply 设备） |
 | `/workspace-verify` | code→workspace 同步、增量编译、上板验证并写 data/verify-results 收据（仅 apply 设备） |
 | `/git-works-push` | dev 分支 commit + push（收据随批入库，仅 apply 设备） |
+| `/loop-engineering` | 验证收敛会话管理：patience/total 双层计数、失败指纹归因、修复重试与退出协议（apply 拉起模式 A / 本地直起模式 B） |
 | `/publish-main-base` | 一键基线发布：harness 自检 → loop 上板验证 → 修复收敛 → 文档同步 → candidate 登记 → promote 到 main（无法修复则禁止 promote，仅 apply 设备） |
 | `/revert-modify-from-main-base` | dev 持续 NG 人工回退到 main 基线并恢复设备（仅 apply 设备） |
+| `/opencode-server` | 一键拉起 OpenCode WebUI（WSL2 + Windows Tailscale），为跨设备 emit/apply 协作提供访问入口 |
 
 也可直接运行脚本：
 

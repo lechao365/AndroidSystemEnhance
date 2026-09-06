@@ -6,6 +6,7 @@
         --result pass|fail|skip --build ... --board ... \
         --acceptance-file "<自描述验收产物 JSON>" --unit-test-file "<自描述单测产物 JSON>" \
         --push-file "<自描述推送产物 JSON>" \
+        [--package-file "<ws_package 打包证据 JSON>"（内嵌收据 package 字段）] \
         --elapsed <秒> --summary "<一句话>" \
         [--body <正文文件>（CDP 原文+失败现场，必传见 SKILL）]
    模式 B（独立触发）:
@@ -49,12 +50,13 @@ from paths import env_path  # noqa: E402
 
 _HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
 
-# 链路已知段中带 verify 前缀的五段（verify_sync/build/push/unit_test/acceptance）：
-# none 模式（-s/文档批）无 verify 环节，missing 判定按 verify_mode 取应有段集时
-# 从 KNOWN_SEGMENTS 去掉这五段，避免 -s 批永远报 verify 段缺失（方向 1 收窄）。
+# 链路已知段中带 verify 前缀的六段（verify_sync/build/push/unit_test/
+# acceptance/start）：none 模式（-s/文档批）无 verify 环节，missing 判定
+# 按 verify_mode 取应有段集时从 KNOWN_SEGMENTS 去掉这些段，避免 -s 批
+# 永远报 verify 段缺失（方向 1 收窄；verify_start 为链起跑编排段，一并列）。
 _VERIFY_PREFIX_SEGMENTS = frozenset((
     "verify_sync", "verify_build", "verify_push",
-    "verify_unit_test", "verify_acceptance",
+    "verify_unit_test", "verify_acceptance", "verify_start",
 ))
 
 # 阶段汇总归类（方向 1 增）：编辑阶段细分段 + 编辑/自检侧 gap 段（自报段
@@ -117,30 +119,14 @@ def _phase_summary(segments):
 def _append_direct_mark(timings_file, batch_id, name):
     """直写自发 mark 到打点文件（B5 参数化共享 helper）。
 
-    目标文件与 timings 探测同源：显式 --timings-file 优先，未传自动探测
-    log_apply_dir()/timings-<batch_id>.json；文件缺失/非法仅 warn 不阻断
-    （打点诊断数据，非收据证据本身）。直接编辑文件（cdp_timing mark 仅
-    支持 --batch 定位，无法覆盖显式 --timings-file 场景）。
+    实现委托 cdp_timing.emit_mark（B8/C-1 收敛：显式 timings_file 优先 >
+    batch_id > CDP_BATCH_ID > current-batch.json；原子写 tmp 带 pid 防并发
+    竞态；文件缺失/非法仅 warn 不阻断——打点诊断数据，非收据证据本身）。
     """
-    target = timings_file
-    if not target and batch_id:
-        probe = log_apply_dir() / f"timings-{batch_id}.json"
-        if probe.is_file():
-            target = str(probe)
-    if not target:
-        return
-    try:
-        p = Path(target)
-        data = json.loads(p.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError("非 JSON 对象")
-        data.setdefault("marks", []).append({"name": name, "wall": time.time()})
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-                       encoding="utf-8")
-        tmp.replace(p)
-    except (OSError, json.JSONDecodeError, ValueError) as e:
-        print(f"warn: {name} 打点失败（不阻断）: {e}", file=sys.stderr)
+    import cdp_timing
+    if not cdp_timing.emit_mark(name, timings_file=timings_file,
+                                batch_id=batch_id):
+        print(f"warn: {name} 打点失败（不阻断）", file=sys.stderr)
 
 
 def _mark_report(timings_file, batch_id):
@@ -283,6 +269,65 @@ def _resolve_cases(cases_arg, batch_id):
     except (OSError, json.JSONDecodeError, ValueError) as e:
         print(f"warn: cases 探测读取失败，置空: {e}", file=sys.stderr)
         return cases_arg
+
+
+# ws_package 打包证据默认落盘域（gitignore，与 ws_package._EVIDENCE_DIR 同源：
+# harness/log/workspace-verify/——本文件在 harness/skills/workspace-verify/，
+# parents[2] = harness）
+_PACKAGE_EVIDENCE_DIR = (Path(__file__).resolve().parents[2]
+                         / "log" / "workspace-verify")
+
+
+def _resolve_package(package_arg, batch_id):
+    """解析收据 package 字段内嵌的 ws_package 打包证据（单行 JSON 串）。
+
+    显式 --package-file 优先；未传时自动探测
+    harness/log/workspace-verify/package-<batch_id>.json（ws_package 默认
+    落盘路径，与 baseline_register 旧探测同源）。证据内嵌随收据入库可追溯，
+    不再依赖 gitignore 域文件（本批意图 1）。
+    返回 (package_json_str, err)：显式路径缺失/非法返 err（调用方拒写）；
+    自动探测缺失/非法仅 warn 降级返空（打包证据非本批必产，不阻断主流程）。
+    """
+    target = (package_arg or "").strip()
+    explicit = bool(target)
+    if not target and batch_id:
+        probe = _PACKAGE_EVIDENCE_DIR / f"package-{batch_id}.json"
+        if probe.is_file():
+            target = str(probe)
+        else:
+            print(f"warn: 未传 --package-file 且未探测到 "
+                  f"package-{batch_id}.json（打包证据缺省不内嵌）",
+                  file=sys.stderr)
+            return "", None
+    if not target:
+        return "", None
+    try:
+        data = json.loads(Path(target).read_text(encoding="utf-8"))
+    except OSError as e:
+        msg = f"--package-file 读取失败（{e}）"
+        if explicit:
+            return "", msg
+        print(f"warn: {msg}（打包证据缺省不内嵌）", file=sys.stderr)
+        return "", None
+    except (ValueError, json.JSONDecodeError) as e:
+        msg = f"--package-file 须为合法 JSON（解析失败: {e}）"
+        if explicit:
+            return "", msg
+        print(f"warn: {msg}（打包证据缺省不内嵌）", file=sys.stderr)
+        return "", None
+    if not isinstance(data, dict):
+        msg = "--package-file 须为 JSON 对象（ws_package 打包证据）"
+        if explicit:
+            return "", msg
+        print(f"warn: {msg}（打包证据缺省不内嵌）", file=sys.stderr)
+        return "", None
+    if not (data.get("run_id") or "").strip():
+        msg = "--package-file 缺 run_id（打包产物身份缺失），拒绝内嵌"
+        if explicit:
+            return "", msg
+        print(f"warn: {msg}（打包证据缺省不内嵌）", file=sys.stderr)
+        return "", None
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":")), None
 
 
 def _validate_acceptance_pass(acceptance):
@@ -488,6 +533,21 @@ def _sanitize(text: str) -> str:
     return text
 
 
+def _forensics_summary_lines(manifest_path):
+    """取证 manifest → 收据正文轻量摘要（一两行）。
+
+    委托 ws_forensics.summarize_for_receipt（manifest 结构知识收敛在
+    forensics 模块，改动 4 衔接处）；manifest 缺失/非法返回空串并 warn
+    （取证摘要非验收证据，仅诊断增强，与 timings 降级口径一致不阻断）。
+    """
+    import ws_forensics
+    out = ws_forensics.summarize_for_receipt(manifest_path)
+    if not out:
+        print(f"warn: --forensics-file 摘要生成失败（不入正文）: {manifest_path}",
+              file=sys.stderr)
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="verify 收据落盘")
     ap.add_argument("--batch-file", help="CDP 批次文件（模式 A）")
@@ -508,6 +568,10 @@ def main(argv=None):
                     help="自描述推送产物 JSON 路径（ws_push.py --result-file 落盘；"
                          "PASS 必需；run_id 与验收产物一致且逐项 sha256/字节/上下文"
                          "三项校验值全绿）")
+    ap.add_argument("--package-file", default="",
+                    help="ws_package 打包证据 JSON 路径（内嵌收据 package 字段随收据"
+                         "入库可追溯；缺省按 batch_id 探测 "
+                         "harness/log/workspace-verify/package-<batch_id>.json）")
     ap.add_argument("--device-dirty", action="store_true",
                     help="teardown 失败（恢复不了本轮改变的设备态）时显式标记"
                          "（PASS 路径亦可从验收产物 device_dirty 自动透传）")
@@ -526,6 +590,10 @@ def main(argv=None):
     ap.add_argument("--timings-file", default="",
                     help="链路耗时打点文件路径（cdp_timing.py finish 产物；写入收据 "
                          "timings 字段供 emit 定位耗时瓶颈；缺失/非法仅 warn 不阻断）")
+    ap.add_argument("--forensics-file", default="",
+                    help="取证 manifest JSON 路径（ws_forensics 产物；触发时在收据"
+                         "正文追加 forensics_dir 与 truncated/skipped 计数轻量摘要；"
+                         "缺失/非法仅 warn 不阻断）")
     ap.add_argument("--body", help="正文文件路径（CDP 原文/失败现场），经脱敏写入")
     args = ap.parse_args(argv)
 
@@ -651,14 +719,28 @@ def main(argv=None):
         print("warn: device_dirty=true（teardown 恢复失败，设备态不可信），"
               "已在收据 header 标注", file=sys.stderr)
 
+    # 打包证据内嵌（本批意图 1）：显式 --package-file 优先，缺省按 batch_id
+    # 探测 harness/log/workspace-verify/package-<batch_id>.json（ws_package
+    # 默认落盘），证据单行化写入收据 package 字段随收据入库可追溯——基线
+    # package_result 不再依赖 gitignore 域文件。显式路径缺失/非法返 2 拒写；
+    # 探测缺失/非法仅 warn 降级（打包证据非本批必产，不阻断主流程）。
+    args.package, pkg_err = _resolve_package(args.package_file, batch_id)
+    if pkg_err:
+        print(f"error: {pkg_err}", file=sys.stderr)
+        return 2
+
     # 自检证据（-s 批次必带，堵零验证通道）：对照 -sv 缺 --acceptance 返 2 的既有约束，
-    # result=skip 而 selfcheck 为空即拒写。自检门禁以退出码为主判据（方向 1-5）：
-    #   - 缺 pytest_rc/refs_rc 任一即返 2（rc 不可见则自检不可信）
-    #   - 任一 rc 非零即返 2（pytest 崩溃/悬空引用均带 rc，文本可能无 failed/skipped）
+    # result=skip 而 selfcheck 为空即拒写。方向 4（批次 ff33f92060ac）：board 模式
+    # （-sv 模式 A / 模式 B 上板）同样强制——上板批自检 rc 须入收据，此前仅 skip
+    # 模式要求致上板批自检 rc 不入收据。自检门禁以退出码为主判据（方向 1-5）：
+    #   - 缺 pytest_rc/refs_rc/config_rc/contract_rc 任一即返 2（rc 不可见则自检不可信）
+    #   - 任一 rc 非零即返 2（pytest 崩溃/悬空引用/配置违规均带 rc，文本可能无 failed/skipped）
     # failed 文本匹配与 skipped 计数保留作冗余（rc 全 0 后的补充防线）
-    if args.result == "skip" and not args.selfcheck.strip():
-        print("error: result=skip 必须传 --selfcheck（自检摘要：pytest harness -q 与 "
-              "check_skill_refs 输出，含 pytest_rc/refs_rc），否则零验证通道敞开",
+    if (args.result == "skip" or verify_mode == "board") \
+            and not args.selfcheck.strip():
+        print("error: result=skip 或 board 模式必须传 --selfcheck（自检摘要：pytest "
+              "harness -q 与 check_skill_refs 输出，含 pytest_rc/refs_rc）——"
+              "上板批自检 rc 须入收据（方向 4），否则零验证通道敞开",
               file=sys.stderr)
         return 2
     if args.selfcheck.strip():
@@ -667,8 +749,9 @@ def main(argv=None):
         found = {}
         for m in re.finditer(r"\b(\w+_rc)=(\d+)\b", args.selfcheck):
             found.setdefault(m.group(1), int(m.group(2)))
-        # 必查键（既有契约）：pytest/refs 两 rc 不可缺席（缺失=自检不可信）
-        for key in ("pytest_rc", "refs_rc"):
+        # 必查键（既有契约 + config/contract）：四 rc 不可缺席（缺失=自检不可信；
+        # config_rc/contract_rc 为 check_config 两模式透出的判红键）
+        for key in ("pytest_rc", "refs_rc", "config_rc", "contract_rc"):
             if key not in found:
                 print(f"error: --selfcheck 缺 {key}（退出码为主判据，文本匹配仅冗余）",
                       file=sys.stderr)
@@ -701,6 +784,14 @@ def main(argv=None):
     body = ""
     if args.body and Path(args.body).is_file():
         body = _sanitize(Path(args.body).read_text(encoding="utf-8"))
+
+    # forensics 摘要附入（收据审计链增强改动 4）：取证触发（manifest 在场）
+    # 时正文追加轻量摘要（forensics_dir + truncated/skipped 计数），未触发
+    # 不加；摘要路径为本机取证目录，刻意在脱敏之后追加（保持原始可追溯）
+    if args.forensics_file:
+        summ = _forensics_summary_lines(args.forensics_file)
+        if summ:
+            body = f"{body}\n\n{summ}" if body else summ
 
     # selfcheck 单行化（header 逐行 key-value，多行正文信息须并入一行才可见）：
     # "531 passed in 27.9s | skipped=0 | OK: ..."，保证 skipped 计数随收据显式落地
@@ -750,6 +841,7 @@ def main(argv=None):
                 summary=args.summary, metrics=args.metrics,
                 timings=args.timings, cases=args.case,
                 selfcheck=args.selfcheck,
+                package=args.package,
                 verified_tree=verified_tree, commit_scope=commit_scope,
                 device_dirty="true" if args.device_dirty else "")
     path = write_receipt(r, body or args.summary)

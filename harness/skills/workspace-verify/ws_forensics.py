@@ -92,13 +92,11 @@ class _Budget:
 
 
 def _atomic_write_json(path, data):
-    """原子写 manifest：先写临时文件再 os.replace，防半截 manifest 被当证据。"""
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-                   encoding="utf-8")
-    os.replace(tmp, p)
+    """原子写 manifest：薄壳委托 verify_common（批次四收敛，统一 tmp 带
+    pid 原语；签名与调用点不变，防半截 manifest 被当证据）。"""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
+    from verify_common import atomic_write_json
+    atomic_write_json(path, data)
 
 
 def _read_host_file(path):
@@ -261,6 +259,29 @@ def collect(ep=None, out_dir=None, stdout_file=None, stderr_file=None,
     }
     _atomic_write_json(run_dir / "manifest.json", manifest)
     return manifest, run_dir
+
+
+def summarize_for_receipt(manifest_path) -> str:
+    """为 verify 收据生成取证轻量摘要（一两行，供 ws_report --forensics-file 衔接）。
+
+    forensics_dir 取 manifest 所在 run 目录（本机路径），truncated/skipped
+    计数来自 manifest items（截断/跳过如实可见，不静默）；manifest 缺失/
+    非法返回空串（取证摘要非验收证据，不阻断收据落盘）。
+    """
+    try:
+        data = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    items = [i for i in (data.get("items") or []) if isinstance(i, dict)]
+    truncated = sum(1 for i in items if i.get("truncated"))
+    skipped = sum(1 for i in items if i.get("skipped"))
+    run_dir = Path(manifest_path).resolve().parent
+    return (f"## forensics\n"
+            f"- forensics_dir: {run_dir}\n"
+            f"- truncated={truncated} | skipped={skipped} | items={len(items)}"
+            f"（详见 {Path(manifest_path).name}）")
 
 
 def main(argv=None):

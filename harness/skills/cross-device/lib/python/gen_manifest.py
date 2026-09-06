@@ -10,7 +10,6 @@ workspace→code 归档方向消亡，本脚本仅保留 manifest 重生成能�
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 from pathlib import Path
 
@@ -24,13 +23,15 @@ from harness.lib.paths import path as profile_path
 
 def generate_manifest(patch_root: Path, check_only: bool,
                       kernel_deletions: list[str],
-                      aosp_deletions: list[str]) -> None:
+                      aosp_deletions: list[str]) -> bool:
     """从 patch_root（code/rpi5）现状扫描，重生成 manifest.yaml。
 
     - kernel/aosp 的 modified/new 段：patch 相对路径 + source workspace 路径映射
     - deletions 段：旧归档流程产物，新流程无删除对齐来源（CLI 固定传空）
     - others 段：source 恒为 null
     - check_only 时不写盘（manifest 缺失/有变化仅报告）
+    - 返回 ok：False = 内容为空/异常（P2-8：此前静默 exit 0，apply 收尾
+      误判成功——PATCHS_DIR 配错正是现实场景，须如实失败）
     """
     manifest_path = patch_root / "manifest.yaml"
 
@@ -92,38 +93,39 @@ def generate_manifest(patch_root: Path, check_only: bool,
     content = "\n".join(lines) + "\n"
 
     if not content.strip():
-        log_error("manifest 内容为空，中止更新")
-        return
+        log_error("manifest 内容为空（PATCHS_DIR 下无 kernel/aosp/others 内容？"
+                  "核对 harness/config/paths.conf），中止更新")
+        return False
 
     if manifest_path.is_file() and manifest_path.read_text(encoding="utf-8") == content:
         log_info("manifest.yaml 无变化")
-        return
+        return True
 
     if check_only:
         log_info("manifest.yaml 有变化（仅检查模式，未写入）")
-        return
+        return True
 
-    manifest_path.write_text(content, encoding="utf-8")
+    from cdp_paths import atomic_write_text
+    atomic_write_text(manifest_path, content)  # 原子写（P1-2 口径统一）
     log_info("manifest.yaml 已更新")
+    return True
 
 
 def _mark_gen_manifest():
     """自发 gen_manifest 打点：清单重生成完成即 mark，供收据 edit 段细分。
 
-    照 selfcheck._mark_selfcheck 的子进程调法（batch 识别走 cdp_timing
-    current-batch.json 三级回落）；发点失败仅 stderr 提示，不改返回码
-    （打点诊断数据，非清单生成结果本身）。
+    进程内直调 emit_mark（B8/C-1 打点胶水收敛，与 selfcheck 同款；batch
+    识别走 CDP_BATCH_ID/current-batch.json 回落）；发点失败仅 stderr 提示，
+    不改返回码（打点诊断数据，非清单生成结果本身）。
     """
-    timing = Path(__file__).resolve().parent / "cdp_timing.py"
+    timing_dir = Path(__file__).resolve().parent
+    if str(timing_dir) not in sys.path:
+        sys.path.insert(0, str(timing_dir))
     try:
-        proc = subprocess.run([sys.executable, str(timing), "mark",
-                               "--name", "gen_manifest"],
-                              capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=10)
-        if proc.returncode != 0:
-            print(f"warn: gen_manifest 打点失败（不阻断）: {proc.stderr.strip()}",
-                  file=sys.stderr)
-    except (OSError, subprocess.TimeoutExpired) as e:
+        import cdp_timing
+        if not cdp_timing.emit_mark("gen_manifest"):
+            print("warn: gen_manifest 打点失败（不阻断）", file=sys.stderr)
+    except Exception as e:
         print(f"warn: gen_manifest 打点失败（不阻断）: {e}", file=sys.stderr)
 
 
@@ -138,10 +140,10 @@ def main() -> None:
     harness_init("gen_manifest")
 
     patch_root = profile_path("PATCHS_DIR")
-    generate_manifest(patch_root, check_only=args.check_only,
-                      kernel_deletions=[], aosp_deletions=[])
+    ok = generate_manifest(patch_root, check_only=args.check_only,
+                           kernel_deletions=[], aosp_deletions=[])
     _mark_gen_manifest()
-    harness_exit(0)
+    harness_exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

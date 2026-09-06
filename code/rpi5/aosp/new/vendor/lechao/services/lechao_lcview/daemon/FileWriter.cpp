@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <sstream>
 #include <iomanip>
@@ -70,17 +71,30 @@ static bool mkdirRecursive(const std::string& path, mode_t mode)
 // uploaded 目录为将来"已上传标记"预留，当前未使用
 FileWriter::FileWriter(const FileWriterConfig& cfg) : mCfg(cfg)
 {
-    // 确保日志根目录存在
-    mkdirRecursive(mCfg.logDir, 0755);
+    // LCV-13：计数器置满——启动后首次 enforceRetention 即全量扫描，
+    // 清理上次运行遗留的超限数据（否则静默期内永不清理）
+    mWritesSinceRetention = cfg.retentionScanEveryWrites;
+    // LCV-15：目录创建失败必须可见（仅靠后续 openFailed 间接可见时，
+    // 首条心跳前无直接信号）；权限 0750 与 rc 文件策略一致
+    if (!mkdirRecursive(mCfg.logDir, 0750))
+        ALOGE("FileWriter: cannot create log dir %s", mCfg.logDir.c_str());
     // 创建 uploaded 子目录（标记已上传到远程存储的文件）
     std::string uploadedDir = mCfg.logDir + "/uploaded";
-    mkdirRecursive(uploadedDir, 0755);
+    if (!mkdirRecursive(uploadedDir, 0750))
+        ALOGE("FileWriter: cannot create uploaded dir %s", uploadedDir.c_str());
 
     // 追加模式打开 invalid_records.log，不覆盖已有内容
     mInvalidFilename = mCfg.logDir + "/invalid_records.log";
     mInvalidStream.open(mInvalidFilename, std::ios::app);
     if (!mInvalidStream.is_open())
         ALOGE("FileWriter: cannot open %s", mInvalidFilename.c_str());
+    else {
+        // CXX-002：daemon 重启后从持久层恢复 invalid 文件已写字节——
+        // 归零会使轮转阈值判定失效（可超限近一倍，LCV-01 修复的前提）
+        struct stat st;
+        if (stat(mInvalidFilename.c_str(), &st) == 0)
+            mInvalidSize = static_cast<size_t>(st.st_size);
+    }
 }
 
 // 析构函数：关闭所有打开的文件流
@@ -191,10 +205,15 @@ void FileWriter::openFile(uint16_t eventId, const EventSchema& schema)
         return;
     }
 
-    // 追加模式下文件可能已有内容：stat 恢复 currentSize，兑现轮转约束
+    // 追加模式下文件可能已有内容：stat 恢复 currentSize，兑现轮转约束。
+    // LCV-11：stat 失败必须可见（静默保持 0 会让该文件轮转约束失效，
+    // 可超限近一倍且无任何信号）
     struct stat st;
     if (stat(fs.currentFilename.c_str(), &st) == 0)
         fs.currentSize = static_cast<size_t>(st.st_size);
+    else
+        ALOGE("FileWriter: openFile: stat %s failed: %s (rotation constraint degraded)",
+              fs.currentFilename.c_str(), strerror(errno));
 
     LC_ALOGD("FileWriter: opened file: %s (restored size=%zu)",
              fs.currentFilename.c_str(), fs.currentSize);
@@ -202,18 +221,68 @@ void FileWriter::openFile(uint16_t eventId, const EventSchema& schema)
     mFiles[eventId] = std::move(fs);
 }
 
+// 校验从 s[i] 开始的 UTF-8 多字节序列长度（LCV-05）：
+// 返回合法序列字节数（2-4），非法/截断返回 0。
+// 首字节 0x80-0xC1（连续字节/overlong 编码）与 0xF5-0xFF（超码位）非法
+static size_t utf8SeqLen(const std::string& s, size_t i)
+{
+    auto isCont = [&](size_t k) {
+        return k < s.size() &&
+               (static_cast<unsigned char>(s[k]) & 0xC0) == 0x80;
+    };
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    if (c >= 0xC2 && c <= 0xDF)                       // 2 字节
+        return isCont(i + 1) ? 2 : 0;
+    if (c == 0xE0) {                                  // 3 字节（排除 overlong）
+        return (i + 2 < s.size() &&
+                static_cast<unsigned char>(s[i + 1]) >= 0xA0 &&
+                static_cast<unsigned char>(s[i + 1]) <= 0xBF &&
+                isCont(i + 2)) ? 3 : 0;
+    }
+    if ((c >= 0xE1 && c <= 0xEC) || (c >= 0xEE && c <= 0xEF))
+        return (isCont(i + 1) && isCont(i + 2)) ? 3 : 0;
+    if (c == 0xED) {                                  // 3 字节（排除 surrogate）
+        return (i + 2 < s.size() &&
+                static_cast<unsigned char>(s[i + 1]) >= 0x80 &&
+                static_cast<unsigned char>(s[i + 1]) <= 0x9F &&
+                isCont(i + 2)) ? 3 : 0;
+    }
+    if (c == 0xF0) {                                  // 4 字节（排除 overlong）
+        return (i + 3 < s.size() &&
+                static_cast<unsigned char>(s[i + 1]) >= 0x90 &&
+                static_cast<unsigned char>(s[i + 1]) <= 0xBF &&
+                isCont(i + 2) && isCont(i + 3)) ? 4 : 0;
+    }
+    if (c >= 0xF1 && c <= 0xF3)
+        return (isCont(i + 1) && isCont(i + 2) && isCont(i + 3)) ? 4 : 0;
+    if (c == 0xF4) {                                  // 4 字节（上限 U+10FFFF）
+        return (i + 3 < s.size() &&
+                static_cast<unsigned char>(s[i + 1]) >= 0x80 &&
+                static_cast<unsigned char>(s[i + 1]) <= 0x8F &&
+                isCont(i + 2) && isCont(i + 3)) ? 4 : 0;
+    }
+    return 0;  // 0x80-0xC1 / 0xF5-0xFF 非法首字节
+}
+
 // JSON 字符串转义（formatJsonLine 与 writeInvalid 共用同一函数）：
 // 对 " \ 及控制字符做 JSON 合法转义，防止输出行裂行/非法 JSONL。
 //   - "  \  \b \f \n \r \t 具名转义；
 //   - 其余 < 0x20 控制字符按 \u00XX 转义（按 unsigned char 判读，
 //     避免有符号 char 下非 ASCII 高位字节误判为负值进入 \u 分支）；
-//   - 原实现仅转引号与反斜杠，USB 描述符含换行时输出行即裂行（P0）。
+//   - >= 0x80 字节做 UTF-8 合法性校验（LCV-05）：合法多字节序列原样
+//     直传（JSON 字符串为 Unicode，UTF-8 合法），非法序列逐字节按
+//     \u00XX 转义——USB 描述符字符串来自设备固件可含任意字节，
+//     严格 JSON 解析器（json.loads 等）对无效 UTF-8 行直接抛异常，
+//     一行坏数据会污染整文件分析；
+//   - 原实现仅转义具名控制字符与引号反斜杠，USB 描述符含换行时
+//     输出行即裂行（P0）。
 // 为什么手动实现而非用 JSON 库：formatJsonLine 需要最高性能，
 // 减少 JSON 库的字符串处理开销
 static void jsonEscapeString(std::ostringstream& oss, const std::string& s)
 {
     oss << "\"";
-    for (unsigned char c : s) {
+    for (size_t i = 0; i < s.size(); i++) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
         switch (c) {
         case '"':  oss << "\\\""; break;
         case '\\': oss << "\\\\"; break;
@@ -227,6 +296,17 @@ static void jsonEscapeString(std::ostringstream& oss, const std::string& s)
                 oss << "\\u00" << std::hex << std::setw(2)
                     << std::setfill('0') << static_cast<unsigned>(c)
                     << std::dec;
+            } else if (c >= 0x80) {
+                // 合法 UTF-8 序列整体直传，非法字节降级 \u00XX
+                size_t seq = utf8SeqLen(s, i);
+                if (seq > 0) {
+                    oss.write(s.data() + i, static_cast<std::streamsize>(seq));
+                    i += seq - 1;
+                } else {
+                    oss << "\\u00" << std::hex << std::setw(2)
+                        << std::setfill('0') << static_cast<unsigned>(c)
+                        << std::dec;
+                }
             } else {
                 oss << c;
             }
@@ -256,7 +336,15 @@ static void appendFieldValue(std::ostringstream& oss, const DecodedField& df)
     case LCVIEW_TYPE_FLOAT: {
         float val;
         memcpy(&val, df.value, 4);
-        oss << val;
+        // LCV-04：NaN/Inf（除零等场景）的默认输出 "nan"/"inf" 非合法
+        // JSON 数值——严格解析器对整行抛异常。降级 null 保整行可解析，
+        // 数值丢失由消费端 null 判读
+        if (std::isnan(val) || std::isinf(val))
+            oss << "null";
+        else
+            // LCV-20：默认 6 位有效数字截断 float 精度（约 7.2 位），
+            // 提升至 9 位保真输出（对整型/字符串输出无影响）
+            oss << std::setprecision(9) << val;
         break;
     }
     case LCVIEW_TYPE_STRING: {
@@ -440,8 +528,11 @@ void FileWriter::writeRecord(const EventSchema& schema,
             std::chrono::steady_clock::now() - tFormatStart).count());
 
     if (line.empty()) {
+        // LCV-18：空串唯一来源是 formatJsonLine 的 OOB 路径（已计
+        // formatOob），此处不再重复计 formatEmpty（同一次丢弃计 2 次
+        // 使心跳 dropped 求和虚高一倍）。formatEmpty 字段保留供心跳
+        // 格式兼容，当前无自增路径
         ALOGE("FileWriter: writeRecord: formatJsonLine returned empty for event %u, DROPPING", schema.id);
-        mDrops.formatEmpty++;
         return;
     }
 
@@ -457,15 +548,84 @@ void FileWriter::writeRecord(const EventSchema& schema,
     it->second.currentSize += line.size();
 }
 
+// invalid 文件轮转（LCV-01）：close → rename 为 invalid_records_{date}_p{seq}.log
+// → 重开新文件并清零累计大小。轮转后的旧文件不再被 mInvalidStream 持有，
+// enforceRetention 可正常淘汰（evictOldFiles 仅跳过当前 mInvalidFilename，
+// 轮转文件名不同天然参与淘汰）。rename 失败（目录只读等）时重开原文件
+// 继续追加保底不丢数据，累计大小保留待下轮重试
+void FileWriter::rotateInvalid()
+{
+    mInvalidStream.flush();
+    mInvalidStream.close();
+    const std::string date = makeDateStr();
+    const std::string rotated = mCfg.logDir + "/invalid_records_" + date
+                                + "_p" + std::to_string(nextInvalidSeqFor(date))
+                                + ".log";
+    if (rename(mInvalidFilename.c_str(), rotated.c_str()) != 0)
+        ALOGE("FileWriter: rotateInvalid: rename to %s failed: %s",
+              rotated.c_str(), strerror(errno));
+    mInvalidStream.open(mInvalidFilename, std::ios::app);
+    if (!mInvalidStream.is_open()) {
+        // 重开失败：后续 writeInvalid 走 invalidNotOpen 分支计数可见
+        ALOGE("FileWriter: rotateInvalid: reopen %s failed",
+              mInvalidFilename.c_str());
+        return;
+    }
+    mInvalidSize = 0;
+    ALOGI("FileWriter: rotated invalid log to %s", rotated.c_str());
+}
+
+// 扫描日志目录中 invalid_records_{date}_p<seq>.log 的最大轮转序号 +1。
+// 与 nextSeqFor 同模式：readdir 纯文件名前缀匹配 + 尾部 seq 解析；
+// 无匹配返 0（首轮轮转）
+int FileWriter::nextInvalidSeqFor(const std::string& date)
+{
+    const std::string prefix = "invalid_records_" + date + "_p";
+    const std::string suffix = ".log";
+    int maxSeq = -1;
+    DIR* dir = opendir(mCfg.logDir.c_str());
+    if (!dir)
+        return 0;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        std::string name(entry->d_name);
+        if (name.compare(0, prefix.size(), prefix) != 0)
+            continue;
+        if (name.size() <= prefix.size() + suffix.size())
+            continue;
+        if (name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0)
+            continue;
+        std::string num = name.substr(prefix.size(),
+                                       name.size() - prefix.size() - suffix.size());
+        char* end = nullptr;
+        long v = strtol(num.c_str(), &end, 10);
+        if (end && *end == '\0' && v >= 0)
+            maxSeq = std::max(maxSeq, static_cast<int>(v));
+    }
+    closedir(dir);
+    return maxSeq + 1;
+}
+
 // 写入非法记录到 invalid_records.log
 // 记录原因、大小和原始字节（hex 截断），供事后离线重解析定位协议缺陷
 // CXX-003: reason 含 " / \ 及控制字符时必须转义（转义并入 jsonEscapeString，
 // 与 formatJsonLine 同规则），否则输出行非合法 JSONL / 裂行
+// LCV-01: 超阈值先轮转，invalid 文件不再无界增长（坏数据风暴写爆 /data）
 void FileWriter::writeInvalid(const uint8_t* data, size_t len,
                                const std::string& reason)
 {
     if (!mInvalidStream.is_open()) {
         ALOGE("FileWriter: writeInvalid: stream not open, DROPPING reason=%s", reason.c_str());
+        mDrops.invalidNotOpen++;
+        return;
+    }
+    // 超过单文件轮转阈值：先轮转再写（写前检查，单文件最多超一个 payload）
+    if (mInvalidSize >= mCfg.maxInvalidFileSizeMb * 1024 * 1024)
+        rotateInvalid();
+    if (!mInvalidStream.is_open()) {
+        // rotateInvalid 重开失败：按未打开语义计数（防轮转失败后静默丢弃）
+        ALOGE("FileWriter: writeInvalid: rotate left stream closed, DROPPING reason=%s",
+              reason.c_str());
         mDrops.invalidNotOpen++;
         return;
     }
@@ -491,11 +651,14 @@ void FileWriter::writeInvalid(const uint8_t* data, size_t len,
     if (mInvalidStream.fail()) {
         /* CXX-002: failbit 粘滞不清除会让 invalid 流从此永久失败——
          * 首写失败后余生空转，mode_invalid 反判绿（坏记录静默丢失）。
-         * 恢复路径：clear 清粘滞 → 重开流 → 重试一次，仍失败计
-         * invalidWriteFailed（进心跳 dropped 求和与 drop_invalidwrite 分项） */
+         * 恢复路径：clear 清粘滞 → 回退首写残留（LCV-07，与 writeLineFlush
+         * 同语义：首写可能部分落盘，重开前须截断回写前偏移 mInvalidSize，
+         * 否则残留半行与下一条追加粘连成非法 JSONL）→ 重开流 → 重试一次，
+         * 仍失败计 invalidWriteFailed（进心跳 dropped 求和与分项） */
         ALOGE("FileWriter: writeInvalid: write failed, attempting recovery");
         mInvalidStream.clear();
         mInvalidStream.close();
+        rollbackFileTo(mInvalidFilename, mInvalidSize);
         mInvalidStream.open(mInvalidFilename, std::ios::app);
         if (!mInvalidStream.is_open()) {
             ALOGE("FileWriter: writeInvalid: recovery reopen failed, DROPPING reason=%s",
@@ -510,10 +673,14 @@ void FileWriter::writeInvalid(const uint8_t* data, size_t len,
                   reason.c_str());
             mDrops.invalidWriteFailed++;
             mInvalidStream.clear();
+            // 重试同样可能部分落盘：回退到写前偏移截断残留半行（LCV-07）
+            rollbackFileTo(mInvalidFilename, mInvalidSize);
             return;
         }
         ALOGI("FileWriter: writeInvalid: recovered invalid stream");
     }
+    // 写成功（含恢复重试成功）才累计，失败路径保持写前偏移供 rollback
+    mInvalidSize += payload.size();
 }
 
 // 文件轮转检查：
@@ -581,12 +748,19 @@ std::vector<FileWriter::LogFile> FileWriter::scanLogFiles()
         return files;
     }
 
-    // 遍历日志目录，收集所有 .jsonl 和 .log 文件
+    // 遍历日志目录，收集所有 .jsonl 和 .log 文件。
+    // LCV-10：精确后缀匹配（原子串包含会把 foo.jsonl.bak / x.log.old
+    // 等文件误入淘汰候选——目录虽由 daemon 自管，人工排障放置的
+    // 中间文件不应被静默删除）
     struct dirent* entry;
     while ((entry = readdir(dir)) != nullptr) {
         std::string name(entry->d_name);
-        if (name.find(".jsonl") == std::string::npos &&
-            name.find(".log") == std::string::npos)
+        const std::string kJsonl = ".jsonl", kLog = ".log";
+        bool isJsonl = name.size() >= kJsonl.size() &&
+            name.compare(name.size() - kJsonl.size(), kJsonl.size(), kJsonl) == 0;
+        bool isLog = name.size() >= kLog.size() &&
+            name.compare(name.size() - kLog.size(), kLog.size(), kLog) == 0;
+        if (!isJsonl && !isLog)
             continue;
 
         std::string fullPath = mCfg.logDir + "/" + name;
@@ -653,7 +827,9 @@ void FileWriter::enforceRetention()
     // 方向 4 降频：每轮主循环全目录 opendir+stat 成本高（空批也扫），
     // 改为按写入计数触发——未达阈值直接跳过，避免无数据时反复扫描。
     // retentionScanEveryWrites == 0 表示关闭降频（每次调用都扫描，
-    // 单测显式调用 enforceRetention 断言扫描行为的场景使用）
+    // 单测显式调用 enforceRetention 断言扫描行为的场景使用）。
+    // LCV-13：构造时把计数器初始化为满阈值——启动后首次调用即执行
+    // 全量扫描，清理上次运行遗留的超限数据（静默期内永不清理的空洞）
     if (mCfg.retentionScanEveryWrites > 0 &&
         mWritesSinceRetention < mCfg.retentionScanEveryWrites) {
         return;

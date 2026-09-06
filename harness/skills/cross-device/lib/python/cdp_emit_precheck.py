@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cdp_issue import read_index  # noqa: E402
 from cdp_paths import project_root  # noqa: E402
 from cdp_receipt import latest_receipt_with_path  # noqa: E402
+from harness.lib.role_guard import require_role  # noqa: E402
 
 # 中文 type 前缀词表与正则：与 .githooks/commit-msg、
 # harness/skills/git-works-push/git_works_push.sh 内校验同一（三处须成对修改）
@@ -85,6 +86,17 @@ def _git(root, *args):
                           encoding="utf-8", errors="replace", timeout=120)
 
 
+def origin_base(root=None):
+    """origin/dev HEAD 前 12 位 hex（批次 base 字段来源，批次六 P2-25）。
+
+    emit 产批写 base:<12hex> 直接取 precheck 输出，省一次 rev-parse
+    探测与手抄漂移；origin/dev 缺失返 None（调用方按缺省处理）。
+    """
+    root = Path(root) if root else project_root()
+    r = _git(root, "rev-parse", "--short=12", "origin/dev")
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
 def _receipt_tracked_by_origin(root: Path, receipt_path: Path) -> bool:
     """最新收据文件是否已被 origin/dev 跟踪：该相对路径的 blob 存在于
     origin/dev tree（git cat-file -e origin/dev:<rel> 成功）。
@@ -143,8 +155,17 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="emit precheck")
     ap.add_argument("--no-pull", action="store_true", help="干跑：不执行 git pull")
     args = ap.parse_args(argv)
+    # 角色机器化门禁：emit precheck 为 emit 专属命令（产批前置），参数
+    # 解析后、副作用（git pull / precheck）发生前拦截非 emit 设备
+    require_role("emit")
     ok, reason, detail = precheck(do_pull=not args.no_pull)
     out = {"ok": ok, "reason": reason, "detail": detail[:100]}
+    # 批次六 P2-25：ok 时输出 base（origin/dev HEAD 前 12 位），emit 产批
+    # 首行 base:<12hex> 直接取此值，省一次 rev-parse 与手抄漂移
+    if ok:
+        base = origin_base()
+        if base:
+            out["base"] = base
     # warns 合入三类：KIR-005 存量告警（issue_id 列表）+ 领先告警（文字串）
     # + 提交前缀告警（方向 4，origin/dev 最新提交标题风格漂移提示）
     warns = known_issues_warns() + lead_warns() + commit_prefix_warns()

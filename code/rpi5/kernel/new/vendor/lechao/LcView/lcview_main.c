@@ -14,7 +14,8 @@
  *
  * 设计约束：
  *   - 单打开限制 (device_opened atomic)：避免多个用户态 reader 争抢，
- *     简化读取指针管理（单生产者 + 单消费者）
+ *     读取指针单消费者管理；写入端为多上下文生产者（KRN-011，
+ *     USB 中断回调 + lciod notifier），由 spinlock 互斥
  *   - 日志级别过滤 (min_level)：由 LCVIEW_SET_LEVEL ioctl 设置，
  *     低于此级别的事件 builder_start 直接返回 NULL，避免分配和序列化开销
  *   - spin_lock 保护：写入 API 可在中断上下文调用（如 USB 中断处理函数）
@@ -100,7 +101,9 @@ static uint8_t min_level = LCVIEW_LEVEL_DEBUG;
 
 /* 模块参数：环形缓冲区大小（KB），默认 256KB，最大 4096KB */
 static uint32_t ring_size_kb = LCVIEW_RING_DEFAULT_KB;
-module_param(ring_size_kb, uint, 0644);
+/* KRN-018：ring_size_kb 仅加载时可设（0444），运行期改写需重载模块，
+ * 防止误写触发重分配路径（该路径未实现，当前参数只在 init 时消费） */
+module_param(ring_size_kb, uint, 0444);
 MODULE_PARM_DESC(ring_size_kb, "Ring buffer size in KB (default 256, max 4096)");
 
 /*
@@ -151,6 +154,15 @@ static ssize_t lcview_read(struct file *file, char __user *buf,
                            size_t len, loff_t *off)
 {
     LC_DBG("read: count=%zu\n", len);
+    /*
+     * KRN-007：支持 O_NONBLOCK——空环时返回 -EAGAIN 而非阻塞
+     * （与 lciod 驱动语义对齐；ring 层无 file 上下文，在 fops 层判定）。
+     * 竞态说明：avail==0 判定后写者可能立即写入（返回 EAGAIN 但有数据），
+     * 非阻塞语义本就允许调用方重试，无害。
+     */
+    if ((file->f_flags & O_NONBLOCK) &&
+        lcview_ring_avail_bytes(&lcview_ring) == 0)
+        return -EAGAIN;
     return lcview_ring_read(&lcview_ring, (uint8_t __user *)buf, len);
 }
 
@@ -206,14 +218,18 @@ static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
     /*
      * 读取溢出计数并清零
      * "边读边清"语义：用户态轮询时可判断自上次查询以来是否发生过溢出
+     *
+     * KRN-018：atomic_xchg 原子"读清"，替代 read→copy→set 三步。
+     * 原实现在 copy_to_user 与 atomic_set(0) 之间，写路径可递增计数——
+     * set(0) 会把并发增量一并清掉；copy 失败时不清理会累积。xchg 单步
+     * 完成，增量最多延迟到下一次查询，不丢失。
      */
     case LCVIEW_GET_OVERRUN:
-        val = (uint32_t)atomic_read(&lcview_ring.overrun_cnt);
+        val = (uint32_t)atomic_xchg(&lcview_ring.overrun_cnt, 0);
         if (copy_to_user((void __user *)arg, &val, sizeof(val))) {
             pr_err(PREFIX "GET_OVERRUN copy_to_user failed\n");
             return -EFAULT;
         }
-        atomic_set(&lcview_ring.overrun_cnt, 0);
         break;
 
     /*

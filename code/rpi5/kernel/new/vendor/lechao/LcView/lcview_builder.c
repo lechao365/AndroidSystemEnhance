@@ -45,6 +45,29 @@ extern int lcview_debug;
 #define PREFIX KERNEL_LCVIEW_TAG ": builder: "
 
 /*
+ * KRN-006：builder 单槽空闲池。
+ * lciod 每条 SCSI 命令在 GFP_ATOMIC 上下文分配/释放 2 个 ~4KB builder，
+ * 内存压力下 kmalloc 失败率高（事件静默丢失）。单槽 xchg 池：
+ * - 命令处理串行（start → commit → free），下一条命令的 start 几乎
+ *   总能命中槽内对象，分配开销降为零；
+ * - 多设备并发时槽未命中方回退 kmalloc，正确性不受影响；
+ * - xchg 原子操作无锁，中断上下文安全。
+ */
+static struct lcview_builder *builder_pool_slot;
+
+static inline struct lcview_builder *builder_pool_get(void)
+{
+    return xchg(&builder_pool_slot, NULL);
+}
+
+static inline void builder_pool_put(struct lcview_builder *b)
+{
+    /* 槽已占用则释放新来的对象（池容量恒为 1） */
+    if (xchg(&builder_pool_slot, b))
+        kfree(b);
+}
+
+/*
  * compute_str_len — 计算字符串长度并截断到 uint16_t 上限
  *
  * 为什么需要长度上限？
@@ -85,9 +108,13 @@ struct lcview_builder *lcview_builder_new(uint16_t event_id, uint8_t level)
 {
     struct lcview_builder *b;
 
-    b = kmalloc(sizeof(*b), GFP_ATOMIC);
+    /* KRN-006：先取空闲池，未命中再走 GFP_ATOMIC 分配 */
+    b = builder_pool_get();
+    if (!b)
+        b = kmalloc(sizeof(*b), GFP_ATOMIC);
     if (!b) {
-        pr_err(PREFIX "kmalloc failed for event_id=%u\n", event_id);
+        /* KRN-014：GFP_ATOMIC 失败在内存压力下可高频出现，限频防日志风暴 */
+        pr_err_ratelimited(PREFIX "kmalloc failed for event_id=%u\n", event_id);
         return NULL;
     }
 
@@ -113,11 +140,13 @@ struct lcview_builder *lcview_builder_new(uint16_t event_id, uint8_t level)
 
 /*
  * lcview_builder_free — 释放构建器内存
- * KISS 原则：直接 kfree，不做额外清理。
+ * KRN-006：优先归还空闲池（供下一条命令复用），池满才真正 kfree。
  */
 void lcview_builder_free(struct lcview_builder *b)
 {
-    kfree(b);
+    if (!b)
+        return;
+    builder_pool_put(b);
 }
 
 /*
@@ -140,6 +169,15 @@ static int builder_write_field(struct lcview_builder *b,
                (size_t)(LCVIEW_BUILDER_MAX_SIZE - b->data_offset));
         return -ENOSPC;
     }
+
+    /*
+     * KRN-015：field_count 为 uint8_t，commit 时写入 record 头。
+     * 达到 255 后继续 add 会回绕到 0，头与数据不一致导致用户态解析错乱。
+     * 4KB builder 实际装不下 255 个最小字段（1B type + 最小值），
+     * data_offset 检查通常先触发，此检查兜底防御。
+     */
+    if (b->field_count >= 255)
+        return -ENOSPC;
 
     b->buf[b->data_offset] = type;
     b->data_offset += 1;
@@ -189,6 +227,9 @@ int lcview_builder_add_str(struct lcview_builder *b, const char *val)
                len, (size_t)(LCVIEW_BUILDER_MAX_SIZE - b->data_offset));
         return -ENOSPC;
     }
+    /* KRN-015：field_count uint8_t 回绕防御（同 builder_write_field） */
+    if (b->field_count >= 255)
+        return -ENOSPC;
 
     b->buf[b->data_offset] = LCVIEW_TYPE_STRING;
     b->data_offset += 1;
@@ -229,6 +270,9 @@ int lcview_builder_add_binary(struct lcview_builder *b,
         LC_DBG("binary overflow: len=%u\n", len);
         return -ENOSPC;
     }
+    /* KRN-015：field_count uint8_t 回绕防御（同 builder_write_field） */
+    if (b->field_count >= 255)
+        return -ENOSPC;
 
     b->buf[b->data_offset] = LCVIEW_TYPE_BINARY;
     b->data_offset += 1;

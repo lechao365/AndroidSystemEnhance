@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
@@ -49,10 +50,20 @@ class TestSyncModifyIntegration(unittest.TestCase):
         dst_cdp.mkdir(parents=True)
         for f in ("cdp_receipt.py", "cdp_paths.py", "cdp_issue.py"):
             shutil.copy(str(CDP_PY / f), str(dst_cdp / f))
+        # cdp_paths 垫片（批次四上移）经 harness.lib.cdp_paths 引主实现，
+        # 临时根 harness/lib/ 须拷入主实现模块
+        dst_lib = self.work / "harness/lib"
+        dst_lib.mkdir(parents=True, exist_ok=True)
+        shutil.copy(str(HARNESS / "lib" / "cdp_paths.py"),
+                    str(dst_lib / "cdp_paths.py"))
         cfg = self.work / "harness/config"
         cfg.mkdir(parents=True)
         (cfg / "baseline-status.yaml").write_text(
             "# baseline 状态登记\nbaselines: []\n", encoding="utf-8")
+        # verify-cases.yaml 为发布全量组门禁基准（cases_coverage 模块相对路径读取），
+        # fixture 须拷入临时根 harness/config/ 才能走通 prepare/promote
+        shutil.copy(str(HARNESS / "config" / "verify-cases.yaml"),
+                    str(cfg / "verify-cases.yaml"))
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -96,13 +107,19 @@ class TestSyncModifyIntegration(unittest.TestCase):
         self._git(["push", "-q", "-u", "origin", "dev"])
         return vc
 
-    def _write_receipt(self, vc, batch_id="inttest", cases=""):
+    def _write_receipt(self, vc, batch_id="inttest", cases="", package=None):
+        pkg_line = ""
+        if package:
+            pkg_json = json.dumps(package, ensure_ascii=False,
+                                  separators=(",", ":"))
+            pkg_line = f"- package: {pkg_json}\n"
         content = (
             f"- schema_version: 1\n- batch_id: {batch_id}\n"
             f"- batch_base: {vc}\n- verified_commit: {vc}\n"
             "- verify_mode: board\n- result: pass\n- build: pass\n"
             "- push_board: pass\n- acceptance: ok\n- elapsed_s: 0\n"
             f"- summary: integration\n- metrics: \n- cases: {cases}\n"
+            f"{pkg_line}"
             "\n## body\n\nintegration test\n")
         p = self.work / RECEIPT_REL
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -112,7 +129,8 @@ class TestSyncModifyIntegration(unittest.TestCase):
     def _content_commit(self, vc, cases=""):
         """B：内容提交（修改 README + 收据随批入库）。"""
         (self.work / "README.md").write_text("content B\n", encoding="utf-8")
-        self._write_receipt(vc, cases=cases)
+        self._write_receipt(vc, cases=cases,
+                            package={"run_id": "r", "script_rc": 0})
         self._commit_all("feat: 内容提交 B")
         return self._git_out(["rev-parse", "--short=12", "HEAD"])
 

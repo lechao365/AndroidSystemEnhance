@@ -29,10 +29,12 @@ struct BatchParseResult {
 };
 
 // 解析一个批次（4B 长度前缀 + 二进制记录序列），写盘并返回统计。
+// LCV-06：接口收为 data/len 指针对——调用方（主循环 flushSegment）
+// 不再构造 std::vector 中转（最大 64KB 拷贝/批），零拷贝透传读缓冲。
 // 覆盖：坏长度/过小记录/validate 失败写 invalid、合法记录写盘、
 //       尾部残留写 invalid（CXX-004 故障可见性）
 BatchParseResult parseBatch(SchemaParser& schema, FileWriter& writer,
-                            const std::vector<uint8_t>& batch);
+                            const uint8_t* data, size_t len);
 
 // schema 加载重试（vendor 分区可能晚于 daemon 就绪）：
 // 最多 maxRetries 次、每次间隔 interval，eventCount>0 即成功

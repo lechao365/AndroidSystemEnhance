@@ -104,7 +104,7 @@ python3 harness/skills/sync-code-to-doc/sync_code_to_doc.py --check-only  # 仅�
 
 ### 3. 取全量上下文（依据 manifest.yaml）
 
-`code/` 中 modified 类只有 `.diff`、无全量上下文。通过 `code/rpi5/manifest.yaml`（由
+`code/` 中 modified 类只有 .diff 补丁、无全量上下文。通过 `code/rpi5/manifest.yaml`（由
 cross-device 流程的 gen_manifest.py 生成）拿到 patch↔workspace 映射，去 workspace 读全量源码：
 
 ```

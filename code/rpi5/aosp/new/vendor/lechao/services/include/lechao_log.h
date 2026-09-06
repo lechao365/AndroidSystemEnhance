@@ -6,14 +6,16 @@
 namespace lechao {
 
 inline bool debugVerbose() {
-    // NOTE: cached 为 static 局部变量，首次调用后缓存结果不再刷新。
-    // 修改 persist.vendor.lechao.loglevel 后需重启进程才能生效。
-    static int cached = -1;
-    if (cached < 0) {
+    // LCD-015：C++11 magic static 一次性初始化（线程安全由编译器保证）——
+    // 原 static int 懒检查在多线程（daemon binder 线程 + monitor 线程）
+    // 并发读写是非原子数据竞争（UB，TSan 必报）。
+    // NOTE: 首次调用后缓存结果不再刷新，修改 persist.vendor.lechao.loglevel
+    // 后需重启进程才能生效。
+    static const int cached = []{
         char val[92] = {0};
         __system_property_get("persist.vendor.lechao.loglevel", val);
-        cached = (val[0] == '1') ? 1 : 0;
-    }
+        return (val[0] == '1') ? 1 : 0;
+    }();
     return cached == 1;
 }
 

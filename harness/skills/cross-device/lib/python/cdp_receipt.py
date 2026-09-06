@@ -5,16 +5,22 @@
 注意: trend.md 不属于详情（文件名排序恒在最后，读取/老化必须显式排除）。
 """
 import datetime
+import getpass
+import platform
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 import yaml
 
-from cdp_paths import data_verify_results_dir, project_root
+from cdp_paths import (atomic_write_text, data_verify_results_dir,  # noqa: E402
+                       project_root)
 
 _DETAIL_KEEP = 50
-_TREND_KEEP = 200
+# 趋势保留行数（审计链增强：200 → 1000，拉长跨批 diff 窗口；趋势行恒
+# 单行、百行级体量，扩容不影响读写性能）
+_TREND_KEEP = 1000
 # 多行模式：^$ 锚定每一行（缺 MULTILINE 会导致 from_text 全默认值）
 # 值用 (.*) 允许空值（如 build/push_board 空值显式解析为空串，baseline_register
 # 据此记 FAIL 不记 SKIP；与 cdp_issue._FIELD_RE 同款）
@@ -47,7 +53,95 @@ _FIELDS = [
     # 清单加摘要（排除收据目录）。旧收据无此两行 → from_text 默认空，兼容
     ("verified_tree", ""),
     ("commit_scope", ""),
+    # package（ws_package 打包证据）：内嵌 ws_package 自描述证据 JSON 单行
+    # 串（script_rc/镜像 sha256/字节/耗时等），随收据入库可追溯——此前证据
+    # 落 harness/log 属 gitignore 域，基线记 package_result PASS 无可追溯
+    # 凭据。旧收据无此行 → from_text 默认空，baseline_register 按兼容语义
+    # （回退 --package-evidence/batch_id 探测）处理。
+    ("package", ""),
+    # 收据审计链增强（改动 1）：operator（操作者，git user.name <user.email>
+    # 合成，git 不可用/无值写 unknown）与 host_env（python/uname/user 单行
+    # 摘要）由 write_receipt 自动采集（调用方显式传参优先）。旧收据无此
+    # 两行 → from_text 默认空串，向后兼容
+    ("operator", ""),
+    ("host_env", ""),
 ]
+
+# 自动采集字段进程级缓存：write_receipt 高频调用（老化单测单用例 55 次写），
+# operator/host_env 进程内不变——缓存避免逐写 2 次子进程 spawn 拖慢批量写
+# 收据路径（实测 55 写 × 2 spawn ≈ 2.1s，逼近单测 slow_guard 3s 墙）
+_AUTOFILL_CACHE: dict = {}
+
+
+def _collect_operator() -> str:
+    """合成操作者标识：git user.name <user.email>（单次 spawn 读两条配置）。
+
+    git 不可用或 name/email 均无值时返回 "unknown"（字段恒有值，读取侧
+    免缺字段分支处理）；显式传参优先的取舍在 write_receipt 调用处完成。
+    """
+    try:
+        r = subprocess.run(
+            ["git", "config", "--get-regexp", r"^user\.(name|email)$"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    if r.returncode != 0:
+        return "unknown"
+    name = email = ""
+    for line in (r.stdout or "").splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0] == "user.name":
+            name = parts[1].strip()
+        elif len(parts) == 2 and parts[0] == "user.email":
+            email = parts[1].strip()
+    if name and email:
+        return f"{name} <{email}>"
+    return name or email or "unknown"
+
+
+def collect_host_env() -> str:
+    """采集宿主环境单行摘要：python=<版本> | uname=<系统 机器> | user=<用户>。
+
+    子项独立采集，任一失败降级为该项 "?"（如 uname 命令不存在），绝不让
+    收据生成失败。
+    """
+    def _run_first_line(cmd):
+        """跑命令取首行输出；失败/空输出降级为 "?"。"""
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            return "?"
+        if r.returncode != 0:
+            return "?"
+        out = (r.stdout or "").strip().splitlines()
+        return out[0].strip() if out else "?"
+
+    try:
+        user = getpass.getuser() or "?"
+    except Exception:
+        # getuser 在异常环境（无登录名可查）下可能抛错，降级不阻断
+        user = "?"
+    return (f"python={platform.python_version()}"
+            f" | uname={_run_first_line(['uname', '-s', '-m'])}"
+            f" | user={user}")
+
+
+def _autofill_audit_fields(receipt):
+    """自动采集 operator/host_env 写入收据（显式传参优先，进程内缓存）。
+
+    缺省字段由 write_receipt 落盘前补齐；采集失败已在 collector 内降级
+    （unknown / 子项 ?），此处不再抛错，保证收据主产物不因审计增强字段
+    失败而不落盘。
+    """
+    for name, collector in (("operator", _collect_operator),
+                            ("host_env", collect_host_env)):
+        if (getattr(receipt, name, "") or "").strip():
+            continue  # 调用方显式传参优先
+        if name not in _AUTOFILL_CACHE:
+            _AUTOFILL_CACHE[name] = collector()
+        setattr(receipt, name, _AUTOFILL_CACHE[name])
 
 
 class Receipt:
@@ -105,6 +199,8 @@ def write_receipt(receipt, body_text):
     上一份现场（对照 cdp_issue.write_issue 的 -n 防冲突）。
     """
     d = data_verify_results_dir()
+    # 审计链字段自动采集（改动 1）：显式传参优先，缺省合成（进程内缓存）
+    _autofill_audit_fields(receipt)
     base = datetime.datetime.now()
     ts = base.strftime("%Y%m%d-%H%M%S")
     path = d / f"{ts}-{receipt.batch_id}.md"
@@ -114,7 +210,10 @@ def write_receipt(receipt, body_text):
         ts = (base + datetime.timedelta(seconds=n)).strftime("%Y%m%d-%H%M%S")
         path = d / f"{ts}-{receipt.batch_id}.md"
     content = receipt.header_lines() + "\n\n## body\n\n" + body_text.strip() + "\n"
-    path.write_text(content, encoding="utf-8")
+    # 原子写（P1-2）：半写收据曾可按文件名 latest 身份进入 promote/loop
+    # 判定（emit precheck 解析半文件即恒拒批，需人工清理）——与全仓
+    # "防半截文件被当证据"纪律对齐
+    atomic_write_text(path, content)
     prune_details(d)
     return path
 
@@ -148,14 +247,17 @@ def latest_board_receipt(verify_dir=None):
 
     evidence-scope 推导锚点：登记时须以上板验证收据为准——最新收据可能
     是 -s skip 或非 board 的文档批，其 cases 不代表真实上板证据范围。
-    返回 (路径, Receipt)；无 board 收据返回 (None, None)。
+    返回 (路径, Receipt, parse_errors)；无 board 收据返回 (None, None, [])。
+    parse_errors 不再丢弃（损坏收据的 result/verify_mode/verified_tree 字段
+    不可信，据其做覆盖判定与树绑定会掩盖证据断裂）——调用方（publish 侧）
+    解析有错即拒，由本函数如实上抛。
     """
     d = verify_dir or data_verify_results_dir()
     for f in reversed(_detail_files(d)):
-        r, _ = read_receipt(f)
+        r, rerrs = read_receipt(f)
         if r.verify_mode == "board":
-            return (f, r)
-    return (None, None)
+            return (f, r, rerrs)
+    return (None, None, [])
 
 
 def append_trend(timestamp, batch_id, result, stage, summary, metrics="",
@@ -175,12 +277,10 @@ def append_trend(timestamp, batch_id, result, stage, summary, metrics="",
     if timing:
         line += f" | {timing}"
     # 原子写：读全量 → 追加新行 → 截断保留 _TREND_KEEP 行 → replace（避免先 append
-    # 再整体重写的非原子读-写，中断会留下半写/丢行态）
+    # 再整体重写的非原子读-写，中断会留下半写/丢行态；写侧走统一原子原语）
     lines = trend.read_text(encoding="utf-8").splitlines() if trend.exists() else []
     lines.append(line)
-    tmp = trend.with_suffix(".md.tmp")
-    tmp.write_text("\n".join(lines[-_TREND_KEEP:]) + "\n", encoding="utf-8")
-    tmp.replace(trend)
+    atomic_write_text(trend, "\n".join(lines[-_TREND_KEEP:]) + "\n")
 
 
 def read_trend_last(verify_dir=None):

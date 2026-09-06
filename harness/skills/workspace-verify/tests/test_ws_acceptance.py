@@ -590,14 +590,49 @@ class TestResolveAcceptance(unittest.TestCase):
         self.assertIn("不存在于", err)
 
     def test_batch_file_case_known_id_ok(self):
-        # 方向 3：case id 存在于 verify-cases.yaml 则通过（真实 cases 表）
+        # 方向 3：case id 存在于 verify-cases.yaml 则通过（真实 cases 表）。
+        # KIR-002 当批修（2026-09-05）：查表后展开为验收文本（镜像 --case
+        # 分支），不再返回 "case:<id>" 原串（原串落自由文本 ai 项 → rc 2）
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "b.cdp"
             p.write_text("-sv base:8c583f57f4e4\n意图: 测试\n"
                          "验收: case:lcview-liveness\n方向: 测试\n", encoding="utf-8")
             acc, err = wa.resolve_acceptance(self._args(batch_file=str(p)))
         self.assertIsNone(err)
-        self.assertEqual(acc, "case:lcview-liveness")
+        cases = yaml.safe_load(
+            Path(wa._CASES_PATH).read_text(encoding="utf-8"))["cases"]
+        self.assertEqual(acc, wa._case_text(cases["lcview-liveness"]))
+
+    def test_batch_file_case_multi_id_joined(self):
+        # 多 id 逐个查表拼接（与 --case 多标签同构）
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "b.cdp"
+            p.write_text("-sv base:8c583f57f4e4\n意图: 测试\n"
+                         "验收: case:lcview-liveness,lcview-pipeline\n方向: 测试\n",
+                         encoding="utf-8")
+            acc, err = wa.resolve_acceptance(self._args(batch_file=str(p)))
+        self.assertIsNone(err)
+        cases = yaml.safe_load(
+            Path(wa._CASES_PATH).read_text(encoding="utf-8"))["cases"]
+        self.assertEqual(acc, " ".join(wa._case_text(cases[i]) for i in
+                                       ("lcview-liveness", "lcview-pipeline")))
+
+    def test_batch_case_labels_extracted_for_write_cases(self):
+        # --case 缺省时实跑标签从批次验收行提取（cases-<batch_id>.json 源）
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "b.cdp"
+            p.write_text("-sv base:8c583f57f4e4\n意图: 测试\n"
+                         "验收: case:lcview-liveness,lciod-liveness\n方向: 测试\n",
+                         encoding="utf-8")
+            self.assertEqual(wa._batch_case_labels(str(p)),
+                             "lcview-liveness,lciod-liveness")
+        # 非 case: 前缀（manual/自由文本）与不可读批次均返空串
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "b.cdp"
+            p.write_text("-sv base:8c583f57f4e4\n意图: 测试\n"
+                         "验收: manual:lcview 正常\n方向: 测试\n", encoding="utf-8")
+            self.assertEqual(wa._batch_case_labels(str(p)), "")
+        self.assertEqual(wa._batch_case_labels(str(Path(d) / "no.cdp")), "")
 
     def test_batch_file_manual_free_text_ok(self):
         # 方向 3：manual 模式自由文本不查表，直接返回

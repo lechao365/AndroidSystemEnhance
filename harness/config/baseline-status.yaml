@@ -17,6 +17,7 @@ baselines:
   sync_manifest: output/log/lc_harness_sync_code_to_patchs/artifacts/20260622-213209-manifest.yaml
   build_result: PASS
   package_result: UNKNOWN
+  package_result_note: 历史遗留 UNKNOWN，2026-09-06 评估标注，引用前须人工复核
   board_verify: PASS
   evidence:
     build_result: PASS
@@ -33,6 +34,7 @@ baselines:
   sync_manifest: output/log/lc_harness_sync_code_to_patchs/artifacts/20260624-073624-manifest.yaml
   build_result: PASS
   package_result: UNKNOWN
+  package_result_note: 历史遗留 UNKNOWN，2026-09-06 评估标注，引用前须人工复核
   board_verify: PASS
   evidence:
     build_result: PASS
@@ -237,3 +239,95 @@ baselines:
       title: selfcheck 每批可能跑多次致收据 timings 同名 apply_selfcheck 重复出现
   approved_by: lechao
   approved_at: '2026-09-05T08:28:04+08:00'
+- baseline_id: BL-20260906-01
+  status: candidate
+  source_branch: dev
+  source_commit: 1cb64bb69586
+  sync_manifest: data/verify-results/20260906-195532-manual-2609061955.md
+  build_result: PASS
+  package_result: UNKNOWN
+  board_verify: PASS
+  evidence_scope: lciod-liveness,lcview-liveness,lcview-perf,lcview-pipeline
+  evidence:
+    build_result: PASS
+    package_result: UNKNOWN
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260906-195532-manual-2609061955.md
+    ki_gate: empty-registry
+    evidence_scope: lciod-liveness,lcview-liveness,lcview-perf,lcview-pipeline
+    known_issues_carried: ''
+    package_evidence: ''
+    package_rc: null
+    cases_coverage:
+      result: partial
+      missing:
+      - lcview-sepolicy-label
+      - lcview-recover-daemon
+      - lcview-transfer
+      - lcview-pipeline-warn
+      - lcview-trigger
+      - lciod-pipeline
+      - lciod-trigger
+      run_count: 4
+- baseline_id: BL-20260906-02
+  status: candidate
+  source_branch: dev
+  source_commit: 786bacad8d88
+  sync_manifest: data/verify-results/20260906-201129-manual-2609062011.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lciod-liveness,lcview-liveness,lcview-perf,lcview-pipeline
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260906-201129-manual-2609062011.md
+    ki_gate: empty-registry
+    evidence_scope: lciod-liveness,lcview-liveness,lcview-perf,lcview-pipeline
+    known_issues_carried: ''
+    package_evidence: data/verify-results/20260906-201129-manual-2609062011.md
+    package_rc: 0
+    cases_coverage:
+      result: partial
+      missing:
+      - lcview-sepolicy-label
+      - lcview-recover-daemon
+      - lcview-transfer
+      - lcview-pipeline-warn
+      - lcview-trigger
+      - lciod-pipeline
+      - lciod-trigger
+      run_count: 4
+- baseline_id: BL-20260906-03
+  status: promoted
+  source_branch: dev
+  source_commit: da02a82ffa0c
+  sync_manifest: data/verify-results/20260906-212755-manual-2609062127.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260906-212755-manual-2609062127.md
+    ki_gate: empty-registry
+    evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+    known_issues_carried: ''
+    package_evidence: data/verify-results/20260906-212755-manual-2609062127.md
+    package_rc: 0
+    cases_coverage:
+      result: full
+      missing: []
+      run_count: 11
+    known_issues_closed:
+    - issue_id: KI-20260902-001
+      resolved_in: 42accb5
+      title: cdp_timing start 时机由 apply 自定致 edit 段耗时失真
+    - issue_id: KI-20260903-001
+      resolved_in: 9faa5632e2e8
+      title: selfcheck 每批可能跑多次致收据 timings 同名 apply_selfcheck 重复出现
+  approved_by: lechao
+  approved_at: '2026-09-06T21:29:11+08:00'

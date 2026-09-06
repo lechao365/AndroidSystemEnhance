@@ -2,6 +2,8 @@
 # apply AI 自判"编辑完成"——-s 批实测漂移（edit mark 打在两轮自检之后，
 # 501.9s+315.6s 真实编辑散落 gap）。制度化：selfcheck 开跑前若编辑未收口
 # 则自动补打 mark edit（同名自动 #N），编辑区间口径不再依赖 AI 自判。
+# B8 后实现走 cdp_timing 公开 API（resolve_batch_id/read_marks/emit_mark
+# 进程内直调），测试以 mock emit_mark 断言补打行为。
 
 import os
 import sys
@@ -27,6 +29,8 @@ class TestEnsureEditCloseMark(unittest.TestCase):
         # 隔离宿主可能残留的 CDP_BATCH_ID（其优先级压过测试构造的
         # current-batch.json 指针，不清理则判定/断言全部失真）
         self._old_batch = os.environ.pop("CDP_BATCH_ID", None)
+        # 确保真实 cdp_timing 已导入（read_marks 读取真实打点文件）
+        self.assertTrue(sc._import_cdp_timing())
 
     def tearDown(self):
         if self._old is None:
@@ -54,16 +58,15 @@ class TestEnsureEditCloseMark(unittest.TestCase):
     def test_no_edit_mark_backfills(self):
         # 无 edit mark（AI 漏打）→ selfcheck 开跑前自动补打 edit
         bid = self._mk_timing([{"name": "edit_plan", "wall": 100.0}])
-        with mock.patch.object(sc.subprocess, "run") as m:
+        with mock.patch.object(sc.cdp_timing, "emit_mark",
+                               wraps=sc.cdp_timing.emit_mark) as m:
             sc._ensure_edit_close_mark()
-        self.assertEqual(m.call_args.args[0][2:6],
-                         ["mark", "--batch", bid, "--name"])
-        self.assertEqual(m.call_args.args[0][6], "edit")
+        m.assert_called_once_with("edit", batch_id=bid)
 
     def test_edit_before_selfcheck_no_backfill(self):
         # 已有 edit 且在自检之前（正常 AI 手打路径）→ 不重复补打
         self._mk_timing([{"name": "edit", "wall": 100.0}])
-        with mock.patch.object(sc.subprocess, "run") as m:
+        with mock.patch.object(sc.cdp_timing, "emit_mark") as m:
             sc._ensure_edit_close_mark()
         m.assert_not_called()
 
@@ -74,17 +77,22 @@ class TestEnsureEditCloseMark(unittest.TestCase):
             {"name": "edit", "wall": 100.0},
             {"name": "apply_selfcheck", "wall": 200.0},
         ])
-        with mock.patch.object(sc.subprocess, "run") as m:
+        with mock.patch.object(sc.cdp_timing, "emit_mark",
+                               wraps=sc.cdp_timing.emit_mark) as m:
             sc._ensure_edit_close_mark()
-        self.assertEqual(m.call_args.args[0][6], "edit")
-        self.assertIn("--batch", m.call_args.args[0])
-        self.assertIn(bid, m.call_args.args[0])
+        m.assert_called_once_with("edit", batch_id=bid)
 
     def test_no_active_batch_skips_silently(self):
         # 无活跃批（emit 侧独立自测等）→ 静默跳过不报错
-        with mock.patch.object(sc.subprocess, "run") as m:
+        with mock.patch.object(sc.cdp_timing, "emit_mark") as m:
             sc._ensure_edit_close_mark()
         m.assert_not_called()
+
+    def test_emit_mark_failure_not_blocking(self):
+        # 补打失败（emit_mark 返 False）仅 warn 不阻断（自检结果与打点解耦）
+        self._mk_timing([{"name": "edit_plan", "wall": 100.0}])
+        with mock.patch.object(sc.cdp_timing, "emit_mark", return_value=False):
+            sc._ensure_edit_close_mark()  # 不抛异常即通过
 
 
 if __name__ == "__main__":

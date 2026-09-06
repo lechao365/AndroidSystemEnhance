@@ -277,10 +277,14 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path("harness/skills/cross-device/lib/python").resolve()))
 import cdp_receipt
-p, _ = cdp_receipt.latest_board_receipt()
+p, _, rerrs = cdp_receipt.latest_board_receipt()
+if rerrs:
+    print("error: 最新 board 收据头部解析有错（拒绝据其做 evidence 锚点）: "
+          + "; ".join(rerrs), file=sys.stderr)
+    sys.exit(1)
 print(os.path.relpath(p) if p else "")
 PYEOF
-  ) || true
+  )
   [ -n "$EVIDENCE_RECEIPT" ] || EVIDENCE_RECEIPT="$LATEST"
   # evidence-scope 可选：缺省交 baseline_register add-candidate 从 board 收据 cases
   # 推导（人工传值仅可为收据实测范围子集，防过度声称）
@@ -355,7 +359,11 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path("harness/skills/cross-device/lib/python").resolve()))
 import cdp_receipt
-p, r = cdp_receipt.latest_board_receipt()
+p, r, rerrs = cdp_receipt.latest_board_receipt()
+if rerrs:
+    print("ERR_PARSE")
+    print("")
+    sys.exit(0)
 if not p or not r.verified_commit:
     print("0")
     print("")
@@ -369,6 +377,11 @@ PYEOF
   ) || true
   BOARD_OK=$(echo "$BOARD_INFO" | sed -n '1p')
   BOARD_VTREE=$(echo "$BOARD_INFO" | sed -n '2p')
+  if [ "$BOARD_OK" = "ERR_PARSE" ]; then
+    check_class RECEIPT_FAIL
+    echo "error: 最新 board 收据头部解析有错（拒绝据其做覆盖判定与树绑定），须修复收据后重试" >&2
+    exit 1
+  fi
   if [ "$BOARD_OK" != "1" ]; then
     check_class RECEIPT_FAIL
     echo "error: promote 要求 code/ 改动被最新 board 收据覆盖（board 收据缺失或 verified_commit 不覆盖 code 改动提交 $CODE_HEAD）" >&2
@@ -393,6 +406,23 @@ PYEOF
       || echo "  （树对象不可解析，无法列出差异路径）" >&2
     exit 1
   fi
+  # 方向 3（批次 ff33f92060ac）promote 硬门禁（末位总闸）：动过 code 且
+  # package_result 非 PASS 即阻断（ws_package 打包证据 rc=0 才记 PASS；
+  # no-code-change 走上面豁免分支不受限）。替换旧"UNKNOWN 仅告警"口径
+  PKG_RESULT=$(BID="$BID" python3 - <<'PYEOF'
+import os
+import yaml
+data = yaml.safe_load(open("harness/config/baseline-status.yaml", encoding="utf-8")) or {}
+row = next((b for b in data.get("baselines", [])
+            if b.get("baseline_id") == os.environ.get("BID")), None)
+print(((row or {}).get("package_result") or "UNKNOWN").upper())
+PYEOF
+) || PKG_RESULT="UNKNOWN"
+if [ "$PKG_RESULT" != "PASS" ]; then
+  check_class RECEIPT_FAIL
+  echo "error: promote 硬门禁：dev 相对 origin/main 动过 code（$CODE_HEAD）且 package_result=$PKG_RESULT 非 PASS（须 ws_package 打包证据；no-code-change 豁免不受限）" >&2
+  exit 1
+fi
 fi
 # 文档同步遗漏提示（warn 不阻断）：dev 相对 origin/main 无 docs/ 改动时提示
 if ! git diff --name-only origin/main...dev | grep -q '^docs/'; then
@@ -420,8 +450,8 @@ python3 harness/skills/publish-main-base/baseline_register.py promote \
   || { echo "error: baseline 晋升登记失败（检查 $BID 是否为 candidate）" >&2; exit 1; }
 # 晋升登记随 dev 提交（squash 时一并进入 main；重建 dev 后仍在——reset --hard 前）
 # 证据快照目录 data/baselines/ 一并 add（promote 已生成 <id>-<收据名>.md 快照）
-# data/known-issues/ 一并 add -A（promote 清算删除的终态条目须随晋升提交入库，
-# 否则删除游离在工作树；verify-tree 已排除该目录，清算不破坏树等价断言）
+# data/known-issues/ 一并 add -A（promote 归档不删文件，批内新登记问题须随晋升
+# 提交入库；verify-tree 已排除该目录，登记变更不破坏树等价断言）
 git add harness/config/baseline-status.yaml
 if [ -d data/baselines ]; then git add data/baselines; fi
 if [ -d data/known-issues ]; then git add -A data/known-issues; fi

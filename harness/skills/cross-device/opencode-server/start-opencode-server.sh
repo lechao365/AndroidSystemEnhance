@@ -328,14 +328,18 @@ emit_summary
 lc_exit 0
 fi
 
-stop_legacy_web_processes
-
+# stop_legacy_web_processes 内含 systemctl stop $SERVICE_UNIT——必须在
+# RESTART_SERVE_ONLY 分支之后调用：restart-serve-only 语义为「只重配
+# serve 不动服务」，若在其前执行会停掉运行中的服务，后续
+# check_local_service_ready 必失败（批次六 T4 修复：清理仅属完整流程）
 if [[ $RESTART_SERVE_ONLY -eq 1 ]]; then
     check_local_service_ready
     configure_or_check_tailscale_serve "configure"
     emit_summary
     lc_exit 0
 fi
+
+stop_legacy_web_processes
 
 write_systemd_service
 restart_systemd_service

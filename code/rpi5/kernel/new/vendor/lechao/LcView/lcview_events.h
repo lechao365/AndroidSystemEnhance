@@ -71,6 +71,21 @@
 /* --- 记录魔数 --- */
 #define LCVIEW_MAGIC  0x4C56
 
+/*
+ * 【字节序契约（CXX-001 / LCV-02 / KRN-002）】
+ * 本头定义的线上格式（lcview_record_hdr + TLV 字段）为主机序裸 memcpy
+ * 序列化——事实上的小端契约：内核写入端（lcview_builder/lcview_ring）
+ * 与用户态解析端（record_codec/SchemaParser/FileWriter）同机同序
+ * （ARM64 LE）三方自洽。
+ * 若未来跨大小端设备传输或引入显式字节序转换，必须内核与用户态
+ * 同步改造，禁止单侧修改（详见 lcview_builder.c add_str 契约注释）。
+ * 下面的编译守卫保证大端环境直接编译失败，防隐性错误。
+ */
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
+    (__BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__)
+#error "LcView 线上格式按小端契约裸 memcpy 序列化（LCV-02/KRN-002），不支持大端编译"
+#endif
+
 /* --- 记录头结构（16B 固定头 + 变长字段区） --- */
 #ifdef __KERNEL__
 struct lcview_record_hdr {

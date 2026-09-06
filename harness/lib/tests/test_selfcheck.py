@@ -1,3 +1,4 @@
+import collections
 import contextlib
 import io
 import os
@@ -10,6 +11,18 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import selfcheck
+
+# 治理工具默认 fake 结果（run_parallel_tools 返回形态，B2 并行采集后
+# 治理段与 pytest 段解耦 mock：用例专注 pytest 序列，治理 rc/结论行由
+# 此桩注入；真跑级由 TestParallelTools 单独覆盖解析逻辑）
+_FAKE_TOOLS = {
+    "refs": (0, "OK: harness/skills + docs 引用完整，无悬空。\n",
+             "OK: harness/skills + docs 引用完整，无悬空。"),
+    "cfg": (0, "OK: config 检查通过，无违规。\n",
+            "OK: config 检查通过，无违规。"),
+    "ctr": (0, "OK: contract 检查通过，无违规。\n",
+            "OK: contract 检查通过，无违规。"),
+}
 
 
 class _FakeProc:
@@ -26,27 +39,40 @@ def _fake_run(seq):
     return _run
 
 
+def _fake_tools(**overrides):
+    """治理工具桩工厂（E1 样板收敛）：按 key 覆盖返回元组。"""
+    tools = {k: tuple(v) for k, v in _FAKE_TOOLS.items()}
+    for key, val in overrides.items():
+        tools[key] = tuple(val)
+    return tools
+
+
 class TestSelfcheck(unittest.TestCase):
     def setUp(self):
         # 屏蔽自发 apply_selfcheck 打点（打点不影响 selfcheck 结果断言，
-        # 其行为由 TestMarkSelfcheck 单独覆盖；不屏蔽会让 mock 的
-        # subprocess.run 固定序列被额外调用耗尽报 IndexError）
+        # 其行为由 TestMarkSelfcheck 单独覆盖）与治理工具真跑（B2 后
+        # run_parallel_tools 真拉起 refs/cfg 进程 ~25s，用例桩注入结果）
         self._mark = mock.patch.object(selfcheck, "_mark_selfcheck")
+        self._tools = mock.patch.object(selfcheck, "run_parallel_tools",
+                                        return_value=_fake_tools())
         self._mark.start()
+        self._tools.start()
 
     def tearDown(self):
         self._mark.stop()
+        self._tools.stop()
 
     def test_rc_nonzero_passed_through(self):
         # 方向 6：桩令 pytest 与 refs 均非零，rc 必须如实透出（不经管道）
         fake = _fake_run([
             _FakeProc(1, "1 failed, 119 passed in 5.0s\n"),
-            _FakeProc(2, "==== 共 3 处悬空引用（exit 1）====\n"),
-        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
-        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
+        tools = _fake_tools(refs=(2, "==== 共 3 处悬空引用（exit 1）====\n",
+                                  ""))
         buf = io.StringIO()
-        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
+                mock.patch.object(selfcheck, "run_parallel_tools",
+                                  return_value=tools):
             with redirect_stdout(buf):
                 self.assertEqual(selfcheck.main(), 0)
         out = buf.getvalue()
@@ -59,9 +85,6 @@ class TestSelfcheck(unittest.TestCase):
         # pytest 通过且摘要含 skipped → 不补 skipped=0（已有计数）
         fake = _fake_run([
             _FakeProc(0, "121 passed, 3 skipped in 6.0s\n"),
-            _FakeProc(0, "OK: 引用完整\n"),
-        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
-        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -76,9 +99,6 @@ class TestSelfcheck(unittest.TestCase):
         # 全绿无跳过 → 补 skipped=0（平台跳过数显式可见）
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
-            _FakeProc(0, "OK: 引用完整\n"),
-        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
-        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -91,9 +111,6 @@ class TestSelfcheck(unittest.TestCase):
         # （兜底会为崩溃的运行伪造计数，使 skipped 门禁永不生效）
         fake = _fake_run([
             _FakeProc(2, "INTERNALERROR> Killed\n"),
-            _FakeProc(0, "OK: 引用完整\n"),
-        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
-        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -109,9 +126,6 @@ class TestSelfcheck(unittest.TestCase):
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n",
                       "warn: 某插件加载失败\nwarn: 忽略\n"),
-            _FakeProc(0, "OK: 引用完整\n"),
-        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
-        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -127,9 +141,6 @@ class TestSelfcheck(unittest.TestCase):
         # 交 ws_report 缺 skipped 拒写（不伪造也不静默通过）
         fake = _fake_run([
             _FakeProc(0, "\n", "warn: 某插件加载失败\n"),
-            _FakeProc(0, "OK: 引用完整\n"),
-        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
-        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
@@ -144,17 +155,39 @@ class TestSelfcheck(unittest.TestCase):
         # 方向 3：refs 结论行只取 stdout 末行，stderr 仅附注不参与判定
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
-            _FakeProc(0, "OK: 引用完整\n", "warn: 非判定信息\n"),
-        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
-        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
+        tools = _fake_tools(refs=(0, "OK: 引用完整\n", "warn: 非判定信息\n"))
         buf = io.StringIO()
-        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
+                mock.patch.object(selfcheck, "run_parallel_tools",
+                                  return_value=tools):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
         self.assertIn("OK: 引用完整", out)
         self.assertNotIn("非判定信息", out)
+
+    def test_config_contract_rcs_passed_through(self):
+        # 方向 4 + B2：--all 双模式 rc 分判红透出（config/contract 结论行
+        # 各自拼接，任一非零由 ws_report 判红拒写）
+        fake = _fake_run([
+            _FakeProc(0, "531 passed in 27.9s\n"),
+        ])
+        tools = _fake_tools(
+            cfg=(1, "[VIOLATION] x\n==== config: 共 1 处违规（判红）====\n",
+                 "==== config: 共 1 处违规（判红）===="),
+            ctr=(0, "OK: contract 检查通过，无违规。\n",
+                 "OK: contract 检查通过，无违规。"))
+        buf = io.StringIO()
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
+                mock.patch.object(selfcheck, "run_parallel_tools",
+                                  return_value=tools):
+            with redirect_stdout(buf):
+                selfcheck.main()
+        out = buf.getvalue()
+        self.assertIn("config_rc=1", out)
+        self.assertIn("共 1 处违规", out)
+        self.assertIn("contract_rc=0", out)
 
     # ── 方向 1：xdist 可导入时 -n auto，导入不到回落串行 ────────────────
     def _run_capture_cmd(self, fake):
@@ -174,9 +207,6 @@ class TestSelfcheck(unittest.TestCase):
         # xdist 可导入 → pytest 命令加 -n auto（并行提速，计数行正则不动）
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
-            _FakeProc(0, "OK: 引用完整\n"),
-        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
-        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         with mock.patch.dict(sys.modules, {"xdist": mock.Mock()}):
             seen = self._run_capture_cmd(fake)
@@ -189,66 +219,102 @@ class TestSelfcheck(unittest.TestCase):
         # → pytest 命令照旧串行（无 -n auto）
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
-            _FakeProc(0, "OK: 引用完整\n"),
-        _FakeProc(0, "OK: config 检查通过，无违规。\n"),
-        _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
         ])
         with mock.patch.dict(sys.modules, {"xdist": None}):
             seen = self._run_capture_cmd(fake)
         pytest_cmd = seen[0]
         self.assertNotIn("-n", pytest_cmd)
 
+    def test_pytest_timeout_returns_124(self):
+        # B3：pytest 挂起超时 → rc=124（约定超时标记），不无限阻塞
+        def _timeout(cmd, **kw):
+            raise selfcheck.subprocess.TimeoutExpired(cmd, 900)
+        buf = io.StringIO()
+        with mock.patch.object(selfcheck.subprocess, "run",
+                               side_effect=_timeout):
+            with redirect_stdout(buf):
+                selfcheck.main()
+        self.assertIn("pytest_rc=124", buf.getvalue())
+
+
+class TestParallelTools(unittest.TestCase):
+    """B2：run_parallel_tools 的 --all 输出解析（mock Popen，不真跑治理
+    进程——真跑级由 selfcheck main 实际运行覆盖）。"""
+
+    def test_all_mode_rc_split(self):
+        # --all 末尾机器 rc 行分解析：config/contract 各自 rc 与结论行
+        out = ("[VIOLATION] x\n==== config: 共 1 处违规（判红）====\n"
+               "OK: contract 检查通过，无违规。\n"
+               "config_rc=1\ncontract_rc=0\n")
+        proc = mock.Mock()
+        proc.communicate.return_value = (out, "")
+        proc.returncode = 1
+        with mock.patch.object(selfcheck.subprocess, "Popen",
+                               return_value=proc):
+            tools = selfcheck.run_parallel_tools()
+        self.assertEqual(tools["cfg"][0], 1)
+        self.assertEqual(tools["ctr"][0], 0)
+        self.assertEqual(tools["cfg"][2], "==== config: 共 1 处违规（判红）====")
+        self.assertEqual(tools["ctr"][2], "OK: contract 检查通过，无违规。")
+        # contract 段切分不含 config 段与机器行
+        self.assertNotIn("[VIOLATION]", tools["ctr"][1])
+        self.assertNotIn("config_rc=", tools["ctr"][1])
+
+    def test_all_mode_tool_timeout_returns_124(self):
+        # 治理工具挂起超时 → kill + rc=124（不无限阻塞自检）
+        proc = mock.Mock()
+        # refs 超时路径：communicate×2（首超时 + kill 后回收）；另一进程正常
+        proc.communicate.side_effect = [
+            selfcheck.subprocess.TimeoutExpired("cmd", 120), ("", ""),
+            ("OK: config 检查通过，无违规。\nconfig_rc=0\ncontract_rc=0\n", ""),
+        ]
+        with mock.patch.object(selfcheck.subprocess, "Popen",
+                               return_value=proc):
+            with contextlib.redirect_stderr(io.StringIO()):
+                tools = selfcheck.run_parallel_tools()
+        rc = tools["refs"][0] if tools["refs"][0] == 124 else tools["cfg"][0]
+        self.assertEqual(rc, 124)
+        proc.kill.assert_called_once()
+
 
 class TestMarkSelfcheck(unittest.TestCase):
-    """方向 1：自检跑完自发 mark apply_selfcheck（batch 三级回落，失败不阻断）。"""
+    """方向 1：自检跑完自发 mark apply_selfcheck（emit_mark 进程内直调，
+    batch 回落识别，失败不阻断）。"""
 
     def test_main_marks_after_selfcheck(self):
         # main() 完成自检后调用 _mark_selfcheck（打点入 cdp_timing mark 链）
-        with mock.patch.object(selfcheck, "_mark_selfcheck") as m:
+        with mock.patch.object(selfcheck, "_mark_selfcheck") as m, \
+                mock.patch.object(selfcheck, "run_parallel_tools",
+                                  return_value=_fake_tools()):
             fake = _fake_run([
                 _FakeProc(0, "531 passed in 27.9s\n"),
-                _FakeProc(0, "OK: 引用完整\n"),
-            _FakeProc(0, "OK: config 检查通过，无违规。\n"),
-            _FakeProc(0, "OK: contract 检查通过，无违规。\n"),
             ])
             with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
                 with redirect_stdout(io.StringIO()):
                     selfcheck.main()
         m.assert_called_once()
 
-    def test_mark_calls_cdp_timing_with_name(self):
-        # _mark_selfcheck 以 cdp_timing.py mark --name apply_selfcheck 调起，
-        # 不显式 --batch（交 cdp_timing 三级回落：env CDP_BATCH_ID > 唯一文件）
-        seen = []
-
-        def _run(cmd, **kw):
-            seen.append(cmd)
-            return _FakeProc(0, "mark: apply_selfcheck @ 123.456\n")
-
-        with mock.patch.object(selfcheck.subprocess, "run", side_effect=_run):
-            with contextlib.redirect_stderr(io.StringIO()):
-                selfcheck._mark_selfcheck()
-        self.assertEqual(len(seen), 1)
-        cmd = seen[0]
-        self.assertTrue(any("cdp_timing" in c for c in cmd))
-        self.assertIn("mark", cmd)
-        self.assertIn("apply_selfcheck", cmd)
-        self.assertNotIn("--batch", cmd)
+    def test_mark_calls_emit_mark_with_name(self):
+        # _mark_selfcheck 进程内直调 cdp_timing.emit_mark（B8 胶水收敛），
+        # 不显式 batch_id（交 emit_mark 回落：CDP_BATCH_ID > current-batch.json）
+        fake_ct = mock.Mock()
+        with mock.patch.object(selfcheck, "cdp_timing", fake_ct):
+            selfcheck._mark_selfcheck(dur_s=1.5)
+        fake_ct.emit_mark.assert_called_once_with("apply_selfcheck", dur_s=1.5)
 
     def test_mark_failure_not_blocking(self):
-        # 发点失败（returncode 非零）仅 warn 不阻断（自检结果与打点解耦）
-        fake = _FakeProc(3, "", "error: 未 start\n")
-        err = io.StringIO()
-        with mock.patch.object(selfcheck.subprocess, "run", return_value=fake):
-            with contextlib.redirect_stderr(err):
-                selfcheck._mark_selfcheck()  # 不抛异常即通过
-        self.assertIn("打点失败（不阻断）", err.getvalue())
+        # 发点失败（emit_mark 返 False）不抛异常不阻断（自检结果与打点解耦）
+        fake_ct = mock.Mock()
+        fake_ct.emit_mark.return_value = False
+        with mock.patch.object(selfcheck, "cdp_timing", fake_ct):
+            selfcheck._mark_selfcheck()  # 不抛异常即通过
+        fake_ct.emit_mark.assert_called_once()
 
 
 class TestMarkSelfcheckDegraded(unittest.TestCase):
     """方向 5：CI 无打点指针降级——CDP_PROJECT_ROOT 指空临时根（无 timings
-    文件、无 CDP_BATCH_ID）时自发 mark 走 cdp_timing warn 降级路径，
-    不抛异常、不阻断自检（真子进程，非 mock）。"""
+    文件、无 CDP_BATCH_ID）时 emit_mark 静默返 False，不抛异常、不阻断
+    自检（进程内直调，无真子进程）。"""
 
     def test_mark_selfcheck_no_pointer_no_raise(self):
         root = tempfile.TemporaryDirectory()
@@ -261,6 +327,72 @@ class TestMarkSelfcheckDegraded(unittest.TestCase):
                     selfcheck._mark_selfcheck()
         finally:
             root.cleanup()
+
+
+class TestCheckPythonEnv(unittest.TestCase):
+    """check_python_env：Python 版本（>=3.8）与 requirements.txt 依赖探测。"""
+
+    def setUp(self):
+        # 与 TestSelfcheck 同款桩：屏蔽打点与治理工具真跑（run_parallel_tools
+        # 真拉起 refs/cfg 进程 ~25s，会触发 slow_guard 判红；本组用例只
+        # 关注 pyenv 段，治理结果以桩注入）
+        self._mark = mock.patch.object(selfcheck, "_mark_selfcheck")
+        self._tools = mock.patch.object(selfcheck, "run_parallel_tools",
+                                        return_value=_fake_tools())
+        self._mark.start()
+        self._tools.start()
+
+    def tearDown(self):
+        self._mark.stop()
+        self._tools.stop()
+
+    def test_healthy_env_reports_ok(self):
+        # 真实环境（python>=3.8 且 requirements.txt 各依赖可导入）→ ok=True，
+        # 汇总行含版本号与依赖名
+        ok, summary = selfcheck.check_python_env()
+        self.assertTrue(ok)
+        self.assertIn("python=", summary)
+        self.assertIn("PyYAML", summary)
+        self.assertNotIn("MISSING", summary)
+
+    def test_missing_dep_reported_not_ok(self):
+        # 依赖导入失败（不存在的包）→ ok=False，汇总行点名 MISSING 依赖
+        # （失败不抛异常，以汇总行形式透出）
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                         encoding="utf-8") as f:
+            f.write("nonexistent_pkg_zz>=1.0\n")
+            path = f.name
+        try:
+            ok, summary = selfcheck.check_python_env(req_path=path)
+        finally:
+            os.unlink(path)
+        self.assertFalse(ok)
+        self.assertIn("nonexistent_pkg_zz>=1.0", summary)
+        self.assertIn("MISSING", summary)
+
+    def test_old_python_version_not_ok(self):
+        # 版本低于 3.8 → ok=False 且汇总行标注 TOO_OLD（版本结论可见）
+        _FakeVI = collections.namedtuple("_FakeVI", "major minor micro")
+        with mock.patch.object(selfcheck.sys, "version_info",
+                               _FakeVI(3, 7, 15)):
+            ok, summary = selfcheck.check_python_env()
+        self.assertFalse(ok)
+        self.assertIn("python=3.7.15", summary)
+        self.assertIn("TOO_OLD", summary)
+
+    def test_main_includes_pyenv_segment(self):
+        # main 汇总输出纳入 pyenv_rc 与环境摘要（环境破损由 rc 非零透出，
+        # 交 ws_report 全 *_rc 扫描判红）
+        fake = _fake_run([
+            _FakeProc(0, "531 passed in 27.9s\n"),
+        ])
+        buf = io.StringIO()
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
+            with redirect_stdout(buf):
+                selfcheck.main()
+        out = buf.getvalue()
+        self.assertIn("pyenv_rc=0", out)
+        self.assertIn("python=", out)
 
 
 if __name__ == "__main__":

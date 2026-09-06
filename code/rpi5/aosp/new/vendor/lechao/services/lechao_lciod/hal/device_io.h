@@ -68,6 +68,19 @@ int get_config(int fd, struct vendor_lechao_usbd_config *config);
 int set_config(int fd, const struct vendor_lechao_usbd_config *config);
 
 /*
+ * clamp_read_timeout_ms — readEvent 超时入参钳位（LCD-002 纯函数）
+ * @timeout_ms: 上层透传的原始超时值（不可信，binder 公开接口）
+ * 返回: <0 钳为 0（非阻塞）；> kMax 裁到 kMax。
+ *
+ * 背景：timeoutMs 从 IIoService/IIoHal 公开 binder 接口一路透传到
+ * poll()，-1 即永久阻塞、INT_MAX 阻塞约 24.8 天；HAL/daemon 两侧
+ * binder 线程池各仅 1 线程，单次恶意/失误调用即瘫痪整条监控链路
+ * （"活着但不工作"）。HAL 侧为最终防线，daemon 侧首层防御。
+ */
+static const int kMaxReadEventTimeoutMs = 1000;
+int clamp_read_timeout_ms(int timeout_ms);
+
+/*
  * read_event — 从内核事件环形缓冲区读取最新一条事件
  * @fd: 设备 fd（需保持打开，用于 poll/read）
  * @event: 输出参数，接收最新事件

@@ -36,8 +36,11 @@ struct DecodedField {
 
 // 从 *ptr 处解码一个 TLV 字段：
 //   - 输入 ptr/end 界定当前记录数据区
-//   - 解码成功则推进 *ptr 越过该字段并返回 kOk；失败不推进
-//   - 未知类型返回 kUnknown（不推进，调用方决定处理）
+//   - kOk：推进 *ptr 越过该字段，值区可用
+//   - kUnknown：未知类型，推进 1 字节 type（调用方输出 null 后继续
+//     遍历，formatJsonLine 的"跳过未知字段继续"语义依赖此推进）
+//   - kTruncated：数据不足，不保证推进（out->type 已填充；
+//     变长字段已推进过 2B 长度前缀时 *ptr 指向长度后，见 .cpp 注释）
 FieldDecodeResult decodeRecordField(const uint8_t** ptr, const uint8_t* end,
                                     DecodedField* out);
 

@@ -7,6 +7,8 @@
 //       INT32/FLOAT: 4 字节定长
 //       INT64:       8 字节定长
 //       STRING/BINARY: 2 字节小端长度前缀 + 变长数据
+//   字节序契约（LCV-02）：主机序裸 memcpy，事实小端（ARM64 LE），
+//   编译期守卫与完整契约见 lcview_events.h，禁止单侧改转换。
 //   边界防护：所有长度读取均先校验剩余字节，杜绝越界读（CXX-002）。
 // ============================================================
 
@@ -66,8 +68,12 @@ FieldDecodeResult decodeRecordField(const uint8_t** ptr, const uint8_t* end,
         }
         valueLen = flen;
     } else {
-        if ((size_t)(end - p) < valueLen)
+        if ((size_t)(end - p) < valueLen) {
+            // LCV-08：定长字段截断也显式填充 type——调用方不依赖 NSDMI
+            // 隐式 0 值恰好落对分支（契约自描述，防后续维护踩坑）
+            out->type = type;
             return FieldDecodeResult::kTruncated;
+        }
     }
 
     out->type = type;

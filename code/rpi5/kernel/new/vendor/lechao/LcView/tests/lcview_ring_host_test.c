@@ -190,12 +190,31 @@ static void test_evict(void)
     CHECK(out_len == 0);
 }
 
+/* ring_read_fit_check：KRN-001 假 EOF 收口语义 */
+static void test_read_fit(void)
+{
+    /* 可装入 → 0 */
+    CHECK(ring_read_fit_check(0, 20, 64) == 0);
+    CHECK(ring_read_fit_check(44, 20, 64) == 0);
+    /* 恰好装满 → 0（边界） */
+    CHECK(ring_read_fit_check(44, 20, 64) == 0);
+    CHECK(ring_read_fit_check(0, 64, 64) == 0);
+
+    /* 放不下但已有已读数据 → 1（break 返回部分） */
+    CHECK(ring_read_fit_check(44, 40, 64) == 1);
+
+    /* KRN-001 核心：无数据且首条放不下 → -1（调用方转 -EINVAL），
+     * 不得返回 0 伪装 EOF */
+    CHECK(ring_read_fit_check(0, 100, 64) == -1);
+}
+
 int main(void)
 {
     test_avail();
     test_memcpy_out();
     test_memcpy_in();
     test_evict();
+    test_read_fit();
     if (g_fails) {
         printf("FAIL: %d/%d checks failed\n", g_fails, g_checks);
         return 1;

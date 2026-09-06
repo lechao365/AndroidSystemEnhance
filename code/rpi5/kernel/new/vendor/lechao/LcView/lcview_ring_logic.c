@@ -86,3 +86,26 @@ int ring_evict_one_core(uint8_t *buf, uint32_t size, uint32_t *read_pos,
     *read_pos = (rpos + old_len) % size;
     return 1;
 }
+
+/*
+ * ring_read_fit_check — 判定当前记录能否装入用户缓冲区剩余空间
+ *
+ * KRN-001 语义收口：copied_total == 0 且首条记录放不下用户缓冲区时，
+ * read 不得返回 0（POSIX 0 = EOF，而 poll 恒报 POLLIN——LT-epoll 消费者
+ * 忙轮询或误判设备关闭，记录永久滞留卡死后续 read），必须报 -EINVAL。
+ *
+ * @copied_total 本次 read 已拷贝给用户态的字节数
+ * @record_len   当前记录总长（含 4B 长度前缀）
+ * @user_len     用户缓冲区总长
+ * @return 0 可装入继续拷贝 / 1 放不下但已有数据（返回已读部分）/
+ *         -1 放不下且无数据（调用方返回 -EINVAL）
+ *
+ * 两参数均 ≤ ring->size ≤ 4MB，uint32 求和无溢出。
+ */
+int ring_read_fit_check(uint32_t copied_total, uint32_t record_len,
+                        uint32_t user_len)
+{
+    if (copied_total + record_len <= user_len)
+        return 0;
+    return (copied_total == 0) ? -1 : 1;
+}

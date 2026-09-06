@@ -208,5 +208,53 @@ class TestForensics(unittest.TestCase):
                              for i in pstore_items))
 
 
+class TestSummarizeForReceipt(unittest.TestCase):
+    """取证 manifest → 收据轻量摘要（收据审计链增强，ws_report 衔接）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write_manifest(self, items, name="manifest.json"):
+        d = Path(self._tmp.name) / "run-x"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_text(json.dumps({
+            "run_id": "r1", "endpoint": "ep", "items": items,
+        }), encoding="utf-8")
+        return d / name
+
+    def test_summary_contains_dir_and_counts(self):
+        # 摘要含 forensics_dir（manifest 所在 run 目录）与
+        # truncated/skipped 计数（manifest 结构知识收敛在 forensics 模块）
+        m = self._write_manifest([
+            {"name": "02-logcat-crash.txt", "truncated": True},
+            {"name": "03-getprop.txt", "skipped": "total_budget"},
+            {"name": "04-df.txt", "rc": 0, "bytes": 10},
+        ])
+        s = wf.summarize_for_receipt(str(m))
+        self.assertIn("forensics_dir", s)
+        self.assertIn(str(m.parent), s)
+        self.assertIn("truncated=1", s)
+        self.assertIn("skipped=1", s)
+        self.assertIn("items=3", s)
+        self.assertNotIn("\n\n", s.strip("\n"), "摘要须为轻量一两行")
+
+    def test_summary_missing_manifest_returns_empty(self):
+        # manifest 缺失 → 空串（取证摘要非验收证据，不阻断收据落盘）
+        miss = Path(self._tmp.name) / "nope.json"
+        self.assertEqual(wf.summarize_for_receipt(str(miss)), "")
+
+    def test_summary_invalid_manifest_returns_empty(self):
+        # 非法 JSON / 非对象结构 → 空串（不抛异常）
+        bad = Path(self._tmp.name) / "bad.json"
+        bad.write_text("{oops", encoding="utf-8")
+        self.assertEqual(wf.summarize_for_receipt(str(bad)), "")
+        arr = Path(self._tmp.name) / "arr.json"
+        arr.write_text("[1,2]", encoding="utf-8")
+        self.assertEqual(wf.summarize_for_receipt(str(arr)), "")
+
+
 if __name__ == "__main__":
     unittest.main()

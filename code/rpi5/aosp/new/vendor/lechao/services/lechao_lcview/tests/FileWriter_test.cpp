@@ -239,6 +239,73 @@ TEST_F(FormatJsonLineTest, UnknownType_ProducesNull) {
     EXPECT_NE(line.find("null"), std::string::npos);
 }
 
+// ============================================================
+// LCV-04/05：输出值域防御（严格 JSON 合法性）
+// ============================================================
+
+TEST_F(FormatJsonLineTest, FloatNanInf_ProducesNull) {
+    // LCV-04：NaN/Inf 默认输出 "nan"/"inf" 非合法 JSON 数值，
+    // 严格解析器（json.loads）对整行抛异常——降级 null 保整行
+    auto schema = makeSchema(4, "e", {FieldType::FLOAT});
+    auto hdr = makeHdr(4, 1);
+    // NaN = 0x7FC00000，Inf = 0x7F800000（IEEE754 小端字节序）
+    {
+        std::vector<uint8_t> fields = {LCVIEW_TYPE_FLOAT, 0x00, 0x00, 0xC0, 0x7F};
+        auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+        EXPECT_NE(line.find("\"f\":[null]"), std::string::npos) << "NaN 须输出 null";
+        EXPECT_EQ(line.find("nan"), std::string::npos);
+    }
+    {
+        std::vector<uint8_t> fields = {LCVIEW_TYPE_FLOAT, 0x00, 0x00, 0x80, 0x7F};
+        auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+        EXPECT_NE(line.find("\"f\":[null]"), std::string::npos) << "+Inf 须输出 null";
+        EXPECT_EQ(line.find("inf"), std::string::npos);
+    }
+    // 正常 float 不受影响
+    {
+        std::vector<uint8_t> fields = {LCVIEW_TYPE_FLOAT, 0xDB, 0x0F, 0x49, 0x40};
+        auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+        EXPECT_NE(line.find("3.14159"), std::string::npos);
+    }
+}
+
+TEST_F(FormatJsonLineTest, StringField_InvalidUtf8_Escaped) {
+    // LCV-05：非法 UTF-8 字节降级 \u00XX 转义，合法序列直传——
+    // 输出永远合法，严格解析器不再因 USB 描述符的坏字节抛异常
+    auto schema = makeSchema(4, "e", {FieldType::STRING});
+    auto hdr = makeHdr(4, 1);
+    {   // 非法序列 0xC3 0x28（"Ã(" 截断）：0xC3 须转义，0x28 是 '(' 直传
+        std::string s{static_cast<char>(0xC3), '('};
+        auto fields = buildFields({FieldType::STRING}, {s});
+        auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+        EXPECT_NE(line.find("\\u00c3"), std::string::npos)
+            << "非法 UTF-8 首字节须转义";
+    }
+    {   // 合法序列 0xE4 0xBD 0xA0（U+4F60 "你"）原样直传
+        std::string s{static_cast<char>(0xE4), static_cast<char>(0xBD),
+                      static_cast<char>(0xA0)};
+        auto fields = buildFields({FieldType::STRING}, {s});
+        auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+        EXPECT_EQ(line.find("\\u00"), std::string::npos)
+            << "合法 UTF-8 不得转义";
+        EXPECT_NE(line.find(s), std::string::npos) << "合法 UTF-8 须原样输出";
+    }
+    {   // 非法首字节 0xFF 直接收口为 \u00ff
+        std::string s{static_cast<char>(0xFF)};
+        auto fields = buildFields({FieldType::STRING}, {s});
+        auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+        EXPECT_NE(line.find("\\u00ff"), std::string::npos);
+    }
+    {   // 4 字节合法 emoji U+1F600（F0 9F 98 80）直传
+        std::string s{static_cast<char>(0xF0), static_cast<char>(0x9F),
+                      static_cast<char>(0x98), static_cast<char>(0x80)};
+        auto fields = buildFields({FieldType::STRING}, {s});
+        auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+        EXPECT_EQ(line.find("\\u00"), std::string::npos);
+        EXPECT_NE(line.find(s), std::string::npos);
+    }
+}
+
 TEST_F(FormatJsonLineTest, Int32Field_Truncated_ReturnsEmpty) {
     auto schema = makeSchema(4, "e", {FieldType::INT32});
     auto hdr = makeHdr(4, 1);
@@ -446,6 +513,114 @@ TEST(FileWriterWriteInvalidTest, WriteFail_RetryFail_CountsAndClearsSticky) {
     EXPECT_EQ(writer.dropCounters().invalidNotOpen, 0);
     EXPECT_FALSE(writer.mInvalidStream.fail());
     SUCCEED();
+}
+
+// ============================================================
+// LCV-01：invalid_records.log 轮转（无界逃逸口收口）
+// ============================================================
+
+TEST(FileWriterWriteInvalidTest, Constructor_RestoresInvalidSize) {
+    // CXX-002：daemon 重启后 invalid 累计大小须从持久层恢复——
+    // 归零则轮转阈值判定失效（可超限近一倍）
+    TempDir dir;
+    prewriteFile(dir.path() + "/invalid_records.log", 4096);
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+    EXPECT_EQ(writer.mInvalidSize, 4096u);
+}
+
+TEST(FileWriterWriteInvalidTest, Rotate_WhenSizeExceedsLimit) {
+    // LCV-01：超过 maxInvalidFileSizeMb 时写前轮转——当前文件重置，
+    // 旧内容进 invalid_records_{date}_p0.log，不再无界增长
+    TempDir dir;
+    prewriteFile(dir.path() + "/invalid_records.log", 1024 * 1024);
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxInvalidFileSizeMb = 1;
+    FileWriter writer(cfg);
+    std::string date = writer.makeDateStr();
+
+    uint8_t data[] = {0xDE, 0xAD, 0xBE, 0xEF};
+    writer.writeInvalid(data, 4, "overflow");
+
+    // 旧内容完整进入轮转文件（rename 保留字节）
+    std::string rotated = dir.path() + "/invalid_records_" + date + "_p0.log";
+    struct stat st;
+    ASSERT_EQ(stat(rotated.c_str(), &st), 0);
+    EXPECT_EQ(st.st_size, 1024 * 1024);
+    // 当前文件被重置：只含本轮新写入一条，内存累计同步归零再累计
+    std::string content = readFile(dir.path() + "/invalid_records.log");
+    EXPECT_NE(content.find("overflow"), std::string::npos);
+    EXPECT_EQ(writer.mInvalidSize, content.size());
+}
+
+TEST(FileWriterWriteInvalidTest, Rotate_SeqContinuesAfterRestart) {
+    // 轮转 seq 续接：目录已有 _p0 时下次轮转用 _p1（重启后不覆盖）
+    TempDir dir;
+    prewriteFile(dir.path() + "/invalid_records.log", 1024 * 1024);
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxInvalidFileSizeMb = 1;
+    FileWriter writer(cfg);
+    std::string date = writer.makeDateStr();
+    prewriteFile(dir.path() + "/invalid_records_" + date + "_p0.log", 100);
+
+    uint8_t data[] = {0x01};
+    writer.writeInvalid(data, 1, "again");
+
+    std::string rotated = dir.path() + "/invalid_records_" + date + "_p1.log";
+    EXPECT_EQ(access(rotated.c_str(), F_OK), 0);
+    // _p1 收到原 invalid_records.log 全部内容（1MB）
+    struct stat st;
+    ASSERT_EQ(stat(rotated.c_str(), &st), 0);
+    EXPECT_EQ(st.st_size, 1024 * 1024);
+    // _p0 未被覆盖（仍 100 字节）
+    struct stat st0;
+    ASSERT_EQ(stat((dir.path() + "/invalid_records_" + date + "_p0.log").c_str(), &st0), 0);
+    EXPECT_EQ(st0.st_size, 100);
+}
+
+TEST(FileWriterWriteInvalidTest, WriteFail_RollbackTruncatesPartialLine) {
+    // LCV-07：首写部分落盘后失败，恢复重开前须回退到写前偏移——
+    // 否则残留半行与下一条追加粘连成非法 JSONL（与 writeLineFlush
+    // 的 rollback 语义对齐）。注入：首写流指向 /dev/full（is_open 但
+    // 恒 ENOSPC 设 failbit，与 WriteFail_RecoversByReopen 同手法），
+    // 目标文件尾预置垃圾字节模拟上次部分落盘，mInvalidSize 保持垃圾
+    // 前偏移——恢复 rollback 须把垃圾截掉，retry 后文件为
+    // 写前内容 + 新行，无残留
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+
+    const std::string pre = "{\"reason\":\"old\"}\n";
+    {
+        std::ofstream f(dir.path() + "/invalid_records.log", std::ios::app);
+        f << pre;
+    }
+    const std::string garbage = "partial-without-newline";
+    {
+        std::ofstream f(dir.path() + "/invalid_records.log", std::ios::app);
+        f << garbage;
+    }
+    // 模拟代码视角：只记得写前偏移（半行残留不属于成功写入）
+    writer.mInvalidSize = pre.size();
+    // 首写流换到 /dev/full（写必失败），mInvalidFilename 保持真实路径
+    writer.mInvalidStream.close();
+    writer.mInvalidStream.open("/dev/full", std::ios::app);
+    ASSERT_TRUE(writer.mInvalidStream.is_open());
+
+    uint8_t data[] = {0xDE, 0xAD};
+    writer.writeInvalid(data, 2, "recover");
+
+    std::string content = readFile(dir.path() + "/invalid_records.log");
+    // 垃圾半行被 rollback 截断：新内容 = pre + 新行
+    EXPECT_EQ(content.find(garbage), std::string::npos);
+    EXPECT_EQ(content.compare(0, pre.size(), pre), 0);
+    EXPECT_NE(content.find("recover"), std::string::npos);
+    // 恢复后内存累计从写前偏移 + 新行大小
+    EXPECT_EQ(writer.mInvalidSize, content.size());
 }
 
 // ============================================================
@@ -716,7 +891,9 @@ TEST(FileWriterDropCountTest, FormatOob_Counts) {
 }
 
 TEST(FileWriterDropCountTest, WriteRecord_BadData_CountsFormat) {
-    // writeRecord 传坏数据：formatOob + formatEmpty 各 +1（越界返回空 → 空丢弃）
+    // writeRecord 传坏数据：越界返回空 → 仅计 formatOob。
+    // LCV-18：同一次丢弃不再计 2 次（原 formatOob+formatEmpty 双计使
+    // 心跳 dropped 求和虚高一倍），formatEmpty 保留字段但无自增路径
     TempDir dir;
     FileWriterConfig cfg;
     cfg.logDir = dir.path();
@@ -727,7 +904,7 @@ TEST(FileWriterDropCountTest, WriteRecord_BadData_CountsFormat) {
 
     writer.writeRecord(schema, &hdr, fields.data(), fields.size());
     EXPECT_EQ(writer.dropCounters().formatOob, 1);
-    EXPECT_EQ(writer.dropCounters().formatEmpty, 1);
+    EXPECT_EQ(writer.dropCounters().formatEmpty, 0);
     SUCCEED();
 }
 
@@ -827,6 +1004,33 @@ TEST(FileWriterRetentionTest, SkipsInvalidRecordsLog) {
     // invalid 跳过 → 删 other（500K），剩余 700K 达标
     EXPECT_EQ(access(invalid.c_str(), F_OK), 0);
     EXPECT_NE(access(other.c_str(), F_OK), 0);
+}
+
+TEST(FileWriterRetentionTest, EvictsRotatedInvalidFiles) {
+    // LCV-01：已轮转的旧 invalid 文件不再被 invalid 流持有，超总容量时
+    // 正常参与淘汰（evictOldFiles 仅跳过当前 mInvalidFilename）；
+    // 当前 invalid_records.log 仍跳过（流持有防 unlink 后写已删 inode）
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxTotalSizeMb = 1;
+    cfg.retentionScanEveryWrites = 0;  // 关闭降频：显式调用即扫描
+    FileWriter writer(cfg);
+    std::string date = writer.makeDateStr();
+    prewriteFile(dir.path() + "/invalid_records.log", 10 * 1024);
+    std::string rotated = dir.path() + "/invalid_records_" + date + "_p0.log";
+    prewriteFile(rotated, 700 * 1024);
+    struct utimbuf tb;
+    tb.actime = 100; tb.modtime = 100; utime(rotated.c_str(), &tb);
+    std::string other = dir.path() + "/9_z_" + date + "_p0.jsonl";
+    prewriteFile(other, 500 * 1024);
+
+    writer.enforceRetention();
+
+    // 总 1.21MB > 1MB：最旧 rotated 被删后 510K 达标；当前 invalid 保留
+    EXPECT_NE(access(rotated.c_str(), F_OK), 0);
+    EXPECT_EQ(access((dir.path() + "/invalid_records.log").c_str(), F_OK), 0);
+    EXPECT_EQ(access(other.c_str(), F_OK), 0);
 }
 
 TEST(FileWriterRetentionTest, UnlinkFailed_NoCrash) {

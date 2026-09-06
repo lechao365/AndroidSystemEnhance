@@ -28,11 +28,16 @@
 //   每累计 N 次写入才真正扫描一次日志目录（opendir+stat 有成本，
 //   原每轮主循环全目录扫描，空批轮次也扫——改为按写入计数触发）。
 //   0 表示关闭降频（每次调用都扫描，单测显式调用场景使用）
+// maxInvalidFileSizeMb — invalid_records.log 单文件轮转阈值：
+//   超过即轮转为 invalid_records_{date}_p{seq}.log（LCV-01），
+//   轮转后的旧文件不再被 invalid 流持有，正常参与容量淘汰。
+//   invalid 是诊断数据，默认阈值小于业务日志（10MB vs 50MB）
 struct FileWriterConfig {
     std::string logDir = "/data/vendor/lechao_lcview/logs";
     size_t maxFileSizeMb = 50;
     size_t maxTotalSizeMb = 500;
     size_t retentionScanEveryWrites = 256;
+    size_t maxInvalidFileSizeMb = 10;
 };
 
 // FileWriter 类：将事件日志写入结构化 JSONL 文件
@@ -117,6 +122,14 @@ private:
     // 写路径耗时累计（微秒；供心跳输出平均微秒/条）
     void recordWriteTiming(std::chrono::steady_clock::time_point start);
 
+    // invalid 文件轮转（LCV-01）：close → rename 为带日期+seq 的
+    // 轮转名 → 重开新文件。rename 失败时尽力重开原文件继续追加
+    // （不丢数据），成败由调用方按流状态判定
+    void rotateInvalid();
+    // 扫描日志目录：invalid_records_{date}_p<seq>.log 已存在的最大
+    // 轮转序号 +1（重启/多次轮转后 seq 续接，与 nextSeqFor 同模式）
+    int nextInvalidSeqFor(const std::string& date);
+
     // 日志目录扫描结果：路径 + mtime + size（enforceRetention 淘汰用）
     struct LogFile {
         std::string path;
@@ -138,10 +151,16 @@ private:
     std::ofstream mInvalidStream;
     // 非法记录日志文件路径
     std::string mInvalidFilename;
-    // DROP 分类累计计数（六条 DROP 路径，进 daemon 心跳）
+    // invalid 当前文件已写入字节数（CXX-002：构造时 stat 从持久层恢复，
+    // 写成功累计，轮转归零——供轮转阈值判定与失败恢复 rollback 基准）
+    size_t mInvalidSize = 0;
+    // DROP 分类累计计数（六条 DROP 路径，进 daemon 心跳）。
+    // formatEmpty 保留供心跳格式兼容，当前无自增路径（LCV-18：
+    // 空行唯一来源 OOB 已计 formatOob，不再重复计数）
     DropCounters mDrops;
     // 写路径耗时统计（方向 3，见 WriteTimings）
     WriteTimings mTimings;
-    // 距上次 enforceRetention 实际扫描的写入次数（方向 4 降频）
+    // 距上次 enforceRetention 实际扫描的写入次数（方向 4 降频）；
+    // 构造时初始化为满阈值（LCV-13：启动首扫清理历史超限数据）
     size_t mWritesSinceRetention = 0;
 };

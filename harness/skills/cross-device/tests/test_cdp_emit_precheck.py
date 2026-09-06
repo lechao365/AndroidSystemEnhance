@@ -125,6 +125,46 @@ class TestEmitPrecheck(unittest.TestCase):
         self.assertEqual(reason, "")
         self.assertEqual(detail, "")
 
+    # ── 批次六 P2-25：origin_base / 输出 base 字段 ────────────────────
+    def test_origin_base_returns_head12(self):
+        self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        self.assertEqual(cdp_emit_precheck.origin_base(self.root), self._head12())
+
+    def test_main_output_contains_base_when_ok(self):
+        # ok 时 JSON 输出带 base（emit 产批首行直接取用，免再 rev-parse）
+        self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        self._commit_all()
+        self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        script = (Path(__file__).resolve().parents[1] / "lib" / "python"
+                  / "cdp_emit_precheck.py")
+        # 角色机器化：emit 专属入口，测试经环境变量注入 HARNESS_ROLE=emit
+        # （不依赖本机 paths.conf 实际配置）
+        env = {k: v for k, v in os.environ.items() if k != "HARNESS_ROLE"}
+        env["HARNESS_ROLE"] = "emit"
+        r = subprocess.run([sys.executable, str(script), "--no-pull"],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        import json
+        out = json.loads(r.stdout)
+        self.assertEqual(out["base"], self._head12())
+
+    # ── 角色机器化：emit 入口跨角色拦截 ──────────────────────────────
+
+    def test_main_role_mismatch_rejected(self):
+        # 非 emit 设备（缺省 apply）跑 emit precheck → ROLE_MISMATCH
+        # exit 1，副作用（git pull/precheck）发生前拦截
+        self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        script = (Path(__file__).resolve().parents[1] / "lib" / "python"
+                  / "cdp_emit_precheck.py")
+        env = {k: v for k, v in os.environ.items() if k != "HARNESS_ROLE"}
+        r = subprocess.run([sys.executable, str(script), "--no-pull"],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", env=env)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("ROLE_MISMATCH", r.stderr)
+        self.assertIn("apply", r.stderr)
+
     # ── KIR-005 存量告警：open/scheduled 条数阈值 8，只告警不阻断 ──
     def _write_index(self, n_open, extra_status=()):
         d = self.root / "data" / "known-issues"

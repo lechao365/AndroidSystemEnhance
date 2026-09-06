@@ -25,9 +25,12 @@ def test_default_isolates_cdp_root_to_tmp():
 
 
 @pytest.mark.real_repo("验证放行：确需真实仓路径的用例显式标记")
-def test_real_repo_marker_skips_isolation():
-    # real_repo marker 放行：fixture 不设置 CDP_PROJECT_ROOT（保持未设置）
-    assert "CDP_PROJECT_ROOT" not in os.environ
+def test_real_repo_marker_skips_isolation(tmp_path):
+    # real_repo marker 放行：fixture 不注入隔离值。CI 作业级预置
+    # CDP_PROJECT_ROOT=runner.temp/cdp-root 时放行即原样保留——断言目标是
+    # "未被 fixture 覆盖"（值不等于本用例的临时目录）而非"不存在"，
+    # 后者在 CI 作业级预置下恒红（门禁一开即红）。
+    assert os.environ.get("CDP_PROJECT_ROOT") != str(tmp_path)
 
 
 @pytest.mark.real_repo
@@ -48,9 +51,10 @@ def test_real_repo_explicit_env_not_overridden():
         os.environ.pop("CDP_PROJECT_ROOT", None)
 
 
-def test_isolate_teardown_restores_unset():
-    # 默认隔离用例结束后 teardown 应清除 CDP_PROJECT_ROOT（恢复未设置态）；
-    # 本用例自身在 fixture setup 设了值，这里手动验证 pop 幂等语义不残留
-    # 到带 real_repo marker 的用例（fixture teardown 在用例后执行）。
-    os.environ.pop("CDP_PROJECT_ROOT", None)
+def test_isolate_teardown_restores_unset(monkeypatch):
+    # 默认隔离用例结束后 teardown 应清除注入值（恢复进入前状态）。CI 作业级
+    # 预置 CDP_PROJECT_ROOT 时直接 pop 全局会破坏 pytest 进程内环境，
+    # 改由 monkeypatch 局部隔离（delenv 验证"清除注入值后未设置"语义，
+    # 用例结束 monkeypatch 自动恢复原值：CI 预置值或本地未设置）。
+    monkeypatch.delenv("CDP_PROJECT_ROOT", raising=False)
     assert "CDP_PROJECT_ROOT" not in os.environ

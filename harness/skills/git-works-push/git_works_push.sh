@@ -25,12 +25,32 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# 运行日志：harness/log/git-works-push/<时间戳>.log（/harness/log/ 已 gitignore，不入库）
-LOG_DIR="$SCRIPT_DIR/../../log/git-works-push"
+# 运行日志：harness/log/git-works-push/git-works-push-<日>.log（日粒度
+# 追加，/harness/log/ 已 gitignore 不入库）。秒级时间戳文件名会让每次
+# push 都新开文件、目录无限膨胀难追溯——同日多次 push 追加同文件，每行
+# 前缀时间戳保证逐条时间归因；留存由 harness/lib/log_prune.py 清理。
+# 目录锚定被操作仓库根（CDP_PROJECT_ROOT 优先，与 cdp_timing 打点根
+# 同源；否则 git 工作树根）：脚本被测试 fixture 复用（cwd/CDP_PROJECT_ROOT
+# 指临时仓）时日志随操作对象落盘，防污染真仓日志目录
+if [ -n "${CDP_PROJECT_ROOT:-}" ]; then
+  ROOT="$CDP_PROJECT_ROOT"
+else
+  ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+fi
+LOG_DIR="$ROOT/harness/log/git-works-push"
 mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/$(date +%Y%m%d-%H%M%S).log"
-out() { echo "$@" | tee -a "$LOG_FILE"; }
-err() { echo "$@" | tee -a "$LOG_FILE" >&2; }
+LOG_FILE="$LOG_DIR/git-works-push-$(date +%Y%m%d).log"
+out() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG_FILE"; }
+err() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG_FILE" >&2; }
+
+# push 段细分自发打点（A-1/B-1：脚本自发替代 AI 手动 mark push；细分
+# commit/remote 两步，157s 级 push 段内部耗时不再不可归因）。失败静默
+# 不阻断（打点诊断数据）。CDP_TIMING_T0 在脚本启动时取值供 push 总耗时。
+CDP_TIMING_T0=$(date +%s.%N)
+cdp_mark() {
+  python3 "$SCRIPT_DIR/../cross-device/lib/python/cdp_timing.py" mark "$@" \
+    >/dev/null 2>&1 || true
+}
 
 # 永不推 main 守卫
 if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
@@ -80,9 +100,31 @@ check_commit_scope() {
   CDP_LIB="$SCRIPT_DIR/../cross-device/lib/python"
   latest_scope=$(PYTHONPATH="$CDP_LIB" python3 harness/lib/commit_scope.py --latest-scope 2>/dev/null) || latest_scope=""
   [ -n "$latest_scope" ] || {
+    # 无收据/旧收据缺 commit_scope：按提交面内容分流（门禁旁路封堵）——
+    # 暂存面含 code/** 业务源码 → 拒（RECEIPT_MISSING：发布内容与验证
+    # 内容绑定不得无收据旁路，须先经 /workspace-verify 产收据）；仅
+    # docs/harness/*.md 等非业务路径 → 维持 warn 放行（文档/工具改动
+    # 无需上板收据）；紧急人工场景经 LGW_ALLOW_NO_RECEIPT=1 逃生门降级
+    # warn（醒目警告留痕，事后须补收据）。命令替换判非空而非管道 -q
+    # （grep -q 早退 + pipefail 会把 SIGPIPE 误判为比对不命中）
+    if [ "${LGW_ALLOW_NO_RECEIPT:-0}" = "1" ]; then
+      err "warn: 逃生门 LGW_ALLOW_NO_RECEIPT=1 生效——无收据跳过提交面比对（紧急人工场景放行，请事后补 /workspace-verify 收据）"
+      return 0
+    fi
+    if [ -n "$(printf '%s\n' "$status_out" | grep -E '^[AMD]+[[:space:]]+code/')" ]; then
+      err "error: RECEIPT_MISSING 无收据 commit_scope 且提交面含 code/ 业务源码（发布内容与验证内容绑定被旁路），请先经 /workspace-verify 产收据后再推送；紧急人工场景可设 LGW_ALLOW_NO_RECEIPT=1"
+      exit 1
+    fi
     echo "warn: 无收据 commit_scope（未走 ws_report 或旧收据），跳过提交面比对" >&2
     return 0
   }
+  # 纯非业务提交面（无 code/ 项）→ 对账降级 warn：发布内容与验证内容的绑定
+  # 语义只约束业务内容；业务收据已随上批入库推送后，后续 harness/docs-only
+  # 工具性提交不再被旧业务收据卡住。提交面含 code/ 时仍强对账（业务整面一致）。
+  if [ -z "$(printf '%s\n' "$status_out" | grep -E '^[AMD]+[[:space:]]+code/')" ]; then
+    echo "warn: 提交面不含 code/ 业务文件，跳过与收据 commit_scope 比对（非业务改动无需上板收据）" >&2
+    return 0
+  fi
   diffs=$(printf '%s\n' "$status_out" | python3 harness/lib/commit_scope.py --check "$latest_scope") || true
   if [ -n "$diffs" ]; then
     err "error: 实际提交面与最新收据 commit_scope 不一致（发布内容与验证内容绑定），请核对或重写收据："
@@ -126,9 +168,10 @@ if [ "$MODE" = "normal" ]; then
   fi
   # 提交面收窄（防 git add -A 误吞运行态/本地产物）：已跟踪修改全收（add -u）；
   # 未跟踪仅白名单命中项随批入库，名单外拒绝并列出（请删除、gitignore 或评审后扩名单）。
-  # 白名单 = 源码/证据目录前缀（case glob 跨 /，前缀锁定目录）：
+  # 白名单 = 源码/证据目录前缀（case glob 跨 /，前缀锁定目录）+ 根目录精确名：
   # 运行态（harness/log 等）已被 gitignore 挡在 ls-files 之外，不会到这里的判定；
-  # 根目录散文件（临时 msg、tar 包等）不在名单，仍拒绝
+  # 根目录散文件（临时 msg、tar 包等）不在名单，仍拒绝（requirements.txt 为
+  # 持久依赖声明，与 .github/* 同类精确放行）
   git add -u || { err "error: git add（已跟踪改动）失败"; exit 1; }
   UNTRACKED_ALLOW=(
     'data/verify-results/*'
@@ -139,6 +182,7 @@ if [ "$MODE" = "normal" ]; then
     'docs/*'
     '.github/*'
     '.githooks/*'
+    'requirements.txt'
   )
   REJECT=()
   while IFS= read -r f; do
@@ -173,6 +217,7 @@ if [ "$MODE" = "normal" ]; then
   fi
   check_commit_scope staged
   git commit -F "$MSG_FILE" || { err "error: commit 失败"; exit 1; }
+  cdp_mark --name push_commit
 fi
 
 # push 失败分类：non-fast-forward（远端领先）给出可恢复提示，其余给原始输出
@@ -181,7 +226,10 @@ fi
 if [ "$MODE" = "push-only" ]; then
   check_commit_scope pushed
 fi
+PUSH_T0=$(date +%s.%N)
+push_dur() { awk -v a="$1" -v b="$(date +%s.%N)" 'BEGIN{printf "%.3f", b-a}'; }
 if ! PUSH_OUTPUT=$(git push -u origin "$BRANCH" 2>&1); then
+  cdp_mark --name push_remote --dur-s "$(push_dur "$PUSH_T0")"
   case "$PUSH_OUTPUT" in
     *"non-fast-forward"*|*"fetch first"*|*"[rejected]"*)
       err "error: push 被拒（远端 $BRANCH 领先，non-fast-forward）。请 git pull --rebase origin $BRANCH 后重试，或确认本地后 --push-only"
@@ -193,6 +241,7 @@ if ! PUSH_OUTPUT=$(git push -u origin "$BRANCH" 2>&1); then
   esac
   exit 2
 fi
+cdp_mark --name push_remote --dur-s "$(push_dur "$PUSH_T0")"
 
 # 推送后核对远端 sha；慢网络/服务端 hook 未完成时 ls-remote 可能短暂滞后，重试 3 次
 LOCAL_SHA=$(git rev-parse HEAD)
@@ -210,4 +259,5 @@ if [ "$REMOTE_SHA" != "$LOCAL_SHA" ]; then
   err "error: 远端 $BRANCH（$REMOTE_SHA）与本地 HEAD（$LOCAL_SHA）不符，疑似推送未生效"; exit 2
 fi
 out "pushed: $BRANCH $(git rev-parse --short HEAD)"
+cdp_mark --name push --dur-s "$(push_dur "$CDP_TIMING_T0")"
 exit 0

@@ -1,11 +1,11 @@
-"""data/known-issues 已知问题登记模块：写详情、读详情、校验、索引（终态条目由 promote 清算，写时不再老化）。
+"""data/known-issues 已知问题登记模块：写详情、读详情、校验、索引（终态条目由 promote 归档，写时不再老化、promote 不再删除）。
 
 问题文件: data/known-issues/<YYYYMMDD-HHMMSS>-<batch_id>-<slug>.md
 （markdown key-value 头 + 正文；命名保证唯一写入，不设配额不老化，
-终态（status 属 fixed 或 wontfix）条目在 promote 晋升时由
-closed_issue_ids + delete_closed 整体清算删除）
+终态（status 属 fixed 或 wontfix）条目在 promote 晋升时归档进基线文档
+「已修复问题归档」段落，registry 不清零不删除）
 索引文件: data/known-issues/index.md（一行一条: issue_id origin blocking task status，
-write_issue 与状态变更均重建回写；index.md 不计清算）
+write_issue 与状态变更均重建回写；index.md 不计归档）
 模板: harness/config/known-issues-template.md（头字段集必须与 _FIELDS 完全一致，
 由单测强制）。
 """
@@ -13,7 +13,7 @@ import datetime
 import re
 from pathlib import Path
 
-from cdp_paths import data_known_issues_dir
+from cdp_paths import atomic_write_text, data_known_issues_dir
 
 # 多行模式：^$ 锚定每一行（缺 MULTILINE 会导致 from_text 全默认值）
 # 值用 (.*) 允许空值（如 resolved_in 未解决时留空），空值头字段也能被解析
@@ -100,8 +100,8 @@ def write_issue(issue, body_text, slug=""):
     batch_id 必须为 12 位小写 hex，否则抛 ValueError——写时失败（现场可修）不留到
     promote 才暴露（畸形文件名式样会被 validate_issue 判红堵死门禁）。
     同秒同批同名冲突时追加 -1/-2 序号，绝不覆盖既有记录。
-    终态条目不在此处老化删除：由 promote 晋升时 closed_issue_ids + delete_closed
-    整体清算（KIR-006 改 promote 清算语义，写时配额老化已删）。
+    终态条目不在此处老化删除：由 promote 晋升时归档进基线文档段落
+    （KIR-006 归档语义，写时配额老化与 promote 删除均已废止）。
     """
     if not re.fullmatch(r"[0-9a-f]{12}", issue.batch_id or ""):
         raise ValueError(f"batch_id 非法: {issue.batch_id!r}（须 12 位小写 hex，"
@@ -115,7 +115,7 @@ def write_issue(issue, body_text, slug=""):
         path = d / f"{ts}-{issue.batch_id}-{slug}-{n}.md"
         n += 1
     content = issue.header_lines() + "\n\n## body\n\n" + body_text.strip() + "\n"
-    path.write_text(content, encoding="utf-8")
+    atomic_write_text(path, content)  # 原子写（P1-2：半写 issue 损坏记录）
     sync_index(d)
     return path
 
@@ -139,8 +139,8 @@ def closed_issue_ids(issues_dir=None):
 
 
 def closed_issue_details(issues_dir=None):
-    """终态条目明细列表（promote 清算入档用）：每项含 issue_id / resolved_in /
-    title，删文件后仍可从清单辨认条目（只存 id 无从辨认）。"""
+    """终态条目明细列表（promote 归档入档用）：每项含 issue_id / resolved_in /
+    title，归档段据此逐条记 id/标题/修复提交，文件保留不清零。"""
     d = issues_dir or data_known_issues_dir()
     return [{"issue_id": i.issue_id, "resolved_in": i.resolved_in,
              "title": i.title}
@@ -149,11 +149,11 @@ def closed_issue_details(issues_dir=None):
 
 
 def delete_closed(issue_ids, issues_dir=None):
-    """按 issue_id 清算删除终态条目文件（index 同步重建），返回删除文件列表。
+    """按 issue_id 删除终态条目文件（index 同步重建），返回删除文件列表。
 
-    删除是 promote 晋升的收尾动作（KIR-006 promote 清算）：终态记录已随
-    evidence.known_issues_closed 入档，删除不销毁证据链。不存在的 id 静默跳过；
-    文件删除失败（OSError）抛错由调用方决定是否阻断（快照已入档不回滚）。
+    注意：promote 归档机制（KIR-006 修订）已废止 promote 时自动删除终态条目，
+    归档改为进基线文档段落（registry 不清零）。本函数保留作显式/人工清理用。
+    不存在的 id 静默跳过；文件删除失败（OSError）抛错由调用方决定是否阻断。
     """
     d = issues_dir or data_known_issues_dir()
     wanted = set(issue_ids)
@@ -180,7 +180,7 @@ def set_status(path, new_status, issues_dir=None):
     new_header = _FIELD_RE.sub(
         lambda m: f"- status: {new_status}" if m.group(1) == "status" else m.group(0),
         header)
-    p.write_text(new_header + sep + body, encoding="utf-8")
+    atomic_write_text(p, new_header + sep + body)  # 原子写（P1-2）
     sync_index(issues_dir)
     return p
 
@@ -207,15 +207,20 @@ def read_index(issues_dir=None):
 
 
 def sync_index(issues_dir=None):
-    """按文件集重建 index.md（一行一条: issue_id origin blocking task status）。"""
+    """按文件集重建 index.md（一行一条: issue_id origin blocking task status）。
+
+    原子写（P1-3）：index 是详情文件的投影（真相源为各 .md），并发写时
+    last-writer-wins 不再产出半写 index 堵死门禁；双向一致性漂移由
+    validate_issue 事后检出。
+    """
     d = issues_dir or data_known_issues_dir()
     lines = []
     for p in issue_files(d):
         issue = read_issue(p)
         lines.append(f"{issue.issue_id} {issue.origin} "
                      f"{str(issue.blocking).lower()} {issue.task} {issue.status}")
-    (d / "index.md").write_text("\n".join(lines) + ("\n" if lines else ""),
-                                encoding="utf-8")
+    atomic_write_text(d / "index.md",
+                      "\n".join(lines) + ("\n" if lines else ""))
 
 
 def validate_issue(path, issues_dir=None):

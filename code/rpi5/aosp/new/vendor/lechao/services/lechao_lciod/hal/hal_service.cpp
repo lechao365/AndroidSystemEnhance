@@ -171,6 +171,7 @@ ndk::ScopedAStatus IoHalImpl::getStats(int32_t in_deviceMinor, IoStats* _aidl_re
     _aidl_return->probeCount = raw.probe_count;
     _aidl_return->disconnectCount = raw.disconnect_count;
     _aidl_return->degradeCount = raw.degrade_count;
+    _aidl_return->eventDropCount = raw.event_drop_count;  /* LCD-012：ABI v2 字段透出 */
     _aidl_return->lastTransportLatencyNs = raw.last_transport_latency_ns;
     _aidl_return->currentRate = raw.current_rate;
     _aidl_return->lastEventTsNs = raw.last_event_ts_ns;
@@ -252,10 +253,15 @@ ndk::ScopedAStatus IoHalImpl::setConfig(int32_t in_deviceMinor, const IoConfig& 
  */
 ndk::ScopedAStatus IoHalImpl::readEvent(int32_t in_deviceMinor, int32_t in_timeoutMs, IoEvent* _aidl_return) {
     *_aidl_return = {};
-    /* 先刷新设备列表，将已消失的设备从 map 中移除 */
-    refresh_devices();
-
+    /* LCD-009：refresh 惰性化——daemon monitor 每 50ms 调 readEvent，
+     * 原实现每次 glob(3) 扫 /dev（20Hz/设备），设备列表变化本只需低频
+     * 感知。改为仅在 resolve 失败（新设备插入）或 reopen 失败（设备
+     * 移除）时刷新一次，热路径零 glob */
     auto* entry = resolve_device(in_deviceMinor);
+    if (!entry) {
+        refresh_devices();
+        entry = resolve_device(in_deviceMinor);
+    }
     if (!entry) { LC_LOGW("readEvent: device not found"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
 
     /* 检查持久 fd 是否有效，无效时尝试重新打开 */
@@ -263,10 +269,18 @@ ndk::ScopedAStatus IoHalImpl::readEvent(int32_t in_deviceMinor, int32_t in_timeo
         LC_LOGD("readEvent: reopening persistent fd");
         entry->fd = ::open_device(entry->path.c_str());
     }
-    if (entry->fd < 0) { LC_LOGE("readEvent: reopen failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
+    if (entry->fd < 0) { LC_LOGE("readEvent: reopen failed: " << strerror(errno));
+        /* reopen 失败可能因设备已移除：刷新一次 map（清掉离线设备），
+         * 设备真不在线则本次返回 -ENODEV（LCD-009 惰性 refresh 收尾） */
+        refresh_devices();
+        return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
 
+    /* LCD-002：timeout 入参钳位（最终防线）——上层可传 -1 使 poll 永久
+     * 阻塞、INT_MAX 阻塞约 24.8 天；HAL 单线程 binder 池下一次调用即
+     * 瘫痪全部客户端。钳位后 -1 → 0（非阻塞），>1s → 1s */
+    int timeout_ms = ::clamp_read_timeout_ms(in_timeoutMs);
     struct vendor_lechao_usbd_event raw;
-    int ret = ::read_event(entry->fd, &raw, in_timeoutMs);
+    int ret = ::read_event(entry->fd, &raw, timeout_ms);
 
     if (ret < 0) {
         /* ETIMEDOUT/EAGAIN 是"暂无事件"的正常语义，返回 ok + valid=false */

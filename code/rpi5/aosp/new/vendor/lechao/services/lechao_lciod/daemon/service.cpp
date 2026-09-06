@@ -45,12 +45,17 @@ using aidl::system::lechao::lciod::IoEvent;
 using VendorIoEvent = aidl::vendor::lechao::lciod::IoEvent;
 using lechao::lciod::ParseMinorFromPath;
 
+/* LCD-002：readIoEvent timeout 首层钳位上限（与 HAL 侧
+ * device_io.h kMaxReadEventTimeoutMs 同值——HAL 侧为最终防线） */
+static const int kMaxReadEventTimeoutMs = 1000;
+
 /* --- 纯计算函数（声明见 service.h，独立于 binder 环境可单测） --- */
 
 int64_t ComputeAverageRate(uint64_t readBytes, uint64_t writeBytes,
                            uint64_t readNs, uint64_t writeNs) {
     // 中间量用 __uint128_t：total/totalNs 累计约 17GiB 时 total*1e9 超出
-    // uint64 上限回绕致速率失真，128 位中间量消除溢出（CXX-001 数值正确性）
+    // uint64 上限回绕致速率失真，128 位中间量消除溢出（CXX-002 边界防御：
+    // 溢出/回绕属资源生命周期与边界类，字节序才是 CXX-001）
     __uint128_t total = static_cast<__uint128_t>(readBytes) + writeBytes;
     __uint128_t totalNs = static_cast<__uint128_t>(readNs) + writeNs;
     if (totalNs > 0)
@@ -69,8 +74,7 @@ uint64_t ComputeKbRate(uint64_t bytes, uint64_t ns) {
 /* --- 字段投影纯函数（声明见 service.h，独立于 binder 环境可单测） --- */
 
 void ProjectSystemIoStats(const aidl::vendor::lechao::lciod::IoStats& vstats,
-                          aidl::system::lechao::lciod::IoStats* out) {
-    out->vid = vstats.vid;
+                          aidl::system::lechao::lciod::IoStats* out) {    out->vid = vstats.vid;
     out->pid = vstats.pid;
     out->vendor = vstats.vendor;
     out->product = vstats.product;
@@ -88,6 +92,7 @@ void ProjectSystemIoStats(const aidl::vendor::lechao::lciod::IoStats& vstats,
     out->probeCount = vstats.probeCount;
     out->disconnectCount = vstats.disconnectCount;
     out->degradeCount = vstats.degradeCount;
+    out->eventDropCount = vstats.eventDropCount;  /* LCD-012：事件丢弃数透出 */
     out->lastTransportLatencyNs = vstats.lastTransportLatencyNs;
     out->lastEventTsNs = vstats.lastEventTsNs;
     out->lastEventType = vstats.lastEventType;
@@ -127,8 +132,12 @@ ndk::ScopedAStatus IoServiceImpl::listDeviceMinors(std::vector<int32_t>* _aidl_r
     _aidl_return->clear();
     for (auto& path : devices) {
         int32_t minor = -1;
+        /* LCD-020：解析失败静默跳过会让"路径格式漂移"表现为空列表，
+         * 至少留 debug 日志供诊断（不升级告警：混合设备名是预期可能） */
         if (ParseMinorFromPath(path, &minor))
             _aidl_return->push_back(minor);
+        else
+            LC_ALOGD("listDeviceMinors: unparsable device path: %s", path.c_str());
     }
     return ndk::ScopedAStatus::ok();
 }
@@ -199,13 +208,18 @@ ndk::ScopedAStatus IoServiceImpl::setIoConfig(int32_t in_deviceMinor, const IoCo
     return hal->setConfig(in_deviceMinor, vcfg, _aidl_return);
 }
 
-/* readIoEvent — 代理转发到 HAL readEvent()，1:1 字段直传 */
+/* readIoEvent — 代理转发到 HAL readEvent()，1:1 字段直传。
+ * LCD-002：timeout 首层钳位（HAL 侧 clamp_read_timeout_ms 为最终防线）——
+ * 公开 binder 接口的负值/超大超时不得透传（-1 永久阻塞、INT_MAX 阻塞
+ * 约天级，daemon 单线程 binder 池即被占死） */
 ndk::ScopedAStatus IoServiceImpl::readIoEvent(int32_t in_deviceMinor, int32_t in_timeoutMs, IoEvent* _aidl_return) {
     *_aidl_return = {};
     auto hal = hal_client_.get();
     if (!hal) { LC_ALOGW("readIoEvent: HAL not connected"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
+    int timeoutMs = in_timeoutMs < 0 ? 0 : in_timeoutMs;
+    if (timeoutMs > kMaxReadEventTimeoutMs) timeoutMs = kMaxReadEventTimeoutMs;
     aidl::vendor::lechao::lciod::IoEvent vev;
-    auto status = hal->readEvent(in_deviceMinor, in_timeoutMs, &vev);
+    auto status = hal->readEvent(in_deviceMinor, timeoutMs, &vev);
     if (!status.isOk()) { LC_ALOGW("readIoEvent: readEvent failed"); return status; }
     ProjectSystemIoEvent(vev, _aidl_return);
     return ndk::ScopedAStatus::ok();
@@ -231,6 +245,18 @@ void IoServiceImpl::start_monitor() {
         int tick = 0;
         std::vector<int32_t> deviceMinors;  /* 当前活跃设备 minor 列表（按 HAL 返回顺序，已排序） */
 
+        /*
+         * LCD-018：绝对时间对齐调度。原 sleep_for(50ms) 的实际周期 =
+         * 50ms + 本轮处理耗时（多设备 readEvent 各至多 50ms timeout），
+         * "每 200 tick = 10s" 的刷新/统计节拍持续漂移放大（4 设备
+         * 全 timeout 时周期可 >250ms，10s 节拍实际 >50s）。
+         * 改为 steady_clock 固定节拍：处理耗时从睡眠中扣除；单轮
+         * 超时则立即追平，不放大漂移。
+         */
+        using clock = std::chrono::steady_clock;
+        const auto kTickPeriod = std::chrono::milliseconds(50);
+        auto next_tick = clock::now() + kTickPeriod;
+
         /* 启动前立即 refresh 一次，避免首轮空转或误读 minor=0 */
         auto hal = hal_client_.get();
         if (hal) {
@@ -245,10 +271,18 @@ void IoServiceImpl::start_monitor() {
         }
 
         while (true) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::this_thread::sleep_until(next_tick);   /* LCD-018：固定节拍 */
+            next_tick += kTickPeriod;
             tick++;
             hal = hal_client_.get();
-            if (!hal) { LC_ALOGW("monitor: HAL not connected, skipping cycle"); continue; }
+            if (!hal) {
+                /* LCD-007：日志节流（200 tick 一次 = 10s 一条）——HAL 故障
+                 * 期间每 50ms 一条 WARNING 会以 1200 条/分钟淹没 logcat，
+                 * 掩盖其他关键日志（与 hal_client 重连失败节流同策略） */
+                if (tick % 200 == 0)
+                    LC_ALOGW("monitor: HAL not connected, skipping cycle (tick=%d)", tick);
+                continue;
+            }
 
             /* 每 200 tick（10s）刷新设备列表 */
             if (tick % 200 == 0) {
@@ -306,10 +340,11 @@ void IoServiceImpl::start_monitor() {
                     uint64_t write_rate = ComputeKbRate(stats.writeBytes, stats.writeNs);
 
                     ALOGI("monitor: minor=%d read_rate=%llu KB/s, write_rate=%llu KB/s, "
-                          "rx_pkts=%lld, tx_pkts=%lld",
+                          "rx_pkts=%lld, tx_pkts=%lld, event_drop=%lld",
                           minor,
                           (unsigned long long)read_rate, (unsigned long long)write_rate,
-                          (long long)stats.readCmds, (long long)stats.writeCmds);
+                          (long long)stats.readCmds, (long long)stats.writeCmds,
+                          (long long)stats.eventDropCount);
                 }
             }
         }

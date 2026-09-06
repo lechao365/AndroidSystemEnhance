@@ -22,7 +22,8 @@ stages:
 ## Human confirmation gates（人工确认门）
 - 零确认（产出批次文本，不落盘不提交）
 ## Outputs / artifacts（输出/产物）
-- 纯文本 CDP 批次（stdout，用户拷贝）；临时文件 harness/log/cross-device-emit/（gitignore）
+- 纯文本 CDP 批次（stdout，用户拷贝）；临时文件 harness/log/cross-device-emit/（gitignore），
+  批次临时文件命名与 apply 侧统一：batch-YYYYMMDD-HHMMSS.cdp
 ## Failure / recovery（失败/恢复）
 - precheck 不过：按 reason 处理（pull 失败网络/树脏/上批未推拒产）
 - selfcheck 不过：AI 修批次后重跑
@@ -42,16 +43,21 @@ stages:
      复盘/下批据此给针对性修复方向）
    - 相关 docs/ 章节
 3. 产批：-s/-sv + base + 意图/验收/方向，总字符 450~500 为目标区间（硬上限 500）；
+   base 直接取步骤 1 precheck JSON 输出的 base 字段（origin/dev HEAD 前 12 位）；
    不足 450 说明描述不清或应合并后续批次（backlog 见底时允许低于 450）；每批 6-7 个变更点；
    base 自动取 precheck 后 origin/dev HEAD 前 12 位
    （git rev-parse --short=12 origin/dev，勿手算）；复杂任务拆多轮，每轮注明后续轮次；
    验收 case 按两级策略选（B6）：常态回归取快速回归组 5 case（lcview-liveness,
    lcview-pipeline, lcview-trigger, lciod-liveness, lciod-trigger）；发布全量批取
    全部；专项修复按需追加——见 verify-cases.yaml 顶部注释与 cdp-contract
-4. selfcheck：python3 harness/skills/cross-device/lib/python/cdp_parse.py
-   --role emit <批次临时文件>（必须 exit 0）；另须确认批次正文不含
-   单双引号字符（' 与 "），如有则改述为描述性说法
-5. 输出：纯文本批次，无包裹标记；产一批等一批，不并行产下一条
+ 4. selfcheck：python3 harness/skills/cross-device/lib/python/cdp_parse.py
+    --role emit <批次临时文件>（必须 exit 0）；另须确认批次正文不含
+    单双引号字符（' 与 "），如有则改述为描述性说法
+ 5. 产批收尾：python3 harness/skills/cross-device/lib/python/cdp_parse.py
+    --gen-checksum <批次临时文件>——插入/刷新批次头部 checksum 行（sha256
+    前 16 位）后整批输出，交付该带 checksum 版本；apply 侧对存在 checksum
+    行的批次强校验（CHECKSUM_MISMATCH 拒），防人工拷贝传输静默截断/损坏
+ 6. 输出：纯文本批次，无包裹标记；产一批等一批，不并行产下一条
 ## 约束（禁止）
 - emit 侧禁止 git commit/push、禁止修改 code/（流程纪律，无技术强制，违者评审回退）
 - 批次正文禁用单双引号字符（' 与 "）：apply 侧写临时文件的方式不受 emit 控制，

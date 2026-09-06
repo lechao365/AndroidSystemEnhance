@@ -175,7 +175,7 @@ chmod +x /home/lechao/opengrok/reindex.sh
 
 - 首次索引预计 **4~8 小时**（12核/32GB），索引数据 60~100GB；后续增量约 10~30 分钟。
 - Windows 浏览器访问：`http://localhost:8080/source`（WSL2 默认 localhost 端口转发）。
-- 源码更新后重新执行 `reindex.sh`（historyBasedReindex 只处理变更文件）。
+- 源码更新后重新执行 reindex.sh 脚本（historyBasedReindex 只处理变更文件）。
 
 ### 2.5 源码目录权限问题（常见坑）
 

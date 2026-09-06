@@ -41,11 +41,20 @@
 #define LCVIEW_LEN_PREFIX_SIZE   4
 
 /*
- * lcview_ring — 无锁单生产者/单消费者环形缓冲区
+ * KRN-008：单次 write 的驱逐条数预算（见 lcview_ring_write）。
+ * 限制 spinlock 持有时间（256 条 ≈ 26µs 上限），超限返回 -ENOSPC
+ * 丢弃本次写入（该场景本就属于 overrun，计数递增可观测）。
+ */
+#define LCVIEW_EVICT_MAX_RECORDS 256
+
+/*
+ * lcview_ring — spinlock 保护的环形缓冲区（KRN-011：非"无锁 SPSC"）
  *
- * 写者 (lcview_ring_write) 在 spin_lock 保护下写入，支持中断上下文。
- * 读者 (lcview_ring_read) 在 spin_lock 保护下读取记录头到 read_buf，
- * 随后解锁执行 copy_to_user，减少持锁时间。
+ * 并发模型：写者（lcview_ring_write）可能在多个上下文并发调用
+ * （USB 中断回调、lciod notifier 等），靠 spin_lock_irqsave 互斥；
+ * 读者（lcview_ring_read）因设备单打开限制为单消费者。
+ * 读者同样持锁读取记录头到 read_buf，随后解锁执行 copy_to_user
+ * 以减少持锁时间。
  *
  * 空间不足时写者自动驱逐最旧记录 (ring_evict_one)，保证最新事件不丢失。
  * 适用于"最新 N 条"日志场景，而非可靠传输。

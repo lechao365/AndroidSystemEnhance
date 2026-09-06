@@ -1,6 +1,6 @@
 # RPI5 编译参考
 
-> **规则 ID**: `BLD-001` ~ `BLD-012`
+> **规则 ID**: `BLD-001` ~ `BLD-013`
 > **适用范围**: 涉及 RPI5 AOSP/内核编译时，AI 必须优先参考本文档获取正确命令，**禁止自行猜测或使用错误参数**。
 > **参考来源**: 本文档命令提取自 `harness/scripts/mk_rpi5_full_image.sh`（编译逻辑）与 AOSP 构建环境准备教程（源码获取/ccache），是该脚本编译逻辑的事实提取。
 >
@@ -94,12 +94,12 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 
 > 对应 `mk_rpi5_full_image.sh` 第 160~283 行。
 
-编译环境通过 `harness-paths.conf` 或环境变量指定（详见 `path-management.md`）。以下命令模板可直接复制执行。
+编译环境通过 `harness/config/paths.conf` 或环境变量指定（详见 `harness/README.md` 的路径配置段）。以下命令模板可直接复制执行。
 
 ### 1.1 设置环境变量
 
 ```bash
-# 从 harness-paths.conf 读取的默认路径（可被对应环境变量覆盖）
+# 从 harness/config/paths.conf 读取的默认路径（可被对应环境变量覆盖）
 export KERNEL_SRC="${KERNEL_SRC:-$HOME/workspace/rpi5-kernel-build/common}"
 export KERNEL_OUT="${KERNEL_OUT:-$HOME/workspace/rpi5-kernel-build/out/android_rpi5}"
 export CLANG_BIN="${CLANG_BIN:-$HOME/workspace/rpi5-kernel-build/prebuilts/clang/host/linux-x86/clang-r522817/bin}"
@@ -268,6 +268,8 @@ sudo TARGET_PRODUCT="${TARGET_PRODUCT}" \
 
 > **BLD-007**: 打包必须通过 `sudo` 显式传递 `TARGET_PRODUCT` 和 `ANDROID_PRODUCT_OUT`，禁止用 `sudo -E` 或 `sudo` 不加环境变量。
 
+> **BLD-013**: opencode 以 systemd user unit 运行时设 `NoNewPrivileges=true`，该标志**子进程继承且不可撤销**——会话内任何 `sudo`（含 `sudo -n true` 探测）恒被内核以 `Operation not permitted` 拒绝，即使配置 `NOPASSWD` 亦无效（非密码问题，是权限标志）。因此**打包（需 sudo 分区/格式化/losetup）必须在 opencode 会话外的普通终端人工执行**，不能期望在会话内完成；人工路径见 workspace-verify SKILL「人工打包步骤」。
+
 ### 产物路径
 
 - 刷机包：`${ANDROID_PRODUCT_OUT}/${VERSION_PREFIX}-<date>-rpi5.img`
@@ -315,3 +317,4 @@ BUILD_JOBS=4 ./mk_rpi5_full_image.sh # 自定义并行数
 | BLD-010 | 首次编译前必须启用 ccache（`USE_CCACHE=1`） | 首次/增量编译显著变慢 |
 | BLD-011 | 源码必须含 raspberry-vanilla local manifest 设备配置 | 无法编译出树莓派5可用镜像 |
 | BLD-012 | 必须安装 `dosfstools/e2fsprogs/fdisk/kpartx/mtools/rsync` 打包依赖 | `rpi5-mkimg.sh` 失败 |
+| BLD-013 | opencode 会话内 sudo 恒被内核拒绝（NoNewPrivileges 继承不可撤销，NOPASSWD 无效）；打包须会话外普通终端人工执行 | 打包无法在会话内完成，误判为权限配置问题 |

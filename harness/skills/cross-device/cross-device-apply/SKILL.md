@@ -35,48 +35,63 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
 ## Related policy IDs（关联规则 ID）
 - CDP-001、SRC-001/002（修订后）
 ---
+## 打点契约表
+
+| 段名 | 触发时机 | 发点方 | AI 动作 |
+|------|---------|--------|---------|
+| start | 批次文件落盘后（步骤 1b） | AI（一次性初始化） | 必做 |
+| precheck | cdp_parse --role apply 通过 | cdp_parse 自发 | 无 |
+| edit_plan | 读完批次方向、编辑开始前 | AI | 必做 |
+| edit_item | 每个方向编辑完成 | AI | 尽量打（漏打仅损分方向归因） |
+| edit | 编辑收口 | selfcheck 自发（edit#N 归口） | 无 |
+| edit_validate | cdp_validate_patch 跑完 | 校验器自发 | 无 |
+| gen_manifest | gen_manifest.py 跑完 | 脚本自发 | 无 |
+| verify_start / verify_end | verify 链起止 | ws_verify_chain 自发 | 无 |
+| apply_selfcheck | 自检完成 | selfcheck 自发 | 无 |
+| report / report_post | 收据解析/落盘 | ws_report 自发 | 无 |
+| push_commit / push_remote / push | commit/网络 push/核对完成 | git-works-push 自发 | 无 |
+| finish（归档） | push 完成后 | AI | 可选（人工/emit 查阅用） |
+
+段名不在常量表仅 stderr warn 不阻断；未 start 时 mark 返 3 仅提示。
 ## 工作流
-1. 接收批次：用户粘贴 → AI 存临时文件 harness/log/cross-device/batch-<ts>.cdp
+1. 接收批次：用户粘贴 → AI 存临时文件
+   harness/log/cross-device/batch-YYYYMMDD-HHMMSS.cdp（date +%Y%m%d-%H%M%S；
+   两端 SKILL 统一命名约定，秒级时间戳保证多批次不互覆）
    批次临时文件必须用 heredoc 写入且定界符加单引号以禁用展开（cat > <文件> <<'EOF' ... EOF）；
    禁止 echo 类写法（引号被吞、多行压成一行致批次结构损坏，收据 batch_base 空）
-2. 门禁：git branch --show-current 须为 dev、git status --porcelain 须为空，否则停止
-2b. 耗时打点 start（必做，失败仍不阻断主流程）：
+1b. 耗时打点 start（必做，失败仍不阻断主流程）：
     python3 harness/skills/cross-device/lib/python/cdp_timing.py start --batch-file <批次文件>
     （batch_id 从批次文件内部解析；打点文件 harness/log/cross-device/
-    timings-<batch_id>.json，供后续各步骤 mark；start 失败仅提示，继续主流程）
+    timings-<batch_id>.json，后续各步骤自发 mark 均按其定位）
+2. 门禁：git branch --show-current 须为 dev、git status --porcelain 须为空，否则停止
 3. precheck（含 base 拒批）：
    python3 harness/skills/cross-device/lib/python/cdp_parse.py --role apply --expect-base "$(git rev-parse --short=12 HEAD)" <批次文件>
    （exit 0 通过；17 在 apply 角色降级 WARN，16 预算超限仍 blocking；
-    exit 18 = base 不匹配，整批拒绝回 emit；exit 3 = 参数/文件错误）
-   通过后打点（必做）：cdp_timing.py mark --batch <batch_id> --name precheck
-   （batch_id 取本步输出；未 start 时 mark 返 3 仅提示，不阻断）
+    exit 18 = base 不匹配，整批拒绝回 emit；exit 3 = 参数/文件错误；
+    precheck 段由解析器自发 mark，无需手动打点）
 4. 编辑：按批次意图/方向编辑 code/ 全目录：
-   读取批次方向后打点（必做）：cdp_timing.py mark --batch <batch_id> --name edit_plan
+   读取批次方向后打点：cdp_timing.py mark --batch <batch_id> --name edit_plan
    - code/rpi5/{aosp,kernel}/{new,modified}、code/rpi5/others、code/rpi-zero2w：全量文件直接编辑
    - modified/*.diff：hunk 内编辑（+ 行/已有 context），禁引入新 context；
-     每个编辑过的 .diff 跑 cdp_validate_patch.py 做结构/语义校验（不传 --against，
-     apply 语义校验由 sync_code_to_workspace.py 承担：其在 checkout base 后
-     git apply --check，避免对已打旧补丁工作树校验产生假失败）：
-     python3 harness/skills/cross-device/lib/python/cdp_validate_patch.py <diff 文件>
+     编辑过的 .diff 一次性传给校验器（支持多参数，勿逐文件多次调用）：
+     python3 harness/skills/cross-device/lib/python/cdp_validate_patch.py <diff1> <diff2> ...
+     （不传 --against，apply 语义校验由 sync_code_to_workspace.py 承担：
+     其在 checkout base 后 git apply --check，避免对已打旧补丁工作树校验产生假失败）
    - 涉及 code/rpi5 时：python3 harness/skills/cross-device/lib/python/gen_manifest.py
      （重生成 code/rpi5/manifest.yaml，patch↔workspace 结构映射；sync-workspace-to-code 已删除）
 编辑自愈重试前打点：cdp_timing.py mark --batch <batch_id> --name edit_retry
-每个方向编辑完成后打点（必做）：cdp_timing.py mark --batch <batch_id> --name edit_item
+每个方向编辑完成后打点：cdp_timing.py mark --batch <batch_id> --name edit_item
    （同名重复 mark 自动 #N 序号，分方向耗时在收据 segments 逐项可见；
-    全部方向完成后再打 edit 收口）
-编辑完成打点（必做）：cdp_timing.py mark --batch <batch_id> --name edit
-   （loop 收敛轮的修复编辑同契约：开始前 mark edit_plan，完成由 selfcheck
-    自动收口为 edit#N，无需手动 mark edit）
+    编辑收口由 selfcheck 自动补打为 edit#N，无需手动 mark edit）
 5. 分流：
    - -sv → 显式执行 /loop-engineering（模式 A）：
-      打点（必做）：cdp_timing.py mark --batch <batch_id> --name verify_start
-     python3 harness/skills/loop-engineering/ws_session.py start
-       --goal "<批次意图>" --batch-file <批次文件>
-     按 loop SKILL 执行收敛循环（run verify 工作流 → done 记账 → 失败分析
-     修复重试，patience/total 上限退出）；loop 终结回传末轮收据+归因+attempt 数
-     （session 丢失/异常时降级：直接执行 /workspace-verify 模式 A，基线行为）
-     末轮收据正文必须含 CDP 原文 + 失败现场（--body；超限终结批并含诊断报告）
-     loop 终结（收据落盘）后打点（必做）：cdp_timing.py mark --batch <batch_id> --name verify_end
+      python3 harness/skills/loop-engineering/ws_session.py start
+        --goal "<批次意图>" --batch-file <批次文件>
+      按 loop SKILL 执行收敛循环（run verify 工作流 → done 记账 → 失败分析
+      修复重试，patience/total 上限退出）；loop 终结回传末轮收据+归因+attempt 数
+      （session 丢失/异常时降级：直接执行 /workspace-verify 模式 A，基线行为）
+      末轮收据正文必须含 CDP 原文 + 失败现场（--body；超限终结批并含诊断报告）
+      （verify_start/verify_end 由 verify 链自发 mark，无需手动打点）
 - 收据落盘是进步骤 6 的前提：ws_report 返 2（如 -sv 缺 --acceptance/--acceptance-file、
       --log-since 非法等参数错误）即收据未落盘，必须补参重试，禁止无收据进步骤 6
    **收据 cases 自动落盘 + 禁改历史口径（2026-09-02 定）**：
@@ -90,16 +105,16 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
      （2026-09-02 BL-20260902-01 发布被迫回填 7833c640079a 的教训）。
 - -s → 写 skip 收据（先自检，证据随收据落地；rc 为主判据，缺 rc/任一非零即拒写）：
       SELFCHECK=$(python3 harness/lib/selfcheck.py)
-      python3 harness/skills/workspace-verify/ws_report.py --batch-file <批次文件> --result skip --build skip --board skip --summary "<意图首句>（-s 无需上板）" --selfcheck "$SELFCHECK" --body <批次文件> [--timings-file harness/log/cross-device/timings-<batch_id>.json]
+      python3 harness/skills/workspace-verify/ws_report.py --batch-file <批次文件> --result skip --build skip --board skip --summary "<意图首句>（-s 无需上板）" --selfcheck "$SELFCHECK" --body <批次文件>
     （selfcheck.py 用 subprocess 直取 pytest/check_skill_refs 的 returncode：
-     命令替换赋值会把 PIPESTATUS 重置为 0，shell 内联取 rc 恒零，禁回退内联写法）
+     命令替换赋值会把 PIPESTATUS 重置为 0，shell 内联取 rc 恒零，禁回退内联写法；
+     timings 由 ws_report 自动探测，无需手动传 --timings-file）
     verify 无论 pass/fail，收据落盘后必须执行下一步骤（git-works-push）
 6. 显式执行 /git-works-push（收据+代码统一 commit push）
-   完成后打点收尾（必做，失败仍不阻断）：cdp_timing.py mark --batch <batch_id> --name push
-   然后 cdp_timing.py finish --batch <batch_id>（生成段耗时 JSON 归档，供人工/emit 参考）
-   （-sv 批次的收据 timings 由 workspace-verify 步骤 6 的 --timings-file 写入，
-    apply 侧 finish 仅归档含 push 段的完整打点）
+   （push_commit/push_remote/push 段由 git-works-push 自发 mark）
+   可选归档：cdp_timing.py finish（生成段耗时 JSON，供人工/emit 参考）
 ## 退出码
-- 0 完成（含 fail 收据已推送）；自愈上限 3 次，超限写 fail 收据继续 push；
-  2 参数错误（ws_report 返 2 收据未落盘，补参重试）；3 参数/文件错误（cdp_parse）；
-  18 precheck 拒批（base 不匹配回 emit）
+- 0：完成（含 fail 收据已推送；自愈上限 3 次，超限写 fail 收据继续 push）
+- 2：参数错误（ws_report 返 2 收据未落盘，补参重试）
+- 3：参数/文件错误（cdp_parse）
+- 18：precheck 拒批（base 不匹配回 emit）

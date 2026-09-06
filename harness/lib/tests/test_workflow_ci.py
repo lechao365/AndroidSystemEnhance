@@ -52,6 +52,19 @@ class TestSelfcheckWorkflow(unittest.TestCase):
         self.assertEqual(job.get("env", {}).get("CDP_PROJECT_ROOT"),
                          "${{ runner.temp }}/cdp-root")
 
+    def test_ci_parses_four_tool_rcs(self):
+        # 方向 1：selfcheck main 恒返 0（只采集不判定），CI 步骤必须解析输出
+        # 中四个 *_rc 任一非零即失败——否则测试失败也绿（CI 只跑不判）
+        job = self.doc["jobs"]["selfcheck"]
+        run_steps = [s.get("run", "") for s in job["steps"]]
+        joined = "\n".join(run_steps)
+        # 四 rc 名须出现在循环解析列表中（缺一即漏判）
+        for rc in ("pytest_rc", "refs_rc", "config_rc", "contract_rc"):
+            self.assertIn(rc, joined, f"CI 须解析 {rc}")
+        # 逐项判定非零即失败
+        self.assertIn('"${rc_name}=0"', joined, "CI 须判定 *_rc 非零即失败")
+        self.assertIn("exit 1", joined, "CI 判定失败须显式 exit 1")
+
 
 if __name__ == "__main__":
     unittest.main()

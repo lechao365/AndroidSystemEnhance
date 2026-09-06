@@ -115,8 +115,13 @@ ssize_t EpollDeviceReader::waitAndRead(uint8_t* buf, size_t offset,
     ssize_t n = ::read(mFd, buf + offset, cap - offset);
     if (n < 0 && (errno == EAGAIN || errno == EINTR))
         return 0;  // 可恢复，视作本次无数据
-    // n > 0：读到数据；n == 0：EOF（设备不会关闭，理论不可达）；
-    // n < 0：致命错误，透传 errno
+    // n == 0：EOF（内核 shutdown 后期望用户态退出，模块卸载场景；
+    // LCV-17：与正常 timeout 同返 0 会伪装正常，计数暴露供心跳判红）
+    if (n == 0) {
+        mEofCount++;
+        LOG(ERROR) << "EpollDeviceReader: read returned EOF (kernel shutdown?)";
+    }
+    // n > 0：读到数据；n < 0：致命错误，透传 errno
     return n;
 }
 
@@ -126,6 +131,7 @@ uint32_t EpollDeviceReader::getOverrun()
     uint32_t overrun = 0;
     if (mFd >= 0 && ioctl(mFd, LCVIEW_GET_OVERRUN, &overrun) == 0)
         return overrun;
+    mIoctlErr++;  // LCV-16：失败计数，心跳可见（返 0 与真实 0 可区分）
     LC_LOGE("ioctl GET_OVERRUN failed: errno=" << errno);
     return 0;
 }
@@ -137,6 +143,7 @@ uint32_t EpollDeviceReader::getTotalRecords()
     struct lcview_stats stats = {};
     if (mFd >= 0 && ioctl(mFd, LCVIEW_GET_STATS, &stats) == 0)
         return stats.total_records;
+    mIoctlErr++;  // LCV-16：失败计数，心跳可见
     LC_LOGE("ioctl GET_STATS failed: errno=" << errno);
     return 0;
 }

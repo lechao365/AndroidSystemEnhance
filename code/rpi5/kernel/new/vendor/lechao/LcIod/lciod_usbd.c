@@ -36,6 +36,7 @@
  */
 
 #include "lciod_usbd.h"
+#include "lciod_read_logic.h"
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/usb.h>
@@ -162,6 +163,13 @@ static DEFINE_MUTEX(vendor_lechao_usbd_mutex);
  *
  * 为什么用 kref_get_unless_zero 而非 kref_get：
  * 当 kref 降为 0 时，设备正在被释放，此时不能再增加引用。
+ *
+ * 【事件消费语义（LCD-008）】本驱动未限制单打开：event_tail 是
+ * per-device 共享状态，多读者并发 open 时构成共享消费队列——
+ * 每条事件被随机分配给其中一个读者（不复制、不回放）。当前
+ * 实际单读者由 sepolicy 保证（lechao_lciod_hal_device 的 chr_file
+ * 访问仅授予 HAL domain）。若未来出现多读者需求，须改为 per-fd
+ * 消费位或事件复制，不能依赖现有语义。
  */
 static int vendor_lechao_usbd_open(struct inode *inode, struct file *file)
 {
@@ -237,11 +245,17 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
         bool empty = (dev->event_head == dev->event_tail);
         bool shutdown = READ_ONCE(dev->event_shutdown);
         spin_unlock_irqrestore(&dev->event_lock, flags);
-        if (shutdown)
-            return 0;
-        if (empty)
+        /*
+         * KRN-004：判定逻辑抽至 lciod_read_logic.c（host 单测覆盖
+         * 四象限语义）。返回 1→-EAGAIN（空环重试）、0→0（EOF）、
+         * -1→落到下面循环取事件（非空 drain，shutdown 不越过非空判定）。
+         */
+        int decision = lciod_nonblock_read_decision(empty, shutdown);
+        if (decision == 1)
             return -EAGAIN;
-        /* ring 非空：落到下面的循环（首次 wait 不会真正阻塞） */
+        if (decision == 0)
+            return 0;
+        /* decision == -1：ring 非空，落到下面的循环（首次 wait 不阻塞） */
     }
 
     for (;;) {
@@ -265,6 +279,18 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
     }
 
     if (copy_to_user(buf, &ev, sizeof(ev))) {
+        /*
+         * KRN-009：copy_to_user 失败时回滚 event_tail，事件留在环中
+         * 供下次重试（原实现事件已消费但用户未收到——静默丢失）。
+         * 回滚持锁操作本身并发安全；多读者并发场景下（见 open 处
+         * LCD-008 消费语义）回滚可能使该事件被重复投递而非丢失，
+         * 实际单读者（sepolicy 保证）下无此差异。
+         */
+        spin_lock_irqsave(&dev->event_lock, flags);
+        dev->event_tail = (dev->event_tail +
+                           VENDOR_LECHAO_USBD_EVENT_BUF_SIZE - 1) %
+                          VENDOR_LECHAO_USBD_EVENT_BUF_SIZE;
+        spin_unlock_irqrestore(&dev->event_lock, flags);
         pr_err(PREFIX "read: copy_to_user failed\n");
         return -EFAULT;
     }

@@ -33,6 +33,14 @@ stages:
 - data/verify-results/<时间戳>-<batch_id>.md + trend.md（只落盘，不 commit——由 git-works-push 随批统一提交）
 - 收据 header `timings` 字段：模式 A 打点（apply 侧 start 后，verify 内部
   sync/build/push/unit_test/acceptance 各段，cdp_timing.py mark；缺失仅 warn 不阻断）
+- harness/log/workspace-verify/runs/<run_id>.json：链式编排运行态（仅编排器
+  ws_verify_chain 写，子脚本/AI 只读不写；记每步真实 rc/起止 epoch/canceled
+  与 skipped 记账；ws_session done --run-file 取运行态 stage/rc 真相源）
+- harness/log/workspace-verify/package-<batch_id>.json：打包自描述证据
+  （ws_package 生产，收据 package 字段内嵌源：三镜像路径/sha256/字节、
+  脚本 rc、BLD-007 合规标记、sudo -n 探测结果与耗时，原子写；失败如实
+  记因不产假证据；ws_report 未传 --package-file 时按 batch_id 自动探测
+  该文件内嵌收据 package 字段，随收据入库可追溯）
 - harness/log/workspace-verify/ 运行日志（gitignore）
 ## Failure / recovery（失败/恢复）
 - code→workspace 同步失败：verify 中止，收据 result=fail（build=fail board=skip）
@@ -75,10 +83,25 @@ stages:
    - acceptance：ws_acceptance.py run 完成自动 mark verify_acceptance
    重试轮沿用同段名 mark，不追加轮次前缀（段名保持稳定供复盘按段统计）；
    脚本自动 mark 缺轮次上下文时由执行者触发对应段。
-0b. 链式入口（推荐，减编排往返）：三步确定性环节可单脚本串联——
-    python3 harness/skills/workspace-verify/ws_verify_chain.py --result-file <chain.json>
-    逐段 stdout 透传、rc 逐段门禁、失败即停（JSON 标注停在何步）；成功后
-    直跳步骤 4b/5。失败时按原分步工作流重跑定位，各段打点口径不变。
+0b. 链式入口（推荐，减编排往返）：全链确定性环节单脚本串联——
+    python3 harness/skills/workspace-verify/ws_verify_chain.py \
+      --batch-file <cdp> [--case <标签>] [--wait-ready --log-since <reboot 时刻>] \
+      [--result-file <chain.json>]
+    六步串联：sync→connect→push→unit_test→acceptance→report，逐段 stdout
+    透传、rc 逐段门禁、失败即停（JSON 标注停在何步）；acceptance/report
+    参数由 --batch-file/--case/--wait-ready/--log-since 确定性构造，report
+    收据参数（result/build/board/summary）由前序真实 rc 机械派生（AI 不手填）；
+    编排器自动注入 CDP_RUN_ID 使 push/unit_test/acceptance 产物同批同 run_id
+    （PASS 同批核验依赖）；运行态恒落 harness/log/workspace-verify/runs/
+    <run_id>.json（仅编排器写：每步真实 rc/起止/canceled/skipped）。
+    并发安全：编排进出经 ws_lock 加解 workspace/device 两把文件锁（占用
+    exit 3）；每步子进程独立进程组，单步超时 killpg 有界 teardown
+    （TERM→宽限 10s→KILL），被杀步 rc=None + canceled=true。
+    退出码：0 全链过 / 1 某步失败 / 2 参数错误 / 3 编排锁被占用。
+    loop 会话记账取运行态真实值：ws_session.py done --session <json>
+    --receipt <收据> --run-file <runs/<run_id>.json 或 chain.json>
+    （stage/verify_exit 取运行态真实 rc，替换 AI 代理值；--stage 仅无
+    运行态时回落）。失败时按原分步工作流重跑定位，各段打点口径不变。
 1. 同步：python3 harness/skills/sync-code-to-workspace/sync_code_to_workspace.py --auto
    （同步源 = code 工作树当前状态；范围 = code/rpi5/{aosp,kernel}；
    data/verify-results、others/、rpi-zero2w 不参与同步）
@@ -146,11 +169,13 @@ stages:
    --acceptance-file harness/log/cross-device/acceptance-<batch_id>.json \
    --unit-test-file harness/log/cross-device/unit-tests-<batch_id>.json \
    --push-file harness/log/cross-device/push-<batch_id>.json \
+   [--package-file harness/log/workspace-verify/package-<batch_id>.json] \
    --summary "<一句话>" --result <pass|fail|skip> --build <pass|fail|skip> --board <pass|fail|skip> \
    --case "<本次实际 --case 标签，逗号分隔（模式 B 逐字透传；模式 A 无则省略）>" \
    --body <正文文件> --batch-file <cdp> --target $(git rev-parse --short=12 HEAD) \
-   [--metrics "<性能三指标 JSON 对象>"] \
-   [--timings-file harness/log/cross-device/timings-<batch_id>.json]
+   --metrics "<性能三指标 JSON 对象>"] \
+   [--timings-file harness/log/cross-device/timings-<batch_id>.json] \
+   --selfcheck "<自检摘要（pytest_rc/refs_rc/config_rc/contract_rc 全 rc 键）>"
    （--batch-file/--target 为模式 A 参数；--body 必传：CDP 原文 + 各阶段明细 +
    失败现场摘录，自动脱敏；PASS 必传 --acceptance-file（步骤 5 自描述验收产物）
    与 --unit-test-file（步骤 4b 自描述单测产物）与 --push-file（步骤 4 自描述
@@ -159,6 +184,9 @@ stages:
    缺失/不一致返 2 拒写，
    避免 promote 时 baseline 证据链有洞（新鲜度由 run_id/输入摘要/单调时间表达，
    不用固定墙钟，长编译/重试不误伤）；fail 可 --acceptance 直传现场；
+   --selfcheck 自检 rc 证据：result=skip 或 board 模式（-sv 模式 A/模式 B 上板）
+   必传且 rc 全 0，缺失返 2（上板批自检 rc 须入收据，方向 4）；链式编排由
+   ws_verify_chain report 步自动跑 selfcheck 注入，无需手传；
    --metrics 为性能三指标结构化 JSON（lcview-perf 采集输出 METRICS 行），写入
    收据 metrics 字段 + trend 行尾，跨批可 diff——性能数字不再只散在正文；
    --timings-file 为模式 A 链路耗时打点（步骤 0 各阶段 mark 的原始文件，ws_report
@@ -174,6 +202,29 @@ stages:
      board+pass 空 cases 由 ws_report 源头拒写（返 2）兜底，发现缺 cases 时
      只写新收据引用旧批次（如 -s 自检批 + 说明），禁止编辑旧收据补字段
      （2026-09-02 BL-20260902-01 发布被迫回填 7833c640079a 的教训）。
+
+### 人工打包步骤（opencode 会话内 sudo 不可用，BLD-013）
+
+opencode 会话（systemd user unit 设 `NoNewPrivileges=true`）内 sudo 恒被内核
+拒绝，ws_package 的 `sudo -n true` 探测会如实记因（`sudo_n=false`）不执行，
+收据 package 字段内嵌证据 `script_rc=null` → baseline 记 UNKNOWN。要拿到
+package_result=PASS，须在**会话外普通终端**人工执行打包：
+
+1. 会话外普通终端（普通 WSL2 shell，非 opencode）运行 ws_package，落默认证据位
+   （证据文件名按 batch_id 命名，供会话内 ws_report 自动探测）：
+   ```bash
+   export CDP_BATCH_ID=<batch_id>
+   python3 harness/skills/workspace-verify/ws_package.py
+   # → harness/log/workspace-verify/package-<batch_id>.json（script_rc=0）
+   ```
+   （也可直接跑 `harness/scripts/mk_rpi5_full_image.sh -mode 0`，但须按 BLD-007
+   sudo 显式传 TARGET_PRODUCT/ANDROID_PRODUCT_OUT，且证据须按 ws_package 格式落盘）
+2. 回会话内重跑 ws_report（或重跑 verify 链 report 步）：未传 --package-file 时
+   自动探测 `harness/log/workspace-verify/package-<batch_id>.json`，把打包证据
+   内嵌收据 package 字段随收据入库——**证据链不受影响**（证据内嵌是收据侧的
+   单点动作，与打包执行位置无关，同 batch 同 run_id 可追溯）。
+3. baseline_register 从收据 package 字段取证据 → script_rc=0 记 PASS → promote
+   硬门禁放行。
 ## 退出码
 - 0 验证完成（含 fail 收据落盘）；1 设备不可达或验收 fail；2 参数错误或验收 ai
 

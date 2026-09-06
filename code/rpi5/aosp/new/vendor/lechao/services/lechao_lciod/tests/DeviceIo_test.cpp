@@ -13,6 +13,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <cstdint>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -201,4 +202,26 @@ TEST(AbiContractTest, StructSizesFrozen) {
 TEST(AbiContractTest, AbiVersionAndBufSizeFrozen) {
     EXPECT_EQ(VENDOR_LECHAO_USBD_ABI_VERSION, 2u);  // v2: stats 追加 event_drop_count
     EXPECT_EQ(VENDOR_LECHAO_USBD_EVENT_BUF_SIZE, 32);
+}
+
+/* --- clamp_read_timeout_ms：LCD-002 timeout 入参钳位 --- */
+
+TEST(ClampReadTimeoutTest, Negative_ClampsToZero) {
+    // 负值 → 0（非阻塞）：-1 原样透传会使 poll 永久阻塞
+    EXPECT_EQ(clamp_read_timeout_ms(-1), 0);
+    EXPECT_EQ(clamp_read_timeout_ms(INT32_MIN), 0);
+}
+
+TEST(ClampReadTimeoutTest, Overshoot_ClampsToUpperBound) {
+    // 超上限 → 1s：INT_MAX 原样透传会阻塞约 24.8 天
+    EXPECT_EQ(clamp_read_timeout_ms(INT32_MAX), kMaxReadEventTimeoutMs);
+    EXPECT_EQ(clamp_read_timeout_ms(kMaxReadEventTimeoutMs + 1),
+              kMaxReadEventTimeoutMs);
+}
+
+TEST(ClampReadTimeoutTest, InRange_PassesThrough) {
+    EXPECT_EQ(clamp_read_timeout_ms(0), 0);
+    EXPECT_EQ(clamp_read_timeout_ms(50), 50);
+    EXPECT_EQ(clamp_read_timeout_ms(kMaxReadEventTimeoutMs),
+              kMaxReadEventTimeoutMs);
 }
