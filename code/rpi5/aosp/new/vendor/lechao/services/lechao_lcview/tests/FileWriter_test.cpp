@@ -449,6 +449,114 @@ TEST(FileWriterWriteInvalidTest, WriteFail_RetryFail_CountsAndClearsSticky) {
 }
 
 // ============================================================
+// LCV-01：invalid_records.log 轮转（无界逃逸口收口）
+// ============================================================
+
+TEST(FileWriterWriteInvalidTest, Constructor_RestoresInvalidSize) {
+    // CXX-002：daemon 重启后 invalid 累计大小须从持久层恢复——
+    // 归零则轮转阈值判定失效（可超限近一倍）
+    TempDir dir;
+    prewriteFile(dir.path() + "/invalid_records.log", 4096);
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+    EXPECT_EQ(writer.mInvalidSize, 4096u);
+}
+
+TEST(FileWriterWriteInvalidTest, Rotate_WhenSizeExceedsLimit) {
+    // LCV-01：超过 maxInvalidFileSizeMb 时写前轮转——当前文件重置，
+    // 旧内容进 invalid_records_{date}_p0.log，不再无界增长
+    TempDir dir;
+    prewriteFile(dir.path() + "/invalid_records.log", 1024 * 1024);
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxInvalidFileSizeMb = 1;
+    FileWriter writer(cfg);
+    std::string date = writer.makeDateStr();
+
+    uint8_t data[] = {0xDE, 0xAD, 0xBE, 0xEF};
+    writer.writeInvalid(data, 4, "overflow");
+
+    // 旧内容完整进入轮转文件（rename 保留字节）
+    std::string rotated = dir.path() + "/invalid_records_" + date + "_p0.log";
+    struct stat st;
+    ASSERT_EQ(stat(rotated.c_str(), &st), 0);
+    EXPECT_EQ(st.st_size, 1024 * 1024);
+    // 当前文件被重置：只含本轮新写入一条，内存累计同步归零再累计
+    std::string content = readFile(dir.path() + "/invalid_records.log");
+    EXPECT_NE(content.find("overflow"), std::string::npos);
+    EXPECT_EQ(writer.mInvalidSize, content.size());
+}
+
+TEST(FileWriterWriteInvalidTest, Rotate_SeqContinuesAfterRestart) {
+    // 轮转 seq 续接：目录已有 _p0 时下次轮转用 _p1（重启后不覆盖）
+    TempDir dir;
+    prewriteFile(dir.path() + "/invalid_records.log", 1024 * 1024);
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxInvalidFileSizeMb = 1;
+    FileWriter writer(cfg);
+    std::string date = writer.makeDateStr();
+    prewriteFile(dir.path() + "/invalid_records_" + date + "_p0.log", 100);
+
+    uint8_t data[] = {0x01};
+    writer.writeInvalid(data, 1, "again");
+
+    std::string rotated = dir.path() + "/invalid_records_" + date + "_p1.log";
+    EXPECT_EQ(access(rotated.c_str(), F_OK), 0);
+    // _p1 收到原 invalid_records.log 全部内容（1MB）
+    struct stat st;
+    ASSERT_EQ(stat(rotated.c_str(), &st), 0);
+    EXPECT_EQ(st.st_size, 1024 * 1024);
+    // _p0 未被覆盖（仍 100 字节）
+    struct stat st0;
+    ASSERT_EQ(stat((dir.path() + "/invalid_records_" + date + "_p0.log").c_str(), &st0), 0);
+    EXPECT_EQ(st0.st_size, 100);
+}
+
+TEST(FileWriterWriteInvalidTest, WriteFail_RollbackTruncatesPartialLine) {
+    // LCV-07：首写部分落盘后失败，恢复重开前须回退到写前偏移——
+    // 否则残留半行与下一条追加粘连成非法 JSONL（与 writeLineFlush
+    // 的 rollback 语义对齐）。注入：首写流指向 /dev/full（is_open 但
+    // 恒 ENOSPC 设 failbit，与 WriteFail_RecoversByReopen 同手法），
+    // 目标文件尾预置垃圾字节模拟上次部分落盘，mInvalidSize 保持垃圾
+    // 前偏移——恢复 rollback 须把垃圾截掉，retry 后文件为
+    // 写前内容 + 新行，无残留
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+
+    const std::string pre = "{\"reason\":\"old\"}\n";
+    {
+        std::ofstream f(dir.path() + "/invalid_records.log", std::ios::app);
+        f << pre;
+    }
+    const std::string garbage = "partial-without-newline";
+    {
+        std::ofstream f(dir.path() + "/invalid_records.log", std::ios::app);
+        f << garbage;
+    }
+    // 模拟代码视角：只记得写前偏移（半行残留不属于成功写入）
+    writer.mInvalidSize = pre.size();
+    // 首写流换到 /dev/full（写必失败），mInvalidFilename 保持真实路径
+    writer.mInvalidStream.close();
+    writer.mInvalidStream.open("/dev/full", std::ios::app);
+    ASSERT_TRUE(writer.mInvalidStream.is_open());
+
+    uint8_t data[] = {0xDE, 0xAD};
+    writer.writeInvalid(data, 2, "recover");
+
+    std::string content = readFile(dir.path() + "/invalid_records.log");
+    // 垃圾半行被 rollback 截断：新内容 = pre + 新行
+    EXPECT_EQ(content.find(garbage), std::string::npos);
+    EXPECT_EQ(content.compare(0, pre.size(), pre), 0);
+    EXPECT_NE(content.find("recover"), std::string::npos);
+    // 恢复后内存累计从写前偏移 + 新行大小
+    EXPECT_EQ(writer.mInvalidSize, content.size());
+}
+
+// ============================================================
 // checkRotation 分支覆盖
 // ============================================================
 
@@ -827,6 +935,33 @@ TEST(FileWriterRetentionTest, SkipsInvalidRecordsLog) {
     // invalid 跳过 → 删 other（500K），剩余 700K 达标
     EXPECT_EQ(access(invalid.c_str(), F_OK), 0);
     EXPECT_NE(access(other.c_str(), F_OK), 0);
+}
+
+TEST(FileWriterRetentionTest, EvictsRotatedInvalidFiles) {
+    // LCV-01：已轮转的旧 invalid 文件不再被 invalid 流持有，超总容量时
+    // 正常参与淘汰（evictOldFiles 仅跳过当前 mInvalidFilename）；
+    // 当前 invalid_records.log 仍跳过（流持有防 unlink 后写已删 inode）
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxTotalSizeMb = 1;
+    cfg.retentionScanEveryWrites = 0;  // 关闭降频：显式调用即扫描
+    FileWriter writer(cfg);
+    std::string date = writer.makeDateStr();
+    prewriteFile(dir.path() + "/invalid_records.log", 10 * 1024);
+    std::string rotated = dir.path() + "/invalid_records_" + date + "_p0.log";
+    prewriteFile(rotated, 700 * 1024);
+    struct utimbuf tb;
+    tb.actime = 100; tb.modtime = 100; utime(rotated.c_str(), &tb);
+    std::string other = dir.path() + "/9_z_" + date + "_p0.jsonl";
+    prewriteFile(other, 500 * 1024);
+
+    writer.enforceRetention();
+
+    // 总 1.21MB > 1MB：最旧 rotated 被删后 510K 达标；当前 invalid 保留
+    EXPECT_NE(access(rotated.c_str(), F_OK), 0);
+    EXPECT_EQ(access((dir.path() + "/invalid_records.log").c_str(), F_OK), 0);
+    EXPECT_EQ(access(other.c_str(), F_OK), 0);
 }
 
 TEST(FileWriterRetentionTest, UnlinkFailed_NoCrash) {

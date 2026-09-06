@@ -81,6 +81,13 @@ FileWriter::FileWriter(const FileWriterConfig& cfg) : mCfg(cfg)
     mInvalidStream.open(mInvalidFilename, std::ios::app);
     if (!mInvalidStream.is_open())
         ALOGE("FileWriter: cannot open %s", mInvalidFilename.c_str());
+    else {
+        // CXX-002：daemon 重启后从持久层恢复 invalid 文件已写字节——
+        // 归零会使轮转阈值判定失效（可超限近一倍，LCV-01 修复的前提）
+        struct stat st;
+        if (stat(mInvalidFilename.c_str(), &st) == 0)
+            mInvalidSize = static_cast<size_t>(st.st_size);
+    }
 }
 
 // 析构函数：关闭所有打开的文件流
@@ -457,15 +464,84 @@ void FileWriter::writeRecord(const EventSchema& schema,
     it->second.currentSize += line.size();
 }
 
+// invalid 文件轮转（LCV-01）：close → rename 为 invalid_records_{date}_p{seq}.log
+// → 重开新文件并清零累计大小。轮转后的旧文件不再被 mInvalidStream 持有，
+// enforceRetention 可正常淘汰（evictOldFiles 仅跳过当前 mInvalidFilename，
+// 轮转文件名不同天然参与淘汰）。rename 失败（目录只读等）时重开原文件
+// 继续追加保底不丢数据，累计大小保留待下轮重试
+void FileWriter::rotateInvalid()
+{
+    mInvalidStream.flush();
+    mInvalidStream.close();
+    const std::string date = makeDateStr();
+    const std::string rotated = mCfg.logDir + "/invalid_records_" + date
+                                + "_p" + std::to_string(nextInvalidSeqFor(date))
+                                + ".log";
+    if (rename(mInvalidFilename.c_str(), rotated.c_str()) != 0)
+        ALOGE("FileWriter: rotateInvalid: rename to %s failed: %s",
+              rotated.c_str(), strerror(errno));
+    mInvalidStream.open(mInvalidFilename, std::ios::app);
+    if (!mInvalidStream.is_open()) {
+        // 重开失败：后续 writeInvalid 走 invalidNotOpen 分支计数可见
+        ALOGE("FileWriter: rotateInvalid: reopen %s failed",
+              mInvalidFilename.c_str());
+        return;
+    }
+    mInvalidSize = 0;
+    ALOGI("FileWriter: rotated invalid log to %s", rotated.c_str());
+}
+
+// 扫描日志目录中 invalid_records_{date}_p<seq>.log 的最大轮转序号 +1。
+// 与 nextSeqFor 同模式：readdir 纯文件名前缀匹配 + 尾部 seq 解析；
+// 无匹配返 0（首轮轮转）
+int FileWriter::nextInvalidSeqFor(const std::string& date)
+{
+    const std::string prefix = "invalid_records_" + date + "_p";
+    const std::string suffix = ".log";
+    int maxSeq = -1;
+    DIR* dir = opendir(mCfg.logDir.c_str());
+    if (!dir)
+        return 0;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        std::string name(entry->d_name);
+        if (name.compare(0, prefix.size(), prefix) != 0)
+            continue;
+        if (name.size() <= prefix.size() + suffix.size())
+            continue;
+        if (name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0)
+            continue;
+        std::string num = name.substr(prefix.size(),
+                                       name.size() - prefix.size() - suffix.size());
+        char* end = nullptr;
+        long v = strtol(num.c_str(), &end, 10);
+        if (end && *end == '\0' && v >= 0)
+            maxSeq = std::max(maxSeq, static_cast<int>(v));
+    }
+    closedir(dir);
+    return maxSeq + 1;
+}
+
 // 写入非法记录到 invalid_records.log
 // 记录原因、大小和原始字节（hex 截断），供事后离线重解析定位协议缺陷
 // CXX-003: reason 含 " / \ 及控制字符时必须转义（转义并入 jsonEscapeString，
 // 与 formatJsonLine 同规则），否则输出行非合法 JSONL / 裂行
+// LCV-01: 超阈值先轮转，invalid 文件不再无界增长（坏数据风暴写爆 /data）
 void FileWriter::writeInvalid(const uint8_t* data, size_t len,
                                const std::string& reason)
 {
     if (!mInvalidStream.is_open()) {
         ALOGE("FileWriter: writeInvalid: stream not open, DROPPING reason=%s", reason.c_str());
+        mDrops.invalidNotOpen++;
+        return;
+    }
+    // 超过单文件轮转阈值：先轮转再写（写前检查，单文件最多超一个 payload）
+    if (mInvalidSize >= mCfg.maxInvalidFileSizeMb * 1024 * 1024)
+        rotateInvalid();
+    if (!mInvalidStream.is_open()) {
+        // rotateInvalid 重开失败：按未打开语义计数（防轮转失败后静默丢弃）
+        ALOGE("FileWriter: writeInvalid: rotate left stream closed, DROPPING reason=%s",
+              reason.c_str());
         mDrops.invalidNotOpen++;
         return;
     }
@@ -491,11 +567,14 @@ void FileWriter::writeInvalid(const uint8_t* data, size_t len,
     if (mInvalidStream.fail()) {
         /* CXX-002: failbit 粘滞不清除会让 invalid 流从此永久失败——
          * 首写失败后余生空转，mode_invalid 反判绿（坏记录静默丢失）。
-         * 恢复路径：clear 清粘滞 → 重开流 → 重试一次，仍失败计
-         * invalidWriteFailed（进心跳 dropped 求和与 drop_invalidwrite 分项） */
+         * 恢复路径：clear 清粘滞 → 回退首写残留（LCV-07，与 writeLineFlush
+         * 同语义：首写可能部分落盘，重开前须截断回写前偏移 mInvalidSize，
+         * 否则残留半行与下一条追加粘连成非法 JSONL）→ 重开流 → 重试一次，
+         * 仍失败计 invalidWriteFailed（进心跳 dropped 求和与分项） */
         ALOGE("FileWriter: writeInvalid: write failed, attempting recovery");
         mInvalidStream.clear();
         mInvalidStream.close();
+        rollbackFileTo(mInvalidFilename, mInvalidSize);
         mInvalidStream.open(mInvalidFilename, std::ios::app);
         if (!mInvalidStream.is_open()) {
             ALOGE("FileWriter: writeInvalid: recovery reopen failed, DROPPING reason=%s",
@@ -510,10 +589,14 @@ void FileWriter::writeInvalid(const uint8_t* data, size_t len,
                   reason.c_str());
             mDrops.invalidWriteFailed++;
             mInvalidStream.clear();
+            // 重试同样可能部分落盘：回退到写前偏移截断残留半行（LCV-07）
+            rollbackFileTo(mInvalidFilename, mInvalidSize);
             return;
         }
         ALOGI("FileWriter: writeInvalid: recovered invalid stream");
     }
+    // 写成功（含恢复重试成功）才累计，失败路径保持写前偏移供 rollback
+    mInvalidSize += payload.size();
 }
 
 // 文件轮转检查：
