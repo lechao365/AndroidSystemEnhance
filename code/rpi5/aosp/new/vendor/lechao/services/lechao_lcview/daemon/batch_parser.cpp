@@ -31,11 +31,18 @@ BatchParseResult vendor::lechao::lcview::parseBatch(
 
         // 长度校验：最小长度和边界检查
         if (total_len < 4 || offset + total_len > batch.size()) {
+            // LCV-03：坏长度截断后续解析，本批剩余字节全部不可信——
+            // invalidCnt 必须计数（心跳 invalid_records 可见），否则坏数据
+            // 风暴下 parseBatch 静默丢数据。writeInvalid 已覆盖 offset 到
+            // 批尾的全部字节，直接 return 终止（不走循环后 trailing 分支，
+            // 避免同段数据重复落盘/重复计数）
+            result.invalidCnt++;
             writer.writeInvalid(batch.data() + offset,
                                 batch.size() - offset, "bad length");
-            ALOGE("lechao_lcview: parse: bad length at offset=%zu, total_len=%u",
-                  offset, total_len);
-            break;
+            ALOGE("lechao_lcview: parse: bad length at offset=%zu, total_len=%u, "
+                  "drop %zu bytes to batch tail",
+                  offset, total_len, batch.size() - offset);
+            return result;
         }
 
         const uint8_t* recordStart = batch.data() + offset + 4;

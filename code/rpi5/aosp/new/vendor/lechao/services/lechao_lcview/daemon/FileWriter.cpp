@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <sstream>
 #include <iomanip>
@@ -209,18 +210,68 @@ void FileWriter::openFile(uint16_t eventId, const EventSchema& schema)
     mFiles[eventId] = std::move(fs);
 }
 
+// 校验从 s[i] 开始的 UTF-8 多字节序列长度（LCV-05）：
+// 返回合法序列字节数（2-4），非法/截断返回 0。
+// 首字节 0x80-0xC1（连续字节/overlong 编码）与 0xF5-0xFF（超码位）非法
+static size_t utf8SeqLen(const std::string& s, size_t i)
+{
+    auto isCont = [&](size_t k) {
+        return k < s.size() &&
+               (static_cast<unsigned char>(s[k]) & 0xC0) == 0x80;
+    };
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    if (c >= 0xC2 && c <= 0xDF)                       // 2 字节
+        return isCont(i + 1) ? 2 : 0;
+    if (c == 0xE0) {                                  // 3 字节（排除 overlong）
+        return (i + 2 < s.size() &&
+                static_cast<unsigned char>(s[i + 1]) >= 0xA0 &&
+                static_cast<unsigned char>(s[i + 1]) <= 0xBF &&
+                isCont(i + 2)) ? 3 : 0;
+    }
+    if ((c >= 0xE1 && c <= 0xEC) || (c >= 0xEE && c <= 0xEF))
+        return (isCont(i + 1) && isCont(i + 2)) ? 3 : 0;
+    if (c == 0xED) {                                  // 3 字节（排除 surrogate）
+        return (i + 2 < s.size() &&
+                static_cast<unsigned char>(s[i + 1]) >= 0x80 &&
+                static_cast<unsigned char>(s[i + 1]) <= 0x9F &&
+                isCont(i + 2)) ? 3 : 0;
+    }
+    if (c == 0xF0) {                                  // 4 字节（排除 overlong）
+        return (i + 3 < s.size() &&
+                static_cast<unsigned char>(s[i + 1]) >= 0x90 &&
+                static_cast<unsigned char>(s[i + 1]) <= 0xBF &&
+                isCont(i + 2) && isCont(i + 3)) ? 4 : 0;
+    }
+    if (c >= 0xF1 && c <= 0xF3)
+        return (isCont(i + 1) && isCont(i + 2) && isCont(i + 3)) ? 4 : 0;
+    if (c == 0xF4) {                                  // 4 字节（上限 U+10FFFF）
+        return (i + 3 < s.size() &&
+                static_cast<unsigned char>(s[i + 1]) >= 0x80 &&
+                static_cast<unsigned char>(s[i + 1]) <= 0x8F &&
+                isCont(i + 2) && isCont(i + 3)) ? 4 : 0;
+    }
+    return 0;  // 0x80-0xC1 / 0xF5-0xFF 非法首字节
+}
+
 // JSON 字符串转义（formatJsonLine 与 writeInvalid 共用同一函数）：
 // 对 " \ 及控制字符做 JSON 合法转义，防止输出行裂行/非法 JSONL。
 //   - "  \  \b \f \n \r \t 具名转义；
 //   - 其余 < 0x20 控制字符按 \u00XX 转义（按 unsigned char 判读，
 //     避免有符号 char 下非 ASCII 高位字节误判为负值进入 \u 分支）；
-//   - 原实现仅转引号与反斜杠，USB 描述符含换行时输出行即裂行（P0）。
+//   - >= 0x80 字节做 UTF-8 合法性校验（LCV-05）：合法多字节序列原样
+//     直传（JSON 字符串为 Unicode，UTF-8 合法），非法序列逐字节按
+//     \u00XX 转义——USB 描述符字符串来自设备固件可含任意字节，
+//     严格 JSON 解析器（json.loads 等）对无效 UTF-8 行直接抛异常，
+//     一行坏数据会污染整文件分析；
+//   - 原实现仅转义具名控制字符与引号反斜杠，USB 描述符含换行时
+//     输出行即裂行（P0）。
 // 为什么手动实现而非用 JSON 库：formatJsonLine 需要最高性能，
 // 减少 JSON 库的字符串处理开销
 static void jsonEscapeString(std::ostringstream& oss, const std::string& s)
 {
     oss << "\"";
-    for (unsigned char c : s) {
+    for (size_t i = 0; i < s.size(); i++) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
         switch (c) {
         case '"':  oss << "\\\""; break;
         case '\\': oss << "\\\\"; break;
@@ -234,6 +285,17 @@ static void jsonEscapeString(std::ostringstream& oss, const std::string& s)
                 oss << "\\u00" << std::hex << std::setw(2)
                     << std::setfill('0') << static_cast<unsigned>(c)
                     << std::dec;
+            } else if (c >= 0x80) {
+                // 合法 UTF-8 序列整体直传，非法字节降级 \u00XX
+                size_t seq = utf8SeqLen(s, i);
+                if (seq > 0) {
+                    oss.write(s.data() + i, static_cast<std::streamsize>(seq));
+                    i += seq - 1;
+                } else {
+                    oss << "\\u00" << std::hex << std::setw(2)
+                        << std::setfill('0') << static_cast<unsigned>(c)
+                        << std::dec;
+                }
             } else {
                 oss << c;
             }
@@ -263,7 +325,13 @@ static void appendFieldValue(std::ostringstream& oss, const DecodedField& df)
     case LCVIEW_TYPE_FLOAT: {
         float val;
         memcpy(&val, df.value, 4);
-        oss << val;
+        // LCV-04：NaN/Inf（除零等场景）的默认输出 "nan"/"inf" 非合法
+        // JSON 数值——严格解析器对整行抛异常。降级 null 保整行可解析，
+        // 数值丢失由消费端 null 判读
+        if (std::isnan(val) || std::isinf(val))
+            oss << "null";
+        else
+            oss << val;
         break;
     }
     case LCVIEW_TYPE_STRING: {

@@ -138,7 +138,10 @@ TEST_F(DaemonLoopTest, BadLength_BreaksAndWritesInvalid) {
     std::vector<uint8_t> batch = {100, 0, 0, 0, 0xAA};
     BatchParseResult r = parseBatch(sp, writer, batch);
     EXPECT_EQ(r.validCnt, 0u);
-    // invalid 落盘（writeInvalid），统计由 break 截断不计数
+    // LCV-03：坏长度截断也必须计数（心跳 invalid_records 可见），
+    // 否则坏数据风暴下 parseBatch 静默丢数据
+    EXPECT_EQ(r.invalidCnt, 1u);
+    // invalid 落盘（writeInvalid）
     struct stat st;
     std::string inv = std::string(mTmp) + "/invalid_records.log";
     EXPECT_EQ(stat(inv.c_str(), &st), 0);

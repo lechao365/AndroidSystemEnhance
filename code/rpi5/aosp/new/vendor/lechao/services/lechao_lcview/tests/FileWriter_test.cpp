@@ -239,6 +239,73 @@ TEST_F(FormatJsonLineTest, UnknownType_ProducesNull) {
     EXPECT_NE(line.find("null"), std::string::npos);
 }
 
+// ============================================================
+// LCV-04/05：输出值域防御（严格 JSON 合法性）
+// ============================================================
+
+TEST_F(FormatJsonLineTest, FloatNanInf_ProducesNull) {
+    // LCV-04：NaN/Inf 默认输出 "nan"/"inf" 非合法 JSON 数值，
+    // 严格解析器（json.loads）对整行抛异常——降级 null 保整行
+    auto schema = makeSchema(4, "e", {FieldType::FLOAT});
+    auto hdr = makeHdr(4, 1);
+    // NaN = 0x7FC00000，Inf = 0x7F800000（IEEE754 小端字节序）
+    {
+        std::vector<uint8_t> fields = {LCVIEW_TYPE_FLOAT, 0x00, 0x00, 0xC0, 0x7F};
+        auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+        EXPECT_NE(line.find("\"f\":[null]"), std::string::npos) << "NaN 须输出 null";
+        EXPECT_EQ(line.find("nan"), std::string::npos);
+    }
+    {
+        std::vector<uint8_t> fields = {LCVIEW_TYPE_FLOAT, 0x00, 0x00, 0x80, 0x7F};
+        auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+        EXPECT_NE(line.find("\"f\":[null]"), std::string::npos) << "+Inf 须输出 null";
+        EXPECT_EQ(line.find("inf"), std::string::npos);
+    }
+    // 正常 float 不受影响
+    {
+        std::vector<uint8_t> fields = {LCVIEW_TYPE_FLOAT, 0xDB, 0x0F, 0x49, 0x40};
+        auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+        EXPECT_NE(line.find("3.14159"), std::string::npos);
+    }
+}
+
+TEST_F(FormatJsonLineTest, StringField_InvalidUtf8_Escaped) {
+    // LCV-05：非法 UTF-8 字节降级 \u00XX 转义，合法序列直传——
+    // 输出永远合法，严格解析器不再因 USB 描述符的坏字节抛异常
+    auto schema = makeSchema(4, "e", {FieldType::STRING});
+    auto hdr = makeHdr(4, 1);
+    {   // 非法序列 0xC3 0x28（"Ã(" 截断）：0xC3 须转义，0x28 是 '(' 直传
+        std::string s{static_cast<char>(0xC3), '('};
+        auto fields = buildFields({FieldType::STRING}, {s});
+        auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+        EXPECT_NE(line.find("\\u00c3"), std::string::npos)
+            << "非法 UTF-8 首字节须转义";
+    }
+    {   // 合法序列 0xE4 0xBD 0xA0（U+4F60 "你"）原样直传
+        std::string s{static_cast<char>(0xE4), static_cast<char>(0xBD),
+                      static_cast<char>(0xA0)};
+        auto fields = buildFields({FieldType::STRING}, {s});
+        auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+        EXPECT_EQ(line.find("\\u00"), std::string::npos)
+            << "合法 UTF-8 不得转义";
+        EXPECT_NE(line.find(s), std::string::npos) << "合法 UTF-8 须原样输出";
+    }
+    {   // 非法首字节 0xFF 直接收口为 \u00ff
+        std::string s{static_cast<char>(0xFF)};
+        auto fields = buildFields({FieldType::STRING}, {s});
+        auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+        EXPECT_NE(line.find("\\u00ff"), std::string::npos);
+    }
+    {   // 4 字节合法 emoji U+1F600（F0 9F 98 80）直传
+        std::string s{static_cast<char>(0xF0), static_cast<char>(0x9F),
+                      static_cast<char>(0x98), static_cast<char>(0x80)};
+        auto fields = buildFields({FieldType::STRING}, {s});
+        auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+        EXPECT_EQ(line.find("\\u00"), std::string::npos);
+        EXPECT_NE(line.find(s), std::string::npos);
+    }
+}
+
 TEST_F(FormatJsonLineTest, Int32Field_Truncated_ReturnsEmpty) {
     auto schema = makeSchema(4, "e", {FieldType::INT32});
     auto hdr = makeHdr(4, 1);
