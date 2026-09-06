@@ -270,6 +270,16 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
     }
 
     if (copy_to_user(buf, &ev, sizeof(ev))) {
+        /*
+         * KRN-009：copy_to_user 失败时回滚 event_tail，事件留在环中
+         * 供下次重试（原实现事件已消费但用户未收到——静默丢失）。
+         * 单打开语义下 tail 唯一写者为本读者，无条件回滚无并发风险。
+         */
+        spin_lock_irqsave(&dev->event_lock, flags);
+        dev->event_tail = (dev->event_tail +
+                           VENDOR_LECHAO_USBD_EVENT_BUF_SIZE - 1) %
+                          VENDOR_LECHAO_USBD_EVENT_BUF_SIZE;
+        spin_unlock_irqrestore(&dev->event_lock, flags);
         pr_err(PREFIX "read: copy_to_user failed\n");
         return -EFAULT;
     }

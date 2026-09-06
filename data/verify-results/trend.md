@@ -109,3 +109,4 @@
 2026-09-06 11:12:06 manual-2609061111 pass build=pass board=pass acc={"run_id":"lcd-p3","input_summary":"svc: LCD P3 批: readEvent 惰性 refresh 去 glob 洪水
 2026-09-06 11:21:26 manual-2609061121 pass build=pass board=pass acc={"run_id":"krn-001","input_summary":"svc KRN-001: ring read 假 EOF 收口(host test 57
 2026-09-06 11:34:17 manual-2609061134 pass build=pass board=pass acc={"run_id":"krn-s3","input_summary":"svc: S3 内核低风险批: KRN-004/007 O_NONBLOCK 语义+014
+2026-09-06 11:43:23 manual-2609061143 pass build=pass board=pass acc={"run_id":"krn-s4","input_summary":"svc: S4 内核热路径批: KRN-005 degrade 阈值+003/009 co

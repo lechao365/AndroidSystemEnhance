@@ -268,21 +268,35 @@ int lcview_ring_write(struct lcview_ring *ring,
      * 迭代数千次。批量驱逐每次最多 64 条再重新检查空间，
      * 将最坏情况下的迭代次数从 ~13000 降至 ~200。
      */
-    while (total > avail && ring->read_pos != ring->write_pos) {
-        int batch = 64;
-        while (batch-- > 0 && ring->read_pos != ring->write_pos) {
-            LC_DBG("evict: pos=%u\n", ring->read_pos);
-            ring_evict_one(ring);
-        }
-        avail = ring_avail_write(ring);
-    }
+    /*
+     * KRN-008：单次 write 驱逐预算。极端场景（256KB 环 + 全 20B 小记录）
+     * 需要驱逐 ~13000 条腾空间，持锁 ~1.3ms，阻塞同锁读者与并发写者。
+     * 预算 256 条（≈26µs 持锁上限）：256×20B=5KB 覆盖常规腾空间需求；
+     * 超限返回 -ENOSPC 丢弃本次写入——该场景本就是 overrun（计数继续
+     * 递增），牺牲单条写入换取读写路径的低延迟。
+     */
+    {
+        uint32_t evicted = 0;
 
-    if (total > avail) {
-        spin_unlock_irqrestore(&ring->lock, flags);
-        /* KRN-014：满环在 I/O 洪水时可每条命令触发，限频防止日志风暴 */
-        pr_err_ratelimited(PREFIX "ring full, write failed (total=%u avail=%u)\n",
-                           total, avail);
-        return -ENOSPC;
+        while (total > avail && ring->read_pos != ring->write_pos) {
+            int batch = 64;
+            while (batch-- > 0 && ring->read_pos != ring->write_pos) {
+                LC_DBG("evict: pos=%u\n", ring->read_pos);
+                ring_evict_one(ring);
+                evicted++;
+            }
+            avail = ring_avail_write(ring);
+            if (evicted >= LCVIEW_EVICT_MAX_RECORDS)
+                break;
+        }
+
+        if (total > avail) {
+            spin_unlock_irqrestore(&ring->lock, flags);
+            /* KRN-014：满环在 I/O 洪水时可每条命令触发，限频防止日志风暴 */
+            pr_err_ratelimited(PREFIX "ring full, write failed (total=%u avail=%u evicted=%u)\n",
+                               total, avail, evicted);
+            return -ENOSPC;
+        }
     }
 
     /* 写入长度前缀（含 total 自身长度），处理跨尾部 wrap */
@@ -440,7 +454,20 @@ int lcview_ring_read(struct lcview_ring *ring,
 
         /* 锁外 copy_to_user（可能触发 page fault，必须不在持锁状态） */
         if (copy_to_user(buf + copied_total, ring->read_buf, record_len)) {
-            pr_err(PREFIX "read copy_to_user failed\n");
+            /*
+             * KRN-003：copy_to_user 失败时尽力回滚 read_pos，让记录留在
+             * 环中供下次重试（原实现记录已被消费但用户未收到——数据丢失）。
+             * 仅当期间 read_pos 未被写者驱逐推进时回滚安全；否则该记录
+             * 已被覆盖，回滚会导致重复消费，放弃（此时数据本已丢失）。
+             * 理论误判：ring->size ≤ record_len 的极端配置下整圈回绕
+             * 可使条件恒真，重试读到坏数据会被 corrupted 检查兜住。
+             */
+            unsigned long flags2;
+            spin_lock_irqsave(&ring->lock, flags2);
+            if (ring->read_pos == (rpos + record_len) % ring->size)
+                ring->read_pos = rpos;
+            spin_unlock_irqrestore(&ring->lock, flags2);
+            pr_err_ratelimited(PREFIX "read copy_to_user failed\n");
             return copied_total > 0 ? (int)copied_total : -EFAULT;
         }
 

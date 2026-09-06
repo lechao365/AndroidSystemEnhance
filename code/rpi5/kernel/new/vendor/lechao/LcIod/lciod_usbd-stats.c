@@ -629,9 +629,19 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
 
                 vendor_lechao_usbd_update_current_rate_locked(rate_dev, bytes, elapsed_ns);
 
-                if (prev_rate > 0 && rate_dev->stats.current_rate < prev_rate)
+                /*
+                 * KRN-005：瞬时判定加 10% 幅度阈值。原实现任意幅度下降/
+                 * 上升即 degraded，而 USB 命令速率逐条波动（±30% 正常），
+                 * 条件几乎恒真——每命令都推送 RATE_DEGRADED 事件 + trace，
+                 * I/O 洪水时 WARN 级事件挤占 ring 驱逐正常记录。
+                 * 真实降级由滑动窗口判定（1s 窗口 + 2 倍阈值）兜底，
+                 * 瞬时判定仅作快速告警，10% 阈值过滤正常抖动。
+                 */
+                if (prev_rate > 0 &&
+                    rate_dev->stats.current_rate < prev_rate - prev_rate / 10)
                     degraded = true;
-                if (prev_latency > 0 && elapsed_ns > prev_latency)
+                if (prev_latency > 0 &&
+                    elapsed_ns > prev_latency + prev_latency / 10)
                     degraded = true;
             }
 

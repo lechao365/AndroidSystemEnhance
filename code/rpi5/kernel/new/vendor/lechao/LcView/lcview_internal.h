@@ -41,6 +41,13 @@
 #define LCVIEW_LEN_PREFIX_SIZE   4
 
 /*
+ * KRN-008：单次 write 的驱逐条数预算（见 lcview_ring_write）。
+ * 限制 spinlock 持有时间（256 条 ≈ 26µs 上限），超限返回 -ENOSPC
+ * 丢弃本次写入（该场景本就属于 overrun，计数递增可观测）。
+ */
+#define LCVIEW_EVICT_MAX_RECORDS 256
+
+/*
  * lcview_ring — 无锁单生产者/单消费者环形缓冲区
  *
  * 写者 (lcview_ring_write) 在 spin_lock 保护下写入，支持中断上下文。
