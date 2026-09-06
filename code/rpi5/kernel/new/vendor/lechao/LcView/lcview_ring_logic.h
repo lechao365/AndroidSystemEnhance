@@ -70,4 +70,16 @@ int ring_evict_one_core(uint8_t *buf, uint32_t size, uint32_t *read_pos,
                         uint32_t write_pos, uint32_t default_record_len,
                         uint32_t *out_len);
 
+/*
+ * ring_read_fit_check — 判定当前记录能否装入用户缓冲区剩余空间
+ *
+ * KRN-001：copied_total == 0 且记录放不下时返回 -1（调用方转 -EINVAL），
+ * 禁止以返回 0 伪装 EOF（poll 恒报 POLLIN 时消费者会忙轮询/误判关闭）。
+ *
+ * @return 0 可装入 / 1 放不下但已有已读数据（break 返回部分）/
+ *         -1 放不下且无数据（调用方返回 -EINVAL）
+ */
+int ring_read_fit_check(uint32_t copied_total, uint32_t record_len,
+                        uint32_t user_len);
+
 #endif /* LCVIEW_RING_LOGIC_H */
