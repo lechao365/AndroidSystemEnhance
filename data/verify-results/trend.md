@@ -102,3 +102,4 @@
 2026-09-06 09:20:25 manual-2609060920 skip build=skip board=skip acc=- git-works-push 日志锚定隔离修复（工具链，skip）
 2026-09-06 10:24:45 manual-2609061024 pass build=pass board=pass acc={"run_id":"lcv01-invalid-rotate","input_ LCV-01+07: invalid_records.log 轮转收口(无界逃逸
 2026-09-06 10:33:49 manual-2609061033 pass build=pass board=pass acc={"run_id":"lcv03-05","input_summary":"sv LCV-03/04/05: bad length 计数与重复落盘修复+NaN/I
+2026-09-06 10:39:04 manual-2609061038 pass build=pass board=pass acc={"run_id":"lcv06","input_summary":"svc:l LCV-06部分: parseBatch 接口 span 化消除 64KB 批次

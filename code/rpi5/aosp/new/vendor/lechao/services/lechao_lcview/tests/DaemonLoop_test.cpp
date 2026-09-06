@@ -106,7 +106,7 @@ protected:
 TEST_F(DaemonLoopTest, EmptyBatch_ZeroCounts) {
     SchemaParser sp = makeSchema();
     FileWriter writer(mCfg);
-    BatchParseResult r = parseBatch(sp, writer, {});
+    BatchParseResult r = parseBatch(sp, writer, nullptr, 0);
     EXPECT_EQ(r.validCnt, 0u);
     EXPECT_EQ(r.invalidCnt, 0u);
 }
@@ -114,7 +114,8 @@ TEST_F(DaemonLoopTest, EmptyBatch_ZeroCounts) {
 TEST_F(DaemonLoopTest, ValidRecord_WrittenAndCounted) {
     SchemaParser sp = makeSchema();
     FileWriter writer(mCfg);
-    BatchParseResult r = parseBatch(sp, writer, makeBatch(makeValidRecord()));
+    auto batch = makeBatch(makeValidRecord());
+    BatchParseResult r = parseBatch(sp, writer, batch.data(), batch.size());
     EXPECT_EQ(r.validCnt, 1u);
     EXPECT_EQ(r.invalidCnt, 0u);
     // 文件真实落盘
@@ -136,7 +137,7 @@ TEST_F(DaemonLoopTest, BadLength_BreaksAndWritesInvalid) {
     FileWriter writer(mCfg);
     // total_len 声明 100 但实际不足 → bad length
     std::vector<uint8_t> batch = {100, 0, 0, 0, 0xAA};
-    BatchParseResult r = parseBatch(sp, writer, batch);
+    BatchParseResult r = parseBatch(sp, writer, batch.data(), batch.size());
     EXPECT_EQ(r.validCnt, 0u);
     // LCV-03：坏长度截断也必须计数（心跳 invalid_records 可见），
     // 否则坏数据风暴下 parseBatch 静默丢数据
@@ -153,7 +154,8 @@ TEST_F(DaemonLoopTest, RecordTooSmall_WritesInvalid) {
     FileWriter writer(mCfg);
     // record 不足 hdr（16B）
     std::vector<uint8_t> rec(8, 0xAA);
-    BatchParseResult r = parseBatch(sp, writer, makeBatch(rec));
+    auto batch = makeBatch(rec);
+    BatchParseResult r = parseBatch(sp, writer, batch.data(), batch.size());
     EXPECT_EQ(r.validCnt, 0u);
     EXPECT_EQ(r.invalidCnt, 1u);
 }
@@ -163,7 +165,8 @@ TEST_F(DaemonLoopTest, ValidateFail_WritesInvalid) {
     FileWriter writer(mCfg);
     auto rec = makeValidRecord();
     reinterpret_cast<lcview_record_hdr*>(rec.data())->event_id = 999;
-    BatchParseResult r = parseBatch(sp, writer, makeBatch(rec));
+    auto batch = makeBatch(rec);
+    BatchParseResult r = parseBatch(sp, writer, batch.data(), batch.size());
     EXPECT_EQ(r.validCnt, 0u);
     EXPECT_EQ(r.invalidCnt, 1u);
 }
@@ -173,7 +176,7 @@ TEST_F(DaemonLoopTest, TrailingBytes_WritesInvalid) {
     FileWriter writer(mCfg);
     auto batch = makeBatch(makeValidRecord());
     batch.push_back(0xFF);  // 尾部 1B 残留
-    BatchParseResult r = parseBatch(sp, writer, batch);
+    BatchParseResult r = parseBatch(sp, writer, batch.data(), batch.size());
     EXPECT_EQ(r.validCnt, 1u);
     EXPECT_EQ(r.invalidCnt, 1u);  // trailing 计数
 }
@@ -190,7 +193,7 @@ TEST_F(DaemonLoopTest, MixedBatch_ValidAndInvalidCounts) {
     auto badBatch = makeBatch(bad);             // 1 invalid
     batch.insert(batch.end(), badBatch.begin(), badBatch.end());
     batch.push_back(0xFF);                      // trailing → 1 invalid
-    BatchParseResult r = parseBatch(sp, writer, batch);
+    BatchParseResult r = parseBatch(sp, writer, batch.data(), batch.size());
     EXPECT_EQ(r.validCnt, 1u);
     EXPECT_EQ(r.invalidCnt, 2u);  // validate fail + trailing
 }

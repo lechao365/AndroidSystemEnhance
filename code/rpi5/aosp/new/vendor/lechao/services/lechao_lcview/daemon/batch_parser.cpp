@@ -19,33 +19,32 @@ using namespace vendor::lechao::lcview;
 
 BatchParseResult vendor::lechao::lcview::parseBatch(
     SchemaParser& schema, FileWriter& writer,
-    const std::vector<uint8_t>& batch)
+    const uint8_t* data, size_t len)
 {
     BatchParseResult result;
     size_t offset = 0;
 
-    while (offset + 4 <= batch.size()) {
+    while (offset + 4 <= len) {
         // 读取本条记录的总长度（含自身 4 字节）
         uint32_t total_len;
-        memcpy(&total_len, batch.data() + offset, 4);
+        memcpy(&total_len, data + offset, 4);
 
         // 长度校验：最小长度和边界检查
-        if (total_len < 4 || offset + total_len > batch.size()) {
+        if (total_len < 4 || offset + total_len > len) {
             // LCV-03：坏长度截断后续解析，本批剩余字节全部不可信——
             // invalidCnt 必须计数（心跳 invalid_records 可见），否则坏数据
             // 风暴下 parseBatch 静默丢数据。writeInvalid 已覆盖 offset 到
             // 批尾的全部字节，直接 return 终止（不走循环后 trailing 分支，
             // 避免同段数据重复落盘/重复计数）
             result.invalidCnt++;
-            writer.writeInvalid(batch.data() + offset,
-                                batch.size() - offset, "bad length");
+            writer.writeInvalid(data + offset, len - offset, "bad length");
             ALOGE("lechao_lcview: parse: bad length at offset=%zu, total_len=%u, "
                   "drop %zu bytes to batch tail",
-                  offset, total_len, batch.size() - offset);
+                  offset, total_len, len - offset);
             return result;
         }
 
-        const uint8_t* recordStart = batch.data() + offset + 4;
+        const uint8_t* recordStart = data + offset + 4;
         size_t recordDataLen = total_len - 4;
 
         // 记录必须至少包含固定头的大小
@@ -90,11 +89,10 @@ BatchParseResult vendor::lechao::lcview::parseBatch(
 
     // 批次尾部残留（<4B 读不出长度前缀）：直读路径拼包 bug 现场必须
     // 落盘 invalid，禁止静默丢弃（CXX-004 故障可见性）
-    if (offset != batch.size()) {
-        writer.writeInvalid(batch.data() + offset,
-                            batch.size() - offset, "trailing bytes");
+    if (offset != len) {
+        writer.writeInvalid(data + offset, len - offset, "trailing bytes");
         ALOGE("lechao_lcview: parse: %zu trailing bytes at batch tail",
-              batch.size() - offset);
+              len - offset);
         result.invalidCnt++;
     }
     return result;

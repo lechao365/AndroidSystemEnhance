@@ -140,14 +140,15 @@ static void flushSegment(EpollDeviceReader& reader, SchemaParser& schema,
         std::chrono::steady_clock::now() - dataArrivedAt > kMaxBufferAge);
     if (shouldFlushBatch(offset, timedOut, ageExpired, bufSize)) {
         flushCount++;
-        std::vector<uint8_t> batch(buf, buf + offset);
-        BatchParseResult parsed = parseBatch(schema, writer, batch);
+        // LCV-06：指针+长度直传 parseBatch，不再构造 vector 中转
+        // （最大 64KB 拷贝/批）
+        BatchParseResult parsed = parseBatch(schema, writer, buf, offset);
         jsonlRecords += parsed.validCnt;
         // invalid 累计透传（方向 1）：wire 漂移等丢弃可见于心跳，
         // 防"采集链路死了 jsonl 归零而零值字段仍全 0"假绿
         invalidRecords += parsed.invalidCnt;
         ALOGI("lechao_lcview: batch parsed: %u valid, %u invalid, %zuB "
-              "(build=%s)", parsed.validCnt, parsed.invalidCnt, batch.size(),
+              "(build=%s)", parsed.validCnt, parsed.invalidCnt, offset,
               LCVIEW_BUILD_TAG);
         offset = 0;
         dataArrivedAt = std::chrono::steady_clock::time_point::max();
