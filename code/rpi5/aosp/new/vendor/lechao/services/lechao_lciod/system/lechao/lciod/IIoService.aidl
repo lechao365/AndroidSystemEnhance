@@ -48,6 +48,11 @@ interface IIoService {
     /*
      * 从内核事件缓冲区读取一条异步事件（带超时）
      * timeoutMs — 阻塞等待超时（毫秒），0 表示非阻塞
+     *             实现侧会钳位到 [0, 1000]（负值按 0，超限按 1000），
+     *             防止单次调用长期占用 binder 线程（LCD-002）
+     * 错误码约定（LCD-017）：ServiceSpecificError 携带负值 errno
+     *   （如 -ENODEV = -2 表示设备不存在），与 framework 惯例的正值
+     *   errno 相反，调用方判等时注意符号
      */
     IoEvent readIoEvent(int deviceMinor, int timeoutMs);
 }

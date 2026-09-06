@@ -106,3 +106,4 @@
 2026-09-06 10:49:16 manual-2609061049 pass build=pass board=pass acc={"run_id":"lcv-p3","input_summary":"svc: LCV P3 批: 注释契约修正+精确后缀匹配+首扫清理+计数器 u64+ioc
 2026-09-06 10:57:19 manual-2609061057 pass build=pass board=pass acc={"run_id":"lcd-002-003","input_summary": LCD-002/003/006: readEvent timeout 双层钳位+
 2026-09-06 11:06:13 manual-2609061106 pass build=pass board=pass acc={"run_id":"lcd-005-012","input_summary": LCD-005/007/012: daemon 去 oneshot(kill 自
+2026-09-06 11:12:06 manual-2609061111 pass build=pass board=pass acc={"run_id":"lcd-p3","input_summary":"svc: LCD P3 批: readEvent 惰性 refresh 去 glob 洪水

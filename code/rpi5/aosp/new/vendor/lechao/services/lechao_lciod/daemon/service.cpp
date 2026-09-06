@@ -54,7 +54,8 @@ static const int kMaxReadEventTimeoutMs = 1000;
 int64_t ComputeAverageRate(uint64_t readBytes, uint64_t writeBytes,
                            uint64_t readNs, uint64_t writeNs) {
     // 中间量用 __uint128_t：total/totalNs 累计约 17GiB 时 total*1e9 超出
-    // uint64 上限回绕致速率失真，128 位中间量消除溢出（CXX-001 数值正确性）
+    // uint64 上限回绕致速率失真，128 位中间量消除溢出（CXX-002 边界防御：
+    // 溢出/回绕属资源生命周期与边界类，字节序才是 CXX-001）
     __uint128_t total = static_cast<__uint128_t>(readBytes) + writeBytes;
     __uint128_t totalNs = static_cast<__uint128_t>(readNs) + writeNs;
     if (totalNs > 0)

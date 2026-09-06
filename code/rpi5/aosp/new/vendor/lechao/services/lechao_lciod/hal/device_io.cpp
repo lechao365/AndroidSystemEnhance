@@ -17,9 +17,11 @@
 #include <sys/ioctl.h>
 #include <android-base/logging.h>
 #include "lechao_log.h"
+#include "minor_utils.h"
 
-/* 内核驱动创建的设备节点路径前缀 */
-#define DEV_PREFIX "/dev/vendor_lechao_usbd"
+/* 内核驱动创建的设备节点路径前缀（LCD-014：统一引用 minor_utils.h
+ * 的 kUsbdDevPrefix，消除与 glob 模式/解析前缀的双份定义漂移风险） */
+#define DEV_PREFIX lechao::lciod::kUsbdDevPrefix
 
 /*
  * list_devices — 使用 glob(3) 枚举所有匹配的设备节点
@@ -53,8 +55,10 @@ std::vector<std::string> list_devices() {
 /*
  * open_device — 带重试的设备节点打开
  * @path:      设备节点路径
- * @max_retries: 最大重试次数（<1 表示不重试，立即返回）
- * @delay_ms:  每次重试间隔（毫秒）
+ * @max_retries: 最大重试次数（LCD-013：<=0 一律取默认 3 次，与
+ *               device_io.h "传 0 则使用默认值" 注释对齐，不存在
+ *               "不重试" 语义）
+ * @delay_ms:  每次重试间隔（<=0 取默认 50ms）
  *
  * 返回: >= 0 为有效 fd，-1 表示全部重试失败（errno 保留最后一次错误）
  */
@@ -70,8 +74,8 @@ int open_device(const char *path, int max_retries, int delay_ms) {
         if (i + 1 < max_retries && delay_ms > 0)
             usleep(delay_ms * 1000);
     }
-    LOG(ERROR) << "Cannot open " << path << " after " << max_retries
-               << " retries: " << strerror(errno);
+    LC_LOGE("Cannot open " << path << " after " << max_retries
+               << " retries: " << strerror(errno));
     return fd;
 }
 
@@ -154,9 +158,15 @@ int clamp_read_timeout_ms(int timeout_ms) {
  */
 int read_event(int fd, struct vendor_lechao_usbd_event *event, int timeout_ms) {
     struct pollfd pfd = { .fd = fd, .events = POLLIN };
-    int ret = poll(&pfd, 1, timeout_ms);
+    /* LCD-016：poll EINTR 重试而非报错——信号打断是瞬时噪声，原实现
+     * 直接 -1 会被上层白名单外判为真实错误层层上抛，monitor 50ms 轮询
+     * 在任何信号到达时误报一条 readEvent failed */
+    int ret;
+    do {
+        ret = poll(&pfd, 1, timeout_ms);
+    } while (ret < 0 && errno == EINTR);
     if (ret < 0) {
-        if (errno != EINTR) LC_LOGW("read_event: poll failed: " << strerror(errno));
+        LC_LOGW("read_event: poll failed: " << strerror(errno));
         return -1;
     }
     if (ret == 0) {
@@ -183,8 +193,8 @@ int read_event(int fd, struct vendor_lechao_usbd_event *event, int timeout_ms) {
         saved_errno = errno;
 
     if (count > 1)
-        LOG(WARNING) << "read_event: drained " << count << " events from kernel, "
-                     << (count - 1) << " dropped";
+        LC_LOGW("read_event: drained " << count << " events from kernel, "
+                     << (count - 1) << " dropped");
     if (count > 0) return 0;
 
     errno = saved_errno ? saved_errno : EAGAIN;
