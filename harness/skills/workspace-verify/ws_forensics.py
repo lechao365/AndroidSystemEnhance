@@ -261,6 +261,29 @@ def collect(ep=None, out_dir=None, stdout_file=None, stderr_file=None,
     return manifest, run_dir
 
 
+def summarize_for_receipt(manifest_path) -> str:
+    """为 verify 收据生成取证轻量摘要（一两行，供 ws_report --forensics-file 衔接）。
+
+    forensics_dir 取 manifest 所在 run 目录（本机路径），truncated/skipped
+    计数来自 manifest items（截断/跳过如实可见，不静默）；manifest 缺失/
+    非法返回空串（取证摘要非验收证据，不阻断收据落盘）。
+    """
+    try:
+        data = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    items = [i for i in (data.get("items") or []) if isinstance(i, dict)]
+    truncated = sum(1 for i in items if i.get("truncated"))
+    skipped = sum(1 for i in items if i.get("skipped"))
+    run_dir = Path(manifest_path).resolve().parent
+    return (f"## forensics\n"
+            f"- forensics_dir: {run_dir}\n"
+            f"- truncated={truncated} | skipped={skipped} | items={len(items)}"
+            f"（详见 {Path(manifest_path).name}）")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="失败时有界取证（只读）")
     ap.add_argument("--endpoint", default=None,

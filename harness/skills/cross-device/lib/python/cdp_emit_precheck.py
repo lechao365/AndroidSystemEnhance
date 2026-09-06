@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cdp_issue import read_index  # noqa: E402
 from cdp_paths import project_root  # noqa: E402
 from cdp_receipt import latest_receipt_with_path  # noqa: E402
+from harness.lib.role_guard import require_role  # noqa: E402
 
 # 中文 type 前缀词表与正则：与 .githooks/commit-msg、
 # harness/skills/git-works-push/git_works_push.sh 内校验同一（三处须成对修改）
@@ -154,6 +155,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="emit precheck")
     ap.add_argument("--no-pull", action="store_true", help="干跑：不执行 git pull")
     args = ap.parse_args(argv)
+    # 角色机器化门禁：emit precheck 为 emit 专属命令（产批前置），参数
+    # 解析后、副作用（git pull / precheck）发生前拦截非 emit 设备
+    require_role("emit")
     ok, reason, detail = precheck(do_pull=not args.no_pull)
     out = {"ok": ok, "reason": reason, "detail": detail[:100]}
     # 批次六 P2-25：ok 时输出 base（origin/dev HEAD 前 12 位），emit 产批

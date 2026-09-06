@@ -1,0 +1,8 @@
+# harness 运行依赖清单（harness/lib/selfcheck.py 的 check_python_env 逐项 import 探测）
+# 安装：python3 -m pip install -r requirements.txt
+
+# PyYAML：harness 配置治理读写（check_config / baseline-status / verify-cases / doc-sync-mapping 等 yaml）
+PyYAML>=6.0
+
+# pytest：harness 测试运行器（harness/lib/tests 及各 skill tests 的执行入口）
+pytest>=7.0

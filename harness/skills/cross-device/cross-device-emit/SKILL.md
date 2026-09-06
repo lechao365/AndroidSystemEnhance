@@ -50,10 +50,14 @@ stages:
    验收 case 按两级策略选（B6）：常态回归取快速回归组 5 case（lcview-liveness,
    lcview-pipeline, lcview-trigger, lciod-liveness, lciod-trigger）；发布全量批取
    全部；专项修复按需追加——见 verify-cases.yaml 顶部注释与 cdp-contract
-4. selfcheck：python3 harness/skills/cross-device/lib/python/cdp_parse.py
-   --role emit <批次临时文件>（必须 exit 0）；另须确认批次正文不含
-   单双引号字符（' 与 "），如有则改述为描述性说法
-5. 输出：纯文本批次，无包裹标记；产一批等一批，不并行产下一条
+ 4. selfcheck：python3 harness/skills/cross-device/lib/python/cdp_parse.py
+    --role emit <批次临时文件>（必须 exit 0）；另须确认批次正文不含
+    单双引号字符（' 与 "），如有则改述为描述性说法
+ 5. 产批收尾：python3 harness/skills/cross-device/lib/python/cdp_parse.py
+    --gen-checksum <批次临时文件>——插入/刷新批次头部 checksum 行（sha256
+    前 16 位）后整批输出，交付该带 checksum 版本；apply 侧对存在 checksum
+    行的批次强校验（CHECKSUM_MISMATCH 拒），防人工拷贝传输静默截断/损坏
+ 6. 输出：纯文本批次，无包裹标记；产一批等一批，不并行产下一条
 ## 约束（禁止）
 - emit 侧禁止 git commit/push、禁止修改 code/（流程纪律，无技术强制，违者评审回退）
 - 批次正文禁用单双引号字符（' 与 "）：apply 侧写临时文件的方式不受 emit 控制，

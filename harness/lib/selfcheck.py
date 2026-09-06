@@ -13,12 +13,15 @@ subprocess 不经管道直取 returncode，如实透出两工具结果。
 也不静默通过。refs 结论行同理只取 stdout 末行，stderr 仅附注不参与判定。
 
 输出单行（| 连接，供 ws_report --selfcheck 落盘与门禁判定）：
-    pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n> | refs_rc=<n> | <refs 结论行> | config_rc=<n> | <config 结论行> | contract_rc=<n> | <contract 结论行>
+    pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n> | refs_rc=<n> | <refs 结论行> | config_rc=<n> | <config 结论行> | contract_rc=<n> | <contract 结论行> | pyenv_rc=<n> | <pyenv 汇总行>
 skipped=<n> 仅在 pytest_rc=0 且摘要无 skipped 时补 0。config_rc/contract_rc
-为 check_config.py 两模式（配置治理/契约检查，方向 4 接入）；ws_report 按
+为 check_config.py 两模式（配置治理/契约检查，方向 4 接入）；pyenv_rc 为
+check_python_env 探测结果（Python 版本 + requirements.txt 依赖，环境破损
+时后续工具结论均不可信）；ws_report 按
 全部 *_rc 键判红（任一非零拒写收据）。退出码恒 0：拒写与否由 ws_report
 按 rc 判定，本脚本只负责如实采集（emit 侧可独立自测）。
 """
+import importlib
 import os
 import re
 import subprocess
@@ -183,6 +186,61 @@ def last_stdout_line(stdout):
     return lines[-1] if lines else ""
 
 
+# requirements.txt 包名 → import 名归一（pip 名与 import 名不一致的已知项）
+_REQ_IMPORT_ALIASES = {"pyyaml": "yaml"}
+
+
+def _parse_requirement_names(req_path):
+    """解析 requirements.txt，产出 (spec, 包名) 列表（# 后视为注释）。
+
+    spec 为去注释后的整行（如 "PyYAML>=6.0"，供汇总行点名）；包名取行首
+    合法包名字符（版本约束符号前缀）。无法解析出包名的行跳过。
+    """
+    reqs = []
+    for raw in req_path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)", line)
+        if m:
+            reqs.append((line, m.group(1)))
+    return reqs
+
+
+def check_python_env(req_path=None):
+    """检查 Python 运行环境：解释器版本（>=3.8）与 requirements.txt 依赖可用性。
+
+    读仓库根 requirements.txt（req_path 可覆盖，供测试注入临时清单）逐项
+    import 探测（包名按 _REQ_IMPORT_ALIASES 归一，如 PyYAML→yaml）。
+    任何失败不抛异常，返回 (ok, summary)：ok 为总判定（版本达标且全部
+    依赖可导入），summary 为汇总行（python 版本结论 + 各依赖 OK/MISSING），
+    供 main 拼接收据；环境破损时 pyenv_rc 非零交由 ws_report 判红。
+    """
+    vi = sys.version_info
+    ver = f"{vi.major}.{vi.minor}.{vi.micro}"
+    ver_ok = vi >= (3, 8)
+    ver_text = f"python={ver} " + ("OK(>=3.8)" if ver_ok else "TOO_OLD(<3.8)")
+    path = Path(req_path) if req_path else ROOT / "requirements.txt"
+    try:
+        reqs = _parse_requirement_names(path)
+    except OSError as e:
+        return False, f"{ver_text}; requirements.txt 读取失败: {e}"
+    if not reqs:
+        return False, f"{ver_text}; requirements.txt 无有效依赖项"
+    ok = ver_ok
+    parts = []
+    for spec, pkg in reqs:
+        import_name = _REQ_IMPORT_ALIASES.get(
+            pkg.lower(), pkg.lower().replace("-", "_"))
+        try:
+            importlib.import_module(import_name)
+            parts.append(f"{spec} OK")
+        except Exception as e:  # 依赖探测：任何导入失败均记 MISSING，不抛出
+            ok = False
+            parts.append(f"{spec} MISSING({type(e).__name__})")
+    return ok, f"{ver_text}; deps: {'; '.join(parts)}"
+
+
 # cdp_timing 模块引用（_import_cdp_timing 成功后置位；打点诊断数据，
 # 导入失败降级不打点但不阻断自检——留痕防 KI-20260902-001 同类漂移不可见）
 cdp_timing = None
@@ -321,6 +379,13 @@ def main():
     parts.append(f"contract_rc={ctr_rc}")
     if ctr_last:
         parts.append(ctr_last)
+    # Python 运行环境探测（版本 + requirements.txt 依赖）：环境破损（缺
+    # yaml 等）时后续工具结论均不可信，pyenv_rc 非零交 ws_report 全
+    # *_rc 扫描判红拒写
+    env_ok, env_summary = check_python_env()
+    parts.append(f"pyenv_rc={0 if env_ok else 1}")
+    if env_summary:
+        parts.append(env_summary)
     print(" | ".join(parts))
     _mark_selfcheck(dur_s=time.time() - _t0)
     return 0

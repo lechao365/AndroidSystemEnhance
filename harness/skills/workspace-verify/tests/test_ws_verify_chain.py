@@ -211,6 +211,50 @@ class TestChain(unittest.TestCase):
         self.assertEqual(json.loads(out.read_text(encoding="utf-8")),
                          data)
 
+    def test_chain_ensures_timings_wired_to_report(self):
+        # 链式耗时接线（修 elapsed_s=0/timings 空心）：独立拉起（未经 apply
+        # 会话 cdp_timing start）时链须补建打点文件、verify_start/verify_end
+        # mark 落盘、--timings-file 显式下传 report，且子脚本自发 mark 定位
+        # 本批（CDP_BATCH_ID 注入）
+        from cdp_paths import log_apply_dir
+        bid = wc.batch_id_from_text(self.batch.read_text(encoding="utf-8"))
+        tpath = log_apply_dir() / f"timings-{bid}.json"
+        self.assertFalse(tpath.exists(), "前置：独立拉起时无打点文件")
+        ctor, _ = _fake_popen(0)
+        calls = []
+        ctor.side_effect = lambda argv, **kw: (
+            calls.append(argv),
+            mock.Mock(wait=mock.Mock(return_value=0)))[1]
+        with mock.patch.object(wc.subprocess, "Popen", ctor), \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(batch_file=str(self.batch),
+                                      use_locks=False)
+        self.assertEqual(rc, 0)
+        # 1) 打点文件已补建，marks 落盘（verify_start/verify_end 可读）
+        data = json.loads(tpath.read_text(encoding="utf-8"))
+        names = [m["name"] for m in data.get("marks") or []]
+        self.assertIn("verify_start", names)
+        self.assertIn("verify_end", names)
+        self.assertIn("start_wall", data)
+        # 2) report argv 显式接线 --timings-file（指向补建文件）
+        rep = next(" ".join(c) for c in calls if "ws_report.py" in c[1])
+        self.assertIn("--timings-file", rep)
+        self.assertIn(str(tpath), rep)
+        # 3) 子脚本自发 mark 定位本批：CDP_BATCH_ID 注入
+        self.assertEqual(os.environ.get("CDP_BATCH_ID"), bid)
+        # 4) 模拟链路真实耗时（起跑时刻回拨 5s）→ ws_report 解析
+        #    elapsed_s > 0 且 timings 非空（segments 含链内段）
+        data["start_wall"] -= 5.0
+        tpath.write_text(json.dumps(data), encoding="utf-8")
+        import ws_report
+        tj, el = ws_report._resolve_timings(str(tpath), bid, "board")
+        self.assertTrue(tj, "timings 须非空")
+        self.assertIsNotNone(el)
+        self.assertGreaterEqual(el, 5, "elapsed_s 须反映链路真实总耗时")
+        self.assertIn('"verify_start"', tj)
+
     def test_lock_held_returns_3_no_run_json(self):
         # 编排锁被占用：exit 3，不执行任何步骤，运行态不落盘
         # （预跑线程仍会启动但被 mock——LockHeld 提前返回不等它收割）

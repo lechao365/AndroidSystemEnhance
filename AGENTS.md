@@ -20,8 +20,10 @@
 | `/cross-device-apply` | 解析 CDP 批次编辑 code/dev，-sv 拉起验证后推送（仅 apply 设备） |
 | `/workspace-verify` | code→workspace 同步、增量编译、上板验证并写 data/verify-results 收据（仅 apply 设备） |
 | `/git-works-push` | dev 分支 commit + push（收据随批入库，仅 apply 设备） |
+| `/loop-engineering` | 验证收敛会话管理：patience/total 双层计数、失败指纹归因、修复重试与退出协议（apply 拉起模式 A / 本地直起模式 B） |
 | `/publish-main-base` | 一键基线发布：harness 自检 → loop 上板验证 → 修复收敛 → 文档同步 → candidate 登记 → promote 到 main（无法修复则禁止 promote，仅 apply 设备） |
 | `/revert-modify-from-main-base` | dev 持续 NG 人工回退到 main 基线并恢复设备（仅 apply 设备） |
+| `/opencode-server` | 一键拉起 OpenCode WebUI（WSL2 + Windows Tailscale），为跨设备 emit/apply 协作提供访问入口 |
 
 harness 能力全部内聚在 `harness/` 目录（不依赖 LcHarness），使用说明见 [harness/README.md](harness/README.md)。
 
@@ -31,7 +33,11 @@ harness 能力全部内聚在 `harness/` 目录（不依赖 LcHarness），使�
 脚本路径引用一律通过 `harness/lib/paths.py` 读取，禁止硬编码工程内路径。
 
 ## 并行策略
-优先使用子 agent 并行处理独立任务，提升效率并减少主会话上下文污染。
+为防止超长任务污染主会话、频繁压缩上下文：
+- 主会话仅用于**信息收集与任务编排**，不承载复杂调查与修改。
+- 复杂的调查任务和修改任务必须放到**子 agent** 中执行。
+- 条件允许时尽可能**多子 agent 并行**，提高任务执行效率。
+- 优先使用子 agent 并行处理独立任务，提升效率并减少主会话上下文污染。
 
 ## PlantUML 画图约束
 所有 PlantUML 图表编写前，必须参考 [harness/rules/plantuml.md](harness/rules/plantuml.md) 中的规则，防止渲染失败（`DOC-002`）。
@@ -69,6 +75,6 @@ lcview / lciod 模块改动后必须通过单元测试编译验证 **且设备�
 `/sync-code-to-workspace` 的恢复真相源为 code 仓 dev/main HEAD（`SRC-004` 已放宽，不再强制 promoted baseline；`--auto` 日常同步不受限）。仅当**选择以某个 promoted baseline 为参考**核对证据时，先查 [harness/config/baseline-status.yaml](harness/config/baseline-status.yaml)：
 - 新流程（cross-device）：candidate 由 `/publish-main-base --prepare` 依据最新 verify 收据自动登记（登记门禁：收据 result 属 pass 或 skip 且 HEAD^ 等于 verified_commit），人工评审通过后 promote 到 main
 - 确认目标 baseline 状态为 `promoted`（证据完整）
-- 检查 `build_result` / `package_result` / `board_verify`：PASS/SKIP 均合法，FAIL 须人工复核
+- 检查 `build_result` / `package_result` / `board_verify`：PASS/SKIP 均合法，FAIL 须人工复核；UNKNOWN 视同 FAIL 处理——须人工复核并补齐证据后方可引用，历史遗留 UNKNOWN 的 promoted 基线在引用前必须人工复核
 - 确认 `approved_by` 和 `approved_at` 已填
 - 未完成证据化晋升的 baseline 不得宣称为基线

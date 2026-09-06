@@ -100,9 +100,31 @@ check_commit_scope() {
   CDP_LIB="$SCRIPT_DIR/../cross-device/lib/python"
   latest_scope=$(PYTHONPATH="$CDP_LIB" python3 harness/lib/commit_scope.py --latest-scope 2>/dev/null) || latest_scope=""
   [ -n "$latest_scope" ] || {
+    # 无收据/旧收据缺 commit_scope：按提交面内容分流（门禁旁路封堵）——
+    # 暂存面含 code/** 业务源码 → 拒（RECEIPT_MISSING：发布内容与验证
+    # 内容绑定不得无收据旁路，须先经 /workspace-verify 产收据）；仅
+    # docs/harness/*.md 等非业务路径 → 维持 warn 放行（文档/工具改动
+    # 无需上板收据）；紧急人工场景经 LGW_ALLOW_NO_RECEIPT=1 逃生门降级
+    # warn（醒目警告留痕，事后须补收据）。命令替换判非空而非管道 -q
+    # （grep -q 早退 + pipefail 会把 SIGPIPE 误判为比对不命中）
+    if [ "${LGW_ALLOW_NO_RECEIPT:-0}" = "1" ]; then
+      err "warn: 逃生门 LGW_ALLOW_NO_RECEIPT=1 生效——无收据跳过提交面比对（紧急人工场景放行，请事后补 /workspace-verify 收据）"
+      return 0
+    fi
+    if [ -n "$(printf '%s\n' "$status_out" | grep -E '^[AMD]+[[:space:]]+code/')" ]; then
+      err "error: RECEIPT_MISSING 无收据 commit_scope 且提交面含 code/ 业务源码（发布内容与验证内容绑定被旁路），请先经 /workspace-verify 产收据后再推送；紧急人工场景可设 LGW_ALLOW_NO_RECEIPT=1"
+      exit 1
+    fi
     echo "warn: 无收据 commit_scope（未走 ws_report 或旧收据），跳过提交面比对" >&2
     return 0
   }
+  # 纯非业务提交面（无 code/ 项）→ 对账降级 warn：发布内容与验证内容的绑定
+  # 语义只约束业务内容；业务收据已随上批入库推送后，后续 harness/docs-only
+  # 工具性提交不再被旧业务收据卡住。提交面含 code/ 时仍强对账（业务整面一致）。
+  if [ -z "$(printf '%s\n' "$status_out" | grep -E '^[AMD]+[[:space:]]+code/')" ]; then
+    echo "warn: 提交面不含 code/ 业务文件，跳过与收据 commit_scope 比对（非业务改动无需上板收据）" >&2
+    return 0
+  fi
   diffs=$(printf '%s\n' "$status_out" | python3 harness/lib/commit_scope.py --check "$latest_scope") || true
   if [ -n "$diffs" ]; then
     err "error: 实际提交面与最新收据 commit_scope 不一致（发布内容与验证内容绑定），请核对或重写收据："
@@ -146,9 +168,10 @@ if [ "$MODE" = "normal" ]; then
   fi
   # 提交面收窄（防 git add -A 误吞运行态/本地产物）：已跟踪修改全收（add -u）；
   # 未跟踪仅白名单命中项随批入库，名单外拒绝并列出（请删除、gitignore 或评审后扩名单）。
-  # 白名单 = 源码/证据目录前缀（case glob 跨 /，前缀锁定目录）：
+  # 白名单 = 源码/证据目录前缀（case glob 跨 /，前缀锁定目录）+ 根目录精确名：
   # 运行态（harness/log 等）已被 gitignore 挡在 ls-files 之外，不会到这里的判定；
-  # 根目录散文件（临时 msg、tar 包等）不在名单，仍拒绝
+  # 根目录散文件（临时 msg、tar 包等）不在名单，仍拒绝（requirements.txt 为
+  # 持久依赖声明，与 .github/* 同类精确放行）
   git add -u || { err "error: git add（已跟踪改动）失败"; exit 1; }
   UNTRACKED_ALLOW=(
     'data/verify-results/*'
@@ -159,6 +182,7 @@ if [ "$MODE" = "normal" ]; then
     'docs/*'
     '.github/*'
     '.githooks/*'
+    'requirements.txt'
   )
   REJECT=()
   while IFS= read -r f; do

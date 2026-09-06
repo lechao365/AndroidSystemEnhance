@@ -5,6 +5,8 @@
 ## 格式
 
     -s/-sv base:<12hex>
+    checksum: <16hex>    （可选元数据行，须紧跟首行；emit 产批经
+                         cdp_parse.py --gen-checksum 生成）
     意图: <这一轮要达成什么>
     验收: <判据>          (-s 必须为「无」；-sv 必须非空且不得为「无」)
     方向: <实施方向/约束>
@@ -15,17 +17,18 @@
 |---|---|
 | 模式 | `-s` 仅代码改动无上板验证；`-sv` 需上板验证 |
 | base | 12 位 hex，= emit 产批时 origin/dev HEAD 前 12 位；apply 以 `--expect-base $(git rev-parse --short=12 HEAD)` 比对，不匹配整批拒绝（exit 18） |
+| checksum | 头部元数据行（紧跟首行），值 = 批次正文（首行与 checksum 行以下全部行，规范化后）sha256 前 16 位；emit 产批经 `--gen-checksum` 生成，apply 侧解析存在即校验，不符整批拒绝（exit 1，双角色 blocking，防传输篡改/损坏）；无 checksum 行的旧批次 warn 兼容放行。他处出现 checksum 行按未知行报 11 |
 | 三标签 | 必填各占一段，且不得重复（重复标签报 11 结构错误，emit/apply 均 blocking）；标签顺序不强制 |
-| 预算 | 总字符 50~500（含首行） |
+| 预算 | 总字符 50~500（含首行；checksum 行为机器元数据不计入，防 500 上限被挤占） |
 | 引号禁令 | 批次正文禁用单双引号字符（' 与 "，emit 角色校验，违规 exit 19）——apply 侧传输层会展开吞字致批次结构损坏；改用中文标点（「」、——）或去引号 |
 | batch_id | 规范化文本（剥 BOM/strip/去空行/LF，逐行删净行内空白）sha256 前 12 位 |
 | 验收语法 | `-sv` 验收必须为 `case:<id>[,<id>...]`（id 限小写字母数字与连字符，多个用逗号分隔，逐个查 verify-cases.yaml cases 段，任一未知判死）或 `manual:<自由文本>`（**仅 manual 模式保留自由文本**）；用例 id 在 verify-cases.yaml 集中维护，批次内不再书写 svc/log/prop/file 等验收表达式。**用例两级策略（B6）**：`-sv` 常态回归批验收 case 默认取快速回归组（lcview-liveness, lcview-pipeline, lcview-trigger, lciod-liveness, lciod-trigger）；publish-main-base 前的全量验收批取全部 case；批次方向涉及特定 case 的专项修复按需追加——选择依据见 verify-cases.yaml 顶部注释 |
 
 ## 退出码
 
-0 通过 / 3 参数错误·文件不可读或非 UTF-8 / 11 结构错误（含未知行）/ 12 空批 / 14 三标签缺失 /
+0 通过 / 1 checksum 不符（篡改/损坏，双角色 blocking）/ 3 参数错误·文件不可读或非 UTF-8 / 11 结构错误（含未知行）/ 12 空批 / 14 三标签缺失 /
 15 base 非法 / 16 预算超限 / 17 验收规则违规 / 18 base 不匹配 / 19 引号违规（仅 emit）
-（emit 全 blocking；apply 仅对 17 降级 WARN，16/18 双角色 blocking，19 仅 emit 校验）
+（emit 全 blocking；apply 仅对 17 降级 WARN，16/1/18 双角色 blocking，19 仅 emit 校验）
 
 ## 收据字段：timings（链路耗时打点）
 

@@ -533,6 +533,21 @@ def _sanitize(text: str) -> str:
     return text
 
 
+def _forensics_summary_lines(manifest_path):
+    """取证 manifest → 收据正文轻量摘要（一两行）。
+
+    委托 ws_forensics.summarize_for_receipt（manifest 结构知识收敛在
+    forensics 模块，改动 4 衔接处）；manifest 缺失/非法返回空串并 warn
+    （取证摘要非验收证据，仅诊断增强，与 timings 降级口径一致不阻断）。
+    """
+    import ws_forensics
+    out = ws_forensics.summarize_for_receipt(manifest_path)
+    if not out:
+        print(f"warn: --forensics-file 摘要生成失败（不入正文）: {manifest_path}",
+              file=sys.stderr)
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="verify 收据落盘")
     ap.add_argument("--batch-file", help="CDP 批次文件（模式 A）")
@@ -575,6 +590,10 @@ def main(argv=None):
     ap.add_argument("--timings-file", default="",
                     help="链路耗时打点文件路径（cdp_timing.py finish 产物；写入收据 "
                          "timings 字段供 emit 定位耗时瓶颈；缺失/非法仅 warn 不阻断）")
+    ap.add_argument("--forensics-file", default="",
+                    help="取证 manifest JSON 路径（ws_forensics 产物；触发时在收据"
+                         "正文追加 forensics_dir 与 truncated/skipped 计数轻量摘要；"
+                         "缺失/非法仅 warn 不阻断）")
     ap.add_argument("--body", help="正文文件路径（CDP 原文/失败现场），经脱敏写入")
     args = ap.parse_args(argv)
 
@@ -765,6 +784,14 @@ def main(argv=None):
     body = ""
     if args.body and Path(args.body).is_file():
         body = _sanitize(Path(args.body).read_text(encoding="utf-8"))
+
+    # forensics 摘要附入（收据审计链增强改动 4）：取证触发（manifest 在场）
+    # 时正文追加轻量摘要（forensics_dir + truncated/skipped 计数），未触发
+    # 不加；摘要路径为本机取证目录，刻意在脱敏之后追加（保持原始可追溯）
+    if args.forensics_file:
+        summ = _forensics_summary_lines(args.forensics_file)
+        if summ:
+            body = f"{body}\n\n{summ}" if body else summ
 
     # selfcheck 单行化（header 逐行 key-value，多行正文信息须并入一行才可见）：
     # "531 passed in 27.9s | skipped=0 | OK: ..."，保证 skipped 计数随收据显式落地

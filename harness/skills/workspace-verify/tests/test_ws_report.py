@@ -688,6 +688,77 @@ class TestWsReport(unittest.TestCase):
         content = details[0].read_text(encoding="utf-8")
         self.assertIn("- timings: ", content)
 
+    # ── 收据审计链增强（改动 4）：forensics 摘要附入收据正文 ─────────────
+    def _write_forensics_manifest(self, items):
+        """构造取证 manifest（与 ws_forensics.collect 产物同构）。"""
+        d = Path(self._tmp.name) / "run-forensics"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "manifest.json").write_text(json.dumps({
+            "run_id": "fr1", "endpoint": "ep", "items": items,
+        }), encoding="utf-8")
+        return str(d / "manifest.json")
+
+    def test_forensics_summary_appended_to_body(self):
+        # --forensics-file 在场（取证已触发）：收据正文追加轻量摘要
+        # （forensics_dir + truncated/skipped 计数），现场正文保留
+        mf = self._write_forensics_manifest([
+            {"name": "02-logcat-crash.txt", "truncated": True},
+            {"name": "03-getprop.txt", "skipped": "total_budget"},
+            {"name": "04-df.txt", "rc": 0, "bytes": 10},
+        ])
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\nadb 失败\n")
+        with redirect_stdout(io.StringIO()):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--forensics-file", mf])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("## forensics", content)
+        self.assertIn("forensics_dir:", content)
+        self.assertIn("truncated=1", content)
+        self.assertIn("skipped=1", content)
+        self.assertIn("adb 失败", content, "原现场正文须保留")
+
+    def test_no_forensics_file_no_summary_section(self):
+        # 未传 --forensics-file（取证未触发）：正文不出现 forensics 摘要段
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\nadb 失败\n")
+        with redirect_stdout(io.StringIO()):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        # 用摘要段标记判定（仓内文件名可能天然含 forensics 字样，不能全文匹配）
+        self.assertNotIn("## forensics", content)
+        self.assertNotIn("forensics_dir:", content)
+
+    def test_forensics_file_invalid_warns_not_blocks(self):
+        # --forensics-file 非法/缺失：warn 降级不阻断（摘要非验收证据，
+        # 与 timings 降级口径一致），收据仍落盘且正文无摘要段
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()):
+            with contextlib.redirect_stderr(err):
+                rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                     "--result", "skip", "--build", "skip",
+                                     "--board", "skip", "--summary", "s",
+                                     "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                     "--forensics-file",
+                                     "/nonexistent/manifest.json"])
+        self.assertEqual(rc, 0)
+        self.assertIn("warn", err.getvalue())
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        self.assertNotIn("## forensics", content)
+
     # ── 方向 2/3：未传 --timings-file 自动探测 + elapsed 推导 ────────────
     def _write_probe_timings(self, batch_path, payload):
         """在 log_apply_dir()（cdp_paths 绝对路径，认 CDP_PROJECT_ROOT）下

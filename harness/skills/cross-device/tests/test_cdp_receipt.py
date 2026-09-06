@@ -1,6 +1,8 @@
 import contextlib
 import io
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -33,6 +35,10 @@ class TestReceipt(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
         self._dir = cdp_paths.data_verify_results_dir()
+        # 自动采集缓存按用例隔离（实现缺失时 no-op），防用例间/跨文件串值
+        getattr(cdp_receipt, "_AUTOFILL_CACHE", {}).clear()
+        self.addCleanup(
+            lambda: getattr(cdp_receipt, "_AUTOFILL_CACHE", {}).clear())
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -327,14 +333,19 @@ class TestReceipt(unittest.TestCase):
 
     def test_append_trend_truncates_to_keep(self):
         """trend 超过 _TREND_KEEP 行时截断保留最新（原子写语义不变）。"""
-        keep = cdp_receipt._TREND_KEEP
-        for i in range(keep + 5):
-            cdp_receipt.append_trend(
-                f"2026-08-23 10:0{i % 60}:00", f"batch{i:012d}", "pass",
-                "build=pass x", f"summary{i}")
+        # 保留策略扩容 200 → 1000（审计链趋势窗口拉长）；真实规模下单测
+        # 逐行追写 1005 次会撞 slow_guard 3s 墙钟，截断行为以小配额等价
+        # 验证 + 常量断言组合覆盖
+        self.assertEqual(cdp_receipt._TREND_KEEP, 1000,
+                         "trend 保留策略应为 1000 行")
+        with mock.patch.object(cdp_receipt, "_TREND_KEEP", 12):
+            for i in range(17):
+                cdp_receipt.append_trend(
+                    f"2026-08-23 10:0{i % 60}:00", f"batch{i:012d}", "pass",
+                    "build=pass x", f"summary{i}")
         lines = (self._dir / "trend.md").read_text(encoding="utf-8").splitlines()
-        self.assertEqual(len(lines), keep)
-        self.assertIn(f"batch{keep + 4:012d}", lines[-1], "应保留最新一行")
+        self.assertEqual(len(lines), 12)
+        self.assertIn(f"batch{16:012d}", lines[-1], "应保留最新一行")
 
     def test_invalid_int_field_reported(self):
         # 方向 1：非法整数不再静默回落默认值，记入 parse_errors
@@ -489,6 +500,77 @@ class TestReceipt(unittest.TestCase):
         leftovers = list(self._dir.glob("*.tmp"))
         self.assertEqual(leftovers, [])
         self.assertEqual(len(cdp_receipt.read_trend_last(self._dir)) > 0, True)
+
+    # ── 收据审计链增强（改动 1）：operator / host_env 自动采集 ──────────
+    def test_write_receipt_autofills_operator_and_host_env(self):
+        # 写收据后两新字段自动采集落盘（不需调用方传参），read_receipt
+        # 往返保真；host_env 须为单行摘要
+        p = cdp_receipt.write_receipt(_mk_receipt(), "正文")
+        got, errs = cdp_receipt.read_receipt(p)
+        self.assertEqual(errs, [])
+        self.assertTrue((got.operator or "").strip(),
+                        "operator 须自动采集非空（git 不可用至少为 unknown）")
+        self.assertRegex((got.host_env or ""),
+                         r"^python=\S+ \| uname=.+ \| user=\S+$")
+        self.assertNotIn("\n", got.host_env)
+
+    @unittest.skipIf(shutil.which("git") is None, "git 不可用")
+    def test_operator_from_repo_git_config(self):
+        # git 可用的仓库环境：operator 由 user.name <user.email> 合成
+        # （非 unknown），单次 spawn 读两条配置
+        repo = Path(self._tmp.name) / "gitrepo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo,
+                       capture_output=True, check=True)
+        for cfg in (["user.name", "测试操作者"],
+                    ["user.email", "op@example.com"]):
+            subprocess.run(["git", "config"] + cfg, cwd=repo,
+                           capture_output=True, check=True)
+        old_cwd = os.getcwd()
+        os.chdir(repo)
+        try:
+            p = cdp_receipt.write_receipt(_mk_receipt(), "正文")
+        finally:
+            os.chdir(old_cwd)
+        got, _ = cdp_receipt.read_receipt(p)
+        self.assertEqual(got.operator, "测试操作者 <op@example.com>")
+
+    def test_operator_explicit_param_wins(self):
+        # 显式传参优先：构造时带 operator 不被自动采集覆盖
+        r = _mk_receipt()
+        r.operator = "手工指定操作者"
+        p = cdp_receipt.write_receipt(r, "正文")
+        got, _ = cdp_receipt.read_receipt(p)
+        self.assertEqual(got.operator, "手工指定操作者")
+
+    def test_operator_git_unavailable_falls_back_unknown(self):
+        # git 不可用：operator 写 unknown，host_env 仍降级生成，
+        # 收据不因采集失败而失败
+        with mock.patch.object(cdp_receipt.subprocess, "run",
+                               side_effect=OSError("no git")):
+            p = cdp_receipt.write_receipt(_mk_receipt(), "正文")
+        got, errs = cdp_receipt.read_receipt(p)
+        self.assertEqual(errs, [])
+        self.assertEqual(got.operator, "unknown")
+        self.assertIn("python=", got.host_env)
+
+    def test_host_env_item_failure_degrades_to_question(self):
+        # 子项采集失败降级为该项 "?"：单行摘要仍产出，不抛异常
+        with mock.patch.object(cdp_receipt.subprocess, "run",
+                               side_effect=OSError("boom")):
+            env = cdp_receipt.collect_host_env()
+        self.assertTrue(env.startswith("python="))
+        self.assertIn("uname=?", env)
+        self.assertNotIn("\n", env)
+
+    def test_old_receipt_without_operator_host_env_falls_back(self):
+        # 旧收据无此两字段 → from_text 默认空串不报错（schema 兼容）
+        r, errs = cdp_receipt.Receipt.from_text(
+            "- schema_version: 1\n- batch_id: old0000000001\n- result: pass\n\n"
+            "## body\n\nx\n")
+        self.assertEqual(errs, [])
+        self.assertEqual(r.operator, "")
+        self.assertEqual(r.host_env, "")
 
 
 if __name__ == "__main__":

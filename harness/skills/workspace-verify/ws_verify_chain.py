@@ -82,6 +82,33 @@ def _atomic_write_json(path, data):
     _atomic_write_json_impl(path, data)
 
 
+def _ensure_timings_started(batch_id):
+    """确保本批打点文件在位（缺失即补建），返回路径或 None。
+
+    链式模式 elapsed_s=0/timings 空心根因：独立拉起链路（未经 apply 会话
+    cdp_timing start）时 timings-<batch_id>.json 不存在——verify_start 与
+    各子脚本自发 mark 静默失败、report 探测不到打点文件，收据 timings 置空、
+    elapsed_s 记 0。此处缺文件即补建（start_wall/start_mono 取链起跑
+    时刻），apply 会话已 start 的文件原样复用；不归档历史文件、不动
+    current-batch 指针（编排器不引入 start 的归档副作用）。
+    """
+    if not batch_id:
+        return None
+    import cdp_timing
+    if not cdp_timing.BATCH_ID_RE.match(batch_id):
+        return None
+    from cdp_paths import atomic_write_text, log_apply_dir
+    path = log_apply_dir() / f"timings-{batch_id}.json"
+    if not path.is_file():
+        atomic_write_text(path, json.dumps({
+            "batch_id": batch_id,
+            "start_wall": time.time(),
+            "start_mono": time.monotonic(),
+            "marks": [],
+        }, ensure_ascii=False, indent=2) + "\n")
+    return path
+
+
 def _run_step(argv, timeout):
     """独立进程组执行一步；返回 (rc, canceled)。
 
@@ -296,9 +323,14 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
         "unit_test_file": str(_CROSS_DEVICE_LOG / f"unit-tests-{suffix}.json"),
         "acc_file": str(_CROSS_DEVICE_LOG / f"acceptance-{suffix}.json"),
     }
-    if batch_file:
-        timings = _CROSS_DEVICE_LOG / f"timings-{batch_id}.json" if batch_id else None
-        chain_args["timings_file"] = str(timings) if timings and timings.is_file() else None
+    if batch_file and batch_id:
+        # 链式耗时接线（修 elapsed_s=0/timings 空心）：打点文件缺失即补建
+        # （独立拉起场景），并显式下传 --timings-file；CDP_BATCH_ID 注入使
+        # 子脚本自发 mark 定位本批（current-batch.json 指针缺失/陈旧时
+        # mark 会落错批或静默失败）
+        tpath = _ensure_timings_started(batch_id)
+        chain_args["timings_file"] = str(tpath) if tpath else None
+        os.environ["CDP_BATCH_ID"] = batch_id
 
     # 锁外预跑 selfcheck（B3）：与锁等待/前序步骤并行，report 步收割
     selfcheck_thread = selfcheck_result = None

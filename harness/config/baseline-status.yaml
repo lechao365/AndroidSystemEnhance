@@ -17,6 +17,7 @@ baselines:
   sync_manifest: output/log/lc_harness_sync_code_to_patchs/artifacts/20260622-213209-manifest.yaml
   build_result: PASS
   package_result: UNKNOWN
+  package_result_note: 历史遗留 UNKNOWN，2026-09-06 评估标注，引用前须人工复核
   board_verify: PASS
   evidence:
     build_result: PASS
@@ -33,6 +34,7 @@ baselines:
   sync_manifest: output/log/lc_harness_sync_code_to_patchs/artifacts/20260624-073624-manifest.yaml
   build_result: PASS
   package_result: UNKNOWN
+  package_result_note: 历史遗留 UNKNOWN，2026-09-06 评估标注，引用前须人工复核
   board_verify: PASS
   evidence:
     build_result: PASS

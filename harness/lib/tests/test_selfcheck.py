@@ -1,3 +1,4 @@
+import collections
 import contextlib
 import io
 import os
@@ -326,6 +327,72 @@ class TestMarkSelfcheckDegraded(unittest.TestCase):
                     selfcheck._mark_selfcheck()
         finally:
             root.cleanup()
+
+
+class TestCheckPythonEnv(unittest.TestCase):
+    """check_python_env：Python 版本（>=3.8）与 requirements.txt 依赖探测。"""
+
+    def setUp(self):
+        # 与 TestSelfcheck 同款桩：屏蔽打点与治理工具真跑（run_parallel_tools
+        # 真拉起 refs/cfg 进程 ~25s，会触发 slow_guard 判红；本组用例只
+        # 关注 pyenv 段，治理结果以桩注入）
+        self._mark = mock.patch.object(selfcheck, "_mark_selfcheck")
+        self._tools = mock.patch.object(selfcheck, "run_parallel_tools",
+                                        return_value=_fake_tools())
+        self._mark.start()
+        self._tools.start()
+
+    def tearDown(self):
+        self._mark.stop()
+        self._tools.stop()
+
+    def test_healthy_env_reports_ok(self):
+        # 真实环境（python>=3.8 且 requirements.txt 各依赖可导入）→ ok=True，
+        # 汇总行含版本号与依赖名
+        ok, summary = selfcheck.check_python_env()
+        self.assertTrue(ok)
+        self.assertIn("python=", summary)
+        self.assertIn("PyYAML", summary)
+        self.assertNotIn("MISSING", summary)
+
+    def test_missing_dep_reported_not_ok(self):
+        # 依赖导入失败（不存在的包）→ ok=False，汇总行点名 MISSING 依赖
+        # （失败不抛异常，以汇总行形式透出）
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
+                                         encoding="utf-8") as f:
+            f.write("nonexistent_pkg_zz>=1.0\n")
+            path = f.name
+        try:
+            ok, summary = selfcheck.check_python_env(req_path=path)
+        finally:
+            os.unlink(path)
+        self.assertFalse(ok)
+        self.assertIn("nonexistent_pkg_zz>=1.0", summary)
+        self.assertIn("MISSING", summary)
+
+    def test_old_python_version_not_ok(self):
+        # 版本低于 3.8 → ok=False 且汇总行标注 TOO_OLD（版本结论可见）
+        _FakeVI = collections.namedtuple("_FakeVI", "major minor micro")
+        with mock.patch.object(selfcheck.sys, "version_info",
+                               _FakeVI(3, 7, 15)):
+            ok, summary = selfcheck.check_python_env()
+        self.assertFalse(ok)
+        self.assertIn("python=3.7.15", summary)
+        self.assertIn("TOO_OLD", summary)
+
+    def test_main_includes_pyenv_segment(self):
+        # main 汇总输出纳入 pyenv_rc 与环境摘要（环境破损由 rc 非零透出，
+        # 交 ws_report 全 *_rc 扫描判红）
+        fake = _fake_run([
+            _FakeProc(0, "531 passed in 27.9s\n"),
+        ])
+        buf = io.StringIO()
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
+            with redirect_stdout(buf):
+                selfcheck.main()
+        out = buf.getvalue()
+        self.assertIn("pyenv_rc=0", out)
+        self.assertIn("python=", out)
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -19,6 +20,22 @@ VALID_S = """-s base:1a2b3c4d5e6f
 
 
 class TestParse(unittest.TestCase):
+    def _cli(self, *argv):
+        """main() 直调 + 角色环境注入（角色机器化）：按 --role 注入同名
+        HARNESS_ROLE 环境变量（--gen-checksum 等无 --role 的 emit 侧命令
+        缺省注入 emit），不依赖本机 paths.conf 实际配置；调用后还原。"""
+        role = argv[argv.index("--role") + 1] if "--role" in argv else "emit"
+        old = os.environ.get("HARNESS_ROLE")
+        os.environ["HARNESS_ROLE"] = role
+
+        def _restore():
+            if old is None:
+                os.environ.pop("HARNESS_ROLE", None)
+            else:
+                os.environ["HARNESS_ROLE"] = old
+        self.addCleanup(_restore)
+        return cp.main(list(argv))
+
     def test_parse_sv(self):
         b = cp.parse_batch(VALID_SV)
         self.assertEqual(b.mode, "sv")
@@ -188,7 +205,7 @@ class TestParse(unittest.TestCase):
         self.addCleanup(Path(path).unlink)
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = cp.main(["--role", "apply", "--expect-base", "1a2b3c4d5e6f", path])
+            rc = self._cli("--role", "apply", "--expect-base", "1a2b3c4d5e6f", path)
         self.assertEqual(rc, 0)
         self.assertIn("warn:", buf.getvalue())
         self.assertNotIn("error:", buf.getvalue())
@@ -200,7 +217,7 @@ class TestParse(unittest.TestCase):
 
     def test_cli_missing_file_exit_3(self):
         # 批次文件不可读 → 3（契约表参数错误）
-        self.assertEqual(cp.main(["--role", "emit", "/nonexistent.cdp"]), 3)
+        self.assertEqual(self._cli("--role", "emit", "/nonexistent.cdp"), 3)
 
     def test_cli_non_utf8_file_exit_3(self):
         # 非 UTF-8 批次文件 → 3（不得裸抛 traceback）
@@ -210,7 +227,7 @@ class TestParse(unittest.TestCase):
         f.close()
         path = f.name
         self.addCleanup(Path(path).unlink)
-        self.assertEqual(cp.main(["--role", "emit", path]), 3)
+        self.assertEqual(self._cli("--role", "emit", path), 3)
 
     def test_cli_expect_base_mismatch_exit_18(self):
         # base 不匹配本地 HEAD → 拒批 exit 18（独立码，参数/文件错误仍 3）
@@ -221,10 +238,10 @@ class TestParse(unittest.TestCase):
         f.close()
         path = f.name
         self.addCleanup(Path(path).unlink)
-        self.assertEqual(cp.main(["--role", "apply", "--expect-base",
-                                  "ffffffffffff", path]), 18)
-        self.assertEqual(cp.main(["--role", "apply", "--expect-base",
-                                  "1a2b3c4d5e6f", path]), 0)
+        self.assertEqual(self._cli("--role", "apply", "--expect-base",
+                                 "ffffffffffff", path), 18)
+        self.assertEqual(self._cli("--role", "apply", "--expect-base",
+                                 "1a2b3c4d5e6f", path), 0)
 
     def test_cli_apply_missing_expect_base_exit_18(self):
         # 方向 4：apply 角色未传 --expect-base → 18（不再静默跳过 base 校验）
@@ -239,7 +256,7 @@ class TestParse(unittest.TestCase):
         self.addCleanup(Path(path).unlink)
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = cp.main(["--role", "apply", path])
+            rc = self._cli("--role", "apply", path)
         self.assertEqual(rc, 18)
         self.assertIn("--expect-base", buf.getvalue())
 
@@ -252,7 +269,7 @@ class TestParse(unittest.TestCase):
         f.close()
         path = f.name
         self.addCleanup(Path(path).unlink)
-        self.assertEqual(cp.main(["--role", "emit", path]), 0)
+        self.assertEqual(self._cli("--role", "emit", path), 0)
 
     def test_cli_apply_pass_emits_precheck_mark(self):
         # A-1：apply 角色通过后解析器自发 mark precheck（脚本自发替代 AI
@@ -288,8 +305,8 @@ class TestParse(unittest.TestCase):
         self.addCleanup(Path(path).unlink)
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = cp.main(["--role", "apply", "--expect-base",
-                          "1a2b3c4d5e6f", path])
+            rc = self._cli("--role", "apply", "--expect-base",
+                        "1a2b3c4d5e6f", path)
         self.assertEqual(rc, 0)
         marks = cdp_timing.read_marks("abc123def456")
         self.assertEqual([m["name"] for m in marks], ["precheck"])
@@ -326,10 +343,159 @@ class TestParse(unittest.TestCase):
         self.addCleanup(Path(path).unlink)
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = cp.main(["--role", "emit", path])
+            rc = self._cli("--role", "emit", path)
         self.assertEqual(rc, 0)
         marks = cdp_timing.read_marks("abc123def456")
         self.assertEqual(marks, [])
+
+    # ── 角色机器化：apply 入口跨角色拦截 ──────────────────────────────
+
+    def test_cli_role_mismatch_blocked(self):
+        # --role apply 但本机角色为 emit → ROLE_MISMATCH exit 1（参数解析
+        # 后、副作用发生前拦截；测试经环境变量注入角色，不依赖本机
+        # paths.conf 实际配置）
+        import io
+        import tempfile
+        from contextlib import redirect_stderr, redirect_stdout
+        f = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
+                                        encoding="utf-8")
+        f.write(VALID_SV)
+        f.close()
+        path = f.name
+        self.addCleanup(Path(path).unlink)
+        old = os.environ.get("HARNESS_ROLE")
+        os.environ["HARNESS_ROLE"] = "emit"
+
+        def _restore():
+            if old is None:
+                os.environ.pop("HARNESS_ROLE", None)
+            else:
+                os.environ["HARNESS_ROLE"] = old
+        self.addCleanup(_restore)
+        err_buf = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err_buf):
+            with self.assertRaises(SystemExit) as cm:
+                cp.main(["--role", "apply", "--expect-base",
+                         "1a2b3c4d5e6f", path])
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn("ROLE_MISMATCH", err_buf.getvalue())
+        self.assertIn("emit", err_buf.getvalue())
+
+    # ── CDP 批次 checksum（emit 生成 / apply 校验）────────────────────
+
+    def test_with_checksum_inserts_line_after_header(self):
+        # emit 生成：首行后插入 checksum 行，值 = 正文（头部以下全部行，
+        # 规范化后）sha256 前 16 位；正文行保持原样
+        out = cp.with_checksum(VALID_SV)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "-sv base:1a2b3c4d5e6f")
+        m = cp.CHECKSUM_RE.match(lines[1])
+        self.assertIsNotNone(m, lines[1])
+        import hashlib
+        body = "\n".join(lines[2:])
+        expect = hashlib.sha256(
+            cp.normalize_batch_text(body).encode("utf-8")).hexdigest()[:16]
+        self.assertEqual(m.group(1), expect)
+        self.assertEqual("\n".join(lines[2:]),
+                         "\n".join(VALID_SV.splitlines()[1:]))
+
+    def test_with_checksum_idempotent_and_refresh(self):
+        # 原位刷新：已有 checksum 行的批次再跑 with_checksum 输出不变；
+        # 正文变更后 checksum 随之变化
+        once = cp.with_checksum(VALID_SV)
+        self.assertEqual(cp.with_checksum(once), once)
+        edited = once.replace("修复 lcview 空指针", "修复 lcview 越界访问")
+        refreshed = cp.with_checksum(edited)
+        self.assertNotEqual(refreshed, once)
+        self.assertNotEqual(refreshed, edited)
+
+    def test_validate_with_checksum_ok_both_roles(self):
+        # 生成后自检：checksum 正确时 emit/apply 双角色均通过
+        code, errs = cp.validate_batch(cp.with_checksum(VALID_SV), role="emit")
+        self.assertEqual(code, 0, errs)
+        code, _ = cp.validate_batch(cp.with_checksum(VALID_SV), role="apply")
+        self.assertEqual(code, 0)
+
+    def test_checksum_mismatch_rejected_both_roles(self):
+        # 篡改正文一行 → CHECKSUM_MISMATCH（exit 1，双角色 blocking）
+        batch = cp.with_checksum(VALID_SV).replace("检查 service.cpp 入口",
+                                                   "检查 service.cpp 出口")
+        for role in ("emit", "apply"):
+            code, errs = cp.validate_batch(batch, role=role)
+            self.assertEqual(code, cp.EXIT_CHECKSUM, (role, errs))
+            self.assertTrue(any("CHECKSUM_MISMATCH" in e for e in errs), errs)
+
+    def test_checksum_line_wrong_position_struct_error(self):
+        # checksum 行不在紧跟首行的头部位置 → 按未知行报 11（结构错误）
+        bad = ("-s base:1a2b3c4d5e6f\n意图: x\nchecksum: " + "a" * 16
+               + "\n验收: 无\n方向: y\n")
+        code, _ = cp.validate_batch(bad, role="emit")
+        self.assertEqual(code, 11)
+
+    def test_cli_checksum_mismatch_exit_1(self):
+        # apply 侧 CLI：篡改正文 → 非零退出（EXIT_CHECKSUM=1）且输出含
+        # CHECKSUM_MISMATCH 分类字样
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        batch = cp.with_checksum(VALID_SV).replace("修复 lcview 空指针",
+                                                   "修复 lcview 空引用")
+        f = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
+                                        encoding="utf-8")
+        f.write(batch)
+        f.close()
+        path = f.name
+        self.addCleanup(Path(path).unlink)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = self._cli("--role", "apply", "--expect-base",
+                           "1a2b3c4d5e6f", path)
+        self.assertEqual(rc, cp.EXIT_CHECKSUM)
+        self.assertIn("CHECKSUM_MISMATCH", buf.getvalue())
+
+    def test_cli_old_batch_without_checksum_warn_compat(self):
+        # 旧格式无 checksum 行 → warn 兼容放行（exit 0）
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        f = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
+                                        encoding="utf-8")
+        f.write(VALID_SV)
+        f.close()
+        path = f.name
+        self.addCleanup(Path(path).unlink)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = self._cli("--role", "apply", "--expect-base",
+                           "1a2b3c4d5e6f", path)
+        self.assertEqual(rc, 0)
+        self.assertIn("无 checksum", buf.getvalue())
+
+    def test_cli_gen_checksum_outputs_valid_batch(self):
+        # emit 产批收尾 CLI：--gen-checksum 输出整批（含 checksum 行），
+        # 与 with_checksum 同值；输出回灌自检（--role emit）须 exit 0
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        f = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
+                                        encoding="utf-8")
+        f.write(VALID_SV)
+        f.close()
+        path = f.name
+        self.addCleanup(Path(path).unlink)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = self._cli("--gen-checksum", path)
+        self.assertEqual(rc, 0)
+        generated = buf.getvalue()
+        self.assertEqual(generated, cp.with_checksum(VALID_SV))
+        self.assertIn("checksum: ", generated)
+        f2 = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
+                                         encoding="utf-8")
+        f2.write(generated)
+        f2.close()
+        self.addCleanup(Path(f2.name).unlink)
+        self.assertEqual(self._cli("--role", "emit", f2.name), 0)
 
 
 if __name__ == "__main__":
