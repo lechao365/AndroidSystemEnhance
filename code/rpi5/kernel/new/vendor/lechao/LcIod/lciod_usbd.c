@@ -36,6 +36,7 @@
  */
 
 #include "lciod_usbd.h"
+#include "lciod_read_logic.h"
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/usb.h>
@@ -245,15 +246,16 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
         bool shutdown = READ_ONCE(dev->event_shutdown);
         spin_unlock_irqrestore(&dev->event_lock, flags);
         /*
-         * KRN-004：先判 empty 再判 shutdown，与阻塞路径 drain 语义对齐。
-         * 原实现 shutdown 先于 empty 检查——非空 ring 的尾部事件被丢弃
-         * （epoll 用户看到 EPOLLIN|EPOLLHUP 后先 read 得 0 误判 EOF，
-         * 拔盘瞬间事件全丢）。现：空环 → shutdown ? 0(EOF) : -EAGAIN；
-         * 非空 → 落到下面循环取事件（wait 条件立即满足不阻塞）。
+         * KRN-004：判定逻辑抽至 lciod_read_logic.c（host 单测覆盖
+         * 四象限语义）。返回 1→-EAGAIN（空环重试）、0→0（EOF）、
+         * -1→落到下面循环取事件（非空 drain，shutdown 不越过非空判定）。
          */
-        if (empty)
-            return shutdown ? 0 : -EAGAIN;
-        /* ring 非空：落到下面的循环（首次 wait 不会真正阻塞） */
+        int decision = lciod_nonblock_read_decision(empty, shutdown);
+        if (decision == 1)
+            return -EAGAIN;
+        if (decision == 0)
+            return 0;
+        /* decision == -1：ring 非空，落到下面的循环（首次 wait 不阻塞） */
     }
 
     for (;;) {
