@@ -132,8 +132,12 @@ ndk::ScopedAStatus IoServiceImpl::listDeviceMinors(std::vector<int32_t>* _aidl_r
     _aidl_return->clear();
     for (auto& path : devices) {
         int32_t minor = -1;
+        /* LCD-020：解析失败静默跳过会让"路径格式漂移"表现为空列表，
+         * 至少留 debug 日志供诊断（不升级告警：混合设备名是预期可能） */
         if (ParseMinorFromPath(path, &minor))
             _aidl_return->push_back(minor);
+        else
+            LC_ALOGD("listDeviceMinors: unparsable device path: %s", path.c_str());
     }
     return ndk::ScopedAStatus::ok();
 }
@@ -241,6 +245,18 @@ void IoServiceImpl::start_monitor() {
         int tick = 0;
         std::vector<int32_t> deviceMinors;  /* 当前活跃设备 minor 列表（按 HAL 返回顺序，已排序） */
 
+        /*
+         * LCD-018：绝对时间对齐调度。原 sleep_for(50ms) 的实际周期 =
+         * 50ms + 本轮处理耗时（多设备 readEvent 各至多 50ms timeout），
+         * "每 200 tick = 10s" 的刷新/统计节拍持续漂移放大（4 设备
+         * 全 timeout 时周期可 >250ms，10s 节拍实际 >50s）。
+         * 改为 steady_clock 固定节拍：处理耗时从睡眠中扣除；单轮
+         * 超时则立即追平，不放大漂移。
+         */
+        using clock = std::chrono::steady_clock;
+        const auto kTickPeriod = std::chrono::milliseconds(50);
+        auto next_tick = clock::now() + kTickPeriod;
+
         /* 启动前立即 refresh 一次，避免首轮空转或误读 minor=0 */
         auto hal = hal_client_.get();
         if (hal) {
@@ -255,7 +271,8 @@ void IoServiceImpl::start_monitor() {
         }
 
         while (true) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::this_thread::sleep_until(next_tick);   /* LCD-018：固定节拍 */
+            next_tick += kTickPeriod;
             tick++;
             hal = hal_client_.get();
             if (!hal) {

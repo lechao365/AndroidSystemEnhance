@@ -162,6 +162,13 @@ static DEFINE_MUTEX(vendor_lechao_usbd_mutex);
  *
  * 为什么用 kref_get_unless_zero 而非 kref_get：
  * 当 kref 降为 0 时，设备正在被释放，此时不能再增加引用。
+ *
+ * 【事件消费语义（LCD-008）】本驱动未限制单打开：event_tail 是
+ * per-device 共享状态，多读者并发 open 时构成共享消费队列——
+ * 每条事件被随机分配给其中一个读者（不复制、不回放）。当前
+ * 实际单读者由 sepolicy 保证（lechao_lciod_hal_device 的 chr_file
+ * 访问仅授予 HAL domain）。若未来出现多读者需求，须改为 per-fd
+ * 消费位或事件复制，不能依赖现有语义。
  */
 static int vendor_lechao_usbd_open(struct inode *inode, struct file *file)
 {
@@ -273,7 +280,9 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
         /*
          * KRN-009：copy_to_user 失败时回滚 event_tail，事件留在环中
          * 供下次重试（原实现事件已消费但用户未收到——静默丢失）。
-         * 单打开语义下 tail 唯一写者为本读者，无条件回滚无并发风险。
+         * 回滚持锁操作本身并发安全；多读者并发场景下（见 open 处
+         * LCD-008 消费语义）回滚可能使该事件被重复投递而非丢失，
+         * 实际单读者（sepolicy 保证）下无此差异。
          */
         spin_lock_irqsave(&dev->event_lock, flags);
         dev->event_tail = (dev->event_tail +

@@ -14,7 +14,8 @@
  *
  * 设计约束：
  *   - 单打开限制 (device_opened atomic)：避免多个用户态 reader 争抢，
- *     简化读取指针管理（单生产者 + 单消费者）
+ *     读取指针单消费者管理；写入端为多上下文生产者（KRN-011，
+ *     USB 中断回调 + lciod notifier），由 spinlock 互斥
  *   - 日志级别过滤 (min_level)：由 LCVIEW_SET_LEVEL ioctl 设置，
  *     低于此级别的事件 builder_start 直接返回 NULL，避免分配和序列化开销
  *   - spin_lock 保护：写入 API 可在中断上下文调用（如 USB 中断处理函数）

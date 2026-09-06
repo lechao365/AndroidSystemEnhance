@@ -112,3 +112,4 @@
 2026-09-06 11:43:23 manual-2609061143 pass build=pass board=pass acc={"run_id":"krn-s4","input_summary":"svc: S4 内核热路径批: KRN-005 degrade 阈值+003/009 co
 2026-09-06 11:52:58 manual-2609061152 pass build=pass board=pass acc={"run_id":"krn-s5","input_summary":"svc: S5 字节序专项: LCV-02+KRN-002+LCD-004 三侧契约收口(
 2026-09-06 12:00:31 manual-2609061200 pass build=pass board=pass acc={"run_id":"s6-selinux","input_summary":" S6 SELinux: LCD-001 注释修正+013 binder_use 
+2026-09-06 12:08:32 manual-2609061208 pass build=pass board=pass acc={"run_id":"s7-arch","input_summary":"svc S7 架构项: KRN-011 并发模型注释修正+LCD-018 固定节拍+01

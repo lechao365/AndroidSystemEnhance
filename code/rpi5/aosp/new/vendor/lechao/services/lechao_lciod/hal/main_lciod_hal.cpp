@@ -23,6 +23,9 @@ int main() {
     android::base::InitLogging(nullptr, android::base::LogdLogger(android::base::SYSTEM));
     android::base::SetDefaultTag("lechao_lciod_hal");
 
+    /* LCD-010：线程池 = 1 为设计意图——HAL 内部 device fd 表与
+     * read_event 状态未做并发审计，串行化所有 AIDL 调用规避竞态；
+     * 扩容前须先为 per-device 访问加互斥。 */
     ABinderProcess_setThreadPoolMaxThreadCount(1);
     auto service = ndk::SharedRefBase::make<IoHalImpl>();
     const std::string instance = "default";

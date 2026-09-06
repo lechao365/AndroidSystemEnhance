@@ -22,6 +22,11 @@
 using namespace ndk;
 
 int main() {
+    /* LCD-010：线程池 = 1 为设计意图而非疏漏——外部 RPC（getConfig/
+     * getStats 等）均为快返回调用，串行处理无实质瓶颈；后台监控线程
+     * 是独立 std::thread，不经 binder 线程池。多客户端并发场景下
+     * 池扩容前须先评审 IoServiceImpl 的并发安全性（hal_client_ 已有
+     * 锁保护，其余成员未审计）。 */
     ABinderProcess_setThreadPoolMaxThreadCount(1);
 
     auto service = ndk::SharedRefBase::make<IoServiceImpl>();
