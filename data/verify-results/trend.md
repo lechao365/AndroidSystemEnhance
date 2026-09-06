@@ -115,3 +115,4 @@
 2026-09-06 12:08:32 manual-2609061208 pass build=pass board=pass acc={"run_id":"s7-arch","input_summary":"svc S7 架构项: KRN-011 并发模型注释修正+LCD-018 固定节拍+01
 2026-09-06 12:18:13 manual-2609061218 pass build=pass board=pass acc={"run_id":"s8-tests","input_summary":"sv S8 测试补强: KRN-004 纯函数化+host 四象限单测+ioctl 头
 2026-09-06 19:55:32 manual-2609061955 pass build=pass board=pass acc={"run_id":"f258ef093a5145b79946d8aeeadf9 基线发布验证: dev 43bd8c0(harness批次A-D) 全链 pas
+2026-09-06 20:11:29 manual-2609062011 pass build=pass board=pass acc={"run_id":"f258ef093a5145b79946d8aeeadf9 基线发布验证: dev 43bd8c0(harness批次A-D) 全链 pas

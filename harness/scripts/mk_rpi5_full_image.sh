@@ -486,6 +486,14 @@ step_end 0
 
 step_begin "拷贝刷机包到 ${WINDOWS_IMG_DIR}"
 
+# WINDOWS_IMG_DIR 未配置（mode 0 仅打包等场景）：镜像保留在 product_out，
+# 跳过拷贝段（原实现 mkdir -p "" 误报失败致打包 rc=1，边界防御修复）
+if [ -z "$WINDOWS_IMG_DIR" ]; then
+    log_info "WINDOWS_IMG_DIR 未配置，跳过拷贝（镜像保留在 product_out）"
+    step_end 0
+    harness_exit 0
+fi
+
 if [ ! -d "$WINDOWS_IMG_DIR" ]; then
     mkdir -p "$WINDOWS_IMG_DIR"
 fi
