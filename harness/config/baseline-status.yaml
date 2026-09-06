@@ -269,3 +269,33 @@ baselines:
       - lciod-pipeline
       - lciod-trigger
       run_count: 4
+- baseline_id: BL-20260906-02
+  status: candidate
+  source_branch: dev
+  source_commit: 786bacad8d88
+  sync_manifest: data/verify-results/20260906-201129-manual-2609062011.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lciod-liveness,lcview-liveness,lcview-perf,lcview-pipeline
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260906-201129-manual-2609062011.md
+    ki_gate: empty-registry
+    evidence_scope: lciod-liveness,lcview-liveness,lcview-perf,lcview-pipeline
+    known_issues_carried: ''
+    package_evidence: data/verify-results/20260906-201129-manual-2609062011.md
+    package_rc: 0
+    cases_coverage:
+      result: partial
+      missing:
+      - lcview-sepolicy-label
+      - lcview-recover-daemon
+      - lcview-transfer
+      - lcview-pipeline-warn
+      - lcview-trigger
+      - lciod-pipeline
+      - lciod-trigger
+      run_count: 4
