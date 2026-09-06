@@ -265,8 +265,12 @@ ndk::ScopedAStatus IoHalImpl::readEvent(int32_t in_deviceMinor, int32_t in_timeo
     }
     if (entry->fd < 0) { LC_LOGE("readEvent: reopen failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
 
+    /* LCD-002：timeout 入参钳位（最终防线）——上层可传 -1 使 poll 永久
+     * 阻塞、INT_MAX 阻塞约 24.8 天；HAL 单线程 binder 池下一次调用即
+     * 瘫痪全部客户端。钳位后 -1 → 0（非阻塞），>1s → 1s */
+    int timeout_ms = ::clamp_read_timeout_ms(in_timeoutMs);
     struct vendor_lechao_usbd_event raw;
-    int ret = ::read_event(entry->fd, &raw, in_timeoutMs);
+    int ret = ::read_event(entry->fd, &raw, timeout_ms);
 
     if (ret < 0) {
         /* ETIMEDOUT/EAGAIN 是"暂无事件"的正常语义，返回 ok + valid=false */

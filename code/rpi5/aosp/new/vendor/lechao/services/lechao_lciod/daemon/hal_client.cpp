@@ -11,6 +11,7 @@
 #include "lechao_log.h"
 #include <android/binder_manager.h>
 #include <android/binder_process.h>
+#include <android/binder_ibinder.h>
 #include <aidl/vendor/lechao/lciod/IIoHal.h>
 #include <chrono>
 
@@ -47,34 +48,44 @@ IoHalClient::IoHalClient() : connected_(false), lastRetryMs_(0), retryCount_(0) 
 
 IoHalClient::~IoHalClient() {
     std::lock_guard<std::mutex> lock(mtx_);
-    if (currentCookie_) {
-        AIBinder_DeathRecipient_delete(currentCookie_->recipient);
-        delete currentCookie_;
-        currentCookie_ = nullptr;
+    /* LCD-006：cookie 生命周期完全交给 onHalDiedUnlinked 回调清理——
+     * 析构中显式 unlinkToDeath 触发回调（binder 线程异步 delete
+     * recipient+cookie），此处不再 delete，消除"析构 delete 与回调
+     * delete 并发"的 double-free/UAF 窗口（原顺序：先 delete cookie
+     * 再析构 hal_ 触发 unlink 回调二次 delete）。
+     * onHalDiedUnlinked 只访问 dc->recipient 与 dc 本身，不回引 self，
+     * 对象析构后回调执行安全 */
+    if (currentCookie_ && hal_) {
+        AIBinder_unlinkToDeath(hal_->asBinder().get(),
+                               currentCookie_->recipient, currentCookie_);
     }
+    currentCookie_ = nullptr;
 }
 
 void IoHalClient::connect() {
     auto hal = IIoHal::fromBinder(
         ndk::SpAIBinder(AServiceManager_checkService(kHalName)));
     if (hal) {
-        hal_ = hal;
-        connected_ = true;
-        retryCount_ = 0;
-
         AIBinder_DeathRecipient *recipient = AIBinder_DeathRecipient_new(&onHalDied);
         AIBinder_DeathRecipient_setOnUnlinked(recipient, &onHalDiedUnlinked);
 
         auto *cookie = new DeathCookie{this, recipient};
-        binder_status_t linkRet = AIBinder_linkToDeath(hal_->asBinder().get(),
+        binder_status_t linkRet = AIBinder_linkToDeath(hal->asBinder().get(),
             recipient, cookie);
         if (linkRet != STATUS_OK) {
-            ALOGE("hal_client: linkToDeath failed: %d", linkRet);
+            /* LCD-003：linkToDeath 失败必须回滚连接状态——只置 connected_
+             * 而 HAL 死亡收不到通知，get() 永远返回死 binder，重连机制
+             * 整体失效且无日志根因（"活着但不工作"）。回滚后走重连退避 */
+            ALOGE("hal_client: linkToDeath failed: %d, rolling back", linkRet);
             AIBinder_DeathRecipient_delete(recipient);
             delete cookie;
-        } else {
-            currentCookie_ = cookie;
+            return;  // hal_/connected_ 保持未连接态，get() 按退避重试
         }
+
+        hal_ = hal;
+        connected_ = true;
+        retryCount_ = 0;
+        currentCookie_ = cookie;
         ALOGI("Connected to HAL service");
     } else {
         connected_ = false;

@@ -45,6 +45,10 @@ using aidl::system::lechao::lciod::IoEvent;
 using VendorIoEvent = aidl::vendor::lechao::lciod::IoEvent;
 using lechao::lciod::ParseMinorFromPath;
 
+/* LCD-002：readIoEvent timeout 首层钳位上限（与 HAL 侧
+ * device_io.h kMaxReadEventTimeoutMs 同值——HAL 侧为最终防线） */
+static const int kMaxReadEventTimeoutMs = 1000;
+
 /* --- 纯计算函数（声明见 service.h，独立于 binder 环境可单测） --- */
 
 int64_t ComputeAverageRate(uint64_t readBytes, uint64_t writeBytes,
@@ -199,13 +203,18 @@ ndk::ScopedAStatus IoServiceImpl::setIoConfig(int32_t in_deviceMinor, const IoCo
     return hal->setConfig(in_deviceMinor, vcfg, _aidl_return);
 }
 
-/* readIoEvent — 代理转发到 HAL readEvent()，1:1 字段直传 */
+/* readIoEvent — 代理转发到 HAL readEvent()，1:1 字段直传。
+ * LCD-002：timeout 首层钳位（HAL 侧 clamp_read_timeout_ms 为最终防线）——
+ * 公开 binder 接口的负值/超大超时不得透传（-1 永久阻塞、INT_MAX 阻塞
+ * 约天级，daemon 单线程 binder 池即被占死） */
 ndk::ScopedAStatus IoServiceImpl::readIoEvent(int32_t in_deviceMinor, int32_t in_timeoutMs, IoEvent* _aidl_return) {
     *_aidl_return = {};
     auto hal = hal_client_.get();
     if (!hal) { LC_ALOGW("readIoEvent: HAL not connected"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
+    int timeoutMs = in_timeoutMs < 0 ? 0 : in_timeoutMs;
+    if (timeoutMs > kMaxReadEventTimeoutMs) timeoutMs = kMaxReadEventTimeoutMs;
     aidl::vendor::lechao::lciod::IoEvent vev;
-    auto status = hal->readEvent(in_deviceMinor, in_timeoutMs, &vev);
+    auto status = hal->readEvent(in_deviceMinor, timeoutMs, &vev);
     if (!status.isOk()) { LC_ALOGW("readIoEvent: readEvent failed"); return status; }
     ProjectSystemIoEvent(vev, _aidl_return);
     return ndk::ScopedAStatus::ok();

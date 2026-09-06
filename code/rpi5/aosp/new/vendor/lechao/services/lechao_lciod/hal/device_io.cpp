@@ -128,6 +128,18 @@ int set_config(int fd, const struct vendor_lechao_usbd_config *config) {
 }
 
 /*
+ * clamp_read_timeout_ms — readEvent 超时入参钳位（LCD-002，声明见 .h）
+ * 负值钳 0（非阻塞），超上限裁到 kMaxReadEventTimeoutMs
+ */
+int clamp_read_timeout_ms(int timeout_ms) {
+    if (timeout_ms < 0)
+        return 0;
+    if (timeout_ms > kMaxReadEventTimeoutMs)
+        return kMaxReadEventTimeoutMs;
+    return timeout_ms;
+}
+
+/*
  * read_event — 从内核事件环形缓冲区读取最新一条事件
  *
  * 实现流程:
