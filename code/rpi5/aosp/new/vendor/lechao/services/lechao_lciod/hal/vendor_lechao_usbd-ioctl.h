@@ -141,7 +141,15 @@ enum vendor_lechao_usbd_event_type {
  * 当 USB 子系统发生异常时，内核将事件写入环形缓冲区。
  * 用户态通过 poll() 等待可读，然后 read() 读取。
  * 每次 read() 返回一条事件（sizeof(struct vendor_lechao_usbd_event) 字节）。
+ *
+ * 【字节序契约（CXX-001 / LCD-004）】本结构与内核 lciod_usbd-ioctl.h
+ * 为拷贝同步共享头，同机同序（ARM64 LE）按主机序裸内存传输（read 直拷），
+ * 事实小端契约；双侧同步维护，禁止单侧改布局。编译守卫防大端环境。
  */
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
+    (__BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__)
+#error "vendor_lechao_usbd_event 按小端契约裸传输（LCD-004），不支持大端编译"
+#endif
 struct vendor_lechao_usbd_event {
 	u64 timestamp_ns;  /* 事件发生时的内核单调时钟时间戳（纳秒） */
 	u32 event_type;    /* 事件类型，见 enum vendor_lechao_usbd_event_type */
