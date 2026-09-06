@@ -116,3 +116,4 @@
 2026-09-06 12:18:13 manual-2609061218 pass build=pass board=pass acc={"run_id":"s8-tests","input_summary":"sv S8 测试补强: KRN-004 纯函数化+host 四象限单测+ioctl 头
 2026-09-06 19:55:32 manual-2609061955 pass build=pass board=pass acc={"run_id":"f258ef093a5145b79946d8aeeadf9 基线发布验证: dev 43bd8c0(harness批次A-D) 全链 pas
 2026-09-06 20:11:29 manual-2609062011 pass build=pass board=pass acc={"run_id":"f258ef093a5145b79946d8aeeadf9 基线发布验证: dev 43bd8c0(harness批次A-D) 全链 pas
+2026-09-06 21:27:56 manual-2609062127 pass build=pass board=pass acc={"run_id":"3580e9a3ad21464fa74fd5752ae98 基线发布全量验证: dev 42832f5 11 case 全覆盖 pass 含
