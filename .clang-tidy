@@ -1,0 +1,5 @@
+# clang-tidy 静态分析（P0-B）：仅对 host 单测纯逻辑文件（独立可编译，
+# 带 -I 编译旗标）执行；clang-analyzer/bugprone 系列，analyzer 警告升错误。
+Checks: 'clang-analyzer-*,bugprone-*'
+WarningsAsErrors: 'clang-analyzer-*'
+HeaderFilterRegex: '.*'

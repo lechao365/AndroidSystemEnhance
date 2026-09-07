@@ -82,6 +82,29 @@ class TestSelfcheckWorkflow(unittest.TestCase):
         self.assertIn('"${rc_name}=0"', stripped, "CI 须判定 *_rc 非零即失败")
         self.assertIn("exit 1", stripped, "CI 判定失败须显式 exit 1")
 
+    def test_host_tests_job_runs_make_test(self):
+        # P0-A：host-tests 作业须跑两个内核 host 单测 make test（业务快检）
+        job = self.doc["jobs"]["host-tests"]
+        run_steps = "\n".join(s.get("run", "") for s in job["steps"])
+        for d in ("LcView", "LcIod"):
+            self.assertIn(f"make -C code/rpi5/kernel/new/vendor/lechao/{d}/tests test",
+                          run_steps)
+
+    def test_host_tests_job_static_check_diff_driven(self):
+        # P0-B：C/C++ 静态检查须 diff 驱动（相对 origin/main，无改动跳过）——
+        # 存量 code/ 文件不强制归一（避免 RECEIPT_MISSING 推送门禁）
+        job = self.doc["jobs"]["host-tests"]
+        run_steps = "\n".join(s.get("run", "") for s in job["steps"])
+        self.assertIn("git fetch --quiet origin main", run_steps)
+        self.assertIn("git diff --name-only", run_steps)
+        self.assertIn("clang-format --dry-run --Werror", run_steps)
+        self.assertIn("clang-tidy", run_steps)
+
+    def test_host_tests_job_installs_clang_tools(self):
+        job = self.doc["jobs"]["host-tests"]
+        run_steps = "\n".join(s.get("run", "") for s in job["steps"])
+        self.assertIn("apt-get", run_steps)
+
     def test_strip_comments_before_gate_check(self):
         # 方向 3 内部逻辑：先剥整行 # 注释再找 for 键集合——注释掉的判定段
         # 不再被匹配（防注释伪满足判绿）
