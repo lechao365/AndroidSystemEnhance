@@ -511,7 +511,7 @@ class TestReceipt(unittest.TestCase):
         self.assertTrue((got.operator or "").strip(),
                         "operator 须自动采集非空（git 不可用至少为 unknown）")
         self.assertRegex((got.host_env or ""),
-                         r"^python=\S+ \| uname=.+ \| user=\S+$")
+                         r"^python=\S+ \| uname=.+ \| user=\S+ \| fs=\S+$")
         self.assertNotIn("\n", got.host_env)
 
     @unittest.skipIf(shutil.which("git") is None, "git 不可用")
@@ -561,7 +561,24 @@ class TestReceipt(unittest.TestCase):
             env = cdp_receipt.collect_host_env()
         self.assertTrue(env.startswith("python="))
         self.assertIn("uname=?", env)
+        self.assertIn("fs=?", env)
         self.assertNotIn("\n", env)
+
+    def test_fs_type_reported_with_df(self):
+        # 方向 4：host_env 增报仓库文件系统类型（df -T 数据行第 2 列）；
+        # df 失败降级 "?"
+        with mock.patch.object(cdp_receipt.subprocess, "run",
+                               return_value=mock.Mock(
+                                   returncode=0,
+                                   stdout="Filesystem Type 1K-blocks Used Use% "
+                                          "Mounted on\n"
+                                          "D:\\ 9p 4096 0 0% /mnt/d\n")):
+            fs = cdp_receipt._fs_type("/mnt/d")
+        self.assertEqual(fs, "9p")
+        with mock.patch.object(cdp_receipt.subprocess, "run",
+                               return_value=mock.Mock(returncode=1,
+                                                      stdout="")):
+            self.assertEqual(cdp_receipt._fs_type("/mnt/d"), "?")
 
     def test_old_receipt_without_operator_host_env_falls_back(self):
         # 旧收据无此两字段 → from_text 默认空串不报错（schema 兼容）

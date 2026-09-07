@@ -36,8 +36,9 @@ _SEVERITY_DEFAULT = "P2"
 _STATUSES = ("open", "scheduled", "fixed", "wontfix")
 _STATUS_DEFAULT = "open"
 # kind 允许取值：空（普通）/ flake（KIR-002 抖动登记，方向 3：未闭环 flake
-# 阻断 promote 晋升；其余未来分类可扩展）
-_KINDS = ("", "flake")
+# 阻断 promote 晋升）/ idle-eligible（人工标记，进入闲时加固队列，方向 1：
+# 闲时加固 skill 只消费 idle-eligible 队列不自选战场）
+_KINDS = ("", "flake", "idle-eligible")
 _KIND_DEFAULT = ""
 
 _SLUG_MAX = 40

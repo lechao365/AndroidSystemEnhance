@@ -271,6 +271,20 @@ class TestChain(unittest.TestCase):
         ctor.assert_not_called()
         self.assertEqual(list(self.runs.glob("*.json")), [])
 
+    def test_lock_held_requests_yield(self):
+        # 方向 1（闲时加固让路协议）：正式任务取锁失败即置让路标志，持锁的
+        # idle-hardening 会话在原子步骤边界检查到后收敛让路（不抢占验证中的
+        # 正式任务）
+        with mock.patch.object(wc.ws_lock, "verify_locks",
+                               side_effect=wc.ws_lock.LockHeld("占用")), \
+                mock.patch.object(wc.ws_lock, "request_yield") as req_yield, \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(batch_file=str(self.batch))
+        self.assertEqual(rc, 3)
+        req_yield.assert_called_once()
+
     def test_no_batch_skips_acceptance_and_report(self):
         # 无验收源/无收据源（裸三步用法兼容）：acceptance/report 记 skipped
         rc, result, _ = self._run(batch_file=None)

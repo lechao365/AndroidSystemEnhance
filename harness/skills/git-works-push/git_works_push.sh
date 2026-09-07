@@ -259,5 +259,13 @@ if [ "$REMOTE_SHA" != "$LOCAL_SHA" ]; then
   err "error: 远端 $BRANCH（$REMOTE_SHA）与本地 HEAD（$LOCAL_SHA）不符，疑似推送未生效"; exit 2
 fi
 out "pushed: $BRANCH $(git rev-parse --short HEAD)"
+# 方向 5：log_prune 接入真实工作流（此前零调用方顺延五批）——push 成功即
+# 清理超龄 push 日志/timings 归档/promote 头快照（--apply 实际清理；失败
+# 仅告警不阻断推送结果，留存规则见 harness/lib/log_prune.py）
+if python3 harness/lib/log_prune.py --apply >/dev/null 2>&1; then
+  out "log_prune: 运行日志清理完成"
+else
+  out "warn: log_prune 清理失败（不影响推送结果）"
+fi
 cdp_mark --name push --dur-s "$(push_dur "$CDP_TIMING_T0")"
 exit 0

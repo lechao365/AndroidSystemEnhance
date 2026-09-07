@@ -119,6 +119,15 @@ class TestVerifyLocks(unittest.TestCase):
                          Path(ws_lock.__file__).resolve().parents[2]
                          / "log" / "workspace-verify")
 
+    def test_yield_flag_roundtrip(self):
+        # 方向 1（闲时加固让路协议）：request_yield 置让路标志 → yield_requested
+        # 命中 → clear_yield 清除（原子步骤边界检查用）
+        self.assertFalse(ws_lock.yield_requested(self.dir))
+        ws_lock.request_yield(self.dir)
+        self.assertTrue(ws_lock.yield_requested(self.dir))
+        ws_lock.clear_yield(self.dir)
+        self.assertFalse(ws_lock.yield_requested(self.dir))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -100,8 +100,30 @@ def _collect_operator() -> str:
     return name or email or "unknown"
 
 
+def _fs_type(path) -> str:
+    """仓库所在文件系统类型（df -T 数据行第 2 列）；失败/非 Linux 降级 "?"。
+
+    方向 4：host_env 增报仓库文件系统类型——WSL2 drvfs(9p) 与本地 ext4 的
+    IO 语义差异显著（drvfs 上 rglob/子进程开销大，曾致 check_skill_refs
+    ~39s），收据带 fs 类型便于 emit 侧归因环境差异。
+    """
+    try:
+        r = subprocess.run(["df", "-T", str(path)], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return "?"
+    if r.returncode != 0:
+        return "?"
+    for ln in (r.stdout or "").splitlines()[1:]:  # 跳过标题行
+        parts = ln.split()
+        if len(parts) >= 2 and parts[1]:
+            return parts[1]
+    return "?"
+
+
 def collect_host_env() -> str:
-    """采集宿主环境单行摘要：python=<版本> | uname=<系统 机器> | user=<用户>。
+    """采集宿主环境单行摘要：python=<版本> | uname=<系统 机器> | user=<用户> | fs=<文件系统>。
 
     子项独立采集，任一失败降级为该项 "?"（如 uname 命令不存在），绝不让
     收据生成失败。
@@ -125,7 +147,8 @@ def collect_host_env() -> str:
         user = "?"
     return (f"python={platform.python_version()}"
             f" | uname={_run_first_line(['uname', '-s', '-m'])}"
-            f" | user={user}")
+            f" | user={user}"
+            f" | fs={_fs_type(project_root())}")
 
 
 def _autofill_audit_fields(receipt):

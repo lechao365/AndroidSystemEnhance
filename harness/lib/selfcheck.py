@@ -30,6 +30,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -119,13 +120,27 @@ def _spawn_cmd(cmd):
     # 方向 4：durs 自 Popen 时刻起（此前 _t0 记在收口时刻，重叠进程
     # communicate 立即返回致 durs 恒 0，emit 无法定位真实耗时）
     proc._spawn_t0 = time.time()
+
+    def _wait_exit():
+        # 方向 3：wait 线程记进程真实退出时刻（_exit_t0）。收口在 pytest
+        # 之后发生，若 dur 取收口时刻减 spawn，六项 durs 恒等 pytest 总时长
+        # ——改取退出减 spawn 才反映工具真实运行时长。
+        try:
+            proc.wait()
+        except Exception:
+            pass
+        finally:
+            proc._exit_t0 = time.time()
+
+    threading.Thread(target=_wait_exit, daemon=True).start()
     return proc
 
 
 def _collect_cmd(proc, name, timeout=_TOOL_TIMEOUT_S):
     """收口单个 Popen：communicate + 墙钟，返回 (rc, stdout, stderr, dur_s)。
-    超时 kill 返 rc=124（约定超时标记，B3 兜底挂死）。dur_s 自 Popen 时刻起
-    （方向 4：收口墙钟 = 启动到回收的主流程跨度，重叠进程不再恒 0）。"""
+    超时 kill 返 rc=124（约定超时标记，B3 兜底挂死）。dur_s = 进程退出时刻
+    （wait 线程记）减 Popen 时刻（方向 3：工具真实运行时长；wait 线程未记
+    即收口时刻——communicate 返回即退出，近似一致）。"""
     _t0 = getattr(proc, "_spawn_t0", time.time())
     try:
         out, err = proc.communicate(timeout=timeout)
@@ -136,7 +151,12 @@ def _collect_cmd(proc, name, timeout=_TOOL_TIMEOUT_S):
         print(f"warn: 治理工具超时（>{timeout}s，rc=124）: {name}",
               file=sys.stderr)
         rc, err = 124, f"timeout after {timeout}s"
-    return rc, out, err, time.time() - _t0
+    exit_t0 = getattr(proc, "_exit_t0", None)
+    # mock/异常形态下 _exit_t0 可能非数值（unittest mock 自动属性），回落收口
+    if not isinstance(exit_t0, (int, float)):
+        exit_t0 = None
+    end = exit_t0 if exit_t0 is not None else time.time()
+    return rc, out, err, end - _t0
 
 
 def _spawn_tools():

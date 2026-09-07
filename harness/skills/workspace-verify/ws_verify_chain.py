@@ -345,6 +345,13 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
                                      timeout_map, chain_args,
                                      selfcheck_thread, selfcheck_result)
     except ws_lock.LockHeld as exc:
+        # 方向 1（闲时加固让路协议）：正式任务取锁失败即置让路标志，持锁的
+        # idle-hardening 会话在原子步骤边界检查到后收敛让路（不抢占验证中的
+        # 正式任务；标志为提示性，写失败静默）
+        try:
+            ws_lock.request_yield()
+        except Exception:
+            pass
         print(f"error: {exc}", file=sys.stderr)
         return 3, {"run_id": run_id, "batch_id": batch_id, "overall": "fail",
                    "exit_rc": 3, "canceled": False, "steps": [],

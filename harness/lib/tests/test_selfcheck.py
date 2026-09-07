@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -329,6 +330,18 @@ class TestParallelTools(unittest.TestCase):
         self.assertEqual(rc, 124)
         self.assertIn("timeout after", err)
         proc.kill.assert_called_once()
+
+    def test_collect_cmd_dur_uses_exit_not_collect(self):
+        # 方向 3：dur 取进程退出时刻（wait 线程 _exit_t0）减 spawn，而非收口
+        # 时刻——收口在 pytest 之后致六项 durs 恒等 pytest 总时长
+        now = time.time()
+        proc = mock.Mock()
+        proc._spawn_t0 = now - 7.0   # 7s 前启动
+        proc._exit_t0 = now - 0.5    # 5.5s 后退出（早于收口）
+        proc.communicate.return_value = ("out", "")
+        proc.returncode = 0
+        rc, out, err, dur = selfcheck._collect_cmd(proc, "manifest")
+        self.assertAlmostEqual(dur, 6.5, places=1)
 
 
 class TestMarkSelfcheck(unittest.TestCase):

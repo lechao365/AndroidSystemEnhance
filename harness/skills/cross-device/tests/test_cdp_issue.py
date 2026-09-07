@@ -92,6 +92,14 @@ class TestIssue(unittest.TestCase):
         # 非法 kind（构造参数）回落默认
         self.assertEqual(_mk_issue(kind="bogus").kind, "")
 
+    def test_kind_idle_eligible_valid(self):
+        # 方向 1：kind=idle-eligible（人工标入闲时加固队列）合法写读
+        r = _mk_issue(issue_id="KI-IDLE-01", title="人工标闲时加固",
+                      kind="idle-eligible")
+        p = cdp_issue.write_issue(r, "现场")
+        self.assertEqual(cdp_issue.read_issue(p).kind, "idle-eligible")
+        self.assertEqual(cdp_issue.validate_issue(p), [])
+
     def test_validate_kind_missing_is_ok_but_invalid_red(self):
         # 方向 3：kind 缺失（旧条目 = 普通）不判畸形（否则历史文件全红阻塞
         # check-issues 门禁）；显式非法 kind 判红

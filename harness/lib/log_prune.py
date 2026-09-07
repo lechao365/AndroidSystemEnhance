@@ -25,11 +25,15 @@ import time
 from pathlib import Path
 
 _LIB_DIR = Path(__file__).resolve().parent
-# 仓根 = harness/lib 的两级上级（harness/lib/../..）；此前误取 parents[0]
-# 得到 harness/，致 DEFAULT_TARGETS 以"harness/log/..." 相对根 glob 恒零命中
-# 仍返 0（scanned=0 静默假成功），修整后锚定真仓根（test_repo_root_is_repo_root
-# 不 patch REPO_ROOT 自证，防回归）
+# 仓根锚定：CDP_PROJECT_ROOT 可覆盖（测试/异地隔离——git-works-push 在
+# CDP_PROJECT_ROOT=临时仓的集成测试里触发 log_prune 时只清理临时仓，不污染
+# 真实仓日志），无 env 时回退 harness/lib 的两级上级（harness/lib/../..）；
+# 此前误取 parents[0] 得到 harness/，致 DEFAULT_TARGETS 以"harness/log/..."
+# 相对根 glob 恒零命中仍返 0（scanned=0 静默假成功），修整后锚定真仓根
+# （test_repo_root_is_repo_root 不 patch REPO_ROOT 自证，防回归）
 REPO_ROOT = _LIB_DIR.parents[1]
+if os.environ.get("CDP_PROJECT_ROOT", "").strip():
+    REPO_ROOT = Path(os.environ["CDP_PROJECT_ROOT"].strip())
 
 # 默认清理目标（相对仓库根的 glob）：各工作流运行产物
 DEFAULT_TARGETS = [
