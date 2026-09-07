@@ -2,10 +2,12 @@
 # 端到端红路径（真超时用例）不入自检套件——判红路径由纯函数直测覆盖；
 # 全绿套件本身即"守卫不误伤"的冒烟（conftest hook 在 harness 全量生效）。
 
+import os
 import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pytest  # noqa: E402
@@ -89,6 +91,16 @@ class TestSlowGuard(unittest.TestCase):
         # 属性转发同样可读——slow guard 豁免依赖该机制）
         self.assertTrue(any(getattr(m, "name", None) == "slow_ok"
                             for m in _decorated_with_slow_ok.pytestmark))
+
+    def test_slow_guard_off_env_disables(self):
+        # 方向 1：SLOW_GUARD_OFF=1 时守卫整体关闭（selfcheck 单独重跑失败
+        # 用例用——单跑慢用例不被误判为"单跑仍红"真回归）
+        item = FakeItem(t0_offset=10.0)
+        rep = FakeRep()
+        with mock.patch.dict(os.environ, {"SLOW_GUARD_OFF": "1"}):
+            violated, _ = slow_guard.enforce_on_call(item, rep)
+        self.assertFalse(violated)
+        self.assertEqual(rep.outcome, "passed")
 
 
 @pytest.mark.slow_ok("自验证 marker 在 pytest 原生用例上对 iter_markers 可见")

@@ -395,6 +395,42 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("promoted:", out)
 
+    # ── 方向 3：未闭环 flake 类 KI 阻断 promote ──────────────────────────
+    def test_open_flake_issues_only_unclosed_flake(self):
+        # _open_flake_issues：只认 kind=flake 且未标终态的条目（普通 open 不算）
+        from cdp_issue import Issue, write_issue
+        write_issue(Issue(issue_id="KI-FLAKE-01", title="[flake] a",
+                          kind="flake", origin="pre-existing", blocking=False,
+                          status="open", task="", discovered_in="abc",
+                          batch_id="18f27638d9f6"), "抖动")
+        write_issue(Issue(issue_id="KI-FLAKE-02", title="[flake] b",
+                          kind="flake", origin="pre-existing", blocking=False,
+                          status="fixed", resolved_in="abc", task="",
+                          discovered_in="abc", batch_id="18f27638d9f6"), "闭环")
+        write_issue(Issue(issue_id="KI-OPEN-01", title="普通问题",
+                          status="open", task="t1", discovered_in="abc",
+                          batch_id="18f27638d9f6"), "普通")
+        from baseline_register import _open_flake_issues
+        flakes = _open_flake_issues(self._root / "data" / "known-issues")
+        self.assertEqual(len(flakes), 1)
+        self.assertIn("[flake] a", flakes[0])
+
+    def test_promote_blocks_open_flake(self):
+        # 存在未闭环 flake（kind=flake 且 open）→ promote 拒绝（抖动未闭环
+        # 不得晋升；闭环须标 fixed/wontfix 并填 resolved_in）
+        from cdp_issue import Issue, write_issue
+        rp = self._make_receipt_pkg()
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        bid = br.load()["baselines"][0]["baseline_id"]
+        write_issue(Issue(issue_id="KI-FLAKE-01", title="[flake] x",
+                          kind="flake", origin="pre-existing", blocking=False,
+                          status="open", task="", discovered_in="abc",
+                          batch_id="18f27638d9f6"), "抖动")
+        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao")
+        self.assertEqual(rc, 1)
+        self.assertIn("未闭环 flake", out)
+
     def test_add_candidate_package_pass_from_evidence(self):
         # 方向 2：ws_package 证据 script_rc=0 → package_result 记 PASS
         # （按收据 batch_id 探测 log/workspace-verify/package-<batch_id>.json）

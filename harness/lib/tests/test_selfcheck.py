@@ -318,8 +318,10 @@ class TestParallelTools(unittest.TestCase):
 
     def test_collect_cmd_timeout_kills_124(self):
         # 方向 1：_collect_cmd 超时 → kill + rc=124（约定超时标记，不无限
-        # 阻塞自检收口）
+        # 阻塞自检收口）；dur 自 Popen 时刻起（方向 4，_spawn_t0 缺省回落
+        # 收口时刻）
         proc = mock.Mock()
+        proc._spawn_t0 = 0.0
         proc.communicate.side_effect = [
             selfcheck.subprocess.TimeoutExpired("cmd", 120), ("", "")]
         with contextlib.redirect_stderr(io.StringIO()):
@@ -557,6 +559,143 @@ class TestCheckPythonEnv(unittest.TestCase):
         # 顺序固定：refs/cfg 并行段启动 → ioctl Popen → manifest Popen →
         # pytest（重叠开始），此后才收口
         self.assertEqual(calls[:4], ["tools", "spawn", "spawn", "pytest"])
+
+
+class TestFlakeRerun(unittest.TestCase):
+    """方向 1：偶现失败机械判定（全量红 → 全新进程单跑 → KIR-002 抖动登记
+    放行 / KIR-001 不顺延 / 单跑仍红阻塞）。"""
+
+    def test_failed_nodeids_extracts(self):
+        # 从 pytest -q 输出提取失败用例 nodeid（FAILED <nodeid> - reason 行）
+        out = ("...\nFAILED harness/lib/tests/test_x.py::TestX::test_y - AssertionError\n"
+               "FAILED harness/lib/tests/test_z.py::TestZ::test_w - boom\n")
+        self.assertEqual(selfcheck._failed_nodeids(out),
+                         ["harness/lib/tests/test_x.py::TestX::test_y",
+                          "harness/lib/tests/test_z.py::TestZ::test_w"])
+
+    def test_rerun_failures_flaky_registers_and_notes(self):
+        # 全量红用例单跑绿（KIR-002 抖动，nodeid 不在本批 git diff 内）→
+        # 自动登记 flake known-issue 并返回放行标注（不阻塞本轮）
+        py_out = "FAILED harness/lib/tests/test_x.py::TestX::test_y - AssertionError\n"
+        with mock.patch.object(selfcheck, "_git_changed_files", return_value=set()), \
+                mock.patch.object(selfcheck, "_register_flake_issue",
+                                  return_value=("harness/lib/tests/test_x.py::TestX::test_y",
+                                                1, "abc123")) as reg, \
+                mock.patch.object(selfcheck.subprocess, "run",
+                                  return_value=mock.Mock(returncode=0)):
+            notes, ki001 = selfcheck._rerun_failures(py_out)
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0][0], "harness/lib/tests/test_x.py::TestX::test_y")
+        self.assertEqual(ki001, [])
+        reg.assert_called_once_with("harness/lib/tests/test_x.py::TestX::test_y")
+
+    def test_rerun_failures_ki001_not_deferred(self):
+        # KIR-001：失败用例命中本批 git diff（引入嫌疑）→ 不得顺延，即便
+        # 单跑绿也只记 ki001_hits（pytest_rc 保持非零阻塞）
+        py_out = "FAILED harness/lib/tests/test_x.py::TestX::test_y - AssertionError\n"
+        with mock.patch.object(selfcheck, "_git_changed_files",
+                               return_value={"harness/lib/tests/test_x.py"}), \
+                mock.patch.object(selfcheck.subprocess, "run",
+                                  return_value=mock.Mock(returncode=0)):
+            notes, ki001 = selfcheck._rerun_failures(py_out)
+        self.assertEqual(notes, [])
+        self.assertEqual(ki001, ["harness/lib/tests/test_x.py::TestX::test_y"])
+
+    def test_rerun_failures_still_red_blocking(self):
+        # 单跑仍红 → 真回归阻塞（不登记不顺延，pytest_rc 保持非零）
+        py_out = "FAILED harness/lib/tests/test_x.py::TestX::test_y - AssertionError\n"
+        with mock.patch.object(selfcheck, "_git_changed_files", return_value=set()), \
+                mock.patch.object(selfcheck.subprocess, "run",
+                                  return_value=mock.Mock(returncode=1)):
+            notes, ki001 = selfcheck._rerun_failures(py_out)
+        self.assertEqual((notes, ki001), ([], []))
+
+    def test_main_flaky_passes_round_writes_flake(self):
+        # main 集成：pytest 全量红但单跑全绿（KIR-002 抖动）→ 输出
+        # pytest_rc=0（放行本轮）+ flake 标注（用例/轮次/首现批次/复现命令）
+        # + skipped 可见 + 无 failed 非零计数（ws_report 文本防线不误拒）
+        fake = _fake_run([
+            _FakeProc(1, "1 failed, 1153 passed in 27.0s\n"),
+        ])
+        flake = [("harness/lib/tests/test_x.py::TestX::test_y", 2, "abc123")]
+        buf = io.StringIO()
+        with mock.patch.object(selfcheck, "_rerun_failures",
+                               return_value=(flake, [])), \
+                mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
+                _patched_parallel():
+            with redirect_stdout(buf):
+                selfcheck.main()
+        out = buf.getvalue()
+        self.assertIn("pytest_rc=0", out)
+        self.assertIn("flake:", out)
+        self.assertIn("round=2", out)
+        self.assertIn("first=abc123", out)
+        self.assertIn('cmd="python3 -m pytest harness/lib/tests/test_x.py::TestX::test_y -q"', out)
+        self.assertIn("skipped=", out)
+        # ws_report 文本防线：不得残留 "1 failed" 等 failed 非零计数
+        self.assertNotRegex(out, r"\b[1-9]\d*\s*failed\b")
+
+
+class TestQuickMode(unittest.TestCase):
+    """方向 2：quick 档（git diff 推导受影响测试；推导不出回落全量）。"""
+
+    def test_quick_targets_maps_module_to_test(self):
+        # harness/lib/x.py → harness/lib/tests/test_x.py
+        with mock.patch.object(selfcheck, "_git_changed_files",
+                               return_value={"harness/lib/selfcheck.py"}):
+            self.assertEqual(selfcheck._quick_test_targets(),
+                             ["harness/lib/tests/test_selfcheck.py"])
+
+    def test_quick_targets_direct_test_file(self):
+        # 改动本身是 tests/test_*.py → 直接跑
+        with mock.patch.object(selfcheck, "_git_changed_files",
+                               return_value={"harness/lib/tests/test_x.py"}):
+            self.assertEqual(selfcheck._quick_test_targets(),
+                             ["harness/lib/tests/test_x.py"])
+
+    def test_quick_targets_undeducible_falls_back_full(self):
+        # 推导不出（非 .py 改动）→ None 回落全量（保守保证覆盖）
+        with mock.patch.object(selfcheck, "_git_changed_files",
+                               return_value={"docs/a.md"}):
+            self.assertIsNone(selfcheck._quick_test_targets())
+
+    def test_quick_targets_missing_test_falls_back_full(self):
+        # 模块对应测试不存在 → None 回落全量
+        with mock.patch.object(selfcheck, "_git_changed_files",
+                               return_value={"harness/lib/nonexist_mod.py"}):
+            self.assertIsNone(selfcheck._quick_test_targets())
+
+    def test_main_quick_uses_derived_scope(self):
+        # --mode quick：pytest 只跑 git diff 推导的测试（非全量 harness）
+        seen = []
+
+        def _run(cmd, **kw):
+            seen.append(cmd)
+            return _FakeProc(0, "12 passed in 1.0s\n")
+
+        with mock.patch.object(selfcheck, "_quick_test_targets",
+                               return_value=["harness/lib/tests/test_selfcheck.py"]), \
+                mock.patch.object(selfcheck.subprocess, "run", side_effect=_run), \
+                _patched_parallel():
+            with redirect_stdout(io.StringIO()):
+                selfcheck.main(["--mode", "quick"])
+        pytest_cmd = seen[0]
+        self.assertIn("harness/lib/tests/test_selfcheck.py", pytest_cmd)
+
+    def test_main_quick_falls_back_full(self):
+        # 推导不出（_quick_test_targets 返 None）→ 回落全量 harness
+        seen = []
+
+        def _run(cmd, **kw):
+            seen.append(cmd)
+            return _FakeProc(0, "531 passed in 27.0s\n")
+
+        with mock.patch.object(selfcheck, "_quick_test_targets", return_value=None), \
+                mock.patch.object(selfcheck.subprocess, "run", side_effect=_run), \
+                _patched_parallel():
+            with redirect_stdout(io.StringIO()):
+                selfcheck.main(["--mode", "quick"])
+        self.assertIn("harness", seen[0])
 
 
 if __name__ == "__main__":

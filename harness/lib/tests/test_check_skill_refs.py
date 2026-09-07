@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import check_skill_refs as ckr
@@ -266,6 +267,48 @@ class TestCheckSkillRefs(unittest.TestCase):
         self._mk("docs/superpowers/plans/only-in-excluded.conf", "x\n")
         self.assertEqual(self._scan("harness/skills/demo/SKILL.md"),
                          ["only-in-excluded.conf"])
+
+    # ── 方向 5：全树 rglob 改 git ls-files（apply 机 WSL2 drvfs ~39s → ~1s）
+    def test_git_ls_files_falls_back_rglob_non_git(self):
+        # 非 git 仓（subprocess git ls-files 失败）→ _git_ls_files 返 None，
+        # 调用方回落 rglob（历史行为兜底）
+        ckr._GIT_LS_CACHE.clear()
+        with mock.patch.object(ckr.subprocess, "run",
+                               return_value=mock.Mock(returncode=128,
+                                                      stdout="")):
+            self.assertIsNone(ckr._git_ls_files())
+
+    def test_basename_index_uses_git_ls_files(self):
+        # git 仓下 basename 索引走 git ls-files（仅跟踪文件，快）；豁免目录
+        # 过滤照旧——EXEMPT_RELS 内同名文件计 0，裸文件名零命中判悬空
+        ckr._INDEX_CACHE.clear()
+        files = ["harness/skills/demo/SKILL.md",
+                 "harness/log/only-in-excluded.conf",
+                 "docs/superpowers/plans/only-in-excluded.conf",
+                 "harness/skills/other/SKILL.md"]
+        with mock.patch.object(ckr, "_git_ls_files",
+                               return_value=[Path(f) for f in files]):
+            self.assertEqual(ckr._basename_count("only-in-excluded.conf"), 0)
+            self.assertEqual(ckr._basename_count("SKILL.md"), 2)
+
+    def test_iter_scan_targets_uses_git_ls_files(self):
+        # 扫描目标走 git ls-files（相对 ROOT 过滤 harness/skills + docs）；
+        # tests 目录排除、harness/lib 不在扫描根、harness/log 豁免
+        ckr._GIT_LS_CACHE.clear()
+        files = ["harness/skills/demo/SKILL.md",
+                 "harness/skills/demo/tests/test_demo.py",
+                 "docs/design.md",
+                 "harness/lib/x.py",
+                 "harness/log/x.md"]
+        with mock.patch.object(ckr, "_git_ls_files",
+                               return_value=[Path(f) for f in files]):
+            targets = ckr.iter_scan_targets(None)
+        rels = [t.relative_to(ckr.ROOT).as_posix() for t in targets]
+        self.assertIn("harness/skills/demo/SKILL.md", rels)
+        self.assertIn("docs/design.md", rels)
+        self.assertNotIn("harness/skills/demo/tests/test_demo.py", rels)
+        self.assertNotIn("harness/lib/x.py", rels)
+        self.assertNotIn("harness/log/x.md", rels)
 
 
 if __name__ == "__main__":

@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -135,28 +136,63 @@ def strip_anchor(p: str) -> str:
 # 防每个裸文件名 token 都全仓 rglob 一次导致扫描变慢
 _INDEX_CACHE: dict[str, dict[str, int]] = {}
 
+# git ls-files 缓存（key=ROOT 绝对路径，None=非 git 仓回落 rglob）
+_GIT_LS_CACHE: dict[str, list[Path] | None] = {}
+
+
+def _git_ls_files() -> list[Path] | None:
+    """git ls-files 一次性列出全部跟踪文件（相对 ROOT）；非 git 仓返 None。
+
+    全树 rglob 在 apply 机 WSL2 drvfs 慢到 ~39s（扫到 .git 对象/__pycache__
+    等大量非仓库资产），而 emit 本机仅 0.38s——refs 是自检关键路径，改用
+    git ls-files 只列跟踪文件（本仓 git 仓，快一两个数量级）。"""
+    key = str(ROOT.resolve())
+    if key in _GIT_LS_CACHE:
+        return _GIT_LS_CACHE[key]
+    try:
+        r = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace")
+    except Exception:
+        r = None
+    if r is None or r.returncode != 0:
+        _GIT_LS_CACHE[key] = None
+        return None
+    files = [Path(ln) for ln in r.stdout.splitlines() if ln]
+    _GIT_LS_CACHE[key] = files
+    return files
+
 
 def _basename_count(name: str) -> int:
     """仓内 basename 为 name 的文件数（方向 3 裸文件名唯一匹配判定）。
 
-    索引须排除 .git 与 EXEMPT_RELS 目录（docs/superpowers、harness/log）：
-    这些目录含大量非仓库资产的同名文件（日志产物/历史计划），纳入索引会
-    把"引用不存在的文件"误判为"多义跳过"（防误报变漏网）。
+    索引须排除 EXEMPT_RELS 目录（docs/superpowers、harness/log）：这些目录
+    含大量非仓库资产的同名文件（日志产物/历史计划），纳入索引会把"引用
+    不存在的文件"误判为"多义跳过"（防误报变漏网）。
+    数据源优先 git ls-files（仅跟踪文件，快）；非 git 仓回落全树 rglob。
     """
     root = ROOT.resolve()
     key = str(root)
     idx = _INDEX_CACHE.get(key)
     if idx is None:
         idx = {}
-        exempt = tuple(root / r for r in EXEMPT_RELS)
-        for f in root.rglob("*"):
-            if not f.is_file():
-                continue
-            if ".git" in f.parts:
-                continue
-            if any(f.is_relative_to(ex) for ex in exempt):
-                continue
-            idx[f.name] = idx.get(f.name, 0) + 1
+        files = _git_ls_files()
+        if files is not None:
+            # git ls-files 输出相对 ROOT，豁免用相对路径比较
+            exempt_rel = tuple(Path(r) for r in EXEMPT_RELS)
+            for f in files:
+                if any(f.is_relative_to(ex) for ex in exempt_rel):
+                    continue
+                idx[f.name] = idx.get(f.name, 0) + 1
+        else:
+            exempt = tuple(root / r for r in EXEMPT_RELS)
+            for f in root.rglob("*"):
+                if not f.is_file():
+                    continue
+                if ".git" in f.parts:
+                    continue
+                if any(f.is_relative_to(ex) for ex in exempt):
+                    continue
+                idx[f.name] = idx.get(f.name, 0) + 1
         _INDEX_CACHE[key] = idx
     return idx.get(name, 0)
 
@@ -231,6 +267,23 @@ def iter_scan_targets(rel: str | None) -> list[Path]:
     bases = [ROOT / rel] if rel else [ROOT / "harness" / "skills", ROOT / "docs"]
     exempt = tuple(ROOT / r for r in EXEMPT_RELS)
     targets: list[Path] = []
+    files = _git_ls_files()
+    if files is not None:
+        # git ls-files 只含跟踪文件（无 __pycache__/.pytest_cache 且不含 .git），
+        # 输出相对 ROOT（快）；tests 目录与豁免/后缀过滤与 rglob 口径一致
+        base_rels = [Path(rel)] if rel else [Path("harness/skills"), Path("docs")]
+        exempt_rel = tuple(Path(r) for r in EXEMPT_RELS)
+        for f in files:
+            if not any(f.is_relative_to(b) for b in base_rels):
+                continue
+            if "tests" in f.parts:
+                continue
+            if any(f.is_relative_to(ex) for ex in exempt_rel):
+                continue
+            if f.suffix not in (".md", ".py", ".sh", ".yaml", ".yml", ".conf"):
+                continue
+            targets.append(ROOT / f)
+        return targets
     for base in bases:
         if base.is_file():
             targets.append(base)

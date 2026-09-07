@@ -8,6 +8,7 @@
 钩子接线在 harness/conftest.py（pytest 收集链对 harness 全量生效）；
 本模块只含纯逻辑，供 conftest 转发与单测直调（test_slow_guard.py）。
 """
+import os
 import time
 
 # 判红阈值（秒）：正常单测毫秒级，3s 已是异常信号（xdist 分发不改变
@@ -16,6 +17,11 @@ SLOW_GUARD_SECONDS = 3.0
 
 # 豁免 marker 名（pytest_configure 注册，未注册会触发 UnknownMarkWarning）
 SLOW_OK_MARKER = "slow_ok"
+
+# 关闭开关（环境变量）：selfcheck 单独重跑失败用例时置 1（方向 1）——
+# 单跑慢用例（如真实子进程语义）会被守卫判红误判为"单跑仍红"真回归，
+# 重跑目的是隔离并发抖动，不判慢
+SLOW_GUARD_OFF = "SLOW_GUARD_OFF"
 
 
 def setup_started(item):
@@ -35,6 +41,10 @@ def enforce_on_call(item, rep):
     非_passed 报告不重复动（已有失败现场，墙钟信息无意义）。
     """
     if rep.when != "call" or not rep.passed:
+        return False, 0.0
+    if os.environ.get(SLOW_GUARD_OFF):
+        # 方向 1：selfcheck 单独重跑失败用例（全新进程）禁用守卫——单跑慢
+        # 用例不应因墙钟判红被误判为"单跑仍红"真回归
         return False, 0.0
     t0 = getattr(item, "_slow_guard_t0", None)
     if t0 is None:

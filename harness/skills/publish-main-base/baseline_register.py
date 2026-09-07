@@ -189,6 +189,22 @@ def _real_known_issues_dir():
     return Path(__file__).resolve().parents[3] / "data" / "known-issues"
 
 
+def _open_flake_issues(issues_dir=None):
+    """未闭环 flake 类 known-issues：kind=flake 且 status 非 fixed/wontfix。
+
+    方向 3：KIR-002 抖动登记（selfcheck 机械放行）的 flake 是"单跑绿非阻塞"
+    记录，但存在未闭环 flake 意味着抖动尚未根因定位/闭环——promote 基线
+    晋升不得携带未闭环抖动，故 promote 硬拒。闭环 = 标 fixed/wontfix 并填
+    resolved_in（KIR-006）。"""
+    d = Path(issues_dir) if issues_dir else _real_known_issues_dir()
+    out = []
+    for p in issue_files(d):
+        i = read_issue(p)
+        if i.kind == "flake" and i.status not in ("fixed", "wontfix"):
+            out.append(f"{p.name}: {i.title}")
+    return out
+
+
 def check_issues_gate(task=None, issues_dir=None):
     """known-issues 门禁主体（check-issues action 与 add-candidate 复用，方向 4）。
 
@@ -511,6 +527,17 @@ def main(argv=None):
                 if not args.approved_by:
                     print("error: promote 必须传 --approved-by"
                           "（审批凭据外部化，不再回落默认常量）", file=sys.stderr)
+                    return 1
+                # 方向 3：存在未闭环 flake 类 KI（kind=flake 且未标终态）即拒
+                # ——KIR-002 抖动登记允许放行本轮自检，但晋升不得携带未闭环
+                # 抖动（闭环须标 fixed/wontfix 并填 resolved_in）
+                open_flakes = _open_flake_issues(args.known_issues_dir)
+                if open_flakes:
+                    print(f"error: promote 存在 {len(open_flakes)} 个未闭环 flake "
+                          f"known-issues（抖动未闭环不得晋升），拒绝：",
+                          file=sys.stderr)
+                    for o in open_flakes:
+                        print(f"  {o}", file=sys.stderr)
                     return 1
                 snapshot_name = f"{args.baseline_id}-{receipt.name}"
                 if not snapshot_name.endswith(".md"):

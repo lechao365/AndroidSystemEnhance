@@ -25,7 +25,7 @@ _NAME_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{12}-.+\.md$")
 _FIELDS = [
     "schema_version", "issue_id", "title", "discovered_in",
     "origin", "severity", "blocking", "blocking_reason", "status", "task",
-    "resolved_in", "archived_in",
+    "resolved_in", "archived_in", "kind",
 ]
 
 # origin / severity / status 允许取值（模板逐字段注释同源维护）
@@ -35,6 +35,10 @@ _SEVERITIES = ("P0", "P1", "P2")
 _SEVERITY_DEFAULT = "P2"
 _STATUSES = ("open", "scheduled", "fixed", "wontfix")
 _STATUS_DEFAULT = "open"
+# kind 允许取值：空（普通）/ flake（KIR-002 抖动登记，方向 3：未闭环 flake
+# 阻断 promote 晋升；其余未来分类可扩展）
+_KINDS = ("", "flake")
+_KIND_DEFAULT = ""
 
 _SLUG_MAX = 40
 
@@ -44,7 +48,7 @@ class Issue:
                  origin=_ORIGIN_DEFAULT, severity=_SEVERITY_DEFAULT,
                  blocking=False, blocking_reason="",
                  status=_STATUS_DEFAULT, task="", resolved_in="", batch_id="",
-                 archived_in=""):
+                 archived_in="", kind=_KIND_DEFAULT):
         self.schema_version = schema_version
         self.issue_id = issue_id
         self.title = title
@@ -57,6 +61,7 @@ class Issue:
         self.task = task
         self.resolved_in = resolved_in
         self.archived_in = archived_in  # 方向 6：promote 归档回写的归属基线 id（非 index 字段）
+        self.kind = kind if kind in _KINDS else _KIND_DEFAULT  # 方向 3：flake 分类
         # 命名元数据（发现批次），不属头字段，仅用于文件名 时间戳-batch_id-slug
         self.batch_id = batch_id
 
@@ -80,6 +85,8 @@ class Issue:
                 continue  # 非法枚举回落默认值，不崩
             elif key == "status" and val not in _STATUSES:
                 continue
+            elif key == "kind" and val not in _KINDS:
+                continue  # 非法 kind 回落默认，不崩
             elif hasattr(r, key):
                 setattr(r, key, val)
         return r
@@ -281,6 +288,10 @@ def validate_issue(path, issues_dir=None):
 
         for f in _FIELDS:
             if f not in fields:
+                # kind 可选（方向 3）：旧条目无 flake 分类 = 普通，缺失不判
+                # 畸形（否则历史 known-issues 文件全红阻塞 check-issues 门禁）
+                if f == "kind":
+                    continue
                 errs.append(f"头字段缺失: {f}")
 
         origin = fields.get("origin", _ORIGIN_DEFAULT)
@@ -292,6 +303,9 @@ def validate_issue(path, issues_dir=None):
         status = fields.get("status", _STATUS_DEFAULT)
         if status not in _STATUSES:
             errs.append(f"status 非法: {status!r}，允许 {_STATUSES}")
+        kind = fields.get("kind", _KIND_DEFAULT)
+        if kind not in _KINDS:
+            errs.append(f"kind 非法: {kind!r}，允许 {_KINDS}")
         blocking = fields.get("blocking", "false").lower() in ("true", "1", "yes")
         if blocking and not fields.get("blocking_reason", ""):
             errs.append("blocking=true 但 blocking_reason 为空")

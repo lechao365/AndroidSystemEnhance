@@ -24,6 +24,7 @@ check_python_env 探测结果（Python 版本 + requirements.txt 依赖，环境
 全部 *_rc 键判红（任一非零拒写收据）。退出码恒 0：拒写与否由 ws_report
 按 rc 判定，本脚本只负责如实采集（emit 侧可独立自测）。
 """
+import argparse
 import importlib
 import os
 import re
@@ -112,15 +113,20 @@ _PYTEST_TIMEOUT_S = 900
 def _spawn_cmd(cmd):
     """Popen 启动单个工具（非阻塞，方向 1：与 pytest 重叠跑，收口在
     _collect_cmd）。cwd=ROOT 与 run_tool 一致。"""
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         encoding="utf-8", errors="replace", cwd=ROOT)
+    # 方向 4：durs 自 Popen 时刻起（此前 _t0 记在收口时刻，重叠进程
+    # communicate 立即返回致 durs 恒 0，emit 无法定位真实耗时）
+    proc._spawn_t0 = time.time()
+    return proc
 
 
 def _collect_cmd(proc, name, timeout=_TOOL_TIMEOUT_S):
     """收口单个 Popen：communicate + 墙钟，返回 (rc, stdout, stderr, dur_s)。
-    超时 kill 返 rc=124（约定超时标记，B3 兜底挂死）。"""
-    _t0 = time.time()
+    超时 kill 返 rc=124（约定超时标记，B3 兜底挂死）。dur_s 自 Popen 时刻起
+    （方向 4：收口墙钟 = 启动到回收的主流程跨度，重叠进程不再恒 0）。"""
+    _t0 = getattr(proc, "_spawn_t0", time.time())
     try:
         out, err = proc.communicate(timeout=timeout)
         rc = proc.returncode
@@ -370,17 +376,210 @@ def _import_cdp_timing():
         return False
 
 
-def main():
+# ── 方向 1：偶现失败机械判定（KIR-002 抖动登记 / KIR-001 不得顺延）──────────
+_FAILED_RE = re.compile(r"^FAILED (\S+)", re.M)
+
+
+def _failed_nodeids(py_out):
+    """从 pytest -q 输出提取失败用例 nodeid（"FAILED <nodeid> - reason" 行）。"""
+    return sorted(set(_FAILED_RE.findall(py_out)))
+
+
+def _git_changed_files():
+    """本批改动文件（git diff --name-only HEAD，相对 ROOT）；无 git/无改动返空集。"""
+    try:
+        r = subprocess.run(["git", "diff", "--name-only", "HEAD"], cwd=ROOT,
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+    except Exception:
+        return set()
+    if r.returncode != 0:
+        return set()
+    return {ln for ln in r.stdout.splitlines() if ln}
+
+
+def _current_batch_id():
+    """当前活跃 batch_id（cdp_timing.resolve_batch_id 回落）；无则空串。"""
+    try:
+        if _import_cdp_timing():
+            return cdp_timing.resolve_batch_id() or ""
+    except Exception:
+        pass
+    return ""
+
+
+def _load_cdp_issue():
+    """延迟导入 cdp_issue（cross-device lib），失败返 None。"""
+    try:
+        issue_dir = ROOT / "harness" / "skills" / "cross-device" / "lib" / "python"
+        if str(issue_dir) not in sys.path:
+            sys.path.insert(0, str(issue_dir))
+        import cdp_issue
+        return cdp_issue
+    except Exception as e:
+        print(f"warn: cdp_issue 导入失败（抖动登记降级，不阻断）: {e}",
+              file=sys.stderr)
+        return None
+
+
+def _flake_history(nodeid):
+    """既有 kind=flake 条目中该 nodeid 的 (轮次, 首现批次)；无则 (0, "")。"""
+    issues_dir = ROOT / "data" / "known-issues"
+    if not issues_dir.is_dir():
+        return 0, ""
+    max_round, first_batch = 0, ""
+    for p in sorted(issues_dir.glob("*.md")):
+        if p.name == "index.md":
+            continue
+        try:
+            txt = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if f"nodeid: {nodeid}" not in txt:
+            continue
+        if not re.search(r"^- kind: flake$", txt, re.M):
+            continue
+        rm = re.search(r"^- round: (\d+)$", txt, re.M)
+        if rm:
+            max_round = max(max_round, int(rm.group(1)))
+        fm = re.search(r"^- first_seen_batch: (\S+)$", txt, re.M)
+        if fm and not first_batch:
+            first_batch = fm.group(1)
+    return max_round, first_batch
+
+
+def _register_flake_issue(nodeid):
+    """按 KIR-002 登记抖动 known-issue（记用例名/轮次/首现批次/复现命令）。
+
+    返回 (nodeid, round, first_batch)。轮次 = 既有该用例 flake 条目数 + 1，
+    首现批次沿用最早条目（同一用例抖动跨批归同一 flake 记录链）。
+    """
+    round_n, first_batch = _flake_history(nodeid)
+    batch_id = _current_batch_id()
+    if not first_batch:
+        first_batch, round_n = batch_id or "unknown", 1
+    else:
+        round_n += 1
+    issue_id = f"KI-FLAKE-{first_batch}-{abs(hash(nodeid)) & 0xFFF:03x}"
+    body = (f"- nodeid: {nodeid}\n"
+            f"- round: {round_n}\n"
+            f"- first_seen_batch: {first_batch}\n"
+            f"- rerun_cmd: python3 -m pytest {nodeid} -q\n"
+            f"- rerun_result: 全新进程单独重跑全部通过（KIR-002 抖动，非阻塞，"
+            f"放行本轮；未闭环 flake 阻断 promote）")
+    cdpi = _load_cdp_issue()
+    if cdpi is not None:
+        try:
+            issue = cdpi.Issue(
+                issue_id=issue_id, title=f"[flake] {nodeid}",
+                kind="flake", origin="pre-existing", blocking=False,
+                status="open", task="", discovered_in=first_batch,
+                batch_id=batch_id or "0" * 12)
+            cdpi.write_issue(issue, body)
+        except Exception as e:
+            print(f"warn: flake 抖动登记失败（不阻断）: {e}", file=sys.stderr)
+    return nodeid, round_n, first_batch
+
+
+def _rerun_failures(py_out):
+    """方向 1：全量红时在全新进程单独重跑失败用例的机械判定。
+
+    返回 (flake_notes, ki001_hits)：
+      flake_notes: [(nodeid, round, first_batch)]——全部单跑绿（KIR-002 抖动，
+        已登记 known-issues 放行本轮）；
+      ki001_hits: [nodeid]——失败用例命中本批改动路径（KIR-001 引入嫌疑，
+        不得顺延，当批修，pytest_rc 保持非零）；
+    任一单跑仍红（真回归阻塞）→ 两项皆空（pytest_rc 保持非零）。
+    """
+    nodeids = _failed_nodeids(py_out)
+    if not nodeids:
+        return [], []
+    changed = _git_changed_files()
+    flake_notes, ki001_hits = [], []
+    for nodeid in nodeids:
+        test_file = nodeid.split("::", 1)[0]
+        # 全新进程单独重跑（禁 slow_guard——慢用例单跑会被守卫误判红；
+        # 单进程避免 xdist 分片抖动干扰）
+        env = dict(os.environ)
+        env["SLOW_GUARD_OFF"] = "1"
+        try:
+            r = subprocess.run(
+                [sys.executable, "-m", "pytest", nodeid, "-q"], cwd=ROOT,
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", env=env, timeout=_PYTEST_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            return [], []  # 重跑挂死按真回归阻塞处理
+        if r.returncode != 0:
+            return [], []  # 单跑仍红 → 真回归阻塞
+        if test_file in changed:
+            ki001_hits.append(nodeid)  # KIR-001：本批引入嫌疑，不得顺延
+        else:
+            flake_notes.append(_register_flake_issue(nodeid))
+    return flake_notes, ki001_hits
+
+
+# ── 方向 2：quick 档（git diff 推导受影响测试；推导不出回落全量）────────────
+def _quick_test_targets():
+    """git diff 推导受影响测试文件；推导不出（无 git/无改动/无法映射）返 None
+    → 回落全量（保守，保证覆盖）。规则：
+      - 改动文件本身是 tests/test_*.py → 直接跑；
+      - harness/lib/<x>.py → harness/lib/tests/test_<x>.py；
+      - harness/skills/<skill>/<...>/<x>.py → harness/skills/<skill>/tests/test_<x>.py；
+      - 其余（非 .py / 无对应测试）→ 推导不出回落全量。
+    """
+    changed = _git_changed_files()
+    if not changed:
+        return None
+    targets = set()
+    for rel in changed:
+        p = Path(rel)
+        if p.suffix != ".py":
+            return None
+        parts = p.parts
+        if "tests" in parts and p.name.startswith("test_"):
+            targets.add(rel)
+            continue
+        if p.name.startswith("test_"):
+            return None
+        if len(parts) >= 2 and parts[0] == "harness" and parts[1] == "lib":
+            cand = f"harness/lib/tests/test_{p.stem}.py"
+        elif len(parts) >= 3 and parts[0] == "harness" and parts[1] == "skills":
+            skill = parts[2]
+            cand = f"harness/skills/{skill}/tests/test_{p.stem}.py"
+        else:
+            return None
+        if not (ROOT / cand).is_file():
+            return None
+        targets.add(cand)
+    return sorted(targets)
+
+
+def main(argv=None):
     # 方向 4：重配标准输出为 utf-8（对齐 harness_lib.harness_init），防 GBK
     # 终端把摘要中的中文/非 ASCII 替换成 � 致自检结论行打印失败或被误判
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
+    # 方向 2：quick 档（git diff 推导受影响测试，推导不出回落全量）
+    mode = "full"
+    if argv:
+        parser = argparse.ArgumentParser(description="harness 自检（-s 采集）")
+        parser.add_argument("--mode", choices=("full", "quick"), default="full",
+                            help="full 全量 harness；quick 由 git diff 推导"
+                                 "受影响测试（推导不出回落全量），供 loop 中间轮")
+        args = parser.parse_args(argv)
+        mode = args.mode
     # 自检整体墙钟实测（方向 3）：pytest 起跑前记 t0，四工具完成后 t1，
     # 差值经 _mark_selfcheck --dur-s 上报（自检段耗时不再被相邻差额吞并）
     _t0 = time.time()
     _ensure_edit_close_mark()
-    pytest_cmd = [sys.executable, "-m", "pytest", "harness", "-q",
+    if mode == "quick":
+        quick_targets = _quick_test_targets()
+        # 推导不出（无 git/无改动/无法映射）回落全量（保守，保证覆盖）
+        scope = quick_targets or ["harness"]
+    else:
+        scope = ["harness"]
+    pytest_cmd = [sys.executable, "-m", "pytest", *scope, "-q",
                   "--durations=5"]
     # xdist 可导入时并行跑（-n auto 按 CPU 核数分流，apply 侧 586 项串行 30s
     # → 并行显著提速）；导入不到照旧串行。计数行正则不动（-q + -n auto 摘要
@@ -409,19 +608,36 @@ def main():
     cfg_rc, cfg_out, cfg_last = tools["cfg"]
     ctr_rc, ctr_out, ctr_last = tools["ctr"]
     summary = pytest_summary(py_out)
+    # 方向 1：全量红时机械判定——全新进程单独重跑失败用例，单跑绿即
+    # KIR-002 抖动（自动登记 known-issues 放行本轮），单跑红判真回归阻塞，
+    # KIR-001 命中者不得顺延（pytest_rc 保持非零）
+    flake_notes, ki001_hits = [], []
+    if py_rc != 0:
+        flake_notes, ki001_hits = _rerun_failures(py_out)
+        if flake_notes and not ki001_hits:
+            py_rc = 0  # 全部单跑绿且无 KIR-001 嫌疑 → 抖动放行本轮
     parts = [f"pytest_rc={py_rc}"]
-    if summary:
-        parts.append(summary)
-    # 最慢 5 用例耗时（方向 3）：回归定位慢点（xdist 分发波动时慢点即
-    # 实时等待混入或真实子进程语义未豁免）
-    durs = durations_summary(py_out)
-    if durs:
-        parts.append("slow5: " + "; ".join(durs))
-    if py_rc == 0 and summary and "skipped" not in summary:
-        # 仅定位到计数行且全绿无跳过时才补 skipped=0（平台跳过数显式可见）；
-        # 未定位到计数行（stderr 顶掉/崩溃）即不补——交 ws_report 缺 skipped
-        # 拒写，不自己伪造计数
-        parts.append("skipped=0")
+    if flake_notes and not ki001_hits:
+        # 抖动放行：原始 failed 计数不拼（ws_report 文本防线见 failed 即拒写），
+        # 改拼 flake 标注（用例名/轮次/首现批次/复现命令，收据可见可追踪）
+        for nodeid, round_n, first_batch in flake_notes:
+            parts.append(f"flake: {nodeid} round={round_n} first={first_batch} "
+                         f'cmd="python3 -m pytest {nodeid} -q"')
+        m = re.search(r"\b(\d+)\s*skipped\b", summary or "")
+        parts.append(f"skipped={m.group(1) if m else 0}")
+    else:
+        if summary:
+            parts.append(summary)
+        # 最慢 5 用例耗时（方向 3）：回归定位慢点（xdist 分发波动时慢点即
+        # 实时等待混入或真实子进程语义未豁免）
+        durs = durations_summary(py_out)
+        if durs:
+            parts.append("slow5: " + "; ".join(durs))
+        if py_rc == 0 and summary and "skipped" not in summary:
+            # 仅定位到计数行且全绿无跳过时才补 skipped=0（平台跳过数显式可见）；
+            # 未定位到计数行（stderr 顶掉/崩溃）即不补——交 ws_report 缺 skipped
+            # 拒写，不自己伪造计数
+            parts.append("skipped=0")
     parts.append(f"refs_rc={refs_rc}")
     refs_last = last_stdout_line(refs_out)
     if refs_last:

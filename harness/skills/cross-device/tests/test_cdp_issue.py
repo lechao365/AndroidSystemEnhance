@@ -15,7 +15,7 @@ _TASK = "lcview-refactor"
 
 
 def _mk_issue(issue_id="KI-20260829-001", status="open", origin="introduced",
-              severity="P2", title="lcview 重复落盘计数异常"):
+              severity="P2", title="lcview 重复落盘计数异常", kind=""):
     return cdp_issue.Issue(
         schema_version=1,
         issue_id=issue_id,
@@ -29,6 +29,7 @@ def _mk_issue(issue_id="KI-20260829-001", status="open", origin="introduced",
         task=_TASK,
         resolved_in="",
         batch_id="18f27638d9f6",
+        kind=kind,
     )
 
 
@@ -79,6 +80,30 @@ class TestIssue(unittest.TestCase):
         # task 为大颗粒任务稳定标识（门禁按此过滤，修法描述入正文）
         self.assertEqual(got.task, _TASK)
         self.assertEqual(got.resolved_in, "")
+
+    def test_kind_field_roundtrip(self):
+        # 方向 3：kind 字段（空=普通 / flake=KIR-002 抖动登记）写读往返
+        r = _mk_issue(issue_id="KI-FLAKE-1", title="[flake] x", kind="flake")
+        p = cdp_issue.write_issue(r, "现场: 抖动")
+        got = cdp_issue.read_issue(p)
+        self.assertEqual(got.kind, "flake")
+        # 缺省 kind 为空（普通问题）
+        self.assertEqual(_mk_issue().kind, "")
+        # 非法 kind（构造参数）回落默认
+        self.assertEqual(_mk_issue(kind="bogus").kind, "")
+
+    def test_validate_kind_missing_is_ok_but_invalid_red(self):
+        # 方向 3：kind 缺失（旧条目 = 普通）不判畸形（否则历史文件全红阻塞
+        # check-issues 门禁）；显式非法 kind 判红
+        r = _mk_issue(issue_id="KI-VALID", kind="flake")
+        p = cdp_issue.write_issue(r, "现场")
+        self.assertEqual(cdp_issue.validate_issue(p), [])
+        # 手工注入非法 kind
+        txt = p.read_text(encoding="utf-8").replace("- kind: flake",
+                                                    "- kind: bogus")
+        p.write_text(txt, encoding="utf-8")
+        errs = cdp_issue.validate_issue(p)
+        self.assertTrue(any("kind 非法" in e for e in errs), errs)
 
     def test_write_issue_rejects_invalid_batch_id(self):
         # batch_id 非 12 位小写 hex → 写时抛错（畸形文件名不留到 promote 才暴露）

@@ -19,6 +19,7 @@
 - task: lcview-refactor          # 大颗粒任务稳定标识（promote 门禁按此过滤；修法描述入正文）
 - resolved_in:                   # 解决时所在 commit（未解决留空）
 - archived_in:                   # 归档归属基线 id（promote 晋升时回写，未归档留空）
+- kind:                          # 分类：空（普通）/ flake（KIR-002 抖动登记，未闭环阻断 promote）
 ```
 
 ## body
