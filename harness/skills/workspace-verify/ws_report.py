@@ -717,6 +717,15 @@ def main(argv=None):
             args.device_dirty = True
 
     if args.device_dirty:
+        # 方向 5：device_dirty 仅 warn 不再被接受为 pass 证据——设备态不可信
+        # 的验证结果不得落 pass 收据（teardown 恢复失败，脏态可能污染后续
+        # 断言）；skip/fail 收据仍可落（标注 header 供审计）。add-candidate
+        # 侧同步拒收（baseline_register 方向 5 门禁）。
+        if args.result == "pass":
+            print("error: device_dirty=true（teardown 恢复失败，设备态不可信）"
+                  "且 result=pass，拒绝写收据（须重跑验证得干净设备态）",
+                  file=sys.stderr)
+            return 2
         print("warn: device_dirty=true（teardown 恢复失败，设备态不可信），"
               "已在收据 header 标注", file=sys.stderr)
 

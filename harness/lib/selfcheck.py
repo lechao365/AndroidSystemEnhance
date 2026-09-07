@@ -13,12 +13,14 @@ subprocess 不经管道直取 returncode，如实透出两工具结果。
 也不静默通过。refs 结论行同理只取 stdout 末行，stderr 仅附注不参与判定。
 
 输出单行（| 连接，供 ws_report --selfcheck 落盘与门禁判定）：
-    pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n> | refs_rc=<n> | <refs 结论行> | config_rc=<n> | <config 结论行> | contract_rc=<n> | <contract 结论行> | pyenv_rc=<n> | <pyenv 汇总行> | ioctl_rc=<n> | <ioctl 结论行>
+    pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n> | refs_rc=<n> | <refs 结论行> | config_rc=<n> | <config 结论行> | contract_rc=<n> | <contract 结论行> | pyenv_rc=<n> | <pyenv 汇总行> | ioctl_rc=<n> | <ioctl 结论行> | manifest_rc=<n> | <manifest 结论行>
 skipped=<n> 仅在 pytest_rc=0 且摘要无 skipped 时补 0。config_rc/contract_rc
 为 check_config.py 两模式（配置治理/契约检查，方向 4 接入）；pyenv_rc 为
 check_python_env 探测结果（Python 版本 + requirements.txt 依赖，环境破损
 时后续工具结论均不可信）；ioctl_rc 为 check_ioctl_headers 内核/AOSP ioctl
-头一致性结果（方向 2，双空/漂移判红透出）；ws_report 按
+头一致性结果（方向 2，双空/漂移判红透出）；manifest_rc 为 gen_manifest
+--check-only 的 code/rpi5 manifest 登记完整性结果（方向 2，未登记/有变化
+判红透出）；ws_report 按
 全部 *_rc 键判红（任一非零拒写收据）。退出码恒 0：拒写与否由 ws_report
 按 rc 判定，本脚本只负责如实采集（emit 侧可独立自测）。
 """
@@ -34,10 +36,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 # ws_report 必查键集合（单点定义，方向 3）：selfcheck 输出的 *_rc 中这些键
 # 任一缺失即拒写收据。ws_report.py 必查循环、test_workflow_ci 断言、CI
-# workflow 均以本集合为口径基准，新增 rc（pyenv_rc/ioctl_rc 等）必须同步进
-# 本常量，防单侧漏接线致判红静默失效。
+# workflow 均以本集合为口径基准，新增 rc（pyenv_rc/ioctl_rc/manifest_rc 等）
+# 必须同步进本常量，防单侧漏接线致判红静默失效。
 REQUIRED_RC_KEYS = ("pytest_rc", "refs_rc", "config_rc", "contract_rc",
-                    "pyenv_rc", "ioctl_rc")
+                    "pyenv_rc", "ioctl_rc", "manifest_rc")
 
 # pytest 摘要计数行：含 passed/failed/skipped 任一计数的行（形如
 # "531 passed in 27.9s"、"121 passed, 3 skipped in 6.0s"、"1 failed, ..."）
@@ -404,6 +406,17 @@ def main():
     ioctl_last = last_stdout_line(ioctl_out)
     if ioctl_last:
         parts.append(ioctl_last)
+    # manifest 登记完整性（方向 2）：gen_manifest --check-only 未登记文件或有
+    # 变化均判红（--check-only 有变化返非零），manifest_rc 透出交 ws_report
+    # 全 *_rc 判红拒写（此前 --check-only 无调用方，manifest 漂移静默无感）
+    manifest_rc, manifest_out, _ = run_tool(
+        [sys.executable, str(ROOT / "harness" / "skills" / "cross-device"
+                             / "lib" / "python" / "gen_manifest.py"), "--check-only"],
+        timeout=_TOOL_TIMEOUT_S)
+    parts.append(f"manifest_rc={manifest_rc}")
+    manifest_last = last_stdout_line(manifest_out)
+    if manifest_last:
+        parts.append(manifest_last)
     print(" | ".join(parts))
     _mark_selfcheck(dur_s=time.time() - _t0)
     return 0

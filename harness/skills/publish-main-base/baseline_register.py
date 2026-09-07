@@ -23,8 +23,9 @@ VERIFY_CASES_PATH = (Path(__file__).resolve().parents[2] / "config"
 # 仿 ws_report.py：引入 cross-device 共享收据模块，candidate 实读真实 verify 收据
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "lib" / "python"))
 from cdp_receipt import read_receipt  # noqa: E402
-from cdp_issue import (closed_issue_details,
-                       issue_files, read_index, read_issue, validate_issue)  # noqa: E402
+from cdp_issue import (closed_issue_details, closed_issue_paths,
+                       issue_files, read_index, read_issue, set_archived_in,
+                       validate_issue)  # noqa: E402
 from cdp_paths import data_baselines_dir, project_root  # noqa: E402
 
 
@@ -178,6 +179,61 @@ def carried_issue_ids(task, issues_dir=None):
             if e["status"] in ("open", "scheduled") and e["task"] == task]
 
 
+def check_issues_gate(task=None):
+    """known-issues 门禁主体（check-issues action 与 add-candidate 复用，方向 4）。
+
+    先判畸形登记（validate_issue 有红即拒：文件名/头字段/枚举/index 一致性
+    全局把关，防 index 按空格切分错位等畸形记录污染门禁判定）→ task 推断/
+    白名单（缺省从 status 非 fixed 条目的 task 集合推断，显式传值须在活跃
+    集合内防拼错）→ 判目标任务未解决阻塞（origin=introduced 或 blocking 且
+    status!=fixed 即拒）。
+    返回 rc：0 通过 / 1 畸形或未解决阻塞 / 3 task 不在活跃集合。
+    """
+    for p in issue_files():
+        errs = validate_issue(p)
+        if errs:
+            for e in errs:
+                print(f"{p.name}: {e}", file=sys.stderr)
+            print("error: known-issues 畸形登记，拒绝（先修复登记再发布基线）",
+                  file=sys.stderr)
+            return 1
+    # task 推断：缺省从 status 非 fixed 条目的 task 集合推断（自动，无需人工申报）
+    active_tasks = {i.task for p in issue_files()
+                    if (i := read_issue(p)).status != "fixed" and i.task}
+    if task:
+        # 白名单：显式传 --task 不在活跃集合内即 exit 3（防拼错静默通过；
+        # 空集合时放行——无活跃任务则无冲突对象）
+        if active_tasks and task not in active_tasks:
+            print(f"error: --task {task!r} 不在活跃任务集合 "
+                  f"{sorted(active_tasks)} 内（防拼错静默通过）",
+                  file=sys.stderr)
+            return 3
+    else:
+        if len(active_tasks) == 1:
+            task = next(iter(active_tasks))
+        elif len(active_tasks) > 1:
+            print(f"error: 活跃任务集合多值 {sorted(active_tasks)}，"
+                  f"须显式传 --task 之一", file=sys.stderr)
+            return 1
+        else:
+            task = "empty-registry"
+    # 再判目标任务未解决阻塞：origin=introduced 或 blocking 且 status!=fixed 即拒
+    bad = []
+    for p in issue_files():
+        i = read_issue(p)
+        if i.task != task:
+            continue
+        if (i.origin == "introduced" or i.blocking) and i.status != "fixed":
+            bad.append(f"{p.name}: origin={i.origin} blocking={i.blocking} "
+                       f"status={i.status}")
+    if bad:
+        print("\n".join(bad), file=sys.stderr)
+        print(f"error: task={task} 存在未解决阻塞问题", file=sys.stderr)
+        return 1
+    print(f"known-issues 门禁通过（task={task} 无未解决阻塞问题）")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="baseline candidate/promoted 登记")
     ap.add_argument("action",
@@ -202,51 +258,7 @@ def main(argv=None):
 
     # check-issues：known-issues 门禁（publish_main_base.sh 委托；不读写登记 yaml）
     if args.action == "check-issues":
-        # 先判畸形登记：validate_issue 有红即拒（文件名/头字段/枚举/index 一致性全局把关，
-        # 防 index 按空格切分错位等畸形记录污染门禁判定）
-        for p in issue_files():
-            errs = validate_issue(p)
-            if errs:
-                for e in errs:
-                    print(f"{p.name}: {e}", file=sys.stderr)
-                print("error: known-issues 畸形登记，拒绝（先修复登记再发布基线）",
-                      file=sys.stderr)
-                return 1
-        # task 推断：缺省从 status 非 fixed 条目的 task 集合推断（自动，无需人工申报）
-        active_tasks = {i.task for p in issue_files()
-                        if (i := read_issue(p)).status != "fixed" and i.task}
-        if args.task:
-            # 白名单：显式传 --task 不在活跃集合内即 exit 3（防拼错静默通过；
-            # 空集合时放行——无活跃任务则无冲突对象）
-            if active_tasks and args.task not in active_tasks:
-                print(f"error: --task {args.task!r} 不在活跃任务集合 "
-                      f"{sorted(active_tasks)} 内（防拼错静默通过）",
-                      file=sys.stderr)
-                return 3
-        else:
-            if len(active_tasks) == 1:
-                args.task = next(iter(active_tasks))
-            elif len(active_tasks) > 1:
-                print(f"error: 活跃任务集合多值 {sorted(active_tasks)}，"
-                      f"须显式传 --task 之一", file=sys.stderr)
-                return 1
-            else:
-                args.task = "empty-registry"
-        # 再判目标任务未解决阻塞：origin=introduced 或 blocking 且 status!=fixed 即拒
-        bad = []
-        for p in issue_files():
-            i = read_issue(p)
-            if i.task != args.task:
-                continue
-            if (i.origin == "introduced" or i.blocking) and i.status != "fixed":
-                bad.append(f"{p.name}: origin={i.origin} blocking={i.blocking} "
-                           f"status={i.status}")
-        if bad:
-            print("\n".join(bad), file=sys.stderr)
-            print(f"error: task={args.task} 存在未解决阻塞问题", file=sys.stderr)
-            return 1
-        print(f"known-issues 门禁通过（task={args.task} 无未解决阻塞问题）")
-        return 0
+        return check_issues_gate(task=args.task)
 
     # verify-tree：树等价断言（publish_main_base.sh squash 后、push main 前委托）。
     # 比较 verified/<id> tag 与 main 的树，排除登记 yaml 与 docs 后必须无差异，
@@ -293,6 +305,12 @@ def main(argv=None):
     today = datetime.date.today().strftime("%Y%m%d")
 
     if args.action == "add-candidate":
+        # 方向 4：known-issues 门禁自执（此前只记 --ki-gate 参数不自执；抽出
+        # check_issues_gate 复用 check-issues action 同源逻辑，门禁不过即拒登记，
+        # 不把门禁结论留给参数声明）
+        gate_rc = check_issues_gate(task=args.task)
+        if gate_rc != 0:
+            return gate_rc
         if not args.receipt_path:
             print("error: add-candidate 必须传 --receipt-path（证据链要求实读 verify 收据）",
                   file=sys.stderr)
@@ -308,6 +326,12 @@ def main(argv=None):
         if receipt_errs:
             print(f"error: 收据解析错误 {args.receipt_path}: "
                   f"{'; '.join(receipt_errs)}", file=sys.stderr)
+            return 1
+        # 方向 5：device_dirty 拒收——设备态不可信的验证结果不得登记为基线
+        # （ws_report 已源头拒落 pass，此处补登记侧防线防绕过）
+        if (r.device_dirty or "").strip().lower() in ("true", "1", "yes"):
+            print("error: 收据 device_dirty=true（teardown 恢复失败，设备态不可信），"
+                  "拒绝登记 candidate", file=sys.stderr)
             return 1
         receipt_cases = {c.strip() for c in (r.cases or "").split(",") if c.strip()}
         # 方向 2（本批意图 2）：evidence 自描述——记录发布全量组覆盖核对结果
@@ -592,6 +616,13 @@ def main(argv=None):
                           "写不成 known_issues_closed 清单（归档仍入基线文档）",
                           file=sys.stderr)
                 if closed_details:
+                    # 方向 6：归档前回写 archived_in 到终态条目文件头（标记归属
+                    # 基线；已归档条目 closed_issue_details 已过滤，不再重复归档）
+                    paths_by_id = closed_issue_paths()
+                    for d in closed_details:
+                        p = paths_by_id.get(d["issue_id"])
+                        if p:
+                            set_archived_in(p, args.baseline_id)
                     archive_lines = ["", "## 已修复问题归档", ""]
                     archive_lines += [
                         f"- {d['issue_id']} | {d['title']} | "

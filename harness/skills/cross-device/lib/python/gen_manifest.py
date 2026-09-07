@@ -142,8 +142,11 @@ def generate_manifest(patch_root: Path, check_only: bool,
         return True
 
     if check_only:
-        log_info("manifest.yaml 有变化（仅检查模式，未写入）")
-        return True
+        # 方向 2：有变化判红（此前仅 log_info 返 True，selfcheck 接入后
+        # manifest_rc 依据此返回值——有变化/未登记均须非零透出拒收据）
+        log_error("manifest.yaml 有变化（仅检查模式，未写入；有变化即判红，"
+                  "须运行重生成后再提交）")
+        return False
 
     from cdp_paths import atomic_write_text
     atomic_write_text(manifest_path, content)  # 原子写（P1-2 口径统一）

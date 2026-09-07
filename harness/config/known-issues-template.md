@@ -18,6 +18,7 @@
 - status: open                   # 状态：open / scheduled / fixed / wontfix
 - task: lcview-refactor          # 大颗粒任务稳定标识（promote 门禁按此过滤；修法描述入正文）
 - resolved_in:                   # 解决时所在 commit（未解决留空）
+- archived_in:                   # 归档归属基线 id（promote 晋升时回写，未归档留空）
 ```
 
 ## body

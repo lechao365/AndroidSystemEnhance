@@ -52,6 +52,18 @@ class TestGenManifest(unittest.TestCase):
                              kernel_deletions=[], aosp_deletions=[])
         self.assertEqual(m.read_text(encoding="utf-8"), "# old content\n")
 
+    def test_check_only_red_when_content_changed(self):
+        # 方向 2：check-only 且 manifest 有变化（未登记/缺登记等）→ 判红返
+        # False（此前仅 log_info 返 True，selfcheck 接入 manifest_rc 依据此
+        # 返回值——有变化即非零透出拒收据）
+        root = self._make_patch_root({"aosp/new/vendor/x/foo.h": "//x"})
+        m = root / "manifest.yaml"
+        m.write_text("# old content\n", encoding="utf-8")
+        ok = gm.generate_manifest(root, check_only=True,
+                                  kernel_deletions=[], aosp_deletions=[])
+        self.assertFalse(ok)
+        self.assertEqual(m.read_text(encoding="utf-8"), "# old content\n")
+
     def test_no_change_reports_ok(self):
         # manifest 与生成内容一致：check-only 亦报无变化（不写盘）
         root = self._make_patch_root({"aosp/new/vendor/x/foo.h": "//x"})

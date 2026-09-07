@@ -58,14 +58,21 @@ class TestSelfcheckWorkflow(unittest.TestCase):
 
     def test_ci_parses_required_rcs(self):
         # 方向 1 + 方向 3：selfcheck main 恒返 0（只采集不判定），CI 步骤必须
-        # 解析全部 REQUIRED_RC_KEYS（含 pyenv_rc/ioctl_rc）任一非零即失败——
-        # 否则测试失败也绿（CI 只跑不判）。键集合与 ws_report 必查键同源
-        # （selfcheck.REQUIRED_RC_KEYS 单点定义），防新增 rc 单侧漏接线。
+        # 解析全部 REQUIRED_RC_KEYS（含 pyenv_rc/ioctl_rc/manifest_rc）任一
+        # 非零即失败——否则测试失败也绿（CI 只跑不判）。键集合与 ws_report
+        # 必查键同源（selfcheck.REQUIRED_RC_KEYS 单点定义）。
+        # 方向 3：不再用 assertIn 扫全文（rc 名出现在注释里即可被 assertIn 满足，
+        # 假阳性）；解析 CI 的 `for rc_name in <键集合>` 行，与 REQUIRED_RC_KEYS
+        # 双向比对（集合相等），键集合漂移/漏键/注释伪满足均判红。
         job = self.doc["jobs"]["selfcheck"]
         run_steps = [s.get("run", "") for s in job["steps"]]
         joined = "\n".join(run_steps)
-        for rc in REQUIRED_RC_KEYS:
-            self.assertIn(rc, joined, f"CI 须解析 {rc}")
+        m = re.search(r"for\s+rc_name\s+in\s+([^;\n]+);", joined)
+        self.assertIsNotNone(m, "CI 须有 `for rc_name in <键集合>` 循环")
+        ci_keys = set(m.group(1).split())
+        self.assertEqual(ci_keys, set(REQUIRED_RC_KEYS),
+                         "CI for 键集合须与 REQUIRED_RC_KEYS 双向一致（漏键/"
+                         "多余键/注释伪满足均判红）")
         # 逐项判定非零即失败
         self.assertIn('"${rc_name}=0"', joined, "CI 须判定 *_rc 非零即失败")
         self.assertIn("exit 1", joined, "CI 判定失败须显式 exit 1")

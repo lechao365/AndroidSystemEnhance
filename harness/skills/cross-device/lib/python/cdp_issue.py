@@ -25,7 +25,7 @@ _NAME_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{12}-.+\.md$")
 _FIELDS = [
     "schema_version", "issue_id", "title", "discovered_in",
     "origin", "severity", "blocking", "blocking_reason", "status", "task",
-    "resolved_in",
+    "resolved_in", "archived_in",
 ]
 
 # origin / severity / status 允许取值（模板逐字段注释同源维护）
@@ -43,7 +43,8 @@ class Issue:
     def __init__(self, schema_version=1, issue_id="", title="", discovered_in="",
                  origin=_ORIGIN_DEFAULT, severity=_SEVERITY_DEFAULT,
                  blocking=False, blocking_reason="",
-                 status=_STATUS_DEFAULT, task="", resolved_in="", batch_id=""):
+                 status=_STATUS_DEFAULT, task="", resolved_in="", batch_id="",
+                 archived_in=""):
         self.schema_version = schema_version
         self.issue_id = issue_id
         self.title = title
@@ -55,6 +56,7 @@ class Issue:
         self.status = status if status in _STATUSES else _STATUS_DEFAULT
         self.task = task
         self.resolved_in = resolved_in
+        self.archived_in = archived_in  # 方向 6：promote 归档回写的归属基线 id（非 index 字段）
         # 命名元数据（发现批次），不属头字段，仅用于文件名 时间戳-batch_id-slug
         self.batch_id = batch_id
 
@@ -138,14 +140,48 @@ def closed_issue_ids(issues_dir=None):
             if (i := read_issue(p)).status in ("fixed", "wontfix")]
 
 
-def closed_issue_details(issues_dir=None):
+def closed_issue_details(issues_dir=None, include_archived=False):
     """终态条目明细列表（promote 归档入档用）：每项含 issue_id / resolved_in /
-    title，归档段据此逐条记 id/标题/修复提交，文件保留不清零。"""
+    title / archived_in。include_archived=False（缺省）时过滤已归档（archived_in
+    非空）条目——归档段只收录首次归档，防跨批重复归档同一条终态（方向 6）。"""
     d = issues_dir or data_known_issues_dir()
-    return [{"issue_id": i.issue_id, "resolved_in": i.resolved_in,
-             "title": i.title}
-            for p in issue_files(d)
-            if (i := read_issue(p)).status in ("fixed", "wontfix")]
+    details = []
+    for p in issue_files(d):
+        i = read_issue(p)
+        if i.status not in ("fixed", "wontfix"):
+            continue
+        if not include_archived and i.archived_in:
+            continue
+        details.append({"issue_id": i.issue_id, "resolved_in": i.resolved_in,
+                        "title": i.title, "archived_in": i.archived_in})
+    return details
+
+
+def closed_issue_paths(issues_dir=None):
+    """终态条目 issue_id → 文件路径 映射（promote 回写 archived_in 定位用）。"""
+    d = issues_dir or data_known_issues_dir()
+    return {i.issue_id: p for p in issue_files(d)
+            if (i := read_issue(p)).status in ("fixed", "wontfix")}
+
+
+def set_archived_in(path, baseline_id):
+    """回写头部 archived_in（promote 归档标记归属基线，防重复归档）。
+
+    baseline_id 为空即跳过；仅当当前 archived_in 为空才写（已有归档记录不
+    覆盖，保首次归档可追溯）。archived_in 非 index 字段，index 不重建。
+    """
+    if not baseline_id:
+        return Path(path)
+    p = Path(path)
+    text = p.read_text(encoding="utf-8")
+    header, sep, body = text.partition("\n## body")
+    if re.search(r"^- archived_in: \S", header, re.M):
+        return p  # 已归档过（首次归档记录保留）
+    new_header = _FIELD_RE.sub(
+        lambda m: f"- archived_in: {baseline_id}" if m.group(1) == "archived_in"
+        else m.group(0), header)
+    atomic_write_text(p, new_header + sep + body)  # 原子写（P1-2）
+    return p
 
 
 def delete_closed(issue_ids, issues_dir=None):

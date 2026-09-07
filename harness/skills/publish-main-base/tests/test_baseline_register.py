@@ -94,6 +94,39 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(b["sync_manifest"], rp)
         self.assertEqual(b["evidence"]["sync_manifest"], rp)
 
+    # ── 方向 4：add-candidate 自执 known-issues 门禁（复用 check_issues_gate）
+    def test_add_candidate_gate_rejects_blocking_open(self):
+        # add-candidate 自执门禁：目标 task 存在未解决阻塞（introduced/blocking
+        # 且未 fixed）→ 拒登记（不再只记 --ki-gate 参数不自执）
+        from cdp_issue import Issue, write_issue
+        base = dict(schema_version=1, discovered_in="abc", severity="P2",
+                    task="t1", batch_id="18f27638d9f6")
+        write_issue(Issue(issue_id="KI-OPEN-BLK", title="阻塞未解决",
+                          origin="introduced", blocking=True,
+                          blocking_reason="r", status="open", **base), "x")
+        rp = self._make_receipt(build="pass", board="pass")
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 1)
+        self.assertIn("未解决阻塞", out)
+
+    # ── 方向 5：add-candidate 拒收 device_dirty 收据 ────────────────────
+    def test_add_candidate_rejects_device_dirty(self):
+        # 收据 device_dirty=true（teardown 恢复失败，设备态不可信）→ 拒收登记
+        from cdp_receipt import Receipt, write_receipt
+        r = Receipt(batch_id="batch-dirty", batch_base="", verified_commit="abc",
+                    verify_mode="board", result="pass", build="pass",
+                    push_board="pass", acceptance="ok", elapsed_s=10,
+                    summary="dirty", cases="lcview-liveness",
+                    device_dirty="true")
+        rp = str(write_receipt(r, "body"))
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 1)
+        self.assertIn("device_dirty", out)
+
     def test_add_candidate_lowercase_receipt(self):
         # 收据 build=skip 等小写值须转大写登记，不硬编码 PASS
         rp = self._make_receipt(build="skip", board="skip")
@@ -639,7 +672,7 @@ class TestBaselineRegister(unittest.TestCase):
                           status="fixed", resolved_in="abc123", **base), "x")
         write_issue(Issue(issue_id="KI-CLOSE-2", title="问题二",
                           origin="introduced", blocking=True,
-                          blocking_reason="影响一致性", status="wontfix", **base), "y")
+                          blocking_reason="影响一致性", status="fixed", **base), "y")
         write_issue(Issue(issue_id="KI-OPEN-1", title="问题三",
                           origin="pre-existing", blocking=False,
                           status="open", **base), "z")
@@ -658,12 +691,12 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("promoted:", out)
         b = br.load()["baselines"][0]
-        # 清单入档为明细列表（含 resolved_in 与 title）
+        # 清单入档为明细列表（含 resolved_in 与 title 与 archived_in）
         self.assertEqual(b["evidence"]["known_issues_closed"], [
             {"issue_id": "KI-CLOSE-1", "resolved_in": "abc123",
-             "title": "问题一"},
+             "title": "问题一", "archived_in": ""},
             {"issue_id": "KI-CLOSE-2", "resolved_in": "",
-             "title": "问题二"},
+             "title": "问题二", "archived_in": ""},
         ])
         # 归档段写入基线文档（快照 = 基线文档本体）
         snapshot = self._root / "data" / "baselines" / f"{bid}-{Path(rp).name}"

@@ -427,6 +427,34 @@ class TestCheckPythonEnv(unittest.TestCase):
         self.assertIn("ioctl_rc=1", out)
         self.assertIn("签名漂移", out)
 
+    def test_main_includes_manifest_segment(self):
+        # 方向 2：selfcheck 接入 gen_manifest --check-only → 输出含 manifest_rc=0
+        # 与结论行（manifest 桩由 _fake_run 兜底成功）
+        fake = _fake_run([
+            _FakeProc(0, "531 passed in 27.9s\n"),
+        ])
+        buf = io.StringIO()
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
+            with redirect_stdout(buf):
+                selfcheck.main()
+        out = buf.getvalue()
+        self.assertIn("manifest_rc=0", out)
+
+    def test_manifest_nonzero_passed_through(self):
+        # 方向 2：code/rpi5 manifest 未登记/有变化 → gen_manifest --check-only
+        # 判红，manifest_rc=1 非零透出（交 ws_report 判红拒写）
+        fake = _fake_run([
+            _FakeProc(0, "531 passed in 27.9s\n"),
+            _FakeProc(0, "[OK] 一致: vendor_lechao_usbd_config\n"),
+            _FakeProc(1, "[ERROR] manifest 未登记 1 个 code/rpi5 文件\n"),
+        ])
+        buf = io.StringIO()
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
+            with redirect_stdout(buf):
+                selfcheck.main()
+        out = buf.getvalue()
+        self.assertIn("manifest_rc=1", out)
+
 
 if __name__ == "__main__":
     unittest.main()

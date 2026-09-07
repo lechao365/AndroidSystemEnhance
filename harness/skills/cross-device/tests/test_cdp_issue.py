@@ -140,9 +140,9 @@ class TestIssue(unittest.TestCase):
         self.assertEqual(
             sorted(details, key=lambda d: d["issue_id"]), [
                 {"issue_id": "KI-FIXED", "resolved_in": "abc123def456",
-                 "title": "lcview 重复落盘计数异常"},
+                 "title": "lcview 重复落盘计数异常", "archived_in": ""},
                 {"issue_id": "KI-WONTFIX", "resolved_in": "",
-                 "title": "lcview 重复落盘计数异常"},
+                 "title": "lcview 重复落盘计数异常", "archived_in": ""},
             ])
 
     def test_closed_fixed_blocking_still_terminal(self):
@@ -151,6 +151,39 @@ class TestIssue(unittest.TestCase):
         r.blocking = True  # _mk_issue 默认 blocking=True
         cdp_issue.write_issue(r, "x")
         self.assertEqual(cdp_issue.closed_issue_ids(self._dir), ["KI-BLK-FIXED"])
+
+    # ── 方向 6：archived_in 归档标记与归档段过滤 ──────────────────────
+    def test_closed_issue_details_filters_archived(self):
+        # 已归档（archived_in 非空）的终态条目缺省过滤——归档段只收录首次
+        # 归档，防跨批重复归档；include_archived=True 时全量返回
+        r1 = _mk_issue("KI-ARCHIVED", status="fixed")
+        p = cdp_issue.write_issue(r1, "x")
+        cdp_issue.set_archived_in(p, "BL-20260907-01")
+        cdp_issue.write_issue(_mk_issue("KI-FRESH", status="fixed"), "y")
+        fresh = cdp_issue.closed_issue_details(self._dir)
+        self.assertEqual([d["issue_id"] for d in fresh], ["KI-FRESH"])
+        self.assertEqual(fresh[0]["archived_in"], "")  # 未归档 archived_in 为空
+        all_d = cdp_issue.closed_issue_details(self._dir, include_archived=True)
+        self.assertEqual(sorted(d["issue_id"] for d in all_d),
+                         ["KI-ARCHIVED", "KI-FRESH"])
+
+    def test_set_archived_in_writes_header_and_keeps_first(self):
+        # set_archived_in 回写头 archived_in；已归档不覆盖（首次归档可追溯）
+        r = _mk_issue("KI-ARC2", status="fixed")
+        p = cdp_issue.write_issue(r, "x")
+        cdp_issue.set_archived_in(p, "BL-20260907-01")
+        got = cdp_issue.read_issue(p)
+        self.assertEqual(got.archived_in, "BL-20260907-01")
+        # 二次回写不覆盖
+        cdp_issue.set_archived_in(p, "BL-20260908-01")
+        self.assertEqual(cdp_issue.read_issue(p).archived_in, "BL-20260907-01")
+
+    def test_set_archived_in_empty_noop(self):
+        # baseline_id 为空即跳过（无归档目标）
+        r = _mk_issue("KI-ARC3", status="fixed")
+        p = cdp_issue.write_issue(r, "x")
+        cdp_issue.set_archived_in(p, "")
+        self.assertEqual(cdp_issue.read_issue(p).archived_in, "")
 
     def test_delete_closed_removes_files_and_syncs_index(self):
         # 清算删除：终态文件删除 + index 同步重建，活项（open/scheduled）全留
@@ -276,6 +309,7 @@ class TestIssue(unittest.TestCase):
             "- discovered_in: 38433d446f07\n- origin: introduced\n"
             "- severity: P3\n- blocking: false\n- blocking_reason: \n"
             "- status: open\n- task: lcview-refactor\n- resolved_in: \n"
+            "- archived_in: \n"
             "\n## body\n\nx\n",
             encoding="utf-8")
         errs = cdp_issue.validate_issue(p, self._dir)
