@@ -164,10 +164,12 @@ class TestSyncModifyToMainBase(unittest.TestCase):
                               cwd=self.root, env=env)
 
     def _run_register(self, *args):
+        # 承重门禁数据源固定仓库真实根（不随 CDP_PROJECT_ROOT 改道），fixture
+        # 的 known-issues 写临时根，经 --known-issues-dir 显式指回
         return subprocess.run(
             [sys.executable,
              str(self.root / "harness" / "skills" / "publish-main-base" / "baseline_register.py"),
-             *args],
+             *args, "--known-issues-dir", str(self.root / "data" / "known-issues")],
             capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=self.root, env=self._env)
 
     def _mk_issue(self, task="t1", status="open", origin="introduced", blocking=True,
@@ -475,6 +477,26 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         b = self._registered_evidence()
         self.assertEqual(b["evidence"]["known_issues_carried"], "")
+
+    def test_add_candidate_forwards_task_multiple_active(self):
+        # 方向：活跃任务多值时 add-candidate 转发 --task（prepare 死锁修复）
+        # —— shell 门禁显式 --task 放行后，登记层同传 --task，不因 task=None
+        # 多值推断 return 1 自拒；此前 publish_main_base.sh 不转发 --task，
+        # 活跃多值时 shell 放行而登记层自拒致 prepare 死锁
+        # 多值成立（活跃 task 集合 {t1,t2}），t1 自身非阻塞（pre-existing）——
+        # 门禁只判目标任务 t1，不因 t2 阻塞影响（t2 阻塞只挡 --task t2）
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
+        cdp_issue.write_issue(self._mk_issue(task="t2", issue_id="KI-Y"), "现场")
+        self._write_receipt(self.parent_vc, batch_id="000000000098",
+                            cases="lcview-liveness")
+        r = self._run_register("add-candidate", "--source-commit", "abc123def456",
+                               "--task", "t1",
+                               "--evidence-scope", "lcview-liveness",
+                               "--receipt-path",
+                               "data/verify-results/20260831-100000-000000000098.md")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._registered_evidence()["status"], "candidate")
 
     # ── 方向 2：carried_issue_ids 自动取 id（只收 open 与 scheduled）────
     def test_carried_issue_ids_only_open_scheduled(self):

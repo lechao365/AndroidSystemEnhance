@@ -87,12 +87,10 @@ def generate_manifest(patch_root: Path, check_only: bool,
             dir_path = patch_root / section / sub
             if not dir_path.is_dir():
                 continue
-            files: list[str] = []
-            for f in sorted(dir_path.rglob("*")):
-                if not f.is_file():
-                    continue
-                rel = str(f.relative_to(dir_path).as_posix())
-                files.append(rel)
+            files = sorted(
+                str(f.relative_to(dir_path).as_posix())
+                for f in dir_path.rglob("*")
+                if f.is_file())
             if not files:
                 continue
             if not section_emitted:

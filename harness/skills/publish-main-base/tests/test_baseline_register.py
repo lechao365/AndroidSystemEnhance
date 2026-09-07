@@ -61,7 +61,10 @@ class TestBaselineRegister(unittest.TestCase):
         buf = io.StringIO()
         err = io.StringIO()
         with redirect_stdout(buf), redirect_stderr(err):
-            rc = br.main(list(args))
+            # 承重门禁数据源固定仓库真实根（方向：不随 CDP_PROJECT_ROOT 改道），
+            # 测试经 --known-issues-dir 显式指回临时根，与收据等 env 隔离并存
+            rc = br.main(list(args) + ["--known-issues-dir",
+                                       str(self._root / "data" / "known-issues")])
         return rc, buf.getvalue() + err.getvalue()
 
     def _patch_no_code_changes(self, changes):
@@ -95,6 +98,25 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(b["evidence"]["sync_manifest"], rp)
 
     # ── 方向 4：add-candidate 自执 known-issues 门禁（复用 check_issues_gate）
+    def test_check_issues_gate_default_source_is_real_root(self):
+        # 方向 3：门禁缺省数据源 = 仓库真实根，不随 CDP_PROJECT_ROOT（setUp
+        # 指向临时根）改道——CI 把 CDP_PROJECT_ROOT 设到 runner 临时目录时
+        # 承重门禁仍读真实登记，不被空目录 empty-registry 假绿关掉
+        from baseline_register import _real_known_issues_dir
+        from cdp_issue import issue_files
+        real = _real_known_issues_dir()
+        self.assertEqual(real,
+                         Path(br.__file__).resolve().parents[3]
+                         / "data" / "known-issues")
+        self.assertNotEqual(real, self._root / "data" / "known-issues")
+        # 真实根确有登记数据（非空），缺省门禁基于真实根判定而非临时空目录
+        self.assertGreater(len(issue_files(real)), 0)
+        # 显式 --known-issues-dir 注入临时根空目录 → empty-registry 放行
+        # （测试注入路径：把门禁数据源指回 fixture 隔离的临时根）
+        rc, out = self._run("check-issues")
+        self.assertEqual(rc, 0)
+        self.assertIn("empty-registry", out)
+
     def test_add_candidate_gate_rejects_blocking_open(self):
         # add-candidate 自执门禁：目标 task 存在未解决阻塞（introduced/blocking
         # 且未 fixed）→ 拒登记（不再只记 --ki-gate 参数不自执）

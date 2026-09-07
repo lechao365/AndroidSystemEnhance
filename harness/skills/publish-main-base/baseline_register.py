@@ -179,7 +179,17 @@ def carried_issue_ids(task, issues_dir=None):
             if e["status"] in ("open", "scheduled") and e["task"] == task]
 
 
-def check_issues_gate(task=None):
+def _real_known_issues_dir():
+    """承重门禁数据源：固定仓库真实根（模块位置解析，不随 CDP_PROJECT_ROOT 改道）。
+
+    CDP_PROJECT_ROOT 是收据/打点等运行产物的隔离机制（CI 自检指向 runner
+    临时目录），known-issues 是发布门禁证据——若随 env 改道到空目录会被
+    环境变量静默关掉（empty-registry 假绿），故门禁一律读真实根。
+    测试经 --known-issues-dir 显式指回临时根，与 env 隔离机制并存。"""
+    return Path(__file__).resolve().parents[3] / "data" / "known-issues"
+
+
+def check_issues_gate(task=None, issues_dir=None):
     """known-issues 门禁主体（check-issues action 与 add-candidate 复用，方向 4）。
 
     先判畸形登记（validate_issue 有红即拒：文件名/头字段/枚举/index 一致性
@@ -187,9 +197,12 @@ def check_issues_gate(task=None):
     白名单（缺省从 status 非 fixed 条目的 task 集合推断，显式传值须在活跃
     集合内防拼错）→ 判目标任务未解决阻塞（origin=introduced 或 blocking 且
     status!=fixed 即拒）。
+    数据源 issues_dir 缺省取仓库真实根（_real_known_issues_dir，不随
+    CDP_PROJECT_ROOT 改道——承重门禁不得被环境变量关掉）。
     返回 rc：0 通过 / 1 畸形或未解决阻塞 / 3 task 不在活跃集合。
     """
-    for p in issue_files():
+    d = Path(issues_dir) if issues_dir else _real_known_issues_dir()
+    for p in issue_files(d):
         errs = validate_issue(p)
         if errs:
             for e in errs:
@@ -198,7 +211,7 @@ def check_issues_gate(task=None):
                   file=sys.stderr)
             return 1
     # task 推断：缺省从 status 非 fixed 条目的 task 集合推断（自动，无需人工申报）
-    active_tasks = {i.task for p in issue_files()
+    active_tasks = {i.task for p in issue_files(d)
                     if (i := read_issue(p)).status != "fixed" and i.task}
     if task:
         # 白名单：显式传 --task 不在活跃集合内即 exit 3（防拼错静默通过；
@@ -219,7 +232,7 @@ def check_issues_gate(task=None):
             task = "empty-registry"
     # 再判目标任务未解决阻塞：origin=introduced 或 blocking 且 status!=fixed 即拒
     bad = []
-    for p in issue_files():
+    for p in issue_files(d):
         i = read_issue(p)
         if i.task != task:
             continue
@@ -254,11 +267,15 @@ def main(argv=None):
     ap.add_argument("--known-issues-carried",
                     help="带病登记 issue_id 列表（逗号分隔，写入 evidence 的 "
                          "known_issues_carried；缺参记空，只记录不阻断）")
+    ap.add_argument("--known-issues-dir",
+                    help="known-issues 门禁数据源目录（缺省固定仓库真实根 "
+                         "data/known-issues，不随 CDP_PROJECT_ROOT 改道；"
+                         "测试/异地经此显式指回，与收据 env 隔离并存）")
     args = ap.parse_args(argv)
 
     # check-issues：known-issues 门禁（publish_main_base.sh 委托；不读写登记 yaml）
     if args.action == "check-issues":
-        return check_issues_gate(task=args.task)
+        return check_issues_gate(task=args.task, issues_dir=args.known_issues_dir)
 
     # verify-tree：树等价断言（publish_main_base.sh squash 后、push main 前委托）。
     # 比较 verified/<id> tag 与 main 的树，排除登记 yaml 与 docs 后必须无差异，
@@ -307,8 +324,8 @@ def main(argv=None):
     if args.action == "add-candidate":
         # 方向 4：known-issues 门禁自执（此前只记 --ki-gate 参数不自执；抽出
         # check_issues_gate 复用 check-issues action 同源逻辑，门禁不过即拒登记，
-        # 不把门禁结论留给参数声明）
-        gate_rc = check_issues_gate(task=args.task)
+        # 不把门禁结论留给参数声明；数据源固定真实根不随 CDP_PROJECT_ROOT 改道）
+        gate_rc = check_issues_gate(task=args.task, issues_dir=args.known_issues_dir)
         if gate_rc != 0:
             return gate_rc
         if not args.receipt_path:

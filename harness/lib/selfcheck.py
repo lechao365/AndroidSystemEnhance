@@ -102,48 +102,60 @@ def timed_run(cmd, timeout=None):
     return rc, out, err, time.time() - _t0
 
 
-# 治理工具超时上限（秒）：refs/config 正常 2~4s，放宽 20 倍仍能兜住挂死
+# 治理工具超时上限（秒）：refs/config 实测 ~25s（全量扫描 refs 索引 + yaml
+# 治理），放宽 4 倍兜住挂死（方向 2 订正：此前注释称 2~4s 与实测差一个数量级）
 _TOOL_TIMEOUT_S = 120
 # pytest 超时上限（秒）：xdist 全量正常 ~25s（WSL2 drvfs ~60s），兜挂死
 _PYTEST_TIMEOUT_S = 900
 
 
-def run_parallel_tools():
-    """refs 与 config/contract 并行采集（B2）：两进程同时拉起，墙钟取
-    max 而非 sum（治理进程冷启动与 pytest 峰值错峰）。
+def _spawn_cmd(cmd):
+    """Popen 启动单个工具（非阻塞，方向 1：与 pytest 重叠跑，收口在
+    _collect_cmd）。cwd=ROOT 与 run_tool 一致。"""
+    return subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        encoding="utf-8", errors="replace", cwd=ROOT)
+
+
+def _collect_cmd(proc, name, timeout=_TOOL_TIMEOUT_S):
+    """收口单个 Popen：communicate + 墙钟，返回 (rc, stdout, stderr, dur_s)。
+    超时 kill 返 rc=124（约定超时标记，B3 兜底挂死）。"""
+    _t0 = time.time()
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        rc = proc.returncode
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = proc.communicate()
+        print(f"warn: 治理工具超时（>{timeout}s，rc=124）: {name}",
+              file=sys.stderr)
+        rc, err = 124, f"timeout after {timeout}s"
+    return rc, out, err, time.time() - _t0
+
+
+def _spawn_tools():
+    """并行启动 refs 与 config/contract（B2，方向 1 拆两阶段）：仅 Popen
+    不阻塞，主流程随后跑 pytest 与治理重叠，收口在 _collect_tools。"""
+    return {
+        "refs": _spawn_cmd(
+            [sys.executable, str(ROOT / "harness" / "lib" / "check_skill_refs.py")]),
+        "cfg": _spawn_cmd(
+            [sys.executable, str(ROOT / "harness" / "lib" / "check_config.py"),
+             "--all"]),
+    }
+
+
+def _collect_tools(procs):
+    """收口 refs/cfg（communicate + 各自墙钟），解析 --all 机器行。
 
     check_config --all 单进程双模式（消两遍 yaml 导入/全量扫描，B2）：
     末尾 config_rc=/contract_rc= 机器行分别解析，结论行按 label 前缀
     分别提取（与单模式 last_stdout_line 口径兼容）。
-    返回 dict：
-      refs: (rc, stdout, stderr)
-      cfg:  (rc, stdout, 结论行)
-      ctr:  (rc, stdout, 结论行)
+    返回 (tools dict, refs_dur, cfg_dur)：tools 形态与 run_parallel_tools
+    一致（refs/cfg/ctr 三元组），两个 dur 供 durs 拆开自报（方向 2）。
     """
-    procs = {
-        "refs": subprocess.Popen(
-            [sys.executable, str(ROOT / "harness" / "lib" / "check_skill_refs.py")],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            encoding="utf-8", errors="replace", cwd=ROOT),
-        "cfg": subprocess.Popen(
-            [sys.executable, str(ROOT / "harness" / "lib" / "check_config.py"),
-             "--all"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            encoding="utf-8", errors="replace", cwd=ROOT),
-    }
-    results = {}
-    for key, proc in procs.items():
-        try:
-            out, err = proc.communicate(timeout=_TOOL_TIMEOUT_S)
-            results[key] = (proc.returncode, out, err)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            out, err = proc.communicate()
-            print(f"warn: 治理工具超时（>{_TOOL_TIMEOUT_S}s，rc=124）: {key}",
-                  file=sys.stderr)
-            results[key] = (124, out or "", f"timeout after {_TOOL_TIMEOUT_S}s")
-    refs_rc, refs_out, refs_err = results["refs"]
-    cfg_rc_raw, cfg_out, _ = results["cfg"]
+    refs_rc, refs_out, refs_err, refs_dur = _collect_cmd(procs["refs"], "refs")
+    cfg_rc_raw, cfg_out, _, cfg_dur = _collect_cmd(procs["cfg"], "cfg")
     # --all 末尾机器 rc 行解析；异常形态（旧版无机器行/输出损坏）按整体
     # rc 兜底双段，结论行回落全文末行保摘要可见性
     cfg_rc, ctr_rc = cfg_rc_raw, cfg_rc_raw
@@ -156,9 +168,22 @@ def run_parallel_tools():
             cfg_rc, ctr_rc = int(m_cfg.group(1)), int(m_ctr.group(1))
     elif not ctr_last:
         ctr_last = last_stdout_line(cfg_out)
-    return {"refs": (refs_rc, refs_out, refs_err),
-            "cfg": (cfg_rc, cfg_out, cfg_last),
-            "ctr": (ctr_rc, ctr_out, ctr_last)}
+    tools = {"refs": (refs_rc, refs_out, refs_err),
+             "cfg": (cfg_rc, cfg_out, cfg_last),
+             "ctr": (ctr_rc, ctr_out, ctr_last)}
+    return tools, refs_dur, cfg_dur
+
+
+def run_parallel_tools():
+    """refs 与 config/contract 并行采集（B2 组合接口，测试/兼容用）。
+
+    两阶段 _spawn_tools + _collect_tools 的即时组合（墙钟取 max 而非 sum）；
+    main 已拆两阶段与 pytest/ioctl/manifest 全重叠（方向 1），本函数保留
+    原接口供 TestParallelTools 与外部调用。
+    """
+    procs = _spawn_tools()
+    tools, _, _ = _collect_tools(procs)
+    return tools
 
 
 def _extract_all_mode_lines(out):
@@ -365,13 +390,21 @@ def main():
         pytest_cmd += ["-n", "auto"]
     except ImportError:
         pass
+    # 方向 1：先 Popen 全部治理工具（refs/cfg/ioctl/manifest）再跑 pytest，
+    # 全重叠后收口——实测 py ~24.8s 与 tools ~27s 可完全重叠，单轮省约 26s
+    tools_procs = _spawn_tools()
+    ioctl_proc = _spawn_cmd(
+        [sys.executable, str(ROOT / "harness" / "lib" / "check_ioctl_headers.py")])
+    manifest_proc = _spawn_cmd(
+        [sys.executable, str(ROOT / "harness" / "skills" / "cross-device"
+                             / "lib" / "python" / "gen_manifest.py"), "--check-only"])
     py_rc, py_out, py_err, py_dur = timed_run(
         pytest_cmd, timeout=_PYTEST_TIMEOUT_S)
-    # refs 与 config/contract 并行采集（B2：Popen 同时拉起 + --all 单进程
-    # 双模式，治理墙钟由 sum 降为 max，两遍 yaml/全量扫描降为一遍）
-    _tools_t0 = time.time()
-    tools = run_parallel_tools()
-    tools_dur = time.time() - _tools_t0
+    # pytest 跑完收口治理（各进程已与 pytest 重叠，墙钟取 max 而非 sum）
+    tools, refs_dur, cfg_dur = _collect_tools(tools_procs)
+    ioctl_rc, ioctl_out, _, ioctl_dur = _collect_cmd(ioctl_proc, "ioctl")
+    manifest_rc, manifest_out, _, manifest_dur = _collect_cmd(
+        manifest_proc, "manifest")
     refs_rc, refs_out, refs_err = tools["refs"]
     cfg_rc, cfg_out, cfg_last = tools["cfg"]
     ctr_rc, ctr_out, ctr_last = tools["ctr"]
@@ -413,9 +446,6 @@ def main():
     # 内核/AOSP ioctl 头一致性（方向 2）：此前 check_ioctl_headers 无调用方，
     # 头文件单侧漂移/双空解析异常静默无感；接入自检后 ioctl_rc 透出，双空
     # 判红在 check_ioctl_headers 内部完成，非零由 ws_report 全 *_rc 判红拒写
-    ioctl_rc, ioctl_out, _, ioctl_dur = timed_run(
-        [sys.executable, str(ROOT / "harness" / "lib" / "check_ioctl_headers.py")],
-        timeout=_TOOL_TIMEOUT_S)
     parts.append(f"ioctl_rc={ioctl_rc}")
     ioctl_last = last_stdout_line(ioctl_out)
     if ioctl_last:
@@ -423,19 +453,19 @@ def main():
     # manifest 登记完整性（方向 2）：gen_manifest --check-only 未登记文件或有
     # 变化均判红（--check-only 有变化返非零），manifest_rc 透出交 ws_report
     # 全 *_rc 判红拒写（此前 --check-only 无调用方，manifest 漂移静默无感）
-    manifest_rc, manifest_out, _, manifest_dur = timed_run(
-        [sys.executable, str(ROOT / "harness" / "skills" / "cross-device"
-                             / "lib" / "python" / "gen_manifest.py"), "--check-only"],
-        timeout=_TOOL_TIMEOUT_S)
     parts.append(f"manifest_rc={manifest_rc}")
     manifest_last = last_stdout_line(manifest_out)
     if manifest_last:
         parts.append(manifest_last)
-    # 方向 6：逐检查器耗时（秒，一位小数）入输出行，供 emit 定位耗时瓶颈；
+    # 方向 2 + 方向 6：逐检查器耗时（秒，一位小数）入输出行，refs/cfg 拆开
+    # 各自自报（合并 tools 无法定位慢点）。重叠模型（方向 1）下语义：
+    # py 为 pytest 进程总耗时；refs/cfg/ioctl/manifest 为其收口阻塞墙钟
+    # （≈进程对主流程耗时的贡献：≈0 即进程在 pytest 期间已完成不拖慢，
+    #  显著非零即收口仍在等待/管道排空——emit 据此定位拖慢主流程的检查器）。
     # 前缀 *_dur 不匹配 ws_report 的 *_rc 判红正则，不干扰 rc 判定
-    parts.append(f"durs: py={py_dur:.1f} tools={tools_dur:.1f} "
-                 f"pyenv={env_dur:.1f} ioctl={ioctl_dur:.1f} "
-                 f"manifest={manifest_dur:.1f}")
+    parts.append(f"durs: py={py_dur:.1f} refs={refs_dur:.1f} "
+                 f"cfg={cfg_dur:.1f} pyenv={env_dur:.1f} "
+                 f"ioctl={ioctl_dur:.1f} manifest={manifest_dur:.1f}")
     print(" | ".join(parts))
     _mark_selfcheck(dur_s=time.time() - _t0)
     return 0

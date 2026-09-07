@@ -118,6 +118,24 @@ class TestGenManifest(unittest.TestCase):
         self.assertTrue(gm.generate_manifest(
             root, check_only=True, kernel_deletions=[], aosp_deletions=[]))
 
+    def test_entries_sorted_by_as_posix(self):
+        # 方向 5：段内排序按 as_posix（/ 统一路径）而非 OS 原生 Path 比较
+        # （Windows 分隔符 \ 参与 Path 比较会使排序依赖平台，manifest 漂移）
+        root = self._make_patch_root({
+            "aosp/new/vendor/z/foo.h": "//z",
+            "aosp/new/vendor/a/bar.h": "//a",
+            "aosp/new/vendor/m/mid.h": "//m",
+        })
+        gm.generate_manifest(root, check_only=False,
+                             kernel_deletions=[], aosp_deletions=[])
+        content = (root / "manifest.yaml").read_text(encoding="utf-8")
+        # 按 as_posix 字典序：a < m < z（若按 Path 原生比较在 Windows 上
+        # 可能 a < z < m 或平台相关，manifest 生成不可复现）
+        self.assertLess(content.index("vendor/a/bar.h"),
+                        content.index("vendor/m/mid.h"))
+        self.assertLess(content.index("vendor/m/mid.h"),
+                        content.index("vendor/z/foo.h"))
+
 
 class TestGenManifestMark(unittest.TestCase):
     """方向 4：gen_manifest main 收尾自发 mark gen_manifest（edit 段细分）。"""

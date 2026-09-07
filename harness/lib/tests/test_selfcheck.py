@@ -52,20 +52,37 @@ def _fake_tools(**overrides):
     return tools
 
 
+@contextlib.contextmanager
+def _patched_parallel():
+    """屏蔽 main 的治理并行段（方向 1 拆分后）：_spawn_tools/_spawn_cmd
+    只 Popen 不阻塞、_collect_tools/_collect_cmd 桩注入结果，避免真跑
+    refs/cfg ~27s 与 ioctl/manifest 进程拖慢用例（收据不依赖真跑值）。
+    """
+    with mock.patch.object(selfcheck, "_spawn_tools",
+                           return_value={"refs": "p", "cfg": "p"}), \
+            mock.patch.object(selfcheck, "_collect_tools",
+                              return_value=(_fake_tools(), 1.0, 2.0)), \
+            mock.patch.object(selfcheck, "_spawn_cmd",
+                              return_value="p"), \
+            mock.patch.object(selfcheck, "_collect_cmd",
+                              return_value=(0, "[OK] 一致\n", "", 0.1)):
+        yield
+
+
 class TestSelfcheck(unittest.TestCase):
     def setUp(self):
         # 屏蔽自发 apply_selfcheck 打点（打点不影响 selfcheck 结果断言，
-        # 其行为由 TestMarkSelfcheck 单独覆盖）与治理工具真跑（B2 后
-        # run_parallel_tools 真拉起 refs/cfg 进程 ~25s，用例桩注入结果）
+        # 其行为由 TestMarkSelfcheck 单独覆盖）与治理工具真跑（方向 1 后
+        # main 经 _spawn_tools/_spawn_cmd 并行拉起 refs/cfg/ioctl/manifest
+        # 进程，桩注入结果避免真跑 ~27s/轮）
         self._mark = mock.patch.object(selfcheck, "_mark_selfcheck")
-        self._tools = mock.patch.object(selfcheck, "run_parallel_tools",
-                                        return_value=_fake_tools())
+        self._ctx = _patched_parallel()
         self._mark.start()
-        self._tools.start()
+        self._ctx.__enter__()
 
     def tearDown(self):
         self._mark.stop()
-        self._tools.stop()
+        self._ctx.__exit__(None, None, None)
 
     def test_rc_nonzero_passed_through(self):
         # 方向 6：桩令 pytest 与 refs 均非零，rc 必须如实透出（不经管道）
@@ -76,8 +93,8 @@ class TestSelfcheck(unittest.TestCase):
                                   ""))
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
-                mock.patch.object(selfcheck, "run_parallel_tools",
-                                  return_value=tools):
+                mock.patch.object(selfcheck, "_collect_tools",
+                                  return_value=(tools, 1.0, 2.0)):
             with redirect_stdout(buf):
                 self.assertEqual(selfcheck.main(), 0)
         out = buf.getvalue()
@@ -164,8 +181,8 @@ class TestSelfcheck(unittest.TestCase):
         tools = _fake_tools(refs=(0, "OK: 引用完整\n", "warn: 非判定信息\n"))
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
-                mock.patch.object(selfcheck, "run_parallel_tools",
-                                  return_value=tools):
+                mock.patch.object(selfcheck, "_collect_tools",
+                                  return_value=(tools, 1.0, 2.0)):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -185,8 +202,8 @@ class TestSelfcheck(unittest.TestCase):
                  "OK: contract 检查通过，无违规。"))
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
-                mock.patch.object(selfcheck, "run_parallel_tools",
-                                  return_value=tools):
+                mock.patch.object(selfcheck, "_collect_tools",
+                                  return_value=(tools, 1.0, 2.0)):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -281,16 +298,47 @@ class TestParallelTools(unittest.TestCase):
         self.assertEqual(rc, 124)
         proc.kill.assert_called_once()
 
+    def test_collect_tools_returns_split_durs(self):
+        # 方向 2：_collect_tools 返回 (tools, refs_dur, cfg_dur)，durs 拆开
+        # refs/cfg 各自自报（合并 tools 无法定位慢点归因）；收口顺序 refs
+        # 先、cfg 后，用 side_effect 逐个注入
+        out = ("[VIOLATION] x\n==== config: 共 1 处违规（判红）====\n"
+               "OK: contract 检查通过，无违规。\nconfig_rc=1\ncontract_rc=0\n")
+        refs_res = (1, "==== 共 3 处悬空引用 ====\n", "", 0.5)
+        cfg_res = (1, out, "", 2.5)
+        with mock.patch.object(selfcheck, "_collect_cmd",
+                               side_effect=[refs_res, cfg_res]):
+            tools, refs_dur, cfg_dur = selfcheck._collect_tools(
+                {"refs": "p", "cfg": "p"})
+        self.assertEqual(refs_dur, 0.5)
+        self.assertEqual(cfg_dur, 2.5)
+        self.assertEqual(tools["refs"][0], 1)
+        self.assertEqual(tools["cfg"][0], 1)
+        self.assertEqual(tools["ctr"][0], 0)
+
+    def test_collect_cmd_timeout_kills_124(self):
+        # 方向 1：_collect_cmd 超时 → kill + rc=124（约定超时标记，不无限
+        # 阻塞自检收口）
+        proc = mock.Mock()
+        proc.communicate.side_effect = [
+            selfcheck.subprocess.TimeoutExpired("cmd", 120), ("", "")]
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc, out, err, dur = selfcheck._collect_cmd(proc, "ioctl")
+        self.assertEqual(rc, 124)
+        self.assertIn("timeout after", err)
+        proc.kill.assert_called_once()
+
 
 class TestMarkSelfcheck(unittest.TestCase):
     """方向 1：自检跑完自发 mark apply_selfcheck（emit_mark 进程内直调，
     batch 回落识别，失败不阻断）。"""
 
     def test_main_marks_after_selfcheck(self):
-        # main() 完成自检后调用 _mark_selfcheck（打点入 cdp_timing mark 链）
+        # main() 完成自检后调用 _mark_selfcheck（打点入 cdp_timing mark 链）。
+        # 本类无 setUp 桩，须显式屏蔽方向 1 并行段（_spawn_tools/_spawn_cmd
+        # 真拉起治理进程会拖慢用例触发 slow_guard 判红）
         with mock.patch.object(selfcheck, "_mark_selfcheck") as m, \
-                mock.patch.object(selfcheck, "run_parallel_tools",
-                                  return_value=_fake_tools()):
+                _patched_parallel():
             fake = _fake_run([
                 _FakeProc(0, "531 passed in 27.9s\n"),
             ])
@@ -338,18 +386,17 @@ class TestCheckPythonEnv(unittest.TestCase):
     """check_python_env：Python 版本（>=3.8）与 requirements.txt 依赖探测。"""
 
     def setUp(self):
-        # 与 TestSelfcheck 同款桩：屏蔽打点与治理工具真跑（run_parallel_tools
-        # 真拉起 refs/cfg 进程 ~25s，会触发 slow_guard 判红；本组用例只
+        # 与 TestSelfcheck 同款桩：屏蔽打点与治理工具真跑（方向 1 后 main
+        # 并行拉起 refs/cfg/ioctl/manifest 进程，会拖慢用例；本组用例只
         # 关注 pyenv 段，治理结果以桩注入）
         self._mark = mock.patch.object(selfcheck, "_mark_selfcheck")
-        self._tools = mock.patch.object(selfcheck, "run_parallel_tools",
-                                        return_value=_fake_tools())
+        self._ctx = _patched_parallel()
         self._mark.start()
-        self._tools.start()
+        self._ctx.__enter__()
 
     def tearDown(self):
         self._mark.stop()
-        self._tools.stop()
+        self._ctx.__exit__(None, None, None)
 
     def test_healthy_env_reports_ok(self):
         # 真实环境（python>=3.8 且 requirements.txt 各依赖可导入）→ ok=True，
@@ -401,7 +448,8 @@ class TestCheckPythonEnv(unittest.TestCase):
 
     def test_main_includes_ioctl_segment(self):
         # 方向 2：selfcheck 接入 check_ioctl_headers → 输出含 ioctl_rc=0
-        # 与一致性结论行（ioctl 桩由 _fake_run 兜底成功）
+        # 与一致性结论行（ioctl 走 _spawn_cmd/_collect_cmd 并行段，由
+        # _patched_parallel 桩返成功）
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
         ])
@@ -415,13 +463,17 @@ class TestCheckPythonEnv(unittest.TestCase):
 
     def test_ioctl_nonzero_passed_through(self):
         # 方向 2：ioctl 头漂移/双空 → ioctl_rc=1 非零透出（交 ws_report
-        # 全 *_rc 扫描判红拒写，不得静默假绿）
+        # 全 *_rc 扫描判红拒写，不得静默假绿）；main 收口顺序 ioctl 先、
+        # manifest 后，用 side_effect 逐个注入
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
-            _FakeProc(1, "签名漂移: vendor_lechao_usbd_config\n"),
         ])
+        ioctl_res = (1, "签名漂移: vendor_lechao_usbd_config\n", "", 0.1)
+        manifest_res = (0, "[OK] 一致\n", "", 0.1)
         buf = io.StringIO()
-        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
+                mock.patch.object(selfcheck, "_collect_cmd",
+                                  side_effect=[ioctl_res, manifest_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -430,7 +482,7 @@ class TestCheckPythonEnv(unittest.TestCase):
 
     def test_main_includes_manifest_segment(self):
         # 方向 2：selfcheck 接入 gen_manifest --check-only → 输出含 manifest_rc=0
-        # 与结论行（manifest 桩由 _fake_run 兜底成功）
+        # 与结论行（manifest 走并行段，由 _patched_parallel 桩返成功）
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
         ])
@@ -446,19 +498,22 @@ class TestCheckPythonEnv(unittest.TestCase):
         # 判红，manifest_rc=1 非零透出（交 ws_report 判红拒写）
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
-            _FakeProc(0, "[OK] 一致: vendor_lechao_usbd_config\n"),
-            _FakeProc(1, "[ERROR] manifest 未登记 1 个 code/rpi5 文件\n"),
         ])
+        ioctl_res = (0, "[OK] 一致\n", "", 0.1)
+        manifest_res = (1, "[ERROR] manifest 未登记 1 个 code/rpi5 文件\n", "", 0.1)
         buf = io.StringIO()
-        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
+                mock.patch.object(selfcheck, "_collect_cmd",
+                                  side_effect=[ioctl_res, manifest_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
         self.assertIn("manifest_rc=1", out)
 
     def test_main_includes_checker_durations(self):
-        # 方向 6：逐检查器耗时入输出行（durs: py=... tools=... 等），供 emit
-        # 定位耗时瓶颈；*_dur 前缀不匹配 ws_report 的 *_rc 判红正则不干扰
+        # 方向 2 + 6：逐检查器耗时入输出行（durs: py/refs/cfg/pyenv/ioctl/
+        # manifest，refs 与 cfg 拆开各自自报）；*_dur 前缀不匹配 ws_report
+        # 的 *_rc 判红正则不干扰
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
         ])
@@ -467,11 +522,41 @@ class TestCheckPythonEnv(unittest.TestCase):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
-        m = re.search(r"durs: py=[0-9.]+ tools=[0-9.]+ pyenv=[0-9.]+ "
-                      r"ioctl=[0-9.]+ manifest=[0-9.]+", out)
-        self.assertIsNotNone(m, "自检输出须含逐检查器耗时 durs 段")
+        m = re.search(r"durs: py=[0-9.]+ refs=[0-9.]+ cfg=[0-9.]+ "
+                      r"pyenv=[0-9.]+ ioctl=[0-9.]+ manifest=[0-9.]+", out)
+        self.assertIsNotNone(m, "自检输出须含逐检查器耗时 durs 段（refs/cfg 拆开）")
         # 耗时不会误成 *_rc 判红键（ws_report 正则 \w+_rc= 不匹配 *_dur=）
         self.assertNotRegex(out, r"\w+_dur=(\d+)")
+
+    def test_main_spawns_all_tools_before_pytest(self):
+        # 方向 1：main 先 Popen 全部治理（_spawn_tools + 两次 _spawn_cmd）
+        # 再跑 pytest，保证治理与 pytest 全重叠（顺序错则单轮多耗 ~26s）
+        calls = []
+
+        def _spawn_tools():
+            calls.append("tools")
+            return {"refs": "p", "cfg": "p"}
+
+        def _spawn_cmd(cmd):
+            calls.append("spawn")
+            return "p"
+
+        def _run(cmd, **kw):
+            calls.append("pytest")
+            return _FakeProc(0, "531 passed in 27.9s\n")
+
+        buf = io.StringIO()
+        with mock.patch.object(selfcheck, "_spawn_tools",
+                               side_effect=_spawn_tools), \
+                mock.patch.object(selfcheck, "_spawn_cmd",
+                                  side_effect=_spawn_cmd), \
+                mock.patch.object(selfcheck.subprocess, "run",
+                                  side_effect=_run):
+            with redirect_stdout(buf):
+                selfcheck.main()
+        # 顺序固定：refs/cfg 并行段启动 → ioctl Popen → manifest Popen →
+        # pytest（重叠开始），此后才收口
+        self.assertEqual(calls[:4], ["tools", "spawn", "spawn", "pytest"])
 
 
 if __name__ == "__main__":

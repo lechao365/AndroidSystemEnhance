@@ -308,10 +308,14 @@ print(",".join(carried_issue_ids(os.environ.get("TASK_VAL", ""))))
 PYEOF
     ) || true
   fi
+  # 方向：add-candidate 必须转发 --task（活跃任务多值时 shell 门禁已显式
+  # --task 放行，但 add-candidate 内部门禁 task=None 多值自拒 → prepare 死锁）
+  ADD_TASK=()
+  [ -n "$TASK" ] && ADD_TASK=(--task "$TASK")
   python3 harness/skills/publish-main-base/baseline_register.py add-candidate \
     --source-commit "$(git rev-parse --short=12 "$BH")" --receipt-path "$EVIDENCE_RECEIPT" \
     --ki-gate "$KIGATE" --evidence-scope "$EVIDENCE_SCOPE" \
-    --known-issues-carried "$KNOWN_ISSUES_CARRIED" \
+    --known-issues-carried "$KNOWN_ISSUES_CARRIED" "${ADD_TASK[@]}" \
     || { echo "error: candidate 登记失败" >&2; exit 1; }
   # 登记随 dev 提交推送（避免弄脏工作树阻塞后续 precheck）
   git add harness/config/baseline-status.yaml
