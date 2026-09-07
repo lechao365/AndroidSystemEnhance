@@ -6,3 +6,6 @@ PyYAML>=6.0
 
 # pytest：harness 测试运行器（harness/lib/tests 及各 skill tests 的执行入口）
 pytest>=7.0
+
+# ruff：Python 静态检查门禁（P0-B；selfcheck 的 ruff_rc 依赖；pip install ruff）
+ruff>=0.6

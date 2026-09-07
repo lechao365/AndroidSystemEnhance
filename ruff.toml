@@ -1,0 +1,16 @@
+# ruff 静态检查配置（P0-B 门禁化）
+# select：安全默认集 E4/E7/E9/F（语法/未定义名/未用导入等确定性错误）
+# ignore E741：ambiguous-variable-name 为风格噪音（存量 18 处单字符循环变量），低价值放行
+# line-length 与 C++ 侧对齐 100
+line-length = 100
+target-version = "py38"
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E741"]
+
+[lint.per-file-ignores]
+# E402：sys.path.insert 后延迟 import 属既有模式，显式放行（checker/tools 层）
+"harness/skills/**/*.py" = ["E402"]
+"harness/lib/**/*.py" = ["E402"]
+"code/**/*.py" = ["E402"]
