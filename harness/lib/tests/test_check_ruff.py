@@ -1,6 +1,5 @@
 """check_ruff 检查器测试：rc 判定 + 结论行 + 工具缺失 fail-closed。"""
 
-import subprocess
 import sys
 import unittest
 from pathlib import Path

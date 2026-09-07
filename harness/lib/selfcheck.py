@@ -46,7 +46,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # 必须同步进本常量，防单侧漏接线致判红静默失效。
 REQUIRED_RC_KEYS = ("pytest_rc", "refs_rc", "config_rc", "contract_rc",
                     "pyenv_rc", "ioctl_rc", "manifest_rc",
-                    "discipline_rc", "scan_rc")
+                    "discipline_rc", "scan_rc", "ruff_rc")
 
 # pytest 摘要计数行：含 passed/failed/skipped 任一计数的行（形如
 # "531 passed in 27.9s"、"121 passed, 3 skipped in 6.0s"、"1 failed, ..."）
@@ -673,6 +673,8 @@ def main(argv=None):
     manifest_proc = _spawn_cmd(
         [sys.executable, str(ROOT / "harness" / "skills" / "cross-device"
                              / "lib" / "python" / "gen_manifest.py"), "--check-only"])
+    ruff_proc = _spawn_cmd(
+        [sys.executable, str(ROOT / "harness" / "lib" / "check_ruff.py")])
     py_rc, py_out, py_err, py_dur = timed_run(
         pytest_cmd, timeout=_PYTEST_TIMEOUT_S)
     # pytest 跑完收口治理（各进程已与 pytest 重叠，墙钟取 max 而非 sum）
@@ -680,6 +682,7 @@ def main(argv=None):
     ioctl_rc, ioctl_out, _, ioctl_dur = _collect_cmd(ioctl_proc, "ioctl")
     manifest_rc, manifest_out, _, manifest_dur = _collect_cmd(
         manifest_proc, "manifest")
+    ruff_rc, ruff_out, _, ruff_dur = _collect_cmd(ruff_proc, "ruff")
     refs_rc, refs_out, refs_err = tools["refs"]
     cfg_rc, cfg_out, cfg_last = tools["cfg"]
     ctr_rc, ctr_out, ctr_last = tools["ctr"]
@@ -771,6 +774,11 @@ def main(argv=None):
     scan_last = last_stdout_line(scan_out)
     if scan_last:
         parts.append(scan_last)
+    # ruff 静态检查（P0-B）：ruff_rc 透出，非零交 ws_report 全 *_rc 判红拒写
+    parts.append(f"ruff_rc={ruff_rc}")
+    ruff_last = last_stdout_line(ruff_out)
+    if ruff_last:
+        parts.append(ruff_last)
     # 方向 2 + 方向 6：逐检查器耗时（秒，一位小数）入输出行，refs/cfg 拆开
     # 各自自报（合并 tools 无法定位慢点）。重叠模型（方向 1）下语义：
     # py 为 pytest 进程总耗时；refs/cfg/ioctl/manifest 为其收口阻塞墙钟
@@ -780,7 +788,8 @@ def main(argv=None):
     parts.append(f"durs: py={py_dur:.1f} refs={refs_dur:.1f} "
                  f"cfg={cfg_dur:.1f} pyenv={env_dur:.1f} "
                  f"ioctl={ioctl_dur:.1f} manifest={manifest_dur:.1f} "
-                 f"discipline={dis_dur:.1f} scan={scan_dur:.1f}")
+                 f"discipline={dis_dur:.1f} scan={scan_dur:.1f} "
+                 f"ruff={ruff_dur:.1f}")
     print(" | ".join(parts))
     _mark_selfcheck(dur_s=time.time() - _t0)
     return 0
