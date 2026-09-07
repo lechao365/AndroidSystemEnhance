@@ -34,6 +34,9 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
 - verify 失败仍 push（失败收据供 emit 分析）；push 失败转人工
 ## Related policy IDs（关联规则 ID）
 - CDP-001、SRC-001/002（修订后）
+- CDP-DOD-001~003（检查器门禁三要件 / 禁依赖未跟踪产物 / 收据逐方向自报，
+  见 [harness/rules/cdp-apply-dod.md](../../../rules/cdp-apply-dod.md)，
+  -s 收据 body 逐方向自报调用方与验证按 CDP-DOD-003）
 ---
 ## 打点契约表
 

@@ -42,6 +42,12 @@ harness 能力全部内聚在 `harness/` 目录（不依赖 LcHarness），使�
 ## PlantUML 画图约束
 所有 PlantUML 图表编写前，必须参考 [harness/rules/plantuml.md](harness/rules/plantuml.md) 中的规则，防止渲染失败（`DOC-002`）。
 
+## CDP apply 完成判据
+执行 cross-device-apply 批次（自检/收据落盘）、接入新检查器到自检门禁链、
+书写 harness 测试或文档引用时，必须先加载 [harness/rules/cdp-apply-dod.md](harness/rules/cdp-apply-dod.md)
+（CDP-DOD-001 检查器门禁三要件 / CDP-DOD-002 测试与文档引用禁依赖未跟踪产物 /
+CDP-DOD-003 收据逐方向自报调用方与验证）。
+
 ## RPI5 环境与开发参考文档
 涉及 RPI5 环境搭建、编译、部署、调试、远程访问时，必须先加载 `harness/reference/` 下对应文档（索引见 [harness/reference/README.md](harness/reference/README.md)）：
 

@@ -2,6 +2,7 @@ import collections
 import contextlib
 import io
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -454,6 +455,23 @@ class TestCheckPythonEnv(unittest.TestCase):
                 selfcheck.main()
         out = buf.getvalue()
         self.assertIn("manifest_rc=1", out)
+
+    def test_main_includes_checker_durations(self):
+        # 方向 6：逐检查器耗时入输出行（durs: py=... tools=... 等），供 emit
+        # 定位耗时瓶颈；*_dur 前缀不匹配 ws_report 的 *_rc 判红正则不干扰
+        fake = _fake_run([
+            _FakeProc(0, "531 passed in 27.9s\n"),
+        ])
+        buf = io.StringIO()
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
+            with redirect_stdout(buf):
+                selfcheck.main()
+        out = buf.getvalue()
+        m = re.search(r"durs: py=[0-9.]+ tools=[0-9.]+ pyenv=[0-9.]+ "
+                      r"ioctl=[0-9.]+ manifest=[0-9.]+", out)
+        self.assertIsNotNone(m, "自检输出须含逐检查器耗时 durs 段")
+        # 耗时不会误成 *_rc 判红键（ws_report 正则 \w+_rc= 不匹配 *_dur=）
+        self.assertNotRegex(out, r"\w+_dur=(\d+)")
 
 
 if __name__ == "__main__":

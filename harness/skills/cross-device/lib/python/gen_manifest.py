@@ -185,7 +185,12 @@ def main() -> None:
     patch_root = profile_path("PATCHS_DIR")
     ok = generate_manifest(patch_root, check_only=args.check_only,
                            kernel_deletions=[], aosp_deletions=[])
-    _mark_gen_manifest()
+    if not args.check_only:
+        # 方向 4：check_only 不发点——selfcheck 内调 gen_manifest --check-only
+        # 做 manifest_rc 门禁时，若发 gen_manifest mark 会与 apply_selfcheck
+        # mark 交错劫持（致三段 0.0）；check-only 非真实重生成，无 edit 段
+        # 归因意义。仅实际重生成（写盘）才打点。
+        _mark_gen_manifest()
     harness_exit(0 if ok else 1)
 
 

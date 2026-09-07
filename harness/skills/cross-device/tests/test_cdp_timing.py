@@ -397,7 +397,8 @@ class TestCdpTiming(unittest.TestCase):
         self.assertAlmostEqual(segs[1]["elapsed_s"], 3.0)  # 504-501
 
     def test_compute_segments_dur_s_invalid_falls_back(self):
-        # dur_s 越界（> interval）或非数值：回退旧算法（整段差额归该段）
+        # dur_s 非数值：回退旧算法（整段差额归该段）；dur_s 超 interval
+        # （方向 5）：不静默回退，段按 interval 落 + 落 dur_exceed 异常段
         data = {
             "batch_id": self.batch,
             "start_wall": 1000.0,
@@ -408,9 +409,13 @@ class TestCdpTiming(unittest.TestCase):
             ],
         }
         segs = cdp_timing.compute_segments(data)
-        self.assertEqual([s["name"] for s in segs], ["a", "b", "c", "finish"])
-        self.assertAlmostEqual(segs[1]["elapsed_s"], 6.0)
-        self.assertAlmostEqual(segs[2]["elapsed_s"], 5.0)
+        self.assertEqual([s["name"] for s in segs],
+                         ["a", "b", "b_dur_exceed", "c", "finish"])
+        self.assertAlmostEqual(segs[1]["elapsed_s"], 6.0)   # b 按 interval
+        self.assertEqual(segs[2]["name"], "b_dur_exceed")
+        self.assertAlmostEqual(segs[2]["elapsed_s"], 93.0)  # 99-6 异常段
+        self.assertEqual(segs[2]["reason"], "dur_s>interval")
+        self.assertAlmostEqual(segs[3]["elapsed_s"], 5.0)   # c 非数值回退
 
     # ── 方向 4：同名段名 #n + 剥序号校验 + gap 段忽略 ─────────────────
     def test_compute_segments_duplicate_name_numbered(self):

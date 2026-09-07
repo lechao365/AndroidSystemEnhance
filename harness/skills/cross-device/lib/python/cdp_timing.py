@@ -246,6 +246,11 @@ def compute_segments(data) -> list[dict]:
     被 GAP_THRESHOLD 吞掉的余量累计进末尾 unattributed 段（B5）：segments
     求和与总时长不再静默差一截，emit 侧可校验归因完整性（无吞余时不出该段）。
 
+    方向 5：dur_s 超 interval（自测真实耗时大于相邻间隔 = 数据矛盾，如打点
+    间隔内混入未打点活动/时钟异常）时**不静默回退**——该段仍按 interval
+    落耗时（保时间序），额外落 <name>_dur_exceed 异常段（elapsed_s=dur_s-
+    interval，带 reason），emit 侧可见异常而不误判为段 0。
+
     同名段名（方向 4）：同一 mark 名第 n 次出现时段名为 name#n（首次不加
     序号），返工轮次在收据段表可见可数；mark 记录本身 name 不变。
     """
@@ -281,6 +286,14 @@ def compute_segments(data) -> list[dict]:
             else:
                 eaten += gap
             segs.append({"name": seg_name, "elapsed_s": round(dur, 3)})
+        elif isinstance(dur, (int, float)) and dur > interval:
+            # 方向 5：dur_s 超 interval（自测耗时大于相邻间隔=数据矛盾）不静默
+            # 回退——段按 interval 落（保时间序），另落 dur_exceed 异常段暴露
+            # 超出的真实耗时，emit 侧可见而非误判段 0
+            segs.append({"name": seg_name, "elapsed_s": round(interval, 3)})
+            segs.append({"name": f"{seg_name}_dur_exceed",
+                         "elapsed_s": round(dur - interval, 3),
+                         "reason": "dur_s>interval"})
         else:
             segs.append({"name": seg_name, "elapsed_s": round(interval, 3)})
         prev = _t(m)

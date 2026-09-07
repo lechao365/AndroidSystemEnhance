@@ -93,6 +93,12 @@ def strip_line_suffix(p: str) -> str:
 def path_like(p: str) -> bool:
     if is_remote(p) or p.startswith("#"):
         return False
+    if p.startswith("harness/log/"):
+        # 运行期产物域（方向 2）：harness/log 全 gitignore，SKILL/文档引用其
+        # 下路径是描述落盘位置（如 sync-code-to-workspace artifacts），干净
+        # 克隆下不存在——判悬空会在 CI 恒红，且产物域非仓库资产无引用完整性
+        # 意义，整前缀豁免（harness/log 内容本身亦在 EXEMPT_RELS 不扫描）。
+        return False
     if PLACEHOLDER.search(p) or "<" in p or ">" in p:
         # 含尖括号占位的 token（如 data/verify-results/<ts>-<batch_id>.md）跳过
         return False

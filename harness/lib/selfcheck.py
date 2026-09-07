@@ -13,7 +13,7 @@ subprocess 不经管道直取 returncode，如实透出两工具结果。
 也不静默通过。refs 结论行同理只取 stdout 末行，stderr 仅附注不参与判定。
 
 输出单行（| 连接，供 ws_report --selfcheck 落盘与门禁判定）：
-    pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n> | refs_rc=<n> | <refs 结论行> | config_rc=<n> | <config 结论行> | contract_rc=<n> | <contract 结论行> | pyenv_rc=<n> | <pyenv 汇总行> | ioctl_rc=<n> | <ioctl 结论行> | manifest_rc=<n> | <manifest 结论行>
+    pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n> | refs_rc=<n> | <refs 结论行> | config_rc=<n> | <config 结论行> | contract_rc=<n> | <contract 结论行> | pyenv_rc=<n> | <pyenv 汇总行> | ioctl_rc=<n> | <ioctl 结论行> | manifest_rc=<n> | <manifest 结论行> | durs: py=<s> tools=<s> pyenv=<s> ioctl=<s> manifest=<s>
 skipped=<n> 仅在 pytest_rc=0 且摘要无 skipped 时补 0。config_rc/contract_rc
 为 check_config.py 两模式（配置治理/契约检查，方向 4 接入）；pyenv_rc 为
 check_python_env 探测结果（Python 版本 + requirements.txt 依赖，环境破损
@@ -91,6 +91,15 @@ def run_tool(cmd, timeout=None):
             if isinstance(e.stdout, bytes) else (e.stdout or "")
         print(f"warn: 工具超时（>{timeout}s，rc=124）: {cmd[:2]}", file=sys.stderr)
         return 124, out, f"timeout after {timeout}s"
+
+
+def timed_run(cmd, timeout=None):
+    """run_tool + 真实墙钟耗时（方向 6）：返回 (rc, stdout, stderr, dur_s)。
+    逐检查器耗时入自检输出行，emit 侧定位耗时瓶颈（慢点归因不再只看
+    pytest --durations 与 gap 段）。"""
+    _t0 = time.time()
+    rc, out, err = run_tool(cmd, timeout=timeout)
+    return rc, out, err, time.time() - _t0
 
 
 # 治理工具超时上限（秒）：refs/config 正常 2~4s，放宽 20 倍仍能兜住挂死
@@ -356,10 +365,13 @@ def main():
         pytest_cmd += ["-n", "auto"]
     except ImportError:
         pass
-    py_rc, py_out, py_err = run_tool(pytest_cmd, timeout=_PYTEST_TIMEOUT_S)
+    py_rc, py_out, py_err, py_dur = timed_run(
+        pytest_cmd, timeout=_PYTEST_TIMEOUT_S)
     # refs 与 config/contract 并行采集（B2：Popen 同时拉起 + --all 单进程
     # 双模式，治理墙钟由 sum 降为 max，两遍 yaml/全量扫描降为一遍）
+    _tools_t0 = time.time()
     tools = run_parallel_tools()
+    tools_dur = time.time() - _tools_t0
     refs_rc, refs_out, refs_err = tools["refs"]
     cfg_rc, cfg_out, cfg_last = tools["cfg"]
     ctr_rc, ctr_out, ctr_last = tools["ctr"]
@@ -392,14 +404,16 @@ def main():
     # Python 运行环境探测（版本 + requirements.txt 依赖）：环境破损（缺
     # yaml 等）时后续工具结论均不可信，pyenv_rc 非零交 ws_report 全
     # *_rc 扫描判红拒写
+    _env_t0 = time.time()
     env_ok, env_summary = check_python_env()
+    env_dur = time.time() - _env_t0
     parts.append(f"pyenv_rc={0 if env_ok else 1}")
     if env_summary:
         parts.append(env_summary)
     # 内核/AOSP ioctl 头一致性（方向 2）：此前 check_ioctl_headers 无调用方，
     # 头文件单侧漂移/双空解析异常静默无感；接入自检后 ioctl_rc 透出，双空
     # 判红在 check_ioctl_headers 内部完成，非零由 ws_report 全 *_rc 判红拒写
-    ioctl_rc, ioctl_out, _ = run_tool(
+    ioctl_rc, ioctl_out, _, ioctl_dur = timed_run(
         [sys.executable, str(ROOT / "harness" / "lib" / "check_ioctl_headers.py")],
         timeout=_TOOL_TIMEOUT_S)
     parts.append(f"ioctl_rc={ioctl_rc}")
@@ -409,7 +423,7 @@ def main():
     # manifest 登记完整性（方向 2）：gen_manifest --check-only 未登记文件或有
     # 变化均判红（--check-only 有变化返非零），manifest_rc 透出交 ws_report
     # 全 *_rc 判红拒写（此前 --check-only 无调用方，manifest 漂移静默无感）
-    manifest_rc, manifest_out, _ = run_tool(
+    manifest_rc, manifest_out, _, manifest_dur = timed_run(
         [sys.executable, str(ROOT / "harness" / "skills" / "cross-device"
                              / "lib" / "python" / "gen_manifest.py"), "--check-only"],
         timeout=_TOOL_TIMEOUT_S)
@@ -417,6 +431,11 @@ def main():
     manifest_last = last_stdout_line(manifest_out)
     if manifest_last:
         parts.append(manifest_last)
+    # 方向 6：逐检查器耗时（秒，一位小数）入输出行，供 emit 定位耗时瓶颈；
+    # 前缀 *_dur 不匹配 ws_report 的 *_rc 判红正则，不干扰 rc 判定
+    parts.append(f"durs: py={py_dur:.1f} tools={tools_dur:.1f} "
+                 f"pyenv={env_dur:.1f} ioctl={ioctl_dur:.1f} "
+                 f"manifest={manifest_dur:.1f}")
     print(" | ".join(parts))
     _mark_selfcheck(dur_s=time.time() - _t0)
     return 0

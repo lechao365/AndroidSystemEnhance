@@ -61,21 +61,43 @@ class TestSelfcheckWorkflow(unittest.TestCase):
         # 解析全部 REQUIRED_RC_KEYS（含 pyenv_rc/ioctl_rc/manifest_rc）任一
         # 非零即失败——否则测试失败也绿（CI 只跑不判）。键集合与 ws_report
         # 必查键同源（selfcheck.REQUIRED_RC_KEYS 单点定义）。
-        # 方向 3：不再用 assertIn 扫全文（rc 名出现在注释里即可被 assertIn 满足，
-        # 假阳性）；解析 CI 的 `for rc_name in <键集合>` 行，与 REQUIRED_RC_KEYS
-        # 双向比对（集合相等），键集合漂移/漏键/注释伪满足均判红。
+        # 方向 3：不再用 assertIn 扫全文（rc 名出现在注释里即可被 assertIn
+        # 满足，假阳性）；解析 CI 的 `for rc_name in <键集合>` 行与
+        # REQUIRED_RC_KEYS 双向比对（集合相等）。且须**先剥注释**——判定段
+        # 整体被注释掉时正则仍能匹配注释原文致判绿，剥掉整行 # 注释后无键
+        # 集合即 assertIsNotNone 判红。
         job = self.doc["jobs"]["selfcheck"]
         run_steps = [s.get("run", "") for s in job["steps"]]
         joined = "\n".join(run_steps)
-        m = re.search(r"for\s+rc_name\s+in\s+([^;\n]+);", joined)
-        self.assertIsNotNone(m, "CI 须有 `for rc_name in <键集合>` 循环")
+        stripped = "\n".join(
+            ln for ln in joined.splitlines() if not ln.lstrip().startswith("#"))
+        m = re.search(r"for\s+rc_name\s+in\s+([^;\n]+);", stripped)
+        self.assertIsNotNone(m, "CI 须有未注释的 `for rc_name in <键集合>` 循环"
+                                "（判定段被注释掉不得判绿）")
         ci_keys = set(m.group(1).split())
         self.assertEqual(ci_keys, set(REQUIRED_RC_KEYS),
                          "CI for 键集合须与 REQUIRED_RC_KEYS 双向一致（漏键/"
                          "多余键/注释伪满足均判红）")
         # 逐项判定非零即失败
-        self.assertIn('"${rc_name}=0"', joined, "CI 须判定 *_rc 非零即失败")
-        self.assertIn("exit 1", joined, "CI 判定失败须显式 exit 1")
+        self.assertIn('"${rc_name}=0"', stripped, "CI 须判定 *_rc 非零即失败")
+        self.assertIn("exit 1", stripped, "CI 判定失败须显式 exit 1")
+
+    def test_strip_comments_before_gate_check(self):
+        # 方向 3 内部逻辑：先剥整行 # 注释再找 for 键集合——注释掉的判定段
+        # 不再被匹配（防注释伪满足判绿）
+        raw = "# for rc_name in pytest_rc refs_rc; do\nfor rc_name in a b; do\n"
+        stripped = "\n".join(ln for ln in raw.splitlines()
+                             if not ln.lstrip().startswith("#"))
+        m = re.search(r"for\s+rc_name\s+in\s+([^;\n]+);", stripped)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), "a b")
+        # 判定段整体被注释掉 → 剥注释后无键集合（assertIsNone 即判红依据）
+        only_comment = "# for rc_name in a b; do\n"
+        stripped2 = "\n".join(ln for ln in only_comment.splitlines()
+                              if not ln.lstrip().startswith("#"))
+        self.assertIsNone(
+            re.search(r"for\s+rc_name\s+in\s+([^;\n]+);", stripped2),
+            "整体注释掉的判定段剥注释后须无键集合（不得判绿）")
 
 
 if __name__ == "__main__":

@@ -155,11 +155,11 @@ class TestGenManifestMark(unittest.TestCase):
             gm._mark_gen_manifest()
         self.assertIn("warn", err.getvalue())
 
-    def test_main_invokes_mark(self):
-        # main 收尾调用 _mark_gen_manifest（mock 生成与 harness 收尾依赖，
-        # 控制 sys.argv 避免读 pytest 参数）
+    def _run_main(self, argv):
+        """mock harness 依赖 + profile_path，以给定 argv 跑 main，返回
+        _mark_gen_manifest mock（断言调用与否）。"""
         old_argv = sys.argv
-        sys.argv = ["gen_manifest", "--check-only"]
+        sys.argv = ["gen_manifest"] + argv
         try:
             with mock.patch.object(gm, "harness_init"), \
                     mock.patch.object(gm, "generate_manifest"), \
@@ -170,6 +170,17 @@ class TestGenManifestMark(unittest.TestCase):
                 gm.main()
         finally:
             sys.argv = old_argv
+        return mk
+
+    def test_main_check_only_no_mark(self):
+        # 方向 4：check_only（selfcheck manifest_rc 内调）不发点——发点会与
+        # apply_selfcheck mark 交错劫持致段 0.0
+        mk = self._run_main(["--check-only"])
+        mk.assert_not_called()
+
+    def test_main_regenerate_invokes_mark(self):
+        # 实际重生成（写盘）才自发打点 gen_manifest（edit 段归因）
+        mk = self._run_main([])
         mk.assert_called_once()
 
 
