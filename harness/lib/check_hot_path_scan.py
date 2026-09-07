@@ -33,6 +33,7 @@ _HOT_PATHS = [
     "harness/lib/check_test_discipline.py",
     "harness/lib/selfcheck.py",
     "harness/lib/check_ruff.py",
+    "harness/lib/check_host_tests.py",
     "harness/skills/cross-device/lib/python/gen_manifest.py",
     # ── 受守卫工具的 import 依赖文件（lib-14，spawn 时真实加载）──
     "harness/lib/harness_lib.py",          # gen_manifest import（日志/初始化）
