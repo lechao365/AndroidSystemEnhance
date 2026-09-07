@@ -202,5 +202,62 @@ class TestGenManifestMark(unittest.TestCase):
         mk.assert_called_once()
 
 
+class TestGenManifestGitFiles(unittest.TestCase):
+    """方向 2：git 仓走 git ls-files（热路径防全树 rglob 39s 回归），含未
+    跟踪文件（--others，覆盖工作树新 patch 未提交场景）。"""
+
+    def _make_patch_root(self, files):
+        d = Path(tempfile.mkdtemp())
+        for rel, content in files.items():
+            p = d / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        return d
+
+    def _make_git_root(self, files, tracked=True):
+        d = self._make_patch_root(files)
+        subprocess.run(["git", "init", "-q"], cwd=d, check=True,
+                       capture_output=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=d,
+                       check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=d,
+                       check=True, capture_output=True)
+        if tracked:
+            subprocess.run(["git", "add", "-A"], cwd=d, check=True,
+                           capture_output=True)
+            subprocess.run(["git", "commit", "-qm", "b"], cwd=d, check=True,
+                           capture_output=True)
+        return d
+
+    def test_git_ls_files_covers_untracked(self):
+        # 未跟踪新 patch（未 add）仍被列出（--others --exclude-standard），
+        # 不破坏"未登记即判红"门禁
+        root = self._make_git_root({"aosp/new/vendor/x/foo.h": "//x",
+                                    "aosp/new/vendor/x/bar.h": "//bar"},
+                                   tracked=True)
+        (root / "aosp" / "new" / "vendor" / "x" / "baz.h").write_text("//baz")
+        rels = {f.as_posix() for f in gm._git_ls_files(root)}
+        self.assertIn("aosp/new/vendor/x/foo.h", rels)
+        self.assertIn("aosp/new/vendor/x/baz.h", rels)
+
+    def test_generate_uses_git_ls_files_in_git_root(self):
+        # 生成走 git ls-files：manifest 条目齐全（等价原 rglob 语义）
+        root = self._make_git_root({"aosp/new/vendor/x/foo.h": "//x"},
+                                   tracked=True)
+        ok = gm.generate_manifest(root, check_only=False,
+                                  kernel_deletions=[], aosp_deletions=[])
+        self.assertTrue(ok)
+        content = (root / "manifest.yaml").read_text(encoding="utf-8")
+        self.assertIn("patch: aosp/new/vendor/x/foo.h", content)
+
+    def test_non_git_falls_back_rglob(self):
+        # 非 git 仓回落 rglob（豁免分支），行为与旧实现一致
+        root = self._make_patch_root({"aosp/new/vendor/x/foo.h": "//x"})
+        self.assertIsNone(gm._git_ls_files(root))
+        files = list(gm._iter_dir_files(root / "aosp" / "new" / "vendor" / "x",
+                                        root))
+        self.assertEqual([f.as_posix() for f in files], ["foo.h"])
+
+
 if __name__ == "__main__":
     unittest.main()

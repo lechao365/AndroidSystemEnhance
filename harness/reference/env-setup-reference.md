@@ -12,6 +12,8 @@
 
 **目录规划约定**：所有源码放在 Linux 文件系统（如 `~/workspace/aosp`），**禁止放在 `/mnt/c` 等 Windows 挂载盘**。原因：Windows 挂载盘在大量小文件场景下有严重 I/O 性能损失，AOSP 有数十万文件，会拖慢 repo sync 与编译。
 
+**本仓（harness/code 工具仓）例外——须常驻 Windows 盘供双系统共用**：本仓位于 WSL2 挂载的 Windows 盘（`host_env` 报 `fs=9p`，即 drvfs）。这是有意取舍：Windows 侧与 WSL2 侧需共用同一份工具仓（双系统/跨设备协作），**9p 的性能代价接受，不迁移到 Linux 文件系统**。代价是真实的：drvfs 上全树 `rglob`/子进程开销大，曾致 `check_skill_refs` 全树扫描 ~39s（emit 本机 0.38s）。因此**治理检查器热路径一律走 `git ls-files`**（只列跟踪文件，快一两个数量级），禁止全树 `rglob`/`os.walk`（`check_hot_path_scan` 守卫强制，见方向 2）。
+
 ---
 
 ## 2. 前置条件
@@ -171,6 +173,7 @@ adb devices   # 如需连接设备
 | ENV-002 | 代理未运行时必须清除 git proxy 配置 | push/拉取报 Failed to connect |
 | ENV-003 | `.wslconfig` 修改后必须 `wsl --shutdown` 重启 | 内存配置不生效 |
 | ENV-004 | 源码目录必须放 Linux 文件系统，禁止 `/mnt/c` | repo sync/编译 I/O 极慢 |
+| ENV-007 | 工具仓（harness/code）须常驻 Windows 盘（9p/drvfs）供双系统共用，性能代价接受不迁移；治理检查器热路径一律 git ls-files，禁全树 rglob/os.walk | 违反即 9p 上热路径扫描退化为 39s 级，refs 回归重现（check_hot_path_scan 守卫判红） |
 | ENV-005 | 使用 JDK 17（AOSP 主线要求） | 编译报版本错误 |
 | ENV-006 | `repo` 必须安装（AOSP 仓库管理依赖） | 无法初始化/同步源码 |
 
@@ -180,5 +183,5 @@ adb devices   # 如需连接设备
 
 - **WSL2 无法启动**：检查 Windows 功能中 WSL 与虚拟化平台是否启用，确认系统已重启，执行 `wsl -l -v` 与 `wsl --status` 查看状态。
 - **`adb` 无法连接设备**：确认 USB 线、设备开发者选项、USB 调试授权，执行 `adb devices`；网络调试先确认主机与设备网络互通。
-- **编译前磁盘不足**：`df -h` 检查，清理 `apt` 缓存与无用构建产物；不要将源码放 Windows 挂载盘。
+- **编译前磁盘不足**：`df -h` 检查，清理 `apt` 缓存与无用构建产物；不要将源码放 Windows 挂载盘（harness 工具仓例外——须常驻 Windows 盘供双系统共用，见 ENV-007）。
 - **代理导致下载失败**：`curl` 验证目标地址，检查代理变量是否生效；代理异常时取消代理后重试。

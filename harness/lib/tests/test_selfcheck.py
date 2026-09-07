@@ -22,8 +22,10 @@ _FAKE_TOOLS = {
              "OK: harness/skills + docs 引用完整，无悬空。"),
     "cfg": (0, "OK: config 检查通过，无违规。\n",
             "OK: config 检查通过，无违规。"),
-    "ctr": (0, "OK: contract 检查通过，无违规。\n",
+     "ctr": (0, "OK: contract 检查通过，无违规。\n",
             "OK: contract 检查通过，无违规。"),
+    "discipline": (0, "OK: 测试改动无新增 xfail/skip/sleep 重试\n", ""),
+    "scan": (0, "OK: 热路径检查器无全树 rglob/os.walk\n", ""),
 }
 
 
@@ -62,7 +64,7 @@ def _patched_parallel():
     with mock.patch.object(selfcheck, "_spawn_tools",
                            return_value={"refs": "p", "cfg": "p"}), \
             mock.patch.object(selfcheck, "_collect_tools",
-                              return_value=(_fake_tools(), 1.0, 2.0)), \
+                              return_value=(_fake_tools(), 1.0, 2.0, 0.1, 0.1)), \
             mock.patch.object(selfcheck, "_spawn_cmd",
                               return_value="p"), \
             mock.patch.object(selfcheck, "_collect_cmd",
@@ -95,7 +97,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1)):
             with redirect_stdout(buf):
                 self.assertEqual(selfcheck.main(), 0)
         out = buf.getvalue()
@@ -183,7 +185,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1)):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -204,7 +206,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1)):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -286,10 +288,12 @@ class TestParallelTools(unittest.TestCase):
     def test_all_mode_tool_timeout_returns_124(self):
         # 治理工具挂起超时 → kill + rc=124（不无限阻塞自检）
         proc = mock.Mock()
-        # refs 超时路径：communicate×2（首超时 + kill 后回收）；另一进程正常
+        # refs 超时路径：communicate×2（首超时 + kill 后回收）；其余三进程正常
         proc.communicate.side_effect = [
             selfcheck.subprocess.TimeoutExpired("cmd", 120), ("", ""),
             ("OK: config 检查通过，无违规。\nconfig_rc=0\ncontract_rc=0\n", ""),
+            ("OK: 测试改动无新增 xfail/skip/sleep 重试\n", ""),
+            ("OK: 热路径检查器无全树 rglob/os.walk\n", ""),
         ]
         with mock.patch.object(selfcheck.subprocess, "Popen",
                                return_value=proc):
@@ -300,22 +304,30 @@ class TestParallelTools(unittest.TestCase):
         proc.kill.assert_called_once()
 
     def test_collect_tools_returns_split_durs(self):
-        # 方向 2：_collect_tools 返回 (tools, refs_dur, cfg_dur)，durs 拆开
-        # refs/cfg 各自自报（合并 tools 无法定位慢点归因）；收口顺序 refs
-        # 先、cfg 后，用 side_effect 逐个注入
+        # 方向 2：_collect_tools 返回 (tools, refs_dur, cfg_dur, dis_dur,
+        # scan_dur)，durs 拆开 refs/cfg/discipline/scan 各自自报（合并 tools
+        # 无法定位慢点归因）；收口顺序 refs 先、cfg 后，用 side_effect 逐个注入
         out = ("[VIOLATION] x\n==== config: 共 1 处违规（判红）====\n"
                "OK: contract 检查通过，无违规。\nconfig_rc=1\ncontract_rc=0\n")
         refs_res = (1, "==== 共 3 处悬空引用 ====\n", "", 0.5)
         cfg_res = (1, out, "", 2.5)
+        dis_res = (0, "OK: 测试改动无新增禁戒\n", "", 0.2)
+        scan_res = (0, "OK: 热路径无全树 rglob\n", "", 0.3)
         with mock.patch.object(selfcheck, "_collect_cmd",
-                               side_effect=[refs_res, cfg_res]):
-            tools, refs_dur, cfg_dur = selfcheck._collect_tools(
-                {"refs": "p", "cfg": "p"})
+                               side_effect=[refs_res, cfg_res,
+                                            dis_res, scan_res]):
+            (tools, refs_dur, cfg_dur, dis_dur, scan_dur) = \
+                selfcheck._collect_tools({"refs": "p", "cfg": "p",
+                                          "discipline": "p", "scan": "p"})
         self.assertEqual(refs_dur, 0.5)
         self.assertEqual(cfg_dur, 2.5)
+        self.assertEqual(dis_dur, 0.2)
+        self.assertEqual(scan_dur, 0.3)
         self.assertEqual(tools["refs"][0], 1)
         self.assertEqual(tools["cfg"][0], 1)
         self.assertEqual(tools["ctr"][0], 0)
+        self.assertEqual(tools["discipline"][0], 0)
+        self.assertEqual(tools["scan"][0], 0)
 
     def test_collect_cmd_timeout_kills_124(self):
         # 方向 1：_collect_cmd 超时 → kill + rc=124（约定超时标记，不无限

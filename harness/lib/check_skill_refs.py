@@ -185,7 +185,7 @@ def _basename_count(name: str) -> int:
                 idx[f.name] = idx.get(f.name, 0) + 1
         else:
             exempt = tuple(root / r for r in EXEMPT_RELS)
-            for f in root.rglob("*"):
+            for f in root.rglob("*"):  # GITLS-FALLBACK: 非 git 仓回落
                 if not f.is_file():
                     continue
                 if ".git" in f.parts:
@@ -290,7 +290,7 @@ def iter_scan_targets(rel: str | None) -> list[Path]:
             continue
         if not base.is_dir():
             continue
-        for f in sorted(base.rglob("*")):
+        for f in sorted(base.rglob("*")):  # GITLS-FALLBACK: 非 git 仓回落
             if not f.is_file():
                 continue
             if "__pycache__" in f.parts or ".pytest_cache" in f.parts or "tests" in f.parts:

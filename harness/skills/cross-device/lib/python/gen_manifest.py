@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,6 +21,40 @@ from harness.lib.harness_lib import (
     harness_init, harness_exit,
 )
 from harness.lib.paths import path as profile_path
+
+
+def _git_ls_files(patch_root: Path) -> list[Path] | None:
+    """git ls-files 列 patch_root 子树文件（热路径防全树 rglob 39s 回归，
+    方向 2）：跟踪 + 未跟踪（--exclude-standard 排除 gitignore 产物），
+    覆盖工作树新 patch 未提交场景；非 git 仓返回 None（回落 rglob）。"""
+    try:
+        r = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard",
+             "--", "."],
+            cwd=patch_root, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return [Path(ln) for ln in r.stdout.splitlines() if ln]
+
+
+def _iter_dir_files(base: Path, patch_root: Path):
+    """子树文件迭代（相对 base）：git ls-files 优先，非 git 仓回落 rglob。
+    产出全部文件（含子目录），与原 rglob 语义一致。"""
+    tracked = _git_ls_files(patch_root)
+    if tracked is not None:
+        base_rel = base.relative_to(patch_root).as_posix()
+        prefix = base_rel + "/"
+        for f in tracked:
+            rel = f.as_posix()
+            if rel == base_rel or rel.startswith(prefix):
+                yield (patch_root / f).relative_to(base)
+        return
+    for f in base.rglob("*"):  # GITLS-FALLBACK: 非 git 仓回落
+        if f.is_file():
+            yield f.relative_to(base)
 
 
 def _unregistered_patch_paths(patch_root: Path, manifest_path: Path) -> list[str]:
@@ -42,9 +77,8 @@ def _unregistered_patch_paths(patch_root: Path, manifest_path: Path) -> list[str
         base = patch_root / section
         if not base.is_dir():
             continue
-        for f in base.rglob("*"):
-            if f.is_file():
-                actual.add(str(f.relative_to(patch_root).as_posix()))
+        for f in _iter_dir_files(base, patch_root):
+            actual.add(str((base / f).relative_to(patch_root).as_posix()))
     return sorted(actual - registered)
 
 
@@ -88,9 +122,8 @@ def generate_manifest(patch_root: Path, check_only: bool,
             if not dir_path.is_dir():
                 continue
             files = sorted(
-                str(f.relative_to(dir_path).as_posix())
-                for f in dir_path.rglob("*")
-                if f.is_file())
+                str(f.as_posix())
+                for f in _iter_dir_files(dir_path, patch_root))
             if not files:
                 continue
             if not section_emitted:
@@ -118,9 +151,8 @@ def generate_manifest(patch_root: Path, check_only: bool,
     others_dir = patch_root / "others"
     if others_dir.is_dir():
         others_files = sorted(
-            str(f.relative_to(others_dir).as_posix())
-            for f in others_dir.rglob("*")
-            if f.is_file()
+            str(f.as_posix())
+            for f in _iter_dir_files(others_dir, patch_root)
         )
         if others_files:
             lines.append("others:")

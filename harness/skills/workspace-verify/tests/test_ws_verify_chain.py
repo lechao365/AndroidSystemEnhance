@@ -242,8 +242,11 @@ class TestChain(unittest.TestCase):
         rep = next(" ".join(c) for c in calls if "ws_report.py" in c[1])
         self.assertIn("--timings-file", rep)
         self.assertIn(str(tpath), rep)
-        # 3) 子脚本自发 mark 定位本批：CDP_BATCH_ID 注入
-        self.assertEqual(os.environ.get("CDP_BATCH_ID"), bid)
+        # 3) 子脚本自发 mark 定位本批：CDP_BATCH_ID 注入生效（链内子进程
+        #    读 env 定位），chain 结束已复原——方向 5：残留会污染同进程
+        #    后续用例（单测进程内多次 run_chain 错绑批次）
+        self.assertIsNone(os.environ.get("CDP_BATCH_ID"),
+                          "CDP_BATCH_ID 用完须复原，不得残留污染后续用例")
         # 4) 模拟链路真实耗时（起跑时刻回拨 5s）→ ws_report 解析
         #    elapsed_s > 0 且 timings 非空（segments 含链内段）
         data["start_wall"] -= 5.0

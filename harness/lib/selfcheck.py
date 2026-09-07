@@ -41,7 +41,8 @@ ROOT = Path(__file__).resolve().parents[2]
 # workflow 均以本集合为口径基准，新增 rc（pyenv_rc/ioctl_rc/manifest_rc 等）
 # 必须同步进本常量，防单侧漏接线致判红静默失效。
 REQUIRED_RC_KEYS = ("pytest_rc", "refs_rc", "config_rc", "contract_rc",
-                    "pyenv_rc", "ioctl_rc", "manifest_rc")
+                    "pyenv_rc", "ioctl_rc", "manifest_rc",
+                    "discipline_rc", "scan_rc")
 
 # pytest 摘要计数行：含 passed/failed/skipped 任一计数的行（形如
 # "531 passed in 27.9s"、"121 passed, 3 skipped in 6.0s"、"1 failed, ..."）
@@ -168,6 +169,12 @@ def _spawn_tools():
         "cfg": _spawn_cmd(
             [sys.executable, str(ROOT / "harness" / "lib" / "check_config.py"),
              "--all"]),
+        "discipline": _spawn_cmd(
+            [sys.executable, str(ROOT / "harness" / "lib"
+                                 / "check_test_discipline.py")]),
+        "scan": _spawn_cmd(
+            [sys.executable, str(ROOT / "harness" / "lib"
+                                 / "check_hot_path_scan.py")]),
     }
 
 
@@ -177,8 +184,9 @@ def _collect_tools(procs):
     check_config --all 单进程双模式（消两遍 yaml 导入/全量扫描，B2）：
     末尾 config_rc=/contract_rc= 机器行分别解析，结论行按 label 前缀
     分别提取（与单模式 last_stdout_line 口径兼容）。
-    返回 (tools dict, refs_dur, cfg_dur)：tools 形态与 run_parallel_tools
-    一致（refs/cfg/ctr 三元组），两个 dur 供 durs 拆开自报（方向 2）。
+    返回 (tools dict, refs_dur, cfg_dur, dis_dur, scan_dur)：tools 形态与
+    run_parallel_tools 一致（refs/cfg/ctr/discipline/scan 五元组），四个 dur
+    供 durs 拆开自报（方向 2）。
     """
     refs_rc, refs_out, refs_err, refs_dur = _collect_cmd(procs["refs"], "refs")
     cfg_rc_raw, cfg_out, _, cfg_dur = _collect_cmd(procs["cfg"], "cfg")
@@ -194,10 +202,16 @@ def _collect_tools(procs):
             cfg_rc, ctr_rc = int(m_cfg.group(1)), int(m_ctr.group(1))
     elif not ctr_last:
         ctr_last = last_stdout_line(cfg_out)
+    # 方向 1/2 新增守卫：discipline（测试改动禁新增 xfail/skip/sleep 重试）
+    # 与 scan（热路径禁全树 rglob/os.walk）并行收口，各自 rc 与结论行透出
+    dis_rc, dis_out, _, dis_dur = _collect_cmd(procs["discipline"], "discipline")
+    scan_rc, scan_out, _, scan_dur = _collect_cmd(procs["scan"], "scan")
     tools = {"refs": (refs_rc, refs_out, refs_err),
              "cfg": (cfg_rc, cfg_out, cfg_last),
-             "ctr": (ctr_rc, ctr_out, ctr_last)}
-    return tools, refs_dur, cfg_dur
+             "ctr": (ctr_rc, ctr_out, ctr_last),
+             "discipline": (dis_rc, dis_out, ""),
+             "scan": (scan_rc, scan_out, "")}
+    return tools, refs_dur, cfg_dur, dis_dur, scan_dur
 
 
 def run_parallel_tools():
@@ -208,7 +222,7 @@ def run_parallel_tools():
     原接口供 TestParallelTools 与外部调用。
     """
     procs = _spawn_tools()
-    tools, _, _ = _collect_tools(procs)
+    tools, _, _, _, _ = _collect_tools(procs)
     return tools
 
 
@@ -620,13 +634,15 @@ def main(argv=None):
     py_rc, py_out, py_err, py_dur = timed_run(
         pytest_cmd, timeout=_PYTEST_TIMEOUT_S)
     # pytest 跑完收口治理（各进程已与 pytest 重叠，墙钟取 max 而非 sum）
-    tools, refs_dur, cfg_dur = _collect_tools(tools_procs)
+    (tools, refs_dur, cfg_dur, dis_dur, scan_dur) = _collect_tools(tools_procs)
     ioctl_rc, ioctl_out, _, ioctl_dur = _collect_cmd(ioctl_proc, "ioctl")
     manifest_rc, manifest_out, _, manifest_dur = _collect_cmd(
         manifest_proc, "manifest")
     refs_rc, refs_out, refs_err = tools["refs"]
     cfg_rc, cfg_out, cfg_last = tools["cfg"]
     ctr_rc, ctr_out, ctr_last = tools["ctr"]
+    dis_rc, dis_out, _ = tools["discipline"]
+    scan_rc, scan_out, _ = tools["scan"]
     summary = pytest_summary(py_out)
     # 方向 1：全量红时机械判定——全新进程单独重跑失败用例，单跑绿即
     # KIR-002 抖动（自动登记 known-issues 放行本轮），单跑红判真回归阻塞，
@@ -693,6 +709,18 @@ def main(argv=None):
     manifest_last = last_stdout_line(manifest_out)
     if manifest_last:
         parts.append(manifest_last)
+    # 测试改动纪律（方向 1，IDLE-006 机械化）：discipline_rc 透出——测试改动
+    # 新增 xfail/skip/sleep 重试即判红，交 ws_report 全 *_rc 判红拒写
+    parts.append(f"discipline_rc={dis_rc}")
+    dis_last = last_stdout_line(dis_out)
+    if dis_last:
+        parts.append(dis_last)
+    # 热路径遍历约束（方向 2）：scan_rc 透出——治理检查器热路径全树
+    # rglob/os.walk 即判红，防 refs 39s 回归重现
+    parts.append(f"scan_rc={scan_rc}")
+    scan_last = last_stdout_line(scan_out)
+    if scan_last:
+        parts.append(scan_last)
     # 方向 2 + 方向 6：逐检查器耗时（秒，一位小数）入输出行，refs/cfg 拆开
     # 各自自报（合并 tools 无法定位慢点）。重叠模型（方向 1）下语义：
     # py 为 pytest 进程总耗时；refs/cfg/ioctl/manifest 为其收口阻塞墙钟
@@ -701,7 +729,8 @@ def main(argv=None):
     # 前缀 *_dur 不匹配 ws_report 的 *_rc 判红正则，不干扰 rc 判定
     parts.append(f"durs: py={py_dur:.1f} refs={refs_dur:.1f} "
                  f"cfg={cfg_dur:.1f} pyenv={env_dur:.1f} "
-                 f"ioctl={ioctl_dur:.1f} manifest={manifest_dur:.1f}")
+                 f"ioctl={ioctl_dur:.1f} manifest={manifest_dur:.1f} "
+                 f"discipline={dis_dur:.1f} scan={scan_dur:.1f}")
     print(" | ".join(parts))
     _mark_selfcheck(dur_s=time.time() - _t0)
     return 0

@@ -304,6 +304,9 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
     run_id = os.environ.get("CDP_RUN_ID") or uuid.uuid4().hex
     # 子步骤产物共享同 run_id：ws_report PASS 核验按 run_id 判同批
     os.environ["CDP_RUN_ID"] = run_id
+    # 方向 5：CDP_BATCH_ID 注入前保存现场，chain 结束后 finally 复原——否则
+    # 残留污染同进程后续用例（单测进程内多次 run_chain 会错绑批次）
+    prev_cdp_batch_id = os.environ.get("CDP_BATCH_ID")
     timeout_map = dict(_STEP_TIMEOUTS)
     if timeouts:
         timeout_map.update(timeouts)
@@ -357,6 +360,12 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
                    "exit_rc": 3, "canceled": False, "steps": [],
                    "skipped": list(_CHAIN_STEPS), "skip_reasons": {},
                    "error": str(exc)}
+    finally:
+        # 方向 5：用完复原 CDP_BATCH_ID（原无则移除），防污染同进程后续用例
+        if prev_cdp_batch_id is None:
+            os.environ.pop("CDP_BATCH_ID", None)
+        else:
+            os.environ["CDP_BATCH_ID"] = prev_cdp_batch_id
 
 
 def _chain_mark(name, batch_id):

@@ -6,10 +6,17 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib" / "python"))
 import cdp_paths
 import cdp_timing
+
+
+def _mark_worker(arg):
+    """并发 mark worker（模块级：multiprocessing 需可 pickle）。"""
+    path, i = arg
+    return cdp_timing._do_mark(Path(path), f"worker-{i}", quiet=True)
 
 
 class TestCdpTiming(unittest.TestCase):
@@ -594,6 +601,62 @@ class TestCdpTiming(unittest.TestCase):
         after = json.loads(archived.read_text(encoding="utf-8"))
         self.assertNotIn("status", after)
         self.assertEqual(after["wall_end"], before["wall_end"])
+
+
+    def test_lock_concurrent_marks_no_lost_segments(self):
+        # 方向 3：并发 mark 不丢段——多进程同时向同一 timings 文件追加，
+        # 无锁时 read→改→写 后写覆盖先写致丢段；_locked 串行化后 marks 数
+        # == 进程数
+        import multiprocessing
+
+        cdp_timing._cmd_start(self.batch)
+        path = str(self._path())
+
+        with multiprocessing.get_context("fork").Pool(4) as pool:
+            rcs = pool.map(_mark_worker, [(path, i) for i in range(8)])
+        self.assertEqual(rcs, [0] * 8)
+        data = json.loads(self._path().read_text(encoding="utf-8"))
+        names = [m["name"] for m in data.get("marks") or []]
+        self.assertEqual(len([n for n in names if n.startswith("worker-")]), 8)
+
+
+class TestCdpTimingLock(unittest.TestCase):
+    """方向 3：_locked 文件锁语义（fcntl 平台）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+        self.batch = "abc123def456"
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("CDP_PROJECT_ROOT", None)
+        else:
+            os.environ["CDP_PROJECT_ROOT"] = self._old
+        self._tmp.cleanup()
+
+    def test_locked_writes_file_and_unlocks(self):
+        # 锁文件落地于打点文件旁；with 内可写、退出后锁释放（可再进入）
+        path = cdp_paths.log_apply_dir() / f"timings-{self.batch}.json"
+        with cdp_timing._locked(path):
+            path.write_text("{}", encoding="utf-8")
+        lock_path = Path(f"{path}.lock")
+        self.assertTrue(lock_path.exists())
+        with cdp_timing._locked(path):
+            pass  # 二次进入不卡死（锁已释放）
+
+    def test_non_fcntl_degrades(self):
+        # 无 fcntl 平台（非 POSIX）：降级不加锁直接执行，不抛异常
+        with mock.patch.dict(sys.modules, {"fcntl": None}):
+            pass
+        # 直接以 import 失败路径触发：patch 内 import fcntl 抛 ImportError
+        path = Path(self._tmp.name) / "x" / "t.json"
+        path.parent.mkdir(parents=True)
+        with mock.patch("builtins.__import__",
+                        side_effect=ImportError("no fcntl")):
+            with cdp_timing._locked(path):
+                pass
 
 
 if __name__ == "__main__":
