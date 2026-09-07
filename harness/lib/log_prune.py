@@ -25,13 +25,17 @@ import time
 from pathlib import Path
 
 _LIB_DIR = Path(__file__).resolve().parent
-REPO_ROOT = _LIB_DIR.parent
+# 仓根 = harness/lib 的两级上级（harness/lib/../..）；此前误取 parents[0]
+# 得到 harness/，致 DEFAULT_TARGETS 以"harness/log/..." 相对根 glob 恒零命中
+# 仍返 0（scanned=0 静默假成功），修整后锚定真仓根（test_repo_root_is_repo_root
+# 不 patch REPO_ROOT 自证，防回归）
+REPO_ROOT = _LIB_DIR.parents[1]
 
 # 默认清理目标（相对仓库根的 glob）：各工作流运行产物
 DEFAULT_TARGETS = [
     "harness/log/git-works-push/*.log",       # push 日报（日粒度追加）
-    "harness/log/promote-*.head",             # promote 头快照
-    "harness/skills/cross-device/log/apply/timings-*.json",  # 打点归档
+    "harness/log/cross-device/promote-*.head",             # promote 头快照
+    "harness/log/cross-device/timings-*.json",  # cdp_timing 打点归档
 ]
 
 

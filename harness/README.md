@@ -81,6 +81,20 @@ Windows（emit 侧）跑依赖 bash 的测试（test_git_works_push / test_publi
 export LC_HARNESS_WIN_BASH=1
 ```
 
+### cross-device 角色声明（emit/apply）
+
+跨设备工作流按机器角色划分权限：`harness/lib/role_guard.py` 读取环境变量
+`HARNESS_ROLE`（取值 emit | apply），**缺省 apply**（安全缺省，未配置机器视为
+apply 设备，emit 专属命令被拦）。apply 设备无需声明；**emit 设备必须先声明**，
+否则 emit 三入口（`cdp_emit_precheck.py` / `cdp_parse.py --role emit` /
+`cdp_parse.py --gen-checksum`）因角色不匹配直接 exit 1 拒批：
+
+```bash
+export HARNESS_ROLE=emit    # 仅 emit 设备（远端）声明
+```
+
+角色是设备级属性而非仓库共享配置，故不写入 paths.conf（见该文件注记）。
+
 ## 路径配置（harness/config/paths.conf）
 
 | key | 说明 | 覆盖方式 |

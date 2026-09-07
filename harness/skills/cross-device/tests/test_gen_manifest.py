@@ -75,6 +75,37 @@ class TestGenManifest(unittest.TestCase):
         self.assertIn("source: rpi5-kernel-build/common/drivers/z.c", content)
         self.assertIn("source: aosp/vendor/x/z.h", content)
 
+    # ── 方向 5：manifest 未登记判红门禁 ─────────────────────────────
+    def test_check_only_red_when_unregistered(self):
+        # 文件存在但 manifest 未登记（如 Makefile 已引用而漏登的
+        # lciod_read_logic.c）→ check_only 判红返 False，且不写盘
+        root = self._make_patch_root({"kernel/new/x/lciod_read_logic.c": "//c"})
+        m = root / "manifest.yaml"
+        m.write_text("# old\n", encoding="utf-8")
+        ok = gm.generate_manifest(root, check_only=True,
+                                  kernel_deletions=[], aosp_deletions=[])
+        self.assertFalse(ok)
+        self.assertEqual(m.read_text(encoding="utf-8"), "# old\n")
+
+    def test_regenerate_registers_unregistered(self):
+        # 非 check_only 重生成：未登记文件被登记进 manifest，返回 True
+        root = self._make_patch_root({"kernel/new/x/lciod_read_logic.c": "//c"})
+        m = root / "manifest.yaml"
+        m.write_text("# old\n", encoding="utf-8")
+        ok = gm.generate_manifest(root, check_only=False,
+                                  kernel_deletions=[], aosp_deletions=[])
+        self.assertTrue(ok)
+        self.assertIn("patch: kernel/new/x/lciod_read_logic.c",
+                      m.read_text(encoding="utf-8"))
+
+    def test_fully_registered_no_red(self):
+        # 全覆盖（无未登记）→ check_only 不判红返 True
+        root = self._make_patch_root({"aosp/new/vendor/x/foo.h": "//x"})
+        gm.generate_manifest(root, check_only=False,
+                             kernel_deletions=[], aosp_deletions=[])
+        self.assertTrue(gm.generate_manifest(
+            root, check_only=True, kernel_deletions=[], aosp_deletions=[]))
+
 
 class TestGenManifestMark(unittest.TestCase):
     """方向 4：gen_manifest main 收尾自发 mark gen_manifest（edit 段细分）。"""

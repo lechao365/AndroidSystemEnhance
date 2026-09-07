@@ -5,6 +5,7 @@ action 按 SHA 固定、只跑自检（无打点指针降级路径）。
 """
 
 import re
+import sys
 import unittest
 from pathlib import Path
 
@@ -13,6 +14,9 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "selfcheck.yml"
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from selfcheck import REQUIRED_RC_KEYS  # noqa: E402 方向 3：必查键单点定义
 
 
 @unittest.skipUnless(WORKFLOW.exists(), "workflow 文件不存在（CI 未随仓检出）")
@@ -52,14 +56,15 @@ class TestSelfcheckWorkflow(unittest.TestCase):
         self.assertEqual(job.get("env", {}).get("CDP_PROJECT_ROOT"),
                          "${{ runner.temp }}/cdp-root")
 
-    def test_ci_parses_four_tool_rcs(self):
-        # 方向 1：selfcheck main 恒返 0（只采集不判定），CI 步骤必须解析输出
-        # 中四个 *_rc 任一非零即失败——否则测试失败也绿（CI 只跑不判）
+    def test_ci_parses_required_rcs(self):
+        # 方向 1 + 方向 3：selfcheck main 恒返 0（只采集不判定），CI 步骤必须
+        # 解析全部 REQUIRED_RC_KEYS（含 pyenv_rc/ioctl_rc）任一非零即失败——
+        # 否则测试失败也绿（CI 只跑不判）。键集合与 ws_report 必查键同源
+        # （selfcheck.REQUIRED_RC_KEYS 单点定义），防新增 rc 单侧漏接线。
         job = self.doc["jobs"]["selfcheck"]
         run_steps = [s.get("run", "") for s in job["steps"]]
         joined = "\n".join(run_steps)
-        # 四 rc 名须出现在循环解析列表中（缺一即漏判）
-        for rc in ("pytest_rc", "refs_rc", "config_rc", "contract_rc"):
+        for rc in REQUIRED_RC_KEYS:
             self.assertIn(rc, joined, f"CI 须解析 {rc}")
         # 逐项判定非零即失败
         self.assertIn('"${rc_name}=0"', joined, "CI 须判定 *_rc 非零即失败")

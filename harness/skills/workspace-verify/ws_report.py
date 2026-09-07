@@ -46,6 +46,7 @@ from cdp_timing import _base_seg_name  # noqa: E402
 from commit_scope import format_scope, porcelain_to_name_status  # noqa: E402
 from content_tree import content_tree  # noqa: E402
 from paths import env_path  # noqa: E402
+from selfcheck import REQUIRED_RC_KEYS  # noqa: E402 方向 3：必查键单点定义
 
 
 _HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -733,7 +734,7 @@ def main(argv=None):
     # result=skip 而 selfcheck 为空即拒写。方向 4（批次 ff33f92060ac）：board 模式
     # （-sv 模式 A / 模式 B 上板）同样强制——上板批自检 rc 须入收据，此前仅 skip
     # 模式要求致上板批自检 rc 不入收据。自检门禁以退出码为主判据（方向 1-5）：
-    #   - 缺 pytest_rc/refs_rc/config_rc/contract_rc 任一即返 2（rc 不可见则自检不可信）
+    #   - 缺 REQUIRED_RC_KEYS 任一键即返 2（rc 不可见则自检不可信）
     #   - 任一 rc 非零即返 2（pytest 崩溃/悬空引用/配置违规均带 rc，文本可能无 failed/skipped）
     # failed 文本匹配与 skipped 计数保留作冗余（rc 全 0 后的补充防线）
     if (args.result == "skip" or verify_mode == "board") \
@@ -749,9 +750,9 @@ def main(argv=None):
         found = {}
         for m in re.finditer(r"\b(\w+_rc)=(\d+)\b", args.selfcheck):
             found.setdefault(m.group(1), int(m.group(2)))
-        # 必查键（既有契约 + config/contract）：四 rc 不可缺席（缺失=自检不可信；
-        # config_rc/contract_rc 为 check_config 两模式透出的判红键）
-        for key in ("pytest_rc", "refs_rc", "config_rc", "contract_rc"):
+        # 必查键（既有契约 + config/contract + pyenv/ioctl，单点定义于
+        # selfcheck.REQUIRED_RC_KEYS，方向 3）：任一 rc 缺席=自检不可信
+        for key in REQUIRED_RC_KEYS:
             if key not in found:
                 print(f"error: --selfcheck 缺 {key}（退出码为主判据，文本匹配仅冗余）",
                       file=sys.stderr)

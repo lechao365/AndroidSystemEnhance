@@ -35,9 +35,10 @@ jobs:
           mkdir -p "$CDP_PROJECT_ROOT"
           out="$(python3 harness/lib/selfcheck.py)"
           echo "$out"
-          # 方向 1：selfcheck main 恒返 0（只采集不判定），必须解析输出中
-          # 五个 *_rc 任一非零即失败——否则测试失败也绿（CI 只跑不判）
-          for rc_name in pytest_rc refs_rc config_rc contract_rc pyenv_rc; do
+          # 方向 1 + 方向 3：selfcheck main 恒返 0（只采集不判定），必须解析
+          # 输出中全部 *_rc（含 pyenv_rc/ioctl_rc）任一非零即失败——否则测试
+          # 失败也绿（CI 只跑不判）；键集合与 ws_report 必查键同源
+          for rc_name in pytest_rc refs_rc config_rc contract_rc pyenv_rc ioctl_rc; do
             echo "$out" | grep -Eq "${rc_name}=0" \
               || { echo "error: ${rc_name} 非零，自检失败"; exit 1; }
           done

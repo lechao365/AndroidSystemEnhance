@@ -73,6 +73,10 @@ def compare(k_path: Path, a_path: Path) -> tuple[int, str]:
         return 2, f"文件缺失: {'内核' if not k_path.is_file() else 'AOSP'} {k_path if not k_path.is_file() else a_path}"
     ksig = extract_signatures(k_path.read_text(encoding="utf-8", errors="replace"))
     asig = extract_signatures(a_path.read_text(encoding="utf-8", errors="replace"))
+    # 双空判红（方向 2）：两侧均未提取到 struct/enum 即头文件解析异常/内容
+    # 异常，不得当作"一致"放行（此前 return 0 "(无结构/枚举)" 静默假绿）
+    if not ksig and not asig:
+        return 1, "双空: 内核与 AOSP 两侧均未提取到 struct/enum（头文件解析异常或内容异常？）"
     problems = []
     for name in sorted(set(ksig) | set(asig)):
         if name not in ksig:

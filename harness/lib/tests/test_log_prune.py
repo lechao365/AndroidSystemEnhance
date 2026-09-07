@@ -11,6 +11,8 @@ import time
 import unittest
 from pathlib import Path
 
+import pytest
+
 _LIB = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location("log_prune", _LIB / "log_prune.py")
 log_prune = importlib.util.module_from_spec(_spec)
@@ -81,6 +83,35 @@ class TestLogPrune(unittest.TestCase):
         log_prune.run(days=0, targets=["harness/log/git-works-push/*.log"],
                       apply=True)
         self.assertFalse(p.exists())
+
+
+class TestRepoRootAnchor(unittest.TestCase):
+    """方向 1：REPO_ROOT 锚点自证（不 patch 模块变量）。
+
+    回归防线：此前 REPO_ROOT 误取 harness/（parents[0]）致 DEFAULT_TARGETS
+    恒零命中仍返 0，靠 patch 的假目录用例掩盖。此处直接对真实模块断言：
+    REPO_ROOT == 仓根，且三条默认 glob 各自在真实仓内有命中（scanned>0），
+    无打补丁即可证伪"锚定错 + 零命中"复发。
+    """
+    # 真扫真实仓产物目录（drvfs 下 glob 命中多文件耗时 ~3s），豁免 slow guard
+    pytestmark = pytest.mark.slow_ok("真实仓默认目标锚点自证")
+
+    def test_repo_root_is_repo_root_without_patch(self):
+        repo_root = Path(__file__).resolve().parents[3]
+        self.assertEqual(log_prune.REPO_ROOT, repo_root)
+        self.assertTrue((log_prune.REPO_ROOT / "harness").is_dir())
+
+    def test_default_targets_hit_real_dir(self):
+        # 每条默认 glob 至少命中一个真实产物文件（防止错路径/零命中静默返 0）
+        for pattern in log_prune.DEFAULT_TARGETS:
+            hits = list(log_prune.REPO_ROOT.glob(pattern))
+            self.assertTrue(
+                hits, f"默认目标 {pattern} 在真实仓零命中（错路径复发？）")
+
+    def test_prune_real_dir_with_defaults(self):
+        # 以真实仓运行默认目标 dry-run：不误删（apply=False）且不报错
+        plan = log_prune.run(targets=log_prune.DEFAULT_TARGETS, apply=False)
+        self.assertEqual(plan["errors"], [])
 
 
 if __name__ == "__main__":

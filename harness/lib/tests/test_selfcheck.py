@@ -33,9 +33,13 @@ class _FakeProc:
 
 
 def _fake_run(seq):
-    """桩 subprocess.run：按调用顺序返回假进程。"""
+    """桩 subprocess.run：按调用顺序返回假进程；seq 耗尽时兜底返回 ioctl
+    检查成功桩（方向 2 接入后 main 二次 run_tool 调 check_ioctl_headers，
+    既有用例无需逐个补 ioctl 桩）。"""
     def _run(cmd, **kw):
-        return seq.pop(0)
+        if seq:
+            return seq.pop(0)
+        return _FakeProc(0, "[OK] 一致: vendor_lechao_usbd_config\n")
     return _run
 
 
@@ -393,6 +397,35 @@ class TestCheckPythonEnv(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("pyenv_rc=0", out)
         self.assertIn("python=", out)
+
+    def test_main_includes_ioctl_segment(self):
+        # 方向 2：selfcheck 接入 check_ioctl_headers → 输出含 ioctl_rc=0
+        # 与一致性结论行（ioctl 桩由 _fake_run 兜底成功）
+        fake = _fake_run([
+            _FakeProc(0, "531 passed in 27.9s\n"),
+        ])
+        buf = io.StringIO()
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
+            with redirect_stdout(buf):
+                selfcheck.main()
+        out = buf.getvalue()
+        self.assertIn("ioctl_rc=0", out)
+        self.assertIn("一致", out)
+
+    def test_ioctl_nonzero_passed_through(self):
+        # 方向 2：ioctl 头漂移/双空 → ioctl_rc=1 非零透出（交 ws_report
+        # 全 *_rc 扫描判红拒写，不得静默假绿）
+        fake = _fake_run([
+            _FakeProc(0, "531 passed in 27.9s\n"),
+            _FakeProc(1, "签名漂移: vendor_lechao_usbd_config\n"),
+        ])
+        buf = io.StringIO()
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
+            with redirect_stdout(buf):
+                selfcheck.main()
+        out = buf.getvalue()
+        self.assertIn("ioctl_rc=1", out)
+        self.assertIn("签名漂移", out)
 
 
 if __name__ == "__main__":

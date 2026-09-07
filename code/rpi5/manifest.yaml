@@ -26,6 +26,10 @@ kernel:
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/Kconfig
     - patch: kernel/new/vendor/lechao/LcIod/Makefile
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/Makefile
+    - patch: kernel/new/vendor/lechao/LcIod/lciod_read_logic.c
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_read_logic.c
+    - patch: kernel/new/vendor/lechao/LcIod/lciod_read_logic.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_read_logic.h
     - patch: kernel/new/vendor/lechao/LcIod/lciod_usbd-ioctl.h
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_usbd-ioctl.h
     - patch: kernel/new/vendor/lechao/LcIod/lciod_usbd-stats.c
@@ -34,6 +38,10 @@ kernel:
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_usbd.c
     - patch: kernel/new/vendor/lechao/LcIod/lciod_usbd.h
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_usbd.h
+    - patch: kernel/new/vendor/lechao/LcIod/tests/Makefile
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/tests/Makefile
+    - patch: kernel/new/vendor/lechao/LcIod/tests/lciod_read_logic_host_test.c
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/tests/lciod_read_logic_host_test.c
     - patch: kernel/new/vendor/lechao/LcView/Kconfig
       source: rpi5-kernel-build/common/vendor/lechao/LcView/Kconfig
     - patch: kernel/new/vendor/lechao/LcView/Makefile

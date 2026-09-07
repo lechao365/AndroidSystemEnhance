@@ -117,3 +117,4 @@
 2026-09-06 19:55:32 manual-2609061955 pass build=pass board=pass acc={"run_id":"f258ef093a5145b79946d8aeeadf9 基线发布验证: dev 43bd8c0(harness批次A-D) 全链 pas
 2026-09-06 20:11:29 manual-2609062011 pass build=pass board=pass acc={"run_id":"f258ef093a5145b79946d8aeeadf9 基线发布验证: dev 43bd8c0(harness批次A-D) 全链 pas
 2026-09-06 21:27:56 manual-2609062127 pass build=pass board=pass acc={"run_id":"3580e9a3ad21464fa74fd5752ae98 基线发布全量验证: dev 42832f5 11 case 全覆盖 pass 含
+2026-09-07 10:18:53 3049a63e1186 skip build=skip board=skip acc=- 空转工具接线与角色门禁解封（-s 无需上板） | {"elapsed_s":1983,"segs":{"edit_plan":5.769,"edit":474.167,"apply_selfcheck":50.362,"gen_manifest":333.087,"gen_manifest#2":12.398,"edit#2":931.597,"apply_selfcheck#2":51.65,"gen_manifest#3":11.053,"edit_item":42.522,"edit#3":10.89,"apply_selfcheck#3":51.841,"report":0.386,"report_post":7.706,"finish":0.019}}
