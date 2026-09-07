@@ -10,7 +10,10 @@ subprocess 不经管道直取 returncode，如实透出两工具结果。
 （emit 实测 39 skipped，C10 方向 3 的兜底伪造计数以 Python 形态复发）。
 故 pytest 摘要行仅从 stdout 用正则定位（含 passed/failed/skipped 的行），
 未定位到计数行即不补 skipped：交 ws_report 缺 skipped 拒写，不自己伪造
-也不静默通过。refs 结论行同理只取 stdout 末行，stderr 仅附注不参与判定。
+也不静默通过。例外（wsv2-01）：flake 放行分支不拼摘要行（原始 failed 计数
+须隐藏）、但摘要存在时 skipped=0 为事实值，须显式透出，否则缺键被
+ws_report 拒写令 KIR-002 放行流程自锁——仅摘要缺失（崩溃/截断）不补。
+refs 结论行同理只取 stdout 末行，stderr 仅附注不参与判定。
 
 输出单行（| 连接，供 ws_report --selfcheck 落盘与门禁判定）：
     pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n> | refs_rc=<n> | <refs 结论行> | config_rc=<n> | <config 结论行> | contract_rc=<n> | <contract 结论行> | pyenv_rc=<n> | <pyenv 汇总行> | ioctl_rc=<n> | <ioctl 结论行> | manifest_rc=<n> | <manifest 结论行> | durs: py=<s> tools=<s> pyenv=<s> ioctl=<s> manifest=<s>
@@ -700,9 +703,14 @@ def main(argv=None):
                          f'cmd="python3 -m pytest {nodeid} -q"')
         m = re.search(r"\b(\d+)\s*skipped\b", summary or "")
         if m:
-            # 仅 summary 定位到 skipped 计数时透出（lib-06）：缺行不伪造
-            # skipped=0——交 ws_report 缺 skipped 拒写，不自己伪造计数
             parts.append(f"skipped={m.group(1)}")
+        elif summary:
+            # 摘要存在但确无 skipped 计数：透出 skipped=0（事实值，非伪造）。
+            # lib-06 曾整体去兜底，但 flake 放行路径不拼摘要行、m 缺失时
+            # 缺 skipped 键会让 ws_report 以「缺 skipped 计数」拒写，KIR-002
+            # 抖动放行收据卡死在自检门禁（wsv2-01 回归）。仅摘要缺失
+            # （崩溃/截断）维持不补——交 ws_report 拒写，不伪造不可见计数
+            parts.append("skipped=0")
     else:
         if summary:
             parts.append(summary)

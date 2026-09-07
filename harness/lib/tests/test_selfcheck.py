@@ -678,10 +678,11 @@ class TestFlakeRerun(unittest.TestCase):
         # ws_report 文本防线：不得残留 "1 failed" 等 failed 非零计数
         self.assertNotRegex(out, r"\b[1-9]\d*\s*failed\b")
 
-    def test_main_flaky_no_skipped_line_no_fake_key(self):
-        # lib-06：flake 放行分支 summary 缺 skipped 计数行时不补 skipped=0
-        # （伪造计数违背本文件 docstring"交 ws_report 拒写"原则——ws_report
-        # 对缺 skipped 拒写收据，fail-closed）
+    def test_main_flaky_no_skipped_line_fact_zero(self):
+        # wsv2-01：flake 放行分支 summary 存在但缺 skipped 计数行 → 补
+        # skipped=0（事实值）。lib-06 曾整体不补，致缺键被 ws_report
+        # 「缺 skipped 计数」拒写、KIR-002 放行收据自锁；崩溃/截断（摘要
+        # 缺失）才维持不补交 ws_report 拒写
         fake = _fake_run([
             _FakeProc(1, "1 failed, 1153 passed in 27.0s\n"),  # 无 skipped
         ])
@@ -696,7 +697,7 @@ class TestFlakeRerun(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("pytest_rc=0", out)
         self.assertIn("flake:", out)
-        self.assertNotIn("skipped=", out)
+        self.assertIn("skipped=0", out)
 
 
 class TestCliArgv(unittest.TestCase):

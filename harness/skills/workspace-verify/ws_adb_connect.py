@@ -282,12 +282,19 @@ def build_exec_cmd(cmd, endpoint=None):
     return base + ["shell", f"{cmd}; echo __LE_EXIT_CODE__=$?"]
 
 
-def build_logcat_cmd(filter_expr=None, tail=200, since=None, pid=None):
+def build_logcat_cmd(filter_expr=None, tail=200, since=None, pid=None,
+                     endpoint=None):
     """since 非空时以 `-t <since>` 收窄时间窗（代 -t <tail>），
     避免命中上轮旧日志致假绿（如 reboot 后验收须从 reboot 时刻起）；
     pid 非空时追加 --pid=<pid> 按进程归属收窄（logfield 5 段写法：日志按
-    进程筛，防旧进程心跳残留行被当新进程心跳）。"""
-    cmd = [adb_bin(), "logcat", "-d"]
+    进程筛，防旧进程心跳残留行被当新进程心跳）。
+    endpoint 非空时带 -s <endpoint> 定向：多 serial 残留时缺 -s 会被 adb
+    以 "more than one device" 拒绝、logcat 取空输出假红（wsv2-02 收口，
+    与 build_exec_cmd 同款定向）。"""
+    cmd = [adb_bin()]
+    if endpoint:
+        cmd += ["-s", endpoint]
+    cmd += ["logcat", "-d"]
     if filter_expr:
         cmd += ["-s", filter_expr]
     cmd += ["-t", since if since else str(tail)]

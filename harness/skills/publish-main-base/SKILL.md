@@ -26,6 +26,10 @@ sync-code-to-doc**——不复制任何子 skill 的实现逻辑。
 - 当前分支 dev；工作树干净；origin 可达
 - 最新收据 pass/skip 且最近内容提交父 == verified_commit（快路径）；
   否则自动进入验证路径（阶段 2）
+- **promote 门禁（收紧，doc-11）**：晋升阶段要求证据收据 `result=pass` 且
+  `verify_mode=board`——skip 收据可过 check/prepare 但不可晋升（除非
+  no-code-change 豁免路径），与脚本头「最新收据须 result=pass 且
+  verify_mode=board」一致
 - known-issues 门禁：promote 不强制 `--task`（门禁无条件执行，缺省由
   check-issues 推断唯一活跃任务，推断失败即拒）；目标任务下存在
   origin=introduced 或 blocking 且 status!=fixed 的问题即拒

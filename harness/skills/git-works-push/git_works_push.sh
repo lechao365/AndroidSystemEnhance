@@ -30,6 +30,12 @@ done
 # 入口锚定仓库根（sync-09）：harness/lib/commit_scope.py、log_prune.py 等
 # 相对路径调用以仓库根为基准，子目录运行时静默不可达（收据比对降级、日志
 # 清理失效）；非 git 仓 fail-closed（cd 失败即拒，防 git 操作打到错误目录）
+# gwp2-01：--message-file 相对路径在下方 cd 到仓库根后解析基准改变（子目录
+# 调用会错位报 exit 3）——先按调用方 cwd realpath 化，仓根调用行为不变
+if [ -n "$MSG_FILE" ]; then
+  MSG_FILE="$(realpath -m "$MSG_FILE")" || {
+    echo "error: 无法解析 --message-file 路径: $MSG_FILE" >&2; exit 1; }
+fi
 TOPLEVEL="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   echo "error: 不在 git 仓库内（无法定位仓库根），拒绝执行" >&2
   exit 1

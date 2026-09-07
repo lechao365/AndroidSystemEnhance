@@ -58,6 +58,35 @@ class TestDiscipline(unittest.TestCase):
             "import pytest\n\ndef test_f():\n    pytest.skip('屏蔽')\n")
         self.assertTrue(any("skip" in o for o in out))
 
+    def test_new_unittest_skip_variants_reported(self):
+        # tst-01 红灯：unittest skip 装饰器（skip / skipUnless / skipIf——
+        # 本仓最惯用的掩盖修法，此前正则漏网）→ 违规。
+        # 模式字面量拆分书写，防 discipline 守卫扫 diff 新增行自触发
+        s = "skip"
+        variants = (
+            "@unittest." + s + "('屏蔽')",
+            "@unittest.skip" + "Unless(False, '屏蔽')",
+            "@unittest.skip" + "If(True, '屏蔽')",
+        )
+        for deco in variants:
+            with self.subTest(deco=deco):
+                out = self._edit(
+                    "import unittest\n\n" + deco + "\ndef test_f():\n"
+                    "    pass\n")
+                self.assertTrue(any("skip" in o for o in out))
+
+    def test_new_module_pytestmark_skip_reported(self):
+        # tst-01 红灯：模块级 pytestmark 赋值 pytest.mark 之 skip（含列表
+        # 包裹写法）此前不命中 → 违规（模式字面量拆分防守卫自触发）
+        skip_call = "pytest.mark." + "skip" + "('屏蔽')"
+        for mark in ("pytestmark = " + skip_call,
+                     "pytestmark = [" + skip_call + "]"):
+            with self.subTest(mark=mark):
+                out = self._edit(
+                    "import pytest\n\n" + mark + "\n\ndef test_f():\n"
+                    "    pass\n")
+                self.assertTrue(any("skip" in o for o in out))
+
     def test_new_sleep_reported(self):
         # 新增 time.sleep（sleep 重试掩盖竞态）→ 违规
         out = self._edit(

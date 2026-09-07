@@ -23,19 +23,28 @@ harness/
 ├── skills/
 │   ├── sync-code-to-workspace/      # code→workspace 同步（dev/main HEAD 真相源）
 │   ├── sync-code-to-doc/             # code→文档同步
-│   ├── cross-device/                 # 跨设备批次（emit 生成 / apply 执行）
+│   ├── cross-device/                 # 跨设备批次（emit 生成 / apply 执行；含 opencode-server）
 │   ├── workspace-verify/             # code→workspace 同步 + 增量编译 + 上板验证 + verify 收据
 │   ├── git-works-push/               # dev 分支 commit + push（收据随批入库）
 │   ├── loop-engineering/             # 验证收敛会话管理（patience/total 计数、失败指纹归因、修复重试）
 │   ├── publish-main-base/          # 一键基线发布编排器（自检→loop 验证→文档→promote）
-│   └── revert-modify-from-main-base/ # dev 持续 NG 人工回退到 main 基线
+│   ├── revert-modify-from-main-base/ # dev 持续 NG 人工回退到 main 基线
+│   └── idle-hardening/               # 闲时加固（idle-eligible 队列、让路协议、预算内修复）
 ├── rules/
 │   ├── source-code-modify.md   # SRC-001~004：源码改动优先级/归档纪律
 │   ├── cxx-coding-rules.md     # CXX-001~004：C/C++ 编码规范
 │   ├── known-issues.md         # KIR-001~007：缺陷归属判定有序判据与准入场景表
-│   └── plantuml.md             # DOC-002：PlantUML 画图约束
+│   ├── plantuml.md             # DOC-002：PlantUML 画图约束
+│   ├── cdp-apply-dod.md        # CDP-DOD-001~003：apply 完成判据（检查器门禁三要件/干净克隆/收据自报）
+│   └── idle-hardening.md       # IDLE-001~007：闲时加固队列准入/让路协议/flake 纪律/预算断点
 ├── reference/
-│   └── build-reference.md      # RPI5 编译参考（源自 harness/scripts/mk_rpi5_full_image.sh）
+│   ├── README.md                 # RPI5 开发参考文档索引（ENV/BLD/FLASH/INC/DBG/RMT 规则 ID 总表）
+│   ├── env-setup-reference.md    # WSL2 / 宿主环境搭建、AOSP 编译前准备（ENV-001~007）
+│   ├── build-reference.md        # RPI5 AOSP / 内核编译、源码获取、ccache、打包（BLD-001~013）
+│   ├── flash-deploy-reference.md # 镜像写入 SD 卡、首次上电、ADB/串口入口（FLASH-001~007）
+│   ├── incremental-dev-reference.md # 模块级修改、增量编译、镜像推送、内核替换、回退（INC-001~010）
+│   ├── debug-tools-reference.md  # 日志抓取、串口调试、WSL 映射 USB 设备（DBG-001~008）
+│   └── remote-access-reference.md # 跨网络远程访问 opencode WebUI（Tailscale + Serve，RMT-001~008）
 ├── scripts/
 │   ├── mk_rpi5_full_image.sh   # RPI5 一键编译打包
 │   └── apply_preset_bugs.py    # 预设 bug 注入/回退（LE 验证用）

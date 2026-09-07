@@ -121,7 +121,10 @@ def adb_run(ep, args, timeout=600):
                            encoding="utf-8", errors="replace",
                            timeout=timeout)
         return p.stdout + p.stderr, p.returncode
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError):
+        # wsv2-04：补捕 OSError（adb 二进制缺失/执行异常），与
+        # ws_forensics/ws_adb_connect.run_adb 同口径——否则 adb 中段不可用
+        # 时抛裸 traceback 中断整个测试批次而非按失败判红
         return "", -1
 
 

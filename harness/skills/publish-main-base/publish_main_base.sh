@@ -448,7 +448,9 @@ if [ "$PKG_RESULT" != "PASS" ]; then
 fi
 fi
 # 文档同步遗漏提示（warn 不阻断）：dev 相对 origin/main 无 docs/ 改动时提示
-if ! git diff --name-only origin/main...dev | grep -q '^docs/'; then
+# （pub2-02：与 code 门禁同用两点差 origin/main..dev——三点对称差在 main
+# 领先 dev 时会混入 main 侧提交，docs 提示口径漂移）
+if ! git diff --name-only origin/main..dev | grep -q '^docs/'; then
   echo "warn: dev 相对 origin/main 无 docs/ 改动（若本批应同步设计文档，请先 /sync-code-to-doc --base origin/main 并 commit 到 dev）"
 fi
 
@@ -475,14 +477,27 @@ python3 harness/skills/publish-main-base/baseline_register.py promote \
 # 证据快照目录 data/baselines/ 一并 add（promote 已生成 <id>-<收据名>.md 快照）
 # data/known-issues/ 一并 add -A（promote 归档不删文件，批内新登记问题须随晋升
 # 提交入库；verify-tree 已排除该目录，登记变更不破坏树等价断言）
-git add harness/config/baseline-status.yaml
-if [ -d data/baselines ]; then git add data/baselines; fi
-if [ -d data/known-issues ]; then git add -A data/known-issues; fi
+git add harness/config/baseline-status.yaml || {
+  rollback_promote; git reset -q; echo "error: add baseline-status.yaml 失败，已回滚并清暂存" >&2; exit 1; }
+if [ -d data/baselines ]; then
+  git add data/baselines || {
+    rollback_promote; git reset -q; echo "error: add data/baselines 失败，已回滚并清暂存" >&2; exit 1; }
+fi
+if [ -d data/known-issues ]; then
+  git add -A data/known-issues || {
+    rollback_promote; git reset -q; echo "error: add data/known-issues 失败，已回滚并清暂存" >&2; exit 1; }
+fi
 if git diff --cached --quiet; then
   echo "warn: baseline-status.yaml 无变更，跳过晋升提交"
 else
+  # pub2-01：晋升登记提交失败也须接 rollback_promote——此前仅 exit 1，tag 已
+  # 推送、promote 现场已落盘且未被回滚，重试 promote 撞「tag verified/$BID 已
+  # 存在」exit 3 死锁（须人工删 tag）；git reset -q 顺带清掉本段刚暂存的
+  # promote 产物（baseline-status/baselines/known-issues），工作树内容保留
   git commit -m "构建(baseline): ${BID} 晋升 promoted" || {
-    echo "error: 晋升登记提交失败" >&2; exit 1; }
+    rollback_promote; git reset -q
+    echo "error: 晋升登记提交失败，已回滚并清暂存（tag 与 candidate 现场已复原）" >&2
+    exit 1; }
 fi
 
 git checkout main && git pull origin main || { rollback_promote; echo "error: checkout/pull main 失败" >&2; exit 1; }

@@ -71,19 +71,41 @@ def extract_signatures(text: str) -> dict[str, list[str]]:
     return out
 
 
+def _strip_comments(text: str) -> str:
+    """去除 /* */ 块注释与 // 行注释：花括号配对扫描前先剥离，防注释内
+    {/} 干扰深度统计（lib2-01）。"""
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"//[^\n]*", "", text)
+
+
 def _nested_block_hits(text: str) -> list[str]:
     """检测签名块内嵌套花括号的块名（lib-09 fail-closed）。
 
-    BLOCK_RE 到首个 `}` 截断，块内（声明行之后）再出现 `{` 必为嵌套
-    struct/enum——此时真实块提取不到、两侧签名可能同时为空而静默假绿，
-    须显式判红交人工复核而非漏检。返回问题块名列表。"""
+    原实现依赖 BLOCK_RE 匹配，而 `[^}]*` 对嵌套块（内层 `} 成员;` 形态）
+    根本无法匹配外层块 → hits 恒空，嵌套 struct 内字段漂移静默漏检
+    （lib2-01 实证两侧签名同缺仍返回一致）。改为花括号配对扫描：逐
+    struct/enum 声明自起始 `{` 前向统计深度，声明体未闭合或出现嵌套 `{`
+    即判红。保守 fail-closed——扁平布局不受影响，嵌套/畸形一律交人工复核。
+    """
     hits = []
-    for m in BLOCK_RE.finditer(text):
-        block = m.group(1)
-        if "{" in block.split("{", 1)[1]:
-            name_m = re.match(r"(?:struct|enum)\s+(\w+)", block)
-            if name_m:
-                hits.append(name_m.group(1))
+    stripped = _strip_comments(text)
+    for m in re.finditer(r"(?:struct|enum)\s+(\w+)\s*\{", stripped):
+        name = m.group(1)
+        depth = 0
+        nested = False
+        closed = False
+        for ch in stripped[m.end() - 1:]:
+            if ch == "{":
+                depth += 1
+                if depth >= 2:
+                    nested = True
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    closed = True
+                    break
+        if not closed or nested:
+            hits.append(name)
     return hits
 
 

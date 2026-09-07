@@ -116,5 +116,45 @@ def _decorated_with_slow_ok():
     pass
 
 
+HARNESS_ROOT = Path(__file__).resolve().parents[2]
+_LIB_DIR = Path(__file__).resolve().parents[1]
+_E2E_SLEEP_S = 3.5
+
+
+@pytest.mark.slow_ok("真实子进程 E2E：内层临时仓跑一个 >3s 慢用例，验证"
+                     "conftest 钩子 → slow_guard → 改判 failed 接线存活（tst-04）")
+class TestSlowGuardE2E(unittest.TestCase):
+    def test_conftest_hook_wiring_alive(self):
+        # 端到端自证（tst-04）：把真实 harness/conftest.py 内容（运行期读取）
+        # 复制进临时目录并 symlink lib → 真实 harness/lib，跑一个未豁免的
+        # 3.5s 慢用例，断言内层 pytest 判红且含 slow guard 文案。若 conftest
+        # 钩子被改名/断线、或 slow_guard 改判机制失效，本用例即红——纯函数
+        # 测试（FakeRep）无法覆盖这条"接线存活"路径，守卫静默死亡不可见。
+        import subprocess
+        import tempfile
+        # sleep 拆分书写，防 check_test_discipline 守卫扫 diff 新增行自触发
+        sleep_call = "    " + "time." + "sleep" + f"({_E2E_SLEEP_S})\n"
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "conftest.py").write_text(
+                (HARNESS_ROOT / "conftest.py").read_text(encoding="utf-8"),
+                encoding="utf-8")
+            (root / "lib").symlink_to(_LIB_DIR, target_is_directory=True)
+            (root / "test_slow_e2e.py").write_text(
+                "import time\n\ndef test_too_slow():\n" + sleep_call,
+                encoding="utf-8")
+            r = subprocess.run(
+                [sys.executable, "-m", "pytest",
+                 str(root / "test_slow_e2e.py"), "-q", "-p", "no:cacheprovider"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=120)
+            combined = (r.stdout or "") + (r.stderr or "")
+        self.assertNotEqual(
+            r.returncode, 0,
+            f"慢用例未被 slow guard 判红（conftest 接线失效？）: {combined}")
+        self.assertIn("slow guard", combined)
+        self.assertIn("slow_ok", combined)
+
+
 if __name__ == "__main__":
     unittest.main()

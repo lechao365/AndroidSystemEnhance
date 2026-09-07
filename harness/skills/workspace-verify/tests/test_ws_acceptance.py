@@ -1427,7 +1427,7 @@ class TestRunIdLifecycle(unittest.TestCase):
         captured = {}
 
         def fake_run_acceptance(acc, adb_exec, adb_logcat, ensure_boot=False,
-                                on_item=None, host_env=None):
+                                on_item=None, host_env=None, endpoint=None):
             captured["host_env"] = host_env
             return "pass", [{"tag": "boot", "status": "pass", "detail": "ok"}]
 
@@ -1465,7 +1465,7 @@ class TestRunIdLifecycle(unittest.TestCase):
         out_json = Path(tempfile.mkdtemp()) / "acc.json"
 
         def fake_run_acceptance(acc, adb_exec, adb_logcat, ensure_boot=False,
-                                on_item=None, host_env=None):
+                                on_item=None, host_env=None, endpoint=None):
             return "pass", [{"tag": "boot", "status": "pass", "detail": "ok"}]
 
         with mock.patch.dict("os.environ", {"CDP_RUN_ID": "shared-run-001"}), \

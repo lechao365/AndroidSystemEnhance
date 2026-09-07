@@ -556,6 +556,12 @@ def _iter_non_repo_files(root: Path):
                 if (p / ".git").exists():
                     log_warn(f"非 repo 扫描遇嵌套 git 仓库，跳过该子树: {p}")
                     continue
+                # sync2-02：嵌套层同样按排除目录跳过（__pycache__/out/prebuilts
+                # 等，git_workspace_util.is_excluded_dir）——此前仅顶层判定，
+                # 嵌套 __pycache__/*.pyc 会误标 EXTRA-NEW-UNTRACKED，--auto
+                # 全选后被物理删除
+                if is_excluded_dir(p.name):
+                    continue
                 stack.append(p)
             elif p.is_file():
                 yield p
@@ -722,7 +728,14 @@ def _do_checkout_patch(proj: str, rel: str) -> bool:
     if not base:
         log_error(f"{proj}: 无法确定 upstream base")
         return False
-    target = Path(ws) / rel
+    # sync2-01：checkout 目标同样经包含性校验（与 _do_restore/_do_sync_extra
+    # 同口径）——plan rel 可被人工/AI 编辑，rel 含 ../ 时 git pathspec 在嵌套
+    # 仓内可命中/覆盖项目目录外文件，备份恢复随之越出项目 ws
+    target_resolved = _resolve_workspace_target(proj, rel)
+    if not target_resolved:
+        log_error(f"checkout 目标越界（拒绝）: {proj}/{rel}")
+        return False
+    target = Path(target_resolved)
     # checkout 前备份原工作树内容（sync-04）：apply 校验/执行失败时恢复
     # 原状再报错，避免"文件已被重置为 base"的破坏性半完成态
     had_file = target.is_file()
@@ -761,6 +774,9 @@ def _do_checkout_patch(proj: str, rel: str) -> bool:
 def _do_checkout_only(proj: str, rel: str) -> bool:
     ws = _resolve_proj_cwd(proj)
     if not ws:
+        return False
+    # sync2-01：checkout-only 目标同样过包含性校验（防 rel ../ 穿越越出项目）
+    if not _resolve_workspace_target(proj, rel):
         return False
     base = _find_upstream_base(cwd=ws)
     if not base:

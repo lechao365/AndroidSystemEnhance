@@ -52,6 +52,18 @@ class TestCmdBuild(unittest.TestCase):
         self.assertNotIn("--pid=", " ".join(ac.build_logcat_cmd(None, 5000)))
         self.assertNotIn("--pid=", " ".join(ac.build_logcat_cmd(None, 5000, pid=None)))
 
+    def test_logcat_endpoint_targets_serial(self):
+        # wsv2-02：endpoint 非空 → -s <endpoint> 置于 logcat 子命令前定向
+        # （多 serial 残留时缺 -s 报 more than one device 假红，与
+        # build_exec_cmd 同款）；缺省/空 endpoint 不携带 -s
+        cmd = ac.build_logcat_cmd(None, 5000, endpoint="10.0.0.5:5555")
+        self.assertEqual(cmd[:2], [ac.adb_bin(), "-s"])
+        self.assertEqual(cmd[2], "10.0.0.5:5555")
+        self.assertIn("logcat", cmd)
+        self.assertNotIn("-s", " ".join(ac.build_logcat_cmd(None, 5000)))
+        self.assertNotIn("-s", " ".join(
+            ac.build_logcat_cmd(None, 5000, endpoint=None)))
+
     def test_parse_devices_states(self):
         out = ("List of devices attached\n"
                "192.168.1.5:5555\tdevice\n"

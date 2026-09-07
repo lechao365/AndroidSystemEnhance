@@ -26,7 +26,11 @@ _ROOT = Path(__file__).resolve().parents[2]
 # sleep 重试可换皮绕过守卫
 _BANNED = [
     (re.compile(r"@pytest\.mark\.xfail\b|pytest\.xfail\s*\("), "xfail"),
-    (re.compile(r"@pytest\.mark\.skip(?:if)?\b|pytest\.skip(?:if)?\s*\("),
+    (re.compile(r"@pytest\.mark\.skip(?:if)?\b|pytest\.skip(?:if)?\s*\("
+                # tst-01：补 unittest 变体（@unittest.skip / skipIf / skipUnless
+                # 是本仓最惯用的掩盖修法，此前漏网）与模块级 pytestmark 写法
+                r"|@unittest\.skip(?:Unless|If)?\s*\("
+                r"|pytestmark\s*=\s*(\[\s*)?pytest\.mark\.skip(?:if)?\s*\("),
      "skip"),
     (re.compile(r"(?:^|[^.\w])time\.sleep\s*\("
                 r"|[^.\w]sleep\s*\("

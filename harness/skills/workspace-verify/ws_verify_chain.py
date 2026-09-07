@@ -189,7 +189,7 @@ def _selfcheck_fallback_rcs(pytest_rc):
         f"{k}={pytest_rc if k == 'pytest_rc' else 1}" for k in REQUIRED_RC_KEYS)
 
 
-def _run_selfcheck(timeout=600):
+def _run_selfcheck(timeout=900):
     """跑 harness/lib/selfcheck.py 取自检摘要文本（board 收据强制入收据，方向 4）。
 
     rc 全 0 与否由 ws_report 扫描 *_rc 键判定——本函数只负责把真实输出
@@ -197,6 +197,9 @@ def _run_selfcheck(timeout=600):
     （TimeoutExpired）或启动失败（OSError）时返回带 error 标注的文本交
     ws_report 的 *_rc 扫描判红，不沿编排栈上抛破坏链的自描述 JSON 输出
     与退出码语义。
+    timeout 与 selfcheck 内部 pytest 上限对齐（_PYTEST_TIMEOUT_S=900，
+    wsv2-03）：此前链级 600s 先于内部 900s 到点，慢环境（drvfs 全量自检
+    合法耗时 600~900s）会被链误杀产出 rc=124 兜底、成因误判为自检异常。
     """
     try:
         proc = subprocess.run(
@@ -342,22 +345,22 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
         "unit_test_file": str(_CROSS_DEVICE_LOG / f"unit-tests-{suffix}.json"),
         "acc_file": str(_CROSS_DEVICE_LOG / f"acceptance-{suffix}.json"),
     }
-    if batch_file and batch_id:
-        # 链式耗时接线（修 elapsed_s=0/timings 空心）：打点文件缺失即补建
-        # （独立拉起场景），并显式下传 --timings-file；CDP_BATCH_ID 注入使
-        # 子脚本自发 mark 定位本批（current-batch.json 指针缺失/陈旧时
-        # mark 会落错批或静默失败）
-        tpath = _ensure_timings_started(batch_id)
-        chain_args["timings_file"] = str(tpath) if tpath else None
-        os.environ["CDP_BATCH_ID"] = batch_id
-
-    # 锁外预跑 selfcheck（B3）：与锁等待/前序步骤并行，report 步收割
     selfcheck_thread = selfcheck_result = None
-    if batch_file:
-        selfcheck_thread, selfcheck_result = _start_selfcheck_preflight()
-
     try:
-        # 锁获取在 with 进入点发生（生成器上下文），LockHeld 统一走 rc 3 处理
+        # wsv2-05：env 注入/批次打点/自检预跑全置于 try 内——此前 CDP_RUN_ID
+        # 在 try 前写入，_ensure_timings_started（IO/import）或预跑线程启动
+        # 抛异常时 finally 不执行、env 残留，同进程后续轮次 run_id 串扰
+        if batch_file and batch_id:
+            # 链式耗时接线（修 elapsed_s=0/timings 空心）：打点文件缺失即补建
+            # （独立拉起场景），并显式下传 --timings-file；CDP_BATCH_ID 注入使
+            # 子脚本自发 mark 定位本批（current-batch.json 指针缺失/陈旧时
+            # mark 会落错批或静默失败）
+            tpath = _ensure_timings_started(batch_id)
+            chain_args["timings_file"] = str(tpath) if tpath else None
+            os.environ["CDP_BATCH_ID"] = batch_id
+        if batch_file:
+            # 锁外预跑 selfcheck（B3）：与锁等待/前序步骤并行，report 步收割
+            selfcheck_thread, selfcheck_result = _start_selfcheck_preflight()
         with (ws_lock.verify_locks() if use_locks else nullcontext()):
             return _run_chain_locked(run_id, batch_id, product, out,
                                      result_file, batch_file, build,

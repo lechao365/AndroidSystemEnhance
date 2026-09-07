@@ -230,12 +230,15 @@ def _clip_body(body, code):
     return body[-400:] if code != 0 else body[:200]
 
 
-def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
+def execute_tag(tag, adb_exec, adb_logcat, host_env=None, endpoint=None):
     """adb_exec(cmd)->(body, exit_code)；adb_logcat()->str。返回 (status, detail)。
 
     status: pass | fail | ai（自由文本由 AI 判定）；exit_code=-1 表示 adb 超时。
     host_env: hostcmd 分支子进程环境（方向 2 按 run_id 导出基线文件路径，
     实现轮次隔离；为 None 时沿用调用进程环境，行为不变）。
+    endpoint（wsv2-02）：非空时 logfresh 的 logcat 定向 -s <endpoint>（多
+    serial 残留防 more than one device 假红）；缺省 None 保持无 -s 旧行为
+    （单 serial / 测试直调）。
     """
     kind, payload = split_tag(tag)
     if kind == "svc":
@@ -345,9 +348,12 @@ def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
             dt = datetime.fromtimestamp(since_epoch, tz=tz)
             since_text = dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             try:
-                r = subprocess.run(ac.build_logcat_cmd(None, 5000, since=since_text),
+                r = subprocess.run(ac.build_logcat_cmd(None, 5000,
+                                                       since=since_text,
+                                                       endpoint=endpoint),
                                    capture_output=True, text=True,
-                                   encoding="utf-8", errors="replace", timeout=60)
+                                   encoding="utf-8", errors="replace",
+                                   timeout=60)
                 out = r.stdout
             except subprocess.TimeoutExpired:
                 return "fail", "logfresh: logcat 执行超时"
@@ -402,7 +408,7 @@ def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
 
 
 def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False,
-                   on_item=None, host_env=None, deadline=None):
+                   on_item=None, host_env=None, deadline=None, endpoint=None):
     """执行全部条目，返回 (overall, items)。overall ∈ pass|fail|ai。
 
     ensure_boot=True 且标签无 boot 时自动追加（兑现 workspace-verify SKILL L20：
@@ -412,6 +418,7 @@ def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False,
     host_env 透传 execute_tag（hostcmd 子进程环境，方向 2 轮次隔离基线）。
     deadline（monotonic 时刻，方向 4）：非 None 时逐项前检查墙钟，超时中断
     剩余项并落 __timeout__ 标记项（生命周期收尾顺序仍完整执行）。
+    endpoint（wsv2-02）：透传 execute_tag，logfresh 的 logcat 定向 -s。
     """
     items = []
     tags = parse_acceptance(acceptance_text)
@@ -433,7 +440,8 @@ def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False,
                                     "按生命周期同一顺序收尾）"})
             break
         start = time.monotonic()
-        status, detail = execute_tag(tag, adb_exec, adb_logcat, host_env=host_env)
+        status, detail = execute_tag(tag, adb_exec, adb_logcat,
+                                     host_env=host_env, endpoint=endpoint)
         items.append({"tag": tag, "status": status, "detail": detail,
                       "elapsed_s": round(time.monotonic() - start, 3)})
         if on_item:
@@ -611,7 +619,8 @@ def run_case_lifecycle(acceptance_text, lifecycle, adb_exec, adb_logcat,
     deadline = time.monotonic() + int(timeout_s) if timeout_s else None
     overall, items = run_acceptance(acceptance_text, adb_exec, adb_logcat,
                                     ensure_boot=ensure_boot, on_item=on_item,
-                                    host_env=host_env, deadline=deadline)
+                                    host_env=host_env, deadline=deadline,
+                                    endpoint=ep)
     meta["timed_out"] = any(i.get("tag") == "__timeout__" for i in items)
     first_error = next((f"{i['tag']}: {i['detail']}" for i in items
                         if i["status"] == "fail"), "")
@@ -905,7 +914,8 @@ def main(argv=None):
             return _logcat_cache[key]
         try:
             r = subprocess.run(ac.build_logcat_cmd(None, 5000,
-                                                   since=device_since, pid=pid),
+                                                   since=device_since,
+                                                   pid=pid, endpoint=ep),
                                capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=60)
             out = r.stdout
@@ -949,7 +959,8 @@ def main(argv=None):
     else:
         overall, items = run_acceptance(acceptance, adb_exec, adb_logcat,
                                         ensure_boot=args.ensure_boot,
-                                        on_item=mark_case, host_env=host_env)
+                                        on_item=mark_case, host_env=host_env,
+                                        endpoint=ep)
         device_dirty = False
         teardown_detail = ""
         forensics_dir = None

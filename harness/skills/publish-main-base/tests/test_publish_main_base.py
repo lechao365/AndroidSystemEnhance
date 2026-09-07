@@ -1,4 +1,5 @@
 import os
+import pytest
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,9 @@ _FULL_CASES = ",".join(br.verify_case_ids())
 
 @unittest.skipUnless(BASH and shutil.which("git"),
                      "需要 bash 与 git 解释器（Windows 环境跳过）")
+@pytest.mark.slow_ok("真 git 仓 fixture：每用例 setUp 做 copytree×2 + git init "
+                     "+ 多 commit + content_tree 子进程，真实子进程语义，"
+                     "单用例实测约 1.6s 逼近慢守卫 3s 阈值（tst-05）")
 class TestSyncModifyToMainBase(unittest.TestCase):
     """真 git 仓 fixture：tempdir + git init 造提交链 c1→c2(HEAD)。
 

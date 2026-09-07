@@ -12,7 +12,9 @@
   - 内核驱动（`drivers/staging/android/lcview/`、`lcview_ring_write`、`lcview_builder_*`、`copy_from_user/copy_to_user` 路径）。
   - 用户态 HAL/Daemon（`lechao_lcview.cpp`、`SchemaParser`、`FileWriter`、`readerLoop/workLoop` 等后台线程）。
   - 跨进程二进制协议格式定义与解析（record 头、schema 字段、JSON line）。
-- **加载时机**：编写或修改上述任何 C/C++ 代码前必须先加载本规则。本规则通过 profile `android-system-enhance` 投影到业务仓后可用。
+- **加载时机**：编写或修改上述任何 C/C++ 代码前必须先加载本规则。本仓已
+  去除 LcHarness 投影机制（harness/README.md），本规则经项目根 AGENTS.md
+  加载后直接可用，无 profile 投影。
 
 ## 2. 规则总览
 
