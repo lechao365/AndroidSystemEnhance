@@ -273,7 +273,9 @@ write_systemd_service() {
 
     # 原子写：同目录临时文件 + mv（中断不留半写态；EnvironmentFile 用 SERVER_ENV_FILE
     # 解析后的实际路径，即 ENV_OPENCODE_SERVER_ENV_FILE 或默认值）。
-    # unit 内路径值统一加双引号（systemd 支持引号值，路径含空格不断裂）
+    # 引号用法：systemd 仅对 ExecStart 类命令指令支持引号解析；EnvironmentFile /
+    # WorkingDirectory 等路径指令不支持引号，加引号会被当成路径字面值报 "path is
+    # not absolute"（2026-09-08 实测服务无法启动）。
     local tmp_file="$SYSTEMD_USER_DIR/.${SERVICE_UNIT}.tmp"
     cat > "$tmp_file" <<EOF
 [Unit]
@@ -283,8 +285,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile="$SERVER_ENV_FILE"
-WorkingDirectory="$TARGET_ROOT"
+EnvironmentFile=$SERVER_ENV_FILE
+WorkingDirectory=$TARGET_ROOT
 ExecStart="$OPENCODE_BIN" web --hostname "$SERVER_HOST" --port $PORT
 Restart=on-failure
 RestartSec=5

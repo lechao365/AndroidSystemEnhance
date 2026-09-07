@@ -32,7 +32,6 @@
 
 import argparse
 import hashlib
-import json
 import os
 import posixpath
 import re

@@ -703,7 +703,7 @@ class TestCli(unittest.TestCase):
         import contextlib
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = ws_session.main(["start", "--goal", "坏标签", "--target",
+            ws_session.main(["start", "--goal", "坏标签", "--target",
                                   "dev", "--case", "no-such"])
         sj = re.search(r"session: (.+)", buf.getvalue()).group(1)
         err = io.StringIO()
@@ -738,7 +738,7 @@ class TestCli(unittest.TestCase):
         # 诊断落位会话目录（确定性），非 --session 裸文件名所在 CWD
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = ws_session.main(["start", "--goal", "诊断落位", "--target",
+            ws_session.main(["start", "--goal", "诊断落位", "--target",
                                   "dev", "--case", "lcview-liveness"])
         sj = re.search(r"session: (.+)", buf.getvalue()).group(1)
         s = ws_session.load_session(sj)
@@ -759,7 +759,7 @@ class TestCli(unittest.TestCase):
         from cdp_receipt import Receipt, write_receipt
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = ws_session.main(["start", "--goal", "闭环", "--target", "dev",
+            ws_session.main(["start", "--goal", "闭环", "--target", "dev",
                                   "--case", "lcview-liveness"])
         sj = re.search(r"session: (.+)", buf.getvalue()).group(1)
         with redirect_stdout(io.StringIO()):

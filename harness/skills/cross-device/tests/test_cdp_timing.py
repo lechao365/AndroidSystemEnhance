@@ -65,7 +65,7 @@ class TestCdpTiming(unittest.TestCase):
     def test_start_with_batch_file(self):
         cdp = Path(self._tmp.name) / "batch.cdp"
         cdp.write_text(
-            f"-sv base:111111111111\n意图: 测试\n验收: svc:x boot\n方向: 改 1 处\n",
+            "-sv base:111111111111\n意图: 测试\n验收: svc:x boot\n方向: 改 1 处\n",
             encoding="utf-8")
         self.assertEqual(cdp_timing.main(["start", "--batch-file", str(cdp)]), 0)
         # batch_id 来自批次内容哈希（12 hex），打点文件落在工作态目录

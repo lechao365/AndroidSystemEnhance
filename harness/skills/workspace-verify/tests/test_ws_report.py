@@ -1028,7 +1028,7 @@ class TestWsReport(unittest.TestCase):
         # 方向 1：验收产物缺 run_id（产物身份缺失）→ 拒 PASS
         batch = self._write(VALID_S, ".cdp")
         body = self._write("## 现场\n")
-        acc = self._write_acc()
+        self._write_acc()
         acc_f = self._write(json.dumps({"overall": "pass", "items": []}), ".json")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):

@@ -293,7 +293,6 @@ class TestParse(unittest.TestCase):
         import os
         import tempfile
         from contextlib import redirect_stdout
-        from unittest import mock
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         old_root = os.environ.get("CDP_PROJECT_ROOT")
@@ -332,7 +331,6 @@ class TestParse(unittest.TestCase):
         import os
         import tempfile
         from contextlib import redirect_stdout
-        from unittest import mock
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         old_root = os.environ.get("CDP_PROJECT_ROOT")

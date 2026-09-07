@@ -2,7 +2,6 @@
 # O_EXCL 回退路径）。关键场景：加解锁往返、并发占用即拒（LockHeld）、
 # verify_locks 成对加解与半持锁回收、无 fcntl 环境退化行为。
 
-import os
 import sys
 import tempfile
 import unittest

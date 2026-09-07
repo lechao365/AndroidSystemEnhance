@@ -296,7 +296,6 @@ class TestScanKernelModified(unittest.TestCase):
         code = self._make_code_with_diff()
         repo = _make_git_repo()
         out = str(Path(tempfile.mkdtemp()) / "out.tsv")
-        real = sw._git_run
         with mock.patch.object(sw, "_patch_root", return_value=code), \
              mock.patch.object(sw, "_kernel_ws", return_value=str(repo)), \
              mock.patch.object(sw, "_find_upstream_base", return_value="HEAD"):

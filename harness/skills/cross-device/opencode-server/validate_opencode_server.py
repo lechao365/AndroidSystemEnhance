@@ -173,8 +173,8 @@ def validate_script_runs() -> list[str]:
         if r.returncode != 0:
             errors.append(f"--help 退出码 {r.returncode} != 0: "
                           f"{(r.stderr or r.stdout).strip()[:200]}")
-        elif "usage" not in r.stdout.lower():
-            errors.append("--help 输出不含 usage（用法说明缺失）")
+        elif "usage" not in r.stdout.lower() and "用法" not in r.stdout:
+            errors.append("--help 输出不含 usage/用法（用法说明缺失）")
     except (OSError, subprocess.TimeoutExpired) as e:
         errors.append(f"--help 执行失败: {e}")
     return errors

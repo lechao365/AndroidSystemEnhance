@@ -25,7 +25,8 @@ class TestCompare(unittest.TestCase):
         k = self._write(text)
         a = self._write(text)
         rc, msg = compare(k, a)
-        k.unlink(); a.unlink()
+        k.unlink()
+        a.unlink()
         self.assertEqual(rc, 0)
         self.assertIn("一致", msg)
 
@@ -33,7 +34,8 @@ class TestCompare(unittest.TestCase):
         k = self._write("struct foo {\n    int a;\n};\n")
         a = self._write("struct foo {\n    long a;\n};\n")
         rc, msg = compare(k, a)
-        k.unlink(); a.unlink()
+        k.unlink()
+        a.unlink()
         self.assertEqual(rc, 1)
         self.assertIn("签名漂移", msg)
 
@@ -50,7 +52,8 @@ class TestCompare(unittest.TestCase):
         k = self._write("/* only comment */\n")
         a = self._write("#define X 1\n")
         rc, msg = compare(k, a)
-        k.unlink(); a.unlink()
+        k.unlink()
+        a.unlink()
         self.assertEqual(rc, 1)
         self.assertIn("双空", msg)
 
@@ -68,7 +71,8 @@ class TestCompare(unittest.TestCase):
         try:
             rc, msg = compare(k, a)
         finally:
-            k.unlink(); a.unlink()
+            k.unlink()
+            a.unlink()
         self.assertEqual(rc, 1)
         self.assertIn("嵌套", msg)
         self.assertIn("outer", msg)

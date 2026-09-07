@@ -16,7 +16,6 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
-from unittest import mock
 
 import paths as real_paths  # 真实模块（别名注册断言用）
 

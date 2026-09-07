@@ -17,11 +17,9 @@
 
 import argparse
 import hashlib
-import json
 import os
 import posixpath
 import re
-import shlex
 import subprocess
 import sys
 import time

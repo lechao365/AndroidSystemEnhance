@@ -25,7 +25,6 @@ import os
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
 
 # 两侧统一的排除集合（前缀匹配：目录带 / 结尾，文件全名）
 EXCLUDE_PATHS = (

@@ -306,14 +306,20 @@ def main(argv=None):
     while i < len(argv):
         a = argv[i]
         if a == "--role" and i + 1 < len(argv):
-            role = argv[i + 1]; i += 2; continue
+            role = argv[i + 1]
+            i += 2
+            continue
         if a == "--expect-base" and i + 1 < len(argv):
-            expect = argv[i + 1]; i += 2; continue
+            expect = argv[i + 1]
+            i += 2
+            continue
         if a.startswith("--"):
             print(f"error: 未知参数 {a}")
             return EXIT_ARGS
         if path is None:
-            path = a; i += 1; continue
+            path = a
+            i += 1
+            continue
         print(f"error: 多余参数 {a}")
         return EXIT_ARGS
     if role not in ("emit", "apply") or path is None:

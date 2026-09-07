@@ -25,7 +25,6 @@
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
@@ -144,7 +143,7 @@ def _collect_pstore(ep, out_dir, budget, items):
 def _list_new_tombstones(ep, since_epoch):
     """列 /data/tombstones/ 下 mtime 晚于 since_epoch 的新增文件（只取本轮新增）。"""
     out, rc = adb_run(
-        ep, ["shell", f"ls /data/tombstones 2>/dev/null"], timeout=30)
+        ep, ["shell", "ls /data/tombstones 2>/dev/null"], timeout=30)
     if rc != 0:
         return []
     names = [ln.strip() for ln in out.splitlines() if ln.strip()]

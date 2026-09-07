@@ -1037,7 +1037,7 @@ class TestAcceptanceInternalSegments(unittest.TestCase):
             marks.append((name, batch_id, zero))
 
         with tempfile.TemporaryDirectory() as d:
-            batch = self._batch(d)
+            self._batch(d)
             p = Path(d) / "b2.cdp"
             p.write_text("-sv base:111111111111\n意图: 分段\n"
                          "验收: boot\n方向: 测试\n", encoding="utf-8")
@@ -1592,7 +1592,8 @@ class TestRunCaseLifecycle(unittest.TestCase):
     def test_fixed_order_fail_then_forensics_then_teardown(self):
         # 方向 2 固定顺序：first_error → ws_forensics 取证 → teardown → 返回
         events = []
-        fake_exec = lambda cmd: ("stopped", 1)
+        def fake_exec(cmd):
+            return ("stopped", 1)
         with mock.patch.object(wa, "_run_host_cmd", return_value=("1", 0)), \
                 mock.patch.object(wa, "_run_forensics",
                                side_effect=lambda *a, **k:
