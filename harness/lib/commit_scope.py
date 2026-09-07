@@ -43,17 +43,30 @@ def porcelain_to_name_status(line):
     return f"{st}\t{path}"
 
 
+def _is_excluded(path, exclude):
+    """豁免前缀判定（lib-10 加目录边界）：path 等于前缀或位于前缀目录下。
+
+    纯 startswith 会把 `data/verify-results-old/...` 误判进
+    `data/verify-results` 豁免（相邻目录静默漏出提交面比对），故须以
+    `p/` 目录边界精确匹配。"""
+    for p in exclude:
+        p = p.rstrip("/")
+        if path == p or path.startswith(p + "/"):
+            return True
+    return False
+
+
 def classify_status(line, exclude=EXCLUDE_PREFIX):
     """name-status --no-renames 单行 → (类别, 路径)；类别 ∈ add/mod/del。
 
     A→add，D→del，其余（M/T 及未知状态）归 mod（保守并入提交面比对）；
-    命中 exclude 前缀的路径返 None（自引用豁免）。
+    命中 exclude 前缀的路径返 None（自引用豁免，带目录边界）。
     """
     parts = line.split("\t", 1)
     if len(parts) != 2 or not parts[1]:
         return None
     status, path = parts[0].strip(), parts[1].strip()
-    if not path or any(path == p or path.startswith(p) for p in exclude):
+    if not path or _is_excluded(path, exclude):
         return None
     if status.startswith("A"):
         return ("add", path)

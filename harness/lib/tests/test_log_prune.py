@@ -4,12 +4,15 @@ monkeypatch 模块级 REPO_ROOT 指向临时目录构造文件集，验证：
 mtime 过龄清理 / 数量上限删最旧 / dry-run 不真删 / --apply 真删 /
 glob 误配静默零删（不报错）。
 """
+import contextlib
 import importlib.util
+import io
 import os
 import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -83,6 +86,39 @@ class TestLogPrune(unittest.TestCase):
         log_prune.run(days=0, targets=["harness/log/git-works-push/*.log"],
                       apply=True)
         self.assertFalse(p.exists())
+
+    def test_stat_race_skips_missing_file(self):
+        # lib-12：glob 与 stat 之间文件被并发删除（TOCTOU）→ 跳过不崩、
+        # 零删（此前裸 f.stat() FileNotFoundError 崩溃）。Path 实例属性
+        # 只读，patch 模块级 REPO_ROOT 为替身仓根（glob 命中已消失文件）
+        ghost = self.root / "harness" / "log" / "git-works-push" / "ghost.log"
+
+        class _FakeRoot:
+            def glob(self, pattern):
+                return [ghost]
+
+        with mock.patch.object(log_prune, "REPO_ROOT", _FakeRoot()):
+            plan = log_prune.run(days=30,
+                                 targets=["harness/log/git-works-push/*.log"],
+                                 apply=True)
+        self.assertEqual(plan["total_removed"], 0)
+        self.assertEqual(plan["patterns"][0]["scanned"], 0)
+        self.assertEqual(plan["errors"], [])
+
+    def test_target_escaping_repo_root_rejected(self):
+        # lib-12 红灯：--target 经 ../ 越出仓根 → 拒绝 rc=2（docstring
+        # "误删面受控"约束，防误删仓外文件）
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = log_prune.main(["--target", "../../outside/*.log"])
+        self.assertEqual(rc, 2)
+        self.assertIn("越出仓根", err.getvalue())
+
+    def test_target_inside_root_accepted(self):
+        # 仓内正常 target 不误伤（dry-run 零删 rc=0）
+        self._touch("harness/log/git-works-push/in.log", time.time())
+        rc = log_prune.main(["--target", "harness/log/git-works-push/*.log"])
+        self.assertEqual(rc, 0)
 
 
 class TestRepoRootAnchor(unittest.TestCase):

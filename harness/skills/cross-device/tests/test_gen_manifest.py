@@ -110,6 +110,35 @@ class TestGenManifest(unittest.TestCase):
         self.assertIn("patch: kernel/new/x/lciod_read_logic.c",
                       m.read_text(encoding="utf-8"))
 
+    def test_regenerate_unregistered_warns_not_errors(self):
+        # CDP-12：重生成路径发现未登记文件降为 log_warn——log_error 仅留给
+        # check_only 拒绝路径，消除"报 error 却登记成功"的日志与结果矛盾
+        root = self._make_patch_root({"kernel/new/x/lciod_read_logic.c": "//c"})
+        m = root / "manifest.yaml"
+        m.write_text("# old\n", encoding="utf-8")
+        with mock.patch.object(gm, "log_error") as me, \
+                mock.patch.object(gm, "log_warn") as mw:
+            ok = gm.generate_manifest(root, check_only=False,
+                                      kernel_deletions=[], aosp_deletions=[])
+        self.assertTrue(ok)
+        warned = " ".join(str(c.args[0]) for c in mw.call_args_list
+                          if c.args)
+        self.assertIn("lciod_read_logic.c", warned)
+        me.assert_not_called()
+
+    def test_check_only_unregistered_errors_not_warns(self):
+        # CDP-12：check_only 拒绝路径保留 log_error（判红门禁语义不变）
+        root = self._make_patch_root({"kernel/new/x/lciod_read_logic.c": "//c"})
+        m = root / "manifest.yaml"
+        m.write_text("# old\n", encoding="utf-8")
+        with mock.patch.object(gm, "log_error") as me, \
+                mock.patch.object(gm, "log_warn") as mw:
+            ok = gm.generate_manifest(root, check_only=True,
+                                      kernel_deletions=[], aosp_deletions=[])
+        self.assertFalse(ok)
+        self.assertTrue(me.called)
+        mw.assert_not_called()
+
     def test_fully_registered_no_red(self):
         # 全覆盖（无未登记）→ check_only 不判红返 True
         root = self._make_patch_root({"aosp/new/vendor/x/foo.h": "//x"})

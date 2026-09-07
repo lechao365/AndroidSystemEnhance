@@ -119,10 +119,25 @@ def precheck(root=None, do_pull=True):
                 return False, "git pull 失败", r.stderr.strip()[:200]
     except subprocess.TimeoutExpired:
         return False, "git pull 超时", ""
-    if _git(root, "status", "--porcelain").stdout.strip():
+    # git 门禁 fail-closed（P1）：git 命令失败（非零退出）不得按空 stdout
+    # 放行（此前 status/rev-parse 失败被当"干净/相等"误判通过）——显式检查
+    # returncode，非零即拒，detail 带 git stderr 供排障
+    r = _git(root, "status", "--porcelain")
+    if r.returncode != 0:
+        return False, "git status 失败（工作树状态不可判，拒绝产批）", \
+            (r.stderr or "").strip()[:200]
+    if r.stdout.strip():
         return False, "工作树不干净", ""
-    head = _git(root, "rev-parse", "HEAD").stdout.strip()
-    origin = _git(root, "rev-parse", "origin/dev").stdout.strip()
+    head_r = _git(root, "rev-parse", "HEAD")
+    if head_r.returncode != 0:
+        return False, "git rev-parse HEAD 失败（HEAD 不可判，拒绝产批）", \
+            (head_r.stderr or "").strip()[:200]
+    origin_r = _git(root, "rev-parse", "origin/dev")
+    if origin_r.returncode != 0:
+        return False, "git rev-parse origin/dev 失败（origin/dev 不可判，拒绝产批）", \
+            (origin_r.stderr or "").strip()[:200]
+    head = head_r.stdout.strip()
+    origin = origin_r.stdout.strip()
     if head != origin:
         return False, "本地 HEAD != origin/dev", ""
     # 上批已推送判定（sha 统一 short=12 比较，防 40 位 vs 12 位恒不等）

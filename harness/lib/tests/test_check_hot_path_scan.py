@@ -64,6 +64,33 @@ class TestHotPathScan(unittest.TestCase):
         out = chps.scan(self.repo)
         self.assertTrue(any("缺失" in o for o in out))
 
+    def test_manifest_covers_import_dependencies(self):
+        # lib-14：清单须覆盖受守卫工具的 import 依赖文件（gen_manifest 直接
+        # import harness_lib/paths；selfcheck 打点/issue 链经 sys.path 注入
+        # import cdp_timing/cdp_parse/cdp_issue/cdp_paths 与 role_guard），
+        # 漏登记即依赖文件的 rglob/os.walk 漂移不在守卫覆盖面
+        required = {
+            "harness/lib/harness_lib.py",
+            "harness/lib/paths.py",
+            "harness/lib/cdp_paths.py",
+            "harness/lib/role_guard.py",
+            "harness/skills/cross-device/lib/python/cdp_timing.py",
+            "harness/skills/cross-device/lib/python/cdp_parse.py",
+            "harness/skills/cross-device/lib/python/cdp_paths.py",
+            "harness/skills/cross-device/lib/python/cdp_issue.py",
+        }
+        self.assertTrue(required.issubset(set(chps._HOT_PATHS)),
+                        f"清单缺依赖文件: {sorted(required - set(chps._HOT_PATHS))}")
+
+    def test_dependency_file_rglob_reported(self):
+        # lib-14 红灯：登记的依赖文件内出现裸 rglob → 判红（此前依赖文件
+        # 不在清单，漂移静默无感）
+        self._put("harness/lib/harness_lib.py",
+                  "def f():\n    for x in root.rglob('*'):\n        pass\n")
+        out = chps.scan(self.repo)
+        self.assertTrue(any("harness_lib.py" in o and "rglob" in o
+                            for o in out))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,7 @@ import contextlib
 import io
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -72,16 +73,29 @@ def _patched_parallel():
         yield
 
 
+@contextlib.contextmanager
+def _patched_cli_argv():
+    """main() 无参直调走 CLI 语义（lib-01：argv=None → sys.argv[1:]）；
+    pytest 进程内 sys.argv 是 pytest 参数会被 argparse 误解析，固定为
+    名义 argv（等价 CLI 直跑无参形态）。"""
+    with mock.patch.object(sys, "argv", ["selfcheck.py"]):
+        yield
+
+
 class TestSelfcheck(unittest.TestCase):
     def setUp(self):
         # 屏蔽自发 apply_selfcheck 打点（打点不影响 selfcheck 结果断言，
         # 其行为由 TestMarkSelfcheck 单独覆盖）与治理工具真跑（方向 1 后
         # main 经 _spawn_tools/_spawn_cmd 并行拉起 refs/cfg/ioctl/manifest
-        # 进程，桩注入结果避免真跑 ~27s/轮）
+        # 进程，桩注入结果避免真跑 ~27s/轮）；argv patch 适配 lib-01 CLI
+        # 语义（进程内直调 main() 不吃 pytest 的 sys.argv）
         self._mark = mock.patch.object(selfcheck, "_mark_selfcheck")
         self._ctx = _patched_parallel()
+        self._argv = mock.patch.object(sys, "argv", ["selfcheck.py"])
         self._mark.start()
         self._ctx.__enter__()
+        self._argv.start()
+        self.addCleanup(self._argv.stop)
 
     def tearDown(self):
         self._mark.stop()
@@ -363,9 +377,9 @@ class TestMarkSelfcheck(unittest.TestCase):
     def test_main_marks_after_selfcheck(self):
         # main() 完成自检后调用 _mark_selfcheck（打点入 cdp_timing mark 链）。
         # 本类无 setUp 桩，须显式屏蔽方向 1 并行段（_spawn_tools/_spawn_cmd
-        # 真拉起治理进程会拖慢用例触发 slow_guard 判红）
+        # 真拉起治理进程会拖慢用例触发 slow_guard 判红）与 CLI argv（lib-01）
         with mock.patch.object(selfcheck, "_mark_selfcheck") as m, \
-                _patched_parallel():
+                _patched_parallel(), _patched_cli_argv():
             fake = _fake_run([
                 _FakeProc(0, "531 passed in 27.9s\n"),
             ])
@@ -415,11 +429,14 @@ class TestCheckPythonEnv(unittest.TestCase):
     def setUp(self):
         # 与 TestSelfcheck 同款桩：屏蔽打点与治理工具真跑（方向 1 后 main
         # 并行拉起 refs/cfg/ioctl/manifest 进程，会拖慢用例；本组用例只
-        # 关注 pyenv 段，治理结果以桩注入）
+        # 关注 pyenv 段，治理结果以桩注入）；argv patch 适配 lib-01
         self._mark = mock.patch.object(selfcheck, "_mark_selfcheck")
         self._ctx = _patched_parallel()
+        self._argv = mock.patch.object(sys, "argv", ["selfcheck.py"])
         self._mark.start()
         self._ctx.__enter__()
+        self._argv.start()
+        self.addCleanup(self._argv.stop)
 
     def tearDown(self):
         self._mark.stop()
@@ -638,16 +655,17 @@ class TestFlakeRerun(unittest.TestCase):
     def test_main_flaky_passes_round_writes_flake(self):
         # main 集成：pytest 全量红但单跑全绿（KIR-002 抖动）→ 输出
         # pytest_rc=0（放行本轮）+ flake 标注（用例/轮次/首现批次/复现命令）
-        # + skipped 可见 + 无 failed 非零计数（ws_report 文本防线不误拒）
+        # + skipped 可见（summary 定位到计数行才拼，lib-06）+ 无 failed
+        # 非零计数（ws_report 文本防线不误拒）
         fake = _fake_run([
-            _FakeProc(1, "1 failed, 1153 passed in 27.0s\n"),
+            _FakeProc(1, "1 failed, 1153 passed, 3 skipped in 27.0s\n"),
         ])
         flake = [("harness/lib/tests/test_x.py::TestX::test_y", 2, "abc123")]
         buf = io.StringIO()
         with mock.patch.object(selfcheck, "_rerun_failures",
                                return_value=(flake, [])), \
                 mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
-                _patched_parallel():
+                _patched_parallel(), _patched_cli_argv():
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -656,9 +674,185 @@ class TestFlakeRerun(unittest.TestCase):
         self.assertIn("round=2", out)
         self.assertIn("first=abc123", out)
         self.assertIn('cmd="python3 -m pytest harness/lib/tests/test_x.py::TestX::test_y -q"', out)
-        self.assertIn("skipped=", out)
+        self.assertIn("skipped=3", out)
         # ws_report 文本防线：不得残留 "1 failed" 等 failed 非零计数
         self.assertNotRegex(out, r"\b[1-9]\d*\s*failed\b")
+
+    def test_main_flaky_no_skipped_line_no_fake_key(self):
+        # lib-06：flake 放行分支 summary 缺 skipped 计数行时不补 skipped=0
+        # （伪造计数违背本文件 docstring"交 ws_report 拒写"原则——ws_report
+        # 对缺 skipped 拒写收据，fail-closed）
+        fake = _fake_run([
+            _FakeProc(1, "1 failed, 1153 passed in 27.0s\n"),  # 无 skipped
+        ])
+        flake = [("harness/lib/tests/test_x.py::TestX::test_y", 2, "abc123")]
+        buf = io.StringIO()
+        with mock.patch.object(selfcheck, "_rerun_failures",
+                               return_value=(flake, [])), \
+                mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
+                _patched_parallel(), _patched_cli_argv():
+            with redirect_stdout(buf):
+                selfcheck.main()
+        out = buf.getvalue()
+        self.assertIn("pytest_rc=0", out)
+        self.assertIn("flake:", out)
+        self.assertNotIn("skipped=", out)
+
+
+class TestCliArgv(unittest.TestCase):
+    """lib-01：CLI 直跑（sys.exit(main())，argv=None）时 argparse 仍须执行。"""
+
+    def test_main_no_arg_uses_sys_argv(self):
+        # argv=None → 回落 sys.argv[1:]：--mode quick 被真实解析，pytest
+        # 按 quick 推导目标跑（修复前 `if argv:` 恒 False，quick 被静默忽略
+        # 恒跑全量，SKILL.md 文档化用法失效）
+        seen = []
+
+        def _run(cmd, **kw):
+            seen.append(cmd)
+            return _FakeProc(0, "12 passed in 1.0s\n")
+
+        fake_argv = ["selfcheck.py", "--mode", "quick"]
+        with mock.patch.object(sys, "argv", fake_argv), \
+                mock.patch.object(selfcheck, "_quick_test_targets",
+                                  return_value=["harness/lib/tests/test_selfcheck.py"]), \
+                mock.patch.object(selfcheck.subprocess, "run", side_effect=_run), \
+                _patched_parallel(), \
+                mock.patch.object(selfcheck, "_mark_selfcheck"), \
+                mock.patch.object(selfcheck, "_ensure_edit_close_mark"):
+            with redirect_stdout(io.StringIO()):
+                selfcheck.main()
+        self.assertIn("harness/lib/tests/test_selfcheck.py", seen[0])
+
+    def test_cli_help_exits_zero_without_full_run(self):
+        # CLI 直跑形态轻量验证：python3 selfcheck.py --help 须经 argparse
+        # 输出 usage 并 exit 0（修复前 argv=None 不解析 → --help 被忽略、
+        # 直接真跑全量 pytest）；--help 在 main 早期 SystemExit，不触发全量
+        script = Path(selfcheck.__file__).resolve()
+        r = subprocess.run([sys.executable, str(script), "--help"],
+                           capture_output=True, text=True,
+                           encoding="utf-8", timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--mode", r.stdout)
+        self.assertIn("quick", r.stdout)
+
+
+class TestFlakeIssueId(unittest.TestCase):
+    """lib-02：flake issue_id 稳定摘要（sha256，跨进程一致）。"""
+
+    def test_issue_id_format_and_prefix(self):
+        # 格式 KI-FLAKE-{first_batch}-{6位hex}，摘要为 sha256 稳定产物
+        aid = selfcheck._flake_issue_id(
+            "harness/lib/tests/test_x.py::TestX::test_y", "abc123")
+        self.assertRegex(aid, r"^KI-FLAKE-abc123-[0-9a-f]{6}$")
+
+    def test_issue_id_stable_same_process(self):
+        a = selfcheck._flake_issue_id("harness/lib/tests/test_x.py::T::t", "b1")
+        b = selfcheck._flake_issue_id("harness/lib/tests/test_x.py::T::t", "b1")
+        self.assertEqual(a, b)
+
+    def test_issue_id_stable_across_processes(self):
+        # 两个独立子进程（PYTHONHASHSEED 随机化互不相同）取同一 nodeid
+        # 摘要须一致（此前 abs(hash(nodeid)) 跨进程不稳定致 KIR-002 归链失效）
+        code = (
+            "import sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import selfcheck\n"
+            "print(selfcheck._flake_issue_id("
+            "'harness/lib/tests/test_x.py::T::t', 'b1'))\n"
+        )
+        lib_dir = str(Path(selfcheck.__file__).resolve().parent)
+        outs = []
+        for _ in range(2):
+            r = subprocess.run([sys.executable, "-c", code, lib_dir],
+                               capture_output=True, text=True,
+                               encoding="utf-8", timeout=30)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            outs.append(r.stdout.strip())
+        self.assertTrue(outs[0], "摘要输出为空")
+        self.assertEqual(outs[0], outs[1])
+
+
+class TestFlakeHistory(unittest.TestCase):
+    """lib-03：_flake_history 行级精确匹配（参数化用例前缀不误命中）。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        issues = self.root / "data" / "known-issues"
+        issues.mkdir(parents=True)
+        self.nodeid = "harness/lib/tests/test_x.py::TestX::test_bar[param0]"
+        (issues / "ki-a.md").write_text(
+            f"- nodeid: {self.nodeid}\n"
+            "- kind: flake\n"
+            "- round: 3\n"
+            "- first_seen_batch: b9\n",
+            encoding="utf-8")
+
+    def test_parametrized_prefix_not_matched(self):
+        # 查询 test_bar 不得命中条目 test_bar[param0]（此前子串匹配误命中
+        # round=3 致轮次虚高）
+        with mock.patch.object(selfcheck, "ROOT", self.root):
+            self.assertEqual(selfcheck._flake_history(
+                "harness/lib/tests/test_x.py::TestX::test_bar"), (0, ""))
+
+    def test_exact_nodeid_matches_round_and_batch(self):
+        with mock.patch.object(selfcheck, "ROOT", self.root):
+            self.assertEqual(selfcheck._flake_history(self.nodeid),
+                             (3, "b9"))
+
+
+class TestRerunTwoPass(unittest.TestCase):
+    """lib-04：_rerun_failures 两遍扫描——存在真回归时不登记任何条目。"""
+
+    def test_second_regression_blocks_registration(self):
+        # 两个 flake 候选：第一个单跑绿、第二个真回归（单跑红）→ 整体阻塞，
+        # 第一个不得落盘（此前循环内先登记先放行，后续红时已登记条目成幽灵）
+        py_out = ("FAILED harness/lib/tests/test_x.py::TestX::test_a - boom\n"
+                  "FAILED harness/lib/tests/test_y.py::TestY::test_b - boom\n")
+        procs = [_FakeProc(0, "1 passed in 0.1s\n"),
+                 _FakeProc(1, "1 failed in 0.1s\n")]
+        with mock.patch.object(selfcheck, "_git_changed_files",
+                               return_value=set()), \
+                mock.patch.object(selfcheck, "_register_flake_issue") as reg, \
+                mock.patch.object(selfcheck.subprocess, "run",
+                                  side_effect=procs):
+            notes, ki001 = selfcheck._rerun_failures(py_out)
+        self.assertEqual((notes, ki001), ([], []))
+        reg.assert_not_called()
+
+    def test_all_green_registers_both(self):
+        # 全部单跑绿 → 两遍扫描后统一登记（顺序与原语义一致）
+        py_out = ("FAILED harness/lib/tests/test_x.py::TestX::test_a - boom\n"
+                  "FAILED harness/lib/tests/test_y.py::TestY::test_b - boom\n")
+        procs = [_FakeProc(0, "1 passed in 0.1s\n"),
+                 _FakeProc(0, "1 passed in 0.1s\n")]
+        notes_fake = [("nid_a", 1, "b"), ("nid_b", 1, "b")]
+        with mock.patch.object(selfcheck, "_git_changed_files",
+                               return_value=set()), \
+                mock.patch.object(selfcheck, "_register_flake_issue",
+                                  side_effect=notes_fake) as reg, \
+                mock.patch.object(selfcheck.subprocess, "run",
+                                  side_effect=procs):
+            notes, ki001 = selfcheck._rerun_failures(py_out)
+        self.assertEqual(len(notes), 2)
+        self.assertEqual(ki001, [])
+        self.assertEqual(reg.call_count, 2)
+
+
+class TestGitChangedFilesTimeout(unittest.TestCase):
+    """lib-11：_git_changed_files subprocess 带 timeout，超时空集回落。"""
+
+    def test_timeout_returns_empty_set(self):
+        # git diff 挂死超时 → warn + 空集（不抛异常拖垮自检链）
+        def _timeout(cmd, **kw):
+            raise selfcheck.subprocess.TimeoutExpired(cmd, 30)
+
+        with mock.patch.object(selfcheck.subprocess, "run",
+                               side_effect=_timeout):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(selfcheck._git_changed_files(), set())
 
 
 class TestQuickMode(unittest.TestCase):

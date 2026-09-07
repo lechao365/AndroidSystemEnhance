@@ -151,7 +151,7 @@ def _code_changes_since_main():
     fail-closed 拒绝豁免（宁可误拒不可放行）。
     """
     r = subprocess.run(
-        ["git", "log", "--format=%h %s", "origin/main...HEAD", "--", "code/"],
+        ["git", "log", "--format=%h %s", "origin/main..HEAD", "--", "code/"],
         capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
         return None
@@ -218,7 +218,17 @@ def check_issues_gate(task=None, issues_dir=None):
     返回 rc：0 通过 / 1 畸形或未解决阻塞 / 3 task 不在活跃集合。
     """
     d = Path(issues_dir) if issues_dir else _real_known_issues_dir()
+    # 单次遍历缓存 (path, Issue) 复用（pub-08）：task 推断与阻塞判定不再逐文件
+    # 重复 read_issue（drvfs IO 放大收敛为一次读取）；read 失败记 None——不可读
+    # 文件仍由下方 validate_issue 判红拒绝，后续遍历跳过 None（行为与原实现一致）
+    issues = []
     for p in issue_files(d):
+        try:
+            i = read_issue(p)
+        except OSError:
+            i = None
+        issues.append((p, i))
+    for p, _i in issues:
         errs = validate_issue(p)
         if errs:
             for e in errs:
@@ -227,8 +237,8 @@ def check_issues_gate(task=None, issues_dir=None):
                   file=sys.stderr)
             return 1
     # task 推断：缺省从 status 非 fixed 条目的 task 集合推断（自动，无需人工申报）
-    active_tasks = {i.task for p in issue_files(d)
-                    if (i := read_issue(p)).status != "fixed" and i.task}
+    active_tasks = {i.task for _p, i in issues
+                    if i is not None and i.status != "fixed" and i.task}
     if task:
         # 白名单：显式传 --task 不在活跃集合内即 exit 3（防拼错静默通过；
         # 空集合时放行——无活跃任务则无冲突对象）
@@ -248,9 +258,8 @@ def check_issues_gate(task=None, issues_dir=None):
             task = "empty-registry"
     # 再判目标任务未解决阻塞：origin=introduced 或 blocking 且 status!=fixed 即拒
     bad = []
-    for p in issue_files(d):
-        i = read_issue(p)
-        if i.task != task:
+    for p, i in issues:
+        if i is None or i.task != task:
             continue
         if (i.origin == "introduced" or i.blocking) and i.status != "fixed":
             bad.append(f"{p.name}: origin={i.origin} blocking={i.blocking} "
@@ -433,6 +442,22 @@ def main(argv=None):
             print(f"error: 收据 result 非法（{r.result!r}），拒绝登记",
                   file=sys.stderr)
             return 1
+        # 登记门禁（AGENTS.md 原文：「登记门禁：收据 result 属 pass 或 skip 且
+        # HEAD^ 等于 verified_commit」）：result=fail 收据（含 build/push_board=
+        # PASS 但 cases 失败者）不具备基线证据性，显式拒绝——堵绕过链（fail 收据
+        # 经 skip 收据成为 LATEST 后由 prepare 取作 evidence 锚点放行登记）
+        if r.result == "fail":
+            print("error: 收据 result=fail，拒绝登记（登记门禁：收据 result 属"
+                  " pass 或 skip，fail 收据不得作为基线证据，见 AGENTS.md）",
+                  file=sys.stderr)
+            return 1
+        # board 模式收据须 result=pass：board 实测批的 skip 不具备上板证据性
+        # （skip 收据仅可用于 harness 自检批，不得充当发布验收证据）
+        if r.verify_mode == "board" and r.result != "pass":
+            print(f"error: 收据 verify_mode=board 但 result={r.result!r} 非 pass，"
+                  "拒绝登记（board 实测收据须 result=pass 才具备基线证据性）",
+                  file=sys.stderr)
+            return 1
         # 缺必需字段：batch_id/verified_commit/build/push_board 必填
         missing = [k for k, v in (("batch_id", r.batch_id),
                                   ("verified_commit", r.verified_commit),
@@ -443,10 +468,14 @@ def main(argv=None):
             print(f"error: 收据缺必需字段 {', '.join(missing)}，拒绝登记",
                   file=sys.stderr)
             return 1
-        # 拒 FAIL：build/board_verify 为 FAIL 不可登记为基线（证据须 pass/skip）
-        if build_result == "FAIL" or board_verify == "FAIL":
-            print("error: 收据 build/board_verify 为 FAIL，拒绝登记"
-                  "（基线证据须 pass/skip）", file=sys.stderr)
+        # 拒非 PASS/SKIP：build/board_verify 非 PASS/SKIP 不可登记为基线
+        # （AGENTS.md：UNKNOWN 视同 FAIL 须人工复核；空值缺省 FAIL 逻辑保留，
+        # 空值不是合法 skip 证据）
+        if build_result not in ("PASS", "SKIP") \
+                or board_verify not in ("PASS", "SKIP"):
+            print(f"error: 收据 build/board_verify 非 PASS/SKIP"
+                  f"（build={build_result} board_verify={board_verify}），"
+                  "拒绝登记（UNKNOWN 视同 FAIL，须人工复核）", file=sys.stderr)
             return 1
         # ki_gate：known-issues 门禁结论（拒批已在脚本层 exit，缺参视为 not-run）
         ki_gate = (args.ki_gate or "").strip() or "not-run"
@@ -480,6 +509,13 @@ def main(argv=None):
                 else:
                     print(f"candidate 复用: {b['baseline_id']}（source_commit={args.source_commit}）")
                 return 0
+        # 显式 --baseline-id 查重（pub-06）：同 id 记录已存在（任意状态）即拒，
+        # 防显式指定绕过 next_id 产生重复 id 污染登记
+        if args.baseline_id and any(b.get("baseline_id") == args.baseline_id
+                                    for b in baselines):
+            print(f"error: baseline_id {args.baseline_id} 已存在，拒绝重复登记",
+                  file=sys.stderr)
+            return 1
         bid = args.baseline_id or next_id(data, today)
         baselines.append({
             "baseline_id": bid,

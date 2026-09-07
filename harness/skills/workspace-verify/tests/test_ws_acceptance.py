@@ -449,7 +449,7 @@ class TestResolveAcceptance(unittest.TestCase):
             m_ac.ensure_connected.side_effect = [None, "10.9.9.9:5555"]
             m_ac.ensure_ready.return_value = True
             m_ac.clock_sync.return_value = (True, "ok")
-            m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+            m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
@@ -488,7 +488,7 @@ class TestResolveAcceptance(unittest.TestCase):
             m_ac.ensure_connected.side_effect = ["ep", "ep"]
             m_ac.ensure_ready.return_value = True
             m_ac.clock_sync.return_value = (True, "ok")
-            m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+            m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_ac.parse_exec_output.return_value = ("1", 0)
@@ -508,7 +508,7 @@ class TestResolveAcceptance(unittest.TestCase):
         # 无 ts/fresh 判据且无 --wait-ready → 不触发 clock_sync
         with mock.patch.object(wa, "ac") as m_ac:
             m_ac.ensure_connected.side_effect = ["ep", "ep"]
-            m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+            m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
@@ -858,7 +858,7 @@ class TestLogcatCacheAndTiming(unittest.TestCase):
         m_ac.ensure_connected.return_value = "ep"
         m_ac.ensure_ready.return_value = True
         m_ac.clock_sync.return_value = (True, "ok")
-        m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+        m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
         m_ac.parse_exec_output.return_value = ("4242", 0)
         m_ac.build_logcat_cmd.return_value = self.LOGCAT
         m_run = mock.patch.object(wa.subprocess, "run",
@@ -993,7 +993,7 @@ class TestAcceptanceInternalSegments(unittest.TestCase):
                 m_ac.ensure_connected.return_value = "ep"
                 m_ac.ensure_ready.return_value = True
                 m_ac.clock_sync.return_value = (True, "ok")
-                m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+                m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
                 m_ac.parse_exec_output.side_effect = fake_parse
                 m_ac.build_logcat_cmd.return_value = LOGCAT
                 buf = io.StringIO()
@@ -1048,7 +1048,7 @@ class TestAcceptanceInternalSegments(unittest.TestCase):
                     mock.patch.object(wa.subprocess, "run",
                                       side_effect=fake_run):
                 m_ac.ensure_connected.return_value = "ep"
-                m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+                m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
                 m_ac.parse_exec_output.side_effect = fake_parse
                 m_ac.build_logcat_cmd.return_value = LOGCAT
                 buf = io.StringIO()
@@ -1433,7 +1433,7 @@ class TestRunIdLifecycle(unittest.TestCase):
 
         with mock.patch.object(wa, "ac") as m_ac:
             m_ac.ensure_connected.side_effect = ["ep", "ep"]
-            m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+            m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
@@ -1471,7 +1471,7 @@ class TestRunIdLifecycle(unittest.TestCase):
         with mock.patch.dict("os.environ", {"CDP_RUN_ID": "shared-run-001"}), \
                 mock.patch.object(wa, "ac") as m_ac:
             m_ac.ensure_connected.side_effect = ["ep", "ep"]
-            m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+            m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
@@ -1489,12 +1489,38 @@ class TestRunIdLifecycle(unittest.TestCase):
         data = json.loads(out_json.read_text(encoding="utf-8"))
         self.assertEqual(data["run_id"], "shared-run-001")
 
+    def test_device_fingerprint_empty_red(self):
+        # wsv-11：设备指纹 getprop 失败（空串）→ 判红返 1 不写产物
+        #（与 serial 全空判红同口径，此前空指纹静默落盘）
+        out_json = Path(tempfile.mkdtemp()) / "acc.json"
+        with mock.patch.object(wa, "ac") as m_ac:
+            m_ac.ensure_connected.side_effect = ["ep", "ep"]
+            m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
+            m_ac.parse_exec_output.return_value = ("", 0)  # 指纹读取为空
+            m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
+            m_sub = mock.Mock()
+            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
+            m_sub.TimeoutExpired = subprocess.TimeoutExpired
+            buf = io.StringIO()
+            with mock.patch.object(wa.subprocess, "run", m_sub):
+                with mock.patch.object(wa, "run_acceptance",
+                                       return_value=("pass", [])):
+                    with mock.patch.object(wa, "_device_serial",
+                                           return_value=("SN1",
+                                                         "getprop ro.serialno")):
+                        with contextlib.redirect_stdout(buf):
+                            rc = wa.main(["run", "--acceptance", "boot",
+                                          "--result-file", str(out_json)])
+        self.assertEqual(rc, 1)
+        self.assertIn("判红", buf.getvalue())
+        self.assertFalse(out_json.exists())
+
     def test_device_serial_all_empty_red(self):
         # 方向 3：产物写入路径上序列号三者皆空 → 判红返 1（不写产物）
         out_json = Path(tempfile.mkdtemp()) / "acc.json"
         with mock.patch.object(wa, "ac") as m_ac:
             m_ac.ensure_connected.side_effect = ["ep", "ep"]
-            m_ac.build_exec_cmd.side_effect = lambda c: ["adb", "shell", c]
+            m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
@@ -1512,6 +1538,41 @@ class TestRunIdLifecycle(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("判红", buf.getvalue())
         self.assertFalse(out_json.exists())
+
+
+class TestRunForensicsTempCleanup(unittest.TestCase):
+    """wsv-08：_run_forensics 临时文件任何退出路径（含 collect 抛异常）都清理，
+    防 /tmp 泄漏。"""
+
+    def test_collect_exception_unlinks_tmp(self):
+        captured = {}
+
+        def fake_collect(ep=None, since_epoch=0, stdout_file=None, **kw):
+            captured["stdout_file"] = stdout_file
+            raise OSError("取证炸了")
+
+        fake_wf = mock.Mock()
+        fake_wf.collect.side_effect = fake_collect
+        with mock.patch.dict(sys.modules, {"ws_forensics": fake_wf}):
+            out = wa._run_forensics("ep", 0, [{"tag": "t"}], "err")
+        self.assertIsNone(out)
+        self.assertIn("stdout_file", captured, "collect 须已收到临时文件路径")
+        self.assertFalse(Path(captured["stdout_file"]).exists(),
+                         "collect 抛异常后临时文件须已清理")
+
+    def test_collect_success_unlinks_tmp(self):
+        captured = {}
+
+        def fake_collect(ep=None, since_epoch=0, stdout_file=None, **kw):
+            captured["stdout_file"] = stdout_file
+            return {"run_id": "x"}, "/fake/run"
+
+        fake_wf = mock.Mock()
+        fake_wf.collect.side_effect = fake_collect
+        with mock.patch.dict(sys.modules, {"ws_forensics": fake_wf}):
+            out = wa._run_forensics("ep", 0, [], "err")
+        self.assertEqual(out, "/fake/run")
+        self.assertFalse(Path(captured["stdout_file"]).exists())
 
 
 class TestRunCaseLifecycle(unittest.TestCase):

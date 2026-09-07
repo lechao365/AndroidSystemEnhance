@@ -1134,6 +1134,36 @@ class TestWsReport(unittest.TestCase):
             self.assertIn("非全绿", err.getvalue())
         self.assertFalse(self._dir.exists())
 
+    def test_pass_unit_test_empty_targets_rejected(self):
+        # wsv-07：targets 为空（rc=0 产物却无任何单测证据）→ 拒 PASS
+        # （与 push 空 items 拒绝对称，防零单测假绿）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "pass", "--build", "pass",
+                                 "--board", "pass", "--summary", "空单测",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--acceptance-file", self._write_acc(),
+                                 "--unit-test-file", self._write_ut(targets=[]),
+                                 "--push-file", self._write_push()])
+        self.assertEqual(rc, 2)
+        self.assertIn("targets 为空", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_acceptance_pass_requires_dict(self):
+        # wsv-09：_validate_acceptance_pass 仅接受 JSON 对象（历史数组分支
+        # 为不可达死代码已删）；dict 形态行为不变
+        parsed, err = ws_report._validate_acceptance_pass(
+            '[{"tag": "svc:x", "status": "pass"}]')
+        self.assertIsNone(parsed)
+        self.assertIn("JSON 对象", err)
+        parsed, err = ws_report._validate_acceptance_pass(
+            '{"overall": "pass", "items": []}')
+        self.assertIsNone(err)
+        self.assertEqual(parsed, {"overall": "pass", "items": []})
+
     def test_pass_without_push_file_rejected(self):
         # 方向 1：PASS 缺 --push-file（ws_push 产物此前无人核验）→ 返 2 拒写
         batch = self._write(VALID_S, ".cdp")

@@ -26,6 +26,9 @@ HEADER_PAIRS = [
 ]
 
 # 提取 struct/enum 块：`struct NAME {` 或 `enum NAME {` 起步至配对 `};`
+# 约束（lib-09）：BLOCK_RE 的 [^}]* 不支持嵌套花括号（嵌套 struct/enum 块
+# 提取不到会静默漏检），extract_signatures 对块内出现嵌套 { 的情况判红
+# fail-closed（见 _nested_block_hits），本提取器只支持扁平成员布局。
 BLOCK_RE = re.compile(r"((?:struct|enum)\s+\w+\s*\{[^}]*\}\s*;)", re.S)
 
 
@@ -68,11 +71,35 @@ def extract_signatures(text: str) -> dict[str, list[str]]:
     return out
 
 
+def _nested_block_hits(text: str) -> list[str]:
+    """检测签名块内嵌套花括号的块名（lib-09 fail-closed）。
+
+    BLOCK_RE 到首个 `}` 截断，块内（声明行之后）再出现 `{` 必为嵌套
+    struct/enum——此时真实块提取不到、两侧签名可能同时为空而静默假绿，
+    须显式判红交人工复核而非漏检。返回问题块名列表。"""
+    hits = []
+    for m in BLOCK_RE.finditer(text):
+        block = m.group(1)
+        if "{" in block.split("{", 1)[1]:
+            name_m = re.match(r"(?:struct|enum)\s+(\w+)", block)
+            if name_m:
+                hits.append(name_m.group(1))
+    return hits
+
+
 def compare(k_path: Path, a_path: Path) -> tuple[int, str]:
     if not k_path.is_file() or not a_path.is_file():
         return 2, f"文件缺失: {'内核' if not k_path.is_file() else 'AOSP'} {k_path if not k_path.is_file() else a_path}"
-    ksig = extract_signatures(k_path.read_text(encoding="utf-8", errors="replace"))
-    asig = extract_signatures(a_path.read_text(encoding="utf-8", errors="replace"))
+    ktext = k_path.read_text(encoding="utf-8", errors="replace")
+    atext = a_path.read_text(encoding="utf-8", errors="replace")
+    # 嵌套花括号块判红（lib-09）：提取器不支持嵌套，任一侧出现即拒判
+    # （fail-closed 优于静默漏检——嵌套块提取不到时漂移不可见）
+    nested = sorted(set(_nested_block_hits(ktext) + _nested_block_hits(atext)))
+    if nested:
+        return 1, ("嵌套花括号块超出提取器支持范围（lib-09 fail-closed，"
+                   "防静默漏检）: " + ", ".join(nested))
+    ksig = extract_signatures(ktext)
+    asig = extract_signatures(atext)
     # 双空判红（方向 2）：两侧均未提取到 struct/enum 即头文件解析异常/内容
     # 异常，不得当作"一致"放行（此前 return 0 "(无结构/枚举)" 静默假绿）
     if not ksig and not asig:

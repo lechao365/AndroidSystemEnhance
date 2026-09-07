@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib" / "python"))
 import cdp_emit_precheck
@@ -70,6 +71,55 @@ class TestEmitPrecheck(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("解析错误", reason)
         self.assertIn("elapsed_s", reason)
+
+    # ── P1 fail-closed：git 门禁命令失败即拒（不得按空 stdout 放行）────
+    def _precheck_with_git(self, fake_git):
+        with mock.patch.object(cdp_emit_precheck, "_git",
+                               side_effect=fake_git):
+            return cdp_emit_precheck.precheck(self.root, do_pull=False)
+
+    def test_git_status_failure_rejected(self):
+        # git status 失败（非零退出）→ 拒绝产批（fail-closed），detail 带
+        # git stderr（旧实现按空 stdout 当"干净"放行）
+        def fake_git(root, *args):
+            if args == ("status", "--porcelain"):
+                return mock.Mock(returncode=128, stdout="",
+                                 stderr="fatal: not a git repository")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        ok, reason, detail = self._precheck_with_git(fake_git)
+        self.assertFalse(ok)
+        self.assertIn("git status 失败", reason)
+        self.assertIn("not a git repository", detail)
+
+    def test_git_rev_parse_head_failure_rejected(self):
+        # rev-parse HEAD 失败 → 拒绝（旧实现空 stdout 与 origin 比较恒等放行）
+        def fake_git(root, *args):
+            if args == ("status", "--porcelain"):
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            if args == ("rev-parse", "HEAD"):
+                return mock.Mock(returncode=128, stdout="",
+                                 stderr="fatal: ambiguous argument 'HEAD'")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        ok, reason, detail = self._precheck_with_git(fake_git)
+        self.assertFalse(ok)
+        self.assertIn("rev-parse HEAD 失败", reason)
+        self.assertIn("ambiguous argument", detail)
+
+    def test_git_rev_parse_origin_failure_rejected(self):
+        # rev-parse origin/dev 失败 → 拒绝（head==origin 假放行根因之一）
+        def fake_git(root, *args):
+            if args == ("status", "--porcelain"):
+                return mock.Mock(returncode=0, stdout="", stderr="")
+            if args == ("rev-parse", "HEAD"):
+                return mock.Mock(returncode=0, stdout="abc\n", stderr="")
+            if args == ("rev-parse", "origin/dev"):
+                return mock.Mock(returncode=128, stdout="",
+                                 stderr="fatal: unknown revision")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        ok, reason, detail = self._precheck_with_git(fake_git)
+        self.assertFalse(ok)
+        self.assertIn("rev-parse origin/dev 失败", reason)
+        self.assertIn("unknown revision", detail)
 
     # ── 分支 1：verified_commit 可达且已被 origin/dev 前进覆盖 → 放行 ──
     def test_reachable_pushed_pass(self):

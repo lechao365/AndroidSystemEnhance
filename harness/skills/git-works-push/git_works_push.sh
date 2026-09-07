@@ -3,7 +3,9 @@
 # 保留：永不推 main 守卫、--push-only、--dry-run、push 失败 commit 保留(exit 2)。
 # 去掉：dev 自动创建、amend、message 三重校验。
 set -euo pipefail
-BRANCH="${GIT_WORKS_BRANCH:-dev}"
+# BRANCH 固定 dev（sync-17）：git-works-push 契约只负责 dev 分支，环境变量
+# 覆盖（GIT_WORKS_BRANCH）可把推送目标改为任意分支且无调用方/文档引用，删除
+BRANCH="dev"
 MODE="normal"   # normal | push-only | dry-run
 MSG_FILE=""
 BASELINE_STATUS=""
@@ -24,6 +26,15 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+# 入口锚定仓库根（sync-09）：harness/lib/commit_scope.py、log_prune.py 等
+# 相对路径调用以仓库根为基准，子目录运行时静默不可达（收据比对降级、日志
+# 清理失效）；非 git 仓 fail-closed（cd 失败即拒，防 git 操作打到错误目录）
+TOPLEVEL="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "error: 不在 git 仓库内（无法定位仓库根），拒绝执行" >&2
+  exit 1
+}
+cd "$TOPLEVEL" || { echo "error: 无法进入仓库根 $TOPLEVEL" >&2; exit 1; }
 
 # 运行日志：harness/log/git-works-push/git-works-push-<日>.log（日粒度
 # 追加，/harness/log/ 已 gitignore 不入库）。秒级时间戳文件名会让每次

@@ -242,14 +242,23 @@ def scan_file(f: Path) -> list[str]:
 
 
 def scan_command_files() -> list[tuple[Path, list[str]]]:
-    """.opencode/command/*.md 的 @ 引用检查。"""
+    """.opencode/command/*.md 的 @ 引用检查。
+
+    读文件异常防护（lib-08，对齐 scan_file 口径）：OSError/UnicodeDecodeError
+    结构化跳过（stderr warn 留痕），不崩也不误报悬空。
+    """
     out: list[tuple[Path, list[str]]] = []
     commands = ROOT / ".opencode" / "command"
     if not commands.is_dir():
         return out
     for f in sorted(commands.glob("*.md")):
+        try:
+            txt = f.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"warn: command 文件读取失败，跳过: {f}: {e}", file=sys.stderr)
+            continue
         misses: list[str] = []
-        for m in AT_RE.finditer(f.read_text(encoding="utf-8")):
+        for m in AT_RE.finditer(txt):
             p = m.group(1)
             if not (ROOT / p).exists():
                 misses.append(p)
@@ -318,11 +327,12 @@ def main() -> int:
     # 收集全部悬空（文件集 + .opencode/command @ 引用）
     dangling: list[tuple[Path, list[str]]] = []
     targets = iter_scan_targets(args.path)
-    if not args.path and not targets:
-        # 方向 5：无 --path 且默认扫描目标为空（扫描根缺失/被全豁免）即判红，
-        # 防扫描根失效假通过（parents[1] 时代 ROOT 解析错误致扫描恒空的历史教训）
-        print("error: 无 --path 且默认扫描目标为空（扫描根缺失或全豁免），判红",
-              file=sys.stderr)
+    if not targets:
+        # 方向 5 + lib-05 fail-closed：默认分支与 --path 分支统一判空判红——
+        # --path 指向不存在/拼错路径时 targets 同样为空，此前漏判致静默
+        # 假绿 exit 0（扫描对象缺失 ≠ 引用完整）
+        print("error: 扫描目标为空（无 --path 且扫描根缺失/全豁免，或 --path "
+              "指向不存在的路径），判红", file=sys.stderr)
         return 1
     for f in targets:
         misses = scan_file(f)

@@ -647,6 +647,33 @@ class TestModeDelta(unittest.TestCase):
                     baseline=str(base), event=8, vid=1256, pid=25344))
         self.assertEqual(rc, 1)
 
+    def test_event_vid_only_match_passes(self):
+        # wsv-06：只传 --vid——pid 未提供不参与比对（None 恒不等曾致单字段
+        # 校验必然判红）
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "base.json"
+            self._base(base, max_ts=1000)
+            fake = FakeAdb(files={f"{LOGS_DIR}/a.jsonl": _jsonl(
+                '{"ts": 2000, "id": 8, "f": [0, 1256, 99999, "Samsung", "Flash"]}')},
+                date_out=self._now_out(), date_rc=0)
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_delta(tmp, _args(baseline=str(base),
+                                              event=8, vid=1256))
+        self.assertEqual(rc, 0)
+
+    def test_event_pid_only_match_passes(self):
+        # wsv-06：只传 --pid 同理
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "base.json"
+            self._base(base, max_ts=1000)
+            fake = FakeAdb(files={f"{LOGS_DIR}/a.jsonl": _jsonl(
+                '{"ts": 2000, "id": 8, "f": [0, 111, 25344, "Samsung", "Flash"]}')},
+                date_out=self._now_out(), date_rc=0)
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_delta(tmp, _args(baseline=str(base),
+                                              event=8, pid=25344))
+        self.assertEqual(rc, 0)
+
     def test_timeout_propagates_minus1(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "base.json"
@@ -655,6 +682,28 @@ class TestModeDelta(unittest.TestCase):
             with mock.patch.object(lc, "adb", fake):
                 rc = lc.mode_delta(tmp, _args(baseline=str(base)))
         self.assertEqual(rc, -1)
+
+
+class TestBaselineExplicit(unittest.TestCase):
+    """wsv-10：--baseline 显式识别兼容空格与等号两种形式（等号形式此前
+    不识别，ts 基线限定静默失效退化为全历史判红）。"""
+
+    def test_space_form_recognized(self):
+        self.assertTrue(lc._baseline_explicit(
+            ["--mode", "ts", "--baseline", "/tmp/x.json"]))
+
+    def test_eq_form_recognized(self):
+        self.assertTrue(lc._baseline_explicit(["--baseline=/tmp/x.json"]))
+
+    def test_absent_not_explicit(self):
+        self.assertFalse(lc._baseline_explicit(["--mode", "ts", "--skew", "600"]))
+
+    def test_default_argv_falls_to_sys_argv(self):
+        # argv=None 回落 sys.argv[1:]（现场 CLI 路径）
+        with mock.patch.object(sys, "argv", ["prog", "--mode", "ts"]):
+            self.assertFalse(lc._baseline_explicit(None))
+        with mock.patch.object(sys, "argv", ["prog", "--baseline=/tmp/b.json"]):
+            self.assertTrue(lc._baseline_explicit(None))
 
 
 def _sysfs(total=0, overrun=0, ring=0):

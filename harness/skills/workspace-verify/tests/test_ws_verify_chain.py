@@ -6,8 +6,11 @@
 # 注：_CHAIN_STEPS patch 为步骤名序列（真实 argv 由 _build_argv/_build_report_argv
 # 按步骤名构造）；Popen 打桩隔离真实子进程；_RUNS_DIR patch 到临时目录。
 
+import contextlib
+import io
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -76,9 +79,46 @@ class TestChain(unittest.TestCase):
         self.assertEqual(result["skipped"], [])
 
     def test_run_id_shared_with_children(self):
-        # 编排器注入 CDP_RUN_ID：push/unit_test/acceptance 产物同批同 run_id
-        rc, result, _ = self._run()
-        self.assertEqual(os.environ.get("CDP_RUN_ID"), result["run_id"])
+        # 编排器注入 CDP_RUN_ID：链内子步骤经 env 读取同批 run_id（产物
+        # 同批核验依赖）；链结束复原现场（CDP_RUN_ID 不残留，防同进程
+        # 多轮 run_chain 串扰）
+        seen = []
+        ctor, _ = _fake_popen(0)
+        ctor.side_effect = lambda argv, **kw: (
+            seen.append(os.environ.get("CDP_RUN_ID")),
+            mock.Mock(wait=mock.Mock(return_value=0)))[1]
+        with mock.patch.object(wc.subprocess, "Popen", ctor), \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(batch_file=str(self.batch),
+                                      use_locks=False)
+        self.assertEqual(rc, 0)
+        self.assertTrue(seen)
+        self.assertTrue(all(v == result["run_id"] for v in seen),
+                        "链内子进程须能从 env 读到本轮 run_id")
+        self.assertIsNone(os.environ.get("CDP_RUN_ID"),
+                          "chain 结束须复原 CDP_RUN_ID 现场")
+
+    def test_cdp_run_id_not_leaked_between_chains(self):
+        # wsv-02：同进程连续两轮 run_chain——第二轮 run_id 不同于首轮
+        #（泄漏会使两轮产物共享 run_id，ws_report 同批核验串扰）
+        rc1, r1, _ = self._run()
+        rc2, r2, _ = self._run()
+        self.assertEqual(rc1, 0)
+        self.assertEqual(rc2, 0)
+        self.assertNotEqual(r1["run_id"], r2["run_id"])
+        self.assertIsNone(os.environ.get("CDP_RUN_ID"))
+
+    def test_cdp_run_id_preexisting_restored(self):
+        # wsv-02：外部注入的 CDP_RUN_ID 优先复用，chain 结束复原为原值
+        os.environ["CDP_RUN_ID"] = "pre-run-001"
+        try:
+            rc, result, _ = self._run()
+            self.assertEqual(result["run_id"], "pre-run-001")
+            self.assertEqual(os.environ.get("CDP_RUN_ID"), "pre-run-001")
+        finally:
+            os.environ.pop("CDP_RUN_ID", None)
 
     def test_step_argv_shape(self):
         # 各步 argv 形态：脚本与关键参数（connect=ensure、acceptance 带
@@ -374,6 +414,86 @@ class TestDeriveReportArgs(unittest.TestCase):
         self.assertEqual(rc, 0)
         rep = next(" ".join(c) for c in calls if "ws_report.py" in c[1])
         self.assertIn("--build fail", rep)
+
+    def test_push_executed_fail_build_fail(self):
+        # wsv-13：push 已执行且 rc!=0（含编译产物缺失）→ build=fail
+        #（不得机械降级 skip 掩盖编译段失败）
+        d = wc._derive_report_args(
+            self._steps(("sync", 0), ("connect", 0), ("push", 1)), "fail")
+        self.assertEqual((d["result"], d["build"], d["board"]),
+                         ("fail", "fail", "fail"))
+
+    def test_push_not_executed_build_skip(self):
+        # wsv-13：push 未执行（sync 失败停链，步骤不在 steps）→ build=skip
+        d = wc._derive_report_args(self._steps(("sync", 1)), "fail")
+        self.assertEqual((d["result"], d["build"], d["board"]),
+                         ("fail", "skip", "skip"))
+
+    def test_push_canceled_build_fail(self):
+        # wsv-13：push 超时取消（步骤已执行、rc=None）→ build=fail
+        d = wc._derive_report_args(
+            [{"name": "push", "rc": None, "canceled": True}], "fail")
+        self.assertEqual(d["build"], "fail")
+
+
+class TestSelfcheckFallbackRcKeys(unittest.TestCase):
+    """wsv-01：selfcheck 超时/启动失败兜底文本须覆盖 REQUIRED_RC_KEYS 全集
+    （跨模块一致：ws_report 缺任一 *_rc 键即拒写，兜底文本缺键会让故障场景
+    以错误的「缺键」门禁判 2，诊断失真）。"""
+
+    def _fallback_text(self, exc):
+        with mock.patch.object(wc.subprocess, "run", side_effect=exc):
+            return wc._run_selfcheck(timeout=1)
+
+    def _report_reject_stderr(self, selfcheck_text):
+        """把兜底文本喂给 ws_report.main（-s 批，result=skip），返回 stderr。
+        期望路径：rc 键校验通过 → 按「非零退出码」判 2（而非「缺 *_rc」）。"""
+        import ws_report
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict("os.environ", {"CDP_PROJECT_ROOT": d}):
+                batch = Path(d) / "b.cdp"
+                batch.write_text(
+                    "-s base:1a2b3c4d5e6f\n"
+                    "意图: selfcheck 兜底文本 rc 键覆盖端到端验证用批次（占位"
+                    "说明文字拉长长度以满足批次长度预算要求，无实际编辑意图）。\n"
+                    "验收: 无\n"
+                    "方向: 1) 端到端验证兜底文本能通过 ws_report 缺键门禁判红。\n",
+                    encoding="utf-8")
+                body = Path(d) / "body.txt"
+                body.write_text("## 现场\n", encoding="utf-8")
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    ws_report.main([
+                        "--batch-file", str(batch), "--body", str(body),
+                        "--result", "skip", "--build", "skip",
+                        "--board", "skip", "--summary", "s",
+                        "--selfcheck", selfcheck_text])
+                return err.getvalue()
+
+    def test_timeout_text_covers_required_rc_keys(self):
+        # 超时兜底文本：键集合 == REQUIRED_RC_KEYS 全集（动态同源）
+        from selfcheck import REQUIRED_RC_KEYS
+        text = self._fallback_text(subprocess.TimeoutExpired("x", 1))
+        found = set(re.findall(r"\b(\w+_rc)=\d+\b", text))
+        self.assertEqual(found, set(REQUIRED_RC_KEYS))
+        self.assertIn("pytest_rc=124", text, "超时 rc 语义值保留")
+        # 能通过 ws_report 的 rc 键校验：报错为「非零退出码」（真实语义），
+        # 不得再出现「缺 *_rc」的缺键误报
+        stderr = self._report_reject_stderr(text)
+        self.assertIn("非零退出码", stderr)
+        self.assertNotIn("缺 ", stderr)
+
+    def test_oserror_text_covers_required_rc_keys(self):
+        # 启动失败兜底文本：同样覆盖全集且通过 rc 键校验
+        from selfcheck import REQUIRED_RC_KEYS
+        text = self._fallback_text(OSError("adb missing"))
+        found = set(re.findall(r"\b(\w+_rc)=\d+\b", text))
+        self.assertEqual(found, set(REQUIRED_RC_KEYS))
+        self.assertIn("启动失败", text)
+        stderr = self._report_reject_stderr(text)
+        self.assertIn("非零退出码", stderr)
+        self.assertNotIn("缺 ", stderr)
 
 
 if __name__ == "__main__":

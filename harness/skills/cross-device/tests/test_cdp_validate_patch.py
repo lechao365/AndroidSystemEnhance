@@ -258,6 +258,27 @@ index 1111111..2222222 100644
 """)
         self.assertEqual(cv.main(["--against", str(root), d]), 1)
 
+    def test_against_timeout_rejected(self):
+        # CDP-04：git apply --check 带 30s timeout——drvfs 卡死时
+        # TimeoutExpired 判红（exit 1）而非挂起/静默通过
+        root = self._git_repo()
+        d = self._write("""diff --git a/foo.c b/foo.c
+index 1111111..2222222 100644
+--- a/foo.c
++++ b/foo.c
+@@ -1 +1,2 @@
+ int y;
++int z;
+""")
+        out = io.StringIO()
+        with mock.patch.object(cv.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired(
+                                   cmd="git", timeout=30)), \
+                contextlib.redirect_stdout(out):
+            rc = cv.main(["--against", str(root), d])
+        self.assertEqual(rc, 1)
+        self.assertIn("超时", out.getvalue())
+
     def test_without_against_unchanged(self):
         # 未传 --against：仅格式校验，上下文失配 diff 仍 exit 0（行为不变）
         d = self._write("""diff --git a/foo.c b/foo.c

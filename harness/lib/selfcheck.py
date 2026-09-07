@@ -25,6 +25,7 @@ check_python_env 探测结果（Python 版本 + requirements.txt 依赖，环境
 按 rc 判定，本脚本只负责如实采集（emit 侧可独立自测）。
 """
 import argparse
+import hashlib
 import importlib
 import os
 import re
@@ -420,11 +421,23 @@ def _failed_nodeids(py_out):
 
 
 def _git_changed_files():
-    """本批改动文件（git diff --name-only HEAD，相对 ROOT）；无 git/无改动返空集。"""
+    """本批改动文件（git diff --name-only HEAD，相对 ROOT）；无 git/无改动返空集。
+
+    timeout=30 对齐本链其他 subprocess 调用（防 drvfs 卡死 git 拖垮自检），
+    超时按空集 + warn 处理（保守：空集 = KIR-001 不命中 = 抖动可放行，
+    不会因 git 卡死而把全部失败误判为引入嫌疑）。
+    KIR-001 机械近似口径：仅当失败用例的测试文件本身命中本批改动才判
+    引入嫌疑；lib 改动 → 测试的传导链不做映射（近似保守，可能漏报引入
+    嫌疑，不会误伤抖动放行）。
+    """
     try:
         r = subprocess.run(["git", "diff", "--name-only", "HEAD"], cwd=ROOT,
                            capture_output=True, text=True, encoding="utf-8",
-                           errors="replace")
+                           errors="replace", timeout=30)
+    except subprocess.TimeoutExpired:
+        print("warn: git diff --name-only 超时（>30s），按无改动处理",
+              file=sys.stderr)
+        return set()
     except Exception:
         return set()
     if r.returncode != 0:
@@ -469,7 +482,9 @@ def _flake_history(nodeid):
             txt = p.read_text(encoding="utf-8")
         except OSError:
             continue
-        if f"nodeid: {nodeid}" not in txt:
+        # 行级精确匹配（lib-03）：子串匹配会让 test_bar 误命中
+        # test_bar[param0] 等参数化前缀条目致轮次虚高，须整行锚定
+        if not re.search(rf"^- nodeid: {re.escape(nodeid)}$", txt, re.M):
             continue
         if not re.search(r"^- kind: flake$", txt, re.M):
             continue
@@ -480,6 +495,16 @@ def _flake_history(nodeid):
         if fm and not first_batch:
             first_batch = fm.group(1)
     return max_round, first_batch
+
+
+def _flake_issue_id(nodeid, first_batch):
+    """flake 条目 id（lib-02）：sha256(nodeid) 前 6 位 hex 稳定摘要。
+
+    此前 abs(hash(nodeid)) & 0xFFF 受 PYTHONHASHSEED 随机化影响，跨进程
+    不稳定且 4096 空间易碰撞，KIR-002 跨批归链失效；sha256 摘要跨进程
+    稳定，6 位 hex（~1600 万空间）显著降碰撞。"""
+    digest = hashlib.sha256(nodeid.encode("utf-8")).hexdigest()[:6]
+    return f"KI-FLAKE-{first_batch}-{digest}"
 
 
 def _register_flake_issue(nodeid):
@@ -494,7 +519,7 @@ def _register_flake_issue(nodeid):
         first_batch, round_n = batch_id or "unknown", 1
     else:
         round_n += 1
-    issue_id = f"KI-FLAKE-{first_batch}-{abs(hash(nodeid)) & 0xFFF:03x}"
+    issue_id = _flake_issue_id(nodeid, first_batch)
     body = (f"- nodeid: {nodeid}\n"
             f"- round: {round_n}\n"
             f"- first_seen_batch: {first_batch}\n"
@@ -524,14 +549,19 @@ def _rerun_failures(py_out):
       ki001_hits: [nodeid]——失败用例命中本批改动路径（KIR-001 引入嫌疑，
         不得顺延，当批修，pytest_rc 保持非零）；
     任一单跑仍红（真回归阻塞）→ 两项皆空（pytest_rc 保持非零）。
+
+    两遍扫描（lib-04）：第一遍对全部待判定用例单跑只收集结果不落盘——
+    存在真回归（任一 rc!=0 / 超时）即不登记任何条目直接返回阻塞，避免
+    此前"先登记先放行、后续单跑红时已登记条目不回滚"的幽灵 known-issue
+    残留；全部放行才第二遍统一登记。
     """
     nodeids = _failed_nodeids(py_out)
     if not nodeids:
         return [], []
     changed = _git_changed_files()
-    flake_notes, ki001_hits = [], []
+    # 第一遍：全部单跑收集结果（不落盘登记）
+    rerun_rc = {}
     for nodeid in nodeids:
-        test_file = nodeid.split("::", 1)[0]
         # 全新进程单独重跑（禁 slow_guard——慢用例单跑会被守卫误判红；
         # 单进程避免 xdist 分片抖动干扰）
         env = dict(os.environ)
@@ -543,8 +573,13 @@ def _rerun_failures(py_out):
                 errors="replace", env=env, timeout=_PYTEST_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             return [], []  # 重跑挂死按真回归阻塞处理
-        if r.returncode != 0:
-            return [], []  # 单跑仍红 → 真回归阻塞
+        rerun_rc[nodeid] = r.returncode
+    if any(rc != 0 for rc in rerun_rc.values()):
+        return [], []  # 任一单跑仍红 → 真回归阻塞，一条都不登记
+    # 第二遍：全部单跑绿，统一登记/归链（KIR-001 命中者不登记只记嫌疑）
+    flake_notes, ki001_hits = [], []
+    for nodeid in nodeids:
+        test_file = nodeid.split("::", 1)[0]
         if test_file in changed:
             ki001_hits.append(nodeid)  # KIR-001：本批引入嫌疑，不得顺延
         else:
@@ -594,15 +629,19 @@ def main(argv=None):
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
-    # 方向 2：quick 档（git diff 推导受影响测试，推导不出回落全量）
+    # 方向 2：quick 档（git diff 推导受影响测试，推导不出回落全量）。
+    # argv is not None 判定（lib-01）：CLI 直跑 sys.exit(main()) 时 argv=None，
+    # 须回落 sys.argv[1:] 让 argparse 真正执行——此前 `if argv:` 致直跑时
+    # --mode quick 被静默忽略恒跑全量（SKILL.md 文档化用法失效）
     mode = "full"
-    if argv:
-        parser = argparse.ArgumentParser(description="harness 自检（-s 采集）")
-        parser.add_argument("--mode", choices=("full", "quick"), default="full",
-                            help="full 全量 harness；quick 由 git diff 推导"
-                                 "受影响测试（推导不出回落全量），供 loop 中间轮")
-        args = parser.parse_args(argv)
-        mode = args.mode
+    if argv is None:
+        argv = sys.argv[1:]
+    parser = argparse.ArgumentParser(description="harness 自检（-s 采集）")
+    parser.add_argument("--mode", choices=("full", "quick"), default="full",
+                        help="full 全量 harness；quick 由 git diff 推导"
+                             "受影响测试（推导不出回落全量），供 loop 中间轮")
+    args = parser.parse_args(argv)
+    mode = args.mode
     # 自检整体墙钟实测（方向 3）：pytest 起跑前记 t0，四工具完成后 t1，
     # 差值经 _mark_selfcheck --dur-s 上报（自检段耗时不再被相邻差额吞并）
     _t0 = time.time()
@@ -660,7 +699,10 @@ def main(argv=None):
             parts.append(f"flake: {nodeid} round={round_n} first={first_batch} "
                          f'cmd="python3 -m pytest {nodeid} -q"')
         m = re.search(r"\b(\d+)\s*skipped\b", summary or "")
-        parts.append(f"skipped={m.group(1) if m else 0}")
+        if m:
+            # 仅 summary 定位到 skipped 计数时透出（lib-06）：缺行不伪造
+            # skipped=0——交 ws_report 缺 skipped 拒写，不自己伪造计数
+            parts.append(f"skipped={m.group(1)}")
     else:
         if summary:
             parts.append(summary)

@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[5]))
 from harness.lib.harness_lib import (
-    log_info, log_error,
+    log_info, log_warn, log_error,
     harness_init, harness_exit,
 )
 from harness.lib.paths import path as profile_path
@@ -98,15 +98,21 @@ def generate_manifest(patch_root: Path, check_only: bool,
 
     # 未登记判红门禁（方向 5）：code/rpi5 存在但 manifest 未登记的 patch
     # 文件。check_only（校验）模式下判红返回 False；正常重生成模式下列出
-    # 并提示将登记（重生成天然全覆盖，不阻断写盘）。
+    # 并提示将登记（重生成天然全覆盖，不阻断写盘）——日志级别随模式区分
+    # （CDP-12：重生成路径用 log_warn，log_error 仅留给 check_only 拒绝
+    # 路径，避免"报 error 却登记成功"的日志与结果矛盾）
     unregistered = _unregistered_patch_paths(patch_root, manifest_path)
     if unregistered:
-        log_error(f"manifest 未登记 {len(unregistered)} 个 code/rpi5 文件"
-                  f"（未登记即判红门禁）：")
-        for rel in unregistered:
-            log_error(f"  {rel}")
         if check_only:
+            log_error(f"manifest 未登记 {len(unregistered)} 个 code/rpi5 文件"
+                      f"（未登记即判红门禁）：")
+            for rel in unregistered:
+                log_error(f"  {rel}")
             return False
+        log_warn(f"manifest 未登记 {len(unregistered)} 个 code/rpi5 文件"
+                 f"（重生成路径，将一并登记）：")
+        for rel in unregistered:
+            log_warn(f"  {rel}")
         log_info(f"重生成将登记 {len(unregistered)} 个新文件")
 
     lines: list[str] = []

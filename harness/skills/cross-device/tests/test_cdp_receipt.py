@@ -30,6 +30,15 @@ def _mk_receipt(batch_id="abc123def456", result="pass"):
     )
 
 
+def _trend_append_worker(arg):
+    """并发 append_trend worker（模块级：multiprocessing 需可 pickle；
+    fork 子进程继承 CDP_PROJECT_ROOT，趋势行落在测试临时目录）。"""
+    i, _n = arg
+    cdp_receipt.append_trend(f"2026-08-23 10:00:{i % 60:02d}",
+                             f"batch{i:012d}", "pass", "board", f"s{i}")
+    return 0
+
+
 class TestReceipt(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -500,6 +509,17 @@ class TestReceipt(unittest.TestCase):
         leftovers = list(self._dir.glob("*.tmp"))
         self.assertEqual(leftovers, [])
         self.assertEqual(len(cdp_receipt.read_trend_last(self._dir)) > 0, True)
+
+    def test_append_trend_concurrent_no_lost_lines(self):
+        # CDP-08：append_trend 读→改→写区间 flock 互斥——并发追加不丢行
+        # （无锁时后写者按旧快照整体重写覆盖先写者）
+        import multiprocessing
+
+        with multiprocessing.get_context("fork").Pool(4) as pool:
+            rcs = pool.map(_trend_append_worker, [(i, 0) for i in range(8)])
+        self.assertEqual(rcs, [0] * 8)
+        lines = (self._dir / "trend.md").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 8, "并发 append_trend 不得丢行")
 
     # ── 收据审计链增强（改动 1）：operator / host_env 自动采集 ──────────
     def test_write_receipt_autofills_operator_and_host_env(self):

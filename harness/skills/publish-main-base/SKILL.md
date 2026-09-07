@@ -132,8 +132,9 @@ bash harness/skills/publish-main-base/publish_main_base.sh --prepare [--task <id
 bash harness/skills/publish-main-base/publish_main_base.sh --promote \
   --baseline-id <id> --message-file <f> [--task <id>] [--approved-by <id>]
 ```
-（squash 会把阶段 5 文档改动一并并入 main；--approved-by 缺省为 lechao；
-失败自动 rollback_promote）
+（squash 会把阶段 5 文档改动一并并入 main；--approved-by 必填，审批凭据
+外部化不再回落默认；登记/checkout/merge/squash/树断言/push main 失败自动
+rollback_promote，含清理中途落盘的证据快照）
 
 ### 阶段 7：完成报告
 输出：baseline_id / main 新 sha / dev 重建状态 / 收据路径 / 文档同步摘要 / 是否含修复

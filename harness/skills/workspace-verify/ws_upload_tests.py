@@ -113,9 +113,10 @@ def adb_run(ep, args, timeout=600):
 
     errors="replace" 对齐 ws_adb_connect.run_adb：设备输出含非 UTF-8 字节
     （如中文/二进制噪声）时不得抛 UnicodeDecodeError 中断整个测试批次。
+    二进制经 ac.adb_bin()（LC_VERIFY_ADB_BIN 覆盖生效，单点同源）。
     """
     try:
-        p = subprocess.run(["adb", "-s", ep] + args,
+        p = subprocess.run([ac.adb_bin(), "-s", ep] + args,
                            capture_output=True, text=True,
                            encoding="utf-8", errors="replace",
                            timeout=timeout)

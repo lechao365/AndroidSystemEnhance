@@ -1,3 +1,5 @@
+import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -151,6 +153,40 @@ class TestCheckSkillRefs(unittest.TestCase):
         finally:
             sys.argv = old_argv
         self.assertEqual(rc, 1)
+
+    def test_path_missing_targets_red(self):
+        # lib-05 红灯：--path 指向不存在/拼错路径 → targets 空 → 判红 exit 1
+        # （此前判红条件 `if not args.path and not targets` 漏掉显式 path
+        # 解析为空的场景，静默假绿 exit 0）
+        old_argv = sys.argv
+        sys.argv = ["check_skill_refs", "--path", "no/such/dir"]
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                rc = ckr.main()
+        finally:
+            sys.argv = old_argv
+        self.assertEqual(rc, 1)
+        self.assertIn("扫描目标为空", err.getvalue())
+
+    def test_scan_command_files_read_error_skipped(self):
+        # lib-08：command 文件读失败（OSError/UnicodeDecodeError）结构化
+        # 跳过（对齐 scan_file 口径），不崩、不误报悬空、stderr 留痕
+        self._mk(".opencode/command/a.md", "@harness/skills/gone/SKILL.md\n")
+        orig_read = Path.read_text
+
+        def _boom(path_self, *a, **kw):
+            if "command" in str(path_self):
+                raise OSError("boom")
+            return orig_read(path_self, *a, **kw)
+
+        with mock.patch.object(Path, "read_text", autospec=True) as m:
+            m.side_effect = _boom
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                out = ckr.scan_command_files()
+        self.assertEqual(out, [])
+        self.assertIn("读取失败", err.getvalue())
 
     def test_report_writes_dangling_manifest(self):
         # 方向 3：--report 把悬空引用清单落盘（可跟踪、随批提交供清零追踪）；

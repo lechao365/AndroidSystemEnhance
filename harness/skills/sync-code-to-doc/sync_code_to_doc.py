@@ -9,7 +9,7 @@
   --base <ref>:      git diff <ref>...HEAD —— 分支相对 ref 的已提交累积变动
                      (promote 前使用 --base origin/main 对比 dev 相对 main 的批次)
   --check-docs:      仅执行文档索引一致性检查(死索引/漏索引/断链/孤儿)，不依赖 git diff
-退出码:  0=成功(有变动); 3=参数/环境错误; 4=无变动; 5=文档索引不一致(--check-docs)
+退出码:  0=成功(有变动); 3=参数/环境/git 故障; 4=无变动; 5=文档索引不一致(--check-docs)
 """
 
 from __future__ import annotations
@@ -131,15 +131,16 @@ def check_orphans(docs_root: Path) -> list[Path]:
     return orphans
 
 
-CODE_LINK_RE = re.compile(r"\]\(([^)#\s]+)(?:#(L\d+))?\)")
+# 锚点支持单行 #L10 与区间 #L10-L20（sync-16）
+CODE_LINK_RE = re.compile(r"\]\(([^)#\s]+)(?:#(L\d+(?:-L\d+)?))?\)")
 CODE_COMMENT_RE = re.compile(
     r"//\s*([A-Za-z0-9_./-]+\.(?:c|cpp|cc|h|mk|bp|py|sh|te|aidl)):\s*(\d+)")
 
 
 def check_code_links(docs_root: Path) -> list[tuple[Path, str]]:
-    """docs 内指向 code/rpi5 的链接目标不存在 → code 链接失效。
+    """docs 内指向 code/（rpi5/rpi-zero2w 等多平台）的链接目标不存在 → 失效。
 
-    返回 [(md, 失效链接)]。仅检查含 code/rpi5 的相对链接，忽略 http/https。
+    返回 [(md, 失效链接)]。仅检查含 code/ 前缀的相对链接，忽略 http/https。
     """
     broken: list[tuple[Path, str]] = []
     for md in _iter_docs_md(docs_root):
@@ -151,7 +152,9 @@ def check_code_links(docs_root: Path) -> list[tuple[Path, str]]:
             rel = m.group(1).strip()
             if rel.startswith(("http://", "https://")):
                 continue
-            if "code/rpi5" not in rel:
+            # code/ 前缀通配多平台归档（sync-16）：只认 rpi5 会漏检
+            # rpi-zero2w 等其他平台的断链
+            if "code/" not in rel:
                 continue
             path_part = rel.partition("#")[0]
             if not (md.parent / path_part).resolve().exists():
@@ -160,8 +163,9 @@ def check_code_links(docs_root: Path) -> list[tuple[Path, str]]:
 
 
 def check_anchor_bounds(docs_root: Path, code_root: Path) -> list[tuple[Path, str, int, int]]:
-    """docs 内 code/rpi5 链接带 #L 锚点且行号超出文件总行数 → 锚点失效。
+    """docs 内 code/ 链接带 #L 锚点且行号超出文件总行数 → 锚点失效。
 
+    支持 #L10 单行与 #L10-L20 区间（区间校验上界，sync-16）。
     返回 [(md, 链接, 行号, 文件总行数)]。文件缺失由 check_code_links 覆盖，此处跳过。
     """
     bad: list[tuple[Path, str, int, int]] = []
@@ -172,18 +176,26 @@ def check_anchor_bounds(docs_root: Path, code_root: Path) -> list[tuple[Path, st
             continue
         for m in CODE_LINK_RE.finditer(text):
             rel = m.group(1).strip()
-            if rel.startswith(("http://", "https://")) or "code/rpi5" not in rel:
+            if rel.startswith(("http://", "https://")) or "code/" not in rel:
                 continue
             anchor = m.group(2) or ""
-            if not anchor.startswith("L") or not anchor[1:].isdigit():
+            am = re.fullmatch(r"L(\d+)(?:-L(\d+))?", anchor)
+            if not am:
                 continue
-            line = int(anchor[1:])
+            line = int(am.group(1))
+            # 区间锚点以上界做越界校验（sync-16）
+            line_hi = int(am.group(2)) if am.group(2) else line
             target = (md.parent / rel).resolve()
             if not target.is_file():
                 continue
-            total = len(target.read_text(encoding="utf-8").splitlines())
-            if line > total:
-                bad.append((md, rel, line, total))
+            # 非 UTF-8/不可读源文件不崩整检（sync-08）：跳过并 log_warn 计数
+            try:
+                total = len(target.read_text(encoding="utf-8").splitlines())
+            except (OSError, UnicodeDecodeError) as e:
+                log_warn(f"锚点检查跳过不可读文件: {target}: {e}")
+                continue
+            if line_hi > total:
+                bad.append((md, rel, line_hi, total))
     return bad
 
 
@@ -198,7 +210,9 @@ def check_code_comments(docs_root: Path, code_root: Path) -> list[tuple[Path, st
 
     def build_index() -> dict[str, Path]:
         idx: dict[str, Path] = {}
-        for p in code_root.rglob("*"):
+        # sorted 后再 setdefault（sync-15）：同名 basename 取目录序首见，
+        # 消除 rglob 顺序非确定性
+        for p in sorted(code_root.rglob("*")):
             if p.is_file():
                 idx.setdefault(p.name, p)
         return idx
@@ -217,7 +231,12 @@ def check_code_comments(docs_root: Path, code_root: Path) -> list[tuple[Path, st
             if target is None:
                 bad.append((md, name, None))
                 continue
-            total = len(target.read_text(encoding="utf-8").splitlines())
+            # 非 UTF-8/不可读源文件不崩整检（sync-08）：跳过并 log_warn 计数
+            try:
+                total = len(target.read_text(encoding="utf-8").splitlines())
+            except (OSError, UnicodeDecodeError) as e:
+                log_warn(f"形态D检查跳过不可读文件: {target}: {e}")
+                continue
             if line > total:
                 bad.append((md, name, line))
     return bad
@@ -292,8 +311,9 @@ def cmd_check_docs(docs_root: Path, code_root: Path | None = None) -> int:
     return 5
 
 
-def _git(args: list[str], timeout: int = 300) -> str:
-    """执行 git 命令，返回 stdout。失败时 log_error（含 stderr）并返回空字符串。"""
+def _git(args: list[str], timeout: int = 300) -> str | None:
+    """执行 git 命令，返回 stdout；失败时 log_error（含 stderr）并返回 None
+    （sync-07）：空输出与命令失败可区分，防 git 故障被当"无变动" exit 4。"""
     r = _git_result(args, timeout=timeout)
     if r.returncode != 0:
         err = r.stderr.strip()
@@ -301,6 +321,7 @@ def _git(args: list[str], timeout: int = 300) -> str:
             f"git 失败({r.returncode}): {' '.join(args)}"
             + (f": {err[:300]}" if err else "")
         )
+        return None
     return r.stdout
 
 
@@ -329,17 +350,23 @@ def _collect_changes(patch_dir: Path, root: Path,
     """
     patch_dir_str = str(patch_dir)
     if base == "HEAD":
-        tracked = _git(["diff", "HEAD", "--name-status", "--", patch_dir_str]).strip()
+        tracked = _git(["diff", "HEAD", "--name-status", "--", patch_dir_str])
     else:
         tracked = _git(
             ["--no-pager", "diff", base + "...HEAD",
              "--name-status", "--", patch_dir_str]
-        ).strip()
-    untracked_lines = _git(
+        )
+    untracked = _git(
         ["ls-files", "--others", "--exclude-standard", "--", patch_dir_str]
-    ).strip()
+    )
+    # git 故障 ≠ 真实无变动（sync-07）：命令失败以独立退出码 3 退出
+    if tracked is None or untracked is None:
+        log_error("git 命令失败，无法收集变动（区别于真实无变动）")
+        harness_exit(3)
+    untracked_lines = untracked.strip()
 
     changes: list[tuple[str, str, str]] = []
+    tracked = tracked.strip()
     if tracked:
         for line in tracked.splitlines():
             parts = line.split("\t")
@@ -387,8 +414,13 @@ def _compute_numstat(stat_path: str, display_path: str, base_status: str,
         if len(lines) == 1:
             numstat_line = lines[0]
         else:
+            # 多行时按 \t 切分对路径列精确相等匹配（sync-14）：endswith 会让
+            # dir/a.py 误命中 a.py 行。numstat 行格式 added\tdeleted\tpath
+            # （rename 为 added\tdeleted\tpath1\tpath2，两列均参与匹配）
             for line in lines:
-                if line.endswith(stat_path):
+                cols = line.split("\t")
+                path_match = len(cols) > 3 and cols[3] == stat_path
+                if len(cols) >= 3 and (cols[2] == stat_path or path_match):
                     numstat_line = line
                     break
             if not numstat_line:
@@ -486,14 +518,14 @@ def _render_full_diff(patch_dir_str: str, root: Path, base: str = "HEAD") -> Non
         diff_text = _git(["--no-pager", "diff", "HEAD", "--", patch_dir_str])
     else:
         diff_text = _git(["--no-pager", "diff", base + "...HEAD", "--", patch_dir_str])
-    if diff_text.strip():
+    if (diff_text or "").strip():
         print(diff_text.rstrip())
     else:
         log_warn("无法获取 diff 正文")
 
-    untracked_files = _git(
+    untracked_files = (_git(
         ["ls-files", "--others", "--exclude-standard", "--", patch_dir_str]
-    ).strip()
+    ) or "").strip()
     if untracked_files:
         print("")
         print("--- untracked 新文件完整内容 ---")
@@ -617,7 +649,8 @@ def main() -> None:
 
     _verify_base(args.base)
 
-    head_short = _git(["rev-parse", "--short", "HEAD"]).strip() or "unknown"
+    # git 故障时 _git 返 None（sync-07）：降级 unknown 标签，不崩溃
+    head_short = (_git(["rev-parse", "--short", "HEAD"]) or "").strip() or "unknown"
     base_label = args.base if args.base != "HEAD" else "HEAD(工作区)"
     log_info(f"基准: {base_label} → HEAD ({head_short})")
     log_info(f"扫描: {patch_dir}/") 

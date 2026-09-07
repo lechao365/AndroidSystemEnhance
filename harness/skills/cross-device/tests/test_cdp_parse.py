@@ -82,8 +82,21 @@ class TestParse(unittest.TestCase):
     def test_unknown_line_exit_11(self):
         # 首行后出现不匹配 TAG_RE 的行 → 11（严格化，不再静默丢弃）
         text = "-s base:1a2b3c4d5e6f\n意图: x\n垃圾行\n验收: 无\n方向: y\n"
-        code, _ = cp.validate_batch(text, role="emit")
+        code, errs = cp.validate_batch(text, role="emit")
         self.assertEqual(code, 11)
+        # CDP-11：错误消息注明"规范化后行号"（与原始批次文件行号可能不符）
+        self.assertTrue(any("规范化后行号" in e for e in errs), errs)
+
+    def test_unknown_line_lineno_normalized_not_raw(self):
+        # CDP-11：原始文件含空行时原始行号与规范化行号漂移——消息行号须
+        # 注明规范化口径（垃圾行原始在第 6 行；规范化剥 3 个空行后位于
+        # 第 3 行：行1 首行、行2 意图、行3 垃圾行）
+        text = ("-s base:1a2b3c4d5e6f\n\n\n意图: x\n\n垃圾行\n"
+                "验收: 无\n方向: y\n")
+        code, errs = cp.validate_batch(text, role="emit")
+        self.assertEqual(code, 11)
+        self.assertTrue(any("规范化后行号 3" in e for e in errs), errs)
+        self.assertFalse(any("行号 6" in e for e in errs), errs)
 
     def test_duplicate_tag_rejected(self):
         # 三标签各占一段且不得重复：重复标签 → 11（emit/apply 均 blocking，结构错误）
@@ -91,6 +104,8 @@ class TestParse(unittest.TestCase):
         code, errs = cp.validate_batch(text, role="emit")
         self.assertEqual(code, 11)
         self.assertTrue(any("重复标签" in e for e in errs), errs)
+        # CDP-11：重复标签消息行号注明"规范化后行号"
+        self.assertTrue(any("规范化后行" in e for e in errs), errs)
         code, _ = cp.validate_batch(text, role="apply")
         self.assertEqual(code, 11, "重复标签不入 SOFT_ERRORS，apply 角色同样 blocking")
 
@@ -384,20 +399,34 @@ class TestParse(unittest.TestCase):
     # ── CDP 批次 checksum（emit 生成 / apply 校验）────────────────────
 
     def test_with_checksum_inserts_line_after_header(self):
-        # emit 生成：首行后插入 checksum 行，值 = 正文（头部以下全部行，
-        # 规范化后）sha256 前 16 位；正文行保持原样
+        # emit 生成：首行后插入 checksum 行，值 = 首行（mode+base）+ 正文
+        # （checksum 行以下全部行）规范化后 sha256 前 16 位；正文行保持原样
         out = cp.with_checksum(VALID_SV)
         lines = out.splitlines()
         self.assertEqual(lines[0], "-sv base:1a2b3c4d5e6f")
         m = cp.CHECKSUM_RE.match(lines[1])
         self.assertIsNotNone(m, lines[1])
         import hashlib
-        body = "\n".join(lines[2:])
+        covered = lines[0] + "\n" + "\n".join(lines[2:])
         expect = hashlib.sha256(
-            cp.normalize_batch_text(body).encode("utf-8")).hexdigest()[:16]
+            cp.normalize_batch_text(covered).encode("utf-8")).hexdigest()[:16]
         self.assertEqual(m.group(1), expect)
         self.assertEqual("\n".join(lines[2:]),
                          "\n".join(VALID_SV.splitlines()[1:]))
+
+    def test_with_checksum_leading_blank_lines_valid_both_roles(self):
+        # CDP-01：原始批次首行前有空行时 with_checksum 先规范化再定位首行
+        # （与解析口径对称）——旧行为按原文 splitlines 定位会把 checksum 行
+        # 插在空行之前，emit selfcheck（normalize 删空行）绿灯而 apply 恒拒
+        raw = "\n\n" + VALID_SV
+        out = cp.with_checksum(raw)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "-sv base:1a2b3c4d5e6f")
+        self.assertRegex(lines[1], r"^checksum: [0-9a-f]{16}$")
+        code, errs = cp.validate_batch(out, role="emit")
+        self.assertEqual(code, 0, errs)
+        code, _ = cp.validate_batch(out, role="apply")
+        self.assertEqual(code, 0)
 
     def test_with_checksum_idempotent_and_refresh(self):
         # 原位刷新：已有 checksum 行的批次再跑 with_checksum 输出不变；
@@ -424,6 +453,23 @@ class TestParse(unittest.TestCase):
             code, errs = cp.validate_batch(batch, role=role)
             self.assertEqual(code, cp.EXIT_CHECKSUM, (role, errs))
             self.assertTrue(any("CHECKSUM_MISMATCH" in e for e in errs), errs)
+
+    def test_checksum_first_line_tamper_rejected_both_roles(self):
+        # CDP-02：首行（mode+base）纳入 checksum 覆盖——-sv→-s / base 篡改
+        # 后 checksum 校验失败判红（exit 1，双角色 blocking），不再经
+        # exit 17（ACCEPTANCE 软错）降级 WARN 放行致验证等级静默降级
+        batch = cp.with_checksum(VALID_SV)
+        mode_tampered = batch.replace("-sv base:1a2b3c4d5e6f",
+                                      "-s base:1a2b3c4d5e6f", 1)
+        self.assertNotEqual(mode_tampered, batch)
+        for role in ("emit", "apply"):
+            code, errs = cp.validate_batch(mode_tampered, role=role)
+            self.assertEqual(code, cp.EXIT_CHECKSUM, (role, errs))
+            self.assertTrue(any("CHECKSUM_MISMATCH" in e for e in errs), errs)
+        base_tampered = batch.replace("base:1a2b3c4d5e6f",
+                                      "base:ffffffffffff", 1)
+        code, errs = cp.validate_batch(base_tampered, role="apply")
+        self.assertEqual(code, cp.EXIT_CHECKSUM, errs)
 
     def test_checksum_line_wrong_position_struct_error(self):
         # checksum 行不在紧跟首行的头部位置 → 按未知行报 11（结构错误）

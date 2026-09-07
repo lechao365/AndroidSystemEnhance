@@ -50,6 +50,7 @@ _SYNC = _SCRIPT_DIR.parent / "sync-code-to-workspace" / "sync_code_to_workspace.
 sys.path.insert(0, str(_SCRIPT_DIR.parents[0] / "cross-device" / "lib" / "python"))
 sys.path.insert(0, str(_SCRIPT_DIR.parents[1] / "lib"))
 from cdp_parse import batch_id_from_text  # noqa: E402
+from selfcheck import REQUIRED_RC_KEYS  # noqa: E402 方向 3：必查键单点定义（与 ws_report 同源）
 from verify_common import atomic_write_json as _atomic_write_json_impl  # noqa: E402
 
 import ws_lock  # noqa: E402
@@ -178,6 +179,16 @@ def _build_argv(name, product, out, chain_args):
     return cmd
 
 
+def _selfcheck_fallback_rcs(pytest_rc):
+    """故障兜底文本的 rc 段：覆盖 REQUIRED_RC_KEYS 全集（单点自 selfcheck
+    导入，与 ws_report 必查键同源，防新增 rc 后兜底文本再缺键）。pytest_rc
+    取真实语义值（超时 124 / 启动失败 1），其余工具未跑成按失败 rc=1 记——
+    缺任一键会让 ws_report 以「缺 *_rc 键」判 2 而非按真实非零 rc 判红，
+    诊断失真且破坏失败轮次收据契约。"""
+    return " | ".join(
+        f"{k}={pytest_rc if k == 'pytest_rc' else 1}" for k in REQUIRED_RC_KEYS)
+
+
 def _run_selfcheck(timeout=600):
     """跑 harness/lib/selfcheck.py 取自检摘要文本（board 收据强制入收据，方向 4）。
 
@@ -194,11 +205,10 @@ def _run_selfcheck(timeout=600):
             timeout=timeout)
         return ((proc.stdout or "") + (proc.stderr or "")).strip()
     except subprocess.TimeoutExpired:
-        return (f"error: selfcheck 超时（>{timeout}s）pytest_rc=124 | "
-                "refs_rc=1 | config_rc=1 | contract_rc=1")
+        return (f"error: selfcheck 超时（>{timeout}s）"
+                f"{_selfcheck_fallback_rcs(124)}")
     except OSError as e:
-        return (f"error: selfcheck 启动失败: {e} pytest_rc=1 | refs_rc=1 | "
-                "config_rc=1 | contract_rc=1")
+        return f"error: selfcheck 启动失败: {e} {_selfcheck_fallback_rcs(1)}"
 
 
 def _build_report_argv(chain_args, derive):
@@ -222,26 +232,29 @@ def _build_report_argv(chain_args, derive):
     return cmd
 
 
-def _step_rc(steps, name):
-    """已执行步骤的真实 rc；未执行返 None。"""
-    for s in steps:
-        if s["name"] == name:
-            return s["rc"]
-    return None
-
-
 def _derive_report_args(steps, overall):
     """收据参数派生：result/build/board/summary 全部由真实 rc 机械推导。
 
     - result：overall（pass/fail）
-    - build：push 过=产物在位记 pass；push 未跑或失败=skip（AI 可显式覆盖）
+    - build：push 未执行（前序已停，编译产物状态不可知）=skip；push 执行
+      且 rc=0（产物在位）=pass；push 已执行且未成功（rc!=0 或 canceled
+      的 rc=None，含编译产物缺失）=fail（push 已跑到产物环节失败，编译段
+      不可信，不得机械降级 skip 掩盖）
     - board：全过=pass；push/unit_test/acceptance 失败=fail（设备已被动过）；
       sync/connect 阶段失败=skip（未触及设备态）
     """
     failed = next((s for s in steps if s.get("canceled")
                    or s["rc"] is None or s["rc"] != 0), None)
     result = "pass" if overall == "pass" else "fail"
-    build = "pass" if _step_rc(steps, "push") == 0 else "skip"
+    # 步骤是否执行以 steps 在场为准（skipped 步骤不进 steps；_step_rc 对
+    # "未执行"与"canceled 的 rc=None"同为 None，不可用于区分执行与否）
+    push_step = next((s for s in steps if s["name"] == "push"), None)
+    if push_step is None:
+        build = "skip"
+    elif push_step["rc"] == 0:
+        build = "pass"
+    else:
+        build = "fail"
     if overall == "pass":
         board = "pass"
     elif failed and failed["name"] in ("push", "unit_test", "acceptance"):
@@ -301,7 +314,10 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
     timeouts：步骤名→秒 覆盖表（缺省 _STEP_TIMEOUTS）。
     use_locks：编排互斥锁开关（单测注入 False；生产恒 True）。
     """
-    run_id = os.environ.get("CDP_RUN_ID") or uuid.uuid4().hex
+    # 方向 5：CDP_RUN_ID 注入前保存现场，chain 结束后 finally 复原——否则
+    # 残留使同进程多轮 run_chain 复用首轮 run_id（串扰致产物跨轮错绑）
+    prev_cdp_run_id = os.environ.get("CDP_RUN_ID")
+    run_id = prev_cdp_run_id or uuid.uuid4().hex
     # 子步骤产物共享同 run_id：ws_report PASS 核验按 run_id 判同批
     os.environ["CDP_RUN_ID"] = run_id
     # 方向 5：CDP_BATCH_ID 注入前保存现场，chain 结束后 finally 复原——否则
@@ -361,7 +377,12 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
                    "skipped": list(_CHAIN_STEPS), "skip_reasons": {},
                    "error": str(exc)}
     finally:
-        # 方向 5：用完复原 CDP_BATCH_ID（原无则移除），防污染同进程后续用例
+        # 方向 5：用完复原 CDP_RUN_ID / CDP_BATCH_ID（原无则移除），防污染
+        # 同进程后续用例（多轮 run_chain 复用首轮 run_id 即串扰）
+        if prev_cdp_run_id is None:
+            os.environ.pop("CDP_RUN_ID", None)
+        else:
+            os.environ["CDP_RUN_ID"] = prev_cdp_run_id
         if prev_cdp_batch_id is None:
             os.environ.pop("CDP_BATCH_ID", None)
         else:

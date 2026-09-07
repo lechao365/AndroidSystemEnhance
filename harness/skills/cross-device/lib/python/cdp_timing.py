@@ -225,7 +225,13 @@ def _resolve_timing_path(args) -> tuple[Path | None, bool]:
         return Path(args.file), False
     env_id = os.environ.get("CDP_BATCH_ID", "").strip()
     if env_id:
-        return _timing_path(env_id), False
+        # env 来源与 --batch 同防（CDP-07）：BATCH_ID_RE 校验，非法拒用
+        # warn 后回落下一级（current-batch.json），不落非法路径（防注入）
+        if not BATCH_ID_RE.match(env_id):
+            print(f"warn: CDP_BATCH_ID 非法（须 12 位小写 hex），拒用回落: "
+                  f"{env_id!r}", file=sys.stderr)
+        else:
+            return _timing_path(env_id), False
     cur = _read_current_batch()
     if cur:
         return _timing_path(cur), False
@@ -481,19 +487,24 @@ def _cmd_finish(path: Path) -> int:
 
     保留 start_wall/marks 原始字段（ws_report --timings-file 两种结构皆可读，
     后续 mark 仍可追加）；仅新增 wall_end + segments。
+    读→算→写整体包进 _locked（CDP-06）：与并发 mark 交错时无锁的旧快照
+    覆盖写会吞 mark（finish 落盘的 marks 是加锁前快照，mark 写回被覆盖），
+    锁内保持单一 _load/_save 原子区间。
     """
-    data = _load(path)
-    if data is None:
-        print(f"error: 未 start（缺打点文件 {path}），先执行 cdp_timing.py start", file=sys.stderr)
-        return 3
-    out = {
-        "batch_id": data.get("batch_id", ""),
-        "start_wall": data.get("start_wall"),
-        "wall_end": _wall(),
-        "marks": data.get("marks", []),
-        "segments": compute_segments(data),
-    }
-    _save(path, out)
+    with _locked(path):
+        data = _load(path)
+        if data is None:
+            print(f"error: 未 start（缺打点文件 {path}），先执行 cdp_timing.py start",
+                  file=sys.stderr)
+            return 3
+        out = {
+            "batch_id": data.get("batch_id", ""),
+            "start_wall": data.get("start_wall"),
+            "wall_end": _wall(),
+            "marks": data.get("marks", []),
+            "segments": compute_segments(data),
+        }
+        _save(path, out)
     print(json.dumps(out, ensure_ascii=False, indent=2))
     print(f"timing finished: {path}")
     return 0

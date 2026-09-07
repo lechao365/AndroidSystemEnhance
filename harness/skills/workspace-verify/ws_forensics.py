@@ -33,6 +33,8 @@ import time
 import uuid
 from pathlib import Path
 
+import ws_adb_connect as ac  # noqa: E402（adb 二进制单点：LC_VERIFY_ADB_BIN 覆盖同源）
+
 # 单文件上限（字节）：超限截断并标记，防单条巨日志撑爆磁盘与收据链
 MAX_FILE_BYTES = 512 * 1024
 # 总量上限（字节）：达到即跳过后续采集项（manifest 记 skipped）
@@ -56,9 +58,12 @@ _BEST_EFFORT_CASES = [
 
 
 def adb_run(ep, args, timeout=60):
-    """adb -s <ep> <args...>；返回 (stdout+stderr, returncode)。"""
+    """adb -s <ep> <args...>；返回 (stdout+stderr, returncode)。
+
+    二进制经 ac.adb_bin()（LC_VERIFY_ADB_BIN 覆盖生效，单点同源）。
+    """
     try:
-        p = subprocess.run(["adb", "-s", ep] + args,
+        p = subprocess.run([ac.adb_bin(), "-s", ep] + args,
                            capture_output=True, text=True,
                            encoding="utf-8", errors="replace",
                            timeout=timeout)

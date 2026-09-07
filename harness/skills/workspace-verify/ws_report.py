@@ -335,8 +335,7 @@ def _validate_acceptance_pass(acceptance):
     """result=pass 时验收证据门禁：解析 acceptance JSON，overall 须为 pass 且
     无 fail 项，否则拒写（堵手填假绿混过 promote——仅查有无不看内容是洞）。
 
-    兼容两种结构（ws_acceptance.run 输出 {"overall","items"} 与历史数组格式
-    [{...}]）：overall 缺失的数组格式按「存在 fail 项」判定。
+    须为 ws_acceptance.run 输出的 JSON 对象（{"overall","items"}）。
     返回 (parsed, err)：err 非 None 时拒写（parsed 为 None）。
     """
     if not acceptance.strip():
@@ -345,15 +344,12 @@ def _validate_acceptance_pass(acceptance):
         data = json.loads(acceptance)
     except (ValueError, json.JSONDecodeError) as e:
         return None, f"--acceptance 须为合法 JSON（解析失败: {e}）"
-    if isinstance(data, dict):
-        if data.get("overall") != "pass":
-            return None, (f"acceptance overall 非 pass（实际 {data.get('overall')!r}），"
-                          "拒绝写 pass 收据")
-        items = data.get("items") or []
-    elif isinstance(data, list):
-        items = data
-    else:
-        return None, "--acceptance 须为 JSON 对象或数组"
+    if not isinstance(data, dict):
+        return None, "--acceptance 须为 JSON 对象（自描述验收产物）"
+    if data.get("overall") != "pass":
+        return None, (f"acceptance overall 非 pass（实际 {data.get('overall')!r}），"
+                      "拒绝写 pass 收据")
+    items = data.get("items") or []
     for it in items:
         if isinstance(it, dict) and it.get("status") == "fail":
             return None, "acceptance 含 fail 项（假绿），拒绝写 pass 收据"
@@ -454,6 +450,10 @@ def _validate_unit_test_file(path, acceptance_run_id):
         return None, "--unit-test-file 缺 run_id，拒绝 PASS"
     if acceptance_run_id and rid != acceptance_run_id:
         return None, "--unit-test-file run_id 与验收产物不一致（非同批产物），拒绝 PASS"
+    if not data.get("targets"):
+        # 空 targets（rc=0 产物却无任何单测证据）不得 PASS：与 push 空 items
+        # 拒绝对称，防零单测假绿
+        return None, "targets 为空，拒绝 PASS"
     for t in data.get("targets") or []:
         if not isinstance(t, dict):
             return None, "--unit-test-file 含非法 target 项，拒绝 PASS"

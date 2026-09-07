@@ -19,6 +19,15 @@ def _mark_worker(arg):
     return cdp_timing._do_mark(Path(path), f"worker-{i}", quiet=True)
 
 
+def _mixed_worker(arg):
+    """mark/finish 交错 worker（CDP-06 并发用例；stdout 重定向防污染）。"""
+    kind, path, i = arg
+    with contextlib.redirect_stdout(io.StringIO()):
+        if kind == "mark":
+            return cdp_timing._do_mark(Path(path), f"race-{i}", quiet=True)
+        return cdp_timing._cmd_finish(Path(path))
+
+
 class TestCdpTiming(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -550,6 +559,26 @@ class TestCdpTiming(unittest.TestCase):
         self.assertFalse((cdp_paths.log_apply_dir().parent.parent.parent
                           / "evil.json").exists())
 
+    def test_env_batch_id_injection_rejected_falls_back(self):
+        # CDP-07：CDP_BATCH_ID 环境变量过 BATCH_ID_RE 校验（--batch 已校验
+        # 而 env 漏，路径注入残留面）——注入 ../../evil 拒用 warn，回落
+        # current-batch.json 定位本批，不落非法路径
+        self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
+        os.environ["CDP_BATCH_ID"] = "../../evil"
+        try:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = cdp_timing.main(["mark", "--name", "verify_sync"])
+            self.assertEqual(rc, 0)
+            self.assertIn("CDP_BATCH_ID 非法", err.getvalue())
+            data = json.loads(self._path().read_text(encoding="utf-8"))
+            self.assertEqual(data["marks"][0]["name"], "verify_sync",
+                             "非法 env 应回落 current-batch.json 定位本批")
+        finally:
+            os.environ.pop("CDP_BATCH_ID", None)
+        self.assertFalse((cdp_paths.log_apply_dir().parent.parent.parent
+                          / "evil.json").exists())
+
     def test_load_rejects_corrupt_structure(self):
         # P2-11：marks 非 list / 顶层非对象 → _load 返 None（mark 按"未 start"
         # 处理返 3，不 AttributeError 裸栈崩溃）
@@ -618,6 +647,24 @@ class TestCdpTiming(unittest.TestCase):
         data = json.loads(self._path().read_text(encoding="utf-8"))
         names = [m["name"] for m in data.get("marks") or []]
         self.assertEqual(len([n for n in names if n.startswith("worker-")]), 8)
+
+    def test_finish_concurrent_with_marks_no_loss(self):
+        # CDP-06：finish 读→算→写包进 _locked——与并发 mark 交错时旧快照
+        # 覆盖写不再吞 mark（marks 数守恒，finish 落盘的 wall_end 亦不丢）
+        import multiprocessing
+
+        cdp_timing._cmd_start(self.batch)
+        path = str(self._path())
+        jobs = ([("mark", path, i) for i in range(6)]
+                + [("finish", path, 0)] * 2)
+        with multiprocessing.get_context("fork").Pool(4) as pool:
+            rcs = pool.map(_mixed_worker, jobs)
+        self.assertEqual(rcs, [0] * len(jobs))
+        data = json.loads(self._path().read_text(encoding="utf-8"))
+        names = [m["name"] for m in data.get("marks") or []]
+        self.assertEqual(sorted(n for n in names if n.startswith("race-")),
+                         sorted(f"race-{i}" for i in range(6)))
+        self.assertIn("wall_end", data, "finish 落盘不得被并发写覆盖丢失")
 
 
 class TestCdpTimingLock(unittest.TestCase):

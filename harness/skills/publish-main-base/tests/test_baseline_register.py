@@ -268,6 +268,57 @@ class TestBaselineRegister(unittest.TestCase):
             self.assertIn("拒绝登记", out)
             self.assertEqual(br.load()["baselines"], [])
 
+    def test_add_candidate_rejects_fail_result_receipt(self):
+        # pub-01 红灯：result=fail 收据（build/push_board=PASS、cases 失败）不得
+        # 登记——堵绕过链（fail 收据经 skip 收据成为 LATEST 后被 prepare 取作
+        # evidence 锚点放行登记；AGENTS.md 登记门禁：result 属 pass 或 skip）
+        rp = self._write_raw_receipt(result="fail", build="pass",
+                                     push_board="pass")
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 1)
+        self.assertIn("result=fail", out)
+        self.assertIn("登记门禁", out)
+        self.assertEqual(br.load()["baselines"], [])
+
+    def test_add_candidate_rejects_board_skip_result(self):
+        # pub-01 红灯：board 收据 result=skip（上板实测 skip 不具备证据性）拒登记
+        rp = self._write_raw_receipt(result="skip", verify_mode="board")
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 1)
+        self.assertIn("非 pass", out)
+        self.assertEqual(br.load()["baselines"], [])
+
+    def test_add_candidate_rejects_unknown_build(self):
+        # pub-03 红灯：build/board_verify=UNKNOWN 视同 FAIL（AGENTS.md）拒登记
+        for kw in ({"build": "unknown"}, {"push_board": "unknown"}):
+            rp = self._write_raw_receipt(**kw)
+            rc, out = self._run("add-candidate", "--receipt-path", rp,
+                                "--source-commit", "abc123",
+                                "--evidence-scope", "lcview-liveness")
+            self.assertEqual(rc, 1, kw)
+            self.assertIn("UNKNOWN 视同 FAIL", out)
+            self.assertEqual(br.load()["baselines"], [])
+
+    def test_add_candidate_explicit_id_duplicate_rejected(self):
+        # pub-06 红灯：显式 --baseline-id 已存在（任意状态）→ 拒绝，不产生重复 id
+        rp = self._make_receipt()
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--source-commit", "abc123",
+                                   "--evidence-scope", "lcview-liveness",
+                                   "--baseline-id", "BL-DUP-01")[0], 0)
+        rp2 = self._make_receipt()
+        rc, out = self._run("add-candidate", "--receipt-path", rp2,
+                            "--source-commit", "def456",
+                            "--evidence-scope", "lcview-liveness",
+                            "--baseline-id", "BL-DUP-01")
+        self.assertEqual(rc, 1)
+        self.assertIn("已存在", out)
+        self.assertEqual(len(br.load()["baselines"]), 1)
+
     def test_add_candidate_rejects_bad_enum(self):
         # 方向 4：verify_mode/result 非法枚举拒绝登记
         for kw in ({"verify_mode": "bogus"}, {"result": "bogus"}):
@@ -858,6 +909,46 @@ class TestBaselineRegister(unittest.TestCase):
         text = self._config.read_text(encoding="utf-8")
         self.assertEqual(text.count("# 头部"), 1)
         self.assertNotIn("条目内", text.split("baselines:", 1)[0])
+
+    @unittest.skipUnless(__import__("shutil").which("git"), "需要 git 解释器")
+    def test_code_changes_since_main_ignores_main_side(self):
+        # pub-04 红灯：两点语法 origin/main..HEAD——main 领先（main 侧有 code/
+        # 提交而 dev 无）时不得把 main 侧提交算进 dev 改动（三点对称差曾把
+        # main 侧提交误判为 dev 改动，令 no-code-change 豁免误拒）
+        import subprocess
+        repo = self._root / "repo"
+        repo.mkdir()
+
+        def _git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args],
+                                  capture_output=True, text=True,
+                                  encoding="utf-8", check=True)
+
+        _git("init", "-q")
+        _git("symbolic-ref", "HEAD", "refs/heads/main")
+        _git("config", "user.email", "t@t")
+        _git("config", "user.name", "t")
+        (repo / "code").mkdir()
+        (repo / "code" / "a.txt").write_text("base\n", encoding="utf-8")
+        _git("add", "-A")
+        _git("commit", "-q", "-m", "base")
+        _git("branch", "dev")
+        main_sha = _git("rev-parse", "HEAD").stdout.strip()
+        # 本地构造 origin/main 引用（无远端，直接写 remote-tracking ref）
+        _git("update-ref", "refs/remotes/origin/main", main_sha)
+        # main 领先：main 侧 code/ 提交（dev 不含）
+        _git("checkout", "-q", "main")
+        (repo / "code" / "m.txt").write_text("main\n", encoding="utf-8")
+        _git("add", "-A")
+        _git("commit", "-q", "-m", "main 侧 code 改动")
+        _git("checkout", "-q", "dev")
+        cwd = os.getcwd()
+        os.chdir(repo)
+        try:
+            changes = br._code_changes_since_main()
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(changes, [])
 
 
 if __name__ == "__main__":

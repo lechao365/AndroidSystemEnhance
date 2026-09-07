@@ -561,14 +561,20 @@ def _run_forensics(ep, since_epoch, items, first_error):
     try:
         tmp = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
                                           encoding="utf-8")
-        tmp.write(json.dumps({"first_error": first_error, "items": items},
-                             ensure_ascii=False, indent=2))
-        tmp.close()
-        _, run_dir = wf.collect(ep=ep, since_epoch=since_epoch,
-                                stdout_file=tmp.name)
-        os.unlink(tmp.name)
-        print(f"NOTE: 失败取证落盘: {run_dir}")
-        return str(run_dir)
+        try:
+            tmp.write(json.dumps({"first_error": first_error, "items": items},
+                                 ensure_ascii=False, indent=2))
+            tmp.close()
+            _, run_dir = wf.collect(ep=ep, since_epoch=since_epoch,
+                                    stdout_file=tmp.name)
+            print(f"NOTE: 失败取证落盘: {run_dir}")
+            return str(run_dir)
+        finally:
+            # 任何退出路径（含 collect 抛异常）都清理临时文件，防 /tmp 泄漏
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
     except (OSError, subprocess.SubprocessError, ValueError) as e:
         print(f"warn: 取证失败（不阻断）: {e}", file=sys.stderr)
         return None
@@ -835,7 +841,7 @@ def main(argv=None):
                           "items": []}, ensure_ascii=False))
         return 1
     _mark_stage("verify_acceptance_connect", batch_id)
-    if args.wait_ready and not ac.ensure_ready():
+    if args.wait_ready and not ac.ensure_ready(endpoint=ep):
         print(json.dumps({"overall": "fail",
                           "error": "设备未就绪（sys.boot_completed 超时，按不可达处理）",
                           "items": []}, ensure_ascii=False))
@@ -862,8 +868,11 @@ def main(argv=None):
 
     def adb_exec(cmd):
         try:
-            r = subprocess.run(ac.build_exec_cmd(cmd), capture_output=True,
-                               text=True, encoding="utf-8", errors="replace",
+            # exec 带 -s 定向本端点：多 serial 残留时缺 -s 会被 adb 以
+            # "more than one device" 拒绝（假红），贯穿 ensure_connected 的 ep
+            r = subprocess.run(ac.build_exec_cmd(cmd, endpoint=ep),
+                               capture_output=True, text=True,
+                               encoding="utf-8", errors="replace",
                                timeout=60)
             return ac.parse_exec_output(r.stdout)
         except subprocess.TimeoutExpired:
@@ -957,6 +966,14 @@ def main(argv=None):
                               "items": []}, ensure_ascii=False))
             return 1
         fprint = adb_exec("getprop ro.build.fingerprint")[0].strip()
+        if not fprint:
+            # 设备指纹获取失败（空串）→ 判红（与 serial 全空判红同口径）：
+            # 指纹是产物设备身份证据，空值产物不可信，不得静默落盘
+            print(json.dumps({"overall": "fail",
+                              "error": "设备指纹获取失败"
+                                       "（ro.build.fingerprint 为空），判红",
+                              "items": []}, ensure_ascii=False))
+            return 1
         result = {
             "run_id": run_id,
             "input_summary": acceptance,

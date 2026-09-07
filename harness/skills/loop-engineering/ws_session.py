@@ -278,6 +278,14 @@ def apply_done(session, receipt_path, stage=None, error_line=None,
         raise RuntimeError(
             f"收据头部解析有错 {receipt_path}: {'; '.join(rerrs)}，拒绝记账")
 
+    # 收据结论合法性（loop-01）：skip/revert 等收据无验证结论，机械归因
+    # task_fail 会同指纹冻结空烧 patience 提前 task_unsolvable——拒绝记账且
+    # 不更新计数/指纹，要求换有效 pass/fail 验证收据
+    if r.result not in ("pass", "fail"):
+        raise RuntimeError(
+            f"收据 result={r.result!r} 非 pass/fail（skip/revert 等收据不具备"
+            "验证结论），拒绝记账不耗轮次，请换有效验证收据后重试 done")
+
     if r.result == "pass":
         # 验收证据门禁：收据 result=pass 时 acceptance overall 须也为 pass
         # 且无 fail 项，否则拒记账（防手填假绿收据推进会话/终态 pass）
@@ -370,28 +378,32 @@ def prune_sessions():
     root = sessions_root()
     if _SESSION_KEEP <= 0:
         return []
-    # 排序键 (mtime, created_at, name)：mtime 升序最旧优先；粗粒度文件系统
-    # （如 /mnt/d drvfs）mtime 秒级并列时退化到 readdir 顺序，非确定性，
-    # 用 created_at（session.json）再 id hex 兜底保证确定（spec §4.7 硬化）
-    def _sort_key(p):
+    # 单次遍历缓存 (mtime, created_at, dir, session)（loop-03）：同一
+    # session.json 只解析一次（原先排序键与活跃判定重复解析）；目录 stat 包
+    # OSError 保护（并发删除时裸异常逃逸，保守跳过）。排序键 (mtime,
+    # created_at, name)：mtime 升序最旧优先；粗粒度文件系统（如 /mnt/d
+    # drvfs）mtime 秒级并列时退化到 readdir 顺序，非确定性，用
+    # created_at（session.json）再 id hex 兜底保证确定（spec §4.7 硬化）
+    entries = []
+    for d in root.glob("session-*"):
         try:
-            created = load_session(p / "session.json").get("created_at", "")
-        except SessionError:
-            created = ""
-        return (p.stat().st_mtime, created, p.name)
-    dirs = sorted((d for d in root.glob("session-*") if d.is_dir()),
-                  key=_sort_key)
-    total = len(dirs)
-    if total <= _SESSION_KEEP:
-        return []
-    finished = []
-    for d in dirs:
+            if not d.is_dir():
+                continue
+            mtime = d.stat().st_mtime
+        except OSError:
+            continue  # 并发删除/不可访问：保守跳过
         try:
             s = load_session(d / "session.json")
         except SessionError:
-            continue  # 损坏目录保守跳过（活跃判定不可靠时不冒险删除）
-        if s.get("exit_attribution"):
-            finished.append(d)
+            s = None  # 损坏目录保守跳过（活跃判定不可靠时不冒险删除）
+        entries.append((mtime, s.get("created_at", "") if s else "", d, s))
+    entries.sort(key=lambda e: (e[0], e[1], e[2].name))
+    dirs = [e[2] for e in entries]
+    total = len(dirs)
+    if total <= _SESSION_KEEP:
+        return []
+    finished = [e[2] for e in entries
+                if e[3] is not None and e[3].get("exit_attribution")]
     removed = []
     for d in finished:  # 排序键升序（mtime -> created_at -> id），最旧优先
         if total <= _SESSION_KEEP:

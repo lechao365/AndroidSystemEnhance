@@ -22,6 +22,10 @@ _ROOT = Path(__file__).resolve().parents[2]
 
 # 热路径检查器清单：selfcheck 每次调用并行 spawn 的治理脚本（方向 2）。
 # 新增治理检查器须登记于此，否则守卫不覆盖（check_test_discipline 亦在内）。
+# 清单维护要求（lib-14）：spawn 检查器 import 的 harness/lib 与
+# cross-device/lib/python 模块会被真实加载执行，须一并登记（含打点链
+# 延迟 import 的 cdp_* 与其 re-export 的 harness/lib 主实现）；新增依赖
+# 文件时同步登记，否则该文件的 rglob/os.walk 漂移不在守卫覆盖面。
 _HOT_PATHS = [
     "harness/lib/check_skill_refs.py",
     "harness/lib/check_config.py",
@@ -29,6 +33,15 @@ _HOT_PATHS = [
     "harness/lib/check_test_discipline.py",
     "harness/lib/selfcheck.py",
     "harness/skills/cross-device/lib/python/gen_manifest.py",
+    # ── 受守卫工具的 import 依赖文件（lib-14，spawn 时真实加载）──
+    "harness/lib/harness_lib.py",          # gen_manifest import（日志/初始化）
+    "harness/lib/paths.py",                # gen_manifest import（profile 路径）
+    "harness/lib/cdp_paths.py",            # selfcheck 打点/issue 链（主实现）
+    "harness/lib/role_guard.py",           # cdp_parse/cdp_emit_precheck import
+    "harness/skills/cross-device/lib/python/cdp_timing.py",   # selfcheck 打点
+    "harness/skills/cross-device/lib/python/cdp_parse.py",    # cdp_timing import
+    "harness/skills/cross-device/lib/python/cdp_paths.py",    # re-export 垫片
+    "harness/skills/cross-device/lib/python/cdp_issue.py",    # selfcheck flake 登记
 ]
 
 # 禁令：全树遍历调用（rglob / os.walk）

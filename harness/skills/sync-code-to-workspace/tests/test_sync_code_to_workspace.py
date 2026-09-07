@@ -377,5 +377,305 @@ class TestMarkStageDurS(unittest.TestCase):
         self.assertNotIn("--dur-s", args)
 
 
+class TestResolveWorkspaceTarget(unittest.TestCase):
+    """sync-01：包含性校验——绝对路径/.. 越界判红拒绝，正常路径与 scope 前缀不回归。"""
+
+    def test_absolute_rel_rejected(self):
+        repo = _make_git_repo()
+        with mock.patch.object(sw, "_kernel_ws", return_value=str(repo)), \
+             mock.patch.object(sw, "log_error") as le:
+            self.assertIsNone(sw._resolve_workspace_target("kernel", "/etc/passwd"))
+        le.assert_called_once()
+
+    def test_dotdot_escape_rejected(self):
+        repo = _make_git_repo()
+        with mock.patch.object(sw, "_kernel_ws", return_value=str(repo)), \
+             mock.patch.object(sw, "log_error") as le:
+            self.assertIsNone(sw._resolve_workspace_target("kernel", "../escape.txt"))
+        le.assert_called_once()
+
+    def test_normal_rel_resolves_inside_ws(self):
+        repo = _make_git_repo()
+        with mock.patch.object(sw, "_kernel_ws", return_value=str(repo)):
+            t = sw._resolve_workspace_target("kernel", "drivers/a.c")
+        self.assertIsNotNone(t)
+        self.assertIn(repo.resolve(), Path(t).parents)
+
+    def test_aosp_repo_scope_rel_resolves(self):
+        ws = Path(tempfile.mkdtemp())
+        scope = ws / "device" / "brcm" / "rpi5"
+        scope.mkdir(parents=True)
+        with mock.patch.object(sw, "_aosp_ws", return_value=str(ws)):
+            t = sw._resolve_workspace_target("aosp:device/brcm/rpi5", "f.txt")
+        self.assertEqual(Path(t), (scope / "f.txt").resolve())
+
+    def test_aosp_nonrepo_scope_prefix_rel_resolves(self):
+        ws = Path(tempfile.mkdtemp())
+        (ws / "top").mkdir()
+        with mock.patch.object(sw, "_aosp_ws", return_value=str(ws)):
+            t = sw._resolve_workspace_target("aosp:top", "top/sub/f.txt")
+        self.assertEqual(Path(t), (ws / "top/sub/f.txt").resolve())
+
+
+class TestApplyPlanDeleteTracked(unittest.TestCase):
+    """sync-02：plan delete 动作对 EXTRA-NEW-TRACKED 走 git rm -f（清 index+工作树）。"""
+
+    def test_plan_delete_tracked_cleans_index(self):
+        repo = _make_git_repo()
+        (repo / "new_tracked.txt").write_text("x", encoding="utf-8")
+        _git(repo, "add", "new_tracked.txt")
+        plan = Path(tempfile.mkdtemp()) / "plan.tsv"
+        plan.write_text(
+            "+\tEXTRA-NEW-TRACKED\tkernel\tnew_tracked.txt\tdelete\t删除对齐\n",
+            encoding="utf-8")
+        with mock.patch.object(sw, "_kernel_ws", return_value=str(repo)):
+            self.assertTrue(sw._apply_plan(str(plan)))
+        self.assertFalse((repo / "new_tracked.txt").exists())
+        # 纯 unlink 会残留 ` D`；git rm -f 后项目 status 必须干净
+        self.assertEqual(_git(repo, "status", "--porcelain"), "")
+
+
+class TestExtraAospCommittedChange(unittest.TestCase):
+    """sync-03：已提交未归档改动（HEAD 领先 base、工作树干净）须可检出。"""
+
+    def test_committed_change_detected_as_extra_modified(self):
+        ws = Path(tempfile.mkdtemp())
+        (ws / ".repo").mkdir()
+        (ws / ".repo" / "project.list").write_text("device/x\n", encoding="utf-8")
+        proj = ws / "device" / "x"
+        proj.mkdir(parents=True)
+        _git(proj, "init", "-q")
+        _git(proj, "config", "user.email", "t@t")
+        _git(proj, "config", "user.name", "t")
+        (proj / "base.txt").write_text("v1", encoding="utf-8")
+        _git(proj, "add", "-A")
+        _git(proj, "commit", "-qm", "c1")
+        base = _git(proj, "rev-parse", "HEAD")
+        (proj / "base.txt").write_text("v2", encoding="utf-8")
+        _git(proj, "add", "-A")
+        _git(proj, "commit", "-qm", "c2")
+        self.assertEqual(_git(proj, "status", "--porcelain"), "")
+        with mock.patch.object(sw, "_aosp_ws", return_value=str(ws)), \
+             mock.patch.object(sw, "_find_upstream_base", return_value=base):
+            rows, err = sw._extra_aosp_worker("device/x")
+        self.assertEqual(err, 0)
+        self.assertTrue(any("EXTRA-MODIFIED" in r and "base.txt" in r for r in rows))
+
+
+class TestDoCheckoutPatchSafety(unittest.TestCase):
+    """sync-04/10：BROKEN-DIFF 恢复原内容；apply 成功后无 staged 残留。"""
+
+    _BROKEN_DIFF = (
+        "diff --git a/base.txt b/base.txt\n"
+        "--- a/base.txt\n+++ b/base.txt\n"
+        "@@ -1 +1 @@\n-notbase\n+custom\n")
+    _APPLY_DIFF = (
+        "diff --git a/base.txt b/base.txt\n"
+        "--- a/base.txt\n+++ b/base.txt\n"
+        "@@ -1 +1 @@\n-base\n+custom\n")
+
+    def _code_root_with_diff(self, text: str) -> Path:
+        code = Path(tempfile.mkdtemp())
+        d = code / "kernel" / "modified"
+        d.mkdir(parents=True)
+        (d / "base.txt.diff").write_text(text, encoding="utf-8")
+        return code
+
+    def test_broken_diff_restores_original_content(self):
+        repo = _make_git_repo()
+        # 工作树含本地定制（与 base 不同），校验失败须原样恢复
+        (repo / "base.txt").write_text("local", encoding="utf-8")
+        base = _git(repo, "rev-parse", "HEAD")
+        code = self._code_root_with_diff(self._BROKEN_DIFF)
+        with mock.patch.object(sw, "_patch_root", return_value=code), \
+             mock.patch.object(sw, "_kernel_ws", return_value=str(repo)), \
+             mock.patch.object(sw, "_find_upstream_base", return_value=base):
+            ok = sw._do_checkout_patch("kernel", "base.txt")
+        self.assertFalse(ok)
+        # 不得留下"重置为 base"的破坏性半完成态（_git 辅助 strip 掉 porcelain 前导空格）
+        self.assertEqual((repo / "base.txt").read_text(encoding="utf-8"), "local")
+        self.assertEqual(_git(repo, "status", "--porcelain"), "M base.txt")
+
+    def test_apply_success_leaves_no_staged_residue(self):
+        repo = _make_git_repo()
+        # 归一换行后制造 HEAD≠base：base.txt 在两 commit 间有变化
+        (repo / "base.txt").write_text("base\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "normalize")
+        (repo / "base.txt").write_text("v2\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "c2")
+        base = _git(repo, "rev-parse", "HEAD~1")
+        code = self._code_root_with_diff(self._APPLY_DIFF)
+        with mock.patch.object(sw, "_patch_root", return_value=code), \
+             mock.patch.object(sw, "_kernel_ws", return_value=str(repo)), \
+             mock.patch.object(sw, "_find_upstream_base", return_value=base):
+            ok = sw._do_checkout_patch("kernel", "base.txt")
+        self.assertTrue(ok)
+        self.assertEqual((repo / "base.txt").read_text(encoding="utf-8"), "custom\n")
+        # index 对齐 HEAD：无 staged 残留（定制以未暂存改动呈现）
+        self.assertEqual(_git(repo, "diff", "--cached", "--name-only"), "")
+        self.assertEqual(_git(repo, "status", "--porcelain"), "M base.txt")
+
+
+class TestWsScanFlagsWarns(unittest.TestCase):
+    """sync-11：配置了路径但校验失败 → log_warn 指明跳过范围；未配置不告警。"""
+
+    def test_invalid_configured_kernel_warns_and_skips(self):
+        bad = tempfile.mkdtemp()  # 无 .git
+        with mock.patch.object(sw, "_kernel_ws", return_value=bad), \
+             mock.patch.object(sw, "_aosp_ws", return_value=""), \
+             mock.patch.object(sw, "log_warn") as lw:
+            k, a = sw._ws_scan_flags()
+        self.assertFalse(k)
+        self.assertFalse(a)
+        self.assertEqual(lw.call_count, 1)
+        self.assertIn("kernel", lw.call_args[0][0])
+
+    def test_invalid_configured_both_sides_warn(self):
+        bad_kernel = tempfile.mkdtemp()  # 无 .git
+        bad_aosp = Path(tempfile.mkdtemp()) / "no-repo"  # 无 .repo
+        bad_aosp.mkdir()
+        with mock.patch.object(sw, "_kernel_ws", return_value=bad_kernel), \
+             mock.patch.object(sw, "_aosp_ws", return_value=str(bad_aosp)), \
+             mock.patch.object(sw, "log_warn") as lw:
+            k, a = sw._ws_scan_flags()
+        self.assertFalse(k)
+        self.assertFalse(a)
+        self.assertEqual(lw.call_count, 2)
+
+    def test_valid_configured_no_warn(self):
+        repo = _make_git_repo()
+        ws = Path(tempfile.mkdtemp())
+        (ws / ".repo").mkdir()
+        with mock.patch.object(sw, "_kernel_ws", return_value=str(repo)), \
+             mock.patch.object(sw, "_aosp_ws", return_value=str(ws)), \
+             mock.patch.object(sw, "log_warn") as lw:
+            k, a = sw._ws_scan_flags()
+        self.assertTrue(k)
+        self.assertTrue(a)
+        lw.assert_not_called()
+
+    def test_unconfigured_no_warn(self):
+        with mock.patch.object(sw, "_kernel_ws", return_value=""), \
+             mock.patch.object(sw, "_aosp_ws", return_value=""), \
+             mock.patch.object(sw, "log_warn") as lw:
+            k, a = sw._ws_scan_flags()
+        self.assertFalse(k)
+        self.assertFalse(a)
+        lw.assert_not_called()
+
+
+class TestScanAospModifiedUnregistered(unittest.TestCase):
+    """sync-12：modified_root 下未登记 project.list 的一级目录告警；
+    嵌套登记项目（a/b）的一级目录 a 为合法前缀，不得误报。"""
+
+    def test_unregistered_dir_warns_registered_not(self):
+        ws = Path(tempfile.mkdtemp())
+        (ws / ".repo").mkdir()
+        (ws / ".repo" / "project.list").write_text("inlist/p\n", encoding="utf-8")
+        proj = ws / "inlist" / "p"
+        proj.mkdir(parents=True)
+        _git(proj, "init", "-q")
+        _git(proj, "config", "user.email", "t@t")
+        _git(proj, "config", "user.name", "t")
+        (proj / "a.c").write_text("a\n", encoding="utf-8")
+        _git(proj, "add", "-A")
+        _git(proj, "commit", "-qm", "c")
+        base = _git(proj, "rev-parse", "HEAD")
+        code = Path(tempfile.mkdtemp())
+        (code / "aosp" / "modified" / "inlist" / "p").mkdir(parents=True)
+        (code / "aosp" / "modified" / "orphan").mkdir(parents=True)
+        out = Path(tempfile.mkdtemp()) / "out.tsv"
+        out.touch()
+        with mock.patch.object(sw, "_aosp_ws", return_value=str(ws)), \
+             mock.patch.object(sw, "_patch_root", return_value=code), \
+             mock.patch.object(sw, "_find_upstream_base", return_value=base), \
+             mock.patch.object(sw, "log_warn") as lw:
+            m, e = sw._scan_aosp_modified(str(out))
+        self.assertEqual(e, 0)
+        warns = [c[0][0] for c in lw.call_args_list]
+        self.assertTrue(any("orphan" in w for w in warns))
+        self.assertFalse(any("inlist" in w for w in warns))
+
+
+class TestNonRepoNestedGitSkip(unittest.TestCase):
+    """sync-13：非 repo 扫描遇嵌套 git 仓库跳过子树——内容不得标 EXTRA
+    （--auto 会按 EXTRA-NEW-UNTRACKED 物理删除）。"""
+
+    def test_nested_repo_contents_not_flagged(self):
+        ws = Path(tempfile.mkdtemp())
+        (ws / ".repo").mkdir()
+        (ws / ".repo" / "project.list").write_text("reg\n", encoding="utf-8")
+        (ws / "reg").mkdir()
+        top = ws / "top"
+        (top / "nested").mkdir(parents=True)
+        (top / "nested" / ".git").mkdir()
+        (top / "nested" / "inner.c").write_text("x", encoding="utf-8")
+        (top / "plain.c").write_text("y", encoding="utf-8")
+        code = Path(tempfile.mkdtemp())
+        out = Path(tempfile.mkdtemp()) / "out.tsv"
+        out.touch()
+        with mock.patch.object(sw, "_aosp_ws", return_value=str(ws)), \
+             mock.patch.object(sw, "_patch_root", return_value=code), \
+             mock.patch.object(sw, "log_warn") as lw:
+            sw._scan_extra_aosp_non_repo(str(out))
+        text = out.read_text(encoding="utf-8")
+        self.assertIn("top/plain.c", text)
+        self.assertNotIn("nested", text)
+        self.assertTrue(any("嵌套" in c[0][0] for c in lw.call_args_list))
+
+
+class TestWarnDirtyCodeTree(unittest.TestCase):
+    """sync-05：code 工作树非干净 → 显式 warn 留痕（保持放行不阻断）。"""
+
+    def test_dirty_tree_warns(self):
+        dirty = mock.Mock(returncode=0, stdout=" M code/f.c\n", stderr="")
+        with mock.patch.object(sw, "_patch_root", return_value="/tmp/x"), \
+             mock.patch.object(sw, "_git_run", return_value=dirty) as gr, \
+             mock.patch.object(sw, "log_warn") as lw:
+            sw._warn_dirty_code_tree()
+        gr.assert_called_once()
+        self.assertEqual(gr.call_args[0][0], ["status", "--porcelain"])
+        lw.assert_called_once()
+        self.assertIn("非干净", lw.call_args[0][0])
+
+    def test_clean_tree_no_warn(self):
+        clean = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(sw, "_patch_root", return_value="/tmp/x"), \
+             mock.patch.object(sw, "_git_run", return_value=clean), \
+             mock.patch.object(sw, "log_warn") as lw:
+            sw._warn_dirty_code_tree()
+        lw.assert_not_called()
+
+
+class TestVerifyCheckoutOnlyKept(unittest.TestCase):
+    """sync-06：checkout-only 执行条目重扫仍偏离 → 归 KEPT 豁免，不判 RESIDUAL。"""
+
+    def test_checkout_only_residual_exempted(self):
+        tmp = Path(tempfile.mkdtemp())
+        orig = tmp / "plan.tsv"
+        orig.write_text(
+            "+\tMODIFIED-DIVERGED\tkernel\tb.c\tcheckout-only\t用户保留\n",
+            encoding="utf-8")
+        new = tmp / "new.tsv"
+        new.write_text(
+            "+\tMODIFIED-DIVERGED\tkernel\tb.c\tcheckout\t仍偏离\n",
+            encoding="utf-8")
+
+        def _write_new(out):
+            Path(out).write_text(new.read_text(encoding="utf-8"))
+            return 0
+
+        with mock.patch.object(sw, "_gen_plan_silent", side_effect=_write_new), \
+             mock.patch.object(sw, "_artifact_path",
+                               return_value=str(tmp / "verify.tsv")):
+            ok = sw._verify_after_apply(str(orig))
+        self.assertTrue(ok)
+        content = (tmp / "verify.tsv").read_text(encoding="utf-8")
+        self.assertIn("KEPT\tkernel\tb.c", content)
+        self.assertNotIn("RESIDUAL\t", content)
+
+
 if __name__ == "__main__":
     unittest.main()

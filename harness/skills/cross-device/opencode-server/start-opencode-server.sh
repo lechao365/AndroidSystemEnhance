@@ -272,9 +272,10 @@ write_systemd_service() {
     }
 
     # 原子写：同目录临时文件 + mv（中断不留半写态；EnvironmentFile 用 SERVER_ENV_FILE
-    # 解析后的实际路径，即 ENV_OPENCODE_SERVER_ENV_FILE 或默认值）
+    # 解析后的实际路径，即 ENV_OPENCODE_SERVER_ENV_FILE 或默认值）。
+    # unit 内路径值统一加双引号（systemd 支持引号值，路径含空格不断裂）
     local tmp_file="$SYSTEMD_USER_DIR/.${SERVICE_UNIT}.tmp"
-    if ! cat > "$tmp_file" <<EOF
+    cat > "$tmp_file" <<EOF
 [Unit]
 Description=OpenCode Web UI Service
 After=network-online.target
@@ -282,9 +283,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=$SERVER_ENV_FILE
-WorkingDirectory=$TARGET_ROOT
-ExecStart=$OPENCODE_BIN web --hostname $SERVER_HOST --port $PORT
+EnvironmentFile="$SERVER_ENV_FILE"
+WorkingDirectory="$TARGET_ROOT"
+ExecStart="$OPENCODE_BIN" web --hostname "$SERVER_HOST" --port $PORT
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -293,19 +294,21 @@ PrivateTmp=true
 [Install]
 WantedBy=default.target
 EOF
-    then
+    # 真实失败码先捕获再清理（修复：rm -f 恒 0 会覆盖 cat 退出码致 rc 丢失）
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
         rm -f "$tmp_file"
-        local rc=$?
         step_end "$rc"
         on_err "${BASH_LINENO[0]}" "写入 $SERVICE_FILE" "$rc"
     fi
 
-    if ! mv -f "$tmp_file" "$SERVICE_FILE"; then
-        rm -f "$tmp_file"
+    mv -f "$tmp_file" "$SERVICE_FILE" || {
+        # 对照 mkdir 分支的 || {} 写法统一：|| 右侧 $? 即 mv 真实退出码
         local rc=$?
+        rm -f "$tmp_file"
         step_end "$rc"
         on_err "${BASH_LINENO[0]}" "mv -f $tmp_file $SERVICE_FILE" "$rc"
-    fi
+    }
 
     systemctl --user daemon-reload >/dev/null 2>&1 || {
         local rc=$?

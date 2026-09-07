@@ -20,12 +20,18 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
 
-# 禁令模式 → 违规类别（方向 1：idle-hardening 禁止修法机械化）
+# 禁令模式 → 违规类别（方向 1：idle-hardening 禁止修法机械化）。
+# sleep 分支（lib-15）：在原 time.sleep / 非标识符前导裸调两分支基础上
+# 补 行首裸 sleep( 与 asyncio.sleep( ——此前漏 asyncio.sleep 与行首裸调，
+# sleep 重试可换皮绕过守卫
 _BANNED = [
     (re.compile(r"@pytest\.mark\.xfail\b|pytest\.xfail\s*\("), "xfail"),
     (re.compile(r"@pytest\.mark\.skip(?:if)?\b|pytest\.skip(?:if)?\s*\("),
      "skip"),
-    (re.compile(r"(?:^|[^.\w])time\.sleep\s*\(|[^.\w]sleep\s*\("), "sleep"),
+    (re.compile(r"(?:^|[^.\w])time\.sleep\s*\("
+                r"|[^.\w]sleep\s*\("
+                r"|^\s*sleep\s*\("
+                r"|asyncio\.sleep\s*\("), "sleep"),
 ]
 
 
@@ -49,13 +55,28 @@ def _git_lines(args: list[str], cwd: Path):
 
 
 def scan(repo: Path, rev: str = "HEAD") -> list[str]:
-    """返回违规明细列表（空 = 无违规）。"""
-    changed = _git_lines(["diff", "--name-only", rev], repo) or []
+    """返回违规明细列表（空 = 无违规）。
+
+    git 调用失败 fail-closed（lib-07）：.git 存在但 diff 返回码非 0 时
+    不得当"无改动"假绿——输出 error 并以哨兵违规判红（rc=1 交
+    discipline_rc 透出），防仓库异常场景静默放行。
+    """
+    changed = _git_lines(["diff", "--name-only", rev], repo)
+    if changed is None:
+        print(f"error: git diff --name-only {rev} 失败（仓库异常/命令不可用），"
+              "无法扫描测试改动，判红", file=sys.stderr)
+        return [f"{repo}: git diff 失败，无法扫描（按违规判红）"]
     findings: list[str] = []
     for rel in sorted(changed):
         if not rel.endswith(".py") or not _is_test_file(rel):
             continue
-        for ln in _git_lines(["diff", rev, "--", rel], repo) or []:
+        file_lines = _git_lines(["diff", rev, "--", rel], repo)
+        if file_lines is None:
+            print(f"error: git diff {rel} 失败，无法扫描，判红",
+                  file=sys.stderr)
+            findings.append(f"{rel}: git diff 失败，无法扫描（按违规判红）")
+            continue
+        for ln in file_lines:
             if not ln.startswith("+") or ln.startswith("+++"):
                 continue
             added = ln[1:]

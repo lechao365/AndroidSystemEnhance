@@ -54,6 +54,25 @@ class TestCompare(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("双空", msg)
 
+    def test_nested_brace_block_returns_red(self):
+        # lib-09 红灯：嵌套 struct（块内嵌套花括号）超出 BLOCK_RE [^}]*
+        # 提取器支持范围，提取不到会静默漏检——fail-closed 判红交人工复核
+        text = ("struct outer {\n"
+                "    struct inner {\n"
+                "        int a;\n"
+                "    };\n"
+                "    int b;\n"
+                "};\n")
+        k = self._write(text)
+        a = self._write(text)
+        try:
+            rc, msg = compare(k, a)
+        finally:
+            k.unlink(); a.unlink()
+        self.assertEqual(rc, 1)
+        self.assertIn("嵌套", msg)
+        self.assertIn("outer", msg)
+
 
 if __name__ == "__main__":
     unittest.main()

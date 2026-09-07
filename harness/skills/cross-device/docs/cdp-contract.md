@@ -17,7 +17,7 @@
 |---|---|
 | 模式 | `-s` 仅代码改动无上板验证；`-sv` 需上板验证 |
 | base | 12 位 hex，= emit 产批时 origin/dev HEAD 前 12 位；apply 以 `--expect-base $(git rev-parse --short=12 HEAD)` 比对，不匹配整批拒绝（exit 18） |
-| checksum | 头部元数据行（紧跟首行），值 = 批次正文（首行与 checksum 行以下全部行，规范化后）sha256 前 16 位；emit 产批经 `--gen-checksum` 生成，apply 侧解析存在即校验，不符整批拒绝（exit 1，双角色 blocking，防传输篡改/损坏）；无 checksum 行的旧批次 warn 兼容放行。他处出现 checksum 行按未知行报 11 |
+| checksum | 头部元数据行（紧跟首行），值 = 首行（mode+base）与正文（checksum 行以下全部行）规范化后整体 sha256 前 16 位；**首行纳入覆盖**（防 `-sv`→`-s` 等 mode/base 篡改静默过 checksum）；emit 产批经 `--gen-checksum` 生成（先规范化再定位首行，与解析口径对称），apply 侧解析存在即校验，不符整批拒绝（exit 1，双角色 blocking，防传输篡改/损坏）；无 checksum 行的旧批次 warn 兼容放行。他处出现 checksum 行按未知行报 11。结构错误消息中的行号为规范化后行号（与原始文件行号可能不一致） |
 | 三标签 | 必填各占一段，且不得重复（重复标签报 11 结构错误，emit/apply 均 blocking）；标签顺序不强制 |
 | 预算 | 总字符 50~500（含首行；checksum 行为机器元数据不计入，防 500 上限被挤占） |
 | 引号禁令 | 批次正文禁用单双引号字符（' 与 "，emit 角色校验，违规 exit 19）——apply 侧传输层会展开吞字致批次结构损坏；改用中文标点（「」、——）或去引号 |

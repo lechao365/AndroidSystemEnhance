@@ -151,14 +151,22 @@ def main(argv=None):
     for f in args.files:
         ok, errs = validate_diff(f)
         if args.against:
-            r = subprocess.run(["git", "-C", args.against, "apply", "--check", f],
-                               capture_output=True, text=True,
-                               encoding="utf-8", errors="replace")
-            if r.returncode != 0:
-                stderr_lines = (r.stderr or "").strip().splitlines()
-                detail = stderr_lines[0] if stderr_lines else f"exit={r.returncode}"
-                errs.append(f"git apply --check 拒绝: {detail}")
+            try:
+                r = subprocess.run(
+                    ["git", "-C", args.against, "apply", "--check", f],
+                    capture_output=True, text=True,
+                    encoding="utf-8", errors="replace",
+                    timeout=30)  # drvfs 卡死防护：无 timeout 曾致整链挂起
+            except subprocess.TimeoutExpired:
+                # 超时判红（fail-closed）：卡死不得静默当通过
+                errs.append("git apply --check 超时（30s，疑似 drvfs/文件系统卡死），判红阻断")
                 ok = False
+            else:
+                if r.returncode != 0:
+                    stderr_lines = (r.stderr or "").strip().splitlines()
+                    detail = stderr_lines[0] if stderr_lines else f"exit={r.returncode}"
+                    errs.append(f"git apply --check 拒绝: {detail}")
+                    ok = False
         for e in errs:
             print(f"{f}: error: {e}")
         if not ok:
