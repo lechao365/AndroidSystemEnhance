@@ -515,11 +515,12 @@ class TestCheckPythonEnv(unittest.TestCase):
         ioctl_res = (1, "签名漂移: vendor_lechao_usbd_config\n", "", 0.1)
         manifest_res = (0, "[OK] 一致\n", "", 0.1)
         ruff_res = (0, "All checks passed!\n", "", 0.1)
+        host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_cmd",
                                   side_effect=[ioctl_res, manifest_res,
-                                               ruff_res]):
+                                               ruff_res, host_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -548,11 +549,12 @@ class TestCheckPythonEnv(unittest.TestCase):
         ioctl_res = (0, "[OK] 一致\n", "", 0.1)
         manifest_res = (1, "[ERROR] manifest 未登记 1 个 code/rpi5 文件\n", "", 0.1)
         ruff_res = (0, "All checks passed!\n", "", 0.1)
+        host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_cmd",
                                   side_effect=[ioctl_res, manifest_res,
-                                               ruff_res]):
+                                               ruff_res, host_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -566,16 +568,37 @@ class TestCheckPythonEnv(unittest.TestCase):
         ioctl_res = (0, "[OK] 一致\n", "", 0.1)
         manifest_res = (0, "[OK] 一致\n", "", 0.1)
         ruff_res = (0, "All checks passed!\n", "", 0.1)
+        host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_cmd",
                                   side_effect=[ioctl_res, manifest_res,
-                                               ruff_res]):
+                                               ruff_res, host_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
         self.assertIn("ruff_rc=0", out)
         self.assertIn("All checks passed!", out)
+
+    def test_main_includes_host_segment(self):
+        # P0-A：selfcheck 接入 check_host_tests → 输出含 host_rc=0 与结论行
+        fake = _fake_run([
+            _FakeProc(0, "531 passed in 27.9s\n"),
+        ])
+        ioctl_res = (0, "[OK] 一致\n", "", 0.1)
+        manifest_res = (0, "[OK] 一致\n", "", 0.1)
+        ruff_res = (0, "All checks passed!\n", "", 0.1)
+        host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
+        buf = io.StringIO()
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
+                mock.patch.object(selfcheck, "_collect_cmd",
+                                  side_effect=[ioctl_res, manifest_res,
+                                               ruff_res, host_res]):
+            with redirect_stdout(buf):
+                selfcheck.main()
+        out = buf.getvalue()
+        self.assertIn("host_rc=0", out)
+        self.assertIn("内核 host 单测全部通过", out)
 
     def test_main_includes_checker_durations(self):
         # 方向 2 + 6：逐检查器耗时入输出行（durs: py/refs/cfg/pyenv/ioctl/
@@ -623,8 +646,8 @@ class TestCheckPythonEnv(unittest.TestCase):
                 selfcheck.main()
         # 顺序固定：refs/cfg 并行段启动 → ioctl Popen → manifest Popen →
         # ruff Popen → pytest（重叠开始），此后才收口
-        self.assertEqual(calls[:5], ["tools", "spawn", "spawn", "spawn",
-                                     "pytest"])
+        self.assertEqual(calls[:6], ["tools", "spawn", "spawn", "spawn",
+                                     "spawn", "pytest"])
 
 
 class TestFlakeRerun(unittest.TestCase):
