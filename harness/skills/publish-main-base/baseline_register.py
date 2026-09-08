@@ -238,7 +238,7 @@ def _read_approval_token(token_file: str | None = None) -> str:
     """读 promote-approval.env 预设 token（缺省
     harness/config/promote-approval.env）；不存在返回 ''。"""
     path = Path(token_file) if token_file else (
-        Path(__file__).resolve().parents[2] / "harness" / "config"
+        Path(__file__).resolve().parents[2] / "config"
         / "promote-approval.env")
     try:
         for ln in path.read_text(encoding="utf-8").splitlines():
@@ -252,8 +252,13 @@ def _read_approval_token(token_file: str | None = None) -> str:
 
 def _check_approval_independence(approved_by: str,
                                  operator: str,
-                                 token: str) -> tuple[bool, str]:
-    """审批独立校验：返回 (ok, err)。"""
+                                 token: str,
+                                 token_file: str | None = None) -> tuple[bool, str]:
+    """审批独立校验：返回 (ok, err)。
+
+    token_file（方向 1）：--approval-token-file 透传（测试/异地覆盖），
+    缺省读 harness/config/promote-approval.env。
+    """
     if not (approved_by or "").strip():
         return False, "promote 必须传 --approved-by（审批凭据外部化）"
     if _norm_identity(approved_by) == _norm_identity(operator) \
@@ -266,8 +271,14 @@ def _check_approval_independence(approved_by: str,
     # 占位符/尖括号一律拒（真实随机 token 不含 < >）
     if "<" in provided or ">" in provided:
         return False, "LC_PROMOTE_APPROVAL_TOKEN 为占位符，拒绝 promote"
-    expected = _read_approval_token()
-    if expected and provided != expected:
+    expected = _read_approval_token(token_file)
+    if not expected:
+        # 缺 token 判红（方向 1）：预设文件缺失/未预设即凭据外部化失败，
+        # 不得静默放行（此前默认路径多拼一层恒读空、空 expected 短路跳过
+        # 比对 fail-open）
+        return False, ("promote-approval.env 缺失或未预设 "
+                       "LC_PROMOTE_APPROVAL_TOKEN（审批凭据外部化失败）")
+    if provided != expected:
         return False, "LC_PROMOTE_APPROVAL_TOKEN 与 promote-approval.env 预设值不一致"
     return True, ""
 
@@ -638,7 +649,8 @@ def main(argv=None):
                     return 1
                 ok, aerr = _check_approval_independence(
                     args.approved_by, _collect_operator(),
-                    os.environ.get("LC_PROMOTE_APPROVAL_TOKEN", ""))
+                    os.environ.get("LC_PROMOTE_APPROVAL_TOKEN", ""),
+                    args.approval_token_file or None)
                 if not ok:
                     print(f"error: {aerr}", file=sys.stderr)
                     return 1

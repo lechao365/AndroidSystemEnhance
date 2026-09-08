@@ -78,6 +78,10 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         # fixture 须拷入临时根 harness/config/ 才能走通 prepare/promote
         shutil.copy(REPO_ROOT / "harness" / "config" / "verify-cases.yaml",
                     cfg / "verify-cases.yaml")
+        # P1-B 审批独立（KI-20260907-001）fail-closed 配套：预设 token 文件与
+        # env 值一致（_read_approval_token 缺 token 判红，不再空 expected fail-open）
+        (cfg / "promote-approval.env").write_text(
+            "LC_PROMOTE_APPROVAL_TOKEN=tok-test\n", encoding="utf-8")
         # 真 git 仓：c1（内容）→ c2（内容，HEAD）
         self._git("init")
         self._git("symbolic-ref", "HEAD", "refs/heads/dev")
@@ -573,8 +577,8 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         msg = Path(self._remote_tmp.name) / "promote-msg.txt"
         msg.write_text("构建(baseline): BL-TEST-01 基线晋升\n", encoding="utf-8")
         # P1-B：审批独立（KI-20260907-001）——审批人 reviewer ≠ 执行人 t；
-        # env token 非占位符且临时根无 promote-approval.env（_read_approval_token
-        # 返空 → 任意非空 token 过），放行
+        # env token 非占位符且临时根 promote-approval.env 预设一致（fail-closed：
+        # 缺预设即判红），放行
         self._env["LC_PROMOTE_APPROVAL_TOKEN"] = "tok-test"
         return self._run("--promote", "--baseline-id", "BL-TEST-01",
                          "--message-file", str(msg), "--task", "t1",

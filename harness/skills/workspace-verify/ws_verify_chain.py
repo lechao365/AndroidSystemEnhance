@@ -246,9 +246,14 @@ def _derive_report_args(steps, overall):
       不可信，不得机械降级 skip 掩盖）
     - board：全过=pass；push/unit_test/acceptance 失败=fail（设备已被动过）；
       sync/connect 阶段失败=skip（未触及设备态）
+    - coverage 步（P1-A 只记录不门禁）不进入 board/链停判定：其失败不得
+      抢先成为 failed 使 board 判 skip 掩盖其后真实的上板失败（方向 4）。
     """
-    failed = next((s for s in steps if s.get("canceled")
-                   or s["rc"] is None or s["rc"] != 0), None)
+    # 排除 coverage：只记录不门禁（P1-A），失败不阻断链、不改 overall，也不得
+    # 充当 board/链停归因（否则 coverage 先失败时 board 判 skip 掩盖真实上板失败）
+    real_failed = next((s for s in steps if s["name"] != "coverage"
+                        and (s.get("canceled") or s["rc"] is None
+                             or s["rc"] != 0)), None)
     result = "pass" if overall == "pass" else "fail"
     # 步骤是否执行以 steps 在场为准（skipped 步骤不进 steps；_step_rc 对
     # "未执行"与"canceled 的 rc=None"同为 None，不可用于区分执行与否）
@@ -261,7 +266,7 @@ def _derive_report_args(steps, overall):
         build = "fail"
     if overall == "pass":
         board = "pass"
-    elif failed and failed["name"] in ("push", "unit_test", "acceptance"):
+    elif real_failed and real_failed["name"] in ("push", "unit_test", "acceptance"):
         board = "fail"
     else:
         board = "skip"
@@ -269,8 +274,9 @@ def _derive_report_args(steps, overall):
         ran = "→".join(s["name"] for s in steps) or "无步骤"
         summary = f"全链通过（{ran}）"
     else:
-        why = "超时取消" if failed and failed.get("canceled") else f"rc={failed['rc'] if failed else '?'}"
-        summary = f"链停于 {failed['name'] if failed else '?'}（{why}）"
+        why = ("超时取消" if real_failed and real_failed.get("canceled")
+               else f"rc={real_failed['rc'] if real_failed else '?'}")
+        summary = f"链停于 {real_failed['name'] if real_failed else '?'}（{why}）"
     return {"result": result, "build": build, "board": board,
             "summary": summary}
 

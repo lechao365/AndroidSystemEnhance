@@ -178,8 +178,8 @@ stages:
    --metrics "<性能三指标 JSON 对象>"] \
    [--timings-file harness/log/cross-device/timings-<batch_id>.json] \
    --selfcheck "<自检摘要（全部 *_rc 键，见 harness/lib/selfcheck.py 的
-   REQUIRED_RC_KEYS 九键：pytest/refs/config/contract/pyenv/ioctl/manifest/
-   discipline/scan——任一缺失 ws_report 拒写）>"
+   REQUIRED_RC_KEYS：pytest/refs/config/contract/pyenv/ioctl/manifest/
+   discipline/scan/ruff/host/metrics/opencode——任一缺失 ws_report 拒写）>"
    （--batch-file/--target 为模式 A 参数；--body 必传：CDP 原文 + 各阶段明细 +
    失败现场摘录，自动脱敏；PASS 必传 --acceptance-file（步骤 5 自描述验收产物）
    与 --unit-test-file（步骤 4b 自描述单测产物）与 --push-file（步骤 4 自描述

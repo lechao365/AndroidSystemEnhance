@@ -1008,5 +1008,70 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(changes, [])
 
 
+class TestApprovalTokenNoStub(unittest.TestCase):
+    """审批 token 不打桩例（方向 1：修路径 + 缺 token 判红）。
+
+    既有 promote 用例全部 stub `_read_approval_token` 返预设值，路径多拼
+    一层 harness 恒读空 + 空 expected 短路放行的 fail-open 被整体掩盖。
+    本类直接测真实文件读取（不打桩）与缺预设判红行为。
+    """
+
+    def test_read_approval_token_real_file(self):
+        # 不打桩：写真实 env 文件直读（回归值解析与引号剥离）
+        with tempfile.TemporaryDirectory() as d:
+            env = Path(d) / "promote-approval.env"
+            env.write_text('LC_PROMOTE_APPROVAL_TOKEN="tok-xyz"\n',
+                           encoding="utf-8")
+            self.assertEqual(br._read_approval_token(str(env)), "tok-xyz")
+
+    def test_read_approval_token_strips_single_quotes(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = Path(d) / "promote-approval.env"
+            env.write_text("LC_PROMOTE_APPROVAL_TOKEN='tok-s'\n",
+                           encoding="utf-8")
+            self.assertEqual(br._read_approval_token(str(env)), "tok-s")
+
+    def test_read_approval_token_missing_file_empty(self):
+        self.assertEqual(br._read_approval_token("/nonexistent/x.env"), "")
+
+    def test_check_missing_preset_token_rejects(self):
+        # 缺预设判红（fail-open 修复核心）：预设空 → 必须拒（此前空 expected
+        # 短路跳过比对，任意非空 token 放行）
+        with mock.patch.object(br, "_read_approval_token", return_value=""):
+            ok, err = br._check_approval_independence(
+                "reviewer <r@x.com>", "lechao <lechao@x.com>", "any-token")
+        self.assertFalse(ok)
+        self.assertIn("promote-approval.env 缺失或未预设", err)
+
+    def test_check_mismatch_rejects(self):
+        with mock.patch.object(br, "_read_approval_token",
+                               return_value="preset-tok"):
+            ok, err = br._check_approval_independence(
+                "reviewer", "lechao", "wrong-tok")
+        self.assertFalse(ok)
+        self.assertIn("不一致", err)
+
+    def test_check_match_ok(self):
+        with mock.patch.object(br, "_read_approval_token",
+                               return_value="preset-tok"):
+            ok, _ = br._check_approval_independence(
+                "reviewer", "lechao", "preset-tok")
+        self.assertTrue(ok)
+
+    def test_check_token_file_override_reads_real_file(self):
+        # --approval-token-file 透传：不打桩、真实文件读取判定
+        with tempfile.TemporaryDirectory() as d:
+            env = Path(d) / "promote-approval.env"
+            env.write_text("LC_PROMOTE_APPROVAL_TOKEN=ovr-tok\n",
+                           encoding="utf-8")
+            ok, _ = br._check_approval_independence(
+                "reviewer", "lechao", "ovr-tok", str(env))
+            self.assertTrue(ok)
+            ok, err = br._check_approval_independence(
+                "reviewer", "lechao", "wrong-tok", str(env))
+            self.assertFalse(ok)
+            self.assertIn("不一致", err)
+
+
 if __name__ == "__main__":
     unittest.main()

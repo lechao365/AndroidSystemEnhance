@@ -1539,6 +1539,60 @@ class TestRunIdLifecycle(unittest.TestCase):
         self.assertIn("判红", buf.getvalue())
         self.assertFalse(out_json.exists())
 
+    def test_batch_file_single_case_enables_lifecycle(self):
+        # 方向 5：批文件模式 case: 前缀单 case 须启用生命周期——此前仅 --case
+        # 生效，批模式 args.case 空致 case_labels 空、lifecycle 恒 None、
+        # teardown 恒不跑、device_dirty 恒假；批次 case:a 与 --case a 语义
+        # 等价，同样走 setup_snapshot → 判据 → teardown 编排
+        d = tempfile.mkdtemp()
+        batch = Path(d) / "b.cdp"
+        batch.write_text(
+            "-sv base:1a2b3c4d5e6f\n"
+            "意图: 批模式生命周期启用验证用批次（占位说明文字拉长以满足批次长度预算下限，"
+            "无实际编辑意图，仅确认批文件模式启用 teardown 生命周期编排）。\n"
+            "验收: case:lcview-trigger\n"
+            "方向: 1) 批文件模式 case: 前缀单 case 须启用生命周期（teardown/device_dirty）。\n",
+            encoding="utf-8")
+        out_json = Path(d) / "acc.json"
+        called = {}
+
+        def fake_run_case_lifecycle(acc, lifecycle, adb_exec, adb_logcat, ep=None,
+                                    ensure_boot=False, on_item=None, host_env=None,
+                                    since_epoch=0):
+            called["enabled"] = True
+            return ("pass", [{"tag": "boot", "status": "pass", "detail": "ok"}],
+                    {"device_dirty": True, "timed_out": False,
+                     "teardown_detail": "已恢复到初值", "forensics_dir": None})
+
+        with mock.patch.object(wa, "ac") as m_ac:
+            m_ac.ensure_connected.side_effect = ["ep", "ep"]
+            m_ac.clock_sync.return_value = (True, "")
+            m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
+            m_ac.parse_exec_output.return_value = ("1", 0)
+            m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
+            m_sub = mock.Mock()
+            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
+            m_sub.TimeoutExpired = subprocess.TimeoutExpired
+            buf = io.StringIO()
+            with mock.patch.object(wa.subprocess, "run", m_sub), \
+                    mock.patch.object(wa, "run_case_lifecycle",
+                                      side_effect=fake_run_case_lifecycle), \
+                    mock.patch.object(wa, "run_acceptance",
+                                      side_effect=AssertionError(
+                                          "批模式未启用生命周期，落到 run_acceptance")), \
+                    mock.patch.object(wa, "_device_serial",
+                                      return_value=("SN1", "getprop ro.serialno")), \
+                    mock.patch.object(wa, "_mark_stage"), \
+                    mock.patch.object(wa, "_write_cases"), \
+                    mock.patch.object(wa, "_backfill_zero_marks"):
+                with contextlib.redirect_stdout(buf):
+                    rc = wa.main(["run", "--batch-file", str(batch),
+                                  "--result-file", str(out_json)])
+        self.assertEqual(rc, 0)
+        self.assertTrue(called.get("enabled"), "批文件模式须启用生命周期")
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertTrue(data["device_dirty"], "批模式生命周期 meta 须透出 device_dirty")
+
 
 class TestRunForensicsTempCleanup(unittest.TestCase):
     """wsv-08：_run_forensics 临时文件任何退出路径（含 collect 抛异常）都清理，

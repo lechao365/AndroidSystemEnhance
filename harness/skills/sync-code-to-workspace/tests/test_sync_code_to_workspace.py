@@ -89,6 +89,35 @@ class TestDoSyncExtra(unittest.TestCase):
         self.assertFalse(f.exists())
         self.assertEqual(_git(repo, "status", "--porcelain"), "")
 
+    def test_extra_new_untracked_symlink_only_unlinks(self):
+        # 方向 1：删除符号链接条目只 unlink 链接本身，不得 rmtree 链接指向的
+        # 真实目录（此前返回 resolve 后路径致删符号链接变删真实目录）
+        repo = _make_git_repo()
+        real = repo / "real_dir"
+        real.mkdir()
+        (real / "keep.txt").write_text("x", encoding="utf-8")
+        link = repo / "mylink"
+        link.symlink_to(real, target_is_directory=True)
+        with mock.patch.object(sw, "_kernel_ws", return_value=str(repo)):
+            ok = sw._do_sync_extra("kernel", "mylink", "EXTRA-NEW-UNTRACKED")
+        self.assertTrue(ok)
+        self.assertFalse(link.exists(), "符号链接应被 unlink 删除")
+        self.assertTrue(real.is_dir(), "链接指向的真实目录不得被删除")
+        self.assertTrue((real / "keep.txt").is_file())
+
+    def test_extra_new_untracked_symlink_file_only_unlinks(self):
+        # 符号链接到普通文件同样只 unlink 链接，目标文件保留
+        repo = _make_git_repo()
+        real = repo / "real.txt"
+        real.write_text("x", encoding="utf-8")
+        link = repo / "mlink.txt"
+        link.symlink_to(real)
+        with mock.patch.object(sw, "_kernel_ws", return_value=str(repo)):
+            ok = sw._do_sync_extra("kernel", "mlink.txt", "EXTRA-NEW-UNTRACKED")
+        self.assertTrue(ok)
+        self.assertFalse(link.exists())
+        self.assertTrue(real.is_file(), "链接指向的真实文件不得被删除")
+
     def test_unknown_category_returns_false(self):
         repo = _make_git_repo()
         with mock.patch.object(sw, "_kernel_ws", return_value=str(repo)):
@@ -415,6 +444,29 @@ class TestResolveWorkspaceTarget(unittest.TestCase):
             t = sw._resolve_workspace_target("aosp:top", "top/sub/f.txt")
         self.assertEqual(Path(t), (ws / "top/sub/f.txt").resolve())
 
+    def test_symlink_entry_returns_unresolved_path(self):
+        # 方向 1：符号链接条目须返回未解析词法路径（链接自身），不得返回
+        # resolve 后的真实目录——否则删除会误删链接指向的实体
+        ws = Path(tempfile.mkdtemp())
+        real = ws / "real_dir"
+        real.mkdir()
+        (ws / "mylink").symlink_to(real, target_is_directory=True)
+        with mock.patch.object(sw, "_kernel_ws", return_value=str(ws)):
+            t = sw._resolve_workspace_target("kernel", "mylink")
+        self.assertIsNotNone(t)
+        self.assertEqual(Path(t), ws / "mylink", "须返回符号链接自身路径，非其目标")
+        self.assertTrue(Path(t).is_symlink())
+
+    def test_symlink_inside_ws_resolves_within_base(self):
+        # 链接目标在 ws 内仍须过包含性校验（可解析且越界判定由 resolve 把关）
+        ws = Path(tempfile.mkdtemp())
+        real = ws / "real_dir"
+        real.mkdir()
+        (ws / "mylink").symlink_to(real, target_is_directory=True)
+        with mock.patch.object(sw, "_kernel_ws", return_value=str(ws)):
+            t = sw._resolve_workspace_target("kernel", "mylink")
+        self.assertIn(ws.resolve(), Path(t).resolve().parents)
+
 
 class TestApplyPlanDeleteTracked(unittest.TestCase):
     """sync-02：plan delete 动作对 EXTRA-NEW-TRACKED 走 git rm -f（清 index+工作树）。"""
@@ -623,6 +675,42 @@ class TestNonRepoNestedGitSkip(unittest.TestCase):
         self.assertIn("top/plain.c", text)
         self.assertNotIn("nested", text)
         self.assertTrue(any("嵌套" in c[0][0] for c in lw.call_args_list))
+
+
+class TestIterNonRepoFilesSkipSymlink(unittest.TestCase):
+    """方向 2：_iter_non_repo_files 必须跳过符号链接。
+
+    目录符号链接被 is_dir() 跟随并入栈后成环即死循环（链回父目录）；
+    且链接指向 workspace 外实体时按 EXTRA 上报会被物理删除。跳过链接后
+    环不再进入，越界实体不再产出。
+    """
+
+    def test_dir_symlink_cycle_terminates_and_skipped(self):
+        ws = Path(tempfile.mkdtemp())
+        top = ws / "top"
+        top.mkdir()
+        # 目录符号链接链回顶层：跟随遍历即成环（旧实现死循环/无限产出）
+        (top / "loop").symlink_to(top, target_is_directory=True)
+        (top / "real.c").write_text("x", encoding="utf-8")
+        files = []
+        for f in sw._iter_non_repo_files(top):
+            files.append(f)
+        names = {f.name for f in files}
+        self.assertNotIn("loop", names, "符号链接不得作为目录/文件产出")
+        self.assertIn("real.c", names)
+
+    def test_file_symlink_skipped(self):
+        ws = Path(tempfile.mkdtemp())
+        target = ws / "outside.txt"
+        target.write_text("secret", encoding="utf-8")
+        top = ws / "top"
+        top.mkdir()
+        (top / "ext.txt").symlink_to(target)
+        (top / "keep.txt").write_text("k", encoding="utf-8")
+        files = list(sw._iter_non_repo_files(top))
+        names = {f.name for f in files}
+        self.assertNotIn("ext.txt", names, "文件符号链接不得产出（防指向外部被删）")
+        self.assertIn("keep.txt", names)
 
 
 class TestWarnDirtyCodeTree(unittest.TestCase):

@@ -16,14 +16,15 @@ ws_report 拒写令 KIR-002 放行流程自锁——仅摘要缺失（崩溃/截
 refs 结论行同理只取 stdout 末行，stderr 仅附注不参与判定。
 
 输出单行（| 连接，供 ws_report --selfcheck 落盘与门禁判定）：
-    pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n> | refs_rc=<n> | <refs 结论行> | config_rc=<n> | <config 结论行> | contract_rc=<n> | <contract 结论行> | pyenv_rc=<n> | <pyenv 汇总行> | ioctl_rc=<n> | <ioctl 结论行> | manifest_rc=<n> | <manifest 结论行> | durs: py=<s> tools=<s> pyenv=<s> ioctl=<s> manifest=<s>
+    pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n> | refs_rc=<n> | <refs 结论行> | config_rc=<n> | <config 结论行> | contract_rc=<n> | <contract 结论行> | pyenv_rc=<n> | <pyenv 汇总行> | ioctl_rc=<n> | <ioctl 结论行> | manifest_rc=<n> | <manifest 结论行> | ... | opencode_rc=<n> | <opencode 结论行> | durs: py=<s> tools=<s> pyenv=<s> ioctl=<s> manifest=<s>
 skipped=<n> 仅在 pytest_rc=0 且摘要无 skipped 时补 0。config_rc/contract_rc
 为 check_config.py 两模式（配置治理/契约检查，方向 4 接入）；pyenv_rc 为
 check_python_env 探测结果（Python 版本 + requirements.txt 依赖，环境破损
 时后续工具结论均不可信）；ioctl_rc 为 check_ioctl_headers 内核/AOSP ioctl
 头一致性结果（方向 2，双空/漂移判红透出）；manifest_rc 为 gen_manifest
 --check-only 的 code/rpi5 manifest 登记完整性结果（方向 2，未登记/有变化
-判红透出）；ws_report 按
+判红透出）；opencode_rc 为 validate_opencode_server 的 opencode-server 脚本
+与 SKILL.md 一致性结果（方向 6，此前无调用方静默判红）；ws_report 按
 全部 *_rc 键判红（任一非零拒写收据）。退出码恒 0：拒写与否由 ws_report
 按 rc 判定，本脚本只负责如实采集（emit 侧可独立自测）。
 """
@@ -47,7 +48,7 @@ ROOT = Path(__file__).resolve().parents[2]
 REQUIRED_RC_KEYS = ("pytest_rc", "refs_rc", "config_rc", "contract_rc",
                     "pyenv_rc", "ioctl_rc", "manifest_rc",
                     "discipline_rc", "scan_rc", "ruff_rc", "host_rc",
-                    "metrics_rc")
+                    "metrics_rc", "opencode_rc")
 
 # pytest 摘要计数行：含 passed/failed/skipped 任一计数的行（形如
 # "531 passed in 27.9s"、"121 passed, 3 skipped in 6.0s"、"1 failed, ..."）
@@ -678,6 +679,10 @@ def main(argv=None):
         [sys.executable, str(ROOT / "harness" / "lib" / "check_ruff.py")])
     host_proc = _spawn_cmd(
         [sys.executable, str(ROOT / "harness" / "lib" / "check_host_tests.py")])
+    opencode_proc = _spawn_cmd(
+        [sys.executable, str(ROOT / "harness" / "skills" / "cross-device"
+                             / "opencode-server"
+                             / "validate_opencode_server.py")])
     py_rc, py_out, py_err, py_dur = timed_run(
         pytest_cmd, timeout=_PYTEST_TIMEOUT_S)
     # pytest 跑完收口治理（各进程已与 pytest 重叠，墙钟取 max 而非 sum）
@@ -687,6 +692,8 @@ def main(argv=None):
         manifest_proc, "manifest")
     ruff_rc, ruff_out, _, ruff_dur = _collect_cmd(ruff_proc, "ruff")
     host_rc, host_out, _, host_dur = _collect_cmd(host_proc, "host")
+    opencode_rc, opencode_out, _, opencode_dur = _collect_cmd(
+        opencode_proc, "opencode")
     refs_rc, refs_out, refs_err = tools["refs"]
     cfg_rc, cfg_out, cfg_last = tools["cfg"]
     ctr_rc, ctr_out, ctr_last = tools["ctr"]
@@ -801,6 +808,13 @@ def main(argv=None):
     host_last = last_stdout_line(host_out)
     if host_last:
         parts.append(host_last)
+    # opencode-server 脚本/SKILL.md 一致性（方向 6）：此前 validate_opencode_server
+    # 无调用方，脚本 || true 吞错/EnvironmentFile 硬编码等破坏曾静默判红；接入
+    # 自检后 opencode_rc 透出，非零交 ws_report 全 *_rc 判红拒写
+    parts.append(f"opencode_rc={opencode_rc}")
+    opencode_last = last_stdout_line(opencode_out)
+    if opencode_last:
+        parts.append(opencode_last)
     # 方向 2 + 方向 6：逐检查器耗时（秒，一位小数）入输出行，refs/cfg 拆开
     # 各自自报（合并 tools 无法定位慢点）。重叠模型（方向 1）下语义：
     # py 为 pytest 进程总耗时；refs/cfg/ioctl/manifest 为其收口阻塞墙钟
@@ -812,6 +826,7 @@ def main(argv=None):
                  f"ioctl={ioctl_dur:.1f} manifest={manifest_dur:.1f} "
                  f"discipline={dis_dur:.1f} scan={scan_dur:.1f} "
                  f"ruff={ruff_dur:.1f} host={host_dur:.1f} "
+                 f"opencode={opencode_dur:.1f} "
                  f"metrics={met_dur:.1f}")
     print(" | ".join(parts))
     _mark_selfcheck(dur_s=time.time() - _t0)

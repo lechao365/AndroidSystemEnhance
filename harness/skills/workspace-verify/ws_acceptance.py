@@ -940,8 +940,13 @@ def main(argv=None):
     t_start = time.monotonic()
     # 生命周期编排（方向 1/2/4）：--case 单标签且资产为 dict 形态时启用
     # （setup_snapshot/teardown/timeout_s）；多 case/--acceptance 直传不启用
-    # （生命周期字段随 cases 资产层，逐 case 责任面需单 case 才可归属）
-    case_labels = [c.strip() for c in (args.case or "").split(",") if c.strip()]
+    # （生命周期字段随 cases 资产层，逐 case 责任面需单 case 才可归属）。
+    # 方向 5：批文件模式 case_labels 亦从批次验收行 case: 前缀提取（此前仅
+    # --case 生效，批模式 args.case 空致 lifecycle 恒 None、teardown 恒不跑、
+    # device_dirty 恒假）——批次 case:a 与 --case a 语义等价，同样启用
+    # 生命周期。
+    case_labels = [c.strip() for c in (
+        args.case or _batch_case_labels(args.batch_file)).split(",") if c.strip()]
     lifecycle = None
     if len(case_labels) == 1:
         lifecycle = _load_lifecycle(_CASES_PATH, case_labels[0])

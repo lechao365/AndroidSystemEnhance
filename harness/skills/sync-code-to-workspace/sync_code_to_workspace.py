@@ -181,6 +181,11 @@ def _resolve_workspace_target(proj: str, rel: str) -> str | None:
     解析结果必须严格位于对应基准根（repo 项目为项目 ws；非 repo 项目为
     _aosp_ws()）之内：rel 为绝对路径或含 ../ 穿越时越界，返回 None
     （调用方已有 None 判红路径），防 rmtree/unlink 越出 workspace。
+
+    **返回未解析路径**（`base/rel` 词法路径而非 `.resolve()` 结果）：删除
+    语义须作用于路径本身——若 rel 是符号链接，返回 resolve 后路径会指向
+    链接目标（真实目录/文件），删除即误删链接背后实体；由调用方在删除前
+    判 `os.path.islink` 只 unlink 链接本身（方向 1 修复）。
     """
     if proj.startswith("aosp:"):
         scope = proj.split(":", 1)[1]
@@ -201,7 +206,8 @@ def _resolve_workspace_target(proj: str, rel: str) -> str | None:
     if resolved == base_resolved or base_resolved not in resolved.parents:
         log_error(f"workspace 目标越界（拒绝）: {proj}/{rel} → {resolved} 不在基准根 {base_resolved} 内")
         return None
-    return str(resolved)
+    # 包含性校验用 resolve 判定，返回值保留未解析词法路径（符号链接删除语义）
+    return str(Path(base / rel))
 
 
 def _ws_scan_flags() -> tuple[bool, bool]:
@@ -549,6 +555,10 @@ def _iter_non_repo_files(root: Path):
 
     嵌套仓内容归各子仓管理，若按 EXTRA-NEW-UNTRACKED 上报会被 --auto
     物理删除。产出顺序由调用方排序保证确定性。
+
+    符号链接一律跳过（方向 2）：目录符号链接被 is_dir() 跟随并入栈，成环
+    （链回父/自身目录）即死循环；且链接指向 workspace 外实体时按 EXTRA
+    上报会被物理删除，误删外部目标。
     """
     stack = [root]
     while stack:
@@ -559,6 +569,10 @@ def _iter_non_repo_files(root: Path):
             log_warn(f"非 repo 目录遍历失败，跳过: {cur}: {e}")
             continue
         for p in entries:
+            if p.is_symlink():
+                # 跳过符号链接：is_symlink 不跟随链接，环/越界实体都不再进入
+                # 后续 is_dir/is_file 判定（防死循环与误删外部目标）
+                continue
             if p.is_dir():
                 if (p / ".git").exists():
                     log_warn(f"非 repo 扫描遇嵌套 git 仓库，跳过该子树: {p}")
@@ -853,7 +867,11 @@ def _do_sync_extra(proj: str, rel: str, category: str) -> bool:
             log_error(f"无法解析路径: {proj}/{rel}")
             return False
         try:
-            if os.path.isdir(target):
+            if os.path.islink(target):
+                # 符号链接只 unlink 链接本身：目标路径未解析（含符号链接
+                # 语义），跟随后续 isdir/rmtree 会删除链接指向的真实目录
+                os.unlink(target)
+            elif os.path.isdir(target):
                 shutil.rmtree(target)
             else:
                 os.unlink(target)
