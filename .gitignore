@@ -18,3 +18,6 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# promote 审批凭据（评审人独立持有，不入库）
+/harness/config/promote-approval.env

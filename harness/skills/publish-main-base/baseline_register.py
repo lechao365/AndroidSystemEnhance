@@ -7,6 +7,7 @@ save() 手工保留 yaml 头部注释块（PyYAML 往返不保留注释）。
 import argparse
 import datetime
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -205,6 +206,72 @@ def _open_flake_issues(issues_dir=None):
     return out
 
 
+# ── P1-B：promote 审批独立校验（修复 KI-20260907-001）────────────────
+# 业界对齐 SLSA 独立审批思想：审批不得自证。两道校验——
+#   1) 身份不等式：--approved-by 审批人不得等于执行人 git 身份（收据
+#      operator 同源采集）；
+#   2) 审批凭据外部化：LC_PROMOTE_APPROVAL_TOKEN 环境变量须与
+#      harness/config/promote-approval.env 预设值一致（评审人独立持有，
+#      文件 gitignore 不入库，杜绝审批可自证）。
+
+
+def _collect_operator() -> str:
+    """执行人 git 身份（与 cdp_receipt._collect_operator 同源口径）。"""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                               / "skills" / "cross-device" / "lib" / "python"))
+        import cdp_receipt
+        return cdp_receipt._collect_operator()
+    except Exception:
+        return "unknown"
+
+
+def _norm_identity(s: str) -> str:
+    """身份归一：'Name <email>' → 'name'; 小写去空白（比较用）。"""
+    s = (s or "").strip()
+    if "<" in s:
+        s = s.split("<", 1)[0]
+    return s.lower().strip()
+
+
+def _read_approval_token(token_file: str | None = None) -> str:
+    """读 promote-approval.env 预设 token（缺省
+    harness/config/promote-approval.env）；不存在返回 ''。"""
+    path = Path(token_file) if token_file else (
+        Path(__file__).resolve().parents[2] / "harness" / "config"
+        / "promote-approval.env")
+    try:
+        for ln in path.read_text(encoding="utf-8").splitlines():
+            ln = ln.strip()
+            if ln.startswith("LC_PROMOTE_APPROVAL_TOKEN="):
+                return ln.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+def _check_approval_independence(approved_by: str,
+                                 operator: str,
+                                 token: str) -> tuple[bool, str]:
+    """审批独立校验：返回 (ok, err)。"""
+    if not (approved_by or "").strip():
+        return False, "promote 必须传 --approved-by（审批凭据外部化）"
+    if _norm_identity(approved_by) == _norm_identity(operator) \
+            and operator.lower() != "unknown":
+        return False, (f"审批人 {approved_by!r} 与执行人 {operator!r} 相同，"
+                       "审批缺乏独立隔离（KI-20260907-001），拒绝 promote")
+    provided = (token or "").strip()
+    if not provided:
+        return False, "缺 LC_PROMOTE_APPROVAL_TOKEN（审批凭据外部化失败）"
+    # 占位符/尖括号一律拒（真实随机 token 不含 < >）
+    if "<" in provided or ">" in provided:
+        return False, "LC_PROMOTE_APPROVAL_TOKEN 为占位符，拒绝 promote"
+    expected = _read_approval_token()
+    if expected and provided != expected:
+        return False, "LC_PROMOTE_APPROVAL_TOKEN 与 promote-approval.env 预设值不一致"
+    return True, ""
+
+
 def check_issues_gate(task=None, issues_dir=None):
     """known-issues 门禁主体（check-issues action 与 add-candidate 复用，方向 4）。
 
@@ -281,6 +348,9 @@ def main(argv=None):
     ap.add_argument("--source-commit")
     ap.add_argument("--receipt-path")
     ap.add_argument("--approved-by")
+    ap.add_argument("--approval-token-file", default="",
+                    help="promote-approval.env 路径（测试/异地覆盖；缺省 "
+                         "harness/config/promote-approval.env）")
     ap.add_argument("--task")
     ap.add_argument("--ki-gate", help="known-issues 门禁结论 pass/not-run，写入 evidence")
     ap.add_argument("--evidence-scope", help="证据范围标签（如 lcview-liveness）；"
@@ -558,11 +628,19 @@ def main(argv=None):
                     print(f"error: 收据文件不存在，无法生成证据快照: {receipt}",
                           file=sys.stderr)
                     return 1
-                # 方向 6：审批凭据外部化——promote 空审批人即拒（在写快照前校验，
-                # 防快照污染），不再回落默认常量（防审批可自证）
+                # 方向 6 + P1-B：审批凭据外部化——promote 审批人不得为执行人、
+                # token 须与 promote-approval.env 预设一致（在写快照前校验，
+                # 防快照污染），不再回落默认常量（防审批可自证，闭环
+                # KI-20260907-001）
                 if not args.approved_by:
                     print("error: promote 必须传 --approved-by"
                           "（审批凭据外部化，不再回落默认常量）", file=sys.stderr)
+                    return 1
+                ok, aerr = _check_approval_independence(
+                    args.approved_by, _collect_operator(),
+                    os.environ.get("LC_PROMOTE_APPROVAL_TOKEN", ""))
+                if not ok:
+                    print(f"error: {aerr}", file=sys.stderr)
                     return 1
                 # 方向 3：存在未闭环 flake 类 KI（kind=flake 且未标终态）即拒
                 # ——KIR-002 抖动登记允许放行本轮自检，但晋升不得携带未闭环
