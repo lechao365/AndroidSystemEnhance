@@ -10,22 +10,46 @@
 # ============================================================
 
 import argparse
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
 
+# ruff 常见用户落点（pip install --user 等装到 HOME 而非系统 bin）：
+# systemd 托管服务（如 opencode-server）环境 PATH 不含 ~/.local/bin，须回退探测。
+_USER_RUFF_CANDIDATES = (".local/bin/ruff", "bin/ruff")
+
+
+def _find_ruff() -> str | None:
+    """解析 ruff 可执行路径：先查 PATH，再回退用户 bin 常见落点。
+
+    返回可执行绝对路径；均不可得返 None（调用方 fail-closed 判红）。
+    """
+    exe = shutil.which("ruff")
+    if exe:
+        return exe
+    for rel in _USER_RUFF_CANDIDATES:
+        cand = Path.home() / rel
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
+
 
 def _run_ruff(scope: str, repo: Path = _ROOT) -> tuple[int, str]:
     """运行 ruff check <scope>，返回 (rc, 机器行)。
 
-    fail-closed：FileNotFoundError（ruff 未安装）与任何非零退出均判红，
+    fail-closed：ruff 未安装（PATH 与用户 bin 均不可得）或执行异常均判红，
     无法检查不得静默绿；rc=0 时结论行带 ruff_rc=0。
     """
     target = str(repo / scope) if not Path(scope).is_absolute() else scope
+    exe = _find_ruff()
+    if not exe:
+        return 1, "ruff_rc=1 | error: ruff 未安装（pip install ruff）"
     try:
-        r = subprocess.run(["ruff", "check", target], capture_output=True,
+        r = subprocess.run([exe, "check", target], capture_output=True,
                            text=True, encoding="utf-8", errors="replace",
                            timeout=120)
     except FileNotFoundError:

@@ -32,9 +32,46 @@ class TestCheckRuff(unittest.TestCase):
             self.assertIn("ruff_rc=1", out)
 
     def test_ruff_missing_fail_closed(self):
-        # 工具缺失按失败判红（fail-closed：无法检查不得静默绿）
-        with mock.patch.object(cr.subprocess, "run",
-                               side_effect=FileNotFoundError):
+        # 工具缺失按失败判红（fail-closed：无法检查不得静默绿）；
+        # PATH 与用户 bin 均不可得才判红
+        with mock.patch.object(cr.shutil, "which", return_value=None), \
+                mock.patch.object(cr.Path, "home",
+                                  return_value=Path("/nonexistent-home")):
+            rc, out = cr._run_ruff("harness/lib/selfcheck.py")
+            self.assertEqual(rc, 1)
+            self.assertIn("ruff_rc=1", out)
+
+    def test_ruff_path_missing_but_user_bin_found(self):
+        # PATH 不含 ruff（systemd 托管环境）但 ~/.local/bin/ruff 存在时，
+        # 回退用户 bin 落点继续检查，不误判"未安装"
+        tmp = Path(tempfile.mkdtemp())
+        ruff_dir = tmp / ".local" / "bin"
+        ruff_dir.mkdir(parents=True)
+        fake = ruff_dir / "ruff"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+        with mock.patch.object(cr.shutil, "which", return_value=None), \
+                mock.patch.object(cr.Path, "home", return_value=tmp):
+            with mock.patch.object(cr.subprocess, "run") as m:
+                m.return_value = mock.Mock(returncode=0, stdout="")
+                rc, out = cr._run_ruff("harness/lib/selfcheck.py")
+                self.assertEqual(rc, 0)
+                self.assertIn("ruff_rc=0", out)
+                used = m.call_args.args[0]
+                self.assertEqual(used[0], str(fake))
+
+    def test_ruff_user_bin_exec_failure_still_red(self):
+        # 回退用户 bin 后执行仍失败（违规/异常）→ 照常判红
+        tmp = Path(tempfile.mkdtemp())
+        ruff_dir = tmp / ".local" / "bin"
+        ruff_dir.mkdir(parents=True)
+        fake = ruff_dir / "ruff"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+        with mock.patch.object(cr.shutil, "which", return_value=None), \
+                mock.patch.object(cr.Path, "home", return_value=tmp), \
+                mock.patch.object(cr.subprocess, "run") as m:
+            m.return_value = mock.Mock(returncode=1, stdout="violation\n")
             rc, out = cr._run_ruff("harness/lib/selfcheck.py")
             self.assertEqual(rc, 1)
             self.assertIn("ruff_rc=1", out)

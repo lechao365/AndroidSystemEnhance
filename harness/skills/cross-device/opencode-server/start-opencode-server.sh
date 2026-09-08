@@ -286,6 +286,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=$SERVER_ENV_FILE
+# 服务由 systemd 托管，环境 PATH 为最小集，不含 login shell 经 ~/.profile
+# 注入的 ~/.local/bin；会话内 selfcheck 等 ruff 门禁依赖该目录下的 ruff，
+# 显式补 PATH（%h 展开为用户 home），防 ruff_rc=1 误判"ruff 未安装"。
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WorkingDirectory=$TARGET_ROOT
 ExecStart="$OPENCODE_BIN" web --hostname "$SERVER_HOST" --port $PORT
 Restart=on-failure
