@@ -499,6 +499,9 @@ class TestSelfcheckFallbackRcKeys(unittest.TestCase):
 class TestQuickMode(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
+        self.runs = Path(self._tmp.name) / "runs"
+        self.batch = Path(self._tmp.name) / "b.cdp"
+        self.batch.write_text(_BATCH % ("a" * 12), encoding="utf-8")
         envpatcher = mock.patch.dict("os.environ", {}, clear=False)
         envpatcher.start()
         self.addCleanup(envpatcher.stop)
@@ -533,6 +536,20 @@ class TestQuickMode(unittest.TestCase):
                                   return_value=_SELFCHECK_OK):
             rc, _ = wc.run_quick(use_locks=False)
         self.assertEqual(rc, 1)
+
+    def test_coverage_step_runs_after_unit_test(self):
+        ctor, proc = _fake_popen(0)
+        with mock.patch.object(wc.subprocess, "Popen", ctor), \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(batch_file=str(self.batch),
+                                      coverage=True, use_locks=False)
+        names = _script_names(ctor.call_args_list)
+        self.assertIn("ws_coverage.py", names)
+        self.assertGreater(
+            [i for i, n in enumerate(names) if n == "ws_coverage.py"][0],
+            [i for i, n in enumerate(names) if n == "ws_upload_tests.py"][0])
 
 
 if __name__ == "__main__":

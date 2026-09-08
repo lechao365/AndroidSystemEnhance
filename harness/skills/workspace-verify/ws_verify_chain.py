@@ -224,7 +224,8 @@ def _build_report_argv(chain_args, derive):
     for key, flag in (("push_file", "--push-file"),
                       ("unit_test_file", "--unit-test-file"),
                       ("acc_file", "--acceptance-file"),
-                      ("timings_file", "--timings-file")):
+                      ("timings_file", "--timings-file"),
+                      ("coverage_file", "--coverage-file")):
         if chain_args.get(key):
             cmd += [flag, chain_args[key]]
     # board 收据强制自检证据（ws_report 方向 4 门禁；rc 全 0 与否由其扫描判定）
@@ -309,7 +310,7 @@ def _join_selfcheck_preflight(thread, result):
 
 def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
               case=None, wait_ready=False, log_since=None, build=None,
-              timeouts=None, use_locks=True):
+              timeouts=None, use_locks=True, coverage=False):
     """顺序执行全链，返回 (rc, result_dict)。失败即停，余步记入 skipped。
 
     batch_file：模式 A 批次文件（acceptance 验收源 + report 收据源）；
@@ -365,7 +366,8 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
             return _run_chain_locked(run_id, batch_id, product, out,
                                      result_file, batch_file, build,
                                      timeout_map, chain_args,
-                                     selfcheck_thread, selfcheck_result)
+                                     selfcheck_thread, selfcheck_result,
+                                     coverage=coverage)
     except ws_lock.LockHeld as exc:
         # 方向 1（闲时加固让路协议）：正式任务取锁失败即置让路标志，持锁的
         # idle-hardening 会话在原子步骤边界检查到后收敛让路（不抢占验证中的
@@ -460,7 +462,8 @@ def _chain_mark(name, batch_id):
 
 def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
                       build, timeout_map, chain_args,
-                      selfcheck_thread=None, selfcheck_result=None):
+                      selfcheck_thread=None, selfcheck_result=None,
+                      coverage=False):
     """锁内编排主体：逐步执行 + 运行态落盘（仅编排器写）。
 
     失败停链语义（A1 修订）：某步失败/取消后，其余验证步记 skipped，
@@ -508,6 +511,23 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
         if canceled or rc is None or rc != 0:
             overall = "fail"
             fail_stop = True  # 不 break：report 步仍执行落 fail 收据（A1）
+        # P1-A：单测成功后可选 coverage 步（只记录不门禁；失败仅记步不进链判红）
+        if coverage and name == "unit_test" and overall == "pass" \
+                and not fail_stop:
+            t0m, t0 = time.monotonic(), time.time()
+            cov_argv = [sys.executable,
+                        str(_SCRIPT_DIR / "ws_coverage.py"),
+                        "--product", product]
+            if out:
+                cov_argv += ["--out", out]
+            cov_file = str(_CROSS_DEVICE_LOG / f"coverage-{batch_id or run_id}.json")
+            cov_argv += ["--result-file", cov_file]
+            cov_rc, cov_canceled = _run_step(cov_argv, timeout_map["unit_test"])
+            steps.append({"name": "coverage", "rc": cov_rc, "start": t0,
+                          "end": time.time(),
+                          "dur_s": round(time.monotonic() - t0m, 3),
+                          "canceled": cov_canceled})
+            chain_args["coverage_file"] = cov_file
     _chain_mark("verify_end", batch_id)
     ended_at = time.time()
     exit_rc = 0 if overall == "pass" else 1
@@ -544,6 +564,8 @@ def main(argv=None):
     ap.add_argument("--quick", action="store_true",
                     help="快检模式：sync + 内核 host 单测 + 自检，不落收据"
                          "（AI 编辑纯逻辑后的廉价反馈，不占真机）")
+    ap.add_argument("--coverage", action="store_true",
+                    help="单测后采集覆盖率（ws_coverage；只记录不门禁）")
     args = ap.parse_args(argv)
     if args.quick:
         rc, result = run_quick()
@@ -552,7 +574,8 @@ def main(argv=None):
     rc, result = run_chain(args.product, args.out, args.result_file,
                            batch_file=args.batch_file, case=args.case,
                            wait_ready=args.wait_ready,
-                           log_since=args.log_since, build=args.build)
+                           log_since=args.log_since, build=args.build,
+                           coverage=args.coverage)
     print(json.dumps(result, ensure_ascii=False))
     return rc
 
