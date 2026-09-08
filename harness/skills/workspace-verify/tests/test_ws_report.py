@@ -1200,10 +1200,16 @@ class TestWsReport(unittest.TestCase):
             '[{"tag": "svc:x", "status": "pass"}]')
         self.assertIsNone(parsed)
         self.assertIn("JSON 对象", err)
+        # 方向 3（2026-09-08）：items 空即拒 pass（overall=pass 却无逐项证据，
+        # 中断路径落盘或手填假绿不得当 pass），既有 dict 正常 items 不受影响
         parsed, err = ws_report._validate_acceptance_pass(
             '{"overall": "pass", "items": []}')
+        self.assertIsNone(parsed)
+        self.assertIn("items 为空", err)
+        parsed, err = ws_report._validate_acceptance_pass(
+            '{"overall": "pass", "items": [{"tag": "boot", "status": "pass"}]}')
         self.assertIsNone(err)
-        self.assertEqual(parsed, {"overall": "pass", "items": []})
+        self.assertEqual(len(parsed["items"]), 1)
 
     def test_pass_without_push_file_rejected(self):
         # 方向 1：PASS 缺 --push-file（ws_push 产物此前无人核验）→ 返 2 拒写

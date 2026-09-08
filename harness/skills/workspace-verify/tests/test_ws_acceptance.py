@@ -977,6 +977,51 @@ class TestMultiCaseLifecycle(unittest.TestCase):
         self.assertEqual(fail_items[0]["tag"], "__crash__")
         self.assertIn("未预期崩溃", fail_items[0]["detail"])
 
+    def test_multi_case_keyboard_interrupt_escapes_fail_not_pass(self):
+        # 方向 1/5（2026-09-08）：多 case 批中途抛 KeyboardInterrupt（用户
+        # Ctrl-C 中断）不得被 finally 内 return 吞成 pass/正常退出假证据——
+        # 记 fail + device_dirty 真后 re-raise，异常向上逃逸；result-file
+        # 已落盘 fail 失败现场（overall 不得为 pass）。此前 finally 末尾
+        # return 会把 KeyboardInterrupt 吞掉并以中途 pass 状态正常返回（假
+        # 绿），本用例即防回归。
+        d = tempfile.mkdtemp()
+        batch = self._batch(d, "lcview-trigger,lcview-transfer")
+        out_json = Path(d) / "acc.json"
+        buf = io.StringIO()
+
+        def fake_lifecycle(acc, lifecycle, adb_exec, adb_logcat, ep=None,
+                           ensure_boot=False, on_item=None, host_env=None,
+                           since_epoch=0):
+            raise KeyboardInterrupt("模拟 Ctrl-C 中断验收")
+
+        with mock.patch.object(wa, "ac") as m_ac:
+            m_ac.ensure_connected.side_effect = ["ep", "ep"]
+            m_ac.clock_sync.return_value = (True, "")
+            m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
+            m_ac.parse_exec_output.return_value = ("1", 0)
+            m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
+            m_sub = mock.Mock()
+            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
+            m_sub.TimeoutExpired = subprocess.TimeoutExpired
+            with mock.patch.object(wa.subprocess, "run", m_sub), \
+                    mock.patch.object(wa, "run_case_lifecycle",
+                                      side_effect=fake_lifecycle), \
+                    mock.patch.object(wa, "_device_serial",
+                                      return_value=("SN1", "getprop ro.serialno")), \
+                    mock.patch.object(wa, "_mark_stage"), \
+                    mock.patch.object(wa, "_write_cases"), \
+                    mock.patch.object(wa, "_backfill_zero_marks"):
+                with contextlib.redirect_stdout(buf):
+                    with self.assertRaises(KeyboardInterrupt):
+                        wa.main(["run", "--batch-file", str(batch),
+                                 "--result-file", str(out_json)])
+        # 中断逃逸但 fail 失败现场已落盘（不得 overall pass）
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertEqual(data["overall"], "fail")
+        self.assertIs(data["device_dirty"], True)
+        fail_tags = [i["tag"] for i in data["items"] if i["status"] == "fail"]
+        self.assertIn("__interrupt__", fail_tags)
+
 
 class TestEmptyAcceptance(unittest.TestCase):
     def test_run_acceptance_empty_fails(self):
@@ -1645,8 +1690,8 @@ class TestRunIdLifecycle(unittest.TestCase):
         self.assertEqual(data["run_id"], "shared-run-001")
 
     def test_device_fingerprint_empty_red(self):
-        # wsv-11：设备指纹 getprop 失败（空串）→ 判红返 1 不写产物
-        #（与 serial 全空判红同口径，此前空指纹静默落盘）
+        # wsv-11：设备指纹 getprop 失败（空串）→ 判红返 1（与 serial 全空判红
+        # 同口径，此前空指纹静默落盘）
         out_json = Path(tempfile.mkdtemp()) / "acc.json"
         with mock.patch.object(wa, "ac") as m_ac:
             m_ac.ensure_connected.side_effect = ["ep", "ep"]
@@ -1668,7 +1713,13 @@ class TestRunIdLifecycle(unittest.TestCase):
                                           "--result-file", str(out_json)])
         self.assertEqual(rc, 1)
         self.assertIn("判红", buf.getvalue())
-        self.assertFalse(out_json.exists())
+        # 方向 1/2（2026-09-08）：判红不再裸 return 不落盘——失败现场须随
+        # fail 产物落盘（身份空档在 result-file 记录 unknown），杜绝中断路径
+        # 上无 result-file 的假证据/假绿
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertEqual(data["overall"], "fail")
+        self.assertEqual(data["device_fingerprint"], "unknown")
+        self.assertTrue(any(i["tag"] == "__identity__" for i in data["items"]))
 
     def test_device_serial_all_empty_red(self):
         # 方向 3：产物写入路径上序列号三者皆空 → 判红返 1（不写产物）
@@ -1692,7 +1743,41 @@ class TestRunIdLifecycle(unittest.TestCase):
                                           "--result-file", str(out_json)])
         self.assertEqual(rc, 1)
         self.assertIn("判红", buf.getvalue())
-        self.assertFalse(out_json.exists())
+        # 方向 1/2（2026-09-08）：判红不再裸 return 不落盘——serial 全空档在
+        # fail 产物落盘记录 unknown（身份不可信，产物仍落盘留失败现场）
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertEqual(data["overall"], "fail")
+        self.assertEqual(data["device_serial"], "unknown")
+        self.assertTrue(any(i["tag"] == "__identity__" for i in data["items"]))
+
+    def test_device_serial_exception_still_writes_result(self):
+        # 方向 2/5（2026-09-08）：_device_serial 抛错（如 adb 故障非返回空）
+        # 仍须落 result-file——finally 收尾只落盘不 return，身份获取异常经
+        # try/except 记入 fail 产物（__identity__ 现场留痕），不得裸退无产物
+        out_json = Path(tempfile.mkdtemp()) / "acc.json"
+        with mock.patch.object(wa, "ac") as m_ac:
+            m_ac.ensure_connected.side_effect = ["ep", "ep"]
+            m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
+            m_ac.parse_exec_output.return_value = ("1", 0)
+            m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
+            m_sub = mock.Mock()
+            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
+            m_sub.TimeoutExpired = subprocess.TimeoutExpired
+            buf = io.StringIO()
+            with mock.patch.object(wa.subprocess, "run", m_sub):
+                with mock.patch.object(wa, "run_acceptance",
+                                       return_value=("pass", [])):
+                    with mock.patch.object(wa, "_device_serial",
+                                           side_effect=OSError("adb 故障")):
+                        with contextlib.redirect_stdout(buf):
+                            rc = wa.main(["run", "--acceptance", "boot",
+                                          "--result-file", str(out_json)])
+        self.assertEqual(rc, 1)
+        self.assertTrue(out_json.is_file(), "身份获取抛错仍须落 result-file")
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertEqual(data["overall"], "fail")
+        self.assertTrue(any(i["tag"] == "__identity__" for i in data["items"]))
+        self.assertIn("设备序列号获取异常", buf.getvalue())
 
     def test_batch_file_single_case_enables_lifecycle(self):
         # 方向 5：批文件模式 case: 前缀单 case 须启用生命周期——此前仅 --case

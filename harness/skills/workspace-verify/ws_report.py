@@ -349,6 +349,11 @@ def _validate_acceptance_pass(acceptance):
         return None, (f"acceptance overall 非 pass（实际 {data.get('overall')!r}），"
                       "拒绝写 pass 收据")
     items = data.get("items") or []
+    # 方向 3（2026-09-08）：items 空即拒 pass——overall=pass 却无任何逐项证据
+    # （中断路径上 finally 落盘可能只带判红说明、或空 items 假绿）不得当 pass
+    # 写入；有 fail 项亦拒（既有防假绿）。
+    if not items:
+        return None, "acceptance items 为空（无逐项证据），拒绝写 pass 收据"
     for it in items:
         if isinstance(it, dict) and it.get("status") == "fail":
             return None, "acceptance 含 fail 项（假绿），拒绝写 pass 收据"

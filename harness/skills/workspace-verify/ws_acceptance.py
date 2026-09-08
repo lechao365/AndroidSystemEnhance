@@ -1053,8 +1053,14 @@ def main(argv=None):
                                             ensure_boot=args.ensure_boot,
                                             on_item=mark_case, host_env=host_env,
                                             endpoint=ep)
-            device_dirty = False
-            teardown_detail = ""
+            if case_labels:
+                # 单 str case（无生命周期资产，teardown 未跑）：与多 case 批
+                # str 旧形态同口径，device_dirty 落 unknown（未跑不得声称干净）
+                device_dirty = "unknown"
+                teardown_detail = "无生命周期资产（str 旧形态，teardown 未跑）"
+            else:
+                device_dirty = False
+                teardown_detail = ""
             forensics_dir = None
     except Exception as e:
         # 执行主体兜底（方向 3）：case 循环外的未预期崩溃（如单 case 生命周期
@@ -1068,27 +1074,56 @@ def main(argv=None):
         device_dirty = True
         teardown_detail = f"验收执行主体异常，设备态不可信: {e!r}"
         forensics_dir = None
+    except BaseException as e:
+        # 中断路径（方向 1，2026-09-08）：KeyboardInterrupt/SystemExit 等
+        # 非 Exception 中断不得被 finally 内 return 吞成 pass/正常退出假证据
+        # ——先记 fail 与 device_dirty 真（中断点 teardown 未保证、后续 case
+        # 未跑，产物不得 overall pass），再 re-raise 让中断继续向上传播；
+        # finally 只落盘不 return，失败现场随 fail 产物落盘。
+        print(f"error: 验收执行被中断（{e!r}），已记 fail/dirty 收尾，"
+              f"中断继续向上传播", file=sys.stderr)
+        overall = "fail"
+        items = items + [{"tag": "__interrupt__", "status": "fail",
+                          "detail": f"验收执行被中断（未跑完）: {e!r}"}]
+        device_dirty = True
+        teardown_detail = f"验收被中断（{e!r}），teardown 未保证，按 dirty 处理"
+        raise
     finally:
+        # 收尾只落盘 + 打点，绝不 return（方向 1）：finally 内 return 会
+        # (a) 吞掉传播中的中断/异常成假证据；(b) 使失败现场产物缺失。返回码
+        # 统一改到 try 末尾（下方按 overall 出口）。_device_serial/getprop
+        # 各包 try/except（方向 2）：设备身份获取失败记 unknown 不阻断落盘，
+        # 判红经 overall=fail 表达而不再裸退（产物仍落盘留失败现场）。
+        identity_notes = []
         if args.result_file:
             # 方向 1/3：自描述验收产物——run_id/输入摘要/设备序列号/设备指纹/
             # 起止单调时间/逐项结果/总判定；原子写防半截文件被当证据
-            serial, serial_src = _device_serial(adb_exec)
+            try:
+                serial, serial_src = _device_serial(adb_exec)
+            except Exception as e:
+                serial, serial_src = None, ""
+                identity_notes.append(f"设备序列号获取异常: {e!r}")
             if not serial:
-                # 方向 3：设备身份标识三者皆空即判红（产物身份不可信）
-                print(json.dumps({"overall": "fail",
-                                  "error": "设备身份标识获取失败（ro.serialno/"
-                                           "ro.boot.serialno/eth0 MAC 皆空），判红",
-                                  "items": []}, ensure_ascii=False))
-                return 1
-            fprint = adb_exec("getprop ro.build.fingerprint")[0].strip()
+                # 方向 3：设备身份标识三者皆空即判红（产物身份不可信），但
+                # 不再裸 return——身份不可信记入 fail 产物留失败现场
+                serial, serial_src = "unknown", ""
+                identity_notes.append("设备身份标识获取失败（ro.serialno/"
+                                      "ro.boot.serialno/eth0 MAC 皆空），判红")
+            try:
+                fprint = adb_exec("getprop ro.build.fingerprint")[0].strip()
+            except Exception as e:
+                fprint = ""
+                identity_notes.append(f"设备指纹获取异常: {e!r}")
             if not fprint:
                 # 设备指纹获取失败（空串）→ 判红（与 serial 全空判红同口径）：
-                # 指纹是产物设备身份证据，空值产物不可信，不得静默落盘
-                print(json.dumps({"overall": "fail",
-                                  "error": "设备指纹获取失败"
-                                           "（ro.build.fingerprint 为空），判红",
-                                  "items": []}, ensure_ascii=False))
-                return 1
+                # 指纹是产物设备身份证据，空值产物不可信；记入 fail 产物留现场
+                fprint = "unknown"
+                identity_notes.append("设备指纹获取失败"
+                                      "（ro.build.fingerprint 为空），判红")
+            if identity_notes:
+                overall = "fail"
+                items = items + [{"tag": "__identity__", "status": "fail",
+                                  "detail": "；".join(identity_notes)}]
             result = {
                 "run_id": run_id,
                 "input_summary": acceptance,
@@ -1126,11 +1161,15 @@ def main(argv=None):
         # （失败不阻断，结果 pass/fail 均记）
         _backfill_zero_marks(batch_id)
         _mark_stage("verify_acceptance", batch_id)
-        if overall == "fail":
-            return 1
-        if overall == "ai":
-            return 2
-        return 0
+    # 返回码统一出口（方向 1）：原在 finally 内 return——中断传播中 finally
+    # 若 return 会把 KeyboardInterrupt 吞成正常退出（假证据链），故返回码移到
+    # try/except/finally 之后按 overall 判定；KeyboardInterrupt 路径已 re-raise，
+    # 走不到此处，中断原样逃逸。
+    if overall == "fail":
+        return 1
+    if overall == "ai":
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
