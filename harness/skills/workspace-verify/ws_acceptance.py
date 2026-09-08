@@ -643,17 +643,28 @@ def run_case_lifecycle(acceptance_text, lifecycle, adb_exec, adb_logcat,
     return overall, items, meta
 
 
-def _mark_stage(name, batch_id=None, zero=False):
-    """验证阶段自动打点：进程内直调 cdp_timing.main mark（batch 识别：显式
-    batch_id > 环境变量 CDP_BATCH_ID > log 目录唯一 timings 文件；均缺时
-    静默跳过返 0，失败不阻断口径）。验收段每项一发 mark（30+ 次），子进程
-    版每次 0.1~0.3s 启动开销串行叠加，进程内直调消除（_backfill_zero_marks
-    同款先例）。zero=True 记零 mark（跳过段占位，段耗时 0）。"""
+def _mark_stage(name, batch_id=None, zero=False, dur_s=None):
+    """验证阶段自动打点：进程内直调 cdp_timing.main mark（batch 识别收窄：
+    仅显式 batch_id 或环境变量 CDP_BATCH_ID 命中才写账本——不再回落
+    current-batch.json 与 log 目录唯一 timings 文件，防手工跑把打点落到
+    当批账本污染归因；均缺时静默跳过返 0，失败不阻断口径）。验收段每项
+    一发 mark（30+ 次），子进程版每次 0.1~0.3s 启动开销串行叠加，进程内
+    直调消除（_backfill_zero_marks 同款先例）。zero=True 记零 mark（跳过段
+    占位，段耗时 0）。dur_s（对齐 ws_push:275）：调用方自测该段真实墙钟
+    耗时，段耗时取 dur_s，相邻差额余量落 gap_before_<name>（未打点活动
+    不再污染段口径）。"""
+    # 收窄 batch 回落（方向 2）：mark 只认显式 batch_id 或 CDP_BATCH_ID，
+    # 避免手工跑 ws_acceptance（无批上下文）时因 current-batch.json 指针/
+    # 唯一 timings 文件存在而误写当批账本
+    if not batch_id and not os.environ.get("CDP_BATCH_ID", "").strip():
+        return
     args = ["mark", "--name", name]
     if batch_id:
         args += ["--batch", batch_id]
     if zero:
         args += ["--zero"]
+    if dur_s is not None:
+        args += ["--dur-s", f"{dur_s:.3f}"]
     try:
         rc = cdp_timing.main(args)
     except SystemExit as e:
@@ -666,14 +677,14 @@ def _mark_stage(name, batch_id=None, zero=False):
 
 
 def _resolve_batch_id(batch_id):
-    """batch 识别回落：显式 batch_id > 环境变量 CDP_BATCH_ID >
-    current-batch.json 指针 > log 目录唯一 timings 文件（多文件静默跳过
-    防误标其他批次）——薄壳委托 verify_common.resolve_batch_id_fallback
-    （批次四 B6 统一口径：与 cdp_timing mark 落点/产物命名同源）。
-    返回 batch_id 或 None。"""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
-    from verify_common import resolve_batch_id_fallback
-    return resolve_batch_id_fallback(batch_id)
+    """batch 识别收窄（方向 2）：仅显式 batch_id 或环境变量 CDP_BATCH_ID
+    命中才返回；不再回落 current-batch.json 指针与 log 目录唯一 timings
+    文件——手工跑 ws_acceptance（无批上下文）时当批指针/唯一打点文件残留
+    会把 mark/cases/补零误落到当批账本污染归因（verify 链模式 A 已注入
+    CDP_BATCH_ID，回落级对其冗余）。返回 batch_id 或 None。"""
+    if batch_id:
+        return batch_id
+    return os.environ.get("CDP_BATCH_ID", "").strip() or None
 
 
 def _batch_case_labels(batch_file):
@@ -747,13 +758,13 @@ def _backfill_zero_marks(batch_id):
 
 
 def _resolve_run_batch_id(batch_file):
-    """main 内 batch_id 解析三级回落：batch-file 显式解析 > CDP_BATCH_ID >
-    log 目录唯一 timings 文件（复用 _resolve_batch_id 口径）。
+    """main 内 batch_id 解析（方向 2 收窄）：batch-file 显式解析 >
+    CDP_BATCH_ID env；不再回落 current-batch.json / 唯一 timings 文件
+    （与 _resolve_batch_id 同口径，防手工跑无批上下文误写当批账本）。
 
-    --case/--acceptance 模式此前 batch_id 恒 None，_backfill_zero_marks
-    直接 return——标准段跳过时 verify_build 永远 missing（0904 三批实证）。
-    回落识别后补零/mark 必落本批打点文件；多打点文件时 _resolve_batch_id
-    静默跳过，防误标其他批次。读取失败按未提供处理（回落继续）。
+    --case/--acceptance 独立 CLI 无 batch-file 无 env 时返回 None，
+    _mark_stage/_backfill_zero_marks 静默跳过（verify 链模式 A 由编排层
+    注入 CDP_BATCH_ID，回落级对其冗余）。读取失败按未提供处理。
     """
     if batch_file:
         try:
@@ -842,12 +853,20 @@ def main(argv=None):
                   file=sys.stderr)
             return 2
 
-    # batch_id 解析三级回落（batch-file > CDP_BATCH_ID > 唯一 timings 文件）：
-    # --case 模式此前恒 None 致 _backfill_zero_marks 直接 return，标准段
-    # 跳过时 verify_build 永远 missing（0904 三批实证）；回落识别与
-    # _mark_stage 同口径，多打点文件时静默跳过防误标其他批次
+    # batch_id 解析收窄（batch-file 显式 > CDP_BATCH_ID env；不再回落
+    # current-batch.json / 唯一 timings 文件）：--case/--acceptance 手工跑无
+    # 批上下文时返回 None，_mark_stage/_write_cases 静默跳过不写账本——
+    # 防手工验收打点/实跑标签误落到 log 目录唯一打点文件所指当批
     batch_id = _resolve_run_batch_id(args.batch_file)
 
+    # verify_acceptance_connect 计时（方向 1）：起表须在 ensure_connected 前，
+    # mark 传实测秒数——连接耗时归 connect 段，脚本启动到连接前的未打点
+    # 活动余量落 gap_before_verify_acceptance_connect（对齐 ws_push:275）。
+    # 仅批上下文（显式 batch_id/CDP_BATCH_ID）存在时计时：无批手工跑不写
+    # 账本，起表无意义且徒增 monotonic 调用
+    _t_conn = (time.monotonic()
+               if (batch_id or os.environ.get("CDP_BATCH_ID", "").strip())
+               else None)
     ep = ac.ensure_connected()
     if not ep:
         # 编排层接线 rescue（激活第三级通道）：mDNS/静态失败后以
@@ -858,7 +877,9 @@ def main(argv=None):
         print(json.dumps({"overall": "fail", "error": "设备不可达",
                           "items": []}, ensure_ascii=False))
         return 1
-    _mark_stage("verify_acceptance_connect", batch_id)
+    _mark_stage("verify_acceptance_connect", batch_id,
+                dur_s=(time.monotonic() - _t_conn) if _t_conn is not None
+                else None)
     if args.wait_ready and not ac.ensure_ready(endpoint=ep):
         print(json.dumps({"overall": "fail",
                           "error": "设备未就绪（sys.boot_completed 超时，按不可达处理）",

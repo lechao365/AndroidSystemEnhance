@@ -453,7 +453,6 @@ class TestResolveAcceptance(unittest.TestCase):
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
-            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
             m_sub.TimeoutExpired = subprocess.TimeoutExpired
             buf = io.StringIO()
             with mock.patch.object(wa.subprocess, "run", m_sub):
@@ -512,7 +511,6 @@ class TestResolveAcceptance(unittest.TestCase):
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
-            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
             m_sub.TimeoutExpired = subprocess.TimeoutExpired
             buf = io.StringIO()
             with mock.patch.object(wa.subprocess, "run", m_sub):
@@ -840,12 +838,15 @@ class TestMultiCaseLifecycle(unittest.TestCase):
                      encoding="utf-8")
         return p
 
-    def _run(self, labels, life_dirty, acc_result=("pass", []), crash_n=0):
+    def _run(self, labels, life_dirty, acc_result=("pass", []), crash_n=0,
+             cases_out=None):
         """跑 main 并返回 (rc, 产物 JSON, run_case_lifecycle 调用序)。
 
         crash_n>0：前 crash_n 个 dict case 在 run_case_lifecycle 内抛
         RuntimeError（模拟 case 执行体非预期崩溃，方向 3），后续 case 正常
         返回；life_dirty 长度 = 实际正常返回的 case 数。
+        cases_out：dict（如 {"text": None}）时捕获 _write_cases 实收的
+        ran_labels 文本（守护分支 append，方向 3 判红用例用）。
         """
         d = tempfile.mkdtemp()
         batch = self._batch(d, labels)
@@ -863,6 +864,10 @@ class TestMultiCaseLifecycle(unittest.TestCase):
                      "timed_out": False, "teardown_detail": "已恢复到初值",
                      "forensics_dir": None})
 
+        def fake_write_cases(batch_id, cases_text):
+            if cases_out is not None:
+                cases_out["text"] = cases_text
+
         with mock.patch.object(wa, "ac") as m_ac:
             m_ac.ensure_connected.side_effect = ["ep", "ep"]
             m_ac.clock_sync.return_value = (True, "")
@@ -870,7 +875,6 @@ class TestMultiCaseLifecycle(unittest.TestCase):
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
-            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
             m_sub.TimeoutExpired = subprocess.TimeoutExpired
             buf = io.StringIO()
             with mock.patch.object(wa.subprocess, "run", m_sub), \
@@ -882,7 +886,8 @@ class TestMultiCaseLifecycle(unittest.TestCase):
                                       return_value=("SN1",
                                                     "getprop ro.serialno")), \
                     mock.patch.object(wa, "_mark_stage"), \
-                    mock.patch.object(wa, "_write_cases"), \
+                    mock.patch.object(wa, "_write_cases",
+                                      side_effect=fake_write_cases), \
                     mock.patch.object(wa, "_backfill_zero_marks"):
                 with contextlib.redirect_stdout(buf):
                     rc = wa.main(["run", "--batch-file", str(batch),
@@ -976,6 +981,32 @@ class TestMultiCaseLifecycle(unittest.TestCase):
         self.assertIn("lcview-trigger", data["teardown_detail"])
         self.assertIn("lcview-transfer", data["teardown_detail"])
 
+    def test_single_lifecycle_case_appends_ran_label(self):
+        # 方向 3（判红守护）：单 dict case 走 lifecycle 分支（对应源码
+        # if lifecycle: ran_labels.append(case_labels[0])）——正常完成后
+        # _write_cases 须收到该 case 实跑标签；若该分支漏 append（回归成
+        # 空 ran_labels）cases json 空 → 本用例判红
+        cases_out = {}
+        rc, data, calls, _ = self._run(
+            "lcview-trigger", [False], cases_out=cases_out)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1, "单 dict case 须启生命周期")
+        self.assertEqual(cases_out.get("text"), "lcview-trigger",
+                         "lifecycle 分支须 append 实跑 case 标签")
+
+    def test_single_str_case_appends_ran_label(self):
+        # 方向 3（判红守护）：单 str case（无生命周期资产）走 else 单 case
+        # 分支（对应源码 else: if case_labels: ran_labels.append(...)）——
+        # 正常完成后 _write_cases 须收到该 case 实跑标签；漏 append 则判红
+        cases_out = {}
+        rc, data, calls, _ = self._run(
+            "lcview-liveness", [], acc_result=("pass", []),
+            cases_out=cases_out)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 0, "str case 不启生命周期")
+        self.assertEqual(cases_out.get("text"), "lcview-liveness",
+                         "单 case else 分支须 append 实跑 case 标签")
+
     def test_single_lifecycle_crash_falls_back_to_finally_result(self):
         # 方向 3：单 case 生命周期模式（len==1，非逐 case 循环体）run_case_
         # lifecycle 抛异常 → 最外层 except 兜底记 fail/dirty，result-file
@@ -1014,7 +1045,6 @@ class TestMultiCaseLifecycle(unittest.TestCase):
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
-            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
             m_sub.TimeoutExpired = subprocess.TimeoutExpired
             with mock.patch.object(wa.subprocess, "run", m_sub), \
                     mock.patch.object(wa, "run_case_lifecycle",
@@ -1065,7 +1095,6 @@ class TestMultiCaseLifecycle(unittest.TestCase):
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
-            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
             m_sub.TimeoutExpired = subprocess.TimeoutExpired
             with mock.patch.object(wa.subprocess, "run", m_sub), \
                     mock.patch.object(wa, "run_case_lifecycle",
@@ -1082,6 +1111,14 @@ class TestMultiCaseLifecycle(unittest.TestCase):
         data = json.loads(out_json.read_text(encoding="utf-8"))
         self.assertEqual(data["overall"], "fail")
         self.assertIs(data["device_dirty"], True)
+        # 方向 4：中断前已跑 case 的判据项须保留在产物 items（逐 case
+        # extend 进 items，中断分支只追加 __interrupt__，不得整体覆盖清空）
+        tags = [i["tag"] for i in data["items"]]
+        self.assertIn("t", tags, "中断前已跑 case 的 items 项须保留")
+        self.assertIn("__interrupt__", tags)
+        self.assertTrue(any(i["tag"] == "t" and i["status"] == "pass"
+                            for i in data["items"]),
+                        "中断前已跑 case 的 pass 项须随失败现场落盘")
         # 已跑 case 的 teardown detail 保留，中断说明拼在其后
         self.assertIn("[lcview-trigger] 已恢复到初值", data["teardown_detail"])
         self.assertIn("验收被中断", data["teardown_detail"])
@@ -1114,7 +1151,6 @@ class TestMultiCaseLifecycle(unittest.TestCase):
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
-            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
             m_sub.TimeoutExpired = subprocess.TimeoutExpired
             with mock.patch.object(wa.subprocess, "run", m_sub), \
                     mock.patch.object(wa, "run_case_lifecycle",
@@ -1268,6 +1304,7 @@ class TestAcceptanceInternalSegments(unittest.TestCase):
         # acc_1..n/verify_acceptance 全序列落本批打点文件（batch_id 显式
         # 传参，多打点文件也不静默跳过）
         marks = []
+        mark_durs = {}
         LOGCAT = ["adb", "logcat", "-d"]
 
         def fake_run(cmd, **kw):
@@ -1289,8 +1326,9 @@ class TestAcceptanceInternalSegments(unittest.TestCase):
             body = stdout.split("__LE_EXIT_CODE__=")[0].rstrip()
             return body, 0
 
-        def fake_mark(name, batch_id=None, zero=False):
+        def fake_mark(name, batch_id=None, zero=False, dur_s=None):
             marks.append((name, batch_id, zero))
+            mark_durs[name] = dur_s
 
         with tempfile.TemporaryDirectory() as d:
             batch = self._batch(d)
@@ -1320,6 +1358,12 @@ class TestAcceptanceInternalSegments(unittest.TestCase):
                                  "verify_acceptance_acc_1",
                                  "verify_acceptance_acc_2",
                                  "verify_acceptance"])
+        # 方向 1：connect 段须传实测 dur_s（批上下文起表），其余段无 dur_s
+        self.assertIsNotNone(mark_durs.get("verify_acceptance_connect"),
+                             "connect 段须传实测 dur_s（余量落 gap_before）")
+        for n in names[1:]:
+            self.assertIsNone(mark_durs.get(n),
+                              f"段 {n} 不应带 dur_s（非自测段）")
         # batch_id 显式传参（来自批次内容），非 None
         self.assertTrue(all(m[1] for m in marks), "batch-file 模式须显式传 batch_id")
         self.assertIn("overall", buf.getvalue())
@@ -1343,7 +1387,7 @@ class TestAcceptanceInternalSegments(unittest.TestCase):
         def fake_parse(stdout):
             return stdout.split("__LE_EXIT_CODE__=")[0].rstrip(), 0
 
-        def fake_mark(name, batch_id=None, zero=False):
+        def fake_mark(name, batch_id=None, zero=False, dur_s=None):
             marks.append((name, batch_id, zero))
 
         with tempfile.TemporaryDirectory() as d:
@@ -1477,16 +1521,16 @@ class TestResolveRunBatchId(unittest.TestCase):
             self.assertEqual(wa._resolve_run_batch_id("/no/such/file.txt"),
                              self.batch)
 
-    def test_no_file_no_env_uses_unique_timings_file(self):
-        # 无 batch-file 无 env → log 目录唯一 timings 文件 stem
-        # （清掉宿主可能残留的 CDP_BATCH_ID，隔离环境隐式依赖）
+    def test_no_file_no_env_returns_none(self):
+        # 方向 2（收窄回落）：无 batch-file 无 env → None，不再回落 log 目录
+        # 唯一 timings 文件（即使 start 落盘）——防手工跑误把当批当上下文
         with mock.patch.dict("os.environ", {}, clear=False):
             os.environ.pop("CDP_BATCH_ID", None)
             wa.cdp_timing.main(["start", "--batch", self.batch])
-            self.assertEqual(wa._resolve_run_batch_id(None), self.batch)
+            self.assertIsNone(wa._resolve_run_batch_id(None))
 
     def test_nothing_resolvable_returns_none(self):
-        # 三级皆缺 → None（调用方补零/mark 静默跳过，防误标其他批次）
+        # 无显式/无 env → None（调用方补零/mark 静默跳过，防误标其他批次）
         with mock.patch.dict("os.environ", {}, clear=False):
             os.environ.pop("CDP_BATCH_ID", None)
             self.assertIsNone(wa._resolve_run_batch_id(None))
@@ -1511,15 +1555,44 @@ class TestMarkStageInProcess(unittest.TestCase):
             wa._mark_stage("verify_sync", "batch001", zero=True)
         self.assertIn("--zero", m.call_args.args[0])
 
+    def test_dur_s_passthrough(self):
+        # 方向 1：dur_s 透传为 --dur-s 参数（对齐 ws_push:275），
+        # connect 段实测秒数据此归因、余量落 gap_before_<name>
+        with mock.patch.object(wa.cdp_timing, "main", return_value=0) as m:
+            wa._mark_stage("verify_acceptance_connect", "batch001",
+                           dur_s=12.345)
+        args = m.call_args.args[0]
+        self.assertIn("--dur-s", args)
+        self.assertEqual(args[args.index("--dur-s") + 1], "12.345")
+
+    def test_no_batch_context_skips_mark(self):
+        # 方向 2（收窄回落）：无显式 batch_id 且无 CDP_BATCH_ID → 不打点
+        # （手工跑不因 current-batch.json/唯一 timings 文件误写当批账本）
+        with mock.patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("CDP_BATCH_ID", None)
+            with mock.patch.object(wa.cdp_timing, "main",
+                                   return_value=0) as m:
+                wa._mark_stage("verify_acceptance", None)
+            m.assert_not_called()
+
+    def test_env_batch_id_context_marks(self):
+        # 方向 2：仅环境变量 CDP_BATCH_ID 命中也写账本（verify 链注入场景）
+        with mock.patch.dict("os.environ", {"CDP_BATCH_ID": "envbatch123456"}), \
+                mock.patch.object(wa.cdp_timing, "main", return_value=0) as m:
+            wa._mark_stage("verify_acceptance", None)
+        args = m.call_args.args[0]
+        # 未显式传 --batch：交给 cdp_timing mark 回落 CDP_BATCH_ID env
+        self.assertNotIn("--batch", args)
+
     def test_nonzero_rc_warns_not_raises(self):
         # cdp_timing 返回非 0 → 仅 warn 不阻断（失败不阻断口径语义不变）
         with mock.patch.object(wa.cdp_timing, "main", return_value=3):
-            wa._mark_stage("verify_acceptance", None)
+            wa._mark_stage("verify_acceptance", "batch001")
 
     def test_exception_warns_not_raises(self):
         with mock.patch.object(wa.cdp_timing, "main",
                                side_effect=RuntimeError("boom")):
-            wa._mark_stage("verify_acceptance", None)
+            wa._mark_stage("verify_acceptance", "batch001")
 
 
 class TestWriteCases(unittest.TestCase):
@@ -1560,18 +1633,27 @@ class TestWriteCases(unittest.TestCase):
                           .read_text(encoding="utf-8"))
         self.assertEqual(data["batch_id"], "envbatch123456")
 
-    def test_unique_timing_file_fallback(self):
-        # 无显式/环境变量 → log 目录唯一 timings 文件回落（复用 _mark_stage
-        # 同款识别口径；多打点文件时静默跳过防误标）
-        wa.cdp_timing.main(["start", "--batch", self.batch])
-        wa._write_cases(None, "lcview-perf")
-        data = json.loads(self._cases_file().read_text(encoding="utf-8"))
-        self.assertEqual(data["batch_id"], self.batch)
+    def test_unique_timing_file_not_fallback(self):
+        # 方向 2（收窄回落）：仅显式/环境变量命中才写账本——即使 log 目录
+        # 有唯一 timings 文件（start 落盘），无显式 batch_id/无 CDP_BATCH_ID
+        # 也不写 cases（防手工跑把实跑标签误落当批）
+        os.environ.pop("CDP_BATCH_ID", None)
+        try:
+            wa.cdp_timing.main(["start", "--batch", self.batch])
+            wa._write_cases(None, "lcview-perf")
+        finally:
+            os.environ.pop("CDP_BATCH_ID", None)
+        self.assertFalse(self._cases_file().exists(),
+                         "唯一 timings 文件不再作为回落源，无批上下文不写")
 
     def test_no_batch_skips(self):
-        # 无显式/环境变量/唯一打点文件 → 静默跳过不落盘（独立 CLI 无 batch
+        # 无显式/环境变量 → 静默跳过不落盘（独立 CLI 无 batch
         # 上下文属正常降级，不阻断）
-        wa._write_cases(None, "lcview-liveness")
+        os.environ.pop("CDP_BATCH_ID", None)
+        try:
+            wa._write_cases(None, "lcview-liveness")
+        finally:
+            os.environ.pop("CDP_BATCH_ID", None)
         self.assertFalse(self._cases_file().exists())
 
     def test_empty_cases_skips(self):
@@ -1747,7 +1829,6 @@ class TestRunIdLifecycle(unittest.TestCase):
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
-            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
             m_sub.TimeoutExpired = subprocess.TimeoutExpired
             with mock.patch.object(wa.subprocess, "run", m_sub):
                 with mock.patch.object(wa, "run_acceptance",
@@ -1785,7 +1866,6 @@ class TestRunIdLifecycle(unittest.TestCase):
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
-            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
             m_sub.TimeoutExpired = subprocess.TimeoutExpired
             with mock.patch.object(wa.subprocess, "run", m_sub):
                 with mock.patch.object(wa, "run_acceptance",
@@ -1809,7 +1889,6 @@ class TestRunIdLifecycle(unittest.TestCase):
             m_ac.parse_exec_output.return_value = ("", 0)  # 指纹读取为空
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
-            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
             m_sub.TimeoutExpired = subprocess.TimeoutExpired
             buf = io.StringIO()
             with mock.patch.object(wa.subprocess, "run", m_sub):
@@ -1840,7 +1919,6 @@ class TestRunIdLifecycle(unittest.TestCase):
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
-            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
             m_sub.TimeoutExpired = subprocess.TimeoutExpired
             buf = io.StringIO()
             with mock.patch.object(wa.subprocess, "run", m_sub):
@@ -1960,7 +2038,6 @@ class TestRunIdLifecycle(unittest.TestCase):
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
-            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
             m_sub.TimeoutExpired = subprocess.TimeoutExpired
             buf = io.StringIO()
             with mock.patch.object(wa.subprocess, "run", m_sub), \
