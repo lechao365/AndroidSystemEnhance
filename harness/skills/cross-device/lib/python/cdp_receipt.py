@@ -67,6 +67,9 @@ _FIELDS = [
     # 两行 → from_text 默认空串，向后兼容
     ("operator", ""),
     ("host_env", ""),
+    # P0-C：本批 selfcheck 登记的 flake 数（ws_report 从 selfcheck 文本解析；
+    # 旧收据无此行 → 默认空，metrics 聚合容错）
+    ("flake_count", ""),
 ]
 
 # 自动采集字段进程级缓存：write_receipt 高频调用（老化单测单用例 55 次写），

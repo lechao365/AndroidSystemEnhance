@@ -585,6 +585,9 @@ def main(argv=None):
     ap.add_argument("--selfcheck", default="",
                     help="自检摘要文本（-s 批次必带：pytest harness -q 与 "
                          "check_skill_refs 输出；含 failed 非零或缺 skipped 计数即拒写）")
+    ap.add_argument("--flake-count", default="",
+                    help="本批 selfcheck 登记的 flake 数（缺省从 --selfcheck "
+                         "文本解析；供 metrics 聚合 flake 率）")
     ap.add_argument("--metrics", default="",
                     help="三指标结构化 JSON 对象（写入收据 metrics 字段与 trend 行尾）")
     ap.add_argument("--timings-file", default="",
@@ -806,6 +809,13 @@ def main(argv=None):
     # "531 passed in 27.9s | skipped=0 | OK: ..."，保证 skipped 计数随收据显式落地
     args.selfcheck = " | ".join(l for l in args.selfcheck.splitlines() if l.strip())
 
+    # P0-C：flake 计数（本批 selfcheck 登记的 KIR-002 抖动条目数），供
+    # metrics 聚合 flake 率；显式传参优先，缺省从 selfcheck 文本解析，缺省 0
+    if not args.flake_count:
+        args.flake_count = (str(len(re.findall(r"\bflake:\s+\S+",
+                                               args.selfcheck)))
+                            if args.selfcheck.strip() else "0")
+
     # 发布内容与验证内容绑定（批次 261f10265269 方向 1）：verified_tree 为
     # 落盘时刻排除统一集合后的内容树（git 树对象 id，可复算）；commit_scope
     # 为该时刻 porcelain 清单加摘要。均排除收据目录（自引用豁免）；git 不可
@@ -850,6 +860,7 @@ def main(argv=None):
                 summary=args.summary, metrics=args.metrics,
                 timings=args.timings, cases=args.case,
                 selfcheck=args.selfcheck,
+                flake_count=args.flake_count,
                 package=args.package,
                 verified_tree=verified_tree, commit_scope=commit_scope,
                 device_dirty="true" if args.device_dirty else "")

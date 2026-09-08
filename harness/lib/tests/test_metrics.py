@@ -40,7 +40,6 @@ class TestMetrics(unittest.TestCase):
     def test_counts_and_rates(self):
         for i, res in enumerate(["pass", "pass", "fail", "skip"]):
             _receipt(self.verify, f"b{i}", res, 30 + i)
-        files = sorted(self.verify.glob("*.md"))
         stats = mt.compute(mt.load_receipts(self.verify),
                            mt.load_trend(self.verify), [])
         self.assertEqual(stats["total"], 4)

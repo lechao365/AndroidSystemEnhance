@@ -46,7 +46,8 @@ ROOT = Path(__file__).resolve().parents[2]
 # 必须同步进本常量，防单侧漏接线致判红静默失效。
 REQUIRED_RC_KEYS = ("pytest_rc", "refs_rc", "config_rc", "contract_rc",
                     "pyenv_rc", "ioctl_rc", "manifest_rc",
-                    "discipline_rc", "scan_rc", "ruff_rc", "host_rc")
+                    "discipline_rc", "scan_rc", "ruff_rc", "host_rc",
+                    "metrics_rc")
 
 # pytest 摘要计数行：含 passed/failed/skipped 任一计数的行（形如
 # "531 passed in 27.9s"、"121 passed, 3 skipped in 6.0s"、"1 failed, ..."）
@@ -751,6 +752,19 @@ def main(argv=None):
     parts.append(f"pyenv_rc={0 if env_ok else 1}")
     if env_summary:
         parts.append(env_summary)
+    # 自度量统计（P0-C）：metrics.py --report 跑通即 0（聚合异常判红）。
+    # metrics.py 首行自带 metrics_rc=0（机器行在前，报表体在后），last 行
+    # 是报表末行——以正则定位 metrics_rc= 机器行，不依赖末行位置。
+    _metrics_t0 = time.time()
+    met_rc, met_out, _, met_dur = timed_run(
+        [sys.executable, str(ROOT / "harness" / "lib" / "metrics.py"),
+         "--report"], timeout=120)
+    parts.append(f"metrics_rc={met_rc}")
+    m = re.search(r"metrics_rc=(\d+)", met_out)
+    if m and int(m.group(1)) == 0:
+        parts.append("OK: 自度量聚合成功")
+    elif met_rc != 0:
+        parts.append("error: 自度量聚合失败")
     # 内核/AOSP ioctl 头一致性（方向 2）：此前 check_ioctl_headers 无调用方，
     # 头文件单侧漂移/双空解析异常静默无感；接入自检后 ioctl_rc 透出，双空
     # 判红在 check_ioctl_headers 内部完成，非零由 ws_report 全 *_rc 判红拒写
@@ -797,7 +811,8 @@ def main(argv=None):
                  f"cfg={cfg_dur:.1f} pyenv={env_dur:.1f} "
                  f"ioctl={ioctl_dur:.1f} manifest={manifest_dur:.1f} "
                  f"discipline={dis_dur:.1f} scan={scan_dur:.1f} "
-                 f"ruff={ruff_dur:.1f} host={host_dur:.1f}")
+                 f"ruff={ruff_dur:.1f} host={host_dur:.1f} "
+                 f"metrics={met_dur:.1f}")
     print(" | ".join(parts))
     _mark_selfcheck(dur_s=time.time() - _t0)
     return 0
