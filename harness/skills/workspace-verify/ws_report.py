@@ -498,6 +498,32 @@ def _validate_push_file(path, acceptance_run_id):
     return data, None
 
 
+def _acceptance_device_dirty(path):
+    """由验收产物读 device_dirty 三态（返回 ""/"true"/"unknown"）。
+
+    只读不改写，与 result 无关（fail/skip 收据亦传 --acceptance-file，
+    ws_verify_chain report 步无条件透传产物路径）：文件缺失/非法/非 JSON
+    对象/键缺省一律返回 ""（非 pass 收据不强制产物，读取失败不阻断；
+    pass 门禁段另有严格校验，此处仅负责设备态三态识别）。
+    ws_acceptance 端 device_dirty 三态：True（teardown 恢复失败）、
+    "unknown"（teardown 未跑，不得声称干净）、False（跑过且干净）。
+    """
+    if not (path or "").strip():
+        return ""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    dd = data.get("device_dirty")
+    if dd is True:
+        return "true"
+    if dd == "unknown":
+        return "unknown"
+    return ""
+
+
 def _resolve_target(target: str):
     """把 --target 解析为 12hex commit，返回 (resolved, err)。
 
@@ -573,8 +599,8 @@ def main(argv=None):
                          "入库可追溯；缺省按 batch_id 探测 "
                          "harness/log/workspace-verify/package-<batch_id>.json）")
     ap.add_argument("--device-dirty", action="store_true",
-                    help="teardown 失败（恢复不了本轮改变的设备态）时显式标记"
-                         "（PASS 路径亦可从验收产物 device_dirty 自动透传）")
+                    help="teardown 恢复失败时显式标记设备态不可信（header 写 "
+                         "true；验收产物 device_dirty True/unknown 亦自动透传）")
     ap.add_argument("--elapsed", type=int, default=None,
                     help="耗时秒数；缺省从 timings 的 wall_end-wall_start 推导"
                          "（推导不出则 0），显式传参优先")
@@ -688,6 +714,19 @@ def main(argv=None):
               "prepare evidence-scope 推导死锁，拒绝写收据", file=sys.stderr)
         return 2
 
+    # 设备态三态识别（device_dirty ∈ ""/"true"/"unknown"）：true=teardown 恢复
+    # 失败，unknown=teardown 未跑，均视为设备态不可信；空=未涉及或已恢复干净。
+    # 来源合并取更严重档：显式 --device-dirty 恒 "true"；验收产物 device_dirty
+    # （True→true / "unknown"→unknown）无条件透传——ws_verify_chain report 步
+    # 无论 pass/fail 都把 acceptance 产物路径传给 --acceptance-file，fail/skip/
+    # revert 收据据此在 header 透传真实设备态供审计，pass 走下方门禁拒写。
+    device_dirty = "true" if args.device_dirty else ""
+    acc_dd = _acceptance_device_dirty(args.acceptance_file)
+    if acc_dd == "true":
+        device_dirty = "true"
+    elif not device_dirty:
+        device_dirty = acc_dd
+
     # 验收证据门禁：result=pass 只接受自描述验收产物文件（--acceptance-file），
     # 校验 run_id/输入摘要/单调时间且整体通过，否则拒写；单测产物（--unit-test-file）
     # 为必需且 run_id 一致、每 target 全绿；推送产物（--push-file）为必需且
@@ -717,22 +756,19 @@ def main(argv=None):
             return 2
         args.acceptance = json.dumps(parsed, ensure_ascii=False,
                                      separators=(",", ":"))
-        # 方向 3：验收产物标 device_dirty（teardown 恢复失败）→ 自动透传收据
-        if (parsed or {}).get("device_dirty") is True:
-            args.device_dirty = True
 
-    if args.device_dirty:
-        # 方向 5：device_dirty 仅 warn 不再被接受为 pass 证据——设备态不可信
-        # 的验证结果不得落 pass 收据（teardown 恢复失败，脏态可能污染后续
-        # 断言）；skip/fail 收据仍可落（标注 header 供审计）。add-candidate
-        # 侧同步拒收（baseline_register 方向 5 门禁）。
+    if device_dirty:
+        # device_dirty 仅 warn 不再被接受为 pass 证据——设备态不可信的验证
+        # 结果不得落 pass 收据（teardown 恢复失败/未跑，脏态可能污染后续断言）；
+        # skip/fail/revert 收据仍可落（header 透传 true/unknown 供审计）。
+        # add-candidate 侧同步拒收（baseline_register 仅空串放行）。
         if args.result == "pass":
-            print("error: device_dirty=true（teardown 恢复失败，设备态不可信）"
-                  "且 result=pass，拒绝写收据（须重跑验证得干净设备态）",
-                  file=sys.stderr)
+            print(f"error: device_dirty={device_dirty}（teardown 恢复失败/未跑，"
+                  "设备态不可信）且 result=pass，拒绝写收据"
+                  "（须重跑验证得干净设备态）", file=sys.stderr)
             return 2
-        print("warn: device_dirty=true（teardown 恢复失败，设备态不可信），"
-              "已在收据 header 标注", file=sys.stderr)
+        print(f"warn: device_dirty={device_dirty}（teardown 恢复失败/未跑，"
+              "设备态不可信），已在收据 header 标注", file=sys.stderr)
 
     # 打包证据内嵌（本批意图 1）：显式 --package-file 优先，缺省按 batch_id
     # 探测 harness/log/workspace-verify/package-<batch_id>.json（ws_package
@@ -880,7 +916,7 @@ def main(argv=None):
                 coverage=coverage,
                 package=args.package,
                 verified_tree=verified_tree, commit_scope=commit_scope,
-                device_dirty="true" if args.device_dirty else "")
+                device_dirty=device_dirty)
     path = write_receipt(r, body or args.summary)
     append_trend(time.strftime("%Y-%m-%d %H:%M:%S"), batch_id, args.result,
                  f"build={args.build} board={args.board} "

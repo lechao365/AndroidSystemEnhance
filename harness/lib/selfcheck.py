@@ -116,6 +116,10 @@ def timed_run(cmd, timeout=None):
 _TOOL_TIMEOUT_S = 120
 # pytest 超时上限（秒）：xdist 全量正常 ~25s（WSL2 drvfs ~60s），兜挂死
 _PYTEST_TIMEOUT_S = 900
+# host 收口超时上限（秒）：check_host_tests 逐模块 make test 各 300s、两模块
+# 顺序跑最坏 ~600s+clean，放 650 兜挂死；须大于单模块超时（300s）防误杀——
+# 不足则内层 TimeoutExpired（rc 判红带归因）会被外层收口 rc=124 抢先截断
+_HOST_TIMEOUT_S = 650
 
 
 def _spawn_cmd(cmd):
@@ -689,16 +693,18 @@ def main(argv=None):
     (tools, refs_dur, cfg_dur, dis_dur, scan_dur) = _collect_tools(tools_procs)
     ioctl_rc, ioctl_out, _, ioctl_dur = _collect_cmd(ioctl_proc, "ioctl")
     ruff_rc, ruff_out, _, ruff_dur = _collect_cmd(ruff_proc, "ruff")
-    host_rc, host_out, _, host_dur = _collect_cmd(host_proc, "host")
+    host_rc, host_out, _, host_dur = _collect_cmd(host_proc, "host",
+                                                  timeout=_HOST_TIMEOUT_S)
     opencode_rc, opencode_out, _, opencode_dur = _collect_cmd(
         opencode_proc, "opencode")
     # gen_manifest 校验延后到 host 收口之后（KIR-002 当批修，批次 7d41df8e24bf
-    # 连带）：check_host_tests 的 `make test` 编译产物（无扩展名 host_test 二进制）
-    # 落在 code/rpi5/kernel/new/.../tests/ 下、`make clean` 前短暂存在，与
-    # gen_manifest 的 git ls-files 扫描并发会被当作「未登记 patch」判红
-    # （manifest_rc=1；xdist 抢占放大编译窗口，真实自检稳定命中）。manifest
-    # 一致性须在 host clean 后的干净 patch 树上校验，故单独在 host 收口后
-    # spawn+collect（~0.6-1.1s 串行代价，换取 manifest_rc 确定性）。
+    # 连带）：check_host_tests 曾在 code/rpi5/kernel/new/.../tests/ 下直跑 make，
+    # 其编译产物（无扩展名 host_test 二进制）短暂存在，与 gen_manifest 的
+    # git ls-files 扫描并发会被当作「未登记 patch」判红（manifest_rc=1；xdist
+    # 抢占放大编译窗口，真实自检稳定命中）。host 现已在 gitignored 副本
+    # （harness/log/host-tests）内跑 make、产物不落 code 树，竞态根因消除；
+    # manifest 仍保持 host 收口后单独校验（干净 patch 树上校验，成本 ~0.6-1.1s
+    # 换取 manifest_rc 确定性）。
     manifest_proc = _spawn_cmd(
         [sys.executable, str(ROOT / "harness" / "skills" / "cross-device"
                              / "lib" / "python" / "gen_manifest.py"),

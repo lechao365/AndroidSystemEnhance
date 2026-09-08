@@ -164,6 +164,22 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("device_dirty", out)
 
+    def test_add_candidate_rejects_device_dirty_unknown(self):
+        # 收据 device_dirty="unknown"（teardown 未跑，设备态不可信）→ 拒收登记
+        # （与 true 同等：device_dirty 仅空串放行，非空一律拒）
+        from cdp_receipt import Receipt, write_receipt
+        r = Receipt(batch_id="batch-dirty-unknown", batch_base="",
+                    verified_commit="abc", verify_mode="board", result="pass",
+                    build="pass", push_board="pass", acceptance="ok",
+                    elapsed_s=10, summary="dirty-unknown",
+                    cases="lcview-liveness", device_dirty="unknown")
+        rp = str(write_receipt(r, "body"))
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 1)
+        self.assertIn("device_dirty=unknown", out)
+
     def test_add_candidate_lowercase_receipt(self):
         # 收据 build=skip 等小写值须转大写登记，不硬编码 PASS
         rp = self._make_receipt(build="skip", board="skip")

@@ -457,10 +457,12 @@ def main(argv=None):
                   f"{'; '.join(receipt_errs)}", file=sys.stderr)
             return 1
         # 方向 5：device_dirty 拒收——设备态不可信的验证结果不得登记为基线
-        # （ws_report 已源头拒落 pass，此处补登记侧防线防绕过）
-        if (r.device_dirty or "").strip().lower() in ("true", "1", "yes"):
-            print("error: 收据 device_dirty=true（teardown 恢复失败，设备态不可信），"
-                  "拒绝登记 candidate", file=sys.stderr)
+        # （ws_report 已源头拒落 pass，此处补登记侧防线防绕过；仅空串放行，
+        # 非空值含 "true"/"unknown"（teardown 恢复失败/未跑）一律拒收登记）
+        dd_val = (r.device_dirty or "").strip()
+        if dd_val:
+            print(f"error: 收据 device_dirty={dd_val}（teardown 恢复失败/未跑，"
+                  "设备态不可信），拒绝登记 candidate", file=sys.stderr)
             return 1
         receipt_cases = {c.strip() for c in (r.cases or "").split(",") if c.strip()}
         # 方向 2（本批意图 2）：evidence 自描述——记录发布全量组覆盖核对结果

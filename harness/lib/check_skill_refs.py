@@ -141,23 +141,32 @@ _GIT_LS_CACHE: dict[str, list[Path] | None] = {}
 
 
 def _git_ls_files() -> list[Path] | None:
-    """git ls-files 一次性列出全部跟踪文件（相对 ROOT）；非 git 仓返 None。
+    """git ls-files 一次性列出工作树文件面：已跟踪 + 未跟踪非忽略文件
+    （相对 ROOT）；非 git 仓返 None。
 
+    方向 4 未跟踪并入：此前只列跟踪文件，新增但未 git add 的 SKILL/文档/
+    脚本不进扫描面，其内悬空引用漏判——上板前假证据。git ls-files 一旦给
+    --others 就不再隐含 --cached（实测只列未跟踪），故显式 --cached 保留
+    跟踪文件面（语义不回退）；--others 并入未跟踪，--exclude-standard 让
+    .gitignore 生效排除忽略产物；输出 sorted(set()) 去重合并排序（git 输出
+    untracked/tracked 两组各自有序、合并非全局有序，调用方需确定性）。
     全树 rglob 在 apply 机 WSL2 drvfs 慢到 ~39s（扫到 .git 对象/__pycache__
     等大量非仓库资产），而 emit 本机仅 0.38s——refs 是自检关键路径，改用
-    git ls-files 只列跟踪文件（本仓 git 仓，快一两个数量级）。"""
+    git ls-files（本仓 git 仓，快一两个数量级）。"""
     key = str(ROOT.resolve())
     if key in _GIT_LS_CACHE:
         return _GIT_LS_CACHE[key]
     try:
-        r = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
-                           text=True, encoding="utf-8", errors="replace")
+        r = subprocess.run(["git", "ls-files", "--cached", "--others",
+                            "--exclude-standard"], cwd=ROOT,
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
     except Exception:
         r = None
     if r is None or r.returncode != 0:
         _GIT_LS_CACHE[key] = None
         return None
-    files = [Path(ln) for ln in r.stdout.splitlines() if ln]
+    files = sorted({Path(ln) for ln in r.stdout.splitlines() if ln})
     _GIT_LS_CACHE[key] = files
     return files
 
@@ -168,7 +177,7 @@ def _basename_count(name: str) -> int:
     索引须排除 EXEMPT_RELS 目录（docs/superpowers、harness/log）：这些目录
     含大量非仓库资产的同名文件（日志产物/历史计划），纳入索引会把"引用
     不存在的文件"误判为"多义跳过"（防误报变漏网）。
-    数据源优先 git ls-files（仅跟踪文件，快）；非 git 仓回落全树 rglob。
+    数据源优先 git ls-files（跟踪+未跟踪非忽略，快）；非 git 仓回落全树 rglob。
     """
     root = ROOT.resolve()
     key = str(root)
@@ -278,8 +287,9 @@ def iter_scan_targets(rel: str | None) -> list[Path]:
     targets: list[Path] = []
     files = _git_ls_files()
     if files is not None:
-        # git ls-files 只含跟踪文件（无 __pycache__/.pytest_cache 且不含 .git），
-        # 输出相对 ROOT（快）；tests 目录与豁免/后缀过滤与 rglob 口径一致
+        # 文件面=跟踪+未跟踪非忽略（无 __pycache__/.pytest_cache 且不含
+        # .git），输出相对 ROOT（快）；tests 目录与豁免/后缀过滤与 rglob
+        # 口径一致
         base_rels = [Path(rel)] if rel else [Path("harness/skills"), Path("docs")]
         exempt_rel = tuple(Path(r) for r in EXEMPT_RELS)
         for f in files:

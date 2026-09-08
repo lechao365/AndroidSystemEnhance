@@ -839,8 +839,13 @@ class TestMultiCaseLifecycle(unittest.TestCase):
                      encoding="utf-8")
         return p
 
-    def _run(self, labels, life_dirty, acc_result=("pass", [])):
-        """跑 main 并返回 (rc, 产物 JSON, run_case_lifecycle 调用序)。"""
+    def _run(self, labels, life_dirty, acc_result=("pass", []), crash_n=0):
+        """跑 main 并返回 (rc, 产物 JSON, run_case_lifecycle 调用序)。
+
+        crash_n>0：前 crash_n 个 dict case 在 run_case_lifecycle 内抛
+        RuntimeError（模拟 case 执行体非预期崩溃，方向 3），后续 case 正常
+        返回；life_dirty 长度 = 实际正常返回的 case 数。
+        """
         d = tempfile.mkdtemp()
         batch = self._batch(d, labels)
         out_json = Path(d) / "acc.json"
@@ -850,8 +855,10 @@ class TestMultiCaseLifecycle(unittest.TestCase):
                            ensure_boot=False, on_item=None, host_env=None,
                            since_epoch=0):
             life_calls.append(lifecycle)
+            if len(life_calls) <= crash_n:
+                raise RuntimeError("case 执行崩溃（模拟子命令异常/设备操作抛错）")
             return ("pass", [{"tag": "t", "status": "pass", "detail": "ok"}],
-                    {"device_dirty": life_dirty[len(life_calls) - 1],
+                    {"device_dirty": life_dirty[len(life_calls) - 1 - crash_n],
                      "timed_out": False, "teardown_detail": "已恢复到初值",
                      "forensics_dir": None})
 
@@ -921,6 +928,54 @@ class TestMultiCaseLifecycle(unittest.TestCase):
                                   "detail": "d"}]))
         self.assertEqual(rc, 1)
         self.assertEqual(data["overall"], "fail")
+
+    def test_multi_case_crash_marks_fail_dirty_keeps_running(self):
+        # 方向 3：首个 dict case 执行体抛非预期异常 → 该 case 记 fail（含异常
+        # 信息）、device_dirty=True（设备态不可信）、后续 case 仍跑完、
+        # result-file 仍落盘（main 正常返回，无异常上抛）
+        rc, data, calls, _ = self._run(
+            "lcview-trigger,lcview-transfer", [False], crash_n=1)
+        self.assertEqual(rc, 1)  # overall fail（含崩溃 case）
+        self.assertEqual(len(calls), 2, "崩溃 case 后后续 case 仍须跑完")
+        self.assertIs(data["device_dirty"], True)
+        self.assertEqual(data["overall"], "fail")
+        fail_items = [i for i in data["items"] if i["status"] == "fail"]
+        self.assertEqual(len(fail_items), 1, "仅崩溃 case 记 fail，另一 case 干净")
+        self.assertEqual(fail_items[0]["tag"], "__crash__")
+        self.assertIn("lcview-trigger", fail_items[0]["detail"])
+        self.assertIn("执行崩溃", fail_items[0]["detail"])
+        self.assertIn("[lcview-trigger]", data["teardown_detail"])
+        self.assertIn("device_dirty", data["teardown_detail"])
+        self.assertIn("[lcview-transfer]", data["teardown_detail"])
+
+    def test_multi_case_all_crash_still_writes_result(self):
+        # 方向 3：多处 case 全崩溃仍最终落盘（逐 case 记 fail/dirty 不中断，
+        # 无异常上抛；收据完整含两崩溃项）
+        rc, data, calls, _ = self._run(
+            "lcview-trigger,lcview-transfer", [], crash_n=2)
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(calls), 2, "全崩溃也须逐个进入 lifecycle 尝试")
+        self.assertIs(data["device_dirty"], True)
+        self.assertEqual(data["overall"], "fail")
+        fail_items = [i for i in data["items"] if i["status"] == "fail"]
+        self.assertEqual(len(fail_items), 2)
+        self.assertTrue(all(i["tag"] == "__crash__" for i in fail_items))
+        self.assertIn("lcview-trigger", data["teardown_detail"])
+        self.assertIn("lcview-transfer", data["teardown_detail"])
+
+    def test_single_lifecycle_crash_falls_back_to_finally_result(self):
+        # 方向 3：单 case 生命周期模式（len==1，非逐 case 循环体）run_case_
+        # lifecycle 抛异常 → 最外层 except 兜底记 fail/dirty，result-file
+        # 仍落盘（main 正常返回 rc=1，无异常上抛）
+        rc, data, calls, _ = self._run("lcview-trigger", [], crash_n=1)
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(calls), 1)
+        self.assertIs(data["device_dirty"], True)
+        self.assertEqual(data["overall"], "fail")
+        fail_items = [i for i in data["items"] if i["status"] == "fail"]
+        self.assertEqual(len(fail_items), 1)
+        self.assertEqual(fail_items[0]["tag"], "__crash__")
+        self.assertIn("未预期崩溃", fail_items[0]["detail"])
 
 
 class TestEmptyAcceptance(unittest.TestCase):

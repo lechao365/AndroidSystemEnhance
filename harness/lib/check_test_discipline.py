@@ -61,25 +61,50 @@ def _git_lines(args: list[str], cwd: Path):
 def scan(repo: Path, rev: str = "HEAD") -> list[str]:
     """返回违规明细列表（空 = 无违规）。
 
-    git 调用失败 fail-closed（lib-07）：.git 存在但 diff 返回码非 0 时
-    不得当"无改动"假绿——输出 error 并以哨兵违规判红（rc=1 交
+    git 调用失败 fail-closed（lib-07）：.git 存在但 diff/ls-files 返回码
+    非 0 时不得当"无改动"假绿——输出 error 并以哨兵违规判红（rc=1 交
     discipline_rc 透出），防仓库异常场景静默放行。
+    文件面 = 已跟踪改动 ∪ 未跟踪非忽略文件（方向 4 未跟踪并入，见内文）。
     """
-    changed = _git_lines(["diff", "--name-only", rev], repo)
-    if changed is None:
+    tracked = _git_lines(["diff", "--name-only", rev], repo)
+    if tracked is None:
         print(f"error: git diff --name-only {rev} 失败（仓库异常/命令不可用），"
               "无法扫描测试改动，判红", file=sys.stderr)
         return [f"{repo}: git diff 失败，无法扫描（按违规判红）"]
+    untracked = _git_lines(["ls-files", "--others", "--exclude-standard"],
+                           repo)
+    if untracked is None:
+        print("error: git ls-files --others --exclude-standard 失败"
+              "（仓库异常/命令不可用），无法扫描未跟踪测试文件，判红",
+              file=sys.stderr)
+        return [f"{repo}: git ls-files 失败，无法扫描未跟踪文件（按违规判红）"]
+    # git diff --name-only 不列未跟踪文件，新增但未 git add 的测试文件其违禁
+    # 新增行（xfail/skip/sleep）此前整文件漏判假绿——上板前假证据；
+    # --exclude-standard 让 .gitignore 生效；两路输出均相对 repo（路径基准
+    # 一致），去重后统一排序。
+    untracked_set = set(untracked)
+    changed = sorted(set(tracked) | untracked_set)
     findings: list[str] = []
-    for rel in sorted(changed):
+    for rel in changed:
         if not rel.endswith(".py") or not _is_test_file(rel):
             continue
-        file_lines = _git_lines(["diff", rev, "--", rel], repo)
-        if file_lines is None:
-            print(f"error: git diff {rel} 失败，无法扫描，判红",
-                  file=sys.stderr)
-            findings.append(f"{rel}: git diff 失败，无法扫描（按违规判红）")
-            continue
+        if rel in untracked_set:
+            # 未跟踪新文件整体视作新增行（git diff 不展示未跟踪内容）
+            try:
+                raw = (repo / rel).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                print(f"error: 读取未跟踪测试文件 {rel} 失败，无法扫描，判红",
+                      file=sys.stderr)
+                findings.append(f"{rel}: 读取失败，无法扫描（按违规判红）")
+                continue
+            file_lines = ["+" + ln for ln in raw.splitlines()]
+        else:
+            file_lines = _git_lines(["diff", rev, "--", rel], repo)
+            if file_lines is None:
+                print(f"error: git diff {rel} 失败，无法扫描，判红",
+                      file=sys.stderr)
+                findings.append(f"{rel}: git diff 失败，无法扫描（按违规判红）")
+                continue
         for ln in file_lines:
             if not ln.startswith("+") or ln.startswith("+++"):
                 continue

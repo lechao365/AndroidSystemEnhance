@@ -1405,6 +1405,44 @@ class TestWsReport(unittest.TestCase):
         self.assertIn("device_dirty", err.getvalue())
         self.assertFalse(self._dir.exists())
 
+    def test_device_dirty_unknown_from_acceptance_rejects_pass(self):
+        # 验收产物 device_dirty="unknown"（teardown 未跑，不得声称干净）+
+        # result=pass → 拒落收据（与 true 同等视为设备态不可信，判红）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        acc = self._write_acc(device_dirty="unknown")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "pass", "--build", "pass",
+                                 "--board", "pass", "--summary", "unknown 态透传",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--acceptance-file", acc,
+                                 "--unit-test-file", self._write_ut(),
+                                 "--push-file", self._write_push()])
+        self.assertEqual(rc, 2)
+        self.assertIn("device_dirty=unknown", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_device_dirty_unknown_auto_passthrough_header_on_fail(self):
+        # fail/skip 收据带 --acceptance-file（ws_verify_chain report 步无条件传
+        # 产物路径）且 device_dirty="unknown" → 收据保留并 header 透传 unknown
+        # （非 pass 不拒写，三态如实标注供审计；header 不再恒写 true/空）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        acc = self._write_acc(device_dirty="unknown")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "fail", "--build", "fail",
+                                 "--board", "fail", "--summary", "失败且未跑 teardown",
+                                 "--acceptance-file", acc])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        self.assertEqual(len(details), 1)
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- device_dirty: unknown", content)
+
     def test_device_dirty_flag_on_fail_receipt(self):
         # 方向 3：fail 收据无产物核验路径 → --device-dirty 显式标记
         batch = self._write(VALID_S, ".cdp")

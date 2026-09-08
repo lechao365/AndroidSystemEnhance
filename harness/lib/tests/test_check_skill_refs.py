@@ -346,6 +346,53 @@ class TestCheckSkillRefs(unittest.TestCase):
         self.assertNotIn("harness/lib/x.py", rels)
         self.assertNotIn("harness/log/x.md", rels)
 
+    # ── 方向 4：文件面并入未跟踪（--cached --others --exclude-standard）
+    def _git(self, *args):
+        subprocess.run(["git", *args], cwd=self.tmp, check=True,
+                       capture_output=True, text=True, encoding="utf-8")
+
+    def test_untracked_skill_dangling_red(self):
+        # 方向 4 红灯：git 仓下未跟踪（未 git add）的 SKILL.md 含悬空引用。
+        # 旧逻辑扫描面只列跟踪文件（git ls-files），该文件整文件漏判假绿；
+        # 并入未跟踪（--others --exclude-standard）后须进扫描面并判红。
+        ckr._GIT_LS_CACHE.clear()
+        ckr._INDEX_CACHE.clear()
+        self._git("init", "-q")
+        self._git("config", "user.email", "t@t")
+        self._git("config", "user.name", "t")
+        self._mk("harness/skills/base/SKILL.md", "ok\n")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        # 模拟上板前新增但未纳入：文件在盘上、不在 index
+        self._mk("harness/skills/untracked/SKILL.md",
+                 "[miss](../base/gone.md)\n")
+        targets = ckr.iter_scan_targets(None)
+        rels = [t.relative_to(self.tmp).as_posix() for t in targets]
+        self.assertIn("harness/skills/untracked/SKILL.md", rels)
+        self.assertEqual(
+            ckr.scan_file(
+                self.tmp / "harness" / "skills" / "untracked" / "SKILL.md"),
+            ["../base/gone.md"])
+
+    def test_bare_filename_ref_untracked_target_valid(self):
+        # 方向 4：裸文件名目标为未跟踪文件（未 git add）→ basename 索引并入
+        # 未跟踪后唯一命中视为有效（此前索引只含跟踪文件，唯一性漏计未跟踪
+        # 目标，引用现存文件会被误判悬空红）
+        ckr._GIT_LS_CACHE.clear()
+        ckr._INDEX_CACHE.clear()
+        self._git("init", "-q")
+        self._git("config", "user.email", "t@t")
+        self._git("config", "user.name", "t")
+        self._mk("harness/skills/demo/SKILL.md", "见 `helper.conf`\n")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        self._mk("harness/skills/demo/helper.conf", "x\n")  # 未跟踪
+        self.assertEqual(ckr._basename_count("helper.conf"), 1)
+        self.assertEqual(
+            ckr.scan_file(
+                self.tmp / "harness" / "skills" / "demo" / "SKILL.md"),
+            [])
+
 
 if __name__ == "__main__":
     unittest.main()

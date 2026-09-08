@@ -275,6 +275,30 @@ class TestSelfcheck(unittest.TestCase):
                 selfcheck.main()
         self.assertIn("pytest_rc=124", buf.getvalue())
 
+    def test_host_collect_timeout_above_module_timeout(self):
+        # 方向 2：host 收口超时 = _HOST_TIMEOUT_S（650）透传 _collect_cmd，
+        # 仍须大于 check_host_tests 单模块 make 超时（300s）——否则外层收口
+        # rc=124 抢先截断内层 TimeoutExpired，丢失超时归因（判红同效但诊断
+        # 退化）；650 也兜住两模块顺序跑最坏 ~600s
+        fake = _fake_run([
+            _FakeProc(0, "531 passed in 27.9s\n"),
+        ])
+        seen = {}
+
+        def _collect(proc, name, **kw):
+            seen[name] = kw.get("timeout")
+            return (0, "[OK] 一致\n", "", 0.1)
+
+        buf = io.StringIO()
+        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
+                mock.patch.object(selfcheck, "_collect_cmd",
+                                  side_effect=_collect):
+            with redirect_stdout(buf):
+                selfcheck.main()
+        self.assertEqual(selfcheck._HOST_TIMEOUT_S, 650)
+        self.assertEqual(seen.get("host"), 650)
+        self.assertGreater(seen.get("host"), 300)
+
 
 class TestParallelTools(unittest.TestCase):
     """B2：run_parallel_tools 的 --all 输出解析（mock Popen，不真跑治理

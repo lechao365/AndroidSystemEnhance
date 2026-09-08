@@ -100,6 +100,23 @@ class TestDiscipline(unittest.TestCase):
         src.write_text("import pytest\nxfail = pytest.mark.xfail\n")
         self.assertEqual(ctd.scan(self.repo), [])
 
+    def test_untracked_new_test_file_reported(self):
+        # 方向 4 红灯：新增但未 git add 的测试文件（git diff --name-only HEAD
+        # 不列未跟踪）含违禁修法 → 旧逻辑整文件漏判假绿；文件面并入未跟踪
+        # （--others --exclude-standard）后必须判红。模式字面量拆分拼接，
+        # 防本文件源码自触发 discipline 守卫
+        cases = {
+            "sleep": "import time\n\ndef test_f():\n    time." + "sleep" + "(2)\n",
+            "xfail": "import pytest\n\n@pytest.mark." + "xfail" + "\n"
+                     "def test_f():\n    pass\n",
+        }
+        for kind, content in cases.items():
+            with self.subTest(kind=kind):
+                f = self.repo / "harness" / "lib" / "tests" / "test_untracked.py"
+                f.write_text(content)
+                out = ctd.scan(self.repo)
+                self.assertTrue(any(kind in o for o in out), out)
+
 
 class TestDisciplineMain(unittest.TestCase):
     def test_non_git_repo_skips(self):
