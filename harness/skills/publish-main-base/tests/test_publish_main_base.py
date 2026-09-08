@@ -572,9 +572,13 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         # message 文件放仓库树外，避免弄脏工作树（promote 前置要求树净）
         msg = Path(self._remote_tmp.name) / "promote-msg.txt"
         msg.write_text("构建(baseline): BL-TEST-01 基线晋升\n", encoding="utf-8")
+        # P1-B：审批独立（KI-20260907-001）——审批人 reviewer ≠ 执行人 t；
+        # env token 非占位符且临时根无 promote-approval.env（_read_approval_token
+        # 返空 → 任意非空 token 过），放行
+        self._env["LC_PROMOTE_APPROVAL_TOKEN"] = "tok-test"
         return self._run("--promote", "--baseline-id", "BL-TEST-01",
                          "--message-file", str(msg), "--task", "t1",
-                         "--approved-by", "t", *extra)
+                         "--approved-by", "reviewer", *extra)
 
     def test_promote_requires_approved_by(self):
         # 方向 6：--promote 缺 --approved-by → exit 3（审批凭据外部化，
@@ -980,8 +984,9 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self._receipt_commit_c3(verify_mode="skip", package=PKG_JSON)
         msg = Path(self._remote_tmp.name) / "promote-msg.txt"
         msg.write_text("构建(baseline): BL-TEST-01 基线晋升\n", encoding="utf-8")
+        self._env["LC_PROMOTE_APPROVAL_TOKEN"] = "tok-test"
         r = self._run("--promote", "--baseline-id", "BL-TEST-01",
-                      "--message-file", str(msg), "--approved-by", "t")
+                      "--message-file", str(msg), "--approved-by", "reviewer")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("known-issues 门禁通过（task=t1", r.stderr)
         self.assertIn("promote 完成", r.stdout)

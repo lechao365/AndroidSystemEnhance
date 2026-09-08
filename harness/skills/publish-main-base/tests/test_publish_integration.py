@@ -87,6 +87,9 @@ class TestSyncModifyIntegration(unittest.TestCase):
     def _run_script(self, *args):
         env = dict(os.environ)
         env["CDP_PROJECT_ROOT"] = str(self.work)
+        # P1-B 审批独立（KI-20260907-001）：token 非占位符且临时根无
+        # promote-approval.env（_read_approval_token 返空 → 任意非空 token 过）
+        env["LC_PROMOTE_APPROVAL_TOKEN"] = "tok-test"
         # 防 python 导入生成 __pycache__ 污染工作树（git status 非空会使预检拒绝）
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         # PATH 前置 python3 shim（Windows 无 python3 命令，脚本内调用经 shim
