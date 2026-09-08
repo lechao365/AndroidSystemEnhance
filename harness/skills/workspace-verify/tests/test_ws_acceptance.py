@@ -828,8 +828,9 @@ class TestMultiCaseLifecycle(unittest.TestCase):
 
     此前多 case 批整体跳过 lifecycle（仅打 NOTE 即弃），dict 形态 case 的
     teardown 不跑而 device_dirty=False（假干净）——改逐 case 编排；str 旧
-    形态 case teardown 未跑，device_dirty 汇总落 "unknown"（未跑不得声称
-    干净）；任一 case teardown 恢复失败（dirty=true）优先透传。
+    形态 case 未登记 setup_snapshot（无 teardown 责任面，与 _restore_state
+    无快照即无 teardown 责任面同口径）落 False，不再标 unknown；任一 case
+    teardown 恢复失败（dirty=true）优先透传。
     """
 
     def _batch(self, d, labels):
@@ -903,15 +904,27 @@ class TestMultiCaseLifecycle(unittest.TestCase):
         self.assertIn("[lcview-trigger]", data["teardown_detail"])
         self.assertIn("[lcview-transfer]", data["teardown_detail"])
 
-    def test_multi_case_mixed_str_marks_unknown(self):
-        # dict + str 混合：str case（lcview-liveness）teardown 未跑 →
-        # device_dirty 汇总 "unknown"（不再假称干净）
+    def test_multi_case_mixed_str_device_dirty_false(self):
+        # dict + str 混合：str case（lcview-liveness）未登记 setup_snapshot
+        # → 无 teardown 责任面，device_dirty 落 False（与 _restore_state 无
+        # 快照同口径，不再汇总 unknown——未跑归无责任面而非状态未知）
         rc, data, calls, _ = self._run(
             "lcview-trigger,lcview-liveness", [False])
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 1)  # 仅 dict case 走生命周期
-        self.assertEqual(data["device_dirty"], "unknown")
-        self.assertIn("teardown 未跑", data["teardown_detail"])
+        self.assertIs(data["device_dirty"], False)
+        self.assertIn("无 setup_snapshot", data["teardown_detail"])
+
+    def test_multi_case_single_str_case_batch_dirty_false(self):
+        # 单 str case 批（batch case:lcview-liveness，str 旧形态无生命周期
+        # 资产）：同样未登记 setup_snapshot → device_dirty 落 False（此前
+        # 恒 unknown 卡发布，2026-09-08 收窄口径的守护用例）
+        rc, data, calls, _ = self._run("lcview-liveness", [],
+                                       acc_result=("pass", []))
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 0, "str case 不启生命周期")
+        self.assertIs(data["device_dirty"], False)
+        self.assertIn("无 setup_snapshot", data["teardown_detail"])
 
     def test_multi_case_dirty_true_wins(self):
         # 任一 case dirty=True 优先于 unknown（恢复失败比未跑更严重）
@@ -1021,6 +1034,103 @@ class TestMultiCaseLifecycle(unittest.TestCase):
         self.assertIs(data["device_dirty"], True)
         fail_tags = [i["tag"] for i in data["items"] if i["status"] == "fail"]
         self.assertIn("__interrupt__", fail_tags)
+
+    def test_interrupt_keeps_prior_teardown_parts(self):
+        # 方向 4（2026-09-08）：多 case 批中断前已有 case 正常完成 teardown
+        # 时，except BaseException 分支不得整体覆盖 teardown_detail——已跑
+        # teardown_parts（如 [lcview-trigger] 已恢复到初值）保留，中断说明
+        # 拼在其后，产物审计可见中断前每 case 的恢复结果
+        d = tempfile.mkdtemp()
+        batch = self._batch(d, "lcview-trigger,lcview-transfer")
+        out_json = Path(d) / "acc.json"
+        buf = io.StringIO()
+        calls = []
+
+        def fake_lifecycle(acc, lifecycle, adb_exec, adb_logcat, ep=None,
+                           ensure_boot=False, on_item=None, host_env=None,
+                           since_epoch=0):
+            calls.append(lifecycle)
+            if len(calls) == 1:
+                return ("pass", [{"tag": "t", "status": "pass",
+                                  "detail": "ok"}],
+                        {"device_dirty": False, "timed_out": False,
+                         "teardown_detail": "已恢复到初值",
+                         "forensics_dir": None})
+            raise KeyboardInterrupt("模拟 Ctrl-C 中断验收")
+
+        with mock.patch.object(wa, "ac") as m_ac:
+            m_ac.ensure_connected.side_effect = ["ep", "ep"]
+            m_ac.clock_sync.return_value = (True, "")
+            m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
+            m_ac.parse_exec_output.return_value = ("1", 0)
+            m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
+            m_sub = mock.Mock()
+            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
+            m_sub.TimeoutExpired = subprocess.TimeoutExpired
+            with mock.patch.object(wa.subprocess, "run", m_sub), \
+                    mock.patch.object(wa, "run_case_lifecycle",
+                                      side_effect=fake_lifecycle), \
+                    mock.patch.object(wa, "_device_serial",
+                                      return_value=("SN1", "getprop ro.serialno")), \
+                    mock.patch.object(wa, "_mark_stage"), \
+                    mock.patch.object(wa, "_write_cases"), \
+                    mock.patch.object(wa, "_backfill_zero_marks"):
+                with contextlib.redirect_stdout(buf):
+                    with self.assertRaises(KeyboardInterrupt):
+                        wa.main(["run", "--batch-file", str(batch),
+                                 "--result-file", str(out_json)])
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertEqual(data["overall"], "fail")
+        self.assertIs(data["device_dirty"], True)
+        # 已跑 case 的 teardown detail 保留，中断说明拼在其后
+        self.assertIn("[lcview-trigger] 已恢复到初值", data["teardown_detail"])
+        self.assertIn("验收被中断", data["teardown_detail"])
+        self.assertNotIn("[lcview-transfer]", data["teardown_detail"],
+                         "中断 case 未跑完，teardown detail 不得含其恢复结果")
+
+    def test_interrupt_writes_running_case_not_request_labels(self):
+        # 方向 3（2026-09-08）：cases json 落盘须为实跑 case 标签而非请求
+        # 全集——KeyboardInterrupt 中断在首个 case 内时只落已进入执行的
+        # lcview-trigger（ran_labels 逐 case 进入时记录），未开始的
+        # lcview-transfer 不得写入（防未跑标签污染 report evidence-scope）
+        d = tempfile.mkdtemp()
+        batch = self._batch(d, "lcview-trigger,lcview-transfer")
+        out_json = Path(d) / "acc.json"
+        buf = io.StringIO()
+        written = {}
+
+        def fake_lifecycle(acc, lifecycle, adb_exec, adb_logcat, ep=None,
+                           ensure_boot=False, on_item=None, host_env=None,
+                           since_epoch=0):
+            raise KeyboardInterrupt("模拟 Ctrl-C 中断验收")
+
+        def fake_write_cases(batch_id, cases_text):
+            written["cases"] = cases_text
+
+        with mock.patch.object(wa, "ac") as m_ac:
+            m_ac.ensure_connected.side_effect = ["ep", "ep"]
+            m_ac.clock_sync.return_value = (True, "")
+            m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
+            m_ac.parse_exec_output.return_value = ("1", 0)
+            m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
+            m_sub = mock.Mock()
+            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
+            m_sub.TimeoutExpired = subprocess.TimeoutExpired
+            with mock.patch.object(wa.subprocess, "run", m_sub), \
+                    mock.patch.object(wa, "run_case_lifecycle",
+                                      side_effect=fake_lifecycle), \
+                    mock.patch.object(wa, "_device_serial",
+                                      return_value=("SN1", "getprop ro.serialno")), \
+                    mock.patch.object(wa, "_mark_stage"), \
+                    mock.patch.object(wa, "_write_cases",
+                                      side_effect=fake_write_cases), \
+                    mock.patch.object(wa, "_backfill_zero_marks"):
+                with contextlib.redirect_stdout(buf):
+                    with self.assertRaises(KeyboardInterrupt):
+                        wa.main(["run", "--batch-file", str(batch),
+                                 "--result-file", str(out_json)])
+        self.assertEqual(written["cases"], "lcview-trigger",
+                         "中断只落已进入执行的 case，不含未开始的请求标签")
 
 
 class TestEmptyAcceptance(unittest.TestCase):
@@ -1751,9 +1861,11 @@ class TestRunIdLifecycle(unittest.TestCase):
         self.assertTrue(any(i["tag"] == "__identity__" for i in data["items"]))
 
     def test_device_serial_exception_still_writes_result(self):
-        # 方向 2/5（2026-09-08）：_device_serial 抛错（如 adb 故障非返回空）
-        # 仍须落 result-file——finally 收尾只落盘不 return，身份获取异常经
-        # try/except 记入 fail 产物（__identity__ 现场留痕），不得裸退无产物
+        # 方向 2/5（2026-09-08）：_device_serial 底层 adb 故障抛错（令
+        # subprocess.run 抛 OSError，非打桩 _device_serial 函数，覆盖真实
+        # adb_exec 路径）仍须落 result-file——finally 收尾只落盘不 return，
+        # 身份获取异常经 try/except 记入 fail 产物（__identity__ 现场留痕），
+        # 不得裸退无产物
         out_json = Path(tempfile.mkdtemp()) / "acc.json"
         with mock.patch.object(wa, "ac") as m_ac:
             m_ac.ensure_connected.side_effect = ["ep", "ep"]
@@ -1761,23 +1873,60 @@ class TestRunIdLifecycle(unittest.TestCase):
             m_ac.parse_exec_output.return_value = ("1", 0)
             m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
             m_sub = mock.Mock()
-            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
+            m_sub.side_effect = OSError("adb 故障")
             m_sub.TimeoutExpired = subprocess.TimeoutExpired
             buf = io.StringIO()
             with mock.patch.object(wa.subprocess, "run", m_sub):
                 with mock.patch.object(wa, "run_acceptance",
                                        return_value=("pass", [])):
-                    with mock.patch.object(wa, "_device_serial",
-                                           side_effect=OSError("adb 故障")):
-                        with contextlib.redirect_stdout(buf):
-                            rc = wa.main(["run", "--acceptance", "boot",
-                                          "--result-file", str(out_json)])
+                    with contextlib.redirect_stdout(buf):
+                        rc = wa.main(["run", "--acceptance", "boot",
+                                      "--result-file", str(out_json)])
         self.assertEqual(rc, 1)
         self.assertTrue(out_json.is_file(), "身份获取抛错仍须落 result-file")
         data = json.loads(out_json.read_text(encoding="utf-8"))
         self.assertEqual(data["overall"], "fail")
         self.assertTrue(any(i["tag"] == "__identity__" for i in data["items"]))
         self.assertIn("设备序列号获取异常", buf.getvalue())
+        self.assertIn("设备指纹获取异常", buf.getvalue())
+
+    def test_device_fingerprint_exception_still_writes_result(self):
+        # 方向 5（2026-09-08）：getprop 指纹 adb 命令抛异常（serial 正常，
+        # 仅指纹命令底层抛错）仍须落 result-file——指纹获取异常记入 fail
+        # 产物（__identity__ 留痕），不得裸退无产物
+        out_json = Path(tempfile.mkdtemp()) / "acc.json"
+
+        def fake_run(cmd, **kw):
+            if cmd[-1] == "getprop ro.build.fingerprint":
+                raise OSError("adb 故障")
+            r = mock.Mock()
+            r.stdout = "out\n__LE_EXIT_CODE__=0\n"
+            return r
+
+        with mock.patch.object(wa, "ac") as m_ac:
+            m_ac.ensure_connected.side_effect = ["ep", "ep"]
+            m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
+            m_ac.parse_exec_output.return_value = ("1", 0)
+            m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
+            m_sub = mock.Mock()
+            m_sub.side_effect = fake_run
+            m_sub.TimeoutExpired = subprocess.TimeoutExpired
+            buf = io.StringIO()
+            with mock.patch.object(wa.subprocess, "run", m_sub):
+                with mock.patch.object(wa, "run_acceptance",
+                                       return_value=("pass", [])):
+                    with mock.patch.object(wa, "_device_serial",
+                                           return_value=("SN1",
+                                                         "getprop ro.serialno")):
+                        with contextlib.redirect_stdout(buf):
+                            rc = wa.main(["run", "--acceptance", "boot",
+                                          "--result-file", str(out_json)])
+        self.assertEqual(rc, 1)
+        self.assertTrue(out_json.is_file(), "指纹获取抛错仍须落 result-file")
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertEqual(data["overall"], "fail")
+        self.assertTrue(any(i["tag"] == "__identity__" for i in data["items"]))
+        self.assertIn("设备指纹获取异常", buf.getvalue())
 
     def test_batch_file_single_case_enables_lifecycle(self):
         # 方向 5：批文件模式 case: 前缀单 case 须启用生命周期——此前仅 --case

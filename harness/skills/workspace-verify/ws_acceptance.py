@@ -956,9 +956,9 @@ def main(argv=None):
     # 多 case 逐 case 跑（批次 7d41df8e24bf 方向 1）：此前多 case 批整体跳过
     # lifecycle，dict 形态 case 的 teardown 不跑而 device_dirty=False（假
     # 干净）——改逐 case 编排（case 间状态隔离，各跑各的 setup_snapshot →
-    # 判据 → 取证 → teardown）；str 旧形态 case 无 teardown 可跑（未跑），
-    # device_dirty 汇总落 "unknown"（未跑不得声称干净）；任一 case teardown
-    # 恢复失败（dirty=true）优先透传。
+    # 判据 → 取证 → teardown）；str 旧形态未登记 setup_snapshot（无 teardown
+    # 责任面，与 _restore_state 无快照同口径），不参与 device_dirty 汇总；
+    # 任一 case teardown 恢复失败（dirty=true）优先透传。
     case_labels = [c.strip() for c in (
         args.case or _batch_case_labels(args.batch_file)).split(",") if c.strip()]
     # 资产层预解析（参数/资产书写错误显式返 2/1 不落盘，与既有错误语义一致；
@@ -994,8 +994,14 @@ def main(argv=None):
     # except 兜底记 fail/dirty；finally 统一落盘收尾，杜绝无 result-file 返回。
     overall, items = "fail", []
     device_dirty, teardown_detail, forensics_dir = True, "", None
+    # 实跑 case 标签累积（方向 3）：逐 case 进入执行时记录，区别于请求标签
+    # ——中断/异常提前退出时只落已实跑 case，防 cases json 记录未跑标签污染
+    # report evidence-scope 推导；teardown_parts 同理跨分支累积，中断分支
+    # 保留已跑部分（方向 4）
+    ran_labels, teardown_parts = [], []
     try:
         if lifecycle:
+            ran_labels.append(case_labels[0])
             overall, items, life_meta = run_case_lifecycle(
                 acceptance, lifecycle, adb_exec, adb_logcat, ep=ep,
                 ensure_boot=args.ensure_boot, on_item=mark_case, host_env=host_env,
@@ -1005,9 +1011,10 @@ def main(argv=None):
             forensics_dir = life_meta["forensics_dir"]
         elif len(case_labels) > 1:
             overall, items = "pass", []
-            device_dirty, dirty_unknown = False, False
-            teardown_parts, forensics_dir = [], None
+            device_dirty = False
+            forensics_dir = None
             for label, val, acc_c in case_vals:
+                ran_labels.append(label)
                 done = len(items)
                 try:
                     if isinstance(val, dict):
@@ -1022,14 +1029,15 @@ def main(argv=None):
                             forensics_dir = meta["forensics_dir"]
                         tdetail = meta["teardown_detail"]
                     else:
-                        # str 旧形态无生命周期资产：teardown 未跑，汇总记 unknown
+                        # str 旧形态未登记 setup_snapshot：无 teardown 责任面，
+                        # device_dirty 落 False（与 _restore_state 无快照即无
+                        # teardown 责任面同口径），不参与汇总标 dirty
                         ov, it = run_acceptance(
                             acc_c, adb_exec, adb_logcat,
                             ensure_boot=args.ensure_boot,
                             on_item=lambda n, off=done: mark_case(off + n),
                             host_env=host_env, endpoint=ep)
-                        dirty_unknown = True
-                        tdetail = "无生命周期资产（str 旧形态，teardown 未跑）"
+                        tdetail = "无生命周期资产（str 旧形态，无 setup_snapshot，无 teardown 责任面）"
                 except Exception as e:
                     # 逐 case 崩溃（方向 3）：非预期异常不得中断整批 case 循环
                     # ——该 case 记 fail 并置 device_dirty=True（设备态不可信，
@@ -1045,19 +1053,19 @@ def main(argv=None):
                 teardown_parts.append(f"[{label}] {tdetail}")
                 overall = _merge_overall(overall, ov)
                 items.extend(it)
-            if device_dirty is not True and dirty_unknown:
-                device_dirty = "unknown"
             teardown_detail = "；".join(teardown_parts)
         else:
+            if case_labels:
+                ran_labels.append(case_labels[0])
             overall, items = run_acceptance(acceptance, adb_exec, adb_logcat,
                                             ensure_boot=args.ensure_boot,
                                             on_item=mark_case, host_env=host_env,
                                             endpoint=ep)
             if case_labels:
-                # 单 str case（无生命周期资产，teardown 未跑）：与多 case 批
-                # str 旧形态同口径，device_dirty 落 unknown（未跑不得声称干净）
-                device_dirty = "unknown"
-                teardown_detail = "无生命周期资产（str 旧形态，teardown 未跑）"
+                # 单 str case 未登记 setup_snapshot：无 teardown 责任面（与
+                # _restore_state 无快照同口径），device_dirty 落 False
+                device_dirty = False
+                teardown_detail = "无生命周期资产（str 旧形态，无 setup_snapshot，无 teardown 责任面）"
             else:
                 device_dirty = False
                 teardown_detail = ""
@@ -1080,13 +1088,17 @@ def main(argv=None):
         # ——先记 fail 与 device_dirty 真（中断点 teardown 未保证、后续 case
         # 未跑，产物不得 overall pass），再 re-raise 让中断继续向上传播；
         # finally 只落盘不 return，失败现场随 fail 产物落盘。
+        # 方向 4：已跑 teardown_parts 保留不整体覆盖——中断前已完成的逐 case
+        # teardown 明细仍随收据可见，中断说明拼在其后（未跑部分归中断项）
         print(f"error: 验收执行被中断（{e!r}），已记 fail/dirty 收尾，"
               f"中断继续向上传播", file=sys.stderr)
         overall = "fail"
         items = items + [{"tag": "__interrupt__", "status": "fail",
                           "detail": f"验收执行被中断（未跑完）: {e!r}"}]
         device_dirty = True
-        teardown_detail = f"验收被中断（{e!r}），teardown 未保证，按 dirty 处理"
+        ran_detail = "；".join(teardown_parts)
+        teardown_detail = ((ran_detail + "；") if ran_detail else "") + \
+            f"验收被中断（{e!r}），teardown 未保证，按 dirty 处理"
         raise
     finally:
         # 收尾只落盘 + 打点，绝不 return（方向 1）：finally 内 return 会
@@ -1153,10 +1165,10 @@ def main(argv=None):
                           "device_dirty": device_dirty,
                           "teardown_detail": teardown_detail},
                          ensure_ascii=False, indent=2))
-        # 本次实跑 case 标签落盘（--case 优先；--batch-file 模式从批次验收行
-        # case: 前缀提取，供 ws_report 自动探测补全，防 board pass 收据 cases
-        # 空致 prepare 死锁）
-        _write_cases(batch_id, args.case or _batch_case_labels(args.batch_file))
+        # 本次实跑 case 标签落盘（逐 case 进入执行时累积 ran_labels，非请求
+        # 标签全集：中断/异常提前退出只落已实跑 case，供 ws_report 自动探测
+        # 补全，防 board pass 收据 cases 空/含未跑标签污染 evidence-scope）
+        _write_cases(batch_id, ",".join(ran_labels))
         # 标准四段缺失补零（跳过段记 0，收据段完整可归因）+ 验收总段打点
         # （失败不阻断，结果 pass/fail 均记）
         _backfill_zero_marks(batch_id)
