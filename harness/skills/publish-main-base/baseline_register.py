@@ -261,8 +261,14 @@ def _check_approval_independence(approved_by: str,
     """
     if not (approved_by or "").strip():
         return False, "promote 必须传 --approved-by（审批凭据外部化）"
-    if _norm_identity(approved_by) == _norm_identity(operator) \
-            and operator.lower() != "unknown":
+    op_norm = _norm_identity(operator)
+    if not op_norm or op_norm == "unknown":
+        # 执行人 git 身份采集失败（unknown/空）→ 无法核验审批独立性。此前
+        # 跳过身份比较放行任意 approved-by（fail-open），批次 7d41df8e24bf
+        # 方向 3 改判红：身份不可知时独立性不可证，不得晋升。
+        return False, (f"执行人 git 身份不可用（{operator!r}），无法核验审批"
+                       "独立性（KI-20260907-001），拒绝 promote")
+    if _norm_identity(approved_by) == op_norm:
         return False, (f"审批人 {approved_by!r} 与执行人 {operator!r} 相同，"
                        "审批缺乏独立隔离（KI-20260907-001），拒绝 promote")
     provided = (token or "").strip()

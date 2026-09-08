@@ -34,6 +34,8 @@ _HOT_PATHS = [
     "harness/lib/selfcheck.py",
     "harness/lib/check_ruff.py",
     "harness/lib/check_host_tests.py",
+    "harness/lib/metrics.py",          # selfcheck spawn（--report 自度量聚合）
+    "harness/skills/workspace-verify/ws_coverage.py",  # verify 链 spawn（覆盖率采集）
     "harness/skills/cross-device/lib/python/gen_manifest.py",
     # ── 受守卫工具的 import 依赖文件（lib-14，spawn 时真实加载）──
     "harness/lib/harness_lib.py",          # gen_manifest import（日志/初始化）

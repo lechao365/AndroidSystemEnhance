@@ -157,15 +157,24 @@ def main(argv=None) -> int:
     ap.add_argument("--verify-dir", default=str(_VERIFY_DIR))
     ap.add_argument("--issues-dir", default=str(_ISSUES_DIR))
     args = ap.parse_args(argv)
+    verify_dir, issues_dir = Path(args.verify_dir), Path(args.issues_dir)
+    # 可达红路径（批次 7d41df8e24bf 方向 4）：数据目录缺失 = 聚合源断链，
+    # 判红——此前聚合全容错（空目录/坏数据静默兜底）恒 rc=0，metrics_rc
+    # 门禁形同虚设（红路径不可达）。目录在但空/坏数据维持容错（0 收据等
+    # 正常态不判红）。
+    for d in (verify_dir, issues_dir):
+        if not d.is_dir():
+            print(f"metrics_rc=1 | error: 数据目录缺失: {d}", file=sys.stderr)
+            return 1
     try:
-        receipts = load_receipts(Path(args.verify_dir))
-        trend = load_trend(Path(args.verify_dir))
-        issues = load_known_issues(Path(args.issues_dir))
+        receipts = load_receipts(verify_dir)
+        trend = load_trend(verify_dir)
+        issues = load_known_issues(issues_dir)
         stats = compute(receipts, trend, issues)
         if args.json:
             out = render_stats(stats, as_json=True)
         else:
-            board = ki_board(Path(args.issues_dir))
+            board = ki_board(issues_dir)
             header = "metrics_rc=0"
             body = render_stats(stats)
             board_lines = " | ".join(

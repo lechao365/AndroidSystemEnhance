@@ -517,12 +517,13 @@ class TestCheckPythonEnv(unittest.TestCase):
         ruff_res = (0, "All checks passed!\n", "", 0.1)
         host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
         opencode_res = (0, "[INFO] 所有校验通过\n", "", 0.1)
+        metrics_res = (0, "metrics_rc=0\n", "", 0.1)
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_cmd",
-                                  side_effect=[ioctl_res, manifest_res,
-                                               ruff_res, host_res,
-                                               opencode_res]):
+                                  side_effect=[ioctl_res, ruff_res,
+                                               host_res, opencode_res,
+                                               manifest_res, metrics_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -553,12 +554,13 @@ class TestCheckPythonEnv(unittest.TestCase):
         ruff_res = (0, "All checks passed!\n", "", 0.1)
         host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
         opencode_res = (0, "[INFO] 所有校验通过\n", "", 0.1)
+        metrics_res = (0, "metrics_rc=0\n", "", 0.1)
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_cmd",
-                                  side_effect=[ioctl_res, manifest_res,
-                                               ruff_res, host_res,
-                                               opencode_res]):
+                                  side_effect=[ioctl_res, ruff_res,
+                                               host_res, opencode_res,
+                                               manifest_res, metrics_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -574,12 +576,13 @@ class TestCheckPythonEnv(unittest.TestCase):
         ruff_res = (0, "All checks passed!\n", "", 0.1)
         host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
         opencode_res = (0, "[INFO] 所有校验通过\n", "", 0.1)
+        metrics_res = (0, "metrics_rc=0\n", "", 0.1)
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_cmd",
-                                  side_effect=[ioctl_res, manifest_res,
-                                               ruff_res, host_res,
-                                               opencode_res]):
+                                  side_effect=[ioctl_res, ruff_res,
+                                               host_res, opencode_res,
+                                               manifest_res, metrics_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -596,12 +599,13 @@ class TestCheckPythonEnv(unittest.TestCase):
         ruff_res = (0, "All checks passed!\n", "", 0.1)
         host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
         opencode_res = (0, "[INFO] 所有校验通过\n", "", 0.1)
+        metrics_res = (0, "metrics_rc=0\n", "", 0.1)
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_cmd",
-                                  side_effect=[ioctl_res, manifest_res,
-                                               ruff_res, host_res,
-                                               opencode_res]):
+                                  side_effect=[ioctl_res, ruff_res,
+                                               host_res, opencode_res,
+                                               manifest_res, metrics_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -633,12 +637,13 @@ class TestCheckPythonEnv(unittest.TestCase):
         ruff_res = (0, "All checks passed!\n", "", 0.1)
         host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
         opencode_res = (1, "[ERROR] 校验失败: EnvironmentFile 硬编码 %h\n", "", 0.1)
+        metrics_res = (0, "metrics_rc=0\n", "", 0.1)
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_cmd",
-                                  side_effect=[ioctl_res, manifest_res,
-                                               ruff_res, host_res,
-                                               opencode_res]):
+                                  side_effect=[ioctl_res, ruff_res,
+                                               host_res, opencode_res,
+                                               manifest_res, metrics_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -689,8 +694,10 @@ class TestCheckPythonEnv(unittest.TestCase):
                                   side_effect=_run):
             with redirect_stdout(buf):
                 selfcheck.main()
-        # 顺序固定：refs/cfg 并行段启动 → ioctl Popen → manifest Popen →
-        # ruff Popen → host Popen → opencode Popen → pytest（重叠开始）
+        # 顺序固定：refs/cfg 并行段启动 → ioctl Popen → ruff Popen →
+        # host Popen → metrics Popen → opencode Popen → pytest（重叠开始；
+        # gen_manifest 延后至 host 收口后单独跑——host 编译产物与 manifest
+        # 扫描并发竞态 KIR-002 修复，见 selfcheck.py）
         self.assertEqual(calls[:7], ["tools", "spawn", "spawn", "spawn",
                                      "spawn", "spawn", "pytest"])
 

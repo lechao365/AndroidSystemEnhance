@@ -823,6 +823,106 @@ class TestMultiCase(unittest.TestCase):
         self.assertIn("为空", err)
 
 
+class TestMultiCaseLifecycle(unittest.TestCase):
+    """批次 7d41df8e24bf 方向 1：多 case 批逐 case 跑 teardown。
+
+    此前多 case 批整体跳过 lifecycle（仅打 NOTE 即弃），dict 形态 case 的
+    teardown 不跑而 device_dirty=False（假干净）——改逐 case 编排；str 旧
+    形态 case teardown 未跑，device_dirty 汇总落 "unknown"（未跑不得声称
+    干净）；任一 case teardown 恢复失败（dirty=true）优先透传。
+    """
+
+    def _batch(self, d, labels):
+        p = Path(d) / "b.cdp"
+        p.write_text("-sv base:1a2b3c4d5e6f\n意图: 多 case 生命周期\n"
+                     f"验收: case:{labels}\n方向: 多 case 逐 case teardown。\n",
+                     encoding="utf-8")
+        return p
+
+    def _run(self, labels, life_dirty, acc_result=("pass", [])):
+        """跑 main 并返回 (rc, 产物 JSON, run_case_lifecycle 调用序)。"""
+        d = tempfile.mkdtemp()
+        batch = self._batch(d, labels)
+        out_json = Path(d) / "acc.json"
+        life_calls = []
+
+        def fake_lifecycle(acc, lifecycle, adb_exec, adb_logcat, ep=None,
+                           ensure_boot=False, on_item=None, host_env=None,
+                           since_epoch=0):
+            life_calls.append(lifecycle)
+            return ("pass", [{"tag": "t", "status": "pass", "detail": "ok"}],
+                    {"device_dirty": life_dirty[len(life_calls) - 1],
+                     "timed_out": False, "teardown_detail": "已恢复到初值",
+                     "forensics_dir": None})
+
+        with mock.patch.object(wa, "ac") as m_ac:
+            m_ac.ensure_connected.side_effect = ["ep", "ep"]
+            m_ac.clock_sync.return_value = (True, "")
+            m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
+            m_ac.parse_exec_output.return_value = ("1", 0)
+            m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
+            m_sub = mock.Mock()
+            m_sub.run.return_value.stdout = "out\n__LE_EXIT_CODE__=0\n"
+            m_sub.TimeoutExpired = subprocess.TimeoutExpired
+            buf = io.StringIO()
+            with mock.patch.object(wa.subprocess, "run", m_sub), \
+                    mock.patch.object(wa, "run_case_lifecycle",
+                                      side_effect=fake_lifecycle), \
+                    mock.patch.object(wa, "run_acceptance",
+                                      return_value=acc_result), \
+                    mock.patch.object(wa, "_device_serial",
+                                      return_value=("SN1",
+                                                    "getprop ro.serialno")), \
+                    mock.patch.object(wa, "_mark_stage"), \
+                    mock.patch.object(wa, "_write_cases"), \
+                    mock.patch.object(wa, "_backfill_zero_marks"):
+                with contextlib.redirect_stdout(buf):
+                    rc = wa.main(["run", "--batch-file", str(batch),
+                                  "--result-file", str(out_json)])
+        data = (json.loads(out_json.read_text(encoding="utf-8"))
+                if out_json.exists() else None)
+        return rc, data, life_calls, buf.getvalue()
+
+    def test_multi_dict_cases_each_run_lifecycle(self):
+        # 两 dict case（lcview-trigger + lcview-transfer）逐 case 各跑一次
+        # run_case_lifecycle（各拿自己的 lifecycle 资产）；全部干净 → False
+        rc, data, calls, _ = self._run(
+            "lcview-trigger,lcview-transfer", [False, False])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 2)
+        self.assertIsNotNone(calls[0].get("teardown"))
+        self.assertIsNotNone(calls[1].get("teardown"))
+        self.assertIs(data["device_dirty"], False)
+        self.assertIn("[lcview-trigger]", data["teardown_detail"])
+        self.assertIn("[lcview-transfer]", data["teardown_detail"])
+
+    def test_multi_case_mixed_str_marks_unknown(self):
+        # dict + str 混合：str case（lcview-liveness）teardown 未跑 →
+        # device_dirty 汇总 "unknown"（不再假称干净）
+        rc, data, calls, _ = self._run(
+            "lcview-trigger,lcview-liveness", [False])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1)  # 仅 dict case 走生命周期
+        self.assertEqual(data["device_dirty"], "unknown")
+        self.assertIn("teardown 未跑", data["teardown_detail"])
+
+    def test_multi_case_dirty_true_wins(self):
+        # 任一 case dirty=True 优先于 unknown（恢复失败比未跑更严重）
+        rc, data, calls, _ = self._run(
+            "lcview-trigger,lcview-liveness", [True])
+        self.assertEqual(rc, 0)
+        self.assertIs(data["device_dirty"], True)
+
+    def test_multi_case_overall_fail_wins(self):
+        # str case 判据 fail → 整批 overall=fail（三态汇总任一 fail 即 fail）
+        rc, data, calls, _ = self._run(
+            "lcview-trigger,lcview-liveness", [False],
+            acc_result=("fail", [{"tag": "x", "status": "fail",
+                                  "detail": "d"}]))
+        self.assertEqual(rc, 1)
+        self.assertEqual(data["overall"], "fail")
+
+
 class TestEmptyAcceptance(unittest.TestCase):
     def test_run_acceptance_empty_fails(self):
         # 空验收（无任何标签）→ 判红并附说明项：防空验收静默返 pass 的假绿

@@ -1058,6 +1058,36 @@ class TestApprovalTokenNoStub(unittest.TestCase):
                 "reviewer", "lechao", "preset-tok")
         self.assertTrue(ok)
 
+    def test_check_operator_unknown_rejects(self):
+        # 批次 7d41df8e24bf 方向 3：operator=unknown（git 身份采集失败）此前
+        # 跳过身份比较放行任意 approved-by（fail-open）——身份不可知时独立性
+        # 不可证，改判红（即使 token 匹配）
+        with mock.patch.object(br, "_read_approval_token",
+                               return_value="preset-tok"):
+            ok, err = br._check_approval_independence(
+                "reviewer", "unknown", "preset-tok")
+        self.assertFalse(ok)
+        self.assertIn("身份不可用", err)
+        self.assertIn("独立性", err)
+
+    def test_check_operator_empty_rejects(self):
+        # operator 空串（采集返回空）与 unknown 同口径判红
+        with mock.patch.object(br, "_read_approval_token",
+                               return_value="preset-tok"):
+            ok, err = br._check_approval_independence(
+                "reviewer", "", "preset-tok")
+        self.assertFalse(ok)
+        self.assertIn("身份不可用", err)
+
+    def test_check_same_identity_rejects_before_unknown_check(self):
+        # 正常 operator 且与审批人同身份 → 仍按"审批缺乏独立隔离"判红
+        with mock.patch.object(br, "_read_approval_token",
+                               return_value="preset-tok"):
+            ok, err = br._check_approval_independence(
+                "lechao <lechao@x.com>", "lechao <lechao@x.com>", "preset-tok")
+        self.assertFalse(ok)
+        self.assertIn("相同", err)
+
     def test_check_token_file_override_reads_real_file(self):
         # --approval-token-file 透传：不打桩、真实文件读取判定
         with tempfile.TemporaryDirectory() as d:

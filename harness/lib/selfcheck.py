@@ -672,13 +672,13 @@ def main(argv=None):
     tools_procs = _spawn_tools()
     ioctl_proc = _spawn_cmd(
         [sys.executable, str(ROOT / "harness" / "lib" / "check_ioctl_headers.py")])
-    manifest_proc = _spawn_cmd(
-        [sys.executable, str(ROOT / "harness" / "skills" / "cross-device"
-                             / "lib" / "python" / "gen_manifest.py"), "--check-only"])
     ruff_proc = _spawn_cmd(
         [sys.executable, str(ROOT / "harness" / "lib" / "check_ruff.py")])
     host_proc = _spawn_cmd(
         [sys.executable, str(ROOT / "harness" / "lib" / "check_host_tests.py")])
+    metrics_proc = _spawn_cmd(
+        [sys.executable, str(ROOT / "harness" / "lib" / "metrics.py"),
+         "--report"])
     opencode_proc = _spawn_cmd(
         [sys.executable, str(ROOT / "harness" / "skills" / "cross-device"
                              / "opencode-server"
@@ -688,12 +688,23 @@ def main(argv=None):
     # pytest 跑完收口治理（各进程已与 pytest 重叠，墙钟取 max 而非 sum）
     (tools, refs_dur, cfg_dur, dis_dur, scan_dur) = _collect_tools(tools_procs)
     ioctl_rc, ioctl_out, _, ioctl_dur = _collect_cmd(ioctl_proc, "ioctl")
-    manifest_rc, manifest_out, _, manifest_dur = _collect_cmd(
-        manifest_proc, "manifest")
     ruff_rc, ruff_out, _, ruff_dur = _collect_cmd(ruff_proc, "ruff")
     host_rc, host_out, _, host_dur = _collect_cmd(host_proc, "host")
     opencode_rc, opencode_out, _, opencode_dur = _collect_cmd(
         opencode_proc, "opencode")
+    # gen_manifest 校验延后到 host 收口之后（KIR-002 当批修，批次 7d41df8e24bf
+    # 连带）：check_host_tests 的 `make test` 编译产物（无扩展名 host_test 二进制）
+    # 落在 code/rpi5/kernel/new/.../tests/ 下、`make clean` 前短暂存在，与
+    # gen_manifest 的 git ls-files 扫描并发会被当作「未登记 patch」判红
+    # （manifest_rc=1；xdist 抢占放大编译窗口，真实自检稳定命中）。manifest
+    # 一致性须在 host clean 后的干净 patch 树上校验，故单独在 host 收口后
+    # spawn+collect（~0.6-1.1s 串行代价，换取 manifest_rc 确定性）。
+    manifest_proc = _spawn_cmd(
+        [sys.executable, str(ROOT / "harness" / "skills" / "cross-device"
+                             / "lib" / "python" / "gen_manifest.py"),
+         "--check-only"])
+    manifest_rc, manifest_out, _, manifest_dur = _collect_cmd(
+        manifest_proc, "manifest")
     refs_rc, refs_out, refs_err = tools["refs"]
     cfg_rc, cfg_out, cfg_last = tools["cfg"]
     ctr_rc, ctr_out, ctr_last = tools["ctr"]
@@ -759,13 +770,14 @@ def main(argv=None):
     parts.append(f"pyenv_rc={0 if env_ok else 1}")
     if env_summary:
         parts.append(env_summary)
-    # 自度量统计（P0-C）：metrics.py --report 跑通即 0（聚合异常判红）。
-    # metrics.py 首行自带 metrics_rc=0（机器行在前，报表体在后），last 行
-    # 是报表末行——以正则定位 metrics_rc= 机器行，不依赖末行位置。
-    _metrics_t0 = time.time()
-    met_rc, met_out, _, met_dur = timed_run(
-        [sys.executable, str(ROOT / "harness" / "lib" / "metrics.py"),
-         "--report"], timeout=120)
+    # 自度量统计（P0-C）：metrics.py --report 跑通即 0（聚合异常/数据目录
+    # 缺失判红，红路径可达）。批次 7d41df8e24bf 方向 4：此前走 timed_run
+    # 串行计入自检墙钟（refs 同量级 ~数秒），且 metrics.py 聚合全容错恒
+    # rc=0——metrics_rc 无可达红路径（门禁形同虚设）；改 _spawn_cmd 与
+    # pytest 重叠（同 ioctl/ruff 族），收口取并行结果不额外占墙钟。
+    # metrics.py 输出首行自带 metrics_rc= 机器行（报表体在后），以正则定位
+    # 机器行，不依赖末行位置。
+    met_rc, met_out, _, met_dur = _collect_cmd(metrics_proc, "metrics")
     parts.append(f"metrics_rc={met_rc}")
     m = re.search(r"metrics_rc=(\d+)", met_out)
     if m and int(m.group(1)) == 0:

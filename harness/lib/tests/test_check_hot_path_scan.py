@@ -111,12 +111,17 @@ class TestHotPathScan(unittest.TestCase):
         # lib-14：清单须覆盖受守卫工具的 import 依赖文件（gen_manifest 直接
         # import harness_lib/paths；selfcheck 打点/issue 链经 sys.path 注入
         # import cdp_timing/cdp_parse/cdp_issue/cdp_paths 与 role_guard），
-        # 漏登记即依赖文件的 rglob/os.walk 漂移不在守卫覆盖面
+        # 漏登记即依赖文件的 rglob/os.walk 漂移不在守卫覆盖面。
+        # 批次 7d41df8e24bf 方向 6：metrics.py（selfcheck spawn）与
+        # ws_coverage.py（verify 链 spawn）一并锁入防回退——此前未登记，
+        # 其 rglob/os.walk 不在守卫覆盖面（守卫失盲）。
         required = {
             "harness/lib/harness_lib.py",
             "harness/lib/paths.py",
             "harness/lib/cdp_paths.py",
             "harness/lib/role_guard.py",
+            "harness/lib/metrics.py",
+            "harness/skills/workspace-verify/ws_coverage.py",
             "harness/skills/cross-device/lib/python/cdp_timing.py",
             "harness/skills/cross-device/lib/python/cdp_parse.py",
             "harness/skills/cross-device/lib/python/cdp_paths.py",

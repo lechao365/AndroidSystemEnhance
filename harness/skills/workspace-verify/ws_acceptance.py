@@ -134,6 +134,15 @@ def parse_acceptance(text):
     return tags
 
 
+def _merge_overall(a, b):
+    """三态汇总：任一 fail 即 fail；无 fail 有 ai 即 ai；全 pass 才 pass。"""
+    if "fail" in (a, b):
+        return "fail"
+    if "ai" in (a, b):
+        return "ai"
+    return "pass"
+
+
 def split_tag(tag):
     if tag == "boot":
         return "boot", ""
@@ -939,20 +948,22 @@ def main(argv=None):
     host_env = _hostcmd_env(run_id)
     t_start = time.monotonic()
     # 生命周期编排（方向 1/2/4）：--case 单标签且资产为 dict 形态时启用
-    # （setup_snapshot/teardown/timeout_s）；多 case/--acceptance 直传不启用
-    # （生命周期字段随 cases 资产层，逐 case 责任面需单 case 才可归属）。
+    # （setup_snapshot/teardown/timeout_s）。
     # 方向 5：批文件模式 case_labels 亦从批次验收行 case: 前缀提取（此前仅
     # --case 生效，批模式 args.case 空致 lifecycle 恒 None、teardown 恒不跑、
     # device_dirty 恒假）——批次 case:a 与 --case a 语义等价，同样启用
     # 生命周期。
+    # 多 case 逐 case 跑（批次 7d41df8e24bf 方向 1）：此前多 case 批整体跳过
+    # lifecycle，dict 形态 case 的 teardown 不跑而 device_dirty=False（假
+    # 干净）——改逐 case 编排（case 间状态隔离，各跑各的 setup_snapshot →
+    # 判据 → 取证 → teardown）；str 旧形态 case 无 teardown 可跑（未跑），
+    # device_dirty 汇总落 "unknown"（未跑不得声称干净）；任一 case teardown
+    # 恢复失败（dirty=true）优先透传。
     case_labels = [c.strip() for c in (
         args.case or _batch_case_labels(args.batch_file)).split(",") if c.strip()]
     lifecycle = None
     if len(case_labels) == 1:
         lifecycle = _load_lifecycle(_CASES_PATH, case_labels[0])
-    elif len(case_labels) > 1:
-        print("NOTE: 多 case 运行不启用生命周期（setup_snapshot/teardown "
-              "仅单 case 可归属）", file=sys.stderr)
     if lifecycle:
         overall, items, life_meta = run_case_lifecycle(
             acceptance, lifecycle, adb_exec, adb_logcat, ep=ep,
@@ -961,6 +972,49 @@ def main(argv=None):
         device_dirty = life_meta["device_dirty"]
         teardown_detail = life_meta["teardown_detail"]
         forensics_dir = life_meta["forensics_dir"]
+    elif len(case_labels) > 1:
+        try:
+            data = yaml.safe_load(_CASES_PATH.read_text(encoding="utf-8")) or {}
+            cases_tbl = data.get("cases") or {}
+        except (OSError, yaml.YAMLError) as e:
+            print(f"error: verify-cases.yaml 读取失败: {e}", file=sys.stderr)
+            return 1
+        overall, items = "pass", []
+        device_dirty, dirty_unknown = False, False
+        teardown_parts, forensics_dir = [], None
+        for label in case_labels:
+            val = cases_tbl.get(label)
+            try:
+                acc_c = _case_text(val)
+            except ValueError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 2
+            done = len(items)
+            if isinstance(val, dict):
+                ov, it, meta = run_case_lifecycle(
+                    acc_c, val, adb_exec, adb_logcat, ep=ep,
+                    ensure_boot=args.ensure_boot,
+                    on_item=lambda n, off=done: mark_case(off + n),
+                    host_env=host_env, since_epoch=int(time.time()))
+                if meta["device_dirty"] is True:
+                    device_dirty = True
+                if forensics_dir is None and meta["forensics_dir"]:
+                    forensics_dir = meta["forensics_dir"]
+                tdetail = meta["teardown_detail"]
+            else:
+                # str 旧形态无生命周期资产：teardown 未跑，汇总记 unknown
+                ov, it = run_acceptance(
+                    acc_c, adb_exec, adb_logcat, ensure_boot=args.ensure_boot,
+                    on_item=lambda n, off=done: mark_case(off + n),
+                    host_env=host_env, endpoint=ep)
+                dirty_unknown = True
+                tdetail = "无生命周期资产（str 旧形态，teardown 未跑）"
+            teardown_parts.append(f"[{label}] {tdetail}")
+            overall = _merge_overall(overall, ov)
+            items.extend(it)
+        if device_dirty is not True and dirty_unknown:
+            device_dirty = "unknown"
+        teardown_detail = "；".join(teardown_parts)
     else:
         overall, items = run_acceptance(acceptance, adb_exec, adb_logcat,
                                         ensure_boot=args.ensure_boot,

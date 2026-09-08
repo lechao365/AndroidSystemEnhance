@@ -41,9 +41,10 @@ def _iter_gcda(products: list[Path]):
     for base in products:
         if not base.is_dir():
             continue
-        for p in base.rglob("*.gcda"):
+        # AOSP out 产物目录非 git 仓，须全树遍历（豁免标记须与调用同行）
+        for p in base.rglob("*.gcda"):  # GITLS-FALLBACK: AOSP out 产物目录
             yield p
-        for p in base.rglob("*.profraw"):
+        for p in base.rglob("*.profraw"):  # GITLS-FALLBACK: AOSP out 产物目录
             yield p
 
 
