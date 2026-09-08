@@ -40,7 +40,7 @@ def _fake_popen(rc=0):
 
 
 def _script_names(calls):
-    return [os.path.basename(c[1]) for c in calls]
+    return [os.path.basename(c.args[0][1]) for c in calls]
 
 
 class TestChain(unittest.TestCase):
@@ -494,6 +494,45 @@ class TestSelfcheckFallbackRcKeys(unittest.TestCase):
         stderr = self._report_reject_stderr(text)
         self.assertIn("非零退出码", stderr)
         self.assertNotIn("缺 ", stderr)
+
+
+class TestQuickMode(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        envpatcher = mock.patch.dict("os.environ", {}, clear=False)
+        envpatcher.start()
+        self.addCleanup(envpatcher.stop)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_quick_runs_sync_host_and_selfcheck_no_receipt(self):
+        # --quick：只跑 sync + host-tests + selfcheck，不触碰设备、不落收据
+        ctor, proc = _fake_popen(0)
+        with mock.patch.object(wc.subprocess, "Popen", ctor), \
+                mock.patch.object(wc, "_RUNS_DIR",
+                                  Path(self._tmp.name) / "runs") as runs, \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK), \
+                mock.patch.object(wc, "_build_argv",
+                                  side_effect=wc._build_argv):
+            rc, result = wc.run_quick(use_locks=False)
+        names = _script_names(ctor.call_args_list)
+        self.assertEqual(names, ["sync_code_to_workspace.py",
+                                 "check_host_tests.py"])
+        self.assertEqual(rc, 0)
+        # 不落运行态/收据
+        self.assertFalse(list(runs.glob("*.json")) if runs.exists() else False)
+
+    def test_quick_host_fail_returns_1(self):
+        def _popen(argv, **kw):
+            proc = mock.Mock()
+            proc.wait = mock.Mock(return_value=1
+                                  if "check_host_tests" in str(argv) else 0)
+            return proc
+        with mock.patch.object(wc.subprocess, "Popen", _popen), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, _ = wc.run_quick(use_locks=False)
+        self.assertEqual(rc, 1)
 
 
 if __name__ == "__main__":

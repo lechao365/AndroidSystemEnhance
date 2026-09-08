@@ -392,6 +392,58 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
             os.environ["CDP_BATCH_ID"] = prev_cdp_batch_id
 
 
+# ── P0-A 快检模式（--quick）──────────────────────────────
+# 语义：AI 编辑内核纯逻辑/单测后的廉价快检——只做 code→workspace 同步 +
+#   内核 host 单测 + 自检，跳过 connect/push/acceptance/report（不触碰
+#   设备、不落收据）。用于在走完整上板链前快速确认「能编译、纯逻辑单测
+#   过、harness 健康」，反馈分钟级、不占真机。
+_QUICK_STEPS = (
+    "sync",      # sync_code_to_workspace.py --auto
+    "host",      # check_host_tests.py（内核 host 单测）
+)
+_QUICK_TIMEOUTS = {"sync": 900, "host": 300}
+
+
+def run_quick(use_locks=True):
+    """快检模式：sync + host 单测 + selfcheck，不落收据。
+
+    返回 (rc, result_dict)。rc=0 全过 / 1 任一步失败 / 3 锁占用。
+    result 含 steps（sync/host 的 rc 与耗时）与 selfcheck 摘要（诊断）。
+    锁模式与 run_chain 同款（ws_lock 模块级已 import；nullcontext 顶部已 import）。
+    """
+    steps, overall = [], "pass"
+    started_at = time.time()
+    try:
+        with (ws_lock.verify_locks() if use_locks else nullcontext()):
+            for name in _QUICK_STEPS:
+                t0 = time.time()
+                if name == "sync":
+                    argv = [sys.executable, str(_SYNC), "--auto"]
+                else:
+                    argv = [sys.executable,
+                            str(_SCRIPT_DIR.parents[1] / "lib"
+                                / "check_host_tests.py")]
+                rc, canceled = _run_step(argv, _QUICK_TIMEOUTS[name])
+                steps.append({"name": name, "rc": rc, "start": t0,
+                              "end": time.time(), "canceled": canceled})
+                if canceled or rc is None or rc != 0:
+                    overall = "fail"
+                    break
+    except ws_lock.LockHeld as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3, {"overall": "fail", "exit_rc": 3, "steps": [],
+                   "error": str(exc)}
+    # 自检摘要只作诊断（快检不落收据，不判红）
+    selfcheck_text = _run_selfcheck()
+    result = {"mode": "quick", "overall": overall,
+              "exit_rc": 0 if overall == "pass" else 1,
+              "steps": steps, "started_at": started_at,
+              "ended_at": time.time(),
+              "selfcheck": selfcheck_text.splitlines()[-1][:200]
+              if selfcheck_text else ""}
+    return result["exit_rc"], result
+
+
 def _chain_mark(name, batch_id):
     """verify 链起止自发 mark（verify_start/verify_end，B1：脚本自发替代
     AI 手打——旧 SKILL 手动 mark verify_start/verify_end 实测漂移且不在
@@ -489,7 +541,14 @@ def main(argv=None):
                     help="logcat 时间窗起点（透传 ws_acceptance --log-since）")
     ap.add_argument("--build", choices=["pass", "fail", "skip"], default=None,
                     help="编译段结果（缺省按 push 真实 rc 派生：push 过=pass）")
+    ap.add_argument("--quick", action="store_true",
+                    help="快检模式：sync + 内核 host 单测 + 自检，不落收据"
+                         "（AI 编辑纯逻辑后的廉价反馈，不占真机）")
     args = ap.parse_args(argv)
+    if args.quick:
+        rc, result = run_quick()
+        print(json.dumps(result, ensure_ascii=False))
+        return rc
     rc, result = run_chain(args.product, args.out, args.result_file,
                            batch_file=args.batch_file, case=args.case,
                            wait_ready=args.wait_ready,
