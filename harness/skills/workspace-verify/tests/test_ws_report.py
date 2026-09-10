@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+
+import pytest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -27,6 +29,13 @@ VALID_SV = """-sv base:1a2b3c4d5e6f
 
 
 class TestWsReport(unittest.TestCase):
+    # 方向 2（slow_ok 豁免）：本类用例全部调用真实 ws_report.main（收据落盘/
+    # trend 老化/打点探测，真实脚本语义），单用例 ~1.4s 逼近 slow_guard 3s，
+    # 负载下（xdist 并行 + 链内其它工具并发）偶发超 3s 判红致 pytest_rc=1
+    # 拒写收据（2026-09-10 批次 3 failed 教训）。显式豁免慢守卫——
+    # 确需慢用例（真实子进程/脚本语义）按 slow_guard 契约豁免。
+    pytestmark = pytest.mark.slow_ok("真实 ws_report.main 脚本语义，单用例~1.4s逼近3s阈值")
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         os.environ["CDP_PROJECT_ROOT"] = self._tmp.name

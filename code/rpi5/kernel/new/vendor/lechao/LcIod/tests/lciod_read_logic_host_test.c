@@ -62,6 +62,54 @@ static void test_tail_rollback_guard(void)
     CHECK(lciod_event_tail_rollback_ok(1, 31, N) == 0);
 }
 
+/* lciod_event_ring_push：事件环写入推进 + overflow 丢弃（方向 1 调用点判红） */
+static void test_event_ring_push(void)
+{
+    const uint32_t N = 32;
+    uint32_t new_tail;
+    int dropped;
+
+    /* 正常写入：head 0→1，tail 不变，无丢弃 */
+    new_tail = 99;
+    dropped = 99;
+    CHECK(lciod_event_ring_push(0, 0, N, &new_tail, &dropped) == 1);
+    CHECK(new_tail == 0);
+    CHECK(dropped == 0);
+
+    /* 环非满写入：head 5→6（tail=0 未追上），tail 不变 */
+    new_tail = 99;
+    dropped = 99;
+    CHECK(lciod_event_ring_push(5, 0, N, &new_tail, &dropped) == 6);
+    CHECK(new_tail == 0);
+    CHECK(dropped == 0);
+
+    /* 环满写入（head 追上前 tail）：head=10,tail=11 → 10+1=11==tail → overflow，
+     * head→11，tail 丢弃最旧 +1→12（KRN-016/event_push overflow 语义） */
+    new_tail = 99;
+    dropped = 99;
+    CHECK(lciod_event_ring_push(10, 11, N, &new_tail, &dropped) == 11);
+    CHECK(new_tail == 12);
+    CHECK(dropped == 1);
+
+    /* 环绕边界：head=31 → 0（buf_size=32），tail=0 未追上（31+1=0==tail 才是满，
+     * 此处 tail 取 5 表示非满）→ 无丢弃，head 绕回 0 */
+    new_tail = 99;
+    dropped = 99;
+    CHECK(lciod_event_ring_push(31, 5, N, &new_tail, &dropped) == 0);
+    CHECK(new_tail == 5);
+    CHECK(dropped == 0);
+
+    /* 环绕满：head=31, tail=0 → 31+1=0==tail → overflow，tail 丢弃 +1→1 */
+    new_tail = 99;
+    dropped = 99;
+    CHECK(lciod_event_ring_push(31, 0, N, &new_tail, &dropped) == 0);
+    CHECK(new_tail == 1);
+    CHECK(dropped == 1);
+
+    /* 出参可空：仅返回 head（调用方不需要 tail/dropped 时） */
+    CHECK(lciod_event_ring_push(3, 7, N, NULL, NULL) == 4);
+}
+
 int main(void)
 {
     test_empty_alive();
@@ -69,6 +117,7 @@ int main(void)
     test_nonempty_alive();
     test_nonempty_shutdown_drain();
     test_tail_rollback_guard();
+    test_event_ring_push();
     if (g_fails) {
         printf("FAIL: %d/%d checks failed\n", g_fails, g_checks);
         return 1;

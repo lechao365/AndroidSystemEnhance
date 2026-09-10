@@ -56,7 +56,12 @@ from verify_common import atomic_write_json as _atomic_write_json_impl  # noqa: 
 import ws_lock  # noqa: E402
 
 # 链式步骤名序列（可注入单测）：argv 由 _build_argv/_build_report_argv 按名构造
-_CHAIN_STEPS = ("sync", "connect", "push", "unit_test", "acceptance", "report")
+# package 步骤（方向 3）：acceptance 后、report 前用 systemd-run --user 拉起
+# ws_package.py 打包（绕 NoNewPrivileges，sudo_n 真实探测），落盘
+# package-<batch_id>.json 供 report 内嵌——打包是证据补充（非上板门禁），
+# 失败不阻断链、不置 overall=fail，只记步。
+_CHAIN_STEPS = ("sync", "connect", "push", "unit_test", "acceptance",
+                "package", "report")
 
 # 单步超时（秒）：覆盖各子脚本内部 timeout 之上的一层编排护栏；
 # 超时走 killpg 有界 teardown，防止子脚本挂死拖垮整链
@@ -66,6 +71,7 @@ _STEP_TIMEOUTS = {
     "push": 1800,       # 推送含 reboot_and_wait（boot_timeout 240s）
     "unit_test": 1500,  # 全量 gtest 上板执行
     "acceptance": 1200, # 逐标签探针执行
+    "package": 1200,    # 打包证据（ws_package mode 0，实测约 3 分钟；失败不阻断链）
     "report": 300,      # 收据落盘（PASS 核验读产物）
 }
 
@@ -146,6 +152,18 @@ def _build_argv(name, product, out, chain_args):
         # 连接 fail-fast：设备不可达时不浪费推送/单测轮次
         # （push/acceptance 内部仍各自 ensure，双保险不冲突）
         return [sys.executable, str(_SCRIPT_DIR / "ws_adb_connect.py"), "ensure"]
+    if name == "package":
+        # 方向 3：打包用 systemd-run --user（绕 opencode 会话 NoNewPrivileges
+        # 导致 sudo -n true 恒拒——上批 BLD-013 实测 systemd-run --user 可绕，
+        # 其下 sudo 正常可用），--wait 等打包完成返回真实 rc；
+        # 同 batch_id 落盘 package-<batch_id>.json 供 report 探测内嵌。
+        # CDP_RUN_ID/CDP_BATCH_ID/AOSP_WS 等 env 由 systemd-run 继承调用者环境。
+        pkg_file = chain_args.get("package_file")
+        cmd = ["systemd-run", "--user", "--wait", sys.executable,
+               str(_SCRIPT_DIR / "ws_package.py"), "--mode", "0"]
+        if pkg_file:
+            cmd += ["--evidence-file", pkg_file]
+        return cmd
     if name == "push":
         cmd = [sys.executable, str(_SCRIPT_DIR / "ws_push.py"),
                "--product", product]
@@ -249,9 +267,10 @@ def _derive_report_args(steps, overall):
     - coverage 步（P1-A 只记录不门禁）不进入 board/链停判定：其失败不得
       抢先成为 failed 使 board 判 skip 掩盖其后真实的上板失败（方向 4）。
     """
-    # 排除 coverage：只记录不门禁（P1-A），失败不阻断链、不改 overall，也不得
-    # 充当 board/链停归因（否则 coverage 先失败时 board 判 skip 掩盖真实上板失败）
-    real_failed = next((s for s in steps if s["name"] != "coverage"
+    # 排除 coverage（只记录不门禁）与 package（方向 3 打包证据，只记录不
+    # 门禁）：其失败不得抢先成为 failed 使 board 判 skip 掩盖其后真实的上板
+    # 失败（方向 4 同款——package 失败如 sudo 不可用是环境问题，非上板归因）
+    real_failed = next((s for s in steps if s["name"] not in ("coverage", "package")
                         and (s.get("canceled") or s["rc"] is None
                              or s["rc"] != 0)), None)
     result = "pass" if overall == "pass" else "fail"
@@ -351,6 +370,10 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
         "push_file": str(_CROSS_DEVICE_LOG / f"push-{suffix}.json"),
         "unit_test_file": str(_CROSS_DEVICE_LOG / f"unit-tests-{suffix}.json"),
         "acc_file": str(_CROSS_DEVICE_LOG / f"acceptance-{suffix}.json"),
+        # 方向 3：打包证据同 batch_id（package-<batch_id>.json，ws_report 自动
+        # 探测路径一致），report 前落盘供内嵌
+        "package_file": str(_SCRIPT_DIR.parents[1] / "log" / "workspace-verify"
+                            / f"package-{suffix}.json"),
     }
     selfcheck_thread = selfcheck_result = None
     try:
@@ -495,6 +518,12 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
             skipped.append(name)
             skip_reasons[name] = "缺 --batch-file（模式 A 收据需批次源）"
             continue
+        if name == "package" and not batch_file:
+            # 方向 3：打包证据为收据补充，无批次源（收据必 skipped）时无
+            # 消费方，跳过免白跑 3 分钟打包
+            skipped.append(name)
+            skip_reasons[name] = "缺 --batch-file（打包证据随收据内嵌，无收据不打包）"
+            continue
         if fail_stop and name != "report":
             # 链已停：余下验证步记 skipped；report 豁免（fail 收据落盘）
             skipped.append(name)
@@ -518,7 +547,10 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
                       "dur_s": round(time.monotonic() - t0m, 3),
                       "canceled": canceled})
         canceled_any = canceled_any or canceled
-        if canceled or rc is None or rc != 0:
+        # 方向 3：package 是证据补充（打包失败只记步，ws_package 已如实落盘
+        # evidence，report 内嵌真实 script_rc），不阻断链、不改 overall——
+        # 与 coverage 同语义（只记录不门禁），避免打包不可用拖垮上板验证。
+        if name != "package" and (canceled or rc is None or rc != 0):
             overall = "fail"
             fail_stop = True  # 不 break：report 步仍执行落 fail 收据（A1）
         # P1-A：单测成功后可选 coverage 步（只记录不门禁；失败仅记步不进链判红）

@@ -39,18 +39,22 @@ def _module_dir(repo: Path) -> Path:
 
 
 def _stage_module_copy(repo: Path, module: str) -> Path:
-    """把 <module> 源码树复制到仓内 gitignored 副本，返回副本模块目录。
+    """把 lechao 模块源码树复制到仓内 gitignored 副本，返回副本模块目录。
 
     每次先清旧副本再全量重建（rmtree + copytree），保证副本与当前源码
     一致且无上次 make 残留；副本路径确定性位于 harness/log/host-tests，
     与真实 code 工作树隔离（产物不落工作树）。
+
+    拷贝整个 vendor/lechao 目录（而非单模块）：LcView 调用点 host 单测
+    （方向 1，lcview_builder.c/lcview_ring.c）经 -I../.. 引用顶层
+    kernel_lechao_log.h，须随副本存在才能编译（单模块 copytree 缺该头）。
     """
-    src = _module_dir(repo) / module
-    dst = repo / _HOST_TEST_STAGE / module
+    src = _module_dir(repo)
+    dst = repo / _HOST_TEST_STAGE / "lechao"
     shutil.rmtree(dst, ignore_errors=True)
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(src, dst)
-    return dst
+    return dst / module
 
 
 def _run_make_test(module: str, repo: Path = _ROOT) -> tuple[int, str]:
@@ -85,8 +89,9 @@ def _run_make_test(module: str, repo: Path = _ROOT) -> tuple[int, str]:
         rc = 0 if r.returncode == 0 else 1
         return rc, f"host_rc={rc} | {module}: {last}"
     finally:
-        # 副本回收：连 make 产物一并移除，code 工作树零残留
-        shutil.rmtree(stage, ignore_errors=True)
+        # 副本回收：整个 lechao 副本根（含 kernel_lechao_log.h 与各模块）连
+        # make 产物一并移除，code 工作树零残留
+        shutil.rmtree(repo / _HOST_TEST_STAGE / "lechao", ignore_errors=True)
 
 
 def main(argv=None) -> int:

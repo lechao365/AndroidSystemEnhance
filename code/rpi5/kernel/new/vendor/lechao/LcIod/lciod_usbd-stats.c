@@ -28,6 +28,7 @@
  */
 
 #include "lciod_usbd.h"
+#include "lciod_read_logic.h"
 #include <linux/math64.h>
 #include <scsi/scsi_cmnd.h>
 #include "lcview_events.h"
@@ -401,12 +402,21 @@ static inline void vendor_lechao_usbd_event_push(
 
     spin_lock_irqsave(&dev->event_lock, flags);
     dev->event_buf[dev->event_head] = ev;
-    dev->event_head = (dev->event_head + 1) % VENDOR_LECHAO_USBD_EVENT_BUF_SIZE;
-    if (dev->event_head == dev->event_tail) {
-        pr_warn_ratelimited(PREFIX "event_push ring overflow, dropped old event\n");
-        /* 统计丢弃事件数，归 event_lock 保护域；fill_stats 在 dev->lock 下读取为原子读 */
-        dev->stats.event_drop_count++;
-        dev->event_tail = (dev->event_tail + 1) % VENDOR_LECHAO_USBD_EVENT_BUF_SIZE;
+    /* KRN-016/方向 1：环推进判定抽至 lciod_read_logic.c（host 单测覆盖
+     * 判红）——head 推进 + overflow 丢弃最旧事件由纯函数统一实现，
+     * 内核调用点与 host 共用同一源码防漂移（改坏照绿收口）。 */
+    {
+        unsigned int new_tail;
+        int dropped;
+        dev->event_head = lciod_event_ring_push(
+            dev->event_head, dev->event_tail,
+            VENDOR_LECHAO_USBD_EVENT_BUF_SIZE, &new_tail, &dropped);
+        if (dropped) {
+            pr_warn_ratelimited(PREFIX "event_push ring overflow, dropped old event\n");
+            /* 统计丢弃事件数，归 event_lock 保护域；fill_stats 在 dev->lock 下读取为原子读 */
+            dev->stats.event_drop_count++;
+            dev->event_tail = new_tail;
+        }
     }
     spin_unlock_irqrestore(&dev->event_lock, flags);
 

@@ -64,6 +64,30 @@ kernel:
       source: rpi5-kernel-build/common/vendor/lechao/LcView/lcview_ring_logic.h
     - patch: kernel/new/vendor/lechao/LcView/tests/Makefile
       source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/Makefile
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/atomic.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/atomic.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/errno.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/errno.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/kernel.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/kernel.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/slab.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/slab.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/spinlock.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/spinlock.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/string.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/string.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/timekeeping.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/timekeeping.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/types.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/types.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/uaccess.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/uaccess.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/vmalloc.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/vmalloc.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/wait.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/wait.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/lcview_callsite_host_test.c
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/lcview_callsite_host_test.c
     - patch: kernel/new/vendor/lechao/LcView/tests/lcview_ring_host_test.c
       source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/lcview_ring_host_test.c
     - patch: kernel/new/vendor/lechao/Makefile

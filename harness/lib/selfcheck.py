@@ -651,6 +651,29 @@ def main(argv=None):
                              "受影响测试（推导不出回落全量），供 loop 中间轮")
     args = parser.parse_args(argv)
     mode = args.mode
+    # 方向 5（批次 env 隔离）：pytest/治理工具子进程必须剥离 CDP_BATCH_ID/
+    # CDP_RUN_ID——链内 report 步（acceptance→package 后）注入的批次 env 会
+    # 污染依赖"无批次环境"的单测（test_cdp_validate_patch / test_gen_manifest /
+    # test_ws_acceptance 等自建临时批次做 mark/logcat 断言，读到真实 batch_id
+    # 即 3 failed 误判红，ws_report 拒写收据，2026-09-10 批次实测复现）。
+    # selfcheck 是纯文件系统检查，内部 edit/apply_selfcheck 打点经
+    # current-batch.json 回落即可（不依赖显式批次 env）；跑完恢复现场。
+    _saved_batch_env = {k: os.environ.get(k)
+                        for k in ("CDP_BATCH_ID", "CDP_RUN_ID")}
+    for _k in _saved_batch_env:
+        os.environ.pop(_k, None)
+    try:
+        return _main_body(mode)
+    finally:
+        for _k, _v in _saved_batch_env.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+
+
+def _main_body(mode):
+    """自检主流程（批次 env 已剥离后执行；见 main 剥离说明）。"""
     # 自检整体墙钟实测（方向 3）：pytest 起跑前记 t0，四工具完成后 t1，
     # 差值经 _mark_selfcheck --dur-s 上报（自检段耗时不再被相邻差额吞并）
     _t0 = time.time()

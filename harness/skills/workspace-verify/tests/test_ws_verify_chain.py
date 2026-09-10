@@ -74,9 +74,59 @@ class TestChain(unittest.TestCase):
         self.assertEqual(result["exit_rc"], 0)
         self.assertEqual([s["name"] for s in result["steps"]],
                          ["sync", "connect", "push", "unit_test",
-                          "acceptance", "report"])
-        self.assertEqual([s["rc"] for s in result["steps"]], [0] * 6)
+                          "acceptance", "package", "report"])
+        self.assertEqual([s["rc"] for s in result["steps"]], [0] * 7)
         self.assertEqual(result["skipped"], [])
+
+    def test_package_step_uses_systemd_run_with_batch_id_evidence(self):
+        # 方向 3：package 步用 systemd-run --user --wait 拉起 ws_package.py，
+        # --evidence-file 指向 package-<batch_id>.json（与 ws_report 探测同源）；
+        # 打包失败不置 overall=fail、不阻断链（证据补充非门禁）
+        calls = []
+        ctor = mock.Mock(side_effect=lambda argv, **kw: (
+            calls.append(argv),
+            mock.Mock(wait=mock.Mock(return_value=0)))[1])
+        with mock.patch.object(wc.subprocess, "Popen", ctor), \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(batch_file=str(self.batch),
+                                      use_locks=False)
+        self.assertEqual(rc, 0)
+        self.assertEqual(result["overall"], "pass")
+        pkg = next(c for c in calls
+                   if any(os.path.basename(x) == "ws_package.py" for x in c))
+        # argv: [systemd-run, --user, --wait, python, ws_package.py, ...]
+        self.assertEqual(pkg[0], "systemd-run")
+        self.assertEqual(pkg[1], "--user")
+        self.assertEqual(pkg[2], "--wait")
+        self.assertIn("--evidence-file", pkg)
+        bid = wc.batch_id_from_text(self.batch.read_text(encoding="utf-8"))
+        self.assertEqual(pkg[pkg.index("--evidence-file") + 1],
+                         str(wc._SCRIPT_DIR.parents[1] / "log"
+                             / "workspace-verify"
+                             / f"package-{bid}.json"))
+
+    def test_package_failure_does_not_fail_chain(self):
+        # 方向 3：package 失败（如 sudo 不可用）只记步不改 overall，
+        # report 仍落盘（evidence 已含真实 script_rc 供内嵌）
+        def run(argv, **kw):
+            if any(os.path.basename(x) == "ws_package.py" for x in argv):
+                return mock.Mock(wait=mock.Mock(return_value=1))
+            return mock.Mock(wait=mock.Mock(return_value=0))
+        ctor = mock.Mock(side_effect=run)
+        with mock.patch.object(wc.subprocess, "Popen", ctor), \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(batch_file=str(self.batch),
+                                      use_locks=False)
+        self.assertEqual(rc, 0)
+        self.assertEqual(result["overall"], "pass")
+        by_name = {s["name"]: s for s in result["steps"]}
+        self.assertEqual(by_name["package"]["rc"], 1)
+        # report 步仍执行（steps 含 report）
+        self.assertIn("report", by_name)
 
     def test_run_id_shared_with_children(self):
         # 编排器注入 CDP_RUN_ID：链内子步骤经 env 读取同批 run_id（产物
@@ -176,7 +226,7 @@ class TestChain(unittest.TestCase):
         self.assertEqual([s["name"] for s in result["steps"]],
                          ["sync", "connect", "push", "report"])
         self.assertEqual([s["rc"] for s in result["steps"]], [0, 0, 1, 0])
-        self.assertEqual(result["skipped"], ["unit_test", "acceptance"])
+        self.assertEqual(result["skipped"], ["unit_test", "acceptance", "package"])
         self.assertIn("unit_test", result["skip_reasons"])
         self.assertIn("链已停", result["skip_reasons"]["unit_test"])
 
@@ -232,7 +282,7 @@ class TestChain(unittest.TestCase):
         self.assertTrue(killed["canceled"])
         # A1 后 report 步执行落 fail 收据（不在 skipped 内）
         self.assertEqual(result["skipped"],
-                         ["connect", "push", "unit_test", "acceptance"])
+                         ["connect", "push", "unit_test", "acceptance", "package"])
 
     def test_run_state_json_written(self):
         # 运行态落盘（仅编排器写）：runs/<run_id>.json 记真实 rc/起止/canceled
@@ -334,7 +384,7 @@ class TestChain(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual([s["name"] for s in result["steps"]],
                          ["sync", "connect", "push", "unit_test"])
-        self.assertEqual(result["skipped"], ["acceptance", "report"])
+        self.assertEqual(result["skipped"], ["acceptance", "package", "report"])
         self.assertIn("acceptance", result["skip_reasons"])
         self.assertIn("report", result["skip_reasons"])
 
@@ -354,7 +404,7 @@ class TestChain(unittest.TestCase):
         self.assertEqual([s["name"] for s in result["steps"]],
                          ["sync", "connect", "push", "unit_test",
                           "acceptance"])
-        self.assertEqual(result["skipped"], ["report"])
+        self.assertEqual(result["skipped"], ["package", "report"])
         acc = next(c for c in calls if "ws_acceptance.py" in c[1])
         self.assertIn("--case", acc)
         self.assertNotIn("--batch-file", acc)

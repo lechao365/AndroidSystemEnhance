@@ -68,8 +68,10 @@ class TestCheckHostTests(unittest.TestCase):
 
     # ── 副本隔离（方向 2）：make 在 gitignored 副本内跑、产物不落 code 树 ──
     def test_make_runs_in_staged_copy_not_source(self):
-        # make test/clean 的 cwd 必须落在副本 harness/log/host-tests/<module>/tests，
-        # 绝不落在 code 源码树；跑完副本被整体回收（源码 tests 目录不受影响）
+        # make test/clean 的 cwd 必须落在副本 harness/log/host-tests/lechao/
+        # <module>/tests（方向 1 起拷整个 vendor/lechao，含顶层
+        # kernel_lechao_log.h 供 LcView 调用点 -I../.. 编译），绝不落在
+        # code 源码树；跑完副本被整体回收（源码 tests 目录不受影响）
         cwds = []
 
         def _fake_run(cmd, **kw):
@@ -80,12 +82,12 @@ class TestCheckHostTests(unittest.TestCase):
             rc, out = cht._run_make_test("LcView", self.repo)
         self.assertEqual(rc, 0)
         stage_tests = (self.repo / "harness" / "log" / "host-tests"
-                       / "LcView" / "tests")
+                       / "lechao" / "LcView" / "tests")
         for cwd in cwds:
             self.assertEqual(Path(cwd), stage_tests)
         # 副本收尾回收、源码树无产物无残留
         self.assertFalse((self.repo / "harness" / "log" / "host-tests"
-                          / "LcView").exists())
+                          / "lechao").exists())
         self.assertTrue((self.src_tests / "Makefile").is_file())
 
     # ── main 判红（方向 2）：make 缺失 / 超时 / rc 非零三种场景 ────────────
