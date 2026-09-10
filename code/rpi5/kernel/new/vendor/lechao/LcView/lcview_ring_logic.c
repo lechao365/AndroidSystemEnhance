@@ -129,3 +129,18 @@ int builder_write_fits(uint32_t data_offset, uint32_t add_len,
         return 0;
     return -ENOSPC;
 }
+
+int builder_str_field_fits(uint32_t data_offset, uint32_t data_len,
+                           uint32_t max_size)
+{
+    /* 变长字段总长 = type(1B) + len(2B) + data，再计入 4B 记录前缀 */
+    return builder_write_fits(data_offset, 3 + data_len, max_size);
+}
+
+uint32_t ring_corrupt_skip_len(uint32_t record_len, uint32_t ring_size,
+                               uint32_t default_skip)
+{
+    if (record_len < LCVIEW_RING_LEN_PREFIX || record_len > ring_size)
+        return default_skip;
+    return record_len;
+}

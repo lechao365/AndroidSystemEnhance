@@ -366,8 +366,12 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
             chain_args["timings_file"] = str(tpath) if tpath else None
             os.environ["CDP_BATCH_ID"] = batch_id
         if batch_file:
-            # 锁外预跑 selfcheck（B3）：与锁等待/前序步骤并行，report 步收割
-            selfcheck_thread, selfcheck_result = _start_selfcheck_preflight()
+            # 方向 5：selfcheck 待 acceptance 后串行（不再锁外并行预跑）。
+            # 上批（8f58b075d679）链内 selfcheck 与 acceptance 并行竞争资源致
+            # pytest_rc=1 误判红，ws_report 拒写收据；改为 report 步（acceptance
+            # 之后）经 _join_selfcheck_preflight(None, {}) 同步串行执行，
+            # report 前固定同步跑，消除并行竞争。
+            selfcheck_thread, selfcheck_result = None, {}
         with (ws_lock.verify_locks() if use_locks else nullcontext()):
             return _run_chain_locked(run_id, batch_id, product, out,
                                      result_file, batch_file, build,

@@ -240,6 +240,36 @@ static void test_builder_fits(void)
     CHECK(builder_write_fits(16, 4077, 4096) == -ENOSPC);
 }
 
+/* builder_str_field_fits：变长字段（STRING/BINARY）调用点判红
+ * （方向 1 判红：add_str/add_binary 此前漏扣 4B 记录前缀）
+ * 变长字段总长 = type(1) + len(2) + data，再计 4B 记录前缀。 */
+static void test_builder_str_fits(void)
+{
+    /* 边界：data_offset + 4(前缀) + 3(type/len) + data == max 恰好可写 */
+    CHECK(builder_str_field_fits(0, 4089, 4096) == 0);
+    CHECK(builder_str_field_fits(16, 4073, 4096) == 0);
+    /* 超 1B 判超限：修复前按 data_offset + 3 + data 对比上限漏扣前缀 →
+     * 内容写满 4096 时记录总长 4 + 4096 = 4100 超限被读侧误判损坏丢弃 */
+    CHECK(builder_str_field_fits(0, 4090, 4096) == -ENOSPC);
+    CHECK(builder_str_field_fits(16, 4074, 4096) == -ENOSPC);
+}
+
+/* ring_corrupt_skip_len：损坏记录跳过前移量判红（方向 2 判红）
+ * 记录在环中实占 record_len 字节，只前移前缀+头（20B）会撕裂后续流；
+ * 但垃圾前缀（<4 或 > ring->size）须回落保守默认，防止跳过头。 */
+static void test_corrupt_skip(void)
+{
+    const uint32_t def = 20; /* 前缀 4 + 记录头 16 */
+    /* 可信前缀（含超 MAX 但 ≤ ring->size，如 4100）→ 按 record_len 前移 */
+    CHECK(ring_corrupt_skip_len(4100, 8192, def) == 4100);
+    CHECK(ring_corrupt_skip_len(4096, 8192, def) == 4096);
+    CHECK(ring_corrupt_skip_len(20, 8192, def) == 20);
+    /* 垃圾前缀 → 保守默认 */
+    CHECK(ring_corrupt_skip_len(0, 8192, def) == def);
+    CHECK(ring_corrupt_skip_len(3, 8192, def) == def);
+    CHECK(ring_corrupt_skip_len(9000, 8192, def) == def);
+}
+
 int main(void)
 {
     test_avail();
@@ -250,6 +280,8 @@ int main(void)
     test_fit_errno();
     test_overrun_restore();
     test_builder_fits();
+    test_builder_str_fits();
+    test_corrupt_skip();
     if (g_fails) {
         printf("FAIL: %d/%d checks failed\n", g_fails, g_checks);
         return 1;

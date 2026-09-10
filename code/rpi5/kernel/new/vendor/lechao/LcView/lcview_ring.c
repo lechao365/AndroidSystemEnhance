@@ -417,8 +417,19 @@ int lcview_ring_read(struct lcview_ring *ring,
             record_len > ring->size) {
             pr_warn_ratelimited(PREFIX "corrupted record at pos=%u, len=%u, skipping\n",
                                 rpos, record_len);
-            ring->read_pos = (rpos + LCVIEW_LEN_PREFIX_SIZE +
-                              sizeof(struct lcview_record_hdr)) % ring->size;
+            /*
+             * 损坏记录跳过量须按 record_len（写侧写入的长度前缀）前移：
+             * 记录在环中实际占用 record_len 字节，只前移前缀+头（20B）
+             * 会让 read_pos 落进记录体中间，把后续记录当损坏撕裂整个流。
+             * record_len 在环内可信（[前缀, ring->size]）时按 record_len
+             * 前移；不可信（<前缀 或 > ring->size，垃圾前缀）才用保守
+             * 默认跳过量（前缀 + 记录头），防止跳过头。判定内聚于 logic
+             * 层 ring_corrupt_skip_len 供单测判红。
+             */
+            ring->read_pos = (rpos + ring_corrupt_skip_len(
+                record_len, ring->size,
+                LCVIEW_LEN_PREFIX_SIZE + sizeof(struct lcview_record_hdr)))
+                % ring->size;
             spin_unlock_irqrestore(&ring->lock, flags);
             continue;
         }

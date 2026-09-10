@@ -228,8 +228,14 @@ int lcview_builder_add_str(struct lcview_builder *b, const char *val)
 {
     uint16_t len = compute_str_len(val);
     /* 写入顺序：type(1B) + len(2B) + data */
-    uint32_t total = 1 + 2 + len;
-    if (b->data_offset + total > LCVIEW_BUILDER_MAX_SIZE) {
+    /*
+     * 容量检查须把 4B 记录长度前缀计入上限（同 builder_write_field）：
+     * 记录在环中存 LCVIEW_LEN_PREFIX_SIZE + 内容，读侧以 record_len > MAX
+     * 判损坏。若不扣前缀，字符串内容写满 4096 时记录总长 4100 超限被读侧
+     * 误判损坏跳过（丢记录）。变长字段 fits 判定内聚于 logic 层供单测判红。
+     */
+    if (builder_str_field_fits(b->data_offset, len,
+                               LCVIEW_BUILDER_MAX_SIZE)) {
         LC_DBG("string overflow: len=%u, rem=%zu\n",
                len, (size_t)(LCVIEW_BUILDER_MAX_SIZE - b->data_offset));
         return -ENOSPC;
@@ -272,8 +278,14 @@ int lcview_builder_add_binary(struct lcview_builder *b,
     if (!ptr && len > 0)
         return -EINVAL;
 
-    uint32_t total = 1 + 2 + len;
-    if (b->data_offset + total > LCVIEW_BUILDER_MAX_SIZE) {
+    /*
+     * 容量检查须把 4B 记录长度前缀计入上限（同 add_str/builder_write_field）：
+     * 记录在环中存 LCVIEW_LEN_PREFIX_SIZE + 内容，读侧以 record_len > MAX
+     * 判损坏。binary 内容写满 4096 时记录总长 4100 超限被读侧误判损坏跳过。
+     * 变长字段 fits 判定内聚于 logic 层供单测判红。
+     */
+    if (builder_str_field_fits(b->data_offset, len,
+                               LCVIEW_BUILDER_MAX_SIZE)) {
         LC_DBG("binary overflow: len=%u\n", len);
         return -ENOSPC;
     }
