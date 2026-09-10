@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <errno.h>
 #include "lcview_ring_logic.h"
 
 static int g_checks = 0;
@@ -203,9 +204,70 @@ static void test_read_fit(void)
     /* 放不下但已有已读数据 → 1（break 返回部分） */
     CHECK(ring_read_fit_check(44, 40, 64) == 1);
 
-    /* KRN-001 核心：无数据且首条放不下 → -1（调用方转 -EINVAL），
+    /* KRN-001 核心：无数据且首条放不下 → -1（调用方转 -EMSGSIZE），
      * 不得返回 0 伪装 EOF */
     CHECK(ring_read_fit_check(0, 100, 64) == -1);
+}
+
+/* ring_read_fit_errno：KRN-001 首条放不下 → -EMSGSIZE（方向 1 判红） */
+static void test_fit_errno(void)
+{
+    /* 修复前调用方转 -EINVAL；须 -EMSGSIZE 提示缓冲不足 */
+    CHECK(ring_read_fit_errno(-1) == -EMSGSIZE);
+    CHECK(ring_read_fit_errno(0) == 0);
+}
+
+/* ring_overrun_restore_amt：GET_OVERRUN 读清失败回加（方向 4 判红） */
+static void test_overrun_restore(void)
+{
+    /* copy 失败：计数不得丢失（低估）——回加读到的值 */
+    CHECK(ring_overrun_restore_amt(42, false) == 42);
+    CHECK(ring_overrun_restore_amt(0, false) == 0);
+    CHECK(ring_overrun_restore_amt(UINT32_MAX, false) == UINT32_MAX);
+    /* copy 成功：已清零交付，无回加 */
+    CHECK(ring_overrun_restore_amt(42, true) == 0);
+}
+
+/* builder_write_fits：上限须扣 4B 长度前缀（方向 5 判红） */
+static void test_builder_fits(void)
+{
+    /* 边界：data_offset + 4(前缀) + add_len == max 恰好可写 */
+    CHECK(builder_write_fits(0, 4092, 4096) == 0);
+    CHECK(builder_write_fits(16, 4076, 4096) == 0);
+    /* 超 1B 判超限：修复前不扣前缀会误判 4093 可写 →
+     * record_len = 4 + 4097 > 4096 被读侧判损坏跳过（丢记录） */
+    CHECK(builder_write_fits(0, 4093, 4096) == -ENOSPC);
+    CHECK(builder_write_fits(16, 4077, 4096) == -ENOSPC);
+}
+
+/* builder_str_field_fits：变长字段（STRING/BINARY）调用点判红
+ * （方向 1 判红：add_str/add_binary 此前漏扣 4B 记录前缀）
+ * 变长字段总长 = type(1) + len(2) + data，再计 4B 记录前缀。 */
+static void test_builder_str_fits(void)
+{
+    /* 边界：data_offset + 4(前缀) + 3(type/len) + data == max 恰好可写 */
+    CHECK(builder_str_field_fits(0, 4089, 4096) == 0);
+    CHECK(builder_str_field_fits(16, 4073, 4096) == 0);
+    /* 超 1B 判超限：修复前按 data_offset + 3 + data 对比上限漏扣前缀 →
+     * 内容写满 4096 时记录总长 4 + 4096 = 4100 超限被读侧误判损坏丢弃 */
+    CHECK(builder_str_field_fits(0, 4090, 4096) == -ENOSPC);
+    CHECK(builder_str_field_fits(16, 4074, 4096) == -ENOSPC);
+}
+
+/* ring_corrupt_skip_len：损坏记录跳过前移量判红（方向 2 判红）
+ * 记录在环中实占 record_len 字节，只前移前缀+头（20B）会撕裂后续流；
+ * 但垃圾前缀（<4 或 > ring->size）须回落保守默认，防止跳过头。 */
+static void test_corrupt_skip(void)
+{
+    const uint32_t def = 20; /* 前缀 4 + 记录头 16 */
+    /* 可信前缀（含超 MAX 但 ≤ ring->size，如 4100）→ 按 record_len 前移 */
+    CHECK(ring_corrupt_skip_len(4100, 8192, def) == 4100);
+    CHECK(ring_corrupt_skip_len(4096, 8192, def) == 4096);
+    CHECK(ring_corrupt_skip_len(20, 8192, def) == 20);
+    /* 垃圾前缀 → 保守默认 */
+    CHECK(ring_corrupt_skip_len(0, 8192, def) == def);
+    CHECK(ring_corrupt_skip_len(3, 8192, def) == def);
+    CHECK(ring_corrupt_skip_len(9000, 8192, def) == def);
 }
 
 int main(void)
@@ -215,6 +277,11 @@ int main(void)
     test_memcpy_in();
     test_evict();
     test_read_fit();
+    test_fit_errno();
+    test_overrun_restore();
+    test_builder_fits();
+    test_builder_str_fits();
+    test_corrupt_skip();
     if (g_fails) {
         printf("FAIL: %d/%d checks failed\n", g_fails, g_checks);
         return 1;

@@ -92,7 +92,7 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 
 ## 1. 内核编译
 
-> 对应 `mk_rpi5_full_image.sh` 第 160~283 行。
+> 对应 `mk_rpi5_full_image.sh` 内 `step_begin "编译内核（AOSP Clang + LLD）"` 段（行号随脚本演进不再写死，按该 step 标题定位）。
 
 编译环境通过 `harness/config/paths.conf` 或环境变量指定（详见 `harness/README.md` 的路径配置段）。以下命令模板可直接复制执行。
 
@@ -201,7 +201,7 @@ cp "${KERNEL_OVERLAYS_DIR}"/*.dtbo "${KERNEL_DEST}/overlays/"
 
 ## 2. AOSP 编译
 
-> 对应 `mk_rpi5_full_image.sh` 第 289~390 行。
+> 对应 `mk_rpi5_full_image.sh` 内 `step_begin "编译 AOSP 镜像..."` 段（行号随脚本演进不再写死，按该 step 标题定位）。
 
 ### 2.1 初始化编译环境
 
@@ -250,7 +250,7 @@ ls -lh "${ANDROID_PRODUCT_OUT}/vendor.img"
 
 ## 3. 打包刷机镜像
 
-> 对应 `mk_rpi5_full_image.sh` 第 396~438 行。
+> 对应 `mk_rpi5_full_image.sh` 内 `step_begin "生成可刷写 .img 镜像（rpi5-mkimg.sh）"` 段（行号随脚本演进不再写死，按该 step 标题定位）。
 
 ```bash
 cd "$AOSP_ROOT"

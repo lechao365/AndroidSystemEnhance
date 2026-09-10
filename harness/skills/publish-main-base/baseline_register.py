@@ -7,6 +7,7 @@ save() 手工保留 yaml 头部注释块（PyYAML 往返不保留注释）。
 import argparse
 import datetime
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -23,8 +24,9 @@ VERIFY_CASES_PATH = (Path(__file__).resolve().parents[2] / "config"
 # 仿 ws_report.py：引入 cross-device 共享收据模块，candidate 实读真实 verify 收据
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "lib" / "python"))
 from cdp_receipt import read_receipt  # noqa: E402
-from cdp_issue import (closed_issue_details,
-                       issue_files, read_index, read_issue, validate_issue)  # noqa: E402
+from cdp_issue import (closed_issue_details, closed_issue_paths,
+                       issue_files, read_index, read_issue, set_archived_in,
+                       validate_issue)  # noqa: E402
 from cdp_paths import data_baselines_dir, project_root  # noqa: E402
 
 
@@ -150,7 +152,7 @@ def _code_changes_since_main():
     fail-closed 拒绝豁免（宁可误拒不可放行）。
     """
     r = subprocess.run(
-        ["git", "log", "--format=%h %s", "origin/main...HEAD", "--", "code/"],
+        ["git", "log", "--format=%h %s", "origin/main..HEAD", "--", "code/"],
         capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
         return None
@@ -178,6 +180,182 @@ def carried_issue_ids(task, issues_dir=None):
             if e["status"] in ("open", "scheduled") and e["task"] == task]
 
 
+def _real_known_issues_dir():
+    """承重门禁数据源：固定仓库真实根（模块位置解析，不随 CDP_PROJECT_ROOT 改道）。
+
+    CDP_PROJECT_ROOT 是收据/打点等运行产物的隔离机制（CI 自检指向 runner
+    临时目录），known-issues 是发布门禁证据——若随 env 改道到空目录会被
+    环境变量静默关掉（empty-registry 假绿），故门禁一律读真实根。
+    测试经 --known-issues-dir 显式指回临时根，与 env 隔离机制并存。"""
+    return Path(__file__).resolve().parents[3] / "data" / "known-issues"
+
+
+def _open_flake_issues(issues_dir=None):
+    """未闭环 flake 类 known-issues：kind=flake 且 status 非 fixed/wontfix。
+
+    方向 3：KIR-002 抖动登记（selfcheck 机械放行）的 flake 是"单跑绿非阻塞"
+    记录，但存在未闭环 flake 意味着抖动尚未根因定位/闭环——promote 基线
+    晋升不得携带未闭环抖动，故 promote 硬拒。闭环 = 标 fixed/wontfix 并填
+    resolved_in（KIR-006）。"""
+    d = Path(issues_dir) if issues_dir else _real_known_issues_dir()
+    out = []
+    for p in issue_files(d):
+        i = read_issue(p)
+        if i.kind == "flake" and i.status not in ("fixed", "wontfix"):
+            out.append(f"{p.name}: {i.title}")
+    return out
+
+
+# ── P1-B：promote 审批独立校验（修复 KI-20260907-001）────────────────
+# 业界对齐 SLSA 独立审批思想：审批不得自证。两道校验——
+#   1) 身份不等式：--approved-by 审批人不得等于执行人 git 身份（收据
+#      operator 同源采集）；
+#   2) 审批凭据外部化：LC_PROMOTE_APPROVAL_TOKEN 环境变量须与
+#      harness/config/promote-approval.env 预设值一致（评审人独立持有，
+#      文件 gitignore 不入库，杜绝审批可自证）。
+
+
+def _collect_operator() -> str:
+    """执行人 git 身份（与 cdp_receipt._collect_operator 同源口径）。"""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                               / "skills" / "cross-device" / "lib" / "python"))
+        import cdp_receipt
+        return cdp_receipt._collect_operator()
+    except Exception:
+        return "unknown"
+
+
+def _norm_identity(s: str) -> str:
+    """身份归一：'Name <email>' → 'name'; 小写去空白（比较用）。"""
+    s = (s or "").strip()
+    if "<" in s:
+        s = s.split("<", 1)[0]
+    return s.lower().strip()
+
+
+def _read_approval_token(token_file: str | None = None) -> str:
+    """读 promote-approval.env 预设 token（缺省
+    harness/config/promote-approval.env）；不存在返回 ''。"""
+    path = Path(token_file) if token_file else (
+        Path(__file__).resolve().parents[2] / "config"
+        / "promote-approval.env")
+    try:
+        for ln in path.read_text(encoding="utf-8").splitlines():
+            ln = ln.strip()
+            if ln.startswith("LC_PROMOTE_APPROVAL_TOKEN="):
+                return ln.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+def _check_approval_independence(approved_by: str,
+                                 operator: str,
+                                 token: str,
+                                 token_file: str | None = None) -> tuple[bool, str]:
+    """审批独立校验：返回 (ok, err)。
+
+    token_file（方向 1）：--approval-token-file 透传（测试/异地覆盖），
+    缺省读 harness/config/promote-approval.env。
+    """
+    if not (approved_by or "").strip():
+        return False, "promote 必须传 --approved-by（审批凭据外部化）"
+    op_norm = _norm_identity(operator)
+    if not op_norm or op_norm == "unknown":
+        # 执行人 git 身份采集失败（unknown/空）→ 无法核验审批独立性。此前
+        # 跳过身份比较放行任意 approved-by（fail-open），批次 7d41df8e24bf
+        # 方向 3 改判红：身份不可知时独立性不可证，不得晋升。
+        return False, (f"执行人 git 身份不可用（{operator!r}），无法核验审批"
+                       "独立性（KI-20260907-001），拒绝 promote")
+    if _norm_identity(approved_by) == op_norm:
+        return False, (f"审批人 {approved_by!r} 与执行人 {operator!r} 相同，"
+                       "审批缺乏独立隔离（KI-20260907-001），拒绝 promote")
+    provided = (token or "").strip()
+    if not provided:
+        return False, "缺 LC_PROMOTE_APPROVAL_TOKEN（审批凭据外部化失败）"
+    # 占位符/尖括号一律拒（真实随机 token 不含 < >）
+    if "<" in provided or ">" in provided:
+        return False, "LC_PROMOTE_APPROVAL_TOKEN 为占位符，拒绝 promote"
+    expected = _read_approval_token(token_file)
+    if not expected:
+        # 缺 token 判红（方向 1）：预设文件缺失/未预设即凭据外部化失败，
+        # 不得静默放行（此前默认路径多拼一层恒读空、空 expected 短路跳过
+        # 比对 fail-open）
+        return False, ("promote-approval.env 缺失或未预设 "
+                       "LC_PROMOTE_APPROVAL_TOKEN（审批凭据外部化失败）")
+    if provided != expected:
+        return False, "LC_PROMOTE_APPROVAL_TOKEN 与 promote-approval.env 预设值不一致"
+    return True, ""
+
+
+def check_issues_gate(task=None, issues_dir=None):
+    """known-issues 门禁主体（check-issues action 与 add-candidate 复用，方向 4）。
+
+    先判畸形登记（validate_issue 有红即拒：文件名/头字段/枚举/index 一致性
+    全局把关，防 index 按空格切分错位等畸形记录污染门禁判定）→ task 推断/
+    白名单（缺省从 status 非 fixed 条目的 task 集合推断，显式传值须在活跃
+    集合内防拼错）→ 判目标任务未解决阻塞（origin=introduced 或 blocking 且
+    status!=fixed 即拒）。
+    数据源 issues_dir 缺省取仓库真实根（_real_known_issues_dir，不随
+    CDP_PROJECT_ROOT 改道——承重门禁不得被环境变量关掉）。
+    返回 rc：0 通过 / 1 畸形或未解决阻塞 / 3 task 不在活跃集合。
+    """
+    d = Path(issues_dir) if issues_dir else _real_known_issues_dir()
+    # 单次遍历缓存 (path, Issue) 复用（pub-08）：task 推断与阻塞判定不再逐文件
+    # 重复 read_issue（drvfs IO 放大收敛为一次读取）；read 失败记 None——不可读
+    # 文件仍由下方 validate_issue 判红拒绝，后续遍历跳过 None（行为与原实现一致）
+    issues = []
+    for p in issue_files(d):
+        try:
+            i = read_issue(p)
+        except OSError:
+            i = None
+        issues.append((p, i))
+    for p, _i in issues:
+        errs = validate_issue(p)
+        if errs:
+            for e in errs:
+                print(f"{p.name}: {e}", file=sys.stderr)
+            print("error: known-issues 畸形登记，拒绝（先修复登记再发布基线）",
+                  file=sys.stderr)
+            return 1
+    # task 推断：缺省从 status 非 fixed 条目的 task 集合推断（自动，无需人工申报）
+    active_tasks = {i.task for _p, i in issues
+                    if i is not None and i.status != "fixed" and i.task}
+    if task:
+        # 白名单：显式传 --task 不在活跃集合内即 exit 3（防拼错静默通过；
+        # 空集合时放行——无活跃任务则无冲突对象）
+        if active_tasks and task not in active_tasks:
+            print(f"error: --task {task!r} 不在活跃任务集合 "
+                  f"{sorted(active_tasks)} 内（防拼错静默通过）",
+                  file=sys.stderr)
+            return 3
+    else:
+        if len(active_tasks) == 1:
+            task = next(iter(active_tasks))
+        elif len(active_tasks) > 1:
+            print(f"error: 活跃任务集合多值 {sorted(active_tasks)}，"
+                  f"须显式传 --task 之一", file=sys.stderr)
+            return 1
+        else:
+            task = "empty-registry"
+    # 再判目标任务未解决阻塞：origin=introduced 或 blocking 且 status!=fixed 即拒
+    bad = []
+    for p, i in issues:
+        if i is None or i.task != task:
+            continue
+        if (i.origin == "introduced" or i.blocking) and i.status != "fixed":
+            bad.append(f"{p.name}: origin={i.origin} blocking={i.blocking} "
+                       f"status={i.status}")
+    if bad:
+        print("\n".join(bad), file=sys.stderr)
+        print(f"error: task={task} 存在未解决阻塞问题", file=sys.stderr)
+        return 1
+    print(f"known-issues 门禁通过（task={task} 无未解决阻塞问题）")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="baseline candidate/promoted 登记")
     ap.add_argument("action",
@@ -187,6 +365,9 @@ def main(argv=None):
     ap.add_argument("--source-commit")
     ap.add_argument("--receipt-path")
     ap.add_argument("--approved-by")
+    ap.add_argument("--approval-token-file", default="",
+                    help="promote-approval.env 路径（测试/异地覆盖；缺省 "
+                         "harness/config/promote-approval.env）")
     ap.add_argument("--task")
     ap.add_argument("--ki-gate", help="known-issues 门禁结论 pass/not-run，写入 evidence")
     ap.add_argument("--evidence-scope", help="证据范围标签（如 lcview-liveness）；"
@@ -198,55 +379,15 @@ def main(argv=None):
     ap.add_argument("--known-issues-carried",
                     help="带病登记 issue_id 列表（逗号分隔，写入 evidence 的 "
                          "known_issues_carried；缺参记空，只记录不阻断）")
+    ap.add_argument("--known-issues-dir",
+                    help="known-issues 门禁数据源目录（缺省固定仓库真实根 "
+                         "data/known-issues，不随 CDP_PROJECT_ROOT 改道；"
+                         "测试/异地经此显式指回，与收据 env 隔离并存）")
     args = ap.parse_args(argv)
 
     # check-issues：known-issues 门禁（publish_main_base.sh 委托；不读写登记 yaml）
     if args.action == "check-issues":
-        # 先判畸形登记：validate_issue 有红即拒（文件名/头字段/枚举/index 一致性全局把关，
-        # 防 index 按空格切分错位等畸形记录污染门禁判定）
-        for p in issue_files():
-            errs = validate_issue(p)
-            if errs:
-                for e in errs:
-                    print(f"{p.name}: {e}", file=sys.stderr)
-                print("error: known-issues 畸形登记，拒绝（先修复登记再发布基线）",
-                      file=sys.stderr)
-                return 1
-        # task 推断：缺省从 status 非 fixed 条目的 task 集合推断（自动，无需人工申报）
-        active_tasks = {i.task for p in issue_files()
-                        if (i := read_issue(p)).status != "fixed" and i.task}
-        if args.task:
-            # 白名单：显式传 --task 不在活跃集合内即 exit 3（防拼错静默通过；
-            # 空集合时放行——无活跃任务则无冲突对象）
-            if active_tasks and args.task not in active_tasks:
-                print(f"error: --task {args.task!r} 不在活跃任务集合 "
-                      f"{sorted(active_tasks)} 内（防拼错静默通过）",
-                      file=sys.stderr)
-                return 3
-        else:
-            if len(active_tasks) == 1:
-                args.task = next(iter(active_tasks))
-            elif len(active_tasks) > 1:
-                print(f"error: 活跃任务集合多值 {sorted(active_tasks)}，"
-                      f"须显式传 --task 之一", file=sys.stderr)
-                return 1
-            else:
-                args.task = "empty-registry"
-        # 再判目标任务未解决阻塞：origin=introduced 或 blocking 且 status!=fixed 即拒
-        bad = []
-        for p in issue_files():
-            i = read_issue(p)
-            if i.task != args.task:
-                continue
-            if (i.origin == "introduced" or i.blocking) and i.status != "fixed":
-                bad.append(f"{p.name}: origin={i.origin} blocking={i.blocking} "
-                           f"status={i.status}")
-        if bad:
-            print("\n".join(bad), file=sys.stderr)
-            print(f"error: task={args.task} 存在未解决阻塞问题", file=sys.stderr)
-            return 1
-        print(f"known-issues 门禁通过（task={args.task} 无未解决阻塞问题）")
-        return 0
+        return check_issues_gate(task=args.task, issues_dir=args.known_issues_dir)
 
     # verify-tree：树等价断言（publish_main_base.sh squash 后、push main 前委托）。
     # 比较 verified/<id> tag 与 main 的树，排除登记 yaml 与 docs 后必须无差异，
@@ -293,6 +434,12 @@ def main(argv=None):
     today = datetime.date.today().strftime("%Y%m%d")
 
     if args.action == "add-candidate":
+        # 方向 4：known-issues 门禁自执（此前只记 --ki-gate 参数不自执；抽出
+        # check_issues_gate 复用 check-issues action 同源逻辑，门禁不过即拒登记，
+        # 不把门禁结论留给参数声明；数据源固定真实根不随 CDP_PROJECT_ROOT 改道）
+        gate_rc = check_issues_gate(task=args.task, issues_dir=args.known_issues_dir)
+        if gate_rc != 0:
+            return gate_rc
         if not args.receipt_path:
             print("error: add-candidate 必须传 --receipt-path（证据链要求实读 verify 收据）",
                   file=sys.stderr)
@@ -308,6 +455,14 @@ def main(argv=None):
         if receipt_errs:
             print(f"error: 收据解析错误 {args.receipt_path}: "
                   f"{'; '.join(receipt_errs)}", file=sys.stderr)
+            return 1
+        # 方向 5：device_dirty 拒收——设备态不可信的验证结果不得登记为基线
+        # （ws_report 已源头拒落 pass，此处补登记侧防线防绕过；仅空串放行，
+        # 非空值含 "true"/"unknown"（teardown 恢复失败/未跑）一律拒收登记）
+        dd_val = (r.device_dirty or "").strip()
+        if dd_val:
+            print(f"error: 收据 device_dirty={dd_val}（teardown 恢复失败/未跑，"
+                  "设备态不可信），拒绝登记 candidate", file=sys.stderr)
             return 1
         receipt_cases = {c.strip() for c in (r.cases or "").split(",") if c.strip()}
         # 方向 2（本批意图 2）：evidence 自描述——记录发布全量组覆盖核对结果
@@ -376,6 +531,22 @@ def main(argv=None):
             print(f"error: 收据 result 非法（{r.result!r}），拒绝登记",
                   file=sys.stderr)
             return 1
+        # 登记门禁（AGENTS.md 原文：「登记门禁：收据 result 属 pass 或 skip 且
+        # HEAD^ 等于 verified_commit」）：result=fail 收据（含 build/push_board=
+        # PASS 但 cases 失败者）不具备基线证据性，显式拒绝——堵绕过链（fail 收据
+        # 经 skip 收据成为 LATEST 后由 prepare 取作 evidence 锚点放行登记）
+        if r.result == "fail":
+            print("error: 收据 result=fail，拒绝登记（登记门禁：收据 result 属"
+                  " pass 或 skip，fail 收据不得作为基线证据，见 AGENTS.md）",
+                  file=sys.stderr)
+            return 1
+        # board 模式收据须 result=pass：board 实测批的 skip 不具备上板证据性
+        # （skip 收据仅可用于 harness 自检批，不得充当发布验收证据）
+        if r.verify_mode == "board" and r.result != "pass":
+            print(f"error: 收据 verify_mode=board 但 result={r.result!r} 非 pass，"
+                  "拒绝登记（board 实测收据须 result=pass 才具备基线证据性）",
+                  file=sys.stderr)
+            return 1
         # 缺必需字段：batch_id/verified_commit/build/push_board 必填
         missing = [k for k, v in (("batch_id", r.batch_id),
                                   ("verified_commit", r.verified_commit),
@@ -386,10 +557,14 @@ def main(argv=None):
             print(f"error: 收据缺必需字段 {', '.join(missing)}，拒绝登记",
                   file=sys.stderr)
             return 1
-        # 拒 FAIL：build/board_verify 为 FAIL 不可登记为基线（证据须 pass/skip）
-        if build_result == "FAIL" or board_verify == "FAIL":
-            print("error: 收据 build/board_verify 为 FAIL，拒绝登记"
-                  "（基线证据须 pass/skip）", file=sys.stderr)
+        # 拒非 PASS/SKIP：build/board_verify 非 PASS/SKIP 不可登记为基线
+        # （AGENTS.md：UNKNOWN 视同 FAIL 须人工复核；空值缺省 FAIL 逻辑保留，
+        # 空值不是合法 skip 证据）
+        if build_result not in ("PASS", "SKIP") \
+                or board_verify not in ("PASS", "SKIP"):
+            print(f"error: 收据 build/board_verify 非 PASS/SKIP"
+                  f"（build={build_result} board_verify={board_verify}），"
+                  "拒绝登记（UNKNOWN 视同 FAIL，须人工复核）", file=sys.stderr)
             return 1
         # ki_gate：known-issues 门禁结论（拒批已在脚本层 exit，缺参视为 not-run）
         ki_gate = (args.ki_gate or "").strip() or "not-run"
@@ -423,6 +598,13 @@ def main(argv=None):
                 else:
                     print(f"candidate 复用: {b['baseline_id']}（source_commit={args.source_commit}）")
                 return 0
+        # 显式 --baseline-id 查重（pub-06）：同 id 记录已存在（任意状态）即拒，
+        # 防显式指定绕过 next_id 产生重复 id 污染登记
+        if args.baseline_id and any(b.get("baseline_id") == args.baseline_id
+                                    for b in baselines):
+            print(f"error: baseline_id {args.baseline_id} 已存在，拒绝重复登记",
+                  file=sys.stderr)
+            return 1
         bid = args.baseline_id or next_id(data, today)
         baselines.append({
             "baseline_id": bid,
@@ -465,11 +647,31 @@ def main(argv=None):
                     print(f"error: 收据文件不存在，无法生成证据快照: {receipt}",
                           file=sys.stderr)
                     return 1
-                # 方向 6：审批凭据外部化——promote 空审批人即拒（在写快照前校验，
-                # 防快照污染），不再回落默认常量（防审批可自证）
+                # 方向 6 + P1-B：审批凭据外部化——promote 审批人不得为执行人、
+                # token 须与 promote-approval.env 预设一致（在写快照前校验，
+                # 防快照污染），不再回落默认常量（防审批可自证，闭环
+                # KI-20260907-001）
                 if not args.approved_by:
                     print("error: promote 必须传 --approved-by"
                           "（审批凭据外部化，不再回落默认常量）", file=sys.stderr)
+                    return 1
+                ok, aerr = _check_approval_independence(
+                    args.approved_by, _collect_operator(),
+                    os.environ.get("LC_PROMOTE_APPROVAL_TOKEN", ""),
+                    args.approval_token_file or None)
+                if not ok:
+                    print(f"error: {aerr}", file=sys.stderr)
+                    return 1
+                # 方向 3：存在未闭环 flake 类 KI（kind=flake 且未标终态）即拒
+                # ——KIR-002 抖动登记允许放行本轮自检，但晋升不得携带未闭环
+                # 抖动（闭环须标 fixed/wontfix 并填 resolved_in）
+                open_flakes = _open_flake_issues(args.known_issues_dir)
+                if open_flakes:
+                    print(f"error: promote 存在 {len(open_flakes)} 个未闭环 flake "
+                          f"known-issues（抖动未闭环不得晋升），拒绝：",
+                          file=sys.stderr)
+                    for o in open_flakes:
+                        print(f"  {o}", file=sys.stderr)
                     return 1
                 snapshot_name = f"{args.baseline_id}-{receipt.name}"
                 if not snapshot_name.endswith(".md"):
@@ -592,6 +794,13 @@ def main(argv=None):
                           "写不成 known_issues_closed 清单（归档仍入基线文档）",
                           file=sys.stderr)
                 if closed_details:
+                    # 方向 6：归档前回写 archived_in 到终态条目文件头（标记归属
+                    # 基线；已归档条目 closed_issue_details 已过滤，不再重复归档）
+                    paths_by_id = closed_issue_paths()
+                    for d in closed_details:
+                        p = paths_by_id.get(d["issue_id"])
+                        if p:
+                            set_archived_in(p, args.baseline_id)
                     archive_lines = ["", "## 已修复问题归档", ""]
                     archive_lines += [
                         f"- {d['issue_id']} | {d['title']} | "

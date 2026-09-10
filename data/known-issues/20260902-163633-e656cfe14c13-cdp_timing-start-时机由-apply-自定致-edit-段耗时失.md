@@ -9,6 +9,7 @@
 - status: fixed
 - task: cdp-timing-start
 - resolved_in: 42accb5
+- archived_in: BL-20260905-01
 
 ## body
 

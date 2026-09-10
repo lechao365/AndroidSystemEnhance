@@ -30,6 +30,21 @@ class TestFormatParse(unittest.TestCase):
         s = commit_scope.format_scope(lines)
         self.assertEqual(s, "add=0 mod=1 del=0 | f.txt")
 
+    def test_exclude_prefix_directory_boundary(self):
+        # lib-10：排除前缀带目录边界——data/verify-results-old/ 是相邻目录，
+        # 不得被 data/verify-results 前缀误排（纯 startswith 静默漏出比对）；
+        # 真收据目录与目录本身仍正确排除
+        c = commit_scope.classify_status("A\tdata/verify-results-old/foo.md")
+        self.assertEqual(c, ("add", "data/verify-results-old/foo.md"))
+        self.assertIsNone(commit_scope.classify_status(
+            "A\tdata/verify-results/20260101-000000-x.md"))
+        self.assertIsNone(commit_scope.classify_status(
+            "A\tdata/verify-results"))
+        # 相邻目录不误排，进 format_scope 计数可见
+        s = commit_scope.format_scope(
+            ["A\tdata/verify-results-old/foo.md", "M\tf.txt"])
+        self.assertIn("data/verify-results-old/foo.md", s)
+
     def test_parse_scope_invalid_returns_none(self):
         counts, paths = commit_scope.parse_scope("add=1 mod=0 del=0")
         self.assertIsNone(counts)

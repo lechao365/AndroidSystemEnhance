@@ -20,12 +20,16 @@ sync-code-to-doc**——不复制任何子 skill 的实现逻辑。
 - emit 侧宣告任务结束，准备建立新基线（一键入口，替代原手动 prepare→doc→promote 三步）
 ## 入口参数（AI 编排层语义，非 publish_main_base.sh 参数）
 - `--task <id>`：known-issues 门禁任务（透传给 `--check`/`--prepare`/`--promote`）
-- `--case <标签>`：验证用例标签（支持逗号分隔多用例），传 loop 模式 B（默认 `lcview-liveness,lcview-transfer,lcview-pipeline,lcview-perf`）
+- `--case <标签>`：验证用例标签（支持逗号分隔多用例），传 loop 模式 B（默认取 `harness/config/verify-cases.yaml` cases 段全部 case——promote 发布全量组门禁要求收据 cases 覆盖全部 case，只跑子集必被拒）
 - `--confirm`：无修改路径也强制人工确认（默认自动基线）
 ## Preconditions（前置条件）
 - 当前分支 dev；工作树干净；origin 可达
 - 最新收据 pass/skip 且最近内容提交父 == verified_commit（快路径）；
   否则自动进入验证路径（阶段 2）
+- **promote 门禁（收紧，doc-11）**：晋升阶段要求证据收据 `result=pass` 且
+  `verify_mode=board`——skip 收据可过 check/prepare 但不可晋升（除非
+  no-code-change 豁免路径），与脚本头「最新收据须 result=pass 且
+  verify_mode=board」一致
 - known-issues 门禁：promote 不强制 `--task`（门禁无条件执行，缺省由
   check-issues 推断唯一活跃任务，推断失败即拒）；目标任务下存在
   origin=introduced 或 blocking 且 status!=fixed 的问题即拒
@@ -93,7 +97,7 @@ bash harness/skills/publish-main-base/publish_main_base.sh --check [--task <id>]
 ```bash
 python3 harness/skills/loop-engineering/ws_session.py start --goal "基线发布验证" --target dev --case <标签>
 ```
-（`--case` 默认 `lcview-liveness,lcview-transfer,lcview-pipeline,lcview-perf`，与 workspace-verify 模式 B 对齐）
+（`--case` 默认 verify-cases.yaml cases 段全部 case，与 promote 发布全量组门禁对齐——只跑子集则收据 cases 缺项，promote 必拒）
 按 loop SKILL 执行收敛循环（AI 语义层）：
 - `run` → 按 workspace-verify SKILL 步骤 1-6 执行单次验证（同步/编译/推送/单测/验收/收据）
 - 收据落盘后 `done` 记账
@@ -130,10 +134,11 @@ bash harness/skills/publish-main-base/publish_main_base.sh --prepare [--task <id
 ### 阶段 6：promote
 ```bash
 bash harness/skills/publish-main-base/publish_main_base.sh --promote \
-  --baseline-id <id> --message-file <f> [--task <id>] [--approved-by <id>]
+  --baseline-id <id> --message-file <f> --approved-by <id> [--task <id>]
 ```
-（squash 会把阶段 5 文档改动一并并入 main；--approved-by 缺省为 lechao；
-失败自动 rollback_promote）
+（squash 会把阶段 5 文档改动一并并入 main；--approved-by 必填，审批凭据
+外部化不再回落默认；登记/checkout/merge/squash/树断言/push main 失败自动
+rollback_promote，含清理中途落盘的证据快照）
 
 ### 阶段 7：完成报告
 输出：baseline_id / main 新 sha / dev 重建状态 / 收据路径 / 文档同步摘要 / 是否含修复

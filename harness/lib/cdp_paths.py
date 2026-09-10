@@ -9,17 +9,21 @@ harness/lib/，向上回退 2 级（parents[2]）即项目根。仓内状态目�
 行为不变）；新代码请直接 from harness.lib.cdp_paths import ...
 """
 import os
+import threading
 from pathlib import Path
 
 
 def atomic_write_text(path, content, encoding="utf-8"):
-    """原子写文本（跨模块统一原语，P1-2 收口）：tmp 文件名带 pid 防并发
-    互写（旧固定 .tmp 名下两进程同写可产出损坏文件），写后 os.replace——
-    中断不留半写态（半写收据/issue 曾可按 latest 身份进入 promote 判定）。
+    """原子写文本（跨模块统一原语，P1-2 收口）：tmp 文件名带 pid + 线程 id
+    防并发互写（旧固定 .tmp 名下两进程/同进程两线程同写可产出损坏文件；
+    lib-13 补 threading.get_ident()——同 pid 多线程并发写同路径此前互写），
+    写后 os.replace——中断不留半写态（半写收据/issue 曾可按 latest 身份
+    进入 promote 判定）。
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp = path.with_name(
+        f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(content, encoding=encoding)
     tmp.replace(path)
 

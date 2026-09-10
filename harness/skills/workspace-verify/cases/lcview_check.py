@@ -447,14 +447,20 @@ def mode_delta(tmp, args):
         if not hit:
             print(f"ERROR: 新增记录中无事件 {args.event}")
             return 1
-        # 校验字段匹配（usb_probe f=[device_index, vid, pid, vendor, product]）
+        # 校验字段匹配（usb_probe f=[device_index, vid, pid, vendor, product]）；
+        # 仅校验已提供字段（只传 --vid/--pid 之一时另一项 None 不参与比对，
+        # None 恒不等会让单字段校验必然判红）
         if args.vid is not None or args.pid is not None:
             for r in hit:
                 f = r["fields"]
-                if (isinstance(f, list) and len(f) >= 3 and
-                        int(f[1]) == args.vid and int(f[2]) == args.pid):
-                    print(f"  字段匹配: f={f}")
-                    return 0
+                if not (isinstance(f, list) and len(f) >= 3):
+                    continue
+                if args.vid is not None and int(f[1]) != args.vid:
+                    continue
+                if args.pid is not None and int(f[2]) != args.pid:
+                    continue
+                print(f"  字段匹配: f={f}")
+                return 0
             print(f"ERROR: 事件 {args.event} 无 vid={args.vid}/pid={args.pid} 匹配记录")
             return 1
     return 0
@@ -761,6 +767,13 @@ MODES = {
 }
 
 
+def _baseline_explicit(argv):
+    """--baseline 是否显式传入：兼容空格与等号两种形式（"--baseline x" 与
+    "--baseline=/tmp/x"）；ts 模式只在显式时做基线限定。"""
+    return any(a == "--baseline" or a.startswith("--baseline=")
+               for a in (argv if argv is not None else sys.argv[1:]))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="lcview 业务数据板端校验器")
     ap.add_argument("--mode", required=True, choices=sorted(MODES),
@@ -800,8 +813,7 @@ def main(argv=None):
                     help="perf 模式 dd 执行 adb 超时（秒）")
     args = ap.parse_args(argv)
     # 记录 --baseline 是否显式传（ts 模式只在显式时做基线限定）
-    args.baseline_explicit = "--baseline" in (argv if argv is not None
-                                              else sys.argv[1:])
+    args.baseline_explicit = _baseline_explicit(argv)
 
     ensure_connected()
     with tempfile.TemporaryDirectory(prefix="lcview_check_") as tmp:

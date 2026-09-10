@@ -25,7 +25,7 @@ _NAME_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{12}-.+\.md$")
 _FIELDS = [
     "schema_version", "issue_id", "title", "discovered_in",
     "origin", "severity", "blocking", "blocking_reason", "status", "task",
-    "resolved_in",
+    "resolved_in", "archived_in", "kind",
 ]
 
 # origin / severity / status 允许取值（模板逐字段注释同源维护）
@@ -35,6 +35,11 @@ _SEVERITIES = ("P0", "P1", "P2")
 _SEVERITY_DEFAULT = "P2"
 _STATUSES = ("open", "scheduled", "fixed", "wontfix")
 _STATUS_DEFAULT = "open"
+# kind 允许取值：空（普通）/ flake（KIR-002 抖动登记，方向 3：未闭环 flake
+# 阻断 promote 晋升）/ idle-eligible（人工标记，进入闲时加固队列，方向 1：
+# 闲时加固 skill 只消费 idle-eligible 队列不自选战场）
+_KINDS = ("", "flake", "idle-eligible")
+_KIND_DEFAULT = ""
 
 _SLUG_MAX = 40
 
@@ -43,7 +48,8 @@ class Issue:
     def __init__(self, schema_version=1, issue_id="", title="", discovered_in="",
                  origin=_ORIGIN_DEFAULT, severity=_SEVERITY_DEFAULT,
                  blocking=False, blocking_reason="",
-                 status=_STATUS_DEFAULT, task="", resolved_in="", batch_id=""):
+                 status=_STATUS_DEFAULT, task="", resolved_in="", batch_id="",
+                 archived_in="", kind=_KIND_DEFAULT):
         self.schema_version = schema_version
         self.issue_id = issue_id
         self.title = title
@@ -55,6 +61,8 @@ class Issue:
         self.status = status if status in _STATUSES else _STATUS_DEFAULT
         self.task = task
         self.resolved_in = resolved_in
+        self.archived_in = archived_in  # 方向 6：promote 归档回写的归属基线 id（非 index 字段）
+        self.kind = kind if kind in _KINDS else _KIND_DEFAULT  # 方向 3：flake 分类
         # 命名元数据（发现批次），不属头字段，仅用于文件名 时间戳-batch_id-slug
         self.batch_id = batch_id
 
@@ -78,6 +86,8 @@ class Issue:
                 continue  # 非法枚举回落默认值，不崩
             elif key == "status" and val not in _STATUSES:
                 continue
+            elif key == "kind" and val not in _KINDS:
+                continue  # 非法 kind 回落默认，不崩
             elif hasattr(r, key):
                 setattr(r, key, val)
         return r
@@ -138,14 +148,48 @@ def closed_issue_ids(issues_dir=None):
             if (i := read_issue(p)).status in ("fixed", "wontfix")]
 
 
-def closed_issue_details(issues_dir=None):
+def closed_issue_details(issues_dir=None, include_archived=False):
     """终态条目明细列表（promote 归档入档用）：每项含 issue_id / resolved_in /
-    title，归档段据此逐条记 id/标题/修复提交，文件保留不清零。"""
+    title / archived_in。include_archived=False（缺省）时过滤已归档（archived_in
+    非空）条目——归档段只收录首次归档，防跨批重复归档同一条终态（方向 6）。"""
     d = issues_dir or data_known_issues_dir()
-    return [{"issue_id": i.issue_id, "resolved_in": i.resolved_in,
-             "title": i.title}
-            for p in issue_files(d)
-            if (i := read_issue(p)).status in ("fixed", "wontfix")]
+    details = []
+    for p in issue_files(d):
+        i = read_issue(p)
+        if i.status not in ("fixed", "wontfix"):
+            continue
+        if not include_archived and i.archived_in:
+            continue
+        details.append({"issue_id": i.issue_id, "resolved_in": i.resolved_in,
+                        "title": i.title, "archived_in": i.archived_in})
+    return details
+
+
+def closed_issue_paths(issues_dir=None):
+    """终态条目 issue_id → 文件路径 映射（promote 回写 archived_in 定位用）。"""
+    d = issues_dir or data_known_issues_dir()
+    return {i.issue_id: p for p in issue_files(d)
+            if (i := read_issue(p)).status in ("fixed", "wontfix")}
+
+
+def set_archived_in(path, baseline_id):
+    """回写头部 archived_in（promote 归档标记归属基线，防重复归档）。
+
+    baseline_id 为空即跳过；仅当当前 archived_in 为空才写（已有归档记录不
+    覆盖，保首次归档可追溯）。archived_in 非 index 字段，index 不重建。
+    """
+    if not baseline_id:
+        return Path(path)
+    p = Path(path)
+    text = p.read_text(encoding="utf-8")
+    header, sep, body = text.partition("\n## body")
+    if re.search(r"^- archived_in: \S", header, re.M):
+        return p  # 已归档过（首次归档记录保留）
+    new_header = _FIELD_RE.sub(
+        lambda m: f"- archived_in: {baseline_id}" if m.group(1) == "archived_in"
+        else m.group(0), header)
+    atomic_write_text(p, new_header + sep + body)  # 原子写（P1-2）
+    return p
 
 
 def delete_closed(issue_ids, issues_dir=None):
@@ -245,6 +289,10 @@ def validate_issue(path, issues_dir=None):
 
         for f in _FIELDS:
             if f not in fields:
+                # kind 可选（方向 3）：旧条目无 flake 分类 = 普通，缺失不判
+                # 畸形（否则历史 known-issues 文件全红阻塞 check-issues 门禁）
+                if f == "kind":
+                    continue
                 errs.append(f"头字段缺失: {f}")
 
         origin = fields.get("origin", _ORIGIN_DEFAULT)
@@ -256,6 +304,9 @@ def validate_issue(path, issues_dir=None):
         status = fields.get("status", _STATUS_DEFAULT)
         if status not in _STATUSES:
             errs.append(f"status 非法: {status!r}，允许 {_STATUSES}")
+        kind = fields.get("kind", _KIND_DEFAULT)
+        if kind not in _KINDS:
+            errs.append(f"kind 非法: {kind!r}，允许 {_KINDS}")
         blocking = fields.get("blocking", "false").lower() in ("true", "1", "yes")
         if blocking and not fields.get("blocking_reason", ""):
             errs.append("blocking=true 但 blocking_reason 为空")

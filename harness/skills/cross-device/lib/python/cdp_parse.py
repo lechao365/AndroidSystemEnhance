@@ -2,9 +2,10 @@
 
 格式（见 docs/cdp-contract.md，CDP-001 纪律：契约文档与解析器成对修改）：
   -s/-sv base:<12hex>
-  checksum: <16hex>   （可选元数据行，须紧跟首行；值 = 正文规范化后
-                      sha256 前 16 位，emit 产批经 --gen-checksum 生成，
-                      apply 侧存在即校验，缺失为旧格式 warn 兼容）
+  checksum: <16hex>   （可选元数据行，须紧跟首行；值 = 首行（mode+base）+
+                      正文（checksum 行以下全部行）规范化后 sha256 前 16 位，
+                      首行纳入覆盖防模式/base 篡改；emit 产批经 --gen-checksum
+                      生成，apply 侧存在即校验，缺失为旧格式 warn 兼容）
   意图: ...
   验收: ...   (-s 必须为「无」；-sv 必须非空且不得为「无」)
   方向: ...
@@ -37,8 +38,9 @@ MODE_RE = re.compile(r"^(-s|-sv)\s+base:\s*(\S+)\s*$")
 TAG_RE = re.compile(r"^(意图|验收|方向):\s*(.*)$")
 # 验收 case id：限小写字母数字与连字符（方向 1 契约）
 CASE_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-# checksum 行（批次防篡改）：紧跟首行的元数据行，值 = 批次正文（头部以下
-# 全部行，规范化后）sha256 前 16 位
+# checksum 行（批次防篡改）：紧跟首行的元数据行，值 = 首行（mode+base）+
+# 正文（checksum 行以下全部行）规范化后 sha256 前 16 位（首行纳入覆盖，
+# 防 -sv→-s 等模式/base 篡改静默过 checksum）
 CHECKSUM_RE = re.compile(r"^checksum:\s*([0-9a-fA-F]{16})$")
 
 EXIT_OK = 0
@@ -84,12 +86,13 @@ def batch_id_from_text(text: str) -> str:
     return hashlib.sha256(stripped.encode("utf-8")).hexdigest()[:12]
 
 
-def _split_checksum(norm: str) -> tuple[str, str]:
-    """规范化批次文本 → (声明的 checksum, 正文文本)。
+def _split_checksum(norm: str) -> tuple[str, str, str]:
+    """规范化批次文本 → (声明的 checksum, checksum 覆盖文本, 正文文本)。
 
     checksum 行仅认「紧跟首行」的头部位置；出现在他处不在此提取，由
-    validate_batch 的标签循环按未知行报 11 结构错误。正文 = 首行与
-    checksum 行以下全部行。
+    validate_batch 的标签循环按未知行报 11 结构错误。覆盖文本 = 首行
+    （mode+base）+ 正文（首行与 checksum 行以下全部行）——首行纳入
+    checksum 覆盖，防 -sv→-s 篡改经 exit 17 软错降级静默放行（CDP-02）。
     """
     lines = norm.splitlines()
     body = lines[1:]
@@ -99,34 +102,39 @@ def _split_checksum(norm: str) -> tuple[str, str]:
         if m:
             claimed = m.group(1).lower()
             body = body[1:]
-    return claimed, "\n".join(body)
+    covered = lines[0] + "\n" + "\n".join(body) if lines else ""
+    return claimed, covered, "\n".join(body)
 
 
-def batch_checksum(body: str) -> str:
-    """批次正文 checksum：规范化后 sha256 前 16 位。
+def batch_checksum(covered: str) -> str:
+    """checksum 覆盖范围（首行 + 正文）的校验值：规范化后 sha256 前 16 位。
 
     与 batch_id 同源归一（剥 BOM/strip/去空行/折叠空白/LF），emit/apply
-    两侧对同一正文恒得同值，抗传输层空白漂移。
+    两侧对同一覆盖文本恒得同值，抗传输层空白漂移。
     """
     return hashlib.sha256(
-        normalize_batch_text(body).encode("utf-8")).hexdigest()[:16]
+        normalize_batch_text(covered).encode("utf-8")).hexdigest()[:16]
 
 
 def with_checksum(text: str) -> str:
     """emit 侧产批收尾：在首行后插入/刷新 checksum: <16hex> 行。
 
-    对既有 checksum 行原位重算（批次编辑后刷新）；checksum 覆盖头部
-    （首行 + checksum 行）以下全部正文行；保留原文行结构与结尾换行。
+    先规范化再定位首行（与解析口径对称，CDP-01：原始文本首行前有空行时
+    按原文 splitlines 定位会把 checksum 行插错位，apply 侧恒拒 exit 11）；
+    checksum 覆盖首行（mode+base）+ 正文（checksum 行以下全部行，CDP-02：
+    防 -sv→-s 篡改静默降级放行）；对既有 checksum 行原位重算（批次编辑后
+    刷新）；输出为规范化文本（空行/BOM 已剥）。
     """
-    lines = text.splitlines()
+    norm = normalize_batch_text(text)
+    lines = norm.splitlines()
     if not lines:
-        return text
-    body = lines[1:]
+        return norm
+    first, body = lines[0], lines[1:]
     if body and CHECKSUM_RE.match(body[0].strip()):
         body = body[1:]
-    fresh = f"checksum: {batch_checksum(chr(10).join(body))}"
-    out = [lines[0], fresh, *body]
-    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+    covered = first + "\n" + "\n".join(body)
+    fresh = f"checksum: {batch_checksum(covered)}"
+    return "\n".join([first, fresh, *body]) + "\n"
 
 
 def parse_batch(text: str) -> Batch:
@@ -139,7 +147,7 @@ def parse_batch(text: str) -> Batch:
     if m:
         b.mode = m.group(1)[1:]  # "-sv" -> "sv", "-s" -> "s"
         b.base = m.group(2).lower()
-        b.checksum, body = _split_checksum(norm)
+        b.checksum, _, body = _split_checksum(norm)
         for ln in body.splitlines():
             t = TAG_RE.match(ln)
             if t:
@@ -162,14 +170,14 @@ def validate_batch(text: str, role: str = "emit"):
     lines = norm.splitlines()
     if not MODE_RE.match(lines[0]):
         return EXIT_STRUCT, [f"首行必须为 -s/-sv base:<12hex>，实际: {lines[0]!r}"]
-    # checksum 行（紧跟首行的元数据行）：存在即校验（对正文重算比对，
+    # checksum 行（紧跟首行的元数据行）：存在即校验（对首行+正文重算比对，
     # 双角色 blocking——篡改/损坏整批拒绝）；他处出现按未知行报 11（下
     # 方标签循环）。缺失为旧格式批次，main 侧 warn 兼容放行
-    claimed, body_norm = _split_checksum(norm)
-    if claimed and claimed != batch_checksum(body_norm):
+    claimed, covered, body_norm = _split_checksum(norm)
+    if claimed and claimed != batch_checksum(covered):
         return EXIT_CHECKSUM, [
-            f"CHECKSUM_MISMATCH 批次正文与头部 checksum 不符（头部 {claimed}，"
-            f"正文重算 {batch_checksum(body_norm)}），疑似传输篡改或损坏，"
+            f"CHECKSUM_MISMATCH 批次（首行+正文）与头部 checksum 不符（头部 {claimed}，"
+            f"重算 {batch_checksum(covered)}），疑似传输篡改或损坏，"
             "整批拒绝"
         ]
     seen_tags: dict[str, int] = {}
@@ -177,11 +185,15 @@ def validate_batch(text: str, role: str = "emit"):
                            start=3 if claimed else 2):
         t = TAG_RE.match(ln)
         if not t:
-            return EXIT_STRUCT, [f"未知行（须为 意图/验收/方向: 前缀）: {ln!r}"]
+            # 行号基于规范化后文本（去空行/折叠空白），与原始批次文件行号
+            # 可能不一致——消息注明口径，排障时对照规范化行序（CDP-11）
+            return EXIT_STRUCT, [
+                f"未知行（须为 意图/验收/方向: 前缀，规范化后行号 {i}）: {ln!r}"
+            ]
         if t.group(1) in seen_tags:
             return EXIT_STRUCT, [
-                f"重复标签 {t.group(1)}（行 {seen_tags[t.group(1)]} 与行 {i}），"
-                "三标签各占一段且不得重复",
+                f"重复标签 {t.group(1)}（规范化后行 {seen_tags[t.group(1)]} "
+                f"与行 {i}，行号为规范化后行号），三标签各占一段且不得重复",
             ]
         seen_tags[t.group(1)] = i
 
@@ -294,14 +306,20 @@ def main(argv=None):
     while i < len(argv):
         a = argv[i]
         if a == "--role" and i + 1 < len(argv):
-            role = argv[i + 1]; i += 2; continue
+            role = argv[i + 1]
+            i += 2
+            continue
         if a == "--expect-base" and i + 1 < len(argv):
-            expect = argv[i + 1]; i += 2; continue
+            expect = argv[i + 1]
+            i += 2
+            continue
         if a.startswith("--"):
             print(f"error: 未知参数 {a}")
             return EXIT_ARGS
         if path is None:
-            path = a; i += 1; continue
+            path = a
+            i += 1
+            continue
         print(f"error: 多余参数 {a}")
         return EXIT_ARGS
     if role not in ("emit", "apply") or path is None:

@@ -112,7 +112,9 @@ stages:
    - 测试：先 make <modules.<模块>.test_targets> -j$(nproc)（lcview 即
      lechao_lcview_unit_test——hal_test 已随 HAL 退役并入 unit_test，
      AGENTS.md 强制）
-   - 部署：m <modules.<模块>.targets>（lcview 实读 Android.bp 的 4 个 Soong 模块）；
+   - 部署：m <modules.<模块>.targets>（lcview 实读 Android.bp 的 2 个 Soong 模块——
+     HAL 已退役删除，仅存 lechao_lcview 与 vendor.lechao.lcview-config，见
+     verify-cases.yaml modules 段；lciod 才是 4 个 target）；
    增量路径按 incremental-dev-reference：
    - aosp 模块：m <module>（BLD-004 先 source build/envsetup.sh + lunch；BLD-005 禁裸 make）
    - boot/内核：make Image dtbs（BLD-001~003 Clang+LLD/产物拷贝 rpi5-kernel/；
@@ -170,12 +172,14 @@ stages:
    --unit-test-file harness/log/cross-device/unit-tests-<batch_id>.json \
    --push-file harness/log/cross-device/push-<batch_id>.json \
    [--package-file harness/log/workspace-verify/package-<batch_id>.json] \
-   --summary "<一句话>" --result <pass|fail|skip> --build <pass|fail|skip> --board <pass|fail|skip> \
+   --summary "<一句话>" --result <pass|fail|skip|revert> --build <pass|fail|skip> --board <pass|fail|skip> \
    --case "<本次实际 --case 标签，逗号分隔（模式 B 逐字透传；模式 A 无则省略）>" \
    --body <正文文件> --batch-file <cdp> --target $(git rev-parse --short=12 HEAD) \
    --metrics "<性能三指标 JSON 对象>"] \
    [--timings-file harness/log/cross-device/timings-<batch_id>.json] \
-   --selfcheck "<自检摘要（pytest_rc/refs_rc/config_rc/contract_rc 全 rc 键）>"
+   --selfcheck "<自检摘要（全部 *_rc 键，见 harness/lib/selfcheck.py 的
+   REQUIRED_RC_KEYS：pytest/refs/config/contract/pyenv/ioctl/manifest/
+   discipline/scan/ruff/host/metrics/opencode——任一缺失 ws_report 拒写）>"
    （--batch-file/--target 为模式 A 参数；--body 必传：CDP 原文 + 各阶段明细 +
    失败现场摘录，自动脱敏；PASS 必传 --acceptance-file（步骤 5 自描述验收产物）
    与 --unit-test-file（步骤 4b 自描述单测产物）与 --push-file（步骤 4 自描述
@@ -278,7 +282,8 @@ package_result=PASS，须在**会话外普通终端**人工执行打包：
 > 板端验证 lcview 业务"工作 OK"的用例资产已内聚到 `harness/config/verify-cases.yaml`
 > （ws_acceptance.py --case 引用，L1/L2 命令经 hostcmd/cmd 标签书写，不再散落
 > cases/ 独立 yaml，9 处硬编码绝对路径消亡）：
-> - `lcview-pipeline` — **L1 被动数据管道**（只读）：files / valid_json / schema_match / fresh。
+> - `lcview-pipeline` — **L1 被动数据管道**（只读）：files / valid_json / schema
+>   （fresh/ts 已移入 lcview-trigger probe 之后——静止态跑 fresh/ts 永不能过）。
 > - `lcview-pipeline-warn` — L1 两条 warn 项（no_invalid / ts），非阻断判据单独成用例。
 > - `lcview-trigger` — **L2 触发型全链路**（authorized 切换 Flash Drive 1-2，按 requires 顺序）：
 >   baseline → authorize_off → disconnect 增量 → authorize_on → probe 增量 + vid/pid 匹配。

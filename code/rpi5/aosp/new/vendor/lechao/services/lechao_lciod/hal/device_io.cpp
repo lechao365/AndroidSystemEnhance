@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <glob.h>
+#include <ctime>
 #include <sys/ioctl.h>
 #include <android-base/logging.h>
 #include "lechao_log.h"
@@ -160,10 +161,26 @@ int read_event(int fd, struct vendor_lechao_usbd_event *event, int timeout_ms) {
     struct pollfd pfd = { .fd = fd, .events = POLLIN };
     /* LCD-016：poll EINTR 重试而非报错——信号打断是瞬时噪声，原实现
      * 直接 -1 会被上层白名单外判为真实错误层层上抛，monitor 50ms 轮询
-     * 在任何信号到达时误报一条 readEvent failed */
+     * 在任何信号到达时误报一条 readEvent failed。
+     * 修复（方向 6）：重试按剩余时间扣减——原实现每次都用原始
+     * timeout_ms 重新起算，多次 EINTR 叠加会让实际等待突破 clamp 上限
+     * kMaxReadEventTimeoutMs，阻塞 monitor 周期。以单调时钟累计已耗时，
+     * 剩余 = clamp 后 timeout 扣减，扣完为 0 不再延长。 */
+    struct timespec t_start, t_now;
+    int remaining = timeout_ms;
     int ret;
+    clock_gettime(CLOCK_MONOTONIC, &t_start);
     do {
-        ret = poll(&pfd, 1, timeout_ms);
+        ret = poll(&pfd, 1, remaining);
+        if (ret < 0 && errno == EINTR) {
+            clock_gettime(CLOCK_MONOTONIC, &t_now);
+            long long elapsed_ms =
+                (t_now.tv_sec - t_start.tv_sec) * 1000LL +
+                (t_now.tv_nsec - t_start.tv_nsec) / 1000000LL;
+            remaining = timeout_ms - (int)elapsed_ms;
+            if (remaining < 0)
+                remaining = 0;
+        }
     } while (ret < 0 && errno == EINTR);
     if (ret < 0) {
         LC_LOGW("read_event: poll failed: " << strerror(errno));

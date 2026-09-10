@@ -39,7 +39,6 @@ log_error() { echo "[ERROR] $*" >&2; }
 log_result(){ echo "[RESULT] $*" >&2; }
 step_begin(){ echo ""; echo "========== $* ==========" >&2; }
 step_end()  { echo "[  OK] $*" >&2; }
-harness_init()  { :; }
 harness_exit()  { exit "$1"; }
 harness_started_at_epoch() { echo "$_START_TS"; }
 harness_now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
@@ -71,8 +70,6 @@ LUNCH_TARGET="aosp_rpi5-bp1a-userdebug"
 BUILD_JOBS=${BUILD_JOBS:-$(nproc)}
 KERNEL_DEFCONFIG="android_rpi5_defconfig"
 VERSION_PREFIX="RaspberryVanillaAOSP15"
-
-harness_init --with-errexit "mk_rpi5_full_image"
 
 #==============================================================================
 # 1. 参数解析与帮助
@@ -187,6 +184,13 @@ if [ "$DO_KERNEL" = true ]; then
     fi
     if [ ! -d "$CLANG_BIN" ]; then
         log_error "Clang 工具链目录不存在: $CLANG_BIN"
+        harness_exit 3
+    fi
+    # KERNEL_OUT 非空预检（mk-01，fail-closed）：空串使 make O= 静默退化为
+    # 源码树内构建，污染内核源码树
+    if [ -z "$KERNEL_OUT" ]; then
+        log_error "KERNEL_OUT 未设置（空值使 make O= 退化为源码树内构建，污染源码树）"
+        log_error "请先 export KERNEL_OUT=<内核编译输出目录>"
         harness_exit 3
     fi
 
@@ -498,25 +502,28 @@ if [ ! -d "$WINDOWS_IMG_DIR" ]; then
     mkdir -p "$WINDOWS_IMG_DIR"
 fi
 
-# 保留最近 2 个版本，删除更旧的
-OLD_COUNT=$(ls "${WINDOWS_IMG_DIR}/${VERSION_PREFIX}"-*-rpi5.img 2>/dev/null | wc -l || true)
-if [ "$OLD_COUNT" -gt 0 ]; then
-    KEEP=2
-    while read -r old; do
-        [ -z "$old" ] && continue
-        log_info "删除旧镜像: $(basename "$old")"
-        rm -f "$old"
-    done < <(ls -t "${WINDOWS_IMG_DIR}/${VERSION_PREFIX}"-*-rpi5.img 2>/dev/null | tail -n +$((KEEP+1)))
-    DELETED=$((OLD_COUNT > KEEP ? OLD_COUNT - KEEP : 0))
-    log_info "保留最近 ${KEEP} 个，清理 ${DELETED} 个旧镜像"
-fi
-
 if ! cp "$NEW_IMG" "$WINDOWS_IMG_DIR/"; then
     log_error "镜像拷贝失败，检查 /mnt/c/ 是否已挂载"
     harness_exit 1
 fi
 echo "  [OK] ${IMG_NAME} → ${WINDOWS_IMG_DIR}/"
 log_result "镜像拷贝" "name=$IMG_NAME" "dest=$WINDOWS_IMG_DIR/"
+
+# 保留最近 2 个版本，删除更旧的（mk-02：清理置于拷贝之后，按含本次新镜像的
+# 目标总数计——原实现先清后拷，实际保留 2 旧 + 1 新 = 3 个）
+KEEP=2
+IMG_LIST=$(ls -t "${WINDOWS_IMG_DIR}/${VERSION_PREFIX}"-*-rpi5.img 2>/dev/null || true)
+if [ -n "$IMG_LIST" ]; then
+    TOTAL=$(printf '%s\n' "$IMG_LIST" | wc -l)
+    if [ "$TOTAL" -gt "$KEEP" ]; then
+        printf '%s\n' "$IMG_LIST" | tail -n +$((KEEP + 1)) | while read -r old; do
+            [ -z "$old" ] && continue
+            log_info "删除旧镜像: $(basename "$old")"
+            rm -f "$old"
+        done
+        log_info "保留最近 ${KEEP} 个，清理 $((TOTAL - KEEP)) 个旧镜像"
+    fi
+fi
 
 step_end 0
 
@@ -536,7 +543,8 @@ echo "  大小:     ${IMG_SIZE}"
 echo "  内核:     ${KERNEL_VER}"
 echo ""
 echo "下一步："
-echo "  1. Windows 打开 C:\\Files\\RaspberryImages\\"
+# 输出实际目标目录（mk-03：硬编码 C:\Files\RaspberryImages\ 与实际配置不符）
+echo "  1. Windows 打开 ${WINDOWS_IMG_DIR}"
 echo "  2. 用 Raspberry Pi Imager 或 balenaEtcher 写入 SD 卡"
 echo ""
 
@@ -544,29 +552,41 @@ echo ""
 BUILD_END_TS=$(date +%s)
 BUILD_DURATION=$((BUILD_END_TS - $(harness_started_at_epoch)))
 REPORT_FILE=$(harness_tmp_file "build-report.json")
-cat > "$REPORT_FILE" <<EOF
-{
-  "ts": "$(harness_now_iso)",
-  "script": "mk_rpi5_full_image",
-  "mode": ${MODE},
-  "plan": "${PLAN}",
-  "exit_code": 0,
-  "_note": "此报告仅在成功路径生成，exit_code 必为 0；失败路径由 harness_observability 的日志记录",
-  "duration_sec": ${BUILD_DURATION},
-  "env": {
-    "BUILD_JOBS": ${BUILD_JOBS},
-    "AOSP_ROOT": "${AOSP_ROOT}",
-    "KERNEL_SRC": "${KERNEL_SRC}",
-    "LUNCH_TARGET": "${LUNCH_TARGET}"
-  },
-  "artifacts": {
-    "image": "${IMG_NAME:-unknown}",
-    "image_size": "${IMG_SIZE:-unknown}",
-    "kernel_version": "${KERNEL_VER:-unknown}",
-    "windows_dest": "${WINDOWS_IMG_DIR}"
-  }
+# 构建报告 JSON 经 python json.dump 生成（mk-04）：手工 heredoc 拼接不转义，
+# KERNEL_VER 等值含引号/反斜杠即产出非法 JSON
+REPORT_FILE="$REPORT_FILE" MODE="$MODE" PLAN="$PLAN" \
+BUILD_DURATION="$BUILD_DURATION" BUILD_JOBS="$BUILD_JOBS" \
+AOSP_ROOT="$AOSP_ROOT" KERNEL_SRC="$KERNEL_SRC" LUNCH_TARGET="$LUNCH_TARGET" \
+IMG_NAME="$IMG_NAME" IMG_SIZE="$IMG_SIZE" KERNEL_VER="$KERNEL_VER" \
+WINDOWS_IMG_DIR="$WINDOWS_IMG_DIR" NOW_ISO="$(harness_now_iso)" \
+python3 -c '
+import json
+import os
+
+report = {
+    "ts": os.environ["NOW_ISO"],
+    "script": "mk_rpi5_full_image",
+    "mode": int(os.environ["MODE"]),
+    "plan": os.environ["PLAN"],
+    "exit_code": 0,
+    "_note": "此报告仅在成功路径生成，exit_code 必为 0；失败路径由 harness_observability 的日志记录",
+    "duration_sec": int(os.environ["BUILD_DURATION"]),
+    "env": {
+        "BUILD_JOBS": int(os.environ["BUILD_JOBS"]),
+        "AOSP_ROOT": os.environ["AOSP_ROOT"],
+        "KERNEL_SRC": os.environ["KERNEL_SRC"],
+        "LUNCH_TARGET": os.environ["LUNCH_TARGET"],
+    },
+    "artifacts": {
+        "image": os.environ["IMG_NAME"] or "unknown",
+        "image_size": os.environ["IMG_SIZE"] or "unknown",
+        "kernel_version": os.environ["KERNEL_VER"] or "unknown",
+        "windows_dest": os.environ["WINDOWS_IMG_DIR"],
+    },
 }
-EOF
+with open(os.environ["REPORT_FILE"], "w", encoding="utf-8") as fh:
+    json.dump(report, fh, ensure_ascii=False, indent=2)
+'
 artifact_register "$REPORT_FILE" "build-report.json"
 rm -f "$REPORT_FILE"
 

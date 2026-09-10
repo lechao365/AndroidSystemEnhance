@@ -181,7 +181,7 @@ class TestCmdIp(unittest.TestCase):
         args.timeout = 2.0
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = ws.cmd_ip(args, c)
+            ws.cmd_ip(args, c)
         self.assertEqual(buf.getvalue().strip(), "10.0.0.8")
 
     def test_no_ipv4_is_no_ipv4_not_silent(self):

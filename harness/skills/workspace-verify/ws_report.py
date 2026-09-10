@@ -26,7 +26,6 @@
 """
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
@@ -46,6 +45,7 @@ from cdp_timing import _base_seg_name  # noqa: E402
 from commit_scope import format_scope, porcelain_to_name_status  # noqa: E402
 from content_tree import content_tree  # noqa: E402
 from paths import env_path  # noqa: E402
+from selfcheck import REQUIRED_RC_KEYS  # noqa: E402 方向 3：必查键单点定义
 
 
 _HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -334,8 +334,7 @@ def _validate_acceptance_pass(acceptance):
     """result=pass 时验收证据门禁：解析 acceptance JSON，overall 须为 pass 且
     无 fail 项，否则拒写（堵手填假绿混过 promote——仅查有无不看内容是洞）。
 
-    兼容两种结构（ws_acceptance.run 输出 {"overall","items"} 与历史数组格式
-    [{...}]）：overall 缺失的数组格式按「存在 fail 项」判定。
+    须为 ws_acceptance.run 输出的 JSON 对象（{"overall","items"}）。
     返回 (parsed, err)：err 非 None 时拒写（parsed 为 None）。
     """
     if not acceptance.strip():
@@ -344,15 +343,17 @@ def _validate_acceptance_pass(acceptance):
         data = json.loads(acceptance)
     except (ValueError, json.JSONDecodeError) as e:
         return None, f"--acceptance 须为合法 JSON（解析失败: {e}）"
-    if isinstance(data, dict):
-        if data.get("overall") != "pass":
-            return None, (f"acceptance overall 非 pass（实际 {data.get('overall')!r}），"
-                          "拒绝写 pass 收据")
-        items = data.get("items") or []
-    elif isinstance(data, list):
-        items = data
-    else:
-        return None, "--acceptance 须为 JSON 对象或数组"
+    if not isinstance(data, dict):
+        return None, "--acceptance 须为 JSON 对象（自描述验收产物）"
+    if data.get("overall") != "pass":
+        return None, (f"acceptance overall 非 pass（实际 {data.get('overall')!r}），"
+                      "拒绝写 pass 收据")
+    items = data.get("items") or []
+    # 方向 3（2026-09-08）：items 空即拒 pass——overall=pass 却无任何逐项证据
+    # （中断路径上 finally 落盘可能只带判红说明、或空 items 假绿）不得当 pass
+    # 写入；有 fail 项亦拒（既有防假绿）。
+    if not items:
+        return None, "acceptance items 为空（无逐项证据），拒绝写 pass 收据"
     for it in items:
         if isinstance(it, dict) and it.get("status") == "fail":
             return None, "acceptance 含 fail 项（假绿），拒绝写 pass 收据"
@@ -453,6 +454,10 @@ def _validate_unit_test_file(path, acceptance_run_id):
         return None, "--unit-test-file 缺 run_id，拒绝 PASS"
     if acceptance_run_id and rid != acceptance_run_id:
         return None, "--unit-test-file run_id 与验收产物不一致（非同批产物），拒绝 PASS"
+    if not data.get("targets"):
+        # 空 targets（rc=0 产物却无任何单测证据）不得 PASS：与 push 空 items
+        # 拒绝对称，防零单测假绿
+        return None, "targets 为空，拒绝 PASS"
     for t in data.get("targets") or []:
         if not isinstance(t, dict):
             return None, "--unit-test-file 含非法 target 项，拒绝 PASS"
@@ -496,6 +501,32 @@ def _validate_push_file(path, acceptance_run_id):
     if data.get("overall") != "pass":
         return None, "--push-file overall 非 pass（推送存在失败），拒绝 PASS"
     return data, None
+
+
+def _acceptance_device_dirty(path):
+    """由验收产物读 device_dirty 三态（返回 ""/"true"/"unknown"）。
+
+    只读不改写，与 result 无关（fail/skip 收据亦传 --acceptance-file，
+    ws_verify_chain report 步无条件透传产物路径）：文件缺失/非法/非 JSON
+    对象/键缺省一律返回 ""（非 pass 收据不强制产物，读取失败不阻断；
+    pass 门禁段另有严格校验，此处仅负责设备态三态识别）。
+    ws_acceptance 端 device_dirty 三态：True（teardown 恢复失败）、
+    "unknown"（teardown 未跑，不得声称干净）、False（跑过且干净）。
+    """
+    if not (path or "").strip():
+        return ""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    dd = data.get("device_dirty")
+    if dd is True:
+        return "true"
+    if dd == "unknown":
+        return "unknown"
+    return ""
 
 
 def _resolve_target(target: str):
@@ -573,8 +604,8 @@ def main(argv=None):
                          "入库可追溯；缺省按 batch_id 探测 "
                          "harness/log/workspace-verify/package-<batch_id>.json）")
     ap.add_argument("--device-dirty", action="store_true",
-                    help="teardown 失败（恢复不了本轮改变的设备态）时显式标记"
-                         "（PASS 路径亦可从验收产物 device_dirty 自动透传）")
+                    help="teardown 恢复失败时显式标记设备态不可信（header 写 "
+                         "true；验收产物 device_dirty True/unknown 亦自动透传）")
     ap.add_argument("--elapsed", type=int, default=None,
                     help="耗时秒数；缺省从 timings 的 wall_end-wall_start 推导"
                          "（推导不出则 0），显式传参优先")
@@ -585,6 +616,12 @@ def main(argv=None):
     ap.add_argument("--selfcheck", default="",
                     help="自检摘要文本（-s 批次必带：pytest harness -q 与 "
                          "check_skill_refs 输出；含 failed 非零或缺 skipped 计数即拒写）")
+    ap.add_argument("--flake-count", default="",
+                    help="本批 selfcheck 登记的 flake 数（缺省从 --selfcheck "
+                         "文本解析；供 metrics 聚合 flake 率）")
+    ap.add_argument("--coverage-file", default="",
+                    help="ws_coverage 覆盖率产物 JSON 路径（写入收据 coverage "
+                         "字段；只记录不门禁，缺失仅 warn 不阻断）")
     ap.add_argument("--metrics", default="",
                     help="三指标结构化 JSON 对象（写入收据 metrics 字段与 trend 行尾）")
     ap.add_argument("--timings-file", default="",
@@ -682,6 +719,19 @@ def main(argv=None):
               "prepare evidence-scope 推导死锁，拒绝写收据", file=sys.stderr)
         return 2
 
+    # 设备态三态识别（device_dirty ∈ ""/"true"/"unknown"）：true=teardown 恢复
+    # 失败，unknown=teardown 未跑，均视为设备态不可信；空=未涉及或已恢复干净。
+    # 来源合并取更严重档：显式 --device-dirty 恒 "true"；验收产物 device_dirty
+    # （True→true / "unknown"→unknown）无条件透传——ws_verify_chain report 步
+    # 无论 pass/fail 都把 acceptance 产物路径传给 --acceptance-file，fail/skip/
+    # revert 收据据此在 header 透传真实设备态供审计，pass 走下方门禁拒写。
+    device_dirty = "true" if args.device_dirty else ""
+    acc_dd = _acceptance_device_dirty(args.acceptance_file)
+    if acc_dd == "true":
+        device_dirty = "true"
+    elif not device_dirty:
+        device_dirty = acc_dd
+
     # 验收证据门禁：result=pass 只接受自描述验收产物文件（--acceptance-file），
     # 校验 run_id/输入摘要/单调时间且整体通过，否则拒写；单测产物（--unit-test-file）
     # 为必需且 run_id 一致、每 target 全绿；推送产物（--push-file）为必需且
@@ -711,13 +761,19 @@ def main(argv=None):
             return 2
         args.acceptance = json.dumps(parsed, ensure_ascii=False,
                                      separators=(",", ":"))
-        # 方向 3：验收产物标 device_dirty（teardown 恢复失败）→ 自动透传收据
-        if (parsed or {}).get("device_dirty") is True:
-            args.device_dirty = True
 
-    if args.device_dirty:
-        print("warn: device_dirty=true（teardown 恢复失败，设备态不可信），"
-              "已在收据 header 标注", file=sys.stderr)
+    if device_dirty:
+        # device_dirty 仅 warn 不再被接受为 pass 证据——设备态不可信的验证
+        # 结果不得落 pass 收据（teardown 恢复失败/未跑，脏态可能污染后续断言）；
+        # skip/fail/revert 收据仍可落（header 透传 true/unknown 供审计）。
+        # add-candidate 侧同步拒收（baseline_register 仅空串放行）。
+        if args.result == "pass":
+            print(f"error: device_dirty={device_dirty}（teardown 恢复失败/未跑，"
+                  "设备态不可信）且 result=pass，拒绝写收据"
+                  "（须重跑验证得干净设备态）", file=sys.stderr)
+            return 2
+        print(f"warn: device_dirty={device_dirty}（teardown 恢复失败/未跑，"
+              "设备态不可信），已在收据 header 标注", file=sys.stderr)
 
     # 打包证据内嵌（本批意图 1）：显式 --package-file 优先，缺省按 batch_id
     # 探测 harness/log/workspace-verify/package-<batch_id>.json（ws_package
@@ -733,7 +789,7 @@ def main(argv=None):
     # result=skip 而 selfcheck 为空即拒写。方向 4（批次 ff33f92060ac）：board 模式
     # （-sv 模式 A / 模式 B 上板）同样强制——上板批自检 rc 须入收据，此前仅 skip
     # 模式要求致上板批自检 rc 不入收据。自检门禁以退出码为主判据（方向 1-5）：
-    #   - 缺 pytest_rc/refs_rc/config_rc/contract_rc 任一即返 2（rc 不可见则自检不可信）
+    #   - 缺 REQUIRED_RC_KEYS 任一键即返 2（rc 不可见则自检不可信）
     #   - 任一 rc 非零即返 2（pytest 崩溃/悬空引用/配置违规均带 rc，文本可能无 failed/skipped）
     # failed 文本匹配与 skipped 计数保留作冗余（rc 全 0 后的补充防线）
     if (args.result == "skip" or verify_mode == "board") \
@@ -749,9 +805,9 @@ def main(argv=None):
         found = {}
         for m in re.finditer(r"\b(\w+_rc)=(\d+)\b", args.selfcheck):
             found.setdefault(m.group(1), int(m.group(2)))
-        # 必查键（既有契约 + config/contract）：四 rc 不可缺席（缺失=自检不可信；
-        # config_rc/contract_rc 为 check_config 两模式透出的判红键）
-        for key in ("pytest_rc", "refs_rc", "config_rc", "contract_rc"):
+        # 必查键（既有契约 + config/contract + pyenv/ioctl，单点定义于
+        # selfcheck.REQUIRED_RC_KEYS，方向 3）：任一 rc 缺席=自检不可信
+        for key in REQUIRED_RC_KEYS:
             if key not in found:
                 print(f"error: --selfcheck 缺 {key}（退出码为主判据，文本匹配仅冗余）",
                       file=sys.stderr)
@@ -797,6 +853,26 @@ def main(argv=None):
     # "531 passed in 27.9s | skipped=0 | OK: ..."，保证 skipped 计数随收据显式落地
     args.selfcheck = " | ".join(l for l in args.selfcheck.splitlines() if l.strip())
 
+    # P0-C：flake 计数（本批 selfcheck 登记的 KIR-002 抖动条目数），供
+    # metrics 聚合 flake 率；显式传参优先，缺省从 selfcheck 文本解析，缺省 0
+    if not args.flake_count:
+        args.flake_count = (str(len(re.findall(r"\bflake:\s+\S+",
+                                               args.selfcheck)))
+                            if args.selfcheck.strip() else "0")
+
+    # P1-A：覆盖率证据（ws_coverage 自描述 JSON；只记录不门禁，读取失败仅 warn）
+    coverage = ""
+    if args.coverage_file:
+        try:
+            cdata = json.loads(Path(args.coverage_file).read_text(
+                encoding="utf-8"))
+            if isinstance(cdata, dict):
+                coverage = json.dumps(cdata, ensure_ascii=False,
+                                      separators=(",", ":"))
+        except (OSError, ValueError, json.JSONDecodeError) as e:
+            print(f"warn: --coverage-file 读取失败（不入收据）: {e}",
+                  file=sys.stderr)
+
     # 发布内容与验证内容绑定（批次 261f10265269 方向 1）：verified_tree 为
     # 落盘时刻排除统一集合后的内容树（git 树对象 id，可复算）；commit_scope
     # 为该时刻 porcelain 清单加摘要。均排除收据目录（自引用豁免）；git 不可
@@ -841,9 +917,11 @@ def main(argv=None):
                 summary=args.summary, metrics=args.metrics,
                 timings=args.timings, cases=args.case,
                 selfcheck=args.selfcheck,
+                flake_count=args.flake_count,
+                coverage=coverage,
                 package=args.package,
                 verified_tree=verified_tree, commit_scope=commit_scope,
-                device_dirty="true" if args.device_dirty else "")
+                device_dirty=device_dirty)
     path = write_receipt(r, body or args.summary)
     append_trend(time.strftime("%Y-%m-%d %H:%M:%S"), batch_id, args.result,
                  f"build={args.build} board={args.board} "

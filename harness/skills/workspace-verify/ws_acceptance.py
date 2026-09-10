@@ -134,6 +134,15 @@ def parse_acceptance(text):
     return tags
 
 
+def _merge_overall(a, b):
+    """三态汇总：任一 fail 即 fail；无 fail 有 ai 即 ai；全 pass 才 pass。"""
+    if "fail" in (a, b):
+        return "fail"
+    if "ai" in (a, b):
+        return "ai"
+    return "pass"
+
+
 def split_tag(tag):
     if tag == "boot":
         return "boot", ""
@@ -230,12 +239,15 @@ def _clip_body(body, code):
     return body[-400:] if code != 0 else body[:200]
 
 
-def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
+def execute_tag(tag, adb_exec, adb_logcat, host_env=None, endpoint=None):
     """adb_exec(cmd)->(body, exit_code)；adb_logcat()->str。返回 (status, detail)。
 
     status: pass | fail | ai（自由文本由 AI 判定）；exit_code=-1 表示 adb 超时。
     host_env: hostcmd 分支子进程环境（方向 2 按 run_id 导出基线文件路径，
     实现轮次隔离；为 None 时沿用调用进程环境，行为不变）。
+    endpoint（wsv2-02）：非空时 logfresh 的 logcat 定向 -s <endpoint>（多
+    serial 残留防 more than one device 假红）；缺省 None 保持无 -s 旧行为
+    （单 serial / 测试直调）。
     """
     kind, payload = split_tag(tag)
     if kind == "svc":
@@ -345,9 +357,12 @@ def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
             dt = datetime.fromtimestamp(since_epoch, tz=tz)
             since_text = dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             try:
-                r = subprocess.run(ac.build_logcat_cmd(None, 5000, since=since_text),
+                r = subprocess.run(ac.build_logcat_cmd(None, 5000,
+                                                       since=since_text,
+                                                       endpoint=endpoint),
                                    capture_output=True, text=True,
-                                   encoding="utf-8", errors="replace", timeout=60)
+                                   encoding="utf-8", errors="replace",
+                                   timeout=60)
                 out = r.stdout
             except subprocess.TimeoutExpired:
                 return "fail", "logfresh: logcat 执行超时"
@@ -402,7 +417,7 @@ def execute_tag(tag, adb_exec, adb_logcat, host_env=None):
 
 
 def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False,
-                   on_item=None, host_env=None, deadline=None):
+                   on_item=None, host_env=None, deadline=None, endpoint=None):
     """执行全部条目，返回 (overall, items)。overall ∈ pass|fail|ai。
 
     ensure_boot=True 且标签无 boot 时自动追加（兑现 workspace-verify SKILL L20：
@@ -412,6 +427,7 @@ def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False,
     host_env 透传 execute_tag（hostcmd 子进程环境，方向 2 轮次隔离基线）。
     deadline（monotonic 时刻，方向 4）：非 None 时逐项前检查墙钟，超时中断
     剩余项并落 __timeout__ 标记项（生命周期收尾顺序仍完整执行）。
+    endpoint（wsv2-02）：透传 execute_tag，logfresh 的 logcat 定向 -s。
     """
     items = []
     tags = parse_acceptance(acceptance_text)
@@ -433,7 +449,8 @@ def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False,
                                     "按生命周期同一顺序收尾）"})
             break
         start = time.monotonic()
-        status, detail = execute_tag(tag, adb_exec, adb_logcat, host_env=host_env)
+        status, detail = execute_tag(tag, adb_exec, adb_logcat,
+                                     host_env=host_env, endpoint=endpoint)
         items.append({"tag": tag, "status": status, "detail": detail,
                       "elapsed_s": round(time.monotonic() - start, 3)})
         if on_item:
@@ -561,14 +578,20 @@ def _run_forensics(ep, since_epoch, items, first_error):
     try:
         tmp = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
                                           encoding="utf-8")
-        tmp.write(json.dumps({"first_error": first_error, "items": items},
-                             ensure_ascii=False, indent=2))
-        tmp.close()
-        _, run_dir = wf.collect(ep=ep, since_epoch=since_epoch,
-                                stdout_file=tmp.name)
-        os.unlink(tmp.name)
-        print(f"NOTE: 失败取证落盘: {run_dir}")
-        return str(run_dir)
+        try:
+            tmp.write(json.dumps({"first_error": first_error, "items": items},
+                                 ensure_ascii=False, indent=2))
+            tmp.close()
+            _, run_dir = wf.collect(ep=ep, since_epoch=since_epoch,
+                                    stdout_file=tmp.name)
+            print(f"NOTE: 失败取证落盘: {run_dir}")
+            return str(run_dir)
+        finally:
+            # 任何退出路径（含 collect 抛异常）都清理临时文件，防 /tmp 泄漏
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
     except (OSError, subprocess.SubprocessError, ValueError) as e:
         print(f"warn: 取证失败（不阻断）: {e}", file=sys.stderr)
         return None
@@ -605,7 +628,8 @@ def run_case_lifecycle(acceptance_text, lifecycle, adb_exec, adb_logcat,
     deadline = time.monotonic() + int(timeout_s) if timeout_s else None
     overall, items = run_acceptance(acceptance_text, adb_exec, adb_logcat,
                                     ensure_boot=ensure_boot, on_item=on_item,
-                                    host_env=host_env, deadline=deadline)
+                                    host_env=host_env, deadline=deadline,
+                                    endpoint=ep)
     meta["timed_out"] = any(i.get("tag") == "__timeout__" for i in items)
     first_error = next((f"{i['tag']}: {i['detail']}" for i in items
                         if i["status"] == "fail"), "")
@@ -619,17 +643,28 @@ def run_case_lifecycle(acceptance_text, lifecycle, adb_exec, adb_logcat,
     return overall, items, meta
 
 
-def _mark_stage(name, batch_id=None, zero=False):
-    """验证阶段自动打点：进程内直调 cdp_timing.main mark（batch 识别：显式
-    batch_id > 环境变量 CDP_BATCH_ID > log 目录唯一 timings 文件；均缺时
-    静默跳过返 0，失败不阻断口径）。验收段每项一发 mark（30+ 次），子进程
-    版每次 0.1~0.3s 启动开销串行叠加，进程内直调消除（_backfill_zero_marks
-    同款先例）。zero=True 记零 mark（跳过段占位，段耗时 0）。"""
+def _mark_stage(name, batch_id=None, zero=False, dur_s=None):
+    """验证阶段自动打点：进程内直调 cdp_timing.main mark（batch 识别收窄：
+    仅显式 batch_id 或环境变量 CDP_BATCH_ID 命中才写账本——不再回落
+    current-batch.json 与 log 目录唯一 timings 文件，防手工跑把打点落到
+    当批账本污染归因；均缺时静默跳过返 0，失败不阻断口径）。验收段每项
+    一发 mark（30+ 次），子进程版每次 0.1~0.3s 启动开销串行叠加，进程内
+    直调消除（_backfill_zero_marks 同款先例）。zero=True 记零 mark（跳过段
+    占位，段耗时 0）。dur_s（对齐 ws_push:275）：调用方自测该段真实墙钟
+    耗时，段耗时取 dur_s，相邻差额余量落 gap_before_<name>（未打点活动
+    不再污染段口径）。"""
+    # 收窄 batch 回落（方向 2）：mark 只认显式 batch_id 或 CDP_BATCH_ID，
+    # 避免手工跑 ws_acceptance（无批上下文）时因 current-batch.json 指针/
+    # 唯一 timings 文件存在而误写当批账本
+    if not batch_id and not os.environ.get("CDP_BATCH_ID", "").strip():
+        return
     args = ["mark", "--name", name]
     if batch_id:
         args += ["--batch", batch_id]
     if zero:
         args += ["--zero"]
+    if dur_s is not None:
+        args += ["--dur-s", f"{dur_s:.3f}"]
     try:
         rc = cdp_timing.main(args)
     except SystemExit as e:
@@ -642,14 +677,14 @@ def _mark_stage(name, batch_id=None, zero=False):
 
 
 def _resolve_batch_id(batch_id):
-    """batch 识别回落：显式 batch_id > 环境变量 CDP_BATCH_ID >
-    current-batch.json 指针 > log 目录唯一 timings 文件（多文件静默跳过
-    防误标其他批次）——薄壳委托 verify_common.resolve_batch_id_fallback
-    （批次四 B6 统一口径：与 cdp_timing mark 落点/产物命名同源）。
-    返回 batch_id 或 None。"""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
-    from verify_common import resolve_batch_id_fallback
-    return resolve_batch_id_fallback(batch_id)
+    """batch 识别收窄（方向 2）：仅显式 batch_id 或环境变量 CDP_BATCH_ID
+    命中才返回；不再回落 current-batch.json 指针与 log 目录唯一 timings
+    文件——手工跑 ws_acceptance（无批上下文）时当批指针/唯一打点文件残留
+    会把 mark/cases/补零误落到当批账本污染归因（verify 链模式 A 已注入
+    CDP_BATCH_ID，回落级对其冗余）。返回 batch_id 或 None。"""
+    if batch_id:
+        return batch_id
+    return os.environ.get("CDP_BATCH_ID", "").strip() or None
 
 
 def _batch_case_labels(batch_file):
@@ -723,13 +758,13 @@ def _backfill_zero_marks(batch_id):
 
 
 def _resolve_run_batch_id(batch_file):
-    """main 内 batch_id 解析三级回落：batch-file 显式解析 > CDP_BATCH_ID >
-    log 目录唯一 timings 文件（复用 _resolve_batch_id 口径）。
+    """main 内 batch_id 解析（方向 2 收窄）：batch-file 显式解析 >
+    CDP_BATCH_ID env；不再回落 current-batch.json / 唯一 timings 文件
+    （与 _resolve_batch_id 同口径，防手工跑无批上下文误写当批账本）。
 
-    --case/--acceptance 模式此前 batch_id 恒 None，_backfill_zero_marks
-    直接 return——标准段跳过时 verify_build 永远 missing（0904 三批实证）。
-    回落识别后补零/mark 必落本批打点文件；多打点文件时 _resolve_batch_id
-    静默跳过，防误标其他批次。读取失败按未提供处理（回落继续）。
+    --case/--acceptance 独立 CLI 无 batch-file 无 env 时返回 None，
+    _mark_stage/_backfill_zero_marks 静默跳过（verify 链模式 A 由编排层
+    注入 CDP_BATCH_ID，回落级对其冗余）。读取失败按未提供处理。
     """
     if batch_file:
         try:
@@ -818,12 +853,20 @@ def main(argv=None):
                   file=sys.stderr)
             return 2
 
-    # batch_id 解析三级回落（batch-file > CDP_BATCH_ID > 唯一 timings 文件）：
-    # --case 模式此前恒 None 致 _backfill_zero_marks 直接 return，标准段
-    # 跳过时 verify_build 永远 missing（0904 三批实证）；回落识别与
-    # _mark_stage 同口径，多打点文件时静默跳过防误标其他批次
+    # batch_id 解析收窄（batch-file 显式 > CDP_BATCH_ID env；不再回落
+    # current-batch.json / 唯一 timings 文件）：--case/--acceptance 手工跑无
+    # 批上下文时返回 None，_mark_stage/_write_cases 静默跳过不写账本——
+    # 防手工验收打点/实跑标签误落到 log 目录唯一打点文件所指当批
     batch_id = _resolve_run_batch_id(args.batch_file)
 
+    # verify_acceptance_connect 计时（方向 1）：起表须在 ensure_connected 前，
+    # mark 传实测秒数——连接耗时归 connect 段，脚本启动到连接前的未打点
+    # 活动余量落 gap_before_verify_acceptance_connect（对齐 ws_push:275）。
+    # 仅批上下文（显式 batch_id/CDP_BATCH_ID）存在时计时：无批手工跑不写
+    # 账本，起表无意义且徒增 monotonic 调用
+    _t_conn = (time.monotonic()
+               if (batch_id or os.environ.get("CDP_BATCH_ID", "").strip())
+               else None)
     ep = ac.ensure_connected()
     if not ep:
         # 编排层接线 rescue（激活第三级通道）：mDNS/静态失败后以
@@ -834,8 +877,10 @@ def main(argv=None):
         print(json.dumps({"overall": "fail", "error": "设备不可达",
                           "items": []}, ensure_ascii=False))
         return 1
-    _mark_stage("verify_acceptance_connect", batch_id)
-    if args.wait_ready and not ac.ensure_ready():
+    _mark_stage("verify_acceptance_connect", batch_id,
+                dur_s=(time.monotonic() - _t_conn) if _t_conn is not None
+                else None)
+    if args.wait_ready and not ac.ensure_ready(endpoint=ep):
         print(json.dumps({"overall": "fail",
                           "error": "设备未就绪（sys.boot_completed 超时，按不可达处理）",
                           "items": []}, ensure_ascii=False))
@@ -862,8 +907,11 @@ def main(argv=None):
 
     def adb_exec(cmd):
         try:
-            r = subprocess.run(ac.build_exec_cmd(cmd), capture_output=True,
-                               text=True, encoding="utf-8", errors="replace",
+            # exec 带 -s 定向本端点：多 serial 残留时缺 -s 会被 adb 以
+            # "more than one device" 拒绝（假红），贯穿 ensure_connected 的 ep
+            r = subprocess.run(ac.build_exec_cmd(cmd, endpoint=ep),
+                               capture_output=True, text=True,
+                               encoding="utf-8", errors="replace",
                                timeout=60)
             return ac.parse_exec_output(r.stdout)
         except subprocess.TimeoutExpired:
@@ -896,7 +944,8 @@ def main(argv=None):
             return _logcat_cache[key]
         try:
             r = subprocess.run(ac.build_logcat_cmd(None, 5000,
-                                                   since=device_since, pid=pid),
+                                                   since=device_since,
+                                                   pid=pid, endpoint=ep),
                                capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=60)
             out = r.stdout
@@ -920,80 +969,235 @@ def main(argv=None):
     host_env = _hostcmd_env(run_id)
     t_start = time.monotonic()
     # 生命周期编排（方向 1/2/4）：--case 单标签且资产为 dict 形态时启用
-    # （setup_snapshot/teardown/timeout_s）；多 case/--acceptance 直传不启用
-    # （生命周期字段随 cases 资产层，逐 case 责任面需单 case 才可归属）
-    case_labels = [c.strip() for c in (args.case or "").split(",") if c.strip()]
+    # （setup_snapshot/teardown/timeout_s）。
+    # 方向 5：批文件模式 case_labels 亦从批次验收行 case: 前缀提取（此前仅
+    # --case 生效，批模式 args.case 空致 lifecycle 恒 None、teardown 恒不跑、
+    # device_dirty 恒假）——批次 case:a 与 --case a 语义等价，同样启用
+    # 生命周期。
+    # 多 case 逐 case 跑（批次 7d41df8e24bf 方向 1）：此前多 case 批整体跳过
+    # lifecycle，dict 形态 case 的 teardown 不跑而 device_dirty=False（假
+    # 干净）——改逐 case 编排（case 间状态隔离，各跑各的 setup_snapshot →
+    # 判据 → 取证 → teardown）；str 旧形态未登记 setup_snapshot（无 teardown
+    # 责任面，与 _restore_state 无快照同口径），不参与 device_dirty 汇总；
+    # 任一 case teardown 恢复失败（dirty=true）优先透传。
+    case_labels = [c.strip() for c in (
+        args.case or _batch_case_labels(args.batch_file)).split(",") if c.strip()]
+    # 资产层预解析（参数/资产书写错误显式返 2/1 不落盘，与既有错误语义一致；
+    # 不并入最外层 try——finally 落盘不应改写此类显式返回的语义）
     lifecycle = None
+    case_vals = []
     if len(case_labels) == 1:
-        lifecycle = _load_lifecycle(_CASES_PATH, case_labels[0])
+        try:
+            lifecycle = _load_lifecycle(_CASES_PATH, case_labels[0])
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
     elif len(case_labels) > 1:
-        print("NOTE: 多 case 运行不启用生命周期（setup_snapshot/teardown "
-              "仅单 case 可归属）", file=sys.stderr)
-    if lifecycle:
-        overall, items, life_meta = run_case_lifecycle(
-            acceptance, lifecycle, adb_exec, adb_logcat, ep=ep,
-            ensure_boot=args.ensure_boot, on_item=mark_case, host_env=host_env,
-            since_epoch=int(time.time()))
-        device_dirty = life_meta["device_dirty"]
-        teardown_detail = life_meta["teardown_detail"]
-        forensics_dir = life_meta["forensics_dir"]
-    else:
-        overall, items = run_acceptance(acceptance, adb_exec, adb_logcat,
-                                        ensure_boot=args.ensure_boot,
-                                        on_item=mark_case, host_env=host_env)
-        device_dirty = False
-        teardown_detail = ""
-        forensics_dir = None
-    t_end = time.monotonic()
-    if args.result_file:
-        # 方向 1/3：自描述验收产物——run_id/输入摘要/设备序列号/设备指纹/
-        # 起止单调时间/逐项结果/总判定；原子写防半截文件被当证据
-        serial, serial_src = _device_serial(adb_exec)
-        if not serial:
-            # 方向 3：设备身份标识三者皆空即判红（产物身份不可信）
-            print(json.dumps({"overall": "fail",
-                              "error": "设备身份标识获取失败（ro.serialno/"
-                                       "ro.boot.serialno/eth0 MAC 皆空），判红",
-                              "items": []}, ensure_ascii=False))
+        try:
+            data = yaml.safe_load(_CASES_PATH.read_text(encoding="utf-8")) or {}
+            cases_tbl = data.get("cases") or {}
+        except (OSError, yaml.YAMLError) as e:
+            print(f"error: verify-cases.yaml 读取失败: {e}", file=sys.stderr)
             return 1
-        fprint = adb_exec("getprop ro.build.fingerprint")[0].strip()
-        result = {
-            "run_id": run_id,
-            "input_summary": acceptance,
-            "device_serial": serial,
-            "device_serial_source": serial_src,
-            # 方向 4：身份标识只认基镜像固化值，增量推送不改变，不能识别增量部署
-            "identity_note": "设备身份标识只认基镜像（序列号/MAC 为烧录固化值），"
-                             "增量推送不改变该标识，不能用于识别增量部署",
-            "device_fingerprint": fprint,
-            "start_monotonic": round(t_start, 3),
-            "end_monotonic": round(t_end, 3),
-            "items": items,
-            "overall": overall,
-            # 方向 3：teardown 只恢复本轮实际改变的状态，失败即标 dirty
-            #（ws_report 透传收据 header device_dirty）
-            "device_dirty": device_dirty,
-            "teardown_detail": teardown_detail,
-            "forensics_dir": forensics_dir,
-        }
-        p = Path(args.result_file)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        # 统一原子写原语（批次四收敛：tmp 带 pid 防并发互写）
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
-        from verify_common import atomic_write_json
-        atomic_write_json(p, result)
-    print(json.dumps({"overall": overall, "items": items,
-                      "device_dirty": device_dirty,
-                      "teardown_detail": teardown_detail},
-                     ensure_ascii=False, indent=2))
-    # 本次实跑 case 标签落盘（--case 优先；--batch-file 模式从批次验收行
-    # case: 前缀提取，供 ws_report 自动探测补全，防 board pass 收据 cases
-    # 空致 prepare 死锁）
-    _write_cases(batch_id, args.case or _batch_case_labels(args.batch_file))
-    # 标准四段缺失补零（跳过段记 0，收据段完整可归因）+ 验收总段打点
-    # （失败不阻断，结果 pass/fail 均记）
-    _backfill_zero_marks(batch_id)
-    _mark_stage("verify_acceptance", batch_id)
+        for label in case_labels:
+            val = cases_tbl.get(label)
+            try:
+                acc_c = _case_text(val)
+            except ValueError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 2
+            case_vals.append((label, val, acc_c))
+    # ── 执行主体（方向 3：逐 case 崩溃不中断整链；最外层 finally 必落盘）──
+    # 单 case 执行体抛非预期异常（子命令异常/设备操作抛错等）曾中断整链致后续
+    # case 不跑、result-file 不写（上板结果缺失又无失败现场 = 假证据/污染）。
+    # 处理：case 循环体包 try/except，崩溃 case 记 fail + device_dirty=True
+    # （设备态不可信，teardown 未跑）继续跑后续；执行主体任何未预期崩溃经
+    # except 兜底记 fail/dirty；finally 统一落盘收尾，杜绝无 result-file 返回。
+    overall, items = "fail", []
+    device_dirty, teardown_detail, forensics_dir = True, "", None
+    # 实跑 case 标签累积（方向 3）：逐 case 进入执行时记录，区别于请求标签
+    # ——中断/异常提前退出时只落已实跑 case，防 cases json 记录未跑标签污染
+    # report evidence-scope 推导；teardown_parts 同理跨分支累积，中断分支
+    # 保留已跑部分（方向 4）
+    ran_labels, teardown_parts = [], []
+    try:
+        if lifecycle:
+            ran_labels.append(case_labels[0])
+            overall, items, life_meta = run_case_lifecycle(
+                acceptance, lifecycle, adb_exec, adb_logcat, ep=ep,
+                ensure_boot=args.ensure_boot, on_item=mark_case, host_env=host_env,
+                since_epoch=int(time.time()))
+            device_dirty = life_meta["device_dirty"]
+            teardown_detail = life_meta["teardown_detail"]
+            forensics_dir = life_meta["forensics_dir"]
+        elif len(case_labels) > 1:
+            overall, items = "pass", []
+            device_dirty = False
+            forensics_dir = None
+            for label, val, acc_c in case_vals:
+                ran_labels.append(label)
+                done = len(items)
+                try:
+                    if isinstance(val, dict):
+                        ov, it, meta = run_case_lifecycle(
+                            acc_c, val, adb_exec, adb_logcat, ep=ep,
+                            ensure_boot=args.ensure_boot,
+                            on_item=lambda n, off=done: mark_case(off + n),
+                            host_env=host_env, since_epoch=int(time.time()))
+                        if meta["device_dirty"] is True:
+                            device_dirty = True
+                        if forensics_dir is None and meta["forensics_dir"]:
+                            forensics_dir = meta["forensics_dir"]
+                        tdetail = meta["teardown_detail"]
+                    else:
+                        # str 旧形态未登记 setup_snapshot：无 teardown 责任面，
+                        # device_dirty 落 False（与 _restore_state 无快照即无
+                        # teardown 责任面同口径），不参与汇总标 dirty
+                        ov, it = run_acceptance(
+                            acc_c, adb_exec, adb_logcat,
+                            ensure_boot=args.ensure_boot,
+                            on_item=lambda n, off=done: mark_case(off + n),
+                            host_env=host_env, endpoint=ep)
+                        tdetail = "无生命周期资产（str 旧形态，无 setup_snapshot，无 teardown 责任面）"
+                except Exception as e:
+                    # 逐 case 崩溃（方向 3）：非预期异常不得中断整批 case 循环
+                    # ——该 case 记 fail 并置 device_dirty=True（设备态不可信，
+                    # teardown 未跑），继续跑后续 case；崩溃现场随 item 与
+                    # teardown_detail 落收据（与既有 teardown 失败标 dirty 同
+                    # 一口径：设备态不可信即 dirty）
+                    ov = "fail"
+                    it = [{"tag": "__crash__", "status": "fail",
+                           "detail": f"case {label!r} 执行崩溃: {e!r}"}]
+                    device_dirty = True
+                    tdetail = (f"case 执行崩溃（{e!r}），teardown 未跑，"
+                               "按 device_dirty 处理")
+                teardown_parts.append(f"[{label}] {tdetail}")
+                overall = _merge_overall(overall, ov)
+                items.extend(it)
+            teardown_detail = "；".join(teardown_parts)
+        else:
+            if case_labels:
+                ran_labels.append(case_labels[0])
+            overall, items = run_acceptance(acceptance, adb_exec, adb_logcat,
+                                            ensure_boot=args.ensure_boot,
+                                            on_item=mark_case, host_env=host_env,
+                                            endpoint=ep)
+            if case_labels:
+                # 单 str case 未登记 setup_snapshot：无 teardown 责任面（与
+                # _restore_state 无快照同口径），device_dirty 落 False
+                device_dirty = False
+                teardown_detail = "无生命周期资产（str 旧形态，无 setup_snapshot，无 teardown 责任面）"
+            else:
+                device_dirty = False
+                teardown_detail = ""
+            forensics_dir = None
+    except Exception as e:
+        # 执行主体兜底（方向 3）：case 循环外的未预期崩溃（如单 case 生命周期
+        # 编排抛异常）也不得无 result-file 返回——记 fail/dirty 后落 finally
+        # 统一收尾；异常类型与消息打印 stderr 留失败现场
+        print(f"error: 验收执行主体异常（已按 fail/dirty 收尾，result-file "
+              f"仍落盘）: {e!r}", file=sys.stderr)
+        overall = "fail"
+        items = [{"tag": "__crash__", "status": "fail",
+                  "detail": f"验收执行主体未预期崩溃: {e!r}"}]
+        device_dirty = True
+        teardown_detail = f"验收执行主体异常，设备态不可信: {e!r}"
+        forensics_dir = None
+    except BaseException as e:
+        # 中断路径（方向 1，2026-09-08）：KeyboardInterrupt/SystemExit 等
+        # 非 Exception 中断不得被 finally 内 return 吞成 pass/正常退出假证据
+        # ——先记 fail 与 device_dirty 真（中断点 teardown 未保证、后续 case
+        # 未跑，产物不得 overall pass），再 re-raise 让中断继续向上传播；
+        # finally 只落盘不 return，失败现场随 fail 产物落盘。
+        # 方向 4：已跑 teardown_parts 保留不整体覆盖——中断前已完成的逐 case
+        # teardown 明细仍随收据可见，中断说明拼在其后（未跑部分归中断项）
+        print(f"error: 验收执行被中断（{e!r}），已记 fail/dirty 收尾，"
+              f"中断继续向上传播", file=sys.stderr)
+        overall = "fail"
+        items = items + [{"tag": "__interrupt__", "status": "fail",
+                          "detail": f"验收执行被中断（未跑完）: {e!r}"}]
+        device_dirty = True
+        ran_detail = "；".join(teardown_parts)
+        teardown_detail = ((ran_detail + "；") if ran_detail else "") + \
+            f"验收被中断（{e!r}），teardown 未保证，按 dirty 处理"
+        raise
+    finally:
+        # 收尾只落盘 + 打点，绝不 return（方向 1）：finally 内 return 会
+        # (a) 吞掉传播中的中断/异常成假证据；(b) 使失败现场产物缺失。返回码
+        # 统一改到 try 末尾（下方按 overall 出口）。_device_serial/getprop
+        # 各包 try/except（方向 2）：设备身份获取失败记 unknown 不阻断落盘，
+        # 判红经 overall=fail 表达而不再裸退（产物仍落盘留失败现场）。
+        identity_notes = []
+        if args.result_file:
+            # 方向 1/3：自描述验收产物——run_id/输入摘要/设备序列号/设备指纹/
+            # 起止单调时间/逐项结果/总判定；原子写防半截文件被当证据
+            try:
+                serial, serial_src = _device_serial(adb_exec)
+            except Exception as e:
+                serial, serial_src = None, ""
+                identity_notes.append(f"设备序列号获取异常: {e!r}")
+            if not serial:
+                # 方向 3：设备身份标识三者皆空即判红（产物身份不可信），但
+                # 不再裸 return——身份不可信记入 fail 产物留失败现场
+                serial, serial_src = "unknown", ""
+                identity_notes.append("设备身份标识获取失败（ro.serialno/"
+                                      "ro.boot.serialno/eth0 MAC 皆空），判红")
+            try:
+                fprint = adb_exec("getprop ro.build.fingerprint")[0].strip()
+            except Exception as e:
+                fprint = ""
+                identity_notes.append(f"设备指纹获取异常: {e!r}")
+            if not fprint:
+                # 设备指纹获取失败（空串）→ 判红（与 serial 全空判红同口径）：
+                # 指纹是产物设备身份证据，空值产物不可信；记入 fail 产物留现场
+                fprint = "unknown"
+                identity_notes.append("设备指纹获取失败"
+                                      "（ro.build.fingerprint 为空），判红")
+            if identity_notes:
+                overall = "fail"
+                items = items + [{"tag": "__identity__", "status": "fail",
+                                  "detail": "；".join(identity_notes)}]
+            result = {
+                "run_id": run_id,
+                "input_summary": acceptance,
+                "device_serial": serial,
+                "device_serial_source": serial_src,
+                # 方向 4：身份标识只认基镜像固化值，增量推送不改变，不能识别增量部署
+                "identity_note": "设备身份标识只认基镜像（序列号/MAC 为烧录固化值），"
+                                 "增量推送不改变该标识，不能用于识别增量部署",
+                "device_fingerprint": fprint,
+                "start_monotonic": round(t_start, 3),
+                "end_monotonic": round(time.monotonic(), 3),
+                "items": items,
+                "overall": overall,
+                # 方向 3：teardown 只恢复本轮实际改变的状态，失败即标 dirty
+                #（ws_report 透传收据 header device_dirty）
+                "device_dirty": device_dirty,
+                "teardown_detail": teardown_detail,
+                "forensics_dir": forensics_dir,
+            }
+            p = Path(args.result_file)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            # 统一原子写原语（批次四收敛：tmp 带 pid 防并发互写）
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
+            from verify_common import atomic_write_json
+            atomic_write_json(p, result)
+        print(json.dumps({"overall": overall, "items": items,
+                          "device_dirty": device_dirty,
+                          "teardown_detail": teardown_detail},
+                         ensure_ascii=False, indent=2))
+        # 本次实跑 case 标签落盘（逐 case 进入执行时累积 ran_labels，非请求
+        # 标签全集：中断/异常提前退出只落已实跑 case，供 ws_report 自动探测
+        # 补全，防 board pass 收据 cases 空/含未跑标签污染 evidence-scope）
+        _write_cases(batch_id, ",".join(ran_labels))
+        # 标准四段缺失补零（跳过段记 0，收据段完整可归因）+ 验收总段打点
+        # （失败不阻断，结果 pass/fail 均记）
+        _backfill_zero_marks(batch_id)
+        _mark_stage("verify_acceptance", batch_id)
+    # 返回码统一出口（方向 1）：原在 finally 内 return——中断传播中 finally
+    # 若 return 会把 KeyboardInterrupt 吞成正常退出（假证据链），故返回码移到
+    # try/except/finally 之后按 overall 判定；KeyboardInterrupt 路径已 re-raise，
+    # 走不到此处，中断原样逃逸。
     if overall == "fail":
         return 1
     if overall == "ai":

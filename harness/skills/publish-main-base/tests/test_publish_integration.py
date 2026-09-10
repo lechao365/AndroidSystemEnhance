@@ -64,6 +64,10 @@ class TestSyncModifyIntegration(unittest.TestCase):
         # fixture 须拷入临时根 harness/config/ 才能走通 prepare/promote
         shutil.copy(str(HARNESS / "config" / "verify-cases.yaml"),
                     str(cfg / "verify-cases.yaml"))
+        # P1-B 审批独立（KI-20260907-001）fail-closed 配套：预设 token 文件与
+        # env 值一致（_read_approval_token 缺 token 判红，不再空 expected fail-open）
+        (cfg / "promote-approval.env").write_text(
+            "LC_PROMOTE_APPROVAL_TOKEN=tok-test\n", encoding="utf-8")
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -87,6 +91,9 @@ class TestSyncModifyIntegration(unittest.TestCase):
     def _run_script(self, *args):
         env = dict(os.environ)
         env["CDP_PROJECT_ROOT"] = str(self.work)
+        # P1-B 审批独立（KI-20260907-001）：token 非占位符且临时根
+        # promote-approval.env 预设一致（fail-closed：缺预设即判红）
+        env["LC_PROMOTE_APPROVAL_TOKEN"] = "tok-test"
         # 防 python 导入生成 __pycache__ 污染工作树（git status 非空会使预检拒绝）
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         # PATH 前置 python3 shim（Windows 无 python3 命令，脚本内调用经 shim

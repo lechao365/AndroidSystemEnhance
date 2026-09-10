@@ -304,6 +304,26 @@ class TestDoneLogic(unittest.TestCase):
         self.assertIsNone(self._s["exit_attribution"])
         self.assertEqual(self._s["total_attempts"], 0)
 
+    def test_done_non_pass_fail_result_rejected(self):
+        # loop-01 红灯：skip/revert 等收据无验证结论，机械归因 task_fail 会
+        # 同指纹冻结空烧 patience 提前 task_unsolvable——拒绝记账且不更新
+        # 计数/指纹（不耗轮次），要求换有效 pass/fail 验证收据
+        for bad in ("skip", "revert"):
+            rp = self._receipt(bad)
+            with self.assertRaises(RuntimeError) as cm:
+                ws_session.apply_done(self._s, rp, stage="acceptance")
+            self.assertIn("非 pass/fail", str(cm.exception))
+        self.assertIsNone(self._s["exit_attribution"])
+        self.assertEqual(self._s["total_attempts"], 0)
+        self.assertEqual(self._s["runs"], [])
+        self.assertEqual(self._s["patience"], 0)
+        # 换有效 fail 收据后正常记账（首轮观测，patience 仍 0）
+        rp_ok = self._receipt("fail")
+        s, _ = ws_session.apply_done(self._s, rp_ok, stage="acceptance")
+        self.assertEqual(s["total_attempts"], 1)
+        self.assertEqual(s["patience"], 0)
+        self.assertEqual(s["runs"][0]["result"], "fail")
+
     def test_done_pass_acceptance_overall_fail_rejected(self):
         # 收据 result=pass 但 acceptance overall=fail → 拒记账（防手填假绿
         # 推进会话/终态 pass）
@@ -458,6 +478,22 @@ class TestPruneSessions(unittest.TestCase):
         removed = ws_session.prune_sessions()
         self.assertEqual(removed, [])
         self.assertTrue(bad.exists())
+
+    def test_prune_stat_oserror_skipped(self):
+        # loop-03 红灯：目录 stat 失败（并发删除场景）保守跳过，不抛裸异常逃逸
+        from unittest import mock
+        ws_session._SESSION_KEEP = 1
+        self._mk(0, finished=False)
+        real_stat = Path.stat
+
+        def _raising_stat(self, *args, **kwargs):
+            if self.name.startswith("session-"):
+                raise OSError("concurrent removal")
+            return real_stat(self, *args, **kwargs)
+
+        with mock.patch.object(Path, "stat", _raising_stat):
+            removed = ws_session.prune_sessions()
+        self.assertEqual(removed, [])
 
 
 class TestDiagnosis(unittest.TestCase):
@@ -667,7 +703,7 @@ class TestCli(unittest.TestCase):
         import contextlib
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = ws_session.main(["start", "--goal", "坏标签", "--target",
+            ws_session.main(["start", "--goal", "坏标签", "--target",
                                   "dev", "--case", "no-such"])
         sj = re.search(r"session: (.+)", buf.getvalue()).group(1)
         err = io.StringIO()
@@ -702,7 +738,7 @@ class TestCli(unittest.TestCase):
         # 诊断落位会话目录（确定性），非 --session 裸文件名所在 CWD
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = ws_session.main(["start", "--goal", "诊断落位", "--target",
+            ws_session.main(["start", "--goal", "诊断落位", "--target",
                                   "dev", "--case", "lcview-liveness"])
         sj = re.search(r"session: (.+)", buf.getvalue()).group(1)
         s = ws_session.load_session(sj)
@@ -723,7 +759,7 @@ class TestCli(unittest.TestCase):
         from cdp_receipt import Receipt, write_receipt
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = ws_session.main(["start", "--goal", "闭环", "--target", "dev",
+            ws_session.main(["start", "--goal", "闭环", "--target", "dev",
                                   "--case", "lcview-liveness"])
         sj = re.search(r"session: (.+)", buf.getvalue()).group(1)
         with redirect_stdout(io.StringIO()):

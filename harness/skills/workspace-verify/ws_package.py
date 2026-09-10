@@ -36,7 +36,6 @@ import paths  # noqa: E402
 _SCRIPT = _SCRIPT_DIR.parents[1] / "scripts" / "mk_rpi5_full_image.sh"
 # 证据目录：harness/log/workspace-verify/（gitignore 域，与 chain runs/ 同域）
 _EVIDENCE_DIR = _SCRIPT_DIR.parents[1] / "log" / "workspace-verify"
-_CROSS_DEVICE_LOG = _SCRIPT_DIR.parents[1] / "log" / "cross-device"
 
 # 三镜像（mode 0 仅打包已有镜像，缺一即前置失败不产假证据）
 _IMAGES = ("boot.img", "system.img", "vendor.img")
@@ -68,29 +67,16 @@ def _sha256(path):
 
 
 def _resolve_batch_id():
-    """batch_id 识别统一口径（B6）：CDP_BATCH_ID env > current-batch.json
-    指针 > 打点目录 mtime 最新（兜底），与 cdp_timing 三级回落同源。
+    """batch_id 识别统一口径（方向 4）：委托 verify_common 四级回落
+    （显式参 > CDP_BATCH_ID > current-batch.json > 唯一 timings 文件）。
 
-    旧实现 glob 字典序取 [0] 依赖"工作态只留当前批"的归档纪律——start
-    中断未归档时会认错批；mtime 最新对多文件残留无歧义。
+    旧实现第三级取打点目录 mtime 最新——start 中断未归档时多文件残留会
+    绑错批次，而打包证据文件名以 batch_id 命名是证据依据；verify_common
+    多文件返 None 防误标，与 ws_acceptance/打包证据命名同源。
     """
-    bid = os.environ.get("CDP_BATCH_ID", "").strip()
-    if bid:
-        return bid
-    try:
-        sys.path.insert(0, str(_SCRIPT_DIR.parents[1] / "cross-device"
-                               / "lib" / "python"))
-        import cdp_timing
-        bid = cdp_timing._read_current_batch()
-        if bid:
-            return bid
-    except Exception:
-        pass
-    files = sorted(_CROSS_DEVICE_LOG.glob("timings-*.json"),
-                   key=lambda p: p.stat().st_mtime)
-    if files:
-        return files[-1].stem[len("timings-"):]
-    return None
+    sys.path.insert(0, str(_SCRIPT_DIR.parents[1] / "lib"))
+    from verify_common import resolve_batch_id_fallback
+    return resolve_batch_id_fallback()
 
 
 def run_package(mode=0, evidence_file=None, timeout=900, aosp_ws=None,

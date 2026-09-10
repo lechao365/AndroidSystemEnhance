@@ -20,6 +20,7 @@
 #else
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #endif
 
 /* 环形缓冲区记录长度前缀字节数（与 LCVIEW_LEN_PREFIX_SIZE 同步，恒 4） */
@@ -81,5 +82,85 @@ int ring_evict_one_core(uint8_t *buf, uint32_t size, uint32_t *read_pos,
  */
 int ring_read_fit_check(uint32_t copied_total, uint32_t record_len,
                         uint32_t user_len);
+
+/*
+ * ring_read_fit_errno — 首条放不下时 read 应返回的错误码映射
+ *
+ * KRN-001 收口：copied_total == 0 且首条记录放不下用户缓冲区时，
+ * lcview_ring_read 返回 -EMSGSIZE（修复前为 -EINVAL）提示缓冲不足，
+ * 禁止返回 0（POSIX 0=EOF 而 poll 恒报 POLLIN，消费者会忙轮询或
+ * 误判设备关闭，记录永久滞留卡死 reader）。
+ *
+ * @fit ring_read_fit_check 的返回：0 可继续 / -1 首条放不下（调用方
+ *      只在 fit < 0 时调用本函数；fit == 1 走 break 返回部分不经过此）
+ * @return 0（fit == 0）/ -EMSGSIZE（fit < 0）
+ */
+int ring_read_fit_errno(int fit);
+
+/*
+ * ring_overrun_restore_amt — GET_OVERRUN 读清失败后的回加量
+ *
+ * KRN-018：atomic_xchg 原子"读清" overrun 计数后，copy_to_user 失败时
+ * 若直接返回，计数已被清零而用户未收到 → overrun 低估（写路径继续
+ * atomic_inc，丢失的增量不可恢复）。修复：失败时把读到的值加回。
+ *
+ * @read_val atomic_xchg 读到的原值
+ * @copy_ok  copy_to_user 是否成功
+ * @return 回加量（copy 失败为 read_val，成功为 0）
+ */
+uint32_t ring_overrun_restore_amt(uint32_t read_val, bool copy_ok);
+
+/*
+ * builder_write_fits — builder 字段写入容量检查（含 4B 长度前缀）
+ *
+ * record 在环中存 4B 长度前缀 + 内容，读侧以
+ * record_len > LCVIEW_BUILDER_MAX_SIZE 判损坏并跳过。builder 的写入
+ * 检查若只按 data_offset + 字段长对比上限，内容写满 4096 时记录总长
+ * = 4 + 4096 = 4100 超限被读侧误判损坏（丢记录）。故检查必须把长度
+ * 前缀 4B（= LCVIEW_RING_LEN_PREFIX，与 LCVIEW_LEN_PREFIX_SIZE 同步）
+ * 一并计入上限。
+ *
+ * @data_offset builder 当前数据偏移（含 16B 记录头）
+ * @add_len     待写入字段字节数（type + value）
+ * @max_size    LCVIEW_BUILDER_MAX_SIZE（单条事件硬上限）
+ * @return 0 装得下 / -ENOSPC 超限
+ */
+int builder_write_fits(uint32_t data_offset, uint32_t add_len,
+                       uint32_t max_size);
+
+/*
+ * builder_str_field_fits — 变长字段（STRING/BINARY）写入容量检查
+ *
+ * 变长字段布局：type(1B) + len(2B) + data(data_len B)，字段总长
+ * 3 + data_len；连同 4B 记录长度前缀一并计入上限（语义与
+ * builder_write_fits 相同，只是把调用点的 total = 3 + data_len 组合
+ * 内聚为纯函数，供 host 测试直接判红调用点——此前 add_str/add_binary
+ * 只按 data_offset + total 对比上限漏扣前缀，记录总长 4100 被读侧
+ * 误判损坏丢弃，且 tests Makefile 只链 logic.c 调用点零覆盖）。
+ *
+ * @data_offset builder 当前数据偏移（含 16B 记录头）
+ * @data_len    变长字段数据字节数（不含 type/len 前缀）
+ * @max_size    LCVIEW_BUILDER_MAX_SIZE（单条事件硬上限）
+ * @return 0 装得下 / -ENOSPC 超限
+ */
+int builder_str_field_fits(uint32_t data_offset, uint32_t data_len,
+                           uint32_t max_size);
+
+/*
+ * ring_corrupt_skip_len — 损坏记录读取跳过的前移量计算
+ *
+ * 判损坏时（record_len < 前缀 或 > MAX 或 > 环大小）跳过该记录。
+ * 记录在环中实际占用 record_len 字节（写侧长度前缀即记录总长），
+ * 前移须按 record_len，否则 read_pos 落进记录体中间把后续流撕裂；
+ * 仅当 record_len 完全不可信（<前缀 或 >环大小，垃圾前缀）才用
+ * 保守默认跳过量（前缀 + 记录头），防止跳过头。
+ *
+ * @record_len  读到的长度前缀
+ * @ring_size   环形缓冲区大小
+ * @default_skip 不可信前缀时的保守跳过量（前缀 + 记录头）
+ * @return 应前移的字节数
+ */
+uint32_t ring_corrupt_skip_len(uint32_t record_len, uint32_t ring_size,
+                               uint32_t default_skip);
 
 #endif /* LCVIEW_RING_LOGIC_H */

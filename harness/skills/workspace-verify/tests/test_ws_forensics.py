@@ -44,6 +44,20 @@ _READONLY_PREFIXES = (
 )
 
 
+class TestAdbBinOverride(unittest.TestCase):
+    """wsv-05：adb_run 二进制经 ac.adb_bin()——LC_VERIFY_ADB_BIN 覆盖生效
+    （此前硬编码 "adb" 绕过覆盖）。"""
+
+    def test_adb_run_uses_lc_verify_adb_bin(self):
+        with mock.patch.dict("os.environ", {"LC_VERIFY_ADB_BIN": "/fake/adb"}), \
+                mock.patch.object(wf.subprocess, "run") as m:
+            m.return_value = mock.Mock(stdout="ok", stderr="", returncode=0)
+            out, rc = wf.adb_run("ep", ["shell", "echo ok"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(m.call_args.args[0][0], "/fake/adb")
+        self.assertEqual(m.call_args.args[0][1:3], ["-s", "ep"])
+
+
 class TestForensics(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

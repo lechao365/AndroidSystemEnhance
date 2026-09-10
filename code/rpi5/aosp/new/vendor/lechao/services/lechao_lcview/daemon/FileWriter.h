@@ -70,8 +70,8 @@ public:
     // conserve 判红后可据此定位丢在哪一条路径）
     struct DropCounters {
         uint64_t openFailed = 0;     // writeRecord 文件打开失败
-        uint64_t formatEmpty = 0;    // formatJsonLine 返回空（字段不匹配等）
-        uint64_t formatOob = 0;      // formatJsonLine 字段越界（数据不足）
+        uint64_t formatEmpty = 0;    // formatJsonLine 返回空（writeRecord 丢弃计数点）
+        uint64_t formatOob = 0;      // 保留供心跳格式兼容（计数点已收敛到 formatEmpty）
         uint64_t reopenFailed = 0;   // 写失败恢复重开失败
         uint64_t retryFailed = 0;    // 恢复后重试二次写失败
         uint64_t invalidNotOpen = 0; // invalid 事件流未打开
@@ -155,8 +155,8 @@ private:
     // 写成功累计，轮转归零——供轮转阈值判定与失败恢复 rollback 基准）
     size_t mInvalidSize = 0;
     // DROP 分类累计计数（六条 DROP 路径，进 daemon 心跳）。
-    // formatEmpty 保留供心跳格式兼容，当前无自增路径（LCV-18：
-    // 空行唯一来源 OOB 已计 formatOob，不再重复计数）
+    // 方向 4：DROP 计数点收敛到 writeRecord 的 formatEmpty；formatOob
+    // 保留供心跳格式兼容，当前无自增路径（同一次丢弃只计 1 次不虚高）
     DropCounters mDrops;
     // 写路径耗时统计（方向 3，见 WriteTimings）
     WriteTimings mTimings;

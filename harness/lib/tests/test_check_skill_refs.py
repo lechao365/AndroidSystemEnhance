@@ -1,9 +1,12 @@
+import contextlib
+import io
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import check_skill_refs as ckr
@@ -151,6 +154,40 @@ class TestCheckSkillRefs(unittest.TestCase):
             sys.argv = old_argv
         self.assertEqual(rc, 1)
 
+    def test_path_missing_targets_red(self):
+        # lib-05 红灯：--path 指向不存在/拼错路径 → targets 空 → 判红 exit 1
+        # （此前判红条件 `if not args.path and not targets` 漏掉显式 path
+        # 解析为空的场景，静默假绿 exit 0）
+        old_argv = sys.argv
+        sys.argv = ["check_skill_refs", "--path", "no/such/dir"]
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                rc = ckr.main()
+        finally:
+            sys.argv = old_argv
+        self.assertEqual(rc, 1)
+        self.assertIn("扫描目标为空", err.getvalue())
+
+    def test_scan_command_files_read_error_skipped(self):
+        # lib-08：command 文件读失败（OSError/UnicodeDecodeError）结构化
+        # 跳过（对齐 scan_file 口径），不崩、不误报悬空、stderr 留痕
+        self._mk(".opencode/command/a.md", "@harness/skills/gone/SKILL.md\n")
+        orig_read = Path.read_text
+
+        def _boom(path_self, *a, **kw):
+            if "command" in str(path_self):
+                raise OSError("boom")
+            return orig_read(path_self, *a, **kw)
+
+        with mock.patch.object(Path, "read_text", autospec=True) as m:
+            m.side_effect = _boom
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                out = ckr.scan_command_files()
+        self.assertEqual(out, [])
+        self.assertIn("读取失败", err.getvalue())
+
     def test_report_writes_dangling_manifest(self):
         # 方向 3：--report 把悬空引用清单落盘（可跟踪、随批提交供清零追踪）；
         # 方向 5：存在悬空即判红（返回码 1），清单仍落盘
@@ -266,6 +303,95 @@ class TestCheckSkillRefs(unittest.TestCase):
         self._mk("docs/superpowers/plans/only-in-excluded.conf", "x\n")
         self.assertEqual(self._scan("harness/skills/demo/SKILL.md"),
                          ["only-in-excluded.conf"])
+
+    # ── 方向 5：全树 rglob 改 git ls-files（apply 机 WSL2 drvfs ~39s → ~1s）
+    def test_git_ls_files_falls_back_rglob_non_git(self):
+        # 非 git 仓（subprocess git ls-files 失败）→ _git_ls_files 返 None，
+        # 调用方回落 rglob（历史行为兜底）
+        ckr._GIT_LS_CACHE.clear()
+        with mock.patch.object(ckr.subprocess, "run",
+                               return_value=mock.Mock(returncode=128,
+                                                      stdout="")):
+            self.assertIsNone(ckr._git_ls_files())
+
+    def test_basename_index_uses_git_ls_files(self):
+        # git 仓下 basename 索引走 git ls-files（仅跟踪文件，快）；豁免目录
+        # 过滤照旧——EXEMPT_RELS 内同名文件计 0，裸文件名零命中判悬空
+        ckr._INDEX_CACHE.clear()
+        files = ["harness/skills/demo/SKILL.md",
+                 "harness/log/only-in-excluded.conf",
+                 "docs/superpowers/plans/only-in-excluded.conf",
+                 "harness/skills/other/SKILL.md"]
+        with mock.patch.object(ckr, "_git_ls_files",
+                               return_value=[Path(f) for f in files]):
+            self.assertEqual(ckr._basename_count("only-in-excluded.conf"), 0)
+            self.assertEqual(ckr._basename_count("SKILL.md"), 2)
+
+    def test_iter_scan_targets_uses_git_ls_files(self):
+        # 扫描目标走 git ls-files（相对 ROOT 过滤 harness/skills + docs）；
+        # tests 目录排除、harness/lib 不在扫描根、harness/log 豁免
+        ckr._GIT_LS_CACHE.clear()
+        files = ["harness/skills/demo/SKILL.md",
+                 "harness/skills/demo/tests/test_demo.py",
+                 "docs/design.md",
+                 "harness/lib/x.py",
+                 "harness/log/x.md"]
+        with mock.patch.object(ckr, "_git_ls_files",
+                               return_value=[Path(f) for f in files]):
+            targets = ckr.iter_scan_targets(None)
+        rels = [t.relative_to(ckr.ROOT).as_posix() for t in targets]
+        self.assertIn("harness/skills/demo/SKILL.md", rels)
+        self.assertIn("docs/design.md", rels)
+        self.assertNotIn("harness/skills/demo/tests/test_demo.py", rels)
+        self.assertNotIn("harness/lib/x.py", rels)
+        self.assertNotIn("harness/log/x.md", rels)
+
+    # ── 方向 4：文件面并入未跟踪（--cached --others --exclude-standard）
+    def _git(self, *args):
+        subprocess.run(["git", *args], cwd=self.tmp, check=True,
+                       capture_output=True, text=True, encoding="utf-8")
+
+    def test_untracked_skill_dangling_red(self):
+        # 方向 4 红灯：git 仓下未跟踪（未 git add）的 SKILL.md 含悬空引用。
+        # 旧逻辑扫描面只列跟踪文件（git ls-files），该文件整文件漏判假绿；
+        # 并入未跟踪（--others --exclude-standard）后须进扫描面并判红。
+        ckr._GIT_LS_CACHE.clear()
+        ckr._INDEX_CACHE.clear()
+        self._git("init", "-q")
+        self._git("config", "user.email", "t@t")
+        self._git("config", "user.name", "t")
+        self._mk("harness/skills/base/SKILL.md", "ok\n")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        # 模拟上板前新增但未纳入：文件在盘上、不在 index
+        self._mk("harness/skills/untracked/SKILL.md",
+                 "[miss](../base/gone.md)\n")
+        targets = ckr.iter_scan_targets(None)
+        rels = [t.relative_to(self.tmp).as_posix() for t in targets]
+        self.assertIn("harness/skills/untracked/SKILL.md", rels)
+        self.assertEqual(
+            ckr.scan_file(
+                self.tmp / "harness" / "skills" / "untracked" / "SKILL.md"),
+            ["../base/gone.md"])
+
+    def test_bare_filename_ref_untracked_target_valid(self):
+        # 方向 4：裸文件名目标为未跟踪文件（未 git add）→ basename 索引并入
+        # 未跟踪后唯一命中视为有效（此前索引只含跟踪文件，唯一性漏计未跟踪
+        # 目标，引用现存文件会被误判悬空红）
+        ckr._GIT_LS_CACHE.clear()
+        ckr._INDEX_CACHE.clear()
+        self._git("init", "-q")
+        self._git("config", "user.email", "t@t")
+        self._git("config", "user.name", "t")
+        self._mk("harness/skills/demo/SKILL.md", "见 `helper.conf`\n")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        self._mk("harness/skills/demo/helper.conf", "x\n")  # 未跟踪
+        self.assertEqual(ckr._basename_count("helper.conf"), 1)
+        self.assertEqual(
+            ckr.scan_file(
+                self.tmp / "harness" / "skills" / "demo" / "SKILL.md"),
+            [])
 
 
 if __name__ == "__main__":

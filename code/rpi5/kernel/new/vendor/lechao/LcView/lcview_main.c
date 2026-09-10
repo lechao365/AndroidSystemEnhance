@@ -30,6 +30,7 @@
 #include <linux/uaccess.h>
 #include "lcview_internal.h"
 #include "lcview_ioctl.h"
+#include "lcview_ring_logic.h"
 #include "kernel_lechao_log.h"
 
 /*
@@ -223,11 +224,16 @@ static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
      * 原实现在 copy_to_user 与 atomic_set(0) 之间，写路径可递增计数——
      * set(0) 会把并发增量一并清掉；copy 失败时不清理会累积。xchg 单步
      * 完成，增量最多延迟到下一次查询，不丢失。
+     * copy_to_user 失败时须按 ring_overrun_restore_amt 把读到的值加回，
+     * 否则计数已被清零而用户未收到 → overrun 低估（写路径继续 inc，
+     * 丢失的增量不可恢复）。
      */
     case LCVIEW_GET_OVERRUN:
         val = (uint32_t)atomic_xchg(&lcview_ring.overrun_cnt, 0);
         if (copy_to_user((void __user *)arg, &val, sizeof(val))) {
             pr_err(PREFIX "GET_OVERRUN copy_to_user failed\n");
+            atomic_add((int)ring_overrun_restore_amt(val, false),
+                       &lcview_ring.overrun_cnt);
             return -EFAULT;
         }
         break;

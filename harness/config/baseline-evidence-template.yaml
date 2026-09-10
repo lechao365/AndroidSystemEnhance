@@ -17,7 +17,10 @@
 # build_result:                      # 增量编译结果 PASS / 附日志路径
 # package_result:                    # 打包镜像结果 PASS / 附产物路径
 # board_verify:                      # 刷机上板功能验证结果 PASS / 附验证摘要
-# approved_by:                       # 批准人
+# approved_by:                       # 批准人（须 ≠ 执行人 git 身份，且
+#                                   #   LC_PROMOTE_APPROVAL_TOKEN 与
+#                                   #   promote-approval.env 预设一致，
+#                                   #   KI-20260907-001 修复后强制）
 # approved_at:                       # 批准完成时间戳（如 2026-06-20T12:34:56+08:00）
 # sync_count: 0                         # 被同步回拉次数（0 = 从未同步回拉）
 # sync_target: BL-YYYYMMDD-NN           # 同步目标 baseline（仅 sync-code-to-workspace 操作填充）

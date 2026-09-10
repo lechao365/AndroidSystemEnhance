@@ -34,6 +34,9 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
 - verify 失败仍 push（失败收据供 emit 分析）；push 失败转人工
 ## Related policy IDs（关联规则 ID）
 - CDP-001、SRC-001/002（修订后）
+- CDP-DOD-001~003（检查器门禁三要件 / 禁依赖未跟踪产物 / 收据逐方向自报，
+  见 [harness/rules/cdp-apply-dod.md](../../../rules/cdp-apply-dod.md)，
+  -s 收据 body 逐方向自报调用方与验证按 CDP-DOD-003）
 ---
 ## 打点契约表
 
@@ -92,6 +95,11 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
       （session 丢失/异常时降级：直接执行 /workspace-verify 模式 A，基线行为）
       末轮收据正文必须含 CDP 原文 + 失败现场（--body；超限终结批并含诊断报告）
       （verify_start/verify_end 由 verify 链自发 mark，无需手动打点）
+      **自检分层（方向 2）**：loop 中间轮（修复验证轮）selfcheck 用 quick 档
+      `python3 harness/lib/selfcheck.py --mode quick`（git diff 推导受影响
+      测试，推导不出回落全量，提速中间轮）；末轮必须 full 全量
+      `python3 harness/lib/selfcheck.py --mode full`（缺省即 full）——快速
+      迭代不停快速反馈，最终证据以全量绿为准。
 - 收据落盘是进步骤 6 的前提：ws_report 返 2（如 -sv 缺 --acceptance/--acceptance-file、
       --log-since 非法等参数错误）即收据未落盘，必须补参重试，禁止无收据进步骤 6
    **收据 cases 自动落盘 + 禁改历史口径（2026-09-02 定）**：

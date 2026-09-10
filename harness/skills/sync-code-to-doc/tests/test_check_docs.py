@@ -10,8 +10,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import sync_code_to_doc as sd  # noqa: E402
 from sync_code_to_doc import (
     check_dead_index,
     check_missing_index,
@@ -252,6 +254,145 @@ class TestCheckAnchors(unittest.TestCase):
             "code/rpi-zero2w/others/usb-fault-inject/raw-gadget.c": "\n" * 20,
         })
         self.assertEqual(check_code_comments(docs, docs / "code"), [])
+
+
+class TestComputeNumstat(unittest.TestCase):
+    """sync-14：多行 numstat 按 \\t 切分精确匹配路径列，后缀同名路径不误命中。"""
+
+    def _numstat(self, stat_path: str, canned: str) -> tuple[str, str]:
+        with mock.patch.object(sd, "_git", return_value=canned):
+            return sd._compute_numstat(stat_path, stat_path, "M",
+                                       Path(tempfile.mkdtemp()), "HEAD")
+
+    def test_same_basename_paths_disambiguated(self):
+        # dir/a.py 行在前：旧 endswith 逻辑会把 a.py 误命中 dir/a.py 行
+        canned = "2\t0\tdir/a.py\n1\t0\ta.py\n"
+        self.assertEqual(self._numstat("a.py", canned), ("1", "0"))
+        self.assertEqual(self._numstat("dir/a.py", canned), ("2", "0"))
+
+
+class TestCodeCommentsIndexDeterminism(unittest.TestCase):
+    """sync-15：basename 索引取 sorted 首见，跨目录同名文件归位确定。"""
+
+    def test_same_basename_picks_sorted_first(self):
+        docs = make_docs({
+            "docs/01-x/a.md": "```c\n// z.c:50\n```\n",
+            "code/a/z.c": "1\n",        # sorted 首见（1 行）→ 50 超界应判红
+            "code/b/z.c": "\n" * 100,   # 若非确定地取此文件（100 行）则漏报
+        })
+        bad = check_code_comments(docs, docs / "code")
+        self.assertEqual(bad, [(docs / "docs/01-x/a.md", "z.c", 50)])
+
+
+class TestUndecodableTargetSkipped(unittest.TestCase):
+    """sync-08：非 UTF-8/不可读源文件不崩整检——跳过并 log_warn 计数。"""
+
+    def test_anchor_bounds_non_utf8_target_no_crash(self):
+        docs = make_docs({
+            "docs/01-x/a.md": "见 [x](../../code/rpi5/x.c#L2)\n",
+        })
+        (docs / "code" / "rpi5").mkdir(parents=True, exist_ok=True)
+        (docs / "code" / "rpi5" / "x.c").write_bytes(b"\xff\xfe bin")
+        with mock.patch.object(sd, "log_warn") as lw:
+            bad = check_anchor_bounds(docs, docs / "code")
+        self.assertEqual(bad, [])
+        self.assertEqual(lw.call_count, 1)
+
+    def test_code_comments_non_utf8_target_no_crash(self):
+        docs = make_docs({
+            "docs/01-x/a.md": "```c\n// x.c:2\n```\n",
+        })
+        (docs / "code").mkdir(parents=True, exist_ok=True)
+        (docs / "code" / "x.c").write_bytes(b"\xff\xfe bin")
+        with mock.patch.object(sd, "log_warn") as lw:
+            bad = check_code_comments(docs, docs / "code")
+        self.assertEqual(bad, [])
+        self.assertEqual(lw.call_count, 1)
+
+
+class TestCodeLinkRangeAnchor(unittest.TestCase):
+    """sync-16：#L10-L20 区间锚点解析 + 上界越界校验。"""
+
+    def test_range_anchor_out_of_bounds_detected(self):
+        docs = make_docs({
+            "docs/01-x/a.md": "见 [f](../../code/rpi5/x.c#L1-L5)\n",
+            "code/rpi5/x.c": "l1\nl2\n",
+        })
+        bad = check_anchor_bounds(docs, docs / "code")
+        self.assertEqual(len(bad), 1)
+        self.assertEqual(bad[0][2], 5)   # 报区间上界行号
+        self.assertEqual(bad[0][3], 2)
+
+    def test_range_anchor_within_bounds_ok(self):
+        docs = make_docs({
+            "docs/01-x/a.md": "见 [f](../../code/rpi5/x.c#L1-L2)\n",
+            "code/rpi5/x.c": "l1\nl2\n",
+        })
+        self.assertEqual(check_anchor_bounds(docs, docs / "code"), [])
+
+    def test_single_anchor_still_checked(self):
+        docs = make_docs({
+            "docs/01-x/a.md": "见 [f](../../code/rpi5/x.c#L3)\n",
+            "code/rpi5/x.c": "l1\nl2\n",
+        })
+        bad = check_anchor_bounds(docs, docs / "code")
+        self.assertEqual(len(bad), 1)
+        self.assertEqual(bad[0][2], 3)
+
+
+class TestCodeLinkMultiPlatform(unittest.TestCase):
+    """sync-16：链接过滤放宽为 code/ 前缀——rpi-zero2w 等平台断链也检查。"""
+
+    def test_rpi_zero2w_broken_link_detected(self):
+        docs = make_docs({
+            "docs/01-x/a.md": "见 [g](../../code/rpi-zero2w/others/g.c)\n",
+        })
+        broken = check_code_links(docs)
+        self.assertEqual(len(broken), 1)
+        self.assertIn("rpi-zero2w", broken[0][1])
+
+    def test_rpi_zero2w_valid_link_ok(self):
+        docs = make_docs({
+            "docs/01-x/a.md": "见 [g](../../code/rpi-zero2w/others/g.c)\n",
+            "code/rpi-zero2w/others/g.c": "x\n",
+        })
+        self.assertEqual(check_code_links(docs), [])
+
+    def test_rpi5_link_still_checked(self):
+        docs = make_docs({
+            "docs/01-x/a.md": "见 [f](../../code/rpi5/gone.c)\n",
+        })
+        self.assertEqual(len(check_code_links(docs)), 1)
+
+
+class TestCollectChangesGitFailure(unittest.TestCase):
+    """sync-07：git 故障 ≠ 真实无变动——git 失败 exit 3，无变动 exit 4。"""
+
+    def _run_main(self, git_return):
+        tmp = make_docs({})
+
+        def _exit(code=0):
+            raise SystemExit(code)
+
+        with mock.patch.object(sys, "argv", ["sync_code_to_doc.py"]), \
+             mock.patch.object(sd, "_git", return_value=git_return), \
+             mock.patch.object(sd, "profile_path", return_value=tmp), \
+             mock.patch.object(sd, "repo_root", return_value=tmp), \
+             mock.patch.object(sd, "harness_init"), \
+             mock.patch.object(sd, "harness_exit", side_effect=_exit):
+            try:
+                sd.main()
+            except SystemExit as e:
+                return e.code
+        return None
+
+    def test_git_failure_exits_3_not_4(self):
+        # _git 返 None（命令失败）→ exit 3，不得误判为"无变动" exit 4
+        self.assertEqual(self._run_main(None), 3)
+
+    def test_genuine_no_changes_exits_4(self):
+        # git 正常（空输出）→ 真实无变动 → exit 4（两路径可区分）
+        self.assertEqual(self._run_main(""), 4)
 
 
 if __name__ == "__main__":

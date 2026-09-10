@@ -13,6 +13,7 @@
 # 第二把 fd 会非阻塞失败，属预期防护而非 bug）。
 # ============================================================
 
+import datetime
 import errno
 import os
 from contextlib import contextmanager
@@ -30,9 +31,46 @@ DEFAULT_LOCK_DIR = _SCRIPT_DIR.parents[1] / "log" / "workspace-verify"
 # 两把锁的语义化名称（编排进出成对加解锁，顺序固定防死锁）
 LOCK_NAMES = ("workspace", "device")
 
+# 让路标志文件名（锁目录下，gitignore 域）：正式任务（apply/verify）取锁
+# 失败（LockHeld）时置位，请求当前持锁的闲时加固（idle-hardening）会话
+# 在原子步骤边界收敛让路；会话收敛到干净工作树释放锁后清除。
+YIELD_FLAG = ".yield-request"
+
 
 class LockHeld(RuntimeError):
     """锁被其他编排进程占用（含锁文件创建失败/权限问题）。"""
+
+
+def request_yield(lock_dir=None):
+    """正式任务取锁失败时置让路标志：请求闲时加固会话让路。
+
+    方向 1（闲时加固）：apply 在 LockHeld 时调本函数，idle-hardening 会话
+    原子步骤边界检查到后收敛退出（完成当前步骤、清理到干净工作树、释放
+    锁），不抢占正在验证的正式任务。标志为提示性（写失败静默）。
+    """
+    d = Path(lock_dir) if lock_dir else DEFAULT_LOCK_DIR
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        (d / YIELD_FLAG).write_text(
+            f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')} "
+            f"pid={os.getpid()}\n", encoding="utf-8")
+    except OSError:
+        pass  # 提示性标志，写失败不影响正式任务取锁失败语义
+
+
+def yield_requested(lock_dir=None) -> bool:
+    """让路标志是否已置（闲时加固会话在原子步骤边界检查）。"""
+    d = Path(lock_dir) if lock_dir else DEFAULT_LOCK_DIR
+    return (d / YIELD_FLAG).exists()
+
+
+def clear_yield(lock_dir=None):
+    """闲时加固会话收敛让路、释放锁后清除让路标志。"""
+    d = Path(lock_dir) if lock_dir else DEFAULT_LOCK_DIR
+    try:
+        (d / YIELD_FLAG).unlink()
+    except OSError:
+        pass
 
 
 class FileLock:

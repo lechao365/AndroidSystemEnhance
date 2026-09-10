@@ -21,6 +21,12 @@ namespace vendor {
 namespace lechao {
 namespace lcview {
 
+// read 返回码"可恢复"白名单判定（EINTR/EAGAIN/EMSGSIZE）
+// 可恢复错误在 EpollDeviceReader 层消化为返回 0（本次无数据，继续循环）；
+// 其余 errno 透传致命错误。注意不含 EINVAL——那是真实参数错误，
+// 吞掉会让 daemon 对坏参数静默，故不得加入白名单。
+bool isRecoverableReadErrno(int e);
+
 // 设备读取抽象接口（LcView::readerLoop 的唯一设备依赖）
 class DeviceReader {
 public:

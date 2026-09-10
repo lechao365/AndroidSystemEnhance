@@ -331,3 +331,56 @@ baselines:
       title: selfcheck 每批可能跑多次致收据 timings 同名 apply_selfcheck 重复出现
   approved_by: lechao
   approved_at: '2026-09-06T21:29:11+08:00'
+- baseline_id: BL-20260907-01
+  status: candidate
+  source_branch: dev
+  source_commit: 5fb1a6213300
+  sync_manifest: data/verify-results/20260907-214451-2b8e11f43d8f.md
+  build_result: PASS
+  package_result: UNKNOWN
+  board_verify: PASS
+  evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+  evidence:
+    build_result: PASS
+    package_result: UNKNOWN
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260907-214451-2b8e11f43d8f.md
+    ki_gate: inferred
+    evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+    known_issues_carried: KI-20260907-001
+    package_evidence: ''
+    package_rc: null
+    cases_coverage:
+      result: full
+      missing: []
+      run_count: 11
+- baseline_id: BL-20260910-01
+  status: promoted
+  source_branch: dev
+  source_commit: 69ba8041883d
+  sync_manifest: data/verify-results/20260910-174511-b1c310ad50bb.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260910-174511-b1c310ad50bb.md
+    ki_gate: inferred
+    evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+    known_issues_carried: KI-20260910-001,KI-20260910-002
+    package_evidence: data/verify-results/20260910-174511-b1c310ad50bb.md
+    package_rc: 0
+    cases_coverage:
+      result: full
+      missing: []
+      run_count: 11
+    known_issues_closed:
+    - issue_id: KI-20260907-001
+      resolved_in: 159c493
+      title: promote 审批人恒等于执行人，审批无独立隔离
+      archived_in: ''
+  approved_by: lechao
+  approved_at: '2026-09-10T19:18:45+08:00'

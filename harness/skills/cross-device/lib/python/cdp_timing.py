@@ -35,6 +35,7 @@ selfcheck、编排空转、收据写盘），不细分无法归因。定位耗�
 前发 report，使兜底段收窄为纯写收据。
 """
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -44,6 +45,43 @@ from pathlib import Path
 
 from cdp_parse import batch_id_from_text
 from cdp_paths import log_apply_dir
+
+
+@contextlib.contextmanager
+def _locked(path: Path):
+    """timings 文件级跨进程互斥（方向 3：并发 mark 丢段）。
+
+    编排器（ws_verify_chain）注入 CDP_BATCH_ID 后，各子脚本独立进程并发
+    自发 mark 同一 timings-<batch_id>.json——read→改→写 无临界区时后写者
+    覆盖先写者（last-writer-wins），段被吞。flock 包住整个区间防丢段；
+    非阻塞重试至多 10s，拿不到锁降级不加锁直写（打点属诊断面，防 mark 链
+    卡死）；无 fcntl 平台（非 POSIX）直接降级。
+    """
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    lock_path = Path(f"{path}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "a")
+    try:
+        deadline = time.monotonic() + 10.0
+        while True:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError):
+                if time.monotonic() >= deadline:
+                    break  # 拿锁超时降级不加锁直写
+                time.sleep(0.05)
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except (OSError, ValueError):
+            pass
+        fh.close()
 
 
 # 链路阶段名常量表：apply/verify 已知链路段。mark 表外名仅 stderr warn
@@ -187,7 +225,13 @@ def _resolve_timing_path(args) -> tuple[Path | None, bool]:
         return Path(args.file), False
     env_id = os.environ.get("CDP_BATCH_ID", "").strip()
     if env_id:
-        return _timing_path(env_id), False
+        # env 来源与 --batch 同防（CDP-07）：BATCH_ID_RE 校验，非法拒用
+        # warn 后回落下一级（current-batch.json），不落非法路径（防注入）
+        if not BATCH_ID_RE.match(env_id):
+            print(f"warn: CDP_BATCH_ID 非法（须 12 位小写 hex），拒用回落: "
+                  f"{env_id!r}", file=sys.stderr)
+        else:
+            return _timing_path(env_id), False
     cur = _read_current_batch()
     if cur:
         return _timing_path(cur), False
@@ -246,6 +290,11 @@ def compute_segments(data) -> list[dict]:
     被 GAP_THRESHOLD 吞掉的余量累计进末尾 unattributed 段（B5）：segments
     求和与总时长不再静默差一截，emit 侧可校验归因完整性（无吞余时不出该段）。
 
+    方向 5：dur_s 超 interval（自测真实耗时大于相邻间隔 = 数据矛盾，如打点
+    间隔内混入未打点活动/时钟异常）时**不静默回退**——该段仍按 interval
+    落耗时（保时间序），额外落 <name>_dur_exceed 异常段（elapsed_s=dur_s-
+    interval，带 reason），emit 侧可见异常而不误判为段 0。
+
     同名段名（方向 4）：同一 mark 名第 n 次出现时段名为 name#n（首次不加
     序号），返工轮次在收据段表可见可数；mark 记录本身 name 不变。
     """
@@ -281,6 +330,14 @@ def compute_segments(data) -> list[dict]:
             else:
                 eaten += gap
             segs.append({"name": seg_name, "elapsed_s": round(dur, 3)})
+        elif isinstance(dur, (int, float)) and dur > interval:
+            # 方向 5：dur_s 超 interval（自测耗时大于相邻间隔=数据矛盾）不静默
+            # 回退——段按 interval 落（保时间序），另落 dur_exceed 异常段暴露
+            # 超出的真实耗时，emit 侧可见而非误判段 0
+            segs.append({"name": seg_name, "elapsed_s": round(interval, 3)})
+            segs.append({"name": f"{seg_name}_dur_exceed",
+                         "elapsed_s": round(dur - interval, 3),
+                         "reason": "dur_s>interval"})
         else:
             segs.append({"name": seg_name, "elapsed_s": round(interval, 3)})
         prev = _t(m)
@@ -303,9 +360,10 @@ def _cmd_start(batch_id: str) -> int:
         return 2
     data = {"batch_id": batch_id, "start_wall": _wall(), "start_mono": _mono(),
             "marks": []}
-    _save(_timing_path(batch_id), data)
-    _archive_previous_timings(batch_id)
-    _write_current_batch(batch_id)
+    with _locked(_timing_path(batch_id)):
+        _save(_timing_path(batch_id), data)
+        _archive_previous_timings(batch_id)
+        _write_current_batch(batch_id)
     print(f"timing started: {_timing_path(batch_id)}")
     return 0
 
@@ -325,35 +383,36 @@ def _do_mark(path: Path, name: str, zero: bool = False, dur_s=None,
     quiet=True：stdout 不打 mark 行（emit_mark 进程内直调时防污染调用方
     stdout，对 ws_report 等 stdout 敏感脚本安全）；stderr 告警保留。
     """
-    data = _load(path)
-    if data is None:
-        if not quiet:
-            print(f"error: 未 start（缺打点文件 {path}），先执行 cdp_timing.py start",
-                  file=sys.stderr)
-        return 3
-    marks = data.get("marks") or []
-    if zero:
-        if marks:
-            wall, mono = marks[-1]["wall"], marks[-1].get("mono")
-        else:
-            wall, mono = data.get("start_wall"), data.get("start_mono")
-        if wall is None:
-            print("error: 无 start_wall 且无 marks，无法记零", file=sys.stderr)
+    with _locked(path):
+        data = _load(path)
+        if data is None:
+            if not quiet:
+                print(f"error: 未 start（缺打点文件 {path}），先执行 cdp_timing.py start",
+                      file=sys.stderr)
             return 3
-    else:
-        wall, mono = _wall(), _mono()
-    mark = {"name": name, "wall": wall}
-    if isinstance(mono, (int, float)):
-        mark["mono"] = mono
-    if dur_s is not None:
-        mark["dur_s"] = round(float(dur_s), 3)
-    data.setdefault("marks", []).append(mark)
-    # 段名表校验剥序号（方向 4）：AI 显式传 name#n 时按基础名比对
-    if _base_seg_name(name) not in KNOWN_SEGMENTS:
-        print(f"warn: 段名 {name!r} 不在常量表 "
-              f"（{', '.join(sorted(KNOWN_SEGMENTS))}），仅告警不阻断",
-              file=sys.stderr)
-    _save(path, data)
+        marks = data.get("marks") or []
+        if zero:
+            if marks:
+                wall, mono = marks[-1]["wall"], marks[-1].get("mono")
+            else:
+                wall, mono = data.get("start_wall"), data.get("start_mono")
+            if wall is None:
+                print("error: 无 start_wall 且无 marks，无法记零", file=sys.stderr)
+                return 3
+        else:
+            wall, mono = _wall(), _mono()
+        mark = {"name": name, "wall": wall}
+        if isinstance(mono, (int, float)):
+            mark["mono"] = mono
+        if dur_s is not None:
+            mark["dur_s"] = round(float(dur_s), 3)
+        data.setdefault("marks", []).append(mark)
+        # 段名表校验剥序号（方向 4）：AI 显式传 name#n 时按基础名比对
+        if _base_seg_name(name) not in KNOWN_SEGMENTS:
+            print(f"warn: 段名 {name!r} 不在常量表 "
+                  f"（{', '.join(sorted(KNOWN_SEGMENTS))}），仅告警不阻断",
+                  file=sys.stderr)
+        _save(path, data)
     if not quiet:
         print(f"mark: {name} @ {wall:.3f}" + ("（零耗时占位）" if zero else ""))
     return 0
@@ -428,19 +487,24 @@ def _cmd_finish(path: Path) -> int:
 
     保留 start_wall/marks 原始字段（ws_report --timings-file 两种结构皆可读，
     后续 mark 仍可追加）；仅新增 wall_end + segments。
+    读→算→写整体包进 _locked（CDP-06）：与并发 mark 交错时无锁的旧快照
+    覆盖写会吞 mark（finish 落盘的 marks 是加锁前快照，mark 写回被覆盖），
+    锁内保持单一 _load/_save 原子区间。
     """
-    data = _load(path)
-    if data is None:
-        print(f"error: 未 start（缺打点文件 {path}），先执行 cdp_timing.py start", file=sys.stderr)
-        return 3
-    out = {
-        "batch_id": data.get("batch_id", ""),
-        "start_wall": data.get("start_wall"),
-        "wall_end": _wall(),
-        "marks": data.get("marks", []),
-        "segments": compute_segments(data),
-    }
-    _save(path, out)
+    with _locked(path):
+        data = _load(path)
+        if data is None:
+            print(f"error: 未 start（缺打点文件 {path}），先执行 cdp_timing.py start",
+                  file=sys.stderr)
+            return 3
+        out = {
+            "batch_id": data.get("batch_id", ""),
+            "start_wall": data.get("start_wall"),
+            "wall_end": _wall(),
+            "marks": data.get("marks", []),
+            "segments": compute_segments(data),
+        }
+        _save(path, out)
     print(json.dumps(out, ensure_ascii=False, indent=2))
     print(f"timing finished: {path}")
     return 0

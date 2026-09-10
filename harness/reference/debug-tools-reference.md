@@ -1,6 +1,6 @@
 # RPI5 开发调试环境参考
 
-> **规则 ID**: `DBG-001` ~ `DBG-012`
+> **规则 ID**: `DBG-001` ~ `DBG-008`
 > **适用范围**: 涉及日志抓取、串口调试、WSL 下映射 USB 设备、调试命令固化时，AI 必须参考本文档。
 > **参考来源**: 由开发调试环境教程重构而来（VS Code/OpenGrok 等人类 IDE 配置迁移至 `docs/development-tools.md`）。
 >

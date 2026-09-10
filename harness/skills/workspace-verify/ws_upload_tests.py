@@ -17,11 +17,9 @@
 
 import argparse
 import hashlib
-import json
 import os
 import posixpath
 import re
-import shlex
 import subprocess
 import sys
 import time
@@ -113,14 +111,18 @@ def adb_run(ep, args, timeout=600):
 
     errors="replace" 对齐 ws_adb_connect.run_adb：设备输出含非 UTF-8 字节
     （如中文/二进制噪声）时不得抛 UnicodeDecodeError 中断整个测试批次。
+    二进制经 ac.adb_bin()（LC_VERIFY_ADB_BIN 覆盖生效，单点同源）。
     """
     try:
-        p = subprocess.run(["adb", "-s", ep] + args,
+        p = subprocess.run([ac.adb_bin(), "-s", ep] + args,
                            capture_output=True, text=True,
                            encoding="utf-8", errors="replace",
                            timeout=timeout)
         return p.stdout + p.stderr, p.returncode
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError):
+        # wsv2-04：补捕 OSError（adb 二进制缺失/执行异常），与
+        # ws_forensics/ws_adb_connect.run_adb 同口径——否则 adb 中段不可用
+        # 时抛裸 traceback 中断整个测试批次而非按失败判红
         return "", -1
 
 

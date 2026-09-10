@@ -22,6 +22,7 @@ HOOKS_DIR = Path(__file__).resolve().parents[4] / ".githooks"
 COMMIT_MSG_HOOK = HOOKS_DIR / "commit-msg"
 
 # ls-remote 空输出（exit 0）：触发 REMOTE_SHA 空值判定
+# rev-parse --show-toplevel → echo "$PWD"：适配入口仓库根锚定（sync-09）
 MOCK_GIT_EMPTY = """#!/usr/bin/env bash
 case "$1" in
   branch) echo dev ;;
@@ -30,7 +31,9 @@ case "$1" in
   commit) echo "mock commit ok"; exit 0 ;;
   push) exit 0 ;;
   ls-remote) exit 0 ;;
-  rev-parse) echo "0123456789abcdef0123456789abcdef01234567" ;;
+  rev-parse)
+    if [ "$2" = "--show-toplevel" ]; then echo "$PWD"
+    else echo "0123456789abcdef0123456789abcdef01234567"; fi ;;
   *) exit 0 ;;
 esac
 """
@@ -45,7 +48,9 @@ case "$1" in
   push) exit 0 ;;
   ls-remote) echo "0123456789abcdef0123456789abcdef01234567" ;;
   rev-parse)
-    if [ "$2" = "--short" ]; then echo "0123456789ab"; else echo "0123456789abcdef0123456789abcdef01234567"; fi ;;
+    if [ "$2" = "--show-toplevel" ]; then echo "$PWD"
+    elif [ "$2" = "--short" ]; then echo "0123456789ab"
+    else echo "0123456789abcdef0123456789abcdef01234567"; fi ;;
   *) exit 0 ;;
 esac
 """
@@ -59,7 +64,9 @@ case "$1" in
   commit) echo "mock commit ok"; exit 0 ;;
   push) echo " ! [rejected] dev -> dev (non-fast-forward)"; exit 1 ;;
   ls-remote) echo "0123456789abcdef0123456789abcdef01234567" ;;
-  rev-parse) echo "0123456789abcdef0123456789abcdef01234567" ;;
+  rev-parse)
+    if [ "$2" = "--show-toplevel" ]; then echo "$PWD"
+    else echo "0123456789abcdef0123456789abcdef01234567"; fi ;;
   *) exit 0 ;;
 esac
 """
@@ -69,6 +76,7 @@ MOCK_GIT_CLEAN = """#!/usr/bin/env bash
 case "$1" in
   branch) echo dev ;;
   status) exit 0 ;;
+  rev-parse) if [ "$2" = "--show-toplevel" ]; then echo "$PWD"; else exit 0; fi ;;
   *) exit 0 ;;
 esac
 """
@@ -89,7 +97,9 @@ case "$1" in
   push) exit 0 ;;
   ls-remote) echo "0123456789abcdef0123456789abcdef01234567" ;;
   rev-parse)
-    if [ "$2" = "--short" ]; then echo "0123456789ab"; else echo "0123456789abcdef0123456789abcdef01234567"; fi ;;
+    if [ "$2" = "--show-toplevel" ]; then echo "$PWD"
+    elif [ "$2" = "--short" ]; then echo "0123456789ab"
+    else echo "0123456789abcdef0123456789abcdef01234567"; fi ;;
   *) exit 0 ;;
 esac
 """
@@ -109,7 +119,9 @@ case "$1" in
   push) exit 0 ;;
   ls-remote) echo "0123456789abcdef0123456789abcdef01234567" ;;
   rev-parse)
-    if [ "$2" = "--short" ]; then echo "0123456789ab"; else echo "0123456789abcdef0123456789abcdef01234567"; fi ;;
+    if [ "$2" = "--show-toplevel" ]; then echo "$PWD"
+    elif [ "$2" = "--short" ]; then echo "0123456789ab"
+    else echo "0123456789abcdef0123456789abcdef01234567"; fi ;;
   *) exit 0 ;;
 esac
 """
@@ -285,6 +297,36 @@ class TestGitWorksPush(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertIn("LGW_ALLOW_NO_RECEIPT", r.stderr)
 
+    def test_branch_env_override_removed(self):
+        # sync-17：GIT_WORKS_BRANCH 覆盖已删除（契约固定 dev）——设置任意
+        # 值不再改变推送目标（旧代码 BRANCH=feature-x 时 CUR=dev 不符会
+        # exit 1"当前分支 dev 非 feature-x"）
+        r = self._run("--message-file", str(self._msg),
+                      env_extra={"GIT_WORKS_BRANCH": "feature-x"})
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("pushed: dev", r.stdout)
+
+
+@unittest.skipUnless(BASH and shutil.which("git"),
+                     "需要 bash 与 git（真 git 验证入口锚定）")
+class TestEntryPointAnchor(unittest.TestCase):
+    """sync-09：入口锚定仓库根——非 git 仓 fail-closed（exit 1）。"""
+
+    def test_nongit_dir_fail_closed(self):
+        # 破坏场景→判红：非 git 仓内运行（git rev-parse --show-toplevel
+        # 失败）必须拒绝执行，不得带着错误 cwd 继续跑
+        argv = bash_argv(SCRIPT, ["--dry-run"])
+        if argv is None:
+            self.skipTest("无 bash（find_bash 返 None）")
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ)
+            env["CDP_PROJECT_ROOT"] = tmp  # 日志根隔离（本用例实际走不到日志段）
+            r = subprocess.run(argv, cwd=tmp, capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               env=env)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("不在 git 仓库内", r.stderr)
+
 
 @unittest.skipUnless(BASH and shutil.which("git"), "需要 bash 与 git（真 git 验证钩子接线）")
 class TestCommitMsgHook(unittest.TestCase):
@@ -450,11 +492,11 @@ class TestCommitFaceNarrow(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
         return r
 
-    def _run_script(self, *args):
+    def _run_script(self, *args, cwd=None):
         argv = bash_argv(SCRIPT, list(args))
         if argv is None:
             self.skipTest("无 bash（find_bash 返 None）")
-        return subprocess.run(argv, cwd=self._repo, capture_output=True,
+        return subprocess.run(argv, cwd=cwd or self._repo, capture_output=True,
                               text=True, encoding="utf-8", errors="replace",
                               env=self._env)
 
@@ -566,6 +608,22 @@ class TestCommitFaceNarrow(unittest.TestCase):
         show = self._git("show", "--name-only", "--format=").stdout
         self.assertIn("f.txt", show)
         self.assertIn("data/verify-results/20260101-000000-261f10265269.md", show)
+
+    def test_subdir_run_reaches_commit_scope_gate(self):
+        # sync-09：子目录运行时入口锚定仓库根——harness/lib/commit_scope.py
+        # 相对调用可达，提交面比对门禁生效（旧行为静默降级 RECEIPT_MISSING）
+        (self._repo / "sub").mkdir(exist_ok=True)
+        biz = self._repo / "code"
+        biz.mkdir(exist_ok=True)
+        (biz / "demo.c").write_text("v2\n", encoding="utf-8")
+        (biz / "extra.c").write_text("new\n", encoding="utf-8")
+        self._write_scope_receipt("add=0 mod=1 del=0 | code/demo.c")
+        r = self._run_script("--message-file", str(self._msg),
+                             cwd=self._repo / "sub")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("commit_scope", r.stderr)
+        self.assertIn("code/extra.c", r.stderr)
+        self.assertNotIn("RECEIPT_MISSING", r.stderr)
 
     def test_commit_scope_absent_warns_and_passes(self):
         # 无收据/旧收据缺 commit_scope → warn 跳过比对（人工 push 场景不阻断）

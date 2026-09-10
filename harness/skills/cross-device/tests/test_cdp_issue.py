@@ -15,7 +15,7 @@ _TASK = "lcview-refactor"
 
 
 def _mk_issue(issue_id="KI-20260829-001", status="open", origin="introduced",
-              severity="P2", title="lcview 重复落盘计数异常"):
+              severity="P2", title="lcview 重复落盘计数异常", kind=""):
     return cdp_issue.Issue(
         schema_version=1,
         issue_id=issue_id,
@@ -29,6 +29,7 @@ def _mk_issue(issue_id="KI-20260829-001", status="open", origin="introduced",
         task=_TASK,
         resolved_in="",
         batch_id="18f27638d9f6",
+        kind=kind,
     )
 
 
@@ -79,6 +80,38 @@ class TestIssue(unittest.TestCase):
         # task 为大颗粒任务稳定标识（门禁按此过滤，修法描述入正文）
         self.assertEqual(got.task, _TASK)
         self.assertEqual(got.resolved_in, "")
+
+    def test_kind_field_roundtrip(self):
+        # 方向 3：kind 字段（空=普通 / flake=KIR-002 抖动登记）写读往返
+        r = _mk_issue(issue_id="KI-FLAKE-1", title="[flake] x", kind="flake")
+        p = cdp_issue.write_issue(r, "现场: 抖动")
+        got = cdp_issue.read_issue(p)
+        self.assertEqual(got.kind, "flake")
+        # 缺省 kind 为空（普通问题）
+        self.assertEqual(_mk_issue().kind, "")
+        # 非法 kind（构造参数）回落默认
+        self.assertEqual(_mk_issue(kind="bogus").kind, "")
+
+    def test_kind_idle_eligible_valid(self):
+        # 方向 1：kind=idle-eligible（人工标入闲时加固队列）合法写读
+        r = _mk_issue(issue_id="KI-IDLE-01", title="人工标闲时加固",
+                      kind="idle-eligible")
+        p = cdp_issue.write_issue(r, "现场")
+        self.assertEqual(cdp_issue.read_issue(p).kind, "idle-eligible")
+        self.assertEqual(cdp_issue.validate_issue(p), [])
+
+    def test_validate_kind_missing_is_ok_but_invalid_red(self):
+        # 方向 3：kind 缺失（旧条目 = 普通）不判畸形（否则历史文件全红阻塞
+        # check-issues 门禁）；显式非法 kind 判红
+        r = _mk_issue(issue_id="KI-VALID", kind="flake")
+        p = cdp_issue.write_issue(r, "现场")
+        self.assertEqual(cdp_issue.validate_issue(p), [])
+        # 手工注入非法 kind
+        txt = p.read_text(encoding="utf-8").replace("- kind: flake",
+                                                    "- kind: bogus")
+        p.write_text(txt, encoding="utf-8")
+        errs = cdp_issue.validate_issue(p)
+        self.assertTrue(any("kind 非法" in e for e in errs), errs)
 
     def test_write_issue_rejects_invalid_batch_id(self):
         # batch_id 非 12 位小写 hex → 写时抛错（畸形文件名不留到 promote 才暴露）
@@ -140,9 +173,9 @@ class TestIssue(unittest.TestCase):
         self.assertEqual(
             sorted(details, key=lambda d: d["issue_id"]), [
                 {"issue_id": "KI-FIXED", "resolved_in": "abc123def456",
-                 "title": "lcview 重复落盘计数异常"},
+                 "title": "lcview 重复落盘计数异常", "archived_in": ""},
                 {"issue_id": "KI-WONTFIX", "resolved_in": "",
-                 "title": "lcview 重复落盘计数异常"},
+                 "title": "lcview 重复落盘计数异常", "archived_in": ""},
             ])
 
     def test_closed_fixed_blocking_still_terminal(self):
@@ -151,6 +184,39 @@ class TestIssue(unittest.TestCase):
         r.blocking = True  # _mk_issue 默认 blocking=True
         cdp_issue.write_issue(r, "x")
         self.assertEqual(cdp_issue.closed_issue_ids(self._dir), ["KI-BLK-FIXED"])
+
+    # ── 方向 6：archived_in 归档标记与归档段过滤 ──────────────────────
+    def test_closed_issue_details_filters_archived(self):
+        # 已归档（archived_in 非空）的终态条目缺省过滤——归档段只收录首次
+        # 归档，防跨批重复归档；include_archived=True 时全量返回
+        r1 = _mk_issue("KI-ARCHIVED", status="fixed")
+        p = cdp_issue.write_issue(r1, "x")
+        cdp_issue.set_archived_in(p, "BL-20260907-01")
+        cdp_issue.write_issue(_mk_issue("KI-FRESH", status="fixed"), "y")
+        fresh = cdp_issue.closed_issue_details(self._dir)
+        self.assertEqual([d["issue_id"] for d in fresh], ["KI-FRESH"])
+        self.assertEqual(fresh[0]["archived_in"], "")  # 未归档 archived_in 为空
+        all_d = cdp_issue.closed_issue_details(self._dir, include_archived=True)
+        self.assertEqual(sorted(d["issue_id"] for d in all_d),
+                         ["KI-ARCHIVED", "KI-FRESH"])
+
+    def test_set_archived_in_writes_header_and_keeps_first(self):
+        # set_archived_in 回写头 archived_in；已归档不覆盖（首次归档可追溯）
+        r = _mk_issue("KI-ARC2", status="fixed")
+        p = cdp_issue.write_issue(r, "x")
+        cdp_issue.set_archived_in(p, "BL-20260907-01")
+        got = cdp_issue.read_issue(p)
+        self.assertEqual(got.archived_in, "BL-20260907-01")
+        # 二次回写不覆盖
+        cdp_issue.set_archived_in(p, "BL-20260908-01")
+        self.assertEqual(cdp_issue.read_issue(p).archived_in, "BL-20260907-01")
+
+    def test_set_archived_in_empty_noop(self):
+        # baseline_id 为空即跳过（无归档目标）
+        r = _mk_issue("KI-ARC3", status="fixed")
+        p = cdp_issue.write_issue(r, "x")
+        cdp_issue.set_archived_in(p, "")
+        self.assertEqual(cdp_issue.read_issue(p).archived_in, "")
 
     def test_delete_closed_removes_files_and_syncs_index(self):
         # 清算删除：终态文件删除 + index 同步重建，活项（open/scheduled）全留
@@ -276,6 +342,7 @@ class TestIssue(unittest.TestCase):
             "- discovered_in: 38433d446f07\n- origin: introduced\n"
             "- severity: P3\n- blocking: false\n- blocking_reason: \n"
             "- status: open\n- task: lcview-refactor\n- resolved_in: \n"
+            "- archived_in: \n"
             "\n## body\n\nx\n",
             encoding="utf-8")
         errs = cdp_issue.validate_issue(p, self._dir)
@@ -337,13 +404,22 @@ class TestBackfilledSeverity(unittest.TestCase):
     def test_all_repo_issues_pass_validation(self):
         # 不设 CDP_PROJECT_ROOT：data_known_issues_dir() 回落仓库真实路径
         # 空目录合法（KIR-006 promote 清算删光终态条目后无存量），跳过校验
-        os.environ.pop("CDP_PROJECT_ROOT", None)
-        files = cdp_issue.issue_files()
-        for p in files:
-            errs = cdp_issue.validate_issue(p)
-            self.assertEqual(errs, [], f"{p.name}: {errs}")
-            severity = cdp_issue.read_issue(p).severity
-            self.assertIn(severity, cdp_issue._SEVERITIES)
+        saved = os.environ.get("CDP_PROJECT_ROOT")
+        try:
+            os.environ.pop("CDP_PROJECT_ROOT", None)
+            files = cdp_issue.issue_files()
+            for p in files:
+                errs = cdp_issue.validate_issue(p)
+                self.assertEqual(errs, [], f"{p.name}: {errs}")
+                severity = cdp_issue.read_issue(p).severity
+                self.assertIn(severity, cdp_issue._SEVERITIES)
+        finally:
+            # tst-07：还原现场——CI 作业级预置 CDP_PROJECT_ROOT 时不得在本
+            # worker 进程内永久移除，改变后续用例的隔离语义
+            if saved is None:
+                os.environ.pop("CDP_PROJECT_ROOT", None)
+            else:
+                os.environ["CDP_PROJECT_ROOT"] = saved
 
 
 if __name__ == "__main__":

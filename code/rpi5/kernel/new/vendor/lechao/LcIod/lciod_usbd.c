@@ -229,6 +229,7 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
 {
     struct vendor_lechao_usbd_device *dev = file->private_data;
     struct vendor_lechao_usbd_event ev;
+    uint32_t consumed_pos;  /* 本次读取的事件槽位（读取前 tail），供回滚守卫 */
     unsigned long flags;
     int ret;
 
@@ -267,6 +268,7 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
         spin_lock_irqsave(&dev->event_lock, flags);
         if (dev->event_head != dev->event_tail) {
             ev = dev->event_buf[dev->event_tail];
+            consumed_pos = dev->event_tail;
             dev->event_tail = (dev->event_tail + 1) % VENDOR_LECHAO_USBD_EVENT_BUF_SIZE;
             spin_unlock_irqrestore(&dev->event_lock, flags);
             break;
@@ -282,14 +284,16 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
         /*
          * KRN-009：copy_to_user 失败时回滚 event_tail，事件留在环中
          * 供下次重试（原实现事件已消费但用户未收到——静默丢失）。
-         * 回滚持锁操作本身并发安全；多读者并发场景下（见 open 处
-         * LCD-008 消费语义）回滚可能使该事件被重复投递而非丢失，
-         * 实际单读者（sepolicy 保证）下无此差异。
+         * 回滚必须带守卫（lciod_event_tail_rollback_ok）：期间写者驱逐
+         * （head 追上 tail 推进 tail，见 lciod_usbd-stats.c event_push）
+         * 会覆盖该槽位，无守卫回滚得 tail==head 判空致事件清零或重复
+         * 消费——仅当 tail 未被驱逐推进时才回滚（与 lcview_ring.c
+         * KRN-003 读指针回滚守卫同构）。判定逻辑抽至 lciod_read_logic.c。
          */
         spin_lock_irqsave(&dev->event_lock, flags);
-        dev->event_tail = (dev->event_tail +
-                           VENDOR_LECHAO_USBD_EVENT_BUF_SIZE - 1) %
-                          VENDOR_LECHAO_USBD_EVENT_BUF_SIZE;
+        if (lciod_event_tail_rollback_ok(dev->event_tail, consumed_pos,
+                                         VENDOR_LECHAO_USBD_EVENT_BUF_SIZE))
+            dev->event_tail = consumed_pos;
         spin_unlock_irqrestore(&dev->event_lock, flags);
         pr_err(PREFIX "read: copy_to_user failed\n");
         return -EFAULT;

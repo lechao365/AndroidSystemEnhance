@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+
+import pytest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -27,6 +29,13 @@ VALID_SV = """-sv base:1a2b3c4d5e6f
 
 
 class TestWsReport(unittest.TestCase):
+    # 方向 2（slow_ok 豁免）：本类用例全部调用真实 ws_report.main（收据落盘/
+    # trend 老化/打点探测，真实脚本语义），单用例 ~1.4s 逼近 slow_guard 3s，
+    # 负载下（xdist 并行 + 链内其它工具并发）偶发超 3s 判红致 pytest_rc=1
+    # 拒写收据（2026-09-10 批次 3 failed 教训）。显式豁免慢守卫——
+    # 确需慢用例（真实子进程/脚本语义）按 slow_guard 契约豁免。
+    pytestmark = pytest.mark.slow_ok("真实 ws_report.main 脚本语义，单用例~1.4s逼近3s阈值")
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
@@ -103,7 +112,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s 说明",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         self.assertIn("receipt:", buf.getvalue())
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
@@ -112,6 +121,47 @@ class TestWsReport(unittest.TestCase):
         self.assertIn("batch_id: ", content)
         self.assertIn("## body", content)
         self.assertIn("adb 失败", content)
+
+    _RC = ("pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 "
+           "ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 "
+           "ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0")
+
+    def test_flake_count_parsed_from_selfcheck(self):
+        # P0-C：selfcheck 文本含 "flake:" 行 → 收据 flake_count 计数；
+        # 无 flake 行 → 0
+        from cdp_receipt import Receipt  # noqa: E402
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        selfcheck_flake = (self._RC + " | 120 passed, 2 skipped in 5.0s"
+                           " | flake: harness/lib/tests/test_x.py "
+                           "round=1 first=b1")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "flake 计数",
+                                 "--selfcheck", selfcheck_flake])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        r, errs = Receipt.from_text(details[0].read_text(encoding="utf-8"))
+        self.assertFalse(errs)
+        self.assertEqual(r.flake_count, "1")
+
+    def test_flake_count_zero_when_no_flake_line(self):
+        from cdp_receipt import Receipt  # noqa: E402
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "无 flake",
+                                 "--selfcheck",
+                                 self._RC + " | 120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        r, _ = Receipt.from_text(details[0].read_text(encoding="utf-8"))
+        self.assertEqual(r.flake_count, "0")
 
     def test_receipt_header_has_verified_tree_and_commit_scope(self):
         # 方向 1（261f10265269）：收据头写 verified_tree（40hex 树 id，
@@ -124,7 +174,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "绑定字段",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         content = details[0].read_text(encoding="utf-8")
@@ -157,7 +207,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 1 failed, 119 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 1 failed, 119 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 2)
         self.assertIn("failed 非零", err.getvalue())
         self.assertFalse(self._dir.exists())
@@ -171,7 +221,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed in 5.0s"])
         self.assertEqual(rc, 2)
         self.assertIn("缺 skipped 计数", err.getvalue())
         self.assertFalse(self._dir.exists())
@@ -231,7 +281,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=1 contract_rc=0 | "
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=1 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | "
                                  "120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 2)
         self.assertIn("非零退出码", err.getvalue())
@@ -247,7 +297,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=1 | "
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=1 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | "
                                  "120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 2)
         self.assertIn("非零退出码", err.getvalue())
@@ -263,7 +313,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=1 refs_rc=0 config_rc=0 contract_rc=0 | "
+                                 "--selfcheck", "pytest_rc=1 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | "
                                  "1 failed, 119 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 2)
         self.assertIn("非零退出码", err.getvalue())
@@ -280,7 +330,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=1 config_rc=0 contract_rc=0 | "
+                                 "--selfcheck", "pytest_rc=0 refs_rc=1 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | "
                                  "531 passed in 27.9s | skipped=0 | "
                                  "==== 共 3 处悬空引用（exit 1）===="])
         self.assertEqual(rc, 2)
@@ -298,7 +348,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | "
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | "
                                  "531 passed in 27.9s | skipped=0 | "
                                  "==== 共 3 处悬空引用（exit 1）===="])
         self.assertEqual(rc, 2)
@@ -309,7 +359,7 @@ class TestWsReport(unittest.TestCase):
         # 方向 2/3/7：正常自检文本（含 skipped 计数、failed 零）写读往返
         batch = self._write(VALID_S, ".cdp")
         body = self._write("## 现场\n")
-        selfcheck = ("pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0\n"
+        selfcheck = ("pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0\n"
                      "121 passed, 3 skipped in 6.0s\n"
                      "OK: harness/skills + docs 引用完整，无悬空。")
         buf = io.StringIO()
@@ -356,7 +406,7 @@ class TestWsReport(unittest.TestCase):
                 rc = ws_report.main(["--batch-file", flat, "--body", body,
                                      "--result", "skip", "--build", "skip",
                                      "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 2)
         self.assertIn("error: 批次校验失败", err.getvalue())
         self.assertFalse(self._dir.exists())
@@ -378,9 +428,9 @@ class TestWsReport(unittest.TestCase):
                 rc = ws_report.main(["--batch-file", soft, "--body", body,
                                      "--result", "skip", "--build", "skip",
                                      "--board", "skip", "--summary", "sv 降级",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                      "--acceptance", "svc:x running",
-                                     "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                     "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         self.assertIn("warn: 批次校验失败", err.getvalue())
         self.assertNotIn("error: 批次校验失败", err.getvalue())
@@ -402,7 +452,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", sv, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "sv 无证据",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 2)
         self.assertIn("必须传 --acceptance", err.getvalue())
         self.assertFalse(self._dir.exists())
@@ -419,7 +469,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "性能基线",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", self._write_acc(),
                                  "--unit-test-file", self._write_ut(), "--push-file", self._write_push(),
                                  "--metrics", metrics])
@@ -442,7 +492,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--metrics", '{"b": 2, "a": 1}'])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
@@ -460,7 +510,7 @@ class TestWsReport(unittest.TestCase):
                 rc = ws_report.main(["--batch-file", batch, "--body", body,
                                      "--result", "skip", "--build", "skip",
                                      "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                      "--metrics", "{broken"])
         self.assertEqual(rc, 2)
         self.assertIn("--metrics 须为合法 JSON 对象", err.getvalue())
@@ -483,7 +533,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--timings-file", tfile])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
@@ -511,7 +561,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--timings-file", tfile])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
@@ -537,7 +587,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--timings-file", tfile])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
@@ -580,7 +630,7 @@ class TestWsReport(unittest.TestCase):
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
                                  "--acceptance", "svc:lechao_lcview boot",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--timings-file", tfile])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
@@ -614,7 +664,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--timings-file", tfile])
         self.assertEqual(rc, 0)
         trend = (self._dir / "trend.md").read_text(encoding="utf-8")
@@ -648,7 +698,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--timings-file", tfile])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
@@ -679,7 +729,7 @@ class TestWsReport(unittest.TestCase):
                 rc = ws_report.main(["--batch-file", batch, "--body", body,
                                      "--result", "skip", "--build", "skip",
                                      "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                      "--timings-file", "/nonexistent/timings.json"])
         self.assertEqual(rc, 0)
         self.assertIn("warn: --timings-file 读取失败", err.getvalue())
@@ -712,7 +762,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--forensics-file", mf])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
@@ -731,7 +781,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         content = details[0].read_text(encoding="utf-8")
@@ -750,7 +800,7 @@ class TestWsReport(unittest.TestCase):
                 rc = ws_report.main(["--batch-file", batch, "--body", body,
                                      "--result", "skip", "--build", "skip",
                                      "--board", "skip", "--summary", "s",
-                                     "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                     "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                      "--forensics-file",
                                      "/nonexistent/manifest.json"])
         self.assertEqual(rc, 0)
@@ -791,7 +841,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         from cdp_paths import log_apply_dir
         self.assertIn(f"自动探测到打点文件: {log_apply_dir()}/timings-{bid}.json",
@@ -821,7 +871,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         self.assertIn(f"自动探测到打点文件: {log_apply_dir()}/timings-{bid}.json",
                       err.getvalue())
@@ -836,7 +886,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         self.assertIn("未探测到", err.getvalue())
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
@@ -859,7 +909,7 @@ class TestWsReport(unittest.TestCase):
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
                                  "--elapsed", "42",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         content = details[0].read_text(encoding="utf-8")
@@ -872,7 +922,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--target", "1a2b3c4d5e6f",
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "revert 恢复",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         self.assertEqual(len(details), 1)
@@ -888,7 +938,7 @@ class TestWsReport(unittest.TestCase):
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "上板通过",
                                  "--case", "lcview-liveness",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", self._write_acc(),
                                  "--unit-test-file", self._write_ut(), "--push-file", self._write_push()])
         self.assertEqual(rc, 0)
@@ -907,7 +957,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "无验收",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 2)
         self.assertIn("必须传 --acceptance-file", err.getvalue())
         self.assertFalse(self._dir.exists())
@@ -921,7 +971,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "手填假绿",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance",
                                  '{"overall": "pass", "items": []}'])
         self.assertEqual(rc, 2)
@@ -938,7 +988,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "手填假绿",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", bad,
                                  "--unit-test-file", self._write_ut(), "--push-file", self._write_push()])
         self.assertEqual(rc, 2)
@@ -955,7 +1005,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "假绿",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", acc,
                                  "--unit-test-file", self._write_ut(), "--push-file", self._write_push()])
         self.assertEqual(rc, 2)
@@ -972,7 +1022,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "假绿",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", acc,
                                  "--unit-test-file", self._write_ut(), "--push-file", self._write_push()])
         self.assertEqual(rc, 2)
@@ -991,7 +1041,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "产物验收",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", acc,
                                  "--unit-test-file", ut,
                                  "--push-file", self._write_push(run_id="runabc123")])
@@ -1017,7 +1067,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "数组验收",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", arr,
                                  "--unit-test-file", self._write_ut(), "--push-file", self._write_push()])
         self.assertEqual(rc, 2)
@@ -1028,14 +1078,14 @@ class TestWsReport(unittest.TestCase):
         # 方向 1：验收产物缺 run_id（产物身份缺失）→ 拒 PASS
         batch = self._write(VALID_S, ".cdp")
         body = self._write("## 现场\n")
-        acc = self._write_acc()
+        self._write_acc()
         acc_f = self._write(json.dumps({"overall": "pass", "items": []}), ".json")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "假绿",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", acc_f,
                                  "--unit-test-file", self._write_ut(), "--push-file", self._write_push()])
         self.assertEqual(rc, 2)
@@ -1052,7 +1102,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "假绿",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", acc,
                                  "--unit-test-file", self._write_ut(), "--push-file", self._write_push()])
         self.assertEqual(rc, 2)
@@ -1073,7 +1123,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "假绿",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", acc,
                                  "--unit-test-file", self._write_ut(), "--push-file", self._write_push(),
                                  "--case", "lcview-liveness"])
@@ -1090,7 +1140,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "无单测",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", self._write_acc()])
         self.assertEqual(rc, 2)
         self.assertIn("必须传 --unit-test-file", err.getvalue())
@@ -1105,7 +1155,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "错批",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", self._write_acc(run_id="acc123"),
                                  "--unit-test-file",
                                  self._write_ut(run_id="other456"),
@@ -1125,7 +1175,7 @@ class TestWsReport(unittest.TestCase):
                 rc = ws_report.main(["--batch-file", batch, "--body", body,
                                      "--result", "pass", "--build", "pass",
                                      "--board", "pass", "--summary", "假绿",
-                                     "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                     "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                      "--acceptance-file", self._write_acc(),
                                      "--unit-test-file",
                                      self._write_ut(targets=targets),
@@ -1133,6 +1183,42 @@ class TestWsReport(unittest.TestCase):
             self.assertEqual(rc, 2, targets)
             self.assertIn("非全绿", err.getvalue())
         self.assertFalse(self._dir.exists())
+
+    def test_pass_unit_test_empty_targets_rejected(self):
+        # wsv-07：targets 为空（rc=0 产物却无任何单测证据）→ 拒 PASS
+        # （与 push 空 items 拒绝对称，防零单测假绿）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "pass", "--build", "pass",
+                                 "--board", "pass", "--summary", "空单测",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--acceptance-file", self._write_acc(),
+                                 "--unit-test-file", self._write_ut(targets=[]),
+                                 "--push-file", self._write_push()])
+        self.assertEqual(rc, 2)
+        self.assertIn("targets 为空", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_acceptance_pass_requires_dict(self):
+        # wsv-09：_validate_acceptance_pass 仅接受 JSON 对象（历史数组分支
+        # 为不可达死代码已删）；dict 形态行为不变
+        parsed, err = ws_report._validate_acceptance_pass(
+            '[{"tag": "svc:x", "status": "pass"}]')
+        self.assertIsNone(parsed)
+        self.assertIn("JSON 对象", err)
+        # 方向 3（2026-09-08）：items 空即拒 pass（overall=pass 却无逐项证据，
+        # 中断路径落盘或手填假绿不得当 pass），既有 dict 正常 items 不受影响
+        parsed, err = ws_report._validate_acceptance_pass(
+            '{"overall": "pass", "items": []}')
+        self.assertIsNone(parsed)
+        self.assertIn("items 为空", err)
+        parsed, err = ws_report._validate_acceptance_pass(
+            '{"overall": "pass", "items": [{"tag": "boot", "status": "pass"}]}')
+        self.assertIsNone(err)
+        self.assertEqual(len(parsed["items"]), 1)
 
     def test_pass_without_push_file_rejected(self):
         # 方向 1：PASS 缺 --push-file（ws_push 产物此前无人核验）→ 返 2 拒写
@@ -1143,7 +1229,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "无推送证据",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", self._write_acc(),
                                  "--unit-test-file", self._write_ut()])
         self.assertEqual(rc, 2)
@@ -1160,7 +1246,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "假绿",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", self._write_acc(),
                                  "--unit-test-file", self._write_ut(),
                                  "--push-file", bad])
@@ -1179,7 +1265,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "缺 run_id",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", self._write_acc(),
                                  "--unit-test-file", self._write_ut(),
                                  "--push-file", push])
@@ -1196,7 +1282,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "错批",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", self._write_acc(),
                                  "--unit-test-file", self._write_ut(),
                                  "--push-file",
@@ -1214,7 +1300,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "空推送",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", self._write_acc(),
                                  "--unit-test-file", self._write_ut(),
                                  "--push-file", self._write_push(items=[])])
@@ -1237,7 +1323,7 @@ class TestWsReport(unittest.TestCase):
                 rc = ws_report.main(["--batch-file", batch, "--body", body,
                                      "--result", "pass", "--build", "pass",
                                      "--board", "pass", "--summary", "假绿",
-                                     "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                     "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                      "--acceptance-file", self._write_acc(),
                                      "--unit-test-file", self._write_ut(),
                                      "--push-file",
@@ -1255,7 +1341,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "失败推送",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", self._write_acc(),
                                  "--unit-test-file", self._write_ut(),
                                  "--push-file",
@@ -1274,7 +1360,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--result", "skip",
                                  "--build", "skip", "--board", "skip", "--body", body,
                                  "--summary", "配置违规",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=1 contract_rc=0 "
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=1 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 "
                                  "| config: 共 2 处违规 | "
                                  "contract_rc=0 | OK: contract 检查通过，无违规。"])
         self.assertEqual(rc, 2)
@@ -1283,18 +1369,22 @@ class TestWsReport(unittest.TestCase):
         self.assertFalse(self._dir.exists())
 
     def test_selfcheck_four_rc_all_zero_passes(self):
-        # 四 rc（pytest/refs/config/contract）全零 → 正常落盘
+        # 六 rc（pytest/refs/config/contract/pyenv/ioctl，REQUIRED_RC_KEYS）
+        # 全零 → 正常落盘
         batch = self._write(VALID_S, ".cdp")
         body = self._write("## 现场\n")
         buf = io.StringIO()
         with redirect_stdout(buf):
             rc = ws_report.main(["--batch-file", batch, "--result", "skip",
                                  "--build", "skip", "--board", "skip", "--body", body,
-                                 "--summary", "四 rc 全零",
+                                 "--summary", "六 rc 全零",
                                  "--selfcheck", "pytest_rc=0 | 10 passed in 1.0s"
                                  " | skipped=0 | refs_rc=0 | OK: refs | "
                                  "config_rc=0 | OK: config 检查通过，无违规。 | "
-                                 "contract_rc=0 | OK: contract 检查通过，无违规。"])
+                                 "contract_rc=0 | OK: contract 检查通过，无违规。 | "
+                                 "pyenv_rc=0 | python=3.12 OK | "
+                                 "ioctl_rc=0 | OK: 一致 | "
+                                 "manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | manifest.yaml 无变化"])
         self.assertEqual(rc, 0)
         self.assertTrue(self._dir.exists())
 
@@ -1311,25 +1401,62 @@ class TestWsReport(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("缺 pytest_rc", err.getvalue())
 
-    def test_device_dirty_auto_from_acceptance_marks_receipt(self):
-        # 方向 3：验收产物 device_dirty=true（teardown 恢复失败）→ PASS 路径
-        # 自动透传收据 header device_dirty: true
+    def test_device_dirty_auto_from_acceptance_rejects_pass(self):
+        # 方向 5：验收产物 device_dirty=true（teardown 恢复失败）+ result=pass
+        # → 拒落收据（设备态不可信的验证结果不得记 pass；fail/skip 仍可落）
         batch = self._write(VALID_S, ".cdp")
         body = self._write("## 现场\n")
         acc = self._write_acc(device_dirty=True)
-        buf = io.StringIO()
-        with redirect_stdout(buf):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "pass", "--build", "pass",
                                  "--board", "pass", "--summary", "脏态透传",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--acceptance-file", acc,
                                  "--unit-test-file", self._write_ut(),
                                  "--push-file", self._write_push()])
+        self.assertEqual(rc, 2)
+        self.assertIn("device_dirty", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_device_dirty_unknown_from_acceptance_rejects_pass(self):
+        # 验收产物 device_dirty="unknown"（teardown 未跑，不得声称干净）+
+        # result=pass → 拒落收据（与 true 同等视为设备态不可信，判红）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        acc = self._write_acc(device_dirty="unknown")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "pass", "--build", "pass",
+                                 "--board", "pass", "--summary", "unknown 态透传",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--acceptance-file", acc,
+                                 "--unit-test-file", self._write_ut(),
+                                 "--push-file", self._write_push()])
+        self.assertEqual(rc, 2)
+        self.assertIn("device_dirty=unknown", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_device_dirty_unknown_auto_passthrough_header_on_fail(self):
+        # fail/skip 收据带 --acceptance-file（ws_verify_chain report 步无条件传
+        # 产物路径）且 device_dirty="unknown" → 收据保留并 header 透传 unknown
+        # （非 pass 不拒写，三态如实标注供审计；header 不再恒写 true/空）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        acc = self._write_acc(device_dirty="unknown")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "fail", "--build", "fail",
+                                 "--board", "fail", "--summary", "失败且未跑 teardown",
+                                 "--acceptance-file", acc])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        self.assertEqual(len(details), 1)
         content = details[0].read_text(encoding="utf-8")
-        self.assertIn("- device_dirty: true", content)
+        self.assertIn("- device_dirty: unknown", content)
 
     def test_device_dirty_flag_on_fail_receipt(self):
         # 方向 3：fail 收据无产物核验路径 → --device-dirty 显式标记
@@ -1422,7 +1549,7 @@ class TestWsReport(unittest.TestCase):
                 rc = ws_report.main(["--target", "dev",
                                      "--result", "skip", "--build", "skip",
                                      "--board", "skip", "--summary", "dev 描述",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         self.assertEqual(len(details), 1)
@@ -1443,7 +1570,7 @@ class TestWsReport(unittest.TestCase):
                     rc = ws_report.main(["--target", "nope",
                                          "--result", "skip", "--build", "skip",
                                          "--board", "skip", "--summary", "坏 target",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 2)
         self.assertIn("无法解析 --target", err.getvalue())
         self.assertFalse(self._dir.exists())
@@ -1462,7 +1589,7 @@ class TestWsReport(unittest.TestCase):
                                      "--target", "dev",
                                      "--result", "skip", "--build", "skip",
                                      "--board", "skip", "--summary", "A dev target",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         self.assertEqual(len(details), 1)
@@ -1503,7 +1630,7 @@ class TestWsReport(unittest.TestCase):
                                  "--acceptance-file",
                                  self._write_acc(summary="svc:lechao_lcview"),
                                  "--unit-test-file", self._write_ut(), "--push-file", self._write_push(),
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         self.assertIn(f"自动探测到 cases 文件: {ws_report.log_apply_dir()}/cases-{bid}.json",
                       err.getvalue())
@@ -1522,7 +1649,7 @@ class TestWsReport(unittest.TestCase):
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
                                  "--case", "lcview-liveness",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         self.assertNotIn("自动探测到 cases 文件", err.getvalue())
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
@@ -1539,7 +1666,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         self.assertIn("未探测到", err.getvalue())
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
@@ -1577,7 +1704,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         content = details[0].read_text(encoding="utf-8")
@@ -1600,7 +1727,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--timings-file", tfile])
         self.assertEqual(rc, 0)
         data = json.loads(Path(tfile).read_text(encoding="utf-8"))
@@ -1636,7 +1763,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         data = json.loads(tfile.read_text(encoding="utf-8"))
         names = [m["name"] for m in data["marks"]]
@@ -1651,7 +1778,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         content = details[0].read_text(encoding="utf-8")
@@ -1674,7 +1801,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--timings-file", tfile])
         self.assertEqual(rc, 0)
         data = json.loads(Path(tfile).read_text(encoding="utf-8"))
@@ -1736,7 +1863,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--package-file", pkg])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
@@ -1769,7 +1896,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
         content = details[0].read_text(encoding="utf-8")
@@ -1784,7 +1911,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s"])
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s"])
         self.assertEqual(rc, 0)
         self.assertIn("未探测到", err.getvalue())
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
@@ -1801,7 +1928,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--package-file", bad])
         self.assertEqual(rc, 2)
         self.assertIn("须为合法 JSON", err.getvalue())
@@ -1817,7 +1944,7 @@ class TestWsReport(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--package-file", bad])
         self.assertEqual(rc, 2)
         self.assertIn("缺 run_id", err.getvalue())
@@ -1967,7 +2094,7 @@ class TestPhaseSummary(unittest.TestCase):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
                                  "--result", "skip", "--build", "skip",
                                  "--board", "skip", "--summary", "s",
-                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | 120 passed, 2 skipped in 5.0s",
                                  "--timings-file", tfile])
         self.assertEqual(rc, 0)
         details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]

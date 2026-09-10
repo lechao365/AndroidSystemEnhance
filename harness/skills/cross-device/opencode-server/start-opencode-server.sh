@@ -272,9 +272,12 @@ write_systemd_service() {
     }
 
     # 原子写：同目录临时文件 + mv（中断不留半写态；EnvironmentFile 用 SERVER_ENV_FILE
-    # 解析后的实际路径，即 ENV_OPENCODE_SERVER_ENV_FILE 或默认值）
+    # 解析后的实际路径，即 ENV_OPENCODE_SERVER_ENV_FILE 或默认值）。
+    # 引号用法：systemd 仅对 ExecStart 类命令指令支持引号解析；EnvironmentFile /
+    # WorkingDirectory 等路径指令不支持引号，加引号会被当成路径字面值报 "path is
+    # not absolute"（2026-09-08 实测服务无法启动）。
     local tmp_file="$SYSTEMD_USER_DIR/.${SERVICE_UNIT}.tmp"
-    if ! cat > "$tmp_file" <<EOF
+    cat > "$tmp_file" <<EOF
 [Unit]
 Description=OpenCode Web UI Service
 After=network-online.target
@@ -283,8 +286,12 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=$SERVER_ENV_FILE
+# 服务由 systemd 托管，环境 PATH 为最小集，不含 login shell 经 ~/.profile
+# 注入的 ~/.local/bin；会话内 selfcheck 等 ruff 门禁依赖该目录下的 ruff，
+# 显式补 PATH（%h 展开为用户 home），防 ruff_rc=1 误判"ruff 未安装"。
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WorkingDirectory=$TARGET_ROOT
-ExecStart=$OPENCODE_BIN web --hostname $SERVER_HOST --port $PORT
+ExecStart="$OPENCODE_BIN" web --hostname "$SERVER_HOST" --port $PORT
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -293,19 +300,21 @@ PrivateTmp=true
 [Install]
 WantedBy=default.target
 EOF
-    then
+    # 真实失败码先捕获再清理（修复：rm -f 恒 0 会覆盖 cat 退出码致 rc 丢失）
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
         rm -f "$tmp_file"
-        local rc=$?
         step_end "$rc"
         on_err "${BASH_LINENO[0]}" "写入 $SERVICE_FILE" "$rc"
     fi
 
-    if ! mv -f "$tmp_file" "$SERVICE_FILE"; then
-        rm -f "$tmp_file"
+    mv -f "$tmp_file" "$SERVICE_FILE" || {
+        # 对照 mkdir 分支的 || {} 写法统一：|| 右侧 $? 即 mv 真实退出码
         local rc=$?
+        rm -f "$tmp_file"
         step_end "$rc"
         on_err "${BASH_LINENO[0]}" "mv -f $tmp_file $SERVICE_FILE" "$rc"
-    fi
+    }
 
     systemctl --user daemon-reload >/dev/null 2>&1 || {
         local rc=$?

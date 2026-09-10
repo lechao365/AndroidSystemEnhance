@@ -2,7 +2,7 @@
 // DeviceReader.cpp — EpollDeviceReader 生产实现
 // 所属模块：LcView 事件日志系统 — Daemon 层
 // 设计目的：封装 /dev/vendor_lechao_lcview 的打开、epoll(LT) 等待
-//   读取、overrun ioctl 查询与关闭。可恢复错误（EINTR/EAGAIN）
+//   读取、overrun ioctl 查询与关闭。可恢复错误（EINTR/EAGAIN/EMSGSIZE）
 //   在本层消化为返回 0，致命错误透传 errno 返回 -1，
 //   使 daemon 主循环的错误处理保持极简。
 // ============================================================
@@ -36,6 +36,23 @@ struct lcview_stats {
 EpollDeviceReader::EpollDeviceReader(int fd) : mFd(fd)
 {
 }
+
+namespace vendor {
+namespace lechao {
+namespace lcview {
+
+bool isRecoverableReadErrno(int e)
+{
+    // EINTR：信号打断瞬时噪声；EAGAIN：非阻塞无数据；
+    // EMSGSIZE：内核 read 首条记录放不下用户缓冲（KRN-001 返 -EMSGSIZE，
+    // 提示缓冲不足，可恢复——下次换大缓冲或分拆再读）。
+    // 刻意不加 EINVAL：真参数错误吞掉会让 daemon 对坏参数静默成环。
+    return e == EINTR || e == EAGAIN || e == EMSGSIZE;
+}
+
+}  // namespace lcview
+}  // namespace lechao
+}  // namespace vendor
 
 EpollDeviceReader::~EpollDeviceReader()
 {
@@ -113,8 +130,8 @@ ssize_t EpollDeviceReader::waitAndRead(uint8_t* buf, size_t offset,
         return 0;  // 超时，无数据
 
     ssize_t n = ::read(mFd, buf + offset, cap - offset);
-    if (n < 0 && (errno == EAGAIN || errno == EINTR))
-        return 0;  // 可恢复，视作本次无数据
+    if (n < 0 && isRecoverableReadErrno(errno))
+        return 0;  // 可恢复（EINTR/EAGAIN/EMSGSIZE），视作本次无数据
     // n == 0：EOF（内核 shutdown 后期望用户态退出，模块卸载场景；
     // LCV-17：与正常 timeout 同返 0 会伪装正常，计数暴露供心跳判红）
     if (n == 0) {

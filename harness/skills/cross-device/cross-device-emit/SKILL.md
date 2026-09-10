@@ -18,6 +18,9 @@ stages:
 ## Trigger（触发条件）
 - 用户在本仓 clone 上 git pull 后，准备发起新一轮跨设备修改
 ## Preconditions（前置条件）
+- 本机声明为 emit 设备：`export HARNESS_ROLE=emit`。role_guard 缺省 apply
+  （安全缺省），未声明时 emit 三入口（cdp_emit_precheck / cdp_parse
+  --role emit / --gen-checksum）因角色不匹配直接 exit 1 拒批
 - 工作树干净；本地 HEAD == origin/dev；上批收据已推送（cdp_emit_precheck.py）
 ## Human confirmation gates（人工确认门）
 - 零确认（产出批次文本，不落盘不提交）

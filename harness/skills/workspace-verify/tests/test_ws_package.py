@@ -162,6 +162,21 @@ class TestWsPackage(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("AOSP_WS", ev["error"])
 
+    def test_resolve_batch_id_delegates_verify_common(self):
+        # 方向 4：batch_id 回落委托 verify_common 统一口径——current-batch
+        # 指针命中；多 timings 文件残留返 None 防误绑（不再 mtime 最新，
+        # 打包证据不落错批次 id）
+        logdir = Path(self._tmp.name) / "harness" / "log" / "cross-device"
+        logdir.mkdir(parents=True)
+        (logdir / "current-batch.json").write_text(
+            json.dumps({"batch_id": "fedcba654321"}), encoding="utf-8")
+        self.assertEqual(wp._resolve_batch_id(), "fedcba654321")
+        (logdir / "current-batch.json").unlink()
+        for bid in ("aaa111bbb222", "ccc333ddd444"):
+            (logdir / f"timings-{bid}.json").write_text("{}",
+                                                        encoding="utf-8")
+        self.assertIsNone(wp._resolve_batch_id())
+
     def test_batch_id_from_env_names_evidence(self):
         # CDP_BATCH_ID env：缺省证据文件名取 batch_id（baseline_register 探测同名）
         os.environ["CDP_BATCH_ID"] = "ff33f92060ac"

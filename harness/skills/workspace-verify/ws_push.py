@@ -32,7 +32,6 @@
 
 import argparse
 import hashlib
-import json
 import os
 import posixpath
 import re
@@ -120,14 +119,18 @@ def adb_run(ep, args, timeout=600):
 
     errors="replace" 对齐 ws_adb_connect.run_adb：设备输出含非 UTF-8 字节
     时不得抛 UnicodeDecodeError 中断整个推送批次。
+    二进制经 ac.adb_bin()（LC_VERIFY_ADB_BIN 覆盖生效，单点同源）。
     """
     try:
-        p = subprocess.run(["adb", "-s", ep] + args,
+        p = subprocess.run([ac.adb_bin(), "-s", ep] + args,
                            capture_output=True, text=True,
                            encoding="utf-8", errors="replace",
                            timeout=timeout)
         return p.stdout + p.stderr, p.returncode
-    except subprocess.TimeoutExpired:
+    except (subprocess.TimeoutExpired, OSError):
+        # wsv2-04：补捕 OSError（adb 二进制缺失/执行异常），与
+        # ws_forensics/ws_adb_connect.run_adb 同口径——否则 adb 中段不可用
+        # 时抛裸 traceback 中断整个推送批次而非按失败判红
         return "", -1
 
 
@@ -186,8 +189,9 @@ def check_context(device_ctx, expect=None):
 def verify_item(local_path, device, expect_ctx=None):
     """回读三项与本地产物比对（方向 2）：任一不符即判红。
 
-    返回 (ok, checks, detail)：checks 为 {"sha256","bytes","context"} 的
-    pass/fail 值（自描述产物的三项校验值）。
+    返回 (ok, checks, detail, local)：checks 为 {"sha256","bytes","context"} 的
+    pass/fail 值（自描述产物的三项校验值）；local 为本地产物指纹
+    {"sha256","bytes"}（回读比对基准，调用方留痕用）。
     """
     local = local_fingerprint(local_path)
     checks = {}
@@ -227,7 +231,7 @@ def reboot_and_wait(ep, boot_timeout=240):
     while time.monotonic() < deadline:
         ep2 = ac.ensure_connected(rescue_enabled=False)
         if ep2:
-            if ac.ensure_ready(timeout=15, poll_interval=5):
+            if ac.ensure_ready(timeout=15, poll_interval=5, endpoint=ep2):
                 return True, f"reboot 后启动完成（endpoint={ep2}）"
             last_err = "已连接但 sys.boot_completed 未就绪"
         else:

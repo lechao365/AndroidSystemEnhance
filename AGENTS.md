@@ -10,6 +10,12 @@
 ## 缺陷归属判定
 缺陷归属判定（当批修或登记 known-issues）前，必须先加载 [harness/rules/known-issues.md](harness/rules/known-issues.md)（KIR-001~007 有序判据与准入场景表）。
 
+## 闲时加固
+执行闲时加固（修复 idle-eligible 队列、让路协议、预算内修复）前，必须先加载
+[harness/rules/idle-hardening.md](harness/rules/idle-hardening.md)
+（IDLE-001~007：队列准入不自选战场 / 让路协议复用 ws_lock / flake 修复纪律 /
+预算与断点续跑）。
+
 ## Harness 工作流命令
 
 | 命令 | 用途 |
@@ -41,6 +47,12 @@ harness 能力全部内聚在 `harness/` 目录（不依赖 LcHarness），使�
 
 ## PlantUML 画图约束
 所有 PlantUML 图表编写前，必须参考 [harness/rules/plantuml.md](harness/rules/plantuml.md) 中的规则，防止渲染失败（`DOC-002`）。
+
+## CDP apply 完成判据
+执行 cross-device-apply 批次（自检/收据落盘）、接入新检查器到自检门禁链、
+书写 harness 测试或文档引用时，必须先加载 [harness/rules/cdp-apply-dod.md](harness/rules/cdp-apply-dod.md)
+（CDP-DOD-001 检查器门禁三要件 / CDP-DOD-002 测试与文档引用禁依赖未跟踪产物 /
+CDP-DOD-003 收据逐方向自报调用方与验证）。
 
 ## RPI5 环境与开发参考文档
 涉及 RPI5 环境搭建、编译、部署、调试、远程访问时，必须先加载 `harness/reference/` 下对应文档（索引见 [harness/reference/README.md](harness/reference/README.md)）：

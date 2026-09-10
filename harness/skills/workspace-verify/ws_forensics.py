@@ -25,13 +25,14 @@
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
 import time
 import uuid
 from pathlib import Path
+
+import ws_adb_connect as ac  # noqa: E402（adb 二进制单点：LC_VERIFY_ADB_BIN 覆盖同源）
 
 # 单文件上限（字节）：超限截断并标记，防单条巨日志撑爆磁盘与收据链
 MAX_FILE_BYTES = 512 * 1024
@@ -56,9 +57,12 @@ _BEST_EFFORT_CASES = [
 
 
 def adb_run(ep, args, timeout=60):
-    """adb -s <ep> <args...>；返回 (stdout+stderr, returncode)。"""
+    """adb -s <ep> <args...>；返回 (stdout+stderr, returncode)。
+
+    二进制经 ac.adb_bin()（LC_VERIFY_ADB_BIN 覆盖生效，单点同源）。
+    """
     try:
-        p = subprocess.run(["adb", "-s", ep] + args,
+        p = subprocess.run([ac.adb_bin(), "-s", ep] + args,
                            capture_output=True, text=True,
                            encoding="utf-8", errors="replace",
                            timeout=timeout)
@@ -139,7 +143,7 @@ def _collect_pstore(ep, out_dir, budget, items):
 def _list_new_tombstones(ep, since_epoch):
     """列 /data/tombstones/ 下 mtime 晚于 since_epoch 的新增文件（只取本轮新增）。"""
     out, rc = adb_run(
-        ep, ["shell", f"ls /data/tombstones 2>/dev/null"], timeout=30)
+        ep, ["shell", "ls /data/tombstones 2>/dev/null"], timeout=30)
     if rc != 0:
         return []
     names = [ln.strip() for ln in out.splitlines() if ln.strip()]

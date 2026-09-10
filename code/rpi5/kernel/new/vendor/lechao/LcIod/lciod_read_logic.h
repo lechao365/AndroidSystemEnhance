@@ -28,4 +28,42 @@
  */
 int lciod_nonblock_read_decision(int ring_empty, int shutdown);
 
+/*
+ * lciod_event_tail_rollback_ok — copy_to_user 失败回滚 event_tail 的守卫
+ *
+ * 事件环读取：读一条后 event_tail 推进到 (consumed_pos + 1) % buf_size；
+ * 期间写者驱逐（head 追上 tail，见 lciod_usbd-stats.c event_push）会继续
+ * 推进 event_tail。此时若无守卫直接回滚 tail-1：
+ *   - 单读者：回滚后 tail 可能 == head 判空，已读事件被"清零"丢失；
+ *   - 多读者（LCD-008 未限制单打开）：回滚到已被新事件覆盖的槽位，
+ *     造成重复消费。
+ * 守卫：仅当 tail 仍等于读后推进位置（期间未被驱逐）才允许回滚——
+ * 与 lcview_ring.c KRN-003 读指针回滚守卫同构。
+ *
+ * @tail_after   当前 event_tail（读取推进后、回滚前）
+ * @consumed_pos 本次读取的事件槽位（读取前 tail）
+ * @buf_size     事件缓冲区大小（VENDOR_LECHAO_USBD_EVENT_BUF_SIZE）
+ * @return 1 未被驱逐，可安全回滚 / 0 已被驱逐推进，禁止回滚
+ */
+int lciod_event_tail_rollback_ok(uint32_t tail_after, uint32_t consumed_pos,
+                                 uint32_t buf_size);
+
+/*
+ * lciod_event_ring_push — 事件环形缓冲区写入推进（调用点纯函数）
+ *
+ * 方向 1（调用点补链）：vendor_lechao_usbd_event_push（lciod_usbd-stats.c）
+ * 的环推进判定（head 写入后 +1；head 追上 tail 即 overflow，丢弃最旧事件
+ * 并推进 tail +1）此前只在内核文件里、不入 host 编译，改坏照绿。本函数
+ * 把该推进判定抽为纯标量逻辑，内核调用点与 host 单测共用同一实现防漂移。
+ *
+ * @head        写入前事件环写指针
+ * @tail        写入前事件环读指针
+ * @buf_size    事件缓冲区大小（VENDOR_LECHAO_USBD_EVENT_BUF_SIZE，恒 32）
+ * @new_tail    出参：推进后的 tail（overflow 时 +1，否则不变）
+ * @dropped     出参：本次是否丢弃最旧事件（1 overflow / 0 正常）
+ * @return 推进后的 head
+ */
+uint32_t lciod_event_ring_push(uint32_t head, uint32_t tail, uint32_t buf_size,
+                               uint32_t *new_tail, int *dropped);
+
 #endif /* LCIOD_READ_LOGIC_H */

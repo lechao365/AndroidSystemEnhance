@@ -116,18 +116,20 @@ def _is_online(endpoint, attempts=3, interval=2):
     return False
 
 
-def ensure_ready(timeout=180, poll_interval=5):
+def ensure_ready(timeout=180, poll_interval=5, endpoint=None):
     """轮询 sys.boot_completed 直到为 1；超时返回 False（设备未完全就绪）。
 
     reboot 后 adb 可能已在线但系统未起完，立即验收会误判；本函数保证
     boot 完成后再进入验收（ws_acceptance.py --wait-ready 调用）。
+    endpoint 非空时 exec 带 -s 定向（多 serial 残留防假红）。
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            r = subprocess.run(build_exec_cmd("getprop sys.boot_completed"),
-                               capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", timeout=10)
+            r = subprocess.run(
+                build_exec_cmd("getprop sys.boot_completed", endpoint=endpoint),
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=10)
             body, code = parse_exec_output(r.stdout)
             if code == 0 and body.strip() == "1":
                 return True
@@ -268,17 +270,31 @@ def ensure_connected(rescue_enabled=False, budget_s=None):
     return ep_rescued
 
 
-def build_exec_cmd(cmd):
-    """exec 命令：输出末尾附 __LE_EXIT_CODE__=<n> 以便解析退出码。"""
-    return [adb_bin(), "shell", f"{cmd}; echo __LE_EXIT_CODE__=$?"]
+def build_exec_cmd(cmd, endpoint=None):
+    """exec 命令：输出末尾附 __LE_EXIT_CODE__=<n> 以便解析退出码。
+
+    endpoint 非空时带 -s <endpoint> 定向执行：多 serial 残留时缺 -s 会被
+    adb 以 "more than one device" 拒绝（假红）；缺省 None 行为不变
+    （单 serial 场景）。"""
+    base = [adb_bin()]
+    if endpoint:
+        base += ["-s", endpoint]
+    return base + ["shell", f"{cmd}; echo __LE_EXIT_CODE__=$?"]
 
 
-def build_logcat_cmd(filter_expr=None, tail=200, since=None, pid=None):
+def build_logcat_cmd(filter_expr=None, tail=200, since=None, pid=None,
+                     endpoint=None):
     """since 非空时以 `-t <since>` 收窄时间窗（代 -t <tail>），
     避免命中上轮旧日志致假绿（如 reboot 后验收须从 reboot 时刻起）；
     pid 非空时追加 --pid=<pid> 按进程归属收窄（logfield 5 段写法：日志按
-    进程筛，防旧进程心跳残留行被当新进程心跳）。"""
-    cmd = [adb_bin(), "logcat", "-d"]
+    进程筛，防旧进程心跳残留行被当新进程心跳）。
+    endpoint 非空时带 -s <endpoint> 定向：多 serial 残留时缺 -s 会被 adb
+    以 "more than one device" 拒绝、logcat 取空输出假红（wsv2-02 收口，
+    与 build_exec_cmd 同款定向）。"""
+    cmd = [adb_bin()]
+    if endpoint:
+        cmd += ["-s", endpoint]
+    cmd += ["logcat", "-d"]
     if filter_expr:
         cmd += ["-s", filter_expr]
     cmd += ["-t", since if since else str(tail)]
@@ -304,9 +320,9 @@ def clock_sync(endpoint=None, max_skew=120):
     时间戳以 UTC 组串并 -u 下发，避免设备时区解释引入新偏差（PIT-5 复发防护）。
     """
     try:
-        r = subprocess.run(build_exec_cmd("date +%s"), capture_output=True,
-                           text=True, encoding="utf-8", errors="replace",
-                           timeout=10)
+        r = subprocess.run(build_exec_cmd("date +%s", endpoint=endpoint),
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=10)
         body, code = parse_exec_output(r.stdout)
     except (OSError, subprocess.TimeoutExpired):
         return False, "无法读取设备时钟（adb 失败或超时）"
@@ -332,7 +348,7 @@ def clock_sync(endpoint=None, max_skew=120):
         return False, "root 后重连失败"
     stamp = time.strftime("%m%d%H%M%Y.%S", time.gmtime())
     try:
-        r = subprocess.run(build_exec_cmd(f"date -u {stamp}"),
+        r = subprocess.run(build_exec_cmd(f"date -u {stamp}", endpoint=endpoint),
                            capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=10)
         body2, code2 = parse_exec_output(r.stdout)
@@ -342,9 +358,9 @@ def clock_sync(endpoint=None, max_skew=120):
         return False, f"date 修正失败 exit={code2}: {body2.strip()!r}"
     # 复核：重读设备时钟确认偏差落回阈值内（仅看退出码不可信，date 可能静默失败）
     try:
-        r = subprocess.run(build_exec_cmd("date +%s"), capture_output=True,
-                           text=True, encoding="utf-8", errors="replace",
-                           timeout=10)
+        r = subprocess.run(build_exec_cmd("date +%s", endpoint=endpoint),
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=10)
         body3, code3 = parse_exec_output(r.stdout)
     except (OSError, subprocess.TimeoutExpired):
         return False, "修正后复核失败（adb 超时）"
@@ -529,6 +545,10 @@ def main(argv=None):
             body, code = parse_exec_output(r.stdout)
             print(body)
             print(f"exit_code: {code}")
+            # adb 层失败（returncode!=0）或 marker 未出现（code=None，输出
+            # 不可信）→ 判 1：断连误判成功会让编排层把失败轮当通过
+            if code is None or r.returncode != 0:
+                return 1
             return 0
         except subprocess.TimeoutExpired:
             print("error: exec 超时")

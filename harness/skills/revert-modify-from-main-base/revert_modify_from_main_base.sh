@@ -36,6 +36,19 @@ HEAD12=$(git rev-parse --short=12 dev)
 
 OLD=$(git rev-parse dev)
 CNT=$(git rev-list --count origin/main.."$OLD")
+# rev-01：force push 前暂存 OLD/CNT 到状态文件——force push 成功而收据落盘
+# 失败退出时，回退已生效但收据未落，重跑时 CNT 已归零（dev==origin/main），
+# 凭状态文件恢复原值补记收据，不再误记「丢弃 0 个提交」
+STATE_DIR="harness/log/revert-modify"
+STATE_FILE="$STATE_DIR/dev-reset.state"
+if [ "$CNT" -eq 0 ] && [ -f "$STATE_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$STATE_FILE"
+  echo "info: 检测到未完成收据的状态文件，恢复原值 OLD=$OLD CNT=$CNT（补记收据）" >&2
+else
+  mkdir -p "$STATE_DIR"
+  printf 'OLD=%s\nCNT=%s\n' "$OLD" "$CNT" > "$STATE_FILE"
+fi
 git checkout dev || exit 1
 git reset --hard origin/main || exit 1
 git push --force origin dev || { echo "error: force push 失败" >&2; exit 2; }
@@ -63,6 +76,8 @@ else
     echo "error: revert 收据提交失败" >&2; exit 1; }
 fi
 git push origin dev || { echo "error: revert 收据推送失败，请人工 push" >&2; exit 2; }
+# 收据已随 dev 提交推送（补记闭环）：清理暂存状态文件
+rm -f "$STATE_FILE"
 
 echo "revert 收据: $RCPT"
 echo "AI 须立即执行恢复验证：/workspace-verify（模式 B：--target main --prefix revert，默认含 boot 验收）"

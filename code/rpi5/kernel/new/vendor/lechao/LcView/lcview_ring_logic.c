@@ -10,8 +10,10 @@
 
 #ifdef __KERNEL__
 #include <linux/string.h>
+#include <linux/errno.h>
 #else
 #include <string.h>
+#include <errno.h>
 #endif
 
 uint32_t ring_avail_write_core(uint32_t size, uint32_t write_pos,
@@ -108,4 +110,37 @@ int ring_read_fit_check(uint32_t copied_total, uint32_t record_len,
     if (copied_total + record_len <= user_len)
         return 0;
     return (copied_total == 0) ? -1 : 1;
+}
+
+int ring_read_fit_errno(int fit)
+{
+    return (fit == 0) ? 0 : -EMSGSIZE;
+}
+
+uint32_t ring_overrun_restore_amt(uint32_t read_val, bool copy_ok)
+{
+    return copy_ok ? 0 : read_val;
+}
+
+int builder_write_fits(uint32_t data_offset, uint32_t add_len,
+                       uint32_t max_size)
+{
+    if (data_offset + LCVIEW_RING_LEN_PREFIX + add_len <= max_size)
+        return 0;
+    return -ENOSPC;
+}
+
+int builder_str_field_fits(uint32_t data_offset, uint32_t data_len,
+                           uint32_t max_size)
+{
+    /* 变长字段总长 = type(1B) + len(2B) + data，再计入 4B 记录前缀 */
+    return builder_write_fits(data_offset, 3 + data_len, max_size);
+}
+
+uint32_t ring_corrupt_skip_len(uint32_t record_len, uint32_t ring_size,
+                               uint32_t default_skip)
+{
+    if (record_len < LCVIEW_RING_LEN_PREFIX || record_len > ring_size)
+        return default_skip;
+    return record_len;
 }

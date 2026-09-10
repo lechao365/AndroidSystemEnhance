@@ -25,14 +25,31 @@ import time
 from pathlib import Path
 
 _LIB_DIR = Path(__file__).resolve().parent
-REPO_ROOT = _LIB_DIR.parent
+# 仓根锚定：CDP_PROJECT_ROOT 可覆盖（测试/异地隔离——git-works-push 在
+# CDP_PROJECT_ROOT=临时仓的集成测试里触发 log_prune 时只清理临时仓，不污染
+# 真实仓日志），无 env 时回退 harness/lib 的两级上级（harness/lib/../..）；
+# 此前误取 parents[0] 得到 harness/，致 DEFAULT_TARGETS 以"harness/log/..."
+# 相对根 glob 恒零命中仍返 0（scanned=0 静默假成功），修整后锚定真仓根
+# （test_repo_root_is_repo_root 不 patch REPO_ROOT 自证，防回归）
+REPO_ROOT = _LIB_DIR.parents[1]
+if os.environ.get("CDP_PROJECT_ROOT", "").strip():
+    REPO_ROOT = Path(os.environ["CDP_PROJECT_ROOT"].strip())
 
 # 默认清理目标（相对仓库根的 glob）：各工作流运行产物
 DEFAULT_TARGETS = [
     "harness/log/git-works-push/*.log",       # push 日报（日粒度追加）
-    "harness/log/promote-*.head",             # promote 头快照
-    "harness/skills/cross-device/log/apply/timings-*.json",  # 打点归档
+    "harness/log/cross-device/promote-*.head",             # promote 头快照
+    "harness/log/cross-device/timings-*.json",  # cdp_timing 打点归档
 ]
+
+
+def _safe_mtime(p):
+    """stat 带 TOCTOU 防护（lib-12）：glob 与 stat 之间文件被并发删除
+    （其他清理进程/用户）时 FileNotFoundError 跳过，不崩。"""
+    try:
+        return p.stat().st_mtime
+    except (FileNotFoundError, OSError):
+        return None
 
 
 def _prune_dir(pattern, cutoff, max_files, plan):
@@ -40,16 +57,19 @@ def _prune_dir(pattern, cutoff, max_files, plan):
 
     规则优先级：先按 mtime < cutoff 删全部超龄；剩余文件数仍超
     max_files 时从最旧继续删。异常（权限等）记 reason 跳过该文件，
-    不中断整体。返回本 pattern 处理摘要 dict。
+    不中断整体。mtime 一次采集复用（lib-12：多次裸 stat 有 TOCTOU 崩溃
+    风险，消失文件按 None 跳过）。返回本 pattern 处理摘要 dict。
     """
-    files = sorted(REPO_ROOT.glob(pattern), key=lambda p: p.stat().st_mtime)
-    stale = [f for f in files if f.stat().st_mtime < cutoff]
+    entries = [(p, _safe_mtime(p)) for p in REPO_ROOT.glob(pattern)]
+    mtimes = {p: mt for p, mt in entries if mt is not None}
+    files = sorted(mtimes, key=mtimes.get)
+    stale = [f for f in files if mtimes[f] < cutoff]
     over = [] if len(files) <= max_files else files[:len(files) - max_files]
-    victims = sorted(set(stale) | set(over), key=lambda p: p.stat().st_mtime)
+    victims = sorted(set(stale) | set(over), key=lambda p: mtimes[p])
     removed = []
     for f in victims:
         entry = {"file": str(f.relative_to(REPO_ROOT)),
-                 "mtime": f.stat().st_mtime}
+                 "mtime": mtimes[f]}
         try:
             if plan["apply"]:
                 f.unlink()
@@ -88,6 +108,15 @@ def main(argv=None):
     ap.add_argument("--apply", action="store_true",
                     help="实际执行删除（缺省仅 dry-run 打印计划）")
     args = ap.parse_args(argv)
+    # --target 越界拒绝（lib-12）：resolve 后必须落在仓根内，`../` 相对
+    # 路径越出仓根即拒（docstring"误删面受控"约束，防误删仓外文件）
+    root_resolved = REPO_ROOT.resolve()
+    for pattern in args.target:
+        probe = (REPO_ROOT / pattern).resolve()
+        if probe != root_resolved and root_resolved not in probe.parents:
+            print(f"error: --target 解析后越出仓根，拒绝: {pattern}",
+                  file=sys.stderr)
+            return 2
     plan = run(days=args.days, max_files=args.max_files,
                targets=args.target or None, apply=args.apply)
     print(json.dumps(plan, ensure_ascii=False, indent=2))

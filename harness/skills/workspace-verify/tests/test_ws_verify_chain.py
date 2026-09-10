@@ -6,8 +6,11 @@
 # 注：_CHAIN_STEPS patch 为步骤名序列（真实 argv 由 _build_argv/_build_report_argv
 # 按步骤名构造）；Popen 打桩隔离真实子进程；_RUNS_DIR patch 到临时目录。
 
+import contextlib
+import io
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -37,7 +40,7 @@ def _fake_popen(rc=0):
 
 
 def _script_names(calls):
-    return [os.path.basename(c[1]) for c in calls]
+    return [os.path.basename(c.args[0][1]) for c in calls]
 
 
 class TestChain(unittest.TestCase):
@@ -71,14 +74,101 @@ class TestChain(unittest.TestCase):
         self.assertEqual(result["exit_rc"], 0)
         self.assertEqual([s["name"] for s in result["steps"]],
                          ["sync", "connect", "push", "unit_test",
-                          "acceptance", "report"])
-        self.assertEqual([s["rc"] for s in result["steps"]], [0] * 6)
+                          "acceptance", "package", "report"])
+        self.assertEqual([s["rc"] for s in result["steps"]], [0] * 7)
         self.assertEqual(result["skipped"], [])
 
+    def test_package_step_uses_systemd_run_with_batch_id_evidence(self):
+        # 方向 3：package 步用 systemd-run --user --wait 拉起 ws_package.py，
+        # --evidence-file 指向 package-<batch_id>.json（与 ws_report 探测同源）；
+        # 打包失败不置 overall=fail、不阻断链（证据补充非门禁）
+        calls = []
+        ctor = mock.Mock(side_effect=lambda argv, **kw: (
+            calls.append(argv),
+            mock.Mock(wait=mock.Mock(return_value=0)))[1])
+        with mock.patch.object(wc.subprocess, "Popen", ctor), \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(batch_file=str(self.batch),
+                                      use_locks=False)
+        self.assertEqual(rc, 0)
+        self.assertEqual(result["overall"], "pass")
+        pkg = next(c for c in calls
+                   if any(os.path.basename(x) == "ws_package.py" for x in c))
+        # argv: [systemd-run, --user, --wait, python, ws_package.py, ...]
+        self.assertEqual(pkg[0], "systemd-run")
+        self.assertEqual(pkg[1], "--user")
+        self.assertEqual(pkg[2], "--wait")
+        self.assertIn("--evidence-file", pkg)
+        bid = wc.batch_id_from_text(self.batch.read_text(encoding="utf-8"))
+        self.assertEqual(pkg[pkg.index("--evidence-file") + 1],
+                         str(wc._SCRIPT_DIR.parents[1] / "log"
+                             / "workspace-verify"
+                             / f"package-{bid}.json"))
+
+    def test_package_failure_does_not_fail_chain(self):
+        # 方向 3：package 失败（如 sudo 不可用）只记步不改 overall，
+        # report 仍落盘（evidence 已含真实 script_rc 供内嵌）
+        def run(argv, **kw):
+            if any(os.path.basename(x) == "ws_package.py" for x in argv):
+                return mock.Mock(wait=mock.Mock(return_value=1))
+            return mock.Mock(wait=mock.Mock(return_value=0))
+        ctor = mock.Mock(side_effect=run)
+        with mock.patch.object(wc.subprocess, "Popen", ctor), \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(batch_file=str(self.batch),
+                                      use_locks=False)
+        self.assertEqual(rc, 0)
+        self.assertEqual(result["overall"], "pass")
+        by_name = {s["name"]: s for s in result["steps"]}
+        self.assertEqual(by_name["package"]["rc"], 1)
+        # report 步仍执行（steps 含 report）
+        self.assertIn("report", by_name)
+
     def test_run_id_shared_with_children(self):
-        # 编排器注入 CDP_RUN_ID：push/unit_test/acceptance 产物同批同 run_id
-        rc, result, _ = self._run()
-        self.assertEqual(os.environ.get("CDP_RUN_ID"), result["run_id"])
+        # 编排器注入 CDP_RUN_ID：链内子步骤经 env 读取同批 run_id（产物
+        # 同批核验依赖）；链结束复原现场（CDP_RUN_ID 不残留，防同进程
+        # 多轮 run_chain 串扰）
+        seen = []
+        ctor, _ = _fake_popen(0)
+        ctor.side_effect = lambda argv, **kw: (
+            seen.append(os.environ.get("CDP_RUN_ID")),
+            mock.Mock(wait=mock.Mock(return_value=0)))[1]
+        with mock.patch.object(wc.subprocess, "Popen", ctor), \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(batch_file=str(self.batch),
+                                      use_locks=False)
+        self.assertEqual(rc, 0)
+        self.assertTrue(seen)
+        self.assertTrue(all(v == result["run_id"] for v in seen),
+                        "链内子进程须能从 env 读到本轮 run_id")
+        self.assertIsNone(os.environ.get("CDP_RUN_ID"),
+                          "chain 结束须复原 CDP_RUN_ID 现场")
+
+    def test_cdp_run_id_not_leaked_between_chains(self):
+        # wsv-02：同进程连续两轮 run_chain——第二轮 run_id 不同于首轮
+        #（泄漏会使两轮产物共享 run_id，ws_report 同批核验串扰）
+        rc1, r1, _ = self._run()
+        rc2, r2, _ = self._run()
+        self.assertEqual(rc1, 0)
+        self.assertEqual(rc2, 0)
+        self.assertNotEqual(r1["run_id"], r2["run_id"])
+        self.assertIsNone(os.environ.get("CDP_RUN_ID"))
+
+    def test_cdp_run_id_preexisting_restored(self):
+        # wsv-02：外部注入的 CDP_RUN_ID 优先复用，chain 结束复原为原值
+        os.environ["CDP_RUN_ID"] = "pre-run-001"
+        try:
+            rc, result, _ = self._run()
+            self.assertEqual(result["run_id"], "pre-run-001")
+            self.assertEqual(os.environ.get("CDP_RUN_ID"), "pre-run-001")
+        finally:
+            os.environ.pop("CDP_RUN_ID", None)
 
     def test_step_argv_shape(self):
         # 各步 argv 形态：脚本与关键参数（connect=ensure、acceptance 带
@@ -136,7 +226,7 @@ class TestChain(unittest.TestCase):
         self.assertEqual([s["name"] for s in result["steps"]],
                          ["sync", "connect", "push", "report"])
         self.assertEqual([s["rc"] for s in result["steps"]], [0, 0, 1, 0])
-        self.assertEqual(result["skipped"], ["unit_test", "acceptance"])
+        self.assertEqual(result["skipped"], ["unit_test", "acceptance", "package"])
         self.assertIn("unit_test", result["skip_reasons"])
         self.assertIn("链已停", result["skip_reasons"]["unit_test"])
 
@@ -192,7 +282,7 @@ class TestChain(unittest.TestCase):
         self.assertTrue(killed["canceled"])
         # A1 后 report 步执行落 fail 收据（不在 skipped 内）
         self.assertEqual(result["skipped"],
-                         ["connect", "push", "unit_test", "acceptance"])
+                         ["connect", "push", "unit_test", "acceptance", "package"])
 
     def test_run_state_json_written(self):
         # 运行态落盘（仅编排器写）：runs/<run_id>.json 记真实 rc/起止/canceled
@@ -242,8 +332,11 @@ class TestChain(unittest.TestCase):
         rep = next(" ".join(c) for c in calls if "ws_report.py" in c[1])
         self.assertIn("--timings-file", rep)
         self.assertIn(str(tpath), rep)
-        # 3) 子脚本自发 mark 定位本批：CDP_BATCH_ID 注入
-        self.assertEqual(os.environ.get("CDP_BATCH_ID"), bid)
+        # 3) 子脚本自发 mark 定位本批：CDP_BATCH_ID 注入生效（链内子进程
+        #    读 env 定位），chain 结束已复原——方向 5：残留会污染同进程
+        #    后续用例（单测进程内多次 run_chain 错绑批次）
+        self.assertIsNone(os.environ.get("CDP_BATCH_ID"),
+                          "CDP_BATCH_ID 用完须复原，不得残留污染后续用例")
         # 4) 模拟链路真实耗时（起跑时刻回拨 5s）→ ws_report 解析
         #    elapsed_s > 0 且 timings 非空（segments 含链内段）
         data["start_wall"] -= 5.0
@@ -271,13 +364,27 @@ class TestChain(unittest.TestCase):
         ctor.assert_not_called()
         self.assertEqual(list(self.runs.glob("*.json")), [])
 
+    def test_lock_held_requests_yield(self):
+        # 方向 1（闲时加固让路协议）：正式任务取锁失败即置让路标志，持锁的
+        # idle-hardening 会话在原子步骤边界检查到后收敛让路（不抢占验证中的
+        # 正式任务）
+        with mock.patch.object(wc.ws_lock, "verify_locks",
+                               side_effect=wc.ws_lock.LockHeld("占用")), \
+                mock.patch.object(wc.ws_lock, "request_yield") as req_yield, \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(batch_file=str(self.batch))
+        self.assertEqual(rc, 3)
+        req_yield.assert_called_once()
+
     def test_no_batch_skips_acceptance_and_report(self):
         # 无验收源/无收据源（裸三步用法兼容）：acceptance/report 记 skipped
         rc, result, _ = self._run(batch_file=None)
         self.assertEqual(rc, 0)
         self.assertEqual([s["name"] for s in result["steps"]],
                          ["sync", "connect", "push", "unit_test"])
-        self.assertEqual(result["skipped"], ["acceptance", "report"])
+        self.assertEqual(result["skipped"], ["acceptance", "package", "report"])
         self.assertIn("acceptance", result["skip_reasons"])
         self.assertIn("report", result["skip_reasons"])
 
@@ -297,7 +404,7 @@ class TestChain(unittest.TestCase):
         self.assertEqual([s["name"] for s in result["steps"]],
                          ["sync", "connect", "push", "unit_test",
                           "acceptance"])
-        self.assertEqual(result["skipped"], ["report"])
+        self.assertEqual(result["skipped"], ["package", "report"])
         acc = next(c for c in calls if "ws_acceptance.py" in c[1])
         self.assertIn("--case", acc)
         self.assertNotIn("--batch-file", acc)
@@ -357,6 +464,162 @@ class TestDeriveReportArgs(unittest.TestCase):
         self.assertEqual(rc, 0)
         rep = next(" ".join(c) for c in calls if "ws_report.py" in c[1])
         self.assertIn("--build fail", rep)
+
+    def test_push_executed_fail_build_fail(self):
+        # wsv-13：push 已执行且 rc!=0（含编译产物缺失）→ build=fail
+        #（不得机械降级 skip 掩盖编译段失败）
+        d = wc._derive_report_args(
+            self._steps(("sync", 0), ("connect", 0), ("push", 1)), "fail")
+        self.assertEqual((d["result"], d["build"], d["board"]),
+                         ("fail", "fail", "fail"))
+
+    def test_coverage_fail_then_acceptance_fail_board_fail(self):
+        # 方向 4：coverage 步（只记录不门禁）失败不得抢先成为 failed，使
+        # board 判 skip 掩盖其后真实上板失败（acceptance 在板上跑失败 → fail）
+        d = wc._derive_report_args(
+            self._steps(("sync", 0), ("push", 0), ("unit_test", 0),
+                        ("coverage", 1), ("acceptance", 1)), "fail")
+        self.assertEqual((d["result"], d["build"], d["board"]),
+                         ("fail", "pass", "fail"))
+        self.assertIn("acceptance", d["summary"], "链停归因须落到真实失败步")
+
+    def test_coverage_fail_alone_does_not_change_overall(self):
+        # 方向 4：coverage 失败不改 overall（只记录不门禁），board 仍全过
+        #（无真实上板失败，coverage 失败仅是记录）
+        d = wc._derive_report_args(
+            self._steps(("sync", 0), ("push", 0), ("unit_test", 0),
+                        ("coverage", 1), ("acceptance", 0)), "pass")
+        self.assertEqual((d["result"], d["build"], d["board"]),
+                         ("pass", "pass", "pass"))
+        self.assertIn("全链通过", d["summary"])
+
+    def test_push_not_executed_build_skip(self):
+        # wsv-13：push 未执行（sync 失败停链，步骤不在 steps）→ build=skip
+        d = wc._derive_report_args(self._steps(("sync", 1)), "fail")
+        self.assertEqual((d["result"], d["build"], d["board"]),
+                         ("fail", "skip", "skip"))
+
+    def test_push_canceled_build_fail(self):
+        # wsv-13：push 超时取消（步骤已执行、rc=None）→ build=fail
+        d = wc._derive_report_args(
+            [{"name": "push", "rc": None, "canceled": True}], "fail")
+        self.assertEqual(d["build"], "fail")
+
+
+class TestSelfcheckFallbackRcKeys(unittest.TestCase):
+    """wsv-01：selfcheck 超时/启动失败兜底文本须覆盖 REQUIRED_RC_KEYS 全集
+    （跨模块一致：ws_report 缺任一 *_rc 键即拒写，兜底文本缺键会让故障场景
+    以错误的「缺键」门禁判 2，诊断失真）。"""
+
+    def _fallback_text(self, exc):
+        with mock.patch.object(wc.subprocess, "run", side_effect=exc):
+            return wc._run_selfcheck(timeout=1)
+
+    def _report_reject_stderr(self, selfcheck_text):
+        """把兜底文本喂给 ws_report.main（-s 批，result=skip），返回 stderr。
+        期望路径：rc 键校验通过 → 按「非零退出码」判 2（而非「缺 *_rc」）。"""
+        import ws_report
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict("os.environ", {"CDP_PROJECT_ROOT": d}):
+                batch = Path(d) / "b.cdp"
+                batch.write_text(
+                    "-s base:1a2b3c4d5e6f\n"
+                    "意图: selfcheck 兜底文本 rc 键覆盖端到端验证用批次（占位"
+                    "说明文字拉长长度以满足批次长度预算要求，无实际编辑意图）。\n"
+                    "验收: 无\n"
+                    "方向: 1) 端到端验证兜底文本能通过 ws_report 缺键门禁判红。\n",
+                    encoding="utf-8")
+                body = Path(d) / "body.txt"
+                body.write_text("## 现场\n", encoding="utf-8")
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    ws_report.main([
+                        "--batch-file", str(batch), "--body", str(body),
+                        "--result", "skip", "--build", "skip",
+                        "--board", "skip", "--summary", "s",
+                        "--selfcheck", selfcheck_text])
+                return err.getvalue()
+
+    def test_timeout_text_covers_required_rc_keys(self):
+        # 超时兜底文本：键集合 == REQUIRED_RC_KEYS 全集（动态同源）
+        from selfcheck import REQUIRED_RC_KEYS
+        text = self._fallback_text(subprocess.TimeoutExpired("x", 1))
+        found = set(re.findall(r"\b(\w+_rc)=\d+\b", text))
+        self.assertEqual(found, set(REQUIRED_RC_KEYS))
+        self.assertIn("pytest_rc=124", text, "超时 rc 语义值保留")
+        # 能通过 ws_report 的 rc 键校验：报错为「非零退出码」（真实语义），
+        # 不得再出现「缺 *_rc」的缺键误报
+        stderr = self._report_reject_stderr(text)
+        self.assertIn("非零退出码", stderr)
+        self.assertNotIn("缺 ", stderr)
+
+    def test_oserror_text_covers_required_rc_keys(self):
+        # 启动失败兜底文本：同样覆盖全集且通过 rc 键校验
+        from selfcheck import REQUIRED_RC_KEYS
+        text = self._fallback_text(OSError("adb missing"))
+        found = set(re.findall(r"\b(\w+_rc)=\d+\b", text))
+        self.assertEqual(found, set(REQUIRED_RC_KEYS))
+        self.assertIn("启动失败", text)
+        stderr = self._report_reject_stderr(text)
+        self.assertIn("非零退出码", stderr)
+        self.assertNotIn("缺 ", stderr)
+
+
+class TestQuickMode(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.runs = Path(self._tmp.name) / "runs"
+        self.batch = Path(self._tmp.name) / "b.cdp"
+        self.batch.write_text(_BATCH % ("a" * 12), encoding="utf-8")
+        envpatcher = mock.patch.dict("os.environ", {}, clear=False)
+        envpatcher.start()
+        self.addCleanup(envpatcher.stop)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_quick_runs_sync_host_and_selfcheck_no_receipt(self):
+        # --quick：只跑 sync + host-tests + selfcheck，不触碰设备、不落收据
+        ctor, proc = _fake_popen(0)
+        with mock.patch.object(wc.subprocess, "Popen", ctor), \
+                mock.patch.object(wc, "_RUNS_DIR",
+                                  Path(self._tmp.name) / "runs") as runs, \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK), \
+                mock.patch.object(wc, "_build_argv",
+                                  side_effect=wc._build_argv):
+            rc, result = wc.run_quick(use_locks=False)
+        names = _script_names(ctor.call_args_list)
+        self.assertEqual(names, ["sync_code_to_workspace.py",
+                                 "check_host_tests.py"])
+        self.assertEqual(rc, 0)
+        # 不落运行态/收据
+        self.assertFalse(list(runs.glob("*.json")) if runs.exists() else False)
+
+    def test_quick_host_fail_returns_1(self):
+        def _popen(argv, **kw):
+            proc = mock.Mock()
+            proc.wait = mock.Mock(return_value=1
+                                  if "check_host_tests" in str(argv) else 0)
+            return proc
+        with mock.patch.object(wc.subprocess, "Popen", _popen), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, _ = wc.run_quick(use_locks=False)
+        self.assertEqual(rc, 1)
+
+    def test_coverage_step_runs_after_unit_test(self):
+        ctor, proc = _fake_popen(0)
+        with mock.patch.object(wc.subprocess, "Popen", ctor), \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(batch_file=str(self.batch),
+                                      coverage=True, use_locks=False)
+        names = _script_names(ctor.call_args_list)
+        self.assertIn("ws_coverage.py", names)
+        self.assertGreater(
+            [i for i, n in enumerate(names) if n == "ws_coverage.py"][0],
+            [i for i, n in enumerate(names) if n == "ws_upload_tests.py"][0])
 
 
 if __name__ == "__main__":

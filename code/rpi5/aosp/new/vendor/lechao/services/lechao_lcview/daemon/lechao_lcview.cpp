@@ -48,8 +48,10 @@ static void signalHandler(int) {
 
 // ============================================================
 // 主循环三段拆分（本批）：原 runMainLoop 105 行仍超长，按职责拆为
-// 读取（readOnce）/ 心跳（emitHeartbeat）/ 落盘（flushSegment），
-// 行为完全不变（拆分自原 main() 的 runMainLoop）
+// 读取（readOnce）/ 心跳（emitHeartbeat）/ 落盘（flushSegment）。
+// 丢数据收口：读取前若缓冲剩余空间不足内核最小读单位，先预防性
+// flush（方向 1）；两条出口（致命读错误 / 优雅退出）前强制 flush
+// 残留（方向 2）——除这两处外主体行为与拆分时一致。
 // ============================================================
 
 // 读取段：单次 epoll 读 + 读计数 + 致命读错误处理
@@ -186,6 +188,8 @@ static int runMainLoop(EpollDeviceReader& reader, SchemaParser& schema,
     long long invalidRecords = 0;
     static constexpr size_t kBufSize = 64 * 1024;
     static constexpr int kEpollTimeoutMs = 1000;
+    // 内核单次读最小容量：内核 read 要求 cap-offset >= 4096，否则 -EINVAL
+    static constexpr size_t kMinReadSize = 4096;
     uint8_t buf[kBufSize];
     size_t offset = 0;
     auto dataArrivedAt = std::chrono::steady_clock::time_point::max();
@@ -193,12 +197,26 @@ static int runMainLoop(EpollDeviceReader& reader, SchemaParser& schema,
     auto lastBeatAt = std::chrono::steady_clock::now();
 
     while (gRunning) {
+        // 方向 1 预防性 flush：缓冲剩余空间不足以容纳内核最小读单位时，
+        // 先强制落盘清空缓冲，令 read 的 cap-offset 恒 >= kMinReadSize，
+        // 根治内核侧 -EINVAL 触发的主循环退出重启环
+        if (shouldPreventiveFlush(offset, kBufSize, kMinReadSize)) {
+            flushSegment(reader, schema, writer, buf, offset, dataArrivedAt,
+                         flushCount, jsonlRecords, invalidRecords, 0, kBufSize);
+        }
+
         ssize_t n = readOnce(reader, buf, kBufSize, kEpollTimeoutMs, offset,
                              readOk, readEmpty, readErr, dataArrivedAt);
         loopCount++;
 
-        if (n < 0)
+        if (n < 0) {
+            // 方向 2：致命读错误退出前强制落盘缓冲残留，不丢已收数据
+            if (shouldFlushOnExit(offset)) {
+                flushSegment(reader, schema, writer, buf, offset, dataArrivedAt,
+                             flushCount, jsonlRecords, invalidRecords, 0, kBufSize);
+            }
             return 1;  // 致命读错误：readOnce 已打日志，退出交 init 重启
+        }
 
         // 心跳时间驱动：距上次满 30s 才发（原 loopCount % 30 在重载下
         // epoll 立返、loop 计数快速膨胀，心跳空转刷屏；时间驱动与
@@ -230,6 +248,11 @@ static int runMainLoop(EpollDeviceReader& reader, SchemaParser& schema,
           static_cast<unsigned long long>(readEmpty),
           static_cast<unsigned long long>(readErr),
           static_cast<unsigned long long>(flushCount));
+    // 方向 2：优雅退出前强制落盘缓冲残留，不丢已收数据
+    if (shouldFlushOnExit(offset)) {
+        flushSegment(reader, schema, writer, buf, offset, dataArrivedAt,
+                     flushCount, jsonlRecords, invalidRecords, 0, kBufSize);
+    }
     return 0;
 }
 

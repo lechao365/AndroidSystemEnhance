@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -93,6 +94,12 @@ def strip_line_suffix(p: str) -> str:
 def path_like(p: str) -> bool:
     if is_remote(p) or p.startswith("#"):
         return False
+    if p.startswith("harness/log/"):
+        # 运行期产物域（方向 2）：harness/log 全 gitignore，SKILL/文档引用其
+        # 下路径是描述落盘位置（如 sync-code-to-workspace artifacts），干净
+        # 克隆下不存在——判悬空会在 CI 恒红，且产物域非仓库资产无引用完整性
+        # 意义，整前缀豁免（harness/log 内容本身亦在 EXEMPT_RELS 不扫描）。
+        return False
     if PLACEHOLDER.search(p) or "<" in p or ">" in p:
         # 含尖括号占位的 token（如 data/verify-results/<ts>-<batch_id>.md）跳过
         return False
@@ -129,28 +136,72 @@ def strip_anchor(p: str) -> str:
 # 防每个裸文件名 token 都全仓 rglob 一次导致扫描变慢
 _INDEX_CACHE: dict[str, dict[str, int]] = {}
 
+# git ls-files 缓存（key=ROOT 绝对路径，None=非 git 仓回落 rglob）
+_GIT_LS_CACHE: dict[str, list[Path] | None] = {}
+
+
+def _git_ls_files() -> list[Path] | None:
+    """git ls-files 一次性列出工作树文件面：已跟踪 + 未跟踪非忽略文件
+    （相对 ROOT）；非 git 仓返 None。
+
+    方向 4 未跟踪并入：此前只列跟踪文件，新增但未 git add 的 SKILL/文档/
+    脚本不进扫描面，其内悬空引用漏判——上板前假证据。git ls-files 一旦给
+    --others 就不再隐含 --cached（实测只列未跟踪），故显式 --cached 保留
+    跟踪文件面（语义不回退）；--others 并入未跟踪，--exclude-standard 让
+    .gitignore 生效排除忽略产物；输出 sorted(set()) 去重合并排序（git 输出
+    untracked/tracked 两组各自有序、合并非全局有序，调用方需确定性）。
+    全树 rglob 在 apply 机 WSL2 drvfs 慢到 ~39s（扫到 .git 对象/__pycache__
+    等大量非仓库资产），而 emit 本机仅 0.38s——refs 是自检关键路径，改用
+    git ls-files（本仓 git 仓，快一两个数量级）。"""
+    key = str(ROOT.resolve())
+    if key in _GIT_LS_CACHE:
+        return _GIT_LS_CACHE[key]
+    try:
+        r = subprocess.run(["git", "ls-files", "--cached", "--others",
+                            "--exclude-standard"], cwd=ROOT,
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+    except Exception:
+        r = None
+    if r is None or r.returncode != 0:
+        _GIT_LS_CACHE[key] = None
+        return None
+    files = sorted({Path(ln) for ln in r.stdout.splitlines() if ln})
+    _GIT_LS_CACHE[key] = files
+    return files
+
 
 def _basename_count(name: str) -> int:
     """仓内 basename 为 name 的文件数（方向 3 裸文件名唯一匹配判定）。
 
-    索引须排除 .git 与 EXEMPT_RELS 目录（docs/superpowers、harness/log）：
-    这些目录含大量非仓库资产的同名文件（日志产物/历史计划），纳入索引会
-    把"引用不存在的文件"误判为"多义跳过"（防误报变漏网）。
+    索引须排除 EXEMPT_RELS 目录（docs/superpowers、harness/log）：这些目录
+    含大量非仓库资产的同名文件（日志产物/历史计划），纳入索引会把"引用
+    不存在的文件"误判为"多义跳过"（防误报变漏网）。
+    数据源优先 git ls-files（跟踪+未跟踪非忽略，快）；非 git 仓回落全树 rglob。
     """
     root = ROOT.resolve()
     key = str(root)
     idx = _INDEX_CACHE.get(key)
     if idx is None:
         idx = {}
-        exempt = tuple(root / r for r in EXEMPT_RELS)
-        for f in root.rglob("*"):
-            if not f.is_file():
-                continue
-            if ".git" in f.parts:
-                continue
-            if any(f.is_relative_to(ex) for ex in exempt):
-                continue
-            idx[f.name] = idx.get(f.name, 0) + 1
+        files = _git_ls_files()
+        if files is not None:
+            # git ls-files 输出相对 ROOT，豁免用相对路径比较
+            exempt_rel = tuple(Path(r) for r in EXEMPT_RELS)
+            for f in files:
+                if any(f.is_relative_to(ex) for ex in exempt_rel):
+                    continue
+                idx[f.name] = idx.get(f.name, 0) + 1
+        else:
+            exempt = tuple(root / r for r in EXEMPT_RELS)
+            for f in root.rglob("*"):  # GITLS-FALLBACK: 非 git 仓回落
+                if not f.is_file():
+                    continue
+                if ".git" in f.parts:
+                    continue
+                if any(f.is_relative_to(ex) for ex in exempt):
+                    continue
+                idx[f.name] = idx.get(f.name, 0) + 1
         _INDEX_CACHE[key] = idx
     return idx.get(name, 0)
 
@@ -200,14 +251,23 @@ def scan_file(f: Path) -> list[str]:
 
 
 def scan_command_files() -> list[tuple[Path, list[str]]]:
-    """.opencode/command/*.md 的 @ 引用检查。"""
+    """.opencode/command/*.md 的 @ 引用检查。
+
+    读文件异常防护（lib-08，对齐 scan_file 口径）：OSError/UnicodeDecodeError
+    结构化跳过（stderr warn 留痕），不崩也不误报悬空。
+    """
     out: list[tuple[Path, list[str]]] = []
     commands = ROOT / ".opencode" / "command"
     if not commands.is_dir():
         return out
     for f in sorted(commands.glob("*.md")):
+        try:
+            txt = f.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"warn: command 文件读取失败，跳过: {f}: {e}", file=sys.stderr)
+            continue
         misses: list[str] = []
-        for m in AT_RE.finditer(f.read_text(encoding="utf-8")):
+        for m in AT_RE.finditer(txt):
             p = m.group(1)
             if not (ROOT / p).exists():
                 misses.append(p)
@@ -225,13 +285,31 @@ def iter_scan_targets(rel: str | None) -> list[Path]:
     bases = [ROOT / rel] if rel else [ROOT / "harness" / "skills", ROOT / "docs"]
     exempt = tuple(ROOT / r for r in EXEMPT_RELS)
     targets: list[Path] = []
+    files = _git_ls_files()
+    if files is not None:
+        # 文件面=跟踪+未跟踪非忽略（无 __pycache__/.pytest_cache 且不含
+        # .git），输出相对 ROOT（快）；tests 目录与豁免/后缀过滤与 rglob
+        # 口径一致
+        base_rels = [Path(rel)] if rel else [Path("harness/skills"), Path("docs")]
+        exempt_rel = tuple(Path(r) for r in EXEMPT_RELS)
+        for f in files:
+            if not any(f.is_relative_to(b) for b in base_rels):
+                continue
+            if "tests" in f.parts:
+                continue
+            if any(f.is_relative_to(ex) for ex in exempt_rel):
+                continue
+            if f.suffix not in (".md", ".py", ".sh", ".yaml", ".yml", ".conf"):
+                continue
+            targets.append(ROOT / f)
+        return targets
     for base in bases:
         if base.is_file():
             targets.append(base)
             continue
         if not base.is_dir():
             continue
-        for f in sorted(base.rglob("*")):
+        for f in sorted(base.rglob("*")):  # GITLS-FALLBACK: 非 git 仓回落
             if not f.is_file():
                 continue
             if "__pycache__" in f.parts or ".pytest_cache" in f.parts or "tests" in f.parts:
@@ -259,11 +337,12 @@ def main() -> int:
     # 收集全部悬空（文件集 + .opencode/command @ 引用）
     dangling: list[tuple[Path, list[str]]] = []
     targets = iter_scan_targets(args.path)
-    if not args.path and not targets:
-        # 方向 5：无 --path 且默认扫描目标为空（扫描根缺失/被全豁免）即判红，
-        # 防扫描根失效假通过（parents[1] 时代 ROOT 解析错误致扫描恒空的历史教训）
-        print("error: 无 --path 且默认扫描目标为空（扫描根缺失或全豁免），判红",
-              file=sys.stderr)
+    if not targets:
+        # 方向 5 + lib-05 fail-closed：默认分支与 --path 分支统一判空判红——
+        # --path 指向不存在/拼错路径时 targets 同样为空，此前漏判致静默
+        # 假绿 exit 0（扫描对象缺失 ≠ 引用完整）
+        print("error: 扫描目标为空（无 --path 且扫描根缺失/全豁免，或 --path "
+              "指向不存在的路径），判红", file=sys.stderr)
         return 1
     for f in targets:
         misses = scan_file(f)

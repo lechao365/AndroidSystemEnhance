@@ -10,7 +10,14 @@
   sync_code_to_workspace.py --auto                            # 单进程闭环（生成→全选→执行→校验）
 """
 
-import sys, os, subprocess, shutil, tempfile, argparse, atexit, time
+import sys
+import os
+import subprocess
+import shutil
+import tempfile
+import argparse
+import atexit
+import time
 from pathlib import Path
 from datetime import datetime
 from functools import lru_cache
@@ -126,7 +133,17 @@ def _git_check(*args: str, cwd: str | Path = ".", timeout: int = 300) -> bool:
 
 
 def _find_upstream_base(cwd: str | Path = ".") -> str | None:
-    ups_ref = _git_lines("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}", cwd=cwd)
+    """当前分支 upstream 与 HEAD 的 merge-base；无 upstream 返回 None。
+
+    用 _git_run 直接执行并静默处理失败：repo 按 tag 检出的 AOSP 项目是
+    detached HEAD，无 @{upstream} 属正常状态，不应逐项目刷 ERROR 日志
+    （调用方按上下文决定 warn/error）。此前用 _git_lines 会为每个
+    detached 项目打一条 ERROR（985 项目刷屏）。
+    """
+    r = _git_run(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], cwd)
+    if r.returncode != 0:
+        return None
+    ups_ref = [l.strip() for l in r.stdout.splitlines() if l.strip()]
     if not ups_ref:
         return None
     base = _git_lines("merge-base", "HEAD", ups_ref[0], cwd=cwd)
@@ -168,15 +185,65 @@ def _resolve_proj_cwd(proj: str) -> str | None:
 
 
 def _resolve_workspace_target(proj: str, rel: str) -> str | None:
-    """解析 workspace 目标路径。repo 项目 rel 相对项目根；非 repo 项目 rel 相对 aosp 根（含 scope 前缀）。"""
+    """解析 workspace 目标路径（含包含性校验）。
+
+    repo 项目 rel 相对项目根；非 repo 项目 rel 相对 aosp 根（含 scope 前缀）。
+    解析结果必须严格位于对应基准根（repo 项目为项目 ws；非 repo 项目为
+    _aosp_ws()）之内：rel 为绝对路径或含 ../ 穿越时越界，返回 None
+    （调用方已有 None 判红路径），防 rmtree/unlink 越出 workspace。
+
+    **返回未解析路径**（`base/rel` 词法路径而非 `.resolve()` 结果）：删除
+    语义须作用于路径本身——若 rel 是符号链接，返回 resolve 后路径会指向
+    链接目标（真实目录/文件），删除即误删链接背后实体；由调用方在删除前
+    判 `os.path.islink` 只 unlink 链接本身（方向 1 修复）。
+    """
     if proj.startswith("aosp:"):
         scope = proj.split(":", 1)[1]
         if rel.startswith(scope + os.sep):
-            return os.path.join(_aosp_ws(), rel)
-    ws = _resolve_proj_cwd(proj)
-    if not ws:
+            base = Path(_aosp_ws())
+        else:
+            base = Path(_resolve_proj_cwd(proj) or "")
+    else:
+        base = Path(_resolve_proj_cwd(proj) or "")
+    if not str(base):
         return None
-    return os.path.join(ws, rel)
+    try:
+        resolved = Path(base / rel).resolve()
+        base_resolved = base.resolve()
+    except (OSError, ValueError) as e:
+        log_error(f"workspace 目标解析失败（拒绝）: {proj}/{rel}: {e}")
+        return None
+    if resolved == base_resolved or base_resolved not in resolved.parents:
+        log_error(f"workspace 目标越界（拒绝）: {proj}/{rel} → {resolved} 不在基准根 {base_resolved} 内")
+        return None
+    # 包含性校验用 resolve 判定，返回值保留未解析词法路径（符号链接删除语义）
+    return str(Path(base / rel))
+
+
+def _ws_scan_flags() -> tuple[bool, bool]:
+    """kernel/aosp 两侧 workspace 有效性判定。
+
+    配置了路径但校验失败时 log_warn 指明跳过范围（sync-11）：静默不扫会让
+    该侧偏离无感。路径未配置（空串）不告警。
+    """
+    kernel_ws = _kernel_ws()
+    kernel_ok = bool(kernel_ws) and (Path(kernel_ws) / ".git").is_dir()
+    if kernel_ws and not kernel_ok:
+        log_warn(f"KERNEL_WS 已配置但校验失败（缺 .git），跳过 kernel 侧扫描: {kernel_ws}")
+    aosp_ws = _aosp_ws()
+    aosp_ok = bool(aosp_ws) and (Path(aosp_ws) / ".repo").is_dir()
+    if aosp_ws and not aosp_ok:
+        log_warn(f"AOSP_WS 已配置但校验失败（缺 .repo），跳过 aosp 侧扫描: {aosp_ws}")
+    return kernel_ok, aosp_ok
+
+
+def _warn_dirty_code_tree() -> None:
+    """code 工作树非干净时显式告警（sync-05）：真相源声明以 HEAD 为准，但
+    diff/new 内容实际读 code 工作树磁盘文件，脏树会把未提交改动一并同步。
+    保持默认放行（不阻断），仅留痕提示。"""
+    r = _git_run(["status", "--porcelain"], cwd=str(_patch_root()))
+    if r.returncode == 0 and r.stdout.strip():
+        log_warn("code 工作树非干净，同步内容含未提交改动（声明真相源为 HEAD，实际同步含脏状态）")
 
 
 # ── diff normalization（显式 encoding） ─────────────────────────
@@ -333,6 +400,14 @@ def _scan_aosp_modified(out: str) -> tuple[int, int]:
     g_match = 0
     errors = 0
     projects = [l.strip() for l in proj_list.read_text(encoding="utf-8").splitlines() if l.strip()]
+    # 反向对账（sync-12）：modified_root 下未登记 project.list 的一级目录
+    # 静默漏扫 → 逐个告警指明跳过范围。一级目录名须与 project.list 任一
+    # 条目首段比对（嵌套项目 "a/b" 登记时其一级目录 "a" 为合法前缀，
+    # 直接对全集相等比对会对合法目录误报）
+    top_projects = {p.split("/", 1)[0] for p in projects}
+    for d in sorted(modified_root.iterdir()):
+        if d.is_dir() and d.name not in top_projects:
+            log_warn(f"aosp: modified 目录未登记于 project.list，该目录差异不扫描: {d.name}")
     for proj in projects:
         proj_dir = modified_root / proj
         if not proj_dir.is_dir():
@@ -432,30 +507,50 @@ def _extra_aosp_worker(proj: str) -> tuple[list[str], int]:
         proj_ws = Path(_aosp_ws()) / proj
         if not (proj_ws / ".git").is_dir():
             return rows, 0
-        r = _git_run(["status", "--porcelain"], proj_ws)
-        if r.returncode != 0:
-            log_error(f"aosp:{proj}: git status --porcelain 失败: {r.stderr.strip()}")
-            return rows, 1
-        if not r.stdout.strip():
-            return rows, 0
+        # 不以 git status --porcelain 空输出早退（sync-03）：有 upstream 的
+        # 项目，已提交未归档改动（HEAD 领先 upstream 且工作树干净）须由下方
+        # git diff base 检出，与 kernel 侧扫描口径对齐
         base = _find_upstream_base(cwd=proj_ws)
-        if not base:
-            log_warn(f"aosp:{proj}: 无法确定 upstream base")
-            return rows, 1
         covered = _coverage_aosp_project(proj)
-        ws_changes: set[str] = set()
-        ws_changes.update(_git_lines("diff", base, "--name-only", cwd=proj_ws))
-        ws_changes.update(_git_lines("ls-files", "--others", "--exclude-standard", cwd=proj_ws))
-        extra = sorted(ws_changes - covered)
-        for f in extra:
-            if not f or _is_excluded(f):
-                continue
-            if _git_check("cat-file", "-e", f"{base}:{f}", cwd=proj_ws):
-                rows.append(f"+\tEXTRA-MODIFIED\taosp:{proj}\t{f}\tsync\t未归档的 upstream 文件改动\n")
-            elif _git_check("ls-files", "--error-unmatch", f, cwd=proj_ws):
-                rows.append(f"+\tEXTRA-NEW-TRACKED\taosp:{proj}\t{f}\tdelete\t未归档 tracked 新文件（code 已删，删除对齐）\n")
-            else:
-                rows.append(f"+\tEXTRA-NEW-UNTRACKED\taosp:{proj}\t{f}\tdelete\t未归档 untracked 新文件（code 已删，删除对齐）\n")
+        if base:
+            ws_changes: set[str] = set()
+            ws_changes.update(_git_lines("diff", base, "--name-only", cwd=proj_ws))
+            ws_changes.update(_git_lines("ls-files", "--others", "--exclude-standard", cwd=proj_ws))
+            extra = sorted(ws_changes - covered)
+            for f in extra:
+                if not f or _is_excluded(f):
+                    continue
+                if _git_check("cat-file", "-e", f"{base}:{f}", cwd=proj_ws):
+                    rows.append(f"+\tEXTRA-MODIFIED\taosp:{proj}\t{f}\tsync\t未归档的 upstream 文件改动\n")
+                elif _git_check("ls-files", "--error-unmatch", f, cwd=proj_ws):
+                    rows.append(f"+\tEXTRA-NEW-TRACKED\taosp:{proj}\t{f}\tdelete\t未归档 tracked 新文件（code 已删，删除对齐）\n")
+                else:
+                    rows.append(f"+\tEXTRA-NEW-UNTRACKED\taosp:{proj}\t{f}\tdelete\t未归档 untracked 新文件（code 已删，删除对齐）\n")
+        else:
+            # 无 upstream（repo 按 tag 检出的 detached HEAD）：无法用
+            # git diff base 检出"已提交未归档"改动，回退工作树扫描（旧语义），
+            # 干净即无额外改动——不阻塞整批（此前对全部项目强制 upstream，
+            # 致 detached workspace 扫描整体失败）
+            r = _git_run(["status", "--porcelain"], cwd=proj_ws)
+            if r.returncode != 0:
+                log_error(f"aosp:{proj}: git status --porcelain 失败: {r.stderr.strip()}")
+                return rows, 1
+            ws_changes = set()
+            for line in r.stdout.splitlines():
+                if len(line) <= 3:
+                    continue
+                p = line[3:]
+                if " -> " in p:
+                    p = p.split(" -> ", 1)[1]
+                ws_changes.add(p.strip().strip('"'))
+            extra = sorted(ws_changes - covered)
+            for f in extra:
+                if not f or _is_excluded(f):
+                    continue
+                if _git_check("ls-files", "--error-unmatch", f, cwd=proj_ws):
+                    rows.append(f"+\tEXTRA-MODIFIED\taosp:{proj}\t{f}\tsync\t未归档的 upstream 文件改动\n")
+                else:
+                    rows.append(f"+\tEXTRA-NEW-UNTRACKED\taosp:{proj}\t{f}\tdelete\t未归档 untracked 新文件（code 已删，删除对齐）\n")
     except Exception as e:  # worker 异常不得让整批并发任务崩（归 error 计数）
         log_error(f"aosp:{proj}: 扫描异常: {e}")
         return rows, 1
@@ -488,6 +583,44 @@ def _scan_extra_aosp(out: str) -> tuple[int, int]:
     return (0, errors)
 
 
+def _iter_non_repo_files(root: Path):
+    """遍历目录树产出文件；遇嵌套 git 仓库子树整体跳过并告警（sync-13）。
+
+    嵌套仓内容归各子仓管理，若按 EXTRA-NEW-UNTRACKED 上报会被 --auto
+    物理删除。产出顺序由调用方排序保证确定性。
+
+    符号链接一律跳过（方向 2）：目录符号链接被 is_dir() 跟随并入栈，成环
+    （链回父/自身目录）即死循环；且链接指向 workspace 外实体时按 EXTRA
+    上报会被物理删除，误删外部目标。
+    """
+    stack = [root]
+    while stack:
+        cur = stack.pop()
+        try:
+            entries = sorted(cur.iterdir())
+        except OSError as e:
+            log_warn(f"非 repo 目录遍历失败，跳过: {cur}: {e}")
+            continue
+        for p in entries:
+            if p.is_symlink():
+                # 跳过符号链接：is_symlink 不跟随链接，环/越界实体都不再进入
+                # 后续 is_dir/is_file 判定（防死循环与误删外部目标）
+                continue
+            if p.is_dir():
+                if (p / ".git").exists():
+                    log_warn(f"非 repo 扫描遇嵌套 git 仓库，跳过该子树: {p}")
+                    continue
+                # sync2-02：嵌套层同样按排除目录跳过（__pycache__/out/prebuilts
+                # 等，git_workspace_util.is_excluded_dir）——此前仅顶层判定，
+                # 嵌套 __pycache__/*.pyc 会误标 EXTRA-NEW-UNTRACKED，--auto
+                # 全选后被物理删除
+                if is_excluded_dir(p.name):
+                    continue
+                stack.append(p)
+            elif p.is_file():
+                yield p
+
+
 def _scan_extra_aosp_non_repo(out: str):
     new_root = Path(_patch_root()) / "aosp" / "new"
     cov_all: set[str] = set()
@@ -514,9 +647,11 @@ def _scan_extra_aosp_non_repo(out: str):
             continue
         if any(p.startswith(bn + "/") for p in projects): 
             continue
-        for f in sorted(d.rglob("*")):
-            if not f.is_file():
-                continue
+        if (d / ".git").exists():
+            log_warn(f"非 repo 扫描遇嵌套 git 仓库，跳过该子树: {d}")
+            continue
+        # 排序保证与原 rglob 有序遍历同等的确定性输出
+        for f in sorted(_iter_non_repo_files(d), key=str):
             rel = str(f.relative_to(Path(_aosp_ws())).as_posix())
             if _is_excluded(rel):
                 continue
@@ -546,8 +681,7 @@ def _gen_plan(out: str) -> int:
         f.write("# 动作: checkout | checkout-only | restore | sync | delete | skip | stash-hint\n")
         f.write("\n")
 
-    kernel_ok = bool(_kernel_ws()) and (Path(_kernel_ws()) / ".git").is_dir()
-    aosp_ok = bool(_aosp_ws()) and (Path(_aosp_ws()) / ".repo").is_dir()
+    kernel_ok, aosp_ok = _ws_scan_flags()
 
     if kernel_ok:
         log_info("扫描 kernel")
@@ -591,8 +725,7 @@ def _gen_plan_silent(out: str) -> int:
     with open(out, "w", encoding="utf-8"):
         pass
 
-    kernel_ok = bool(_kernel_ws()) and (Path(_kernel_ws()) / ".git").is_dir()
-    aosp_ok = bool(_aosp_ws()) and (Path(_aosp_ws()) / ".repo").is_dir()
+    kernel_ok, aosp_ok = _ws_scan_flags()
 
     scan_rc = 0
     if kernel_ok:
@@ -617,6 +750,18 @@ def _gen_plan_silent(out: str) -> int:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def _restore_target(target: Path, backup: bytes | None, had_file: bool) -> None:
+    """恢复备份的原文件内容（sync-04）。失败仅告警，不在错误路径二次破坏。"""
+    try:
+        if not had_file:
+            if target.exists():
+                target.unlink()
+        elif backup is not None:
+            target.write_bytes(backup)
+    except OSError as e:
+        log_error(f"恢复原文件失败: {target}: {e}")
+
+
 def _do_checkout_patch(proj: str, rel: str) -> bool:
     ws = _resolve_proj_cwd(proj)
     if not ws:
@@ -637,24 +782,55 @@ def _do_checkout_patch(proj: str, rel: str) -> bool:
     if not base:
         log_error(f"{proj}: 无法确定 upstream base")
         return False
+    # sync2-01：checkout 目标同样经包含性校验（与 _do_restore/_do_sync_extra
+    # 同口径）——plan rel 可被人工/AI 编辑，rel 含 ../ 时 git pathspec 在嵌套
+    # 仓内可命中/覆盖项目目录外文件，备份恢复随之越出项目 ws
+    target_resolved = _resolve_workspace_target(proj, rel)
+    if not target_resolved:
+        log_error(f"checkout 目标越界（拒绝）: {proj}/{rel}")
+        return False
+    target = Path(target_resolved)
+    # checkout 前备份原工作树内容（sync-04）：apply 校验/执行失败时恢复
+    # 原状再报错，避免"文件已被重置为 base"的破坏性半完成态
+    had_file = target.is_file()
+    backup: bytes | None = None
+    if had_file:
+        try:
+            backup = target.read_bytes()
+        except OSError as e:
+            log_error(f"备份原文件失败，中止 checkout: {rel}: {e}")
+            return False
     r2 = _git_run(["checkout", base, "--", rel], cwd=ws)
     if r2.returncode != 0:
         log_error(f"checkout 失败: {rel} ({r2.stderr.strip()})")
         return False
     r1 = _git_run(["apply", "--check", str(diff_file)], cwd=ws)
     if r1.returncode != 0:
-        log_error(f"BROKEN-DIFF: {diff_file} 无法应用到 upstream（文件已回退 base）")
+        _restore_target(target, backup, had_file)
+        # index 对齐（sync-10）：checkout base 已把 index 改为 base 版本，
+        # reset 回 HEAD 消除 staged 假象
+        _git_run(["reset", "-q", "--", rel], cwd=ws)
+        log_error(f"BROKEN-DIFF: {diff_file} 无法应用到 upstream（已恢复原内容）")
         return False
     r3 = _git_run(["apply", str(diff_file)], cwd=ws)
     if r3.returncode != 0:
-        log_error(f"git apply 失败: {diff_file} ({r3.stderr.strip()})")
+        _restore_target(target, backup, had_file)
+        _git_run(["reset", "-q", "--", rel], cwd=ws)
+        log_error(f"git apply 失败: {diff_file} ({r3.stderr.strip()}，已恢复原内容)")
         return False
+    # apply 成功后 index 仍停留在 base 版本（sync-10，git checkout 同时更新
+    # index+worktree）：reset 对齐 HEAD，定制以未暂存改动呈现。目标环境 git
+    # 版本不保证支持 git restore --source，故用 checkout + 事后 reset 方案
+    _git_run(["reset", "-q", "--", rel], cwd=ws)
     return True
 
 
 def _do_checkout_only(proj: str, rel: str) -> bool:
     ws = _resolve_proj_cwd(proj)
     if not ws:
+        return False
+    # sync2-01：checkout-only 目标同样过包含性校验（防 rel ../ 穿越越出项目）
+    if not _resolve_workspace_target(proj, rel):
         return False
     base = _find_upstream_base(cwd=ws)
     if not base:
@@ -684,7 +860,13 @@ def _do_restore(proj: str, rel: str) -> bool:
     if not pfile.is_file():
         log_error(f"code 源文件不存在: {pfile}")
         return False
-    target = Path(ws) / rel
+    # 包含性校验（sync-01）：restore 写盘目标与删除路径同级防护——rel 为
+    # 绝对路径或含 ../ 穿越时拒绝（越界写盘会破坏 workspace 外文件）
+    target_str = _resolve_workspace_target(proj, rel)
+    if not target_str:
+        log_error(f"restore 目标越界或不可解析（拒绝写盘）: {proj}/{rel}")
+        return False
+    target = Path(target_str)
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(pfile, target)
     return True
@@ -718,7 +900,11 @@ def _do_sync_extra(proj: str, rel: str, category: str) -> bool:
             log_error(f"无法解析路径: {proj}/{rel}")
             return False
         try:
-            if os.path.isdir(target):
+            if os.path.islink(target):
+                # 符号链接只 unlink 链接本身：目标路径未解析（含符号链接
+                # 语义），跟随后续 isdir/rmtree 会删除链接指向的真实目录
+                os.unlink(target)
+            elif os.path.isdir(target):
                 shutil.rmtree(target)
             else:
                 os.unlink(target)
@@ -782,7 +968,11 @@ def _apply_plan(plan: str) -> bool:
             rc = _do_sync_extra(proj, rel, category)
         elif action == "delete":
             log_info(f"  [DELETE] {proj}:{rel}")
-            rc = _do_sync_extra(proj, rel, "EXTRA-DELETE")
+            # delete 动作按 plan 类别分发（sync-02）：EXTRA-NEW-TRACKED 走
+            # git rm -f（清 index+工作树，与 kernel 侧语义对齐）；统一硬映射
+            # EXTRA-DELETE 纯 unlink 会漏清 git index，删后残留 ` D`
+            rc = _do_sync_extra(proj, rel,
+                                category if category == "EXTRA-NEW-TRACKED" else "EXTRA-DELETE")
         elif action in ("skip", "stash-hint"):
             continue
         else:
@@ -818,6 +1008,7 @@ def _verify_after_apply(orig_plan: str) -> bool:
 
     orig_exec: set[str] = set()
     orig_skip: set[str] = set()
+    orig_checkout_only: set[str] = set()
     for l in orig_lines:
         if not l or l.startswith("#"):
             continue
@@ -827,6 +1018,10 @@ def _verify_after_apply(orig_plan: str) -> bool:
         key = f"{parts[2]}\t{parts[3]}"
         if l[0] == "+":
             orig_exec.add(key)
+            # checkout-only 执行后 worktree==base，重扫必然仍报偏离（sync-06）：
+            # 归入 KEPT 豁免（与 '-' 标记 KEPT 同款），否则落盘校验必判 RESIDUAL
+            if len(parts) >= 5 and parts[4] == "checkout-only":
+                orig_checkout_only.add(key)
         elif l[0] == "-":
             orig_skip.add(key)
 
@@ -842,14 +1037,15 @@ def _verify_after_apply(orig_plan: str) -> bool:
 
     verify_out = _artifact_path("verify.tsv")
     fixed = sorted(orig_exec - new_diverged)
-    kept = sorted(orig_skip & new_diverged)
-    residual = sorted(orig_exec & new_diverged)
+    kept = sorted((orig_skip | orig_checkout_only) & new_diverged)
+    residual = sorted((orig_exec & new_diverged) - orig_checkout_only)
     newdiff = sorted(new_diverged - orig_exec - orig_skip)
 
     with open(verify_out, "w", encoding="utf-8") as f:
         f.write("# VERIFY generated\n")
         f.write("# FIXED    = 原执行条目现已 MATCH（同步生效）\n")
-        f.write("# KEPT     = 原 skip 条目仍偏离（用户主动保留，不算失败）\n")
+        f.write("# KEPT     = 原 skip 条目/checkout-only 执行条目仍偏离"
+                "（用户主动保留或语义内状态，不算失败）\n")
         f.write("# RESIDUAL = 原执行条目仍偏离（同步未生效，真正失败）\n")
         f.write("# NEW-DIFF = 新出现的偏离（需排查）\n\n")
         for k in fixed:
@@ -935,8 +1131,7 @@ def main():
         log_error("--apply 模式必须配合 --plan-file <path>")
         harness_exit(3)
 
-    kernel_ok = bool(_kernel_ws()) and (Path(_kernel_ws()) / ".git").is_dir()
-    aosp_ok = bool(_aosp_ws()) and (Path(_aosp_ws()) / ".repo").is_dir()
+    kernel_ok, aosp_ok = _ws_scan_flags()
 
     if not kernel_ok and not aosp_ok:
         log_error("未找到有效的 workspace（检查 KERNEL_WS/AOSP_WS 环境变量）")
@@ -952,6 +1147,9 @@ def main():
     if not _git_check("rev-parse", "--verify", "HEAD", cwd=str(_patch_root())):
         log_error("code 仓无 HEAD，无法以 dev/main 为真相源")
         harness_exit(3)
+    # sync-05：diff/new 读 code 工作树磁盘文件——树脏时同步含未提交改动，
+    # 显式告警留痕（保持默认放行，不阻断）
+    _warn_dirty_code_tree()
 
     if args.auto:
         plan_file = args.plan_file or _artifact_path("auto_plan.tsv")

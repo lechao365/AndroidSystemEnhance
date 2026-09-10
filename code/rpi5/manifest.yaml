@@ -26,6 +26,10 @@ kernel:
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/Kconfig
     - patch: kernel/new/vendor/lechao/LcIod/Makefile
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/Makefile
+    - patch: kernel/new/vendor/lechao/LcIod/lciod_read_logic.c
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_read_logic.c
+    - patch: kernel/new/vendor/lechao/LcIod/lciod_read_logic.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_read_logic.h
     - patch: kernel/new/vendor/lechao/LcIod/lciod_usbd-ioctl.h
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_usbd-ioctl.h
     - patch: kernel/new/vendor/lechao/LcIod/lciod_usbd-stats.c
@@ -34,6 +38,10 @@ kernel:
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_usbd.c
     - patch: kernel/new/vendor/lechao/LcIod/lciod_usbd.h
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_usbd.h
+    - patch: kernel/new/vendor/lechao/LcIod/tests/Makefile
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/tests/Makefile
+    - patch: kernel/new/vendor/lechao/LcIod/tests/lciod_read_logic_host_test.c
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/tests/lciod_read_logic_host_test.c
     - patch: kernel/new/vendor/lechao/LcView/Kconfig
       source: rpi5-kernel-build/common/vendor/lechao/LcView/Kconfig
     - patch: kernel/new/vendor/lechao/LcView/Makefile
@@ -56,6 +64,30 @@ kernel:
       source: rpi5-kernel-build/common/vendor/lechao/LcView/lcview_ring_logic.h
     - patch: kernel/new/vendor/lechao/LcView/tests/Makefile
       source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/Makefile
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/atomic.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/atomic.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/errno.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/errno.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/kernel.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/kernel.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/slab.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/slab.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/spinlock.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/spinlock.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/string.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/string.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/timekeeping.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/timekeeping.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/types.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/types.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/uaccess.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/uaccess.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/vmalloc.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/vmalloc.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/wait.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/wait.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/lcview_callsite_host_test.c
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/lcview_callsite_host_test.c
     - patch: kernel/new/vendor/lechao/LcView/tests/lcview_ring_host_test.c
       source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/lcview_ring_host_test.c
     - patch: kernel/new/vendor/lechao/Makefile

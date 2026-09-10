@@ -4,12 +4,16 @@ monkeypatch 模块级 REPO_ROOT 指向临时目录构造文件集，验证：
 mtime 过龄清理 / 数量上限删最旧 / dry-run 不真删 / --apply 真删 /
 glob 误配静默零删（不报错）。
 """
+import contextlib
 import importlib.util
+import io
 import os
-import sys
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
+
+import pytest
 
 _LIB = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location("log_prune", _LIB / "log_prune.py")
@@ -81,6 +85,83 @@ class TestLogPrune(unittest.TestCase):
         log_prune.run(days=0, targets=["harness/log/git-works-push/*.log"],
                       apply=True)
         self.assertFalse(p.exists())
+
+    def test_stat_race_skips_missing_file(self):
+        # lib-12：glob 与 stat 之间文件被并发删除（TOCTOU）→ 跳过不崩、
+        # 零删（此前裸 f.stat() FileNotFoundError 崩溃）。Path 实例属性
+        # 只读，patch 模块级 REPO_ROOT 为替身仓根（glob 命中已消失文件）
+        ghost = self.root / "harness" / "log" / "git-works-push" / "ghost.log"
+
+        class _FakeRoot:
+            def glob(self, pattern):
+                return [ghost]
+
+        with mock.patch.object(log_prune, "REPO_ROOT", _FakeRoot()):
+            plan = log_prune.run(days=30,
+                                 targets=["harness/log/git-works-push/*.log"],
+                                 apply=True)
+        self.assertEqual(plan["total_removed"], 0)
+        self.assertEqual(plan["patterns"][0]["scanned"], 0)
+        self.assertEqual(plan["errors"], [])
+
+    def test_target_escaping_repo_root_rejected(self):
+        # lib-12 红灯：--target 经 ../ 越出仓根 → 拒绝 rc=2（docstring
+        # "误删面受控"约束，防误删仓外文件）
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = log_prune.main(["--target", "../../outside/*.log"])
+        self.assertEqual(rc, 2)
+        self.assertIn("越出仓根", err.getvalue())
+
+    def test_target_inside_root_accepted(self):
+        # 仓内正常 target 不误伤（dry-run 零删 rc=0）
+        self._touch("harness/log/git-works-push/in.log", time.time())
+        rc = log_prune.main(["--target", "harness/log/git-works-push/*.log"])
+        self.assertEqual(rc, 0)
+
+
+class TestRepoRootAnchor(unittest.TestCase):
+    """方向 1：REPO_ROOT 锚点自证（不 patch 模块变量）。
+
+    回归防线：此前 REPO_ROOT 误取 harness/（parents[0]）致 DEFAULT_TARGETS
+    恒零命中仍返 0，靠 patch 的假目录用例掩盖。此处直接对真实模块断言：
+    REPO_ROOT == 仓根，且三条默认 glob 各自能命中——产物由用例自建（方向 1：
+    干净克隆无 gitignore 域产物，断言真实产物存在会恒零命中致 CI 红）。
+    """
+    # 自建/清理真实仓 gitignore 域临时产物（drvfs 下 glob ~3s），豁免 slow guard
+    pytestmark = pytest.mark.slow_ok("真实仓默认目标锚点自证")
+
+    def _probe_rel(self, pattern):
+        """把默认 glob 首个 * 替换为测试唯一 token，得到可匹配的相对路径。"""
+        token = f"prune-anchor-{os.getpid()}"
+        return pattern.replace("*", token, 1)
+
+    def test_repo_root_is_repo_root_without_patch(self):
+        repo_root = Path(__file__).resolve().parents[3]
+        self.assertEqual(log_prune.REPO_ROOT, repo_root)
+        self.assertTrue((log_prune.REPO_ROOT / "harness").is_dir())
+
+    def test_default_targets_hit_real_dir(self):
+        # 自建临时产物再 glob 证锚点（不依赖真实仓 gitignore 产物）：对每条
+        # 默认 glob 在其静态目录下创建匹配文件，验证 REPO_ROOT 锚点命中后清理
+        created = []
+        try:
+            for pattern in log_prune.DEFAULT_TARGETS:
+                p = log_prune.REPO_ROOT / self._probe_rel(pattern)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("x", encoding="utf-8")
+                created.append(p)
+                hits = list(log_prune.REPO_ROOT.glob(pattern))
+                self.assertTrue(
+                    hits, f"默认目标 {pattern} 在真实仓零命中（错路径复发？）")
+        finally:
+            for p in created:
+                p.unlink(missing_ok=True)
+
+    def test_prune_real_dir_with_defaults(self):
+        # 以真实仓运行默认目标 dry-run：不误删（apply=False）且不报错
+        plan = log_prune.run(targets=log_prune.DEFAULT_TARGETS, apply=False)
+        self.assertEqual(plan["errors"], [])
 
 
 if __name__ == "__main__":

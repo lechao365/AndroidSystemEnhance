@@ -30,6 +30,15 @@ def _mk_receipt(batch_id="abc123def456", result="pass"):
     )
 
 
+def _trend_append_worker(arg):
+    """并发 append_trend worker（模块级：multiprocessing 需可 pickle；
+    fork 子进程继承 CDP_PROJECT_ROOT，趋势行落在测试临时目录）。"""
+    i, _n = arg
+    cdp_receipt.append_trend(f"2026-08-23 10:00:{i % 60:02d}",
+                             f"batch{i:012d}", "pass", "board", f"s{i}")
+    return 0
+
+
 class TestReceipt(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -501,6 +510,17 @@ class TestReceipt(unittest.TestCase):
         self.assertEqual(leftovers, [])
         self.assertEqual(len(cdp_receipt.read_trend_last(self._dir)) > 0, True)
 
+    def test_append_trend_concurrent_no_lost_lines(self):
+        # CDP-08：append_trend 读→改→写区间 flock 互斥——并发追加不丢行
+        # （无锁时后写者按旧快照整体重写覆盖先写者）
+        import multiprocessing
+
+        with multiprocessing.get_context("fork").Pool(4) as pool:
+            rcs = pool.map(_trend_append_worker, [(i, 0) for i in range(8)])
+        self.assertEqual(rcs, [0] * 8)
+        lines = (self._dir / "trend.md").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 8, "并发 append_trend 不得丢行")
+
     # ── 收据审计链增强（改动 1）：operator / host_env 自动采集 ──────────
     def test_write_receipt_autofills_operator_and_host_env(self):
         # 写收据后两新字段自动采集落盘（不需调用方传参），read_receipt
@@ -511,7 +531,7 @@ class TestReceipt(unittest.TestCase):
         self.assertTrue((got.operator or "").strip(),
                         "operator 须自动采集非空（git 不可用至少为 unknown）")
         self.assertRegex((got.host_env or ""),
-                         r"^python=\S+ \| uname=.+ \| user=\S+$")
+                         r"^python=\S+ \| uname=.+ \| user=\S+ \| fs=\S+$")
         self.assertNotIn("\n", got.host_env)
 
     @unittest.skipIf(shutil.which("git") is None, "git 不可用")
@@ -561,7 +581,24 @@ class TestReceipt(unittest.TestCase):
             env = cdp_receipt.collect_host_env()
         self.assertTrue(env.startswith("python="))
         self.assertIn("uname=?", env)
+        self.assertIn("fs=?", env)
         self.assertNotIn("\n", env)
+
+    def test_fs_type_reported_with_df(self):
+        # 方向 4：host_env 增报仓库文件系统类型（df -T 数据行第 2 列）；
+        # df 失败降级 "?"
+        with mock.patch.object(cdp_receipt.subprocess, "run",
+                               return_value=mock.Mock(
+                                   returncode=0,
+                                   stdout="Filesystem Type 1K-blocks Used Use% "
+                                          "Mounted on\n"
+                                          "D:\\ 9p 4096 0 0% /mnt/d\n")):
+            fs = cdp_receipt._fs_type("/mnt/d")
+        self.assertEqual(fs, "9p")
+        with mock.patch.object(cdp_receipt.subprocess, "run",
+                               return_value=mock.Mock(returncode=1,
+                                                      stdout="")):
+            self.assertEqual(cdp_receipt._fs_type("/mnt/d"), "?")
 
     def test_old_receipt_without_operator_host_env_falls_back(self):
         # 旧收据无此两字段 → from_text 默认空串不报错（schema 兼容）

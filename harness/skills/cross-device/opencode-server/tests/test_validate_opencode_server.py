@@ -148,3 +148,37 @@ class TestFilesExist:
         monkeypatch.setattr(vmod, "SKILL_MD", tmp_path / "SKILL.md")
         errors = vmod.validate_files_exist()
         assert len(errors) == 2
+
+
+class TestLibShellCoverage:
+    """CDP-09：护栏覆盖 lib/shell/ 拆出件（注入违规须判红且带来源标注）。"""
+
+    def test_lib_or_true_flagged(self, tmp_path, monkeypatch):
+        # 向 lib 拆出件注入 || true → 校验判红（规模拆分不得逃逸吞错检查）
+        lib = tmp_path / "lib" / "shell"
+        lib.mkdir(parents=True)
+        (lib / "start_opencode_server_systemd.sh").write_text(
+            'pgrep -f "opencode web" || true\n', encoding="utf-8")
+        monkeypatch.setattr(vmod, "LIB_SHELL_DIR", lib)
+        errors = vmod.validate_no_true_swallow()
+        assert len(errors) == 1
+        assert "start_opencode_server_systemd.sh" in errors[0]
+        assert "|| true" in errors[0]
+
+    def test_lib_core_ref_flagged(self, tmp_path, monkeypatch):
+        # lib 拆出件引用 LcSkills core 运行时 → 同样判红
+        lib = tmp_path / "lib" / "shell"
+        lib.mkdir(parents=True)
+        (lib / "x.sh").write_text("source core/lib/shell/lc_bootstrap.sh\n",
+                                  encoding="utf-8")
+        monkeypatch.setattr(vmod, "LIB_SHELL_DIR", lib)
+        errors = vmod.validate_no_lcskills_core_ref()
+        assert len(errors) == 1
+        assert "lc_bootstrap" in errors[0]
+        assert "x.sh" in errors[0]
+
+    def test_main_script_violation_still_source_annotated(self, fake_script):
+        # 主入口违规仍判红且标注主脚本来源（语义不变）
+        fake_script(GOOD + 'pgrep -f "opencode web" || true\n')
+        errors = vmod.validate_no_true_swallow()
+        assert any("start-opencode-server.sh" in e for e in errors)

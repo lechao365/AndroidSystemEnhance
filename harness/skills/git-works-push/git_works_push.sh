@@ -3,7 +3,9 @@
 # 保留：永不推 main 守卫、--push-only、--dry-run、push 失败 commit 保留(exit 2)。
 # 去掉：dev 自动创建、amend、message 三重校验。
 set -euo pipefail
-BRANCH="${GIT_WORKS_BRANCH:-dev}"
+# BRANCH 固定 dev（sync-17）：git-works-push 契约只负责 dev 分支，环境变量
+# 覆盖（GIT_WORKS_BRANCH）可把推送目标改为任意分支且无调用方/文档引用，删除
+BRANCH="dev"
 MODE="normal"   # normal | push-only | dry-run
 MSG_FILE=""
 BASELINE_STATUS=""
@@ -24,6 +26,21 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+# 入口锚定仓库根（sync-09）：harness/lib/commit_scope.py、log_prune.py 等
+# 相对路径调用以仓库根为基准，子目录运行时静默不可达（收据比对降级、日志
+# 清理失效）；非 git 仓 fail-closed（cd 失败即拒，防 git 操作打到错误目录）
+# gwp2-01：--message-file 相对路径在下方 cd 到仓库根后解析基准改变（子目录
+# 调用会错位报 exit 3）——先按调用方 cwd realpath 化，仓根调用行为不变
+if [ -n "$MSG_FILE" ]; then
+  MSG_FILE="$(realpath -m "$MSG_FILE")" || {
+    echo "error: 无法解析 --message-file 路径: $MSG_FILE" >&2; exit 1; }
+fi
+TOPLEVEL="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "error: 不在 git 仓库内（无法定位仓库根），拒绝执行" >&2
+  exit 1
+}
+cd "$TOPLEVEL" || { echo "error: 无法进入仓库根 $TOPLEVEL" >&2; exit 1; }
 
 # 运行日志：harness/log/git-works-push/git-works-push-<日>.log（日粒度
 # 追加，/harness/log/ 已 gitignore 不入库）。秒级时间戳文件名会让每次
@@ -259,5 +276,13 @@ if [ "$REMOTE_SHA" != "$LOCAL_SHA" ]; then
   err "error: 远端 $BRANCH（$REMOTE_SHA）与本地 HEAD（$LOCAL_SHA）不符，疑似推送未生效"; exit 2
 fi
 out "pushed: $BRANCH $(git rev-parse --short HEAD)"
+# 方向 5：log_prune 接入真实工作流（此前零调用方顺延五批）——push 成功即
+# 清理超龄 push 日志/timings 归档/promote 头快照（--apply 实际清理；失败
+# 仅告警不阻断推送结果，留存规则见 harness/lib/log_prune.py）
+if python3 harness/lib/log_prune.py --apply >/dev/null 2>&1; then
+  out "log_prune: 运行日志清理完成"
+else
+  out "warn: log_prune 清理失败（不影响推送结果）"
+fi
 cdp_mark --name push --dur-s "$(push_dur "$CDP_TIMING_T0")"
 exit 0

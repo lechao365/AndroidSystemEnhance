@@ -1,4 +1,5 @@
 import os
+import pytest
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,9 @@ _FULL_CASES = ",".join(br.verify_case_ids())
 
 @unittest.skipUnless(BASH and shutil.which("git"),
                      "需要 bash 与 git 解释器（Windows 环境跳过）")
+@pytest.mark.slow_ok("真 git 仓 fixture：每用例 setUp 做 copytree×2 + git init "
+                     "+ 多 commit + content_tree 子进程，真实子进程语义，"
+                     "单用例实测约 1.6s 逼近慢守卫 3s 阈值（tst-05）")
 class TestSyncModifyToMainBase(unittest.TestCase):
     """真 git 仓 fixture：tempdir + git init 造提交链 c1→c2(HEAD)。
 
@@ -74,6 +78,10 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         # fixture 须拷入临时根 harness/config/ 才能走通 prepare/promote
         shutil.copy(REPO_ROOT / "harness" / "config" / "verify-cases.yaml",
                     cfg / "verify-cases.yaml")
+        # P1-B 审批独立（KI-20260907-001）fail-closed 配套：预设 token 文件与
+        # env 值一致（_read_approval_token 缺 token 判红，不再空 expected fail-open）
+        (cfg / "promote-approval.env").write_text(
+            "LC_PROMOTE_APPROVAL_TOKEN=tok-test\n", encoding="utf-8")
         # 真 git 仓：c1（内容）→ c2（内容，HEAD）
         self._git("init")
         self._git("symbolic-ref", "HEAD", "refs/heads/dev")
@@ -164,10 +172,12 @@ class TestSyncModifyToMainBase(unittest.TestCase):
                               cwd=self.root, env=env)
 
     def _run_register(self, *args):
+        # 承重门禁数据源固定仓库真实根（不随 CDP_PROJECT_ROOT 改道），fixture
+        # 的 known-issues 写临时根，经 --known-issues-dir 显式指回
         return subprocess.run(
             [sys.executable,
              str(self.root / "harness" / "skills" / "publish-main-base" / "baseline_register.py"),
-             *args],
+             *args, "--known-issues-dir", str(self.root / "data" / "known-issues")],
             capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=self.root, env=self._env)
 
     def _mk_issue(self, task="t1", status="open", origin="introduced", blocking=True,
@@ -245,6 +255,25 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         r = self._run("--rollback", "--baseline-id", self.BID_RB)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("reverted-candidate", r.stdout + r.stderr)
+
+    def test_rollback_cleans_evidence_snapshots(self):
+        # pub-02 红灯：promote 中途落盘的证据快照随 rollback 清理——baseline_register
+        # promote 拒绝覆盖同名快照，不清理则同 BID 重试撞「快照已存在」死锁
+        self._write_promoted_yaml("candidate")
+        self._git("add", "-A")
+        self._git("commit", "-m", "构建(baseline): 登记")
+        base = self._git("rev-parse", "HEAD").stdout.strip()
+        self._write_promoted_yaml("promoted")
+        self._git("add", "-A")
+        self._git("commit", "-m", "构建(baseline): 晋升元提交")
+        snapshot_dir = self.root / "data" / "baselines"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        snapshot = snapshot_dir / f"{self.BID_RB}-receipt.md"
+        snapshot.write_text("中途落盘的证据快照\n", encoding="utf-8")
+        self._state_file().write_text(base + "\n", encoding="utf-8")
+        r = self._run("--rollback", "--baseline-id", self.BID_RB)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(snapshot.exists(), "证据快照未随 rollback 清理")
 
     # ── 方向 3（261f10265269）：promote 绑定 verified_tree（一致过路径由
     # test_promote_passes_code_covered_by_board_receipt 显式覆盖）──────────
@@ -476,6 +505,26 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         b = self._registered_evidence()
         self.assertEqual(b["evidence"]["known_issues_carried"], "")
 
+    def test_add_candidate_forwards_task_multiple_active(self):
+        # 方向：活跃任务多值时 add-candidate 转发 --task（prepare 死锁修复）
+        # —— shell 门禁显式 --task 放行后，登记层同传 --task，不因 task=None
+        # 多值推断 return 1 自拒；此前 publish_main_base.sh 不转发 --task，
+        # 活跃多值时 shell 放行而登记层自拒致 prepare 死锁
+        # 多值成立（活跃 task 集合 {t1,t2}），t1 自身非阻塞（pre-existing）——
+        # 门禁只判目标任务 t1，不因 t2 阻塞影响（t2 阻塞只挡 --task t2）
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
+        cdp_issue.write_issue(self._mk_issue(task="t2", issue_id="KI-Y"), "现场")
+        self._write_receipt(self.parent_vc, batch_id="000000000098",
+                            cases="lcview-liveness")
+        r = self._run_register("add-candidate", "--source-commit", "abc123def456",
+                               "--task", "t1",
+                               "--evidence-scope", "lcview-liveness",
+                               "--receipt-path",
+                               "data/verify-results/20260831-100000-000000000098.md")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._registered_evidence()["status"], "candidate")
+
     # ── 方向 2：carried_issue_ids 自动取 id（只收 open 与 scheduled）────
     def test_carried_issue_ids_only_open_scheduled(self):
         cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
@@ -527,9 +576,13 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         # message 文件放仓库树外，避免弄脏工作树（promote 前置要求树净）
         msg = Path(self._remote_tmp.name) / "promote-msg.txt"
         msg.write_text("构建(baseline): BL-TEST-01 基线晋升\n", encoding="utf-8")
+        # P1-B：审批独立（KI-20260907-001）——审批人 reviewer ≠ 执行人 t；
+        # env token 非占位符且临时根 promote-approval.env 预设一致（fail-closed：
+        # 缺预设即判红），放行
+        self._env["LC_PROMOTE_APPROVAL_TOKEN"] = "tok-test"
         return self._run("--promote", "--baseline-id", "BL-TEST-01",
                          "--message-file", str(msg), "--task", "t1",
-                         "--approved-by", "t", *extra)
+                         "--approved-by", "reviewer", *extra)
 
     def test_promote_requires_approved_by(self):
         # 方向 6：--promote 缺 --approved-by → exit 3（审批凭据外部化，
@@ -557,6 +610,36 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("check_class=RECEIPT_FAIL", r.stderr)
         self.assertIn("被最新 board 收据覆盖", r.stderr)
+
+    def test_promote_rejects_fail_board_receipt(self):
+        # pub-01 红灯（promote 层）：fail 收据（result=fail）+ 同锚 skip 收据成为
+        # LATEST 的绕过链 → 覆盖检查须对 fail 证据收据 fail-closed 拒绝
+        # （AGENTS.md 登记门禁：证据收据须 result=pass 且 verify_mode=board）
+        self._setup_remote()
+        (self.root / "code").mkdir()
+        (self.root / "code" / "foo.txt").write_text("x\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): code 改动")
+        self._git("push", "origin", "dev")
+        code_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        # fail board 收据（build/push_board=PASS、cases 失败 → result=fail）
+        self._write_receipt(code_head, batch_id="000000000001", result="fail",
+                            verify_mode="board", cases=_FULL_CASES,
+                            package=PKG_JSON)
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): fail board 收据入库")
+        self._git("push", "origin", "dev")
+        # 同锚 skip 收据成为 LATEST（LATEST 层 pass/skip 门禁放行 skip）
+        skip_anchor = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        self._write_receipt(skip_anchor, batch_id="000000000002",
+                            cases="", verify_mode="skip")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): skip 收据入库")
+        self._git("push", "origin", "dev")
+        r = self._promote()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("check_class=RECEIPT_FAIL", r.stderr)
+        self.assertIn("非 pass", r.stderr)
 
     def _candidate_yaml_pkg(self, package_result):
         """candidate 登记模板（可变 package_result，供方向 3 门禁两态用例）。"""
@@ -778,6 +861,31 @@ class TestSyncModifyToMainBase(unittest.TestCase):
                       self._git("ls-remote", "origin",
                                 "refs/tags/verified/BL-TEST-01").stdout)
 
+    def test_promote_code_head_ignores_main_side_code_commits(self):
+        # pub-04 红灯：main 领先 dev（main 侧有 code/ 提交）时 CODE_HEAD 须取
+        # origin/main..dev（两点），不把 main 侧领先提交误判为 dev 改动——
+        # dev 确无 code 改动 → 豁免放行 warn 出现，且不再误报「须 board 收据覆盖」；
+        # main 侧内容不随 squash 进 dev 一致性检查（预期失败点后移到 squash 一致性）
+        self._setup_remote()
+        # main 领先：经临时分支向 origin/main 推一个 main 侧 code/ 提交
+        self._git("checkout", "-q", "-b", "tmpmain", "main")
+        (self.root / "code").mkdir()
+        (self.root / "code" / "m.txt").write_text("main-side\n", encoding="utf-8")
+        self._git("add", "code/m.txt")
+        self._git("commit", "-m", "修复(test): main 侧 code 改动")
+        self._git("push", "origin", "tmpmain:main")
+        self._git("checkout", "-q", "dev")
+        self._git("branch", "-D", "tmpmain")
+        self._candidate_yaml()
+        self._receipt_commit_c3(verify_mode="skip", package=PKG_JSON)
+        r = self._promote()
+        # CODE_HEAD 未取 main 侧提交：dev 零代码改动 → 走豁免分支
+        self.assertIn("无 code/ 改动，豁免放行", r.stdout)
+        self.assertNotIn("被最新 board 收据覆盖", r.stderr)
+        # main 侧内容使 squash 一致性检查按设计判红（证明已越过覆盖判定）
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("squash 暂存与 dev 内容不一致", r.stderr)
+
     def test_promote_rejects_duplicate_tag(self):
         # 方向 1 同名 tag 拒：verified/BL-TEST-01 已存在 → 退 3（未发生任何变更）
         self._setup_remote()
@@ -880,8 +988,9 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self._receipt_commit_c3(verify_mode="skip", package=PKG_JSON)
         msg = Path(self._remote_tmp.name) / "promote-msg.txt"
         msg.write_text("构建(baseline): BL-TEST-01 基线晋升\n", encoding="utf-8")
+        self._env["LC_PROMOTE_APPROVAL_TOKEN"] = "tok-test"
         r = self._run("--promote", "--baseline-id", "BL-TEST-01",
-                      "--message-file", str(msg), "--approved-by", "t")
+                      "--message-file", str(msg), "--approved-by", "reviewer")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("known-issues 门禁通过（task=t1", r.stderr)
         self.assertIn("promote 完成", r.stdout)

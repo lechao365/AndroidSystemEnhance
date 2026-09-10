@@ -18,6 +18,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SKILL_MD = HERE / "SKILL.md"
 SCRIPT = HERE / "start-opencode-server.sh"
+LIB_SHELL_DIR = HERE / "lib" / "shell"
 
 OR_TRUE_PATTERN = re.compile(r"\|\|\s*true\b")
 ENV_FILE_HARDCODE = re.compile(r"EnvironmentFile=%h|EnvironmentFile=\$HOME\b")
@@ -54,18 +55,37 @@ def validate_files_exist() -> list[str]:
     return errors
 
 
+def _script_files() -> list[Path]:
+    """护栏覆盖文件清单：主入口 + lib/shell/ 拆出件（CDP-09：规模拆分后
+    拆出件同在护栏内，防 lib 注入 || true 等吞错逃逸检查）。"""
+    files = [SCRIPT]
+    if LIB_SHELL_DIR.is_dir():
+        files.extend(sorted(LIB_SHELL_DIR.glob("*.sh")))
+    return files
+
+
+def _script_texts() -> list[tuple[str, str]]:
+    """逐文件读取（保留来源标注），返回 [(文件名, 文本)]；缺文件跳过
+    （存在性由 validate_files_exist 判红，此处不重复报）。"""
+    out: list[tuple[str, str]] = []
+    for f in _script_files():
+        if f.is_file():
+            out.append((f.name, f.read_text(encoding="utf-8")))
+    return out
+
+
 def _script_text() -> str:
-    return SCRIPT.read_text(encoding="utf-8")
+    """全部护栏文件拼接文本（仅供无行号语义的整体正则校验使用）。"""
+    return "\n".join(t for _, t in _script_texts())
 
 
 def validate_no_true_swallow() -> list[str]:
-    """禁止 `|| true` 吞错（须显式分支处理）。"""
-    if not SCRIPT.is_file():
-        return []
+    """禁止 `|| true` 吞错（须显式分支处理）。逐文件扫描并标注来源。"""
     errors = []
-    for lineno, line in enumerate(_script_text().splitlines(), 1):
-        if OR_TRUE_PATTERN.search(line):
-            errors.append(f"脚本 L{lineno} 存在 `|| true` 吞错: {line.strip()}")
+    for src, text in _script_texts():
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if OR_TRUE_PATTERN.search(line):
+                errors.append(f"{src} L{lineno} 存在 `|| true` 吞错: {line.strip()}")
     return errors
 
 
@@ -96,10 +116,13 @@ def validate_atomic_write() -> list[str]:
 
 
 def validate_help_before_init() -> list[str]:
-    """--help 须在 lc_init 之前拦截（消除日志/artifact 与运行汇总副作用）。"""
+    """--help 须在 lc_init 之前拦截（消除日志/artifact 与运行汇总副作用）。
+
+    仅扫主入口：lc_init/--help 均属主入口流程语义（lib 拆出件由入口在
+    拦截之后 source，行号语义以主脚本为准）。"""
     if not SCRIPT.is_file():
         return []
-    lines = _script_text().splitlines()
+    lines = SCRIPT.read_text(encoding="utf-8").splitlines()
     init_lineno = next((i + 1 for i, line in enumerate(lines) if INIT_PATTERN.search(line)), None)
     help_lineno = next((i + 1 for i, line in enumerate(lines) if HELP_PATTERN.search(line)), None)
     errors = []
@@ -116,32 +139,33 @@ def validate_help_before_init() -> list[str]:
 
 def validate_no_lcskills_core_ref() -> list[str]:
     """迁移完整性：脚本不得再引用 LcSkills core 运行时（core/lib、core/scripts、lc_bootstrap）。"""
-    if not SCRIPT.is_file():
-        return []
     errors = []
-    for lineno, line in enumerate(_script_text().splitlines(), 1):
-        if LCSKILLS_CORE_REF.search(line):
-            errors.append(f"脚本 L{lineno} 仍引用 LcSkills core 运行时: {line.strip()}")
+    for src, text in _script_texts():
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if LCSKILLS_CORE_REF.search(line):
+                errors.append(f"{src} L{lineno} 仍引用 LcSkills core 运行时: {line.strip()}")
     return errors
 
 
 def validate_script_runs() -> list[str]:
-    """脚本须可真跑：bash -n 语法检查退 0；--help 断言退 0 且含 usage。
-
-    让校验跑真脚本（而非仅静态正则）：语法错误/参数解析破坏在检查期暴露，
-    不再等上板/手工触发。
+    """脚本须可真跑：主入口 + lib/shell 拆出件逐个 bash -n 退 0；主入口
+    --help 断言退 0 且含 usage（拆出件由入口 source 加载，语法错误同样
+    在检查期暴露，不因拆分逃逸护栏）。
     """
     if not SCRIPT.is_file():
         return [f"脚本不存在: {SCRIPT}"]
     errors = []
-    try:
-        r = subprocess.run(["bash", "-n", str(SCRIPT)],
-                           capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=60)
-        if r.returncode != 0:
-            errors.append(f"bash -n 语法检查失败: {r.stderr.strip()[:200]}")
-    except (OSError, subprocess.TimeoutExpired) as e:
-        errors.append(f"bash -n 执行失败: {e}")
+    for f in _script_files():
+        if not f.is_file():
+            continue
+        try:
+            r = subprocess.run(["bash", "-n", str(f)],
+                               capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=60)
+            if r.returncode != 0:
+                errors.append(f"{f.name} bash -n 语法检查失败: {r.stderr.strip()[:200]}")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            errors.append(f"{f.name} bash -n 执行失败: {e}")
     try:
         r = subprocess.run(["bash", str(SCRIPT), "--help"],
                            capture_output=True, text=True,
@@ -149,8 +173,8 @@ def validate_script_runs() -> list[str]:
         if r.returncode != 0:
             errors.append(f"--help 退出码 {r.returncode} != 0: "
                           f"{(r.stderr or r.stdout).strip()[:200]}")
-        elif "usage" not in r.stdout.lower():
-            errors.append("--help 输出不含 usage（用法说明缺失）")
+        elif "usage" not in r.stdout.lower() and "用法" not in r.stdout:
+            errors.append("--help 输出不含 usage/用法（用法说明缺失）")
     except (OSError, subprocess.TimeoutExpired) as e:
         errors.append(f"--help 执行失败: {e}")
     return errors

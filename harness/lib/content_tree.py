@@ -16,16 +16,20 @@ verified_tree = 收据落盘时刻、排除统一集合后的内容树（git 树
   .gitignore 同语义——测试仓无 gitignore 时 add -A 会把它收进树，不排除
   则绑定比对被运行态文件干扰。
 
-实现：临时 index（GIT_INDEX_FILE 指向临时文件）上 read-tree + add -A +
-rm --cached 排除项 + write-tree，不触碰用户 index；write-tree 产出真实
-树对象，git diff --name-only 可直接用于归因差异路径。
+实现：临时 index（GIT_INDEX_FILE 指向临时文件）上 read-tree + rm --cached
+排除项 + write-tree，不触碰用户 index；write-tree 产出真实树对象，
+git diff --name-only 可直接用于归因差异路径。
+- 工作树模式（ref=None）：以 HEAD（或空）为基后 add -A 叠加工作树全量
+  变更与未跟踪文件（排除集合内除外），表达"收据落盘时刻的内容树"。
+- 引用模式（ref 给定）：从该引用的树出发即止，**不得 add -A**——无条件
+  add -A 会把工作树污染收进 index，冲掉 read-tree 的 ref 树，致多个不同
+  提交算出同一棵树（KI-20260910-001，2026-09-10 修复）。
 """
 
 import os
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
 
 # 两侧统一的排除集合（前缀匹配：目录带 / 结尾，文件全名）
 EXCLUDE_PATHS = (
@@ -69,7 +73,9 @@ def content_tree(exclude=EXCLUDE_PATHS, ref=None, repo_root=None):
                 _run_git(["read-tree", "HEAD"], env, cwd)
             else:
                 _run_git(["read-tree", "--empty"], env, cwd)
-        _run_git(["add", "-A"], env, cwd)
+            # 仅工作树模式叠加工作树全量（KI-20260910-001：若无条件 add -A，
+            # 引用模式会被工作树污染冲掉 read-tree ref，需收进 else 分支）
+            _run_git(["add", "-A"], env, cwd)
         for path in exclude:
             _run_git(["rm", "--cached", "-r", "-q", "--ignore-unmatch",
                       "--", path], env, cwd)

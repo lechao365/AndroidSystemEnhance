@@ -103,3 +103,27 @@ TEST_F(EpollDeviceReaderTest, CloseIdempotent) {
     mReader->close();
     SUCCEED();
 }
+
+/* 方向 2：read errno 可恢复白名单（加 EMSGSIZE；不加 EINVAL） */
+
+TEST(RecoverableErrnoTest, EmsgsizeIsRecoverable) {
+    // 内核 read 首条记录放不下返 -EMSGSIZE（KRN-001），可恢复——
+    // 缓冲不足属本次无数据，daemon 继续循环而非误判致命
+    EXPECT_TRUE(isRecoverableReadErrno(EMSGSIZE));
+}
+
+TEST(RecoverableErrnoTest, EagainAndEintrRecoverable) {
+    EXPECT_TRUE(isRecoverableReadErrno(EAGAIN));
+    EXPECT_TRUE(isRecoverableReadErrno(EINTR));
+}
+
+TEST(RecoverableErrnoTest, EinvalIsFatal) {
+    // 刻意不加 EINVAL：真参数错误吞掉会让 daemon 对坏参数静默成环
+    EXPECT_FALSE(isRecoverableReadErrno(EINVAL));
+}
+
+TEST(RecoverableErrnoTest, OtherErrnosFatal) {
+    EXPECT_FALSE(isRecoverableReadErrno(EBADF));
+    EXPECT_FALSE(isRecoverableReadErrno(EPIPE));
+    EXPECT_FALSE(isRecoverableReadErrno(EIO));
+}

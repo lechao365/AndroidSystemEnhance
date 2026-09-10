@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import baseline_register as br  # noqa: E402
@@ -31,6 +32,20 @@ class TestBaselineRegister(unittest.TestCase):
         self._config = self._root / "baseline-status.yaml"
         self._config.write_text(_initial_config(), encoding="utf-8")
         br.CONFIG = self._config
+        # P1-B 审批独立门禁打桩（KI-20260907-001）：operator 固定为执行人、
+        # _read_approval_token 返预设值、env token 匹配——既有 promote 成功
+        # 路径测试免逐个包装；审批人统一传 reviewer（≠ operator）
+        self._promote_gates = [
+            mock.patch("baseline_register._collect_operator",
+                       return_value="lechao <lechao@x.com>"),
+            mock.patch("baseline_register._read_approval_token",
+                       return_value="tok-abc"),
+            mock.patch.dict("os.environ",
+                            {"LC_PROMOTE_APPROVAL_TOKEN": "tok-abc"}),
+        ]
+        for g in self._promote_gates:
+            g.start()
+            self.addCleanup(g.stop)
 
     def tearDown(self):
         br.CONFIG = Path(br.__file__).resolve().parents[2] / "config" / "baseline-status.yaml"
@@ -61,7 +76,10 @@ class TestBaselineRegister(unittest.TestCase):
         buf = io.StringIO()
         err = io.StringIO()
         with redirect_stdout(buf), redirect_stderr(err):
-            rc = br.main(list(args))
+            # 承重门禁数据源固定仓库真实根（方向：不随 CDP_PROJECT_ROOT 改道），
+            # 测试经 --known-issues-dir 显式指回临时根，与收据等 env 隔离并存
+            rc = br.main(list(args) + ["--known-issues-dir",
+                                       str(self._root / "data" / "known-issues")])
         return rc, buf.getvalue() + err.getvalue()
 
     def _patch_no_code_changes(self, changes):
@@ -93,6 +111,74 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(b["evidence"]["evidence_scope"], "lcview-liveness")
         self.assertEqual(b["sync_manifest"], rp)
         self.assertEqual(b["evidence"]["sync_manifest"], rp)
+
+    # ── 方向 4：add-candidate 自执 known-issues 门禁（复用 check_issues_gate）
+    def test_check_issues_gate_default_source_is_real_root(self):
+        # 方向 3：门禁缺省数据源 = 仓库真实根，不随 CDP_PROJECT_ROOT（setUp
+        # 指向临时根）改道——CI 把 CDP_PROJECT_ROOT 设到 runner 临时目录时
+        # 承重门禁仍读真实登记，不被空目录 empty-registry 假绿关掉
+        from baseline_register import _real_known_issues_dir
+        from cdp_issue import issue_files
+        real = _real_known_issues_dir()
+        self.assertEqual(real,
+                         Path(br.__file__).resolve().parents[3]
+                         / "data" / "known-issues")
+        self.assertNotEqual(real, self._root / "data" / "known-issues")
+        # 真实根确有登记数据（非空），缺省门禁基于真实根判定而非临时空目录
+        self.assertGreater(len(issue_files(real)), 0)
+        # 显式 --known-issues-dir 注入临时根空目录 → empty-registry 放行
+        # （测试注入路径：把门禁数据源指回 fixture 隔离的临时根）
+        rc, out = self._run("check-issues")
+        self.assertEqual(rc, 0)
+        self.assertIn("empty-registry", out)
+
+    def test_add_candidate_gate_rejects_blocking_open(self):
+        # add-candidate 自执门禁：目标 task 存在未解决阻塞（introduced/blocking
+        # 且未 fixed）→ 拒登记（不再只记 --ki-gate 参数不自执）
+        from cdp_issue import Issue, write_issue
+        base = dict(schema_version=1, discovered_in="abc", severity="P2",
+                    task="t1", batch_id="18f27638d9f6")
+        write_issue(Issue(issue_id="KI-OPEN-BLK", title="阻塞未解决",
+                          origin="introduced", blocking=True,
+                          blocking_reason="r", status="open", **base), "x")
+        rp = self._make_receipt(build="pass", board="pass")
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 1)
+        self.assertIn("未解决阻塞", out)
+
+    # ── 方向 5：add-candidate 拒收 device_dirty 收据 ────────────────────
+    def test_add_candidate_rejects_device_dirty(self):
+        # 收据 device_dirty=true（teardown 恢复失败，设备态不可信）→ 拒收登记
+        from cdp_receipt import Receipt, write_receipt
+        r = Receipt(batch_id="batch-dirty", batch_base="", verified_commit="abc",
+                    verify_mode="board", result="pass", build="pass",
+                    push_board="pass", acceptance="ok", elapsed_s=10,
+                    summary="dirty", cases="lcview-liveness",
+                    device_dirty="true")
+        rp = str(write_receipt(r, "body"))
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 1)
+        self.assertIn("device_dirty", out)
+
+    def test_add_candidate_rejects_device_dirty_unknown(self):
+        # 收据 device_dirty="unknown"（teardown 未跑，设备态不可信）→ 拒收登记
+        # （与 true 同等：device_dirty 仅空串放行，非空一律拒）
+        from cdp_receipt import Receipt, write_receipt
+        r = Receipt(batch_id="batch-dirty-unknown", batch_base="",
+                    verified_commit="abc", verify_mode="board", result="pass",
+                    build="pass", push_board="pass", acceptance="ok",
+                    elapsed_s=10, summary="dirty-unknown",
+                    cases="lcview-liveness", device_dirty="unknown")
+        rp = str(write_receipt(r, "body"))
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 1)
+        self.assertIn("device_dirty=unknown", out)
 
     def test_add_candidate_lowercase_receipt(self):
         # 收据 build=skip 等小写值须转大写登记，不硬编码 PASS
@@ -213,6 +299,57 @@ class TestBaselineRegister(unittest.TestCase):
             self.assertIn("拒绝登记", out)
             self.assertEqual(br.load()["baselines"], [])
 
+    def test_add_candidate_rejects_fail_result_receipt(self):
+        # pub-01 红灯：result=fail 收据（build/push_board=PASS、cases 失败）不得
+        # 登记——堵绕过链（fail 收据经 skip 收据成为 LATEST 后被 prepare 取作
+        # evidence 锚点放行登记；AGENTS.md 登记门禁：result 属 pass 或 skip）
+        rp = self._write_raw_receipt(result="fail", build="pass",
+                                     push_board="pass")
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 1)
+        self.assertIn("result=fail", out)
+        self.assertIn("登记门禁", out)
+        self.assertEqual(br.load()["baselines"], [])
+
+    def test_add_candidate_rejects_board_skip_result(self):
+        # pub-01 红灯：board 收据 result=skip（上板实测 skip 不具备证据性）拒登记
+        rp = self._write_raw_receipt(result="skip", verify_mode="board")
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 1)
+        self.assertIn("非 pass", out)
+        self.assertEqual(br.load()["baselines"], [])
+
+    def test_add_candidate_rejects_unknown_build(self):
+        # pub-03 红灯：build/board_verify=UNKNOWN 视同 FAIL（AGENTS.md）拒登记
+        for kw in ({"build": "unknown"}, {"push_board": "unknown"}):
+            rp = self._write_raw_receipt(**kw)
+            rc, out = self._run("add-candidate", "--receipt-path", rp,
+                                "--source-commit", "abc123",
+                                "--evidence-scope", "lcview-liveness")
+            self.assertEqual(rc, 1, kw)
+            self.assertIn("UNKNOWN 视同 FAIL", out)
+            self.assertEqual(br.load()["baselines"], [])
+
+    def test_add_candidate_explicit_id_duplicate_rejected(self):
+        # pub-06 红灯：显式 --baseline-id 已存在（任意状态）→ 拒绝，不产生重复 id
+        rp = self._make_receipt()
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--source-commit", "abc123",
+                                   "--evidence-scope", "lcview-liveness",
+                                   "--baseline-id", "BL-DUP-01")[0], 0)
+        rp2 = self._make_receipt()
+        rc, out = self._run("add-candidate", "--receipt-path", rp2,
+                            "--source-commit", "def456",
+                            "--evidence-scope", "lcview-liveness",
+                            "--baseline-id", "BL-DUP-01")
+        self.assertEqual(rc, 1)
+        self.assertIn("已存在", out)
+        self.assertEqual(len(br.load()["baselines"]), 1)
+
     def test_add_candidate_rejects_bad_enum(self):
         # 方向 4：verify_mode/result 非法枚举拒绝登记
         for kw in ({"verify_mode": "bogus"}, {"result": "bogus"}):
@@ -240,8 +377,8 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
-        self.assertEqual(self._run("promote", "--baseline-id", bid, "--approved-by", "lechao")[0], 0)
-        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao")
+        self.assertEqual(self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer")[0], 0)
+        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer")
         self.assertEqual(rc, 1)
         self.assertIn("仅 candidate 可 promote", out)
 
@@ -251,7 +388,7 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
-        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao")
+        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer")
         self.assertEqual(rc, 0)
         self.assertIn("promoted:", out)
         snapshot = self._root / "data" / "baselines" / f"{bid}-{Path(rp).name}"
@@ -270,10 +407,52 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(b["package_result"], "UNKNOWN")
         bid = b["baseline_id"]
         rc, out = self._run("promote", "--baseline-id", bid,
-                            "--approved-by", "lechao")
+                            "--approved-by", "reviewer")
         self.assertEqual(rc, 1)
         self.assertIn("promote 硬门禁", out)
         self.assertEqual(br.load()["baselines"][0]["status"], "candidate")
+
+    def _make_candidate_bid(self):
+        """登记一个可 promote 的 candidate（PASS 收据 + 全量 cases），返 baseline_id。"""
+        rp = self._make_receipt_pkg()
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        return br.load()["baselines"][0]["baseline_id"]
+
+    def test_promote_rejects_approver_same_as_operator(self):
+        # KI-20260907-001：审批人恒等执行人 → 拒（身份不等式硬校验）
+        bid = self._make_candidate_bid()
+        with mock.patch.object(br, "_collect_operator",
+                               return_value="lechao <lechao@x.com>"), \
+                mock.patch.object(br, "_read_approval_token",
+                                  return_value="tok-abc"), \
+                mock.patch.dict("os.environ",
+                                {"LC_PROMOTE_APPROVAL_TOKEN": "tok-abc"}):
+            rc = self._run("promote", "--baseline-id", bid,
+                           "--approved-by", "lechao <lechao@x.com>")[0]
+        self.assertNotEqual(rc, 0)
+
+    def test_promote_rejects_token_mismatch(self):
+        # env token ≠ 预设值 → 凭据外部化失败即拒（≠ promote-approval.env）
+        bid = self._make_candidate_bid()
+        with mock.patch.dict("os.environ",
+                             {"LC_PROMOTE_APPROVAL_TOKEN": "wrong-tok"}):
+            rc = self._run("promote", "--baseline-id", bid,
+                           "--approved-by", "reviewer <r@x.com>")[0]
+        self.assertNotEqual(rc, 0)
+
+    def test_promote_approver_diff_and_token_match_ok(self):
+        # 不同审批人 + token 匹配 → 放行（回归既有 promote 成功路径）
+        bid = self._make_candidate_bid()
+        with mock.patch.object(br, "_collect_operator",
+                               return_value="lechao <lechao@x.com>"), \
+                mock.patch.object(br, "_read_approval_token",
+                                  return_value="tok-abc"), \
+                mock.patch.dict("os.environ",
+                                {"LC_PROMOTE_APPROVAL_TOKEN": "tok-abc"}):
+            rc = self._run("promote", "--baseline-id", bid,
+                           "--approved-by", "reviewer <r@x.com>")[0]
+        self.assertEqual(rc, 0)
 
     # ── 方向 1/2（本批意图 1/2）：发布全量组覆盖核对（promote 门禁 + evidence 记录）──
     def _full_cases_without(self, drop):
@@ -311,7 +490,7 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
-        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao")
+        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer")
         self.assertEqual(rc, 1)
         self.assertIn("发布全量组门禁", out)
         self.assertIn("lcview-trigger", out)
@@ -325,7 +504,7 @@ class TestBaselineRegister(unittest.TestCase):
                                    "--evidence-scope", "no-code-change")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
         with self._patch_no_code_changes([]):
-            rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao",
+            rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer",
                                 "--evidence-scope", "no-code-change")
         self.assertEqual(rc, 0, out)
         self.assertIn("promoted:", out)
@@ -336,9 +515,45 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
-        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao")
+        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer")
         self.assertEqual(rc, 0, out)
         self.assertIn("promoted:", out)
+
+    # ── 方向 3：未闭环 flake 类 KI 阻断 promote ──────────────────────────
+    def test_open_flake_issues_only_unclosed_flake(self):
+        # _open_flake_issues：只认 kind=flake 且未标终态的条目（普通 open 不算）
+        from cdp_issue import Issue, write_issue
+        write_issue(Issue(issue_id="KI-FLAKE-01", title="[flake] a",
+                          kind="flake", origin="pre-existing", blocking=False,
+                          status="open", task="", discovered_in="abc",
+                          batch_id="18f27638d9f6"), "抖动")
+        write_issue(Issue(issue_id="KI-FLAKE-02", title="[flake] b",
+                          kind="flake", origin="pre-existing", blocking=False,
+                          status="fixed", resolved_in="abc", task="",
+                          discovered_in="abc", batch_id="18f27638d9f6"), "闭环")
+        write_issue(Issue(issue_id="KI-OPEN-01", title="普通问题",
+                          status="open", task="t1", discovered_in="abc",
+                          batch_id="18f27638d9f6"), "普通")
+        from baseline_register import _open_flake_issues
+        flakes = _open_flake_issues(self._root / "data" / "known-issues")
+        self.assertEqual(len(flakes), 1)
+        self.assertIn("[flake] a", flakes[0])
+
+    def test_promote_blocks_open_flake(self):
+        # 存在未闭环 flake（kind=flake 且 open）→ promote 拒绝（抖动未闭环
+        # 不得晋升；闭环须标 fixed/wontfix 并填 resolved_in）
+        from cdp_issue import Issue, write_issue
+        rp = self._make_receipt_pkg()
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        bid = br.load()["baselines"][0]["baseline_id"]
+        write_issue(Issue(issue_id="KI-FLAKE-01", title="[flake] x",
+                          kind="flake", origin="pre-existing", blocking=False,
+                          status="open", task="", discovered_in="abc",
+                          batch_id="18f27638d9f6"), "抖动")
+        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer")
+        self.assertEqual(rc, 1)
+        self.assertIn("未闭环 flake", out)
 
     def test_add_candidate_package_pass_from_evidence(self):
         # 方向 2：ws_package 证据 script_rc=0 → package_result 记 PASS
@@ -474,7 +689,7 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(br.load()["baselines"][0]["package_result"], "PASS")
         bid = br.load()["baselines"][0]["baseline_id"]
         rc, out = self._run("promote", "--baseline-id", bid,
-                            "--approved-by", "lechao")
+                            "--approved-by", "reviewer")
         self.assertEqual(rc, 1)
         self.assertIn("一致性校验", out)
         self.assertIn("UNKNOWN", out)
@@ -489,7 +704,7 @@ class TestBaselineRegister(unittest.TestCase):
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
         rc, out = self._run("promote", "--baseline-id", bid,
-                            "--approved-by", "lechao")
+                            "--approved-by", "reviewer")
         self.assertEqual(rc, 0)
         self.assertIn("promoted:", out)
 
@@ -502,7 +717,7 @@ class TestBaselineRegister(unittest.TestCase):
         bid = br.load()["baselines"][0]["baseline_id"]
         with self._patch_no_code_changes([]):
             rc, out = self._run("promote", "--baseline-id", bid,
-                                "--approved-by", "lechao")
+                                "--approved-by", "reviewer")
         self.assertEqual(rc, 0)
         self.assertIn("promoted:", out)
         b = br.load()["baselines"][0]
@@ -516,7 +731,7 @@ class TestBaselineRegister(unittest.TestCase):
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
         with self._patch_no_code_changes([]):
-            rc, _ = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao",
+            rc, _ = self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer",
                               "--evidence-scope", "no-code-change")
         self.assertEqual(rc, 0)
         b = br.load()["baselines"][0]
@@ -543,12 +758,12 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
-        self.assertEqual(self._run("promote", "--baseline-id", bid, "--approved-by", "lechao")[0], 0)
+        self.assertEqual(self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer")[0], 0)
         snapshot = self._root / "data" / "baselines" / f"{bid}-{Path(rp).name}"
         snapshot.write_text("历史证据，不可覆盖", encoding="utf-8")
         # 回退 candidate 后再次 promote：应命中快照已存在而拒绝
         self.assertEqual(self._run("revert-candidate", "--baseline-id", bid)[0], 0)
-        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao")
+        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer")
         self.assertEqual(rc, 1)
         self.assertIn("快照已存在", out)
         self.assertEqual(snapshot.read_text(encoding="utf-8"), "历史证据，不可覆盖")
@@ -561,7 +776,7 @@ class TestBaselineRegister(unittest.TestCase):
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
         with self._patch_no_code_changes([]):
-            rc, _ = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao",
+            rc, _ = self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer",
                               "--evidence-scope", "no-code-change")
         self.assertEqual(rc, 0)
         b = br.load()["baselines"][0]
@@ -577,7 +792,7 @@ class TestBaselineRegister(unittest.TestCase):
         bid = br.load()["baselines"][0]["baseline_id"]
         with self._patch_no_code_changes(["abc123 fix: 动过 code",
                                           "def456 新增(module): 又一个改动"]):
-            rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao",
+            rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer",
                                 "--evidence-scope", "no-code-change")
         self.assertEqual(rc, 1)
         self.assertIn("机器核对", out)
@@ -593,7 +808,7 @@ class TestBaselineRegister(unittest.TestCase):
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
         with self._patch_no_code_changes(None):
-            rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao",
+            rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer",
                                 "--evidence-scope", "no-code-change")
         self.assertEqual(rc, 1)
         self.assertIn("无法核对 code/ 改动", out)
@@ -607,7 +822,7 @@ class TestBaselineRegister(unittest.TestCase):
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
         rc, out = self._run("promote", "--baseline-id", bid,
-                            "--approved-by", "lechao",
+                            "--approved-by", "reviewer",
                             "--evidence-scope", "lcview-liveness,lcview-perf")
         self.assertEqual(rc, 1)
         self.assertIn("超出收据实测 cases", out)
@@ -621,7 +836,7 @@ class TestBaselineRegister(unittest.TestCase):
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
         rc, out = self._run("promote", "--baseline-id", bid,
-                            "--approved-by", "lechao",
+                            "--approved-by", "reviewer",
                             "--evidence-scope", "lcview-transfer")
         self.assertEqual(rc, 0, out)
         self.assertIn("promoted:", out)
@@ -639,7 +854,7 @@ class TestBaselineRegister(unittest.TestCase):
                           status="fixed", resolved_in="abc123", **base), "x")
         write_issue(Issue(issue_id="KI-CLOSE-2", title="问题二",
                           origin="introduced", blocking=True,
-                          blocking_reason="影响一致性", status="wontfix", **base), "y")
+                          blocking_reason="影响一致性", status="fixed", **base), "y")
         write_issue(Issue(issue_id="KI-OPEN-1", title="问题三",
                           origin="pre-existing", blocking=False,
                           status="open", **base), "z")
@@ -654,16 +869,16 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
-        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao")
+        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer")
         self.assertEqual(rc, 0)
         self.assertIn("promoted:", out)
         b = br.load()["baselines"][0]
-        # 清单入档为明细列表（含 resolved_in 与 title）
+        # 清单入档为明细列表（含 resolved_in 与 title 与 archived_in）
         self.assertEqual(b["evidence"]["known_issues_closed"], [
             {"issue_id": "KI-CLOSE-1", "resolved_in": "abc123",
-             "title": "问题一"},
+             "title": "问题一", "archived_in": ""},
             {"issue_id": "KI-CLOSE-2", "resolved_in": "",
-             "title": "问题二"},
+             "title": "问题二", "archived_in": ""},
         ])
         # 归档段写入基线文档（快照 = 基线文档本体）
         snapshot = self._root / "data" / "baselines" / f"{bid}-{Path(rp).name}"
@@ -690,7 +905,7 @@ class TestBaselineRegister(unittest.TestCase):
         data["baselines"][0]["evidence"] = "not-a-dict"
         br.save(data)
         bid = b["baseline_id"]
-        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao")
+        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer")
         self.assertEqual(rc, 0)
         self.assertIn("evidence 非字典", out)
         self.assertIn("promoted:", out)
@@ -713,7 +928,7 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
-        rc, _ = self._run("promote", "--baseline-id", bid, "--approved-by", "lechao")
+        rc, _ = self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer")
         self.assertEqual(rc, 0)
         snapshot = self._root / "data" / "baselines" / f"{bid}-{Path(rp).name}"
         self.assertTrue(snapshot.is_file(), "快照未落盘")
@@ -730,7 +945,7 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("仅 promoted 可 revert-candidate", out)
         # promote 后再 revert 成功
-        self.assertEqual(self._run("promote", "--baseline-id", bid, "--approved-by", "lechao")[0], 0)
+        self.assertEqual(self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer")[0], 0)
         rc, out = self._run("revert-candidate", "--baseline-id", bid)
         self.assertEqual(rc, 0)
         self.assertIn("reverted-candidate:", out)
@@ -767,6 +982,141 @@ class TestBaselineRegister(unittest.TestCase):
         text = self._config.read_text(encoding="utf-8")
         self.assertEqual(text.count("# 头部"), 1)
         self.assertNotIn("条目内", text.split("baselines:", 1)[0])
+
+    @unittest.skipUnless(__import__("shutil").which("git"), "需要 git 解释器")
+    def test_code_changes_since_main_ignores_main_side(self):
+        # pub-04 红灯：两点语法 origin/main..HEAD——main 领先（main 侧有 code/
+        # 提交而 dev 无）时不得把 main 侧提交算进 dev 改动（三点对称差曾把
+        # main 侧提交误判为 dev 改动，令 no-code-change 豁免误拒）
+        import subprocess
+        repo = self._root / "repo"
+        repo.mkdir()
+
+        def _git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args],
+                                  capture_output=True, text=True,
+                                  encoding="utf-8", check=True)
+
+        _git("init", "-q")
+        _git("symbolic-ref", "HEAD", "refs/heads/main")
+        _git("config", "user.email", "t@t")
+        _git("config", "user.name", "t")
+        (repo / "code").mkdir()
+        (repo / "code" / "a.txt").write_text("base\n", encoding="utf-8")
+        _git("add", "-A")
+        _git("commit", "-q", "-m", "base")
+        _git("branch", "dev")
+        main_sha = _git("rev-parse", "HEAD").stdout.strip()
+        # 本地构造 origin/main 引用（无远端，直接写 remote-tracking ref）
+        _git("update-ref", "refs/remotes/origin/main", main_sha)
+        # main 领先：main 侧 code/ 提交（dev 不含）
+        _git("checkout", "-q", "main")
+        (repo / "code" / "m.txt").write_text("main\n", encoding="utf-8")
+        _git("add", "-A")
+        _git("commit", "-q", "-m", "main 侧 code 改动")
+        _git("checkout", "-q", "dev")
+        cwd = os.getcwd()
+        os.chdir(repo)
+        try:
+            changes = br._code_changes_since_main()
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(changes, [])
+
+
+class TestApprovalTokenNoStub(unittest.TestCase):
+    """审批 token 不打桩例（方向 1：修路径 + 缺 token 判红）。
+
+    既有 promote 用例全部 stub `_read_approval_token` 返预设值，路径多拼
+    一层 harness 恒读空 + 空 expected 短路放行的 fail-open 被整体掩盖。
+    本类直接测真实文件读取（不打桩）与缺预设判红行为。
+    """
+
+    def test_read_approval_token_real_file(self):
+        # 不打桩：写真实 env 文件直读（回归值解析与引号剥离）
+        with tempfile.TemporaryDirectory() as d:
+            env = Path(d) / "promote-approval.env"
+            env.write_text('LC_PROMOTE_APPROVAL_TOKEN="tok-xyz"\n',
+                           encoding="utf-8")
+            self.assertEqual(br._read_approval_token(str(env)), "tok-xyz")
+
+    def test_read_approval_token_strips_single_quotes(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = Path(d) / "promote-approval.env"
+            env.write_text("LC_PROMOTE_APPROVAL_TOKEN='tok-s'\n",
+                           encoding="utf-8")
+            self.assertEqual(br._read_approval_token(str(env)), "tok-s")
+
+    def test_read_approval_token_missing_file_empty(self):
+        self.assertEqual(br._read_approval_token("/nonexistent/x.env"), "")
+
+    def test_check_missing_preset_token_rejects(self):
+        # 缺预设判红（fail-open 修复核心）：预设空 → 必须拒（此前空 expected
+        # 短路跳过比对，任意非空 token 放行）
+        with mock.patch.object(br, "_read_approval_token", return_value=""):
+            ok, err = br._check_approval_independence(
+                "reviewer <r@x.com>", "lechao <lechao@x.com>", "any-token")
+        self.assertFalse(ok)
+        self.assertIn("promote-approval.env 缺失或未预设", err)
+
+    def test_check_mismatch_rejects(self):
+        with mock.patch.object(br, "_read_approval_token",
+                               return_value="preset-tok"):
+            ok, err = br._check_approval_independence(
+                "reviewer", "lechao", "wrong-tok")
+        self.assertFalse(ok)
+        self.assertIn("不一致", err)
+
+    def test_check_match_ok(self):
+        with mock.patch.object(br, "_read_approval_token",
+                               return_value="preset-tok"):
+            ok, _ = br._check_approval_independence(
+                "reviewer", "lechao", "preset-tok")
+        self.assertTrue(ok)
+
+    def test_check_operator_unknown_rejects(self):
+        # 批次 7d41df8e24bf 方向 3：operator=unknown（git 身份采集失败）此前
+        # 跳过身份比较放行任意 approved-by（fail-open）——身份不可知时独立性
+        # 不可证，改判红（即使 token 匹配）
+        with mock.patch.object(br, "_read_approval_token",
+                               return_value="preset-tok"):
+            ok, err = br._check_approval_independence(
+                "reviewer", "unknown", "preset-tok")
+        self.assertFalse(ok)
+        self.assertIn("身份不可用", err)
+        self.assertIn("独立性", err)
+
+    def test_check_operator_empty_rejects(self):
+        # operator 空串（采集返回空）与 unknown 同口径判红
+        with mock.patch.object(br, "_read_approval_token",
+                               return_value="preset-tok"):
+            ok, err = br._check_approval_independence(
+                "reviewer", "", "preset-tok")
+        self.assertFalse(ok)
+        self.assertIn("身份不可用", err)
+
+    def test_check_same_identity_rejects_before_unknown_check(self):
+        # 正常 operator 且与审批人同身份 → 仍按"审批缺乏独立隔离"判红
+        with mock.patch.object(br, "_read_approval_token",
+                               return_value="preset-tok"):
+            ok, err = br._check_approval_independence(
+                "lechao <lechao@x.com>", "lechao <lechao@x.com>", "preset-tok")
+        self.assertFalse(ok)
+        self.assertIn("相同", err)
+
+    def test_check_token_file_override_reads_real_file(self):
+        # --approval-token-file 透传：不打桩、真实文件读取判定
+        with tempfile.TemporaryDirectory() as d:
+            env = Path(d) / "promote-approval.env"
+            env.write_text("LC_PROMOTE_APPROVAL_TOKEN=ovr-tok\n",
+                           encoding="utf-8")
+            ok, _ = br._check_approval_independence(
+                "reviewer", "lechao", "ovr-tok", str(env))
+            self.assertTrue(ok)
+            ok, err = br._check_approval_independence(
+                "reviewer", "lechao", "wrong-tok", str(env))
+            self.assertFalse(ok)
+            self.assertIn("不一致", err)
 
 
 if __name__ == "__main__":

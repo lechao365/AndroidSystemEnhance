@@ -19,6 +19,19 @@ class TestCmdBuild(unittest.TestCase):
         joined = " ".join(ac.build_exec_cmd("getprop ro.build.version"))
         self.assertIn("__LE_EXIT_CODE__", joined)
 
+    def test_exec_cmd_with_endpoint_includes_serial(self):
+        # wsv-04：endpoint 非空 → -s 定向（多 serial 残留时缺 -s 会被 adb
+        # 以 "more than one device" 拒绝假红）
+        cmd = ac.build_exec_cmd("getprop ro.serialno",
+                                endpoint="10.0.0.5:5555")
+        self.assertEqual(cmd[:4], ["adb", "-s", "10.0.0.5:5555", "shell"])
+
+    def test_exec_cmd_without_endpoint_unchanged(self):
+        # 单 serial 场景行为不变：缺省不带 -s
+        cmd = ac.build_exec_cmd("getprop ro.serialno")
+        self.assertEqual(cmd[0], "adb")
+        self.assertNotIn("-s", cmd)
+
     def test_logcat_tail(self):
         joined = " ".join(ac.build_logcat_cmd("lechao", tail=200))
         self.assertIn("-d", joined)
@@ -38,6 +51,18 @@ class TestCmdBuild(unittest.TestCase):
         self.assertIn("--pid=4242", cmd)
         self.assertNotIn("--pid=", " ".join(ac.build_logcat_cmd(None, 5000)))
         self.assertNotIn("--pid=", " ".join(ac.build_logcat_cmd(None, 5000, pid=None)))
+
+    def test_logcat_endpoint_targets_serial(self):
+        # wsv2-02：endpoint 非空 → -s <endpoint> 置于 logcat 子命令前定向
+        # （多 serial 残留时缺 -s 报 more than one device 假红，与
+        # build_exec_cmd 同款）；缺省/空 endpoint 不携带 -s
+        cmd = ac.build_logcat_cmd(None, 5000, endpoint="10.0.0.5:5555")
+        self.assertEqual(cmd[:2], [ac.adb_bin(), "-s"])
+        self.assertEqual(cmd[2], "10.0.0.5:5555")
+        self.assertIn("logcat", cmd)
+        self.assertNotIn("-s", " ".join(ac.build_logcat_cmd(None, 5000)))
+        self.assertNotIn("-s", " ".join(
+            ac.build_logcat_cmd(None, 5000, endpoint=None)))
 
     def test_parse_devices_states(self):
         out = ("List of devices attached\n"
@@ -339,6 +364,49 @@ class TestEnsureConnectedRescueLevel(unittest.TestCase):
                 mock.patch.object(ac.subprocess, "run"):
             ep = ac.ensure_connected()
         self.assertEqual(ep, "10.0.0.6:5555")
+
+
+class TestExecExitCodeGate(unittest.TestCase):
+    """wsv-03：exec 子命令 adb 层失败（rc!=0 / marker 缺失）不得误判成功。"""
+
+    def _main_rc(self, returncode, stdout):
+        fake = mock.Mock(returncode=returncode, stdout=stdout)
+        with mock.patch.object(ac.subprocess, "run", return_value=fake):
+            return ac.main(["exec", "--cmd", "echo hi"])
+
+    def test_adb_failure_without_marker_returns_1(self):
+        # adb 层失败输出无 marker（断连场景）→ rc=1（此前恒 0 误判成功）
+        self.assertEqual(self._main_rc(1, "error: device not found\n"), 1)
+
+    def test_marker_missing_with_rc0_returns_1(self):
+        # rc=0 但 marker 未出现（输出不可信）→ rc=1
+        self.assertEqual(self._main_rc(0, "hi\n"), 1)
+
+    def test_success_with_marker_returns_0(self):
+        self.assertEqual(self._main_rc(0, "hi\n__LE_EXIT_CODE__=0\n"), 0)
+
+
+class TestEndpointThreading(unittest.TestCase):
+    """wsv-04：exec 链路贯穿 ensure_connected 的 ep（ensure_ready/clock_sync）。"""
+
+    def test_ensure_ready_passes_endpoint(self):
+        # boot 探测 exec 带 -s 定向本端点
+        fake = mock.Mock(stdout="1\n__LE_EXIT_CODE__=0\n")
+        with mock.patch.object(ac.subprocess, "run", return_value=fake) as m:
+            ok = ac.ensure_ready(endpoint="10.0.0.5:5555")
+        self.assertTrue(ok)
+        cmd = m.call_args.args[0]
+        self.assertEqual(cmd[:3], ["adb", "-s", "10.0.0.5:5555"])
+
+    def test_clock_sync_exec_carries_endpoint(self):
+        # clock_sync 的 date exec 带 -s 定向本端点
+        now = int(__import__("time").time())
+        fake = mock.Mock(returncode=0, stdout=f"{now}\n__LE_EXIT_CODE__=0\n")
+        with mock.patch.object(ac.subprocess, "run", return_value=fake) as m:
+            ok, _ = ac.clock_sync(endpoint="10.0.0.5:5555", max_skew=120)
+        self.assertTrue(ok)
+        first = m.call_args_list[0].args[0]
+        self.assertEqual(first[:3], ["adb", "-s", "10.0.0.5:5555"])
 
 
 class TestClockSync(unittest.TestCase):

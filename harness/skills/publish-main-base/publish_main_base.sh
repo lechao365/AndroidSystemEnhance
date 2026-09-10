@@ -79,6 +79,10 @@ rollback_promote() {
   # verified tag 一并回滚（本地 + 远端尽力而为），防残留假锚点阻断后续重试
   git tag -d "verified/$BID" >/dev/null 2>&1 || true
   git push origin ":refs/tags/verified/$BID" >/dev/null 2>&1 || true
+  # promote 中途已落盘的证据快照一并清理（pub-02）：baseline_register promote
+  # 会写 data/baselines/<id>-<收据名>.md 且拒绝覆盖——不清理则同 BID 重试撞
+  # 「快照已存在」死锁；BID 已在入口校验非空
+  rm -f data/baselines/"$BID"-*.md
   # 推导一：登记已执行（工作区该条目已 promoted）才回退 candidate；
   # revert-candidate 仅改工作区 yaml 不产生提交，不影响下方 HEAD 推导
   if python3 - "$BID" <<'PYEOF'
@@ -308,10 +312,14 @@ print(",".join(carried_issue_ids(os.environ.get("TASK_VAL", ""))))
 PYEOF
     ) || true
   fi
+  # 方向：add-candidate 必须转发 --task（活跃任务多值时 shell 门禁已显式
+  # --task 放行，但 add-candidate 内部门禁 task=None 多值自拒 → prepare 死锁）
+  ADD_TASK=()
+  [ -n "$TASK" ] && ADD_TASK=(--task "$TASK")
   python3 harness/skills/publish-main-base/baseline_register.py add-candidate \
     --source-commit "$(git rev-parse --short=12 "$BH")" --receipt-path "$EVIDENCE_RECEIPT" \
     --ki-gate "$KIGATE" --evidence-scope "$EVIDENCE_SCOPE" \
-    --known-issues-carried "$KNOWN_ISSUES_CARRIED" \
+    --known-issues-carried "$KNOWN_ISSUES_CARRIED" "${ADD_TASK[@]}" \
     || { echo "error: candidate 登记失败" >&2; exit 1; }
   # 登记随 dev 提交推送（避免弄脏工作树阻塞后续 precheck）
   git add harness/config/baseline-status.yaml
@@ -330,12 +338,13 @@ fi
 # ── promote ────────────────────────────────────────────────────────
 # 记录 promote 进入时的 dev HEAD 作为回滚基准（rollback_promote 状态推导依据）
 DEV_HEAD_BEFORE=$(git rev-parse HEAD)
-mkdir -p harness/log/cross-device
-printf '%s\n' "$DEV_HEAD_BEFORE" > "$(promote_state_file "$BID")"
+# 参数校验先于状态文件落盘（pub-05）：BID 缺失时不得残留垃圾状态文件
 [ -n "$BID" ] || { echo "error: --baseline-id 必填" >&2; exit 3; }
 [ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || { echo "error: --message-file 缺失或不存在" >&2; exit 3; }
 # 方向 6：审批凭据外部化——--approved-by 必填（不再回落默认常量，防审批可自证）
 [ -n "$APPROVED_BY" ] || { echo "error: --promote 必须传 --approved-by（审批凭据外部化，不再回落默认常量）" >&2; exit 3; }
+mkdir -p harness/log/cross-device
+printf '%s\n' "$DEV_HEAD_BEFORE" > "$(promote_state_file "$BID")"
 # promote 不再强制 --task：known-issues 门禁在共用段已无条件执行（缺省推断；
 # 推断失败时门禁段 exit 1 拒绝），显式 --task 仅作白名单确认
 git fetch origin || { echo "error: fetch 失败" >&2; exit 1; }
@@ -346,7 +355,9 @@ git fetch origin || { echo "error: fetch 失败" >&2; exit 1; }
 # 且证据范围改写为 no-code-change（本批无代码改动，原 scope 不适用）；
 # 其余（board 收据缺失或未覆盖 code 改动）按 RECEIPT_FAIL 拒绝
 PROMOTE_SCOPE="$EVIDENCE_SCOPE"
-CODE_HEAD=$(git log --format=%H origin/main...dev -- code/ | head -1)
+# 两点语法 origin/main..dev（pub-04）：dev 相对 origin/main 的 code 改动取
+# 「dev 有而 main 无」——三点对称差会把 main 侧领先提交误算成 dev 改动
+CODE_HEAD=$(git log --format=%H origin/main..dev -- code/ | head -1)
 if [ -z "$CODE_HEAD" ]; then
   echo "warn: 最新收据 result=$RESULT verify_mode=$MODEV 非 pass+board，但 dev 相对 origin/main 无 code/ 改动，豁免放行"
   PROMOTE_SCOPE="no-code-change"
@@ -368,6 +379,13 @@ if not p or not r.verified_commit:
     print("0")
     print("")
     sys.exit(0)
+# 登记门禁（AGENTS.md：「收据 result 属 pass 或 skip」且 promote 须上板证据）：
+# 证据收据须 result=pass 且 verify_mode=board——fail/skip 收据（如 cases 失败
+# 的 board 批）不得充当晋升上板证据，fail-closed（pub-01）
+if r.result != "pass" or r.verify_mode != "board":
+    print("ERR_RESULT")
+    print("")
+    sys.exit(0)
 r0 = subprocess.run(["git", "merge-base", "--is-ancestor",
                      os.environ["CODE_HEAD"], r.verified_commit],
                     capture_output=True)
@@ -380,6 +398,11 @@ PYEOF
   if [ "$BOARD_OK" = "ERR_PARSE" ]; then
     check_class RECEIPT_FAIL
     echo "error: 最新 board 收据头部解析有错（拒绝据其做覆盖判定与树绑定），须修复收据后重试" >&2
+    exit 1
+  fi
+  if [ "$BOARD_OK" = "ERR_RESULT" ]; then
+    check_class RECEIPT_FAIL
+    echo "error: 最新 board 收据 result 非 pass 或 verify_mode 非 board（fail/skip 收据不得充当晋升上板证据），拒绝" >&2
     exit 1
   fi
   if [ "$BOARD_OK" != "1" ]; then
@@ -425,7 +448,9 @@ if [ "$PKG_RESULT" != "PASS" ]; then
 fi
 fi
 # 文档同步遗漏提示（warn 不阻断）：dev 相对 origin/main 无 docs/ 改动时提示
-if ! git diff --name-only origin/main...dev | grep -q '^docs/'; then
+# （pub2-02：与 code 门禁同用两点差 origin/main..dev——三点对称差在 main
+# 领先 dev 时会混入 main 侧提交，docs 提示口径漂移）
+if ! git diff --name-only origin/main..dev | grep -q '^docs/'; then
   echo "warn: dev 相对 origin/main 无 docs/ 改动（若本批应同步设计文档，请先 /sync-code-to-doc --base origin/main 并 commit 到 dev）"
 fi
 
@@ -447,19 +472,32 @@ git push origin "refs/tags/verified/$BID" || {
 python3 harness/skills/publish-main-base/baseline_register.py promote \
   --baseline-id "$BID" --approved-by "$APPROVED_BY" \
   ${PROMOTE_SCOPE:+--evidence-scope "$PROMOTE_SCOPE"} \
-  || { echo "error: baseline 晋升登记失败（检查 $BID 是否为 candidate）" >&2; exit 1; }
+  || { rollback_promote; echo "error: baseline 晋升登记失败（检查 $BID 是否为 candidate），已回滚" >&2; exit 1; }
 # 晋升登记随 dev 提交（squash 时一并进入 main；重建 dev 后仍在——reset --hard 前）
 # 证据快照目录 data/baselines/ 一并 add（promote 已生成 <id>-<收据名>.md 快照）
 # data/known-issues/ 一并 add -A（promote 归档不删文件，批内新登记问题须随晋升
 # 提交入库；verify-tree 已排除该目录，登记变更不破坏树等价断言）
-git add harness/config/baseline-status.yaml
-if [ -d data/baselines ]; then git add data/baselines; fi
-if [ -d data/known-issues ]; then git add -A data/known-issues; fi
+git add harness/config/baseline-status.yaml || {
+  rollback_promote; git reset -q; echo "error: add baseline-status.yaml 失败，已回滚并清暂存" >&2; exit 1; }
+if [ -d data/baselines ]; then
+  git add data/baselines || {
+    rollback_promote; git reset -q; echo "error: add data/baselines 失败，已回滚并清暂存" >&2; exit 1; }
+fi
+if [ -d data/known-issues ]; then
+  git add -A data/known-issues || {
+    rollback_promote; git reset -q; echo "error: add data/known-issues 失败，已回滚并清暂存" >&2; exit 1; }
+fi
 if git diff --cached --quiet; then
   echo "warn: baseline-status.yaml 无变更，跳过晋升提交"
 else
+  # pub2-01：晋升登记提交失败也须接 rollback_promote——此前仅 exit 1，tag 已
+  # 推送、promote 现场已落盘且未被回滚，重试 promote 撞「tag verified/$BID 已
+  # 存在」exit 3 死锁（须人工删 tag）；git reset -q 顺带清掉本段刚暂存的
+  # promote 产物（baseline-status/baselines/known-issues），工作树内容保留
   git commit -m "构建(baseline): ${BID} 晋升 promoted" || {
-    echo "error: 晋升登记提交失败" >&2; exit 1; }
+    rollback_promote; git reset -q
+    echo "error: 晋升登记提交失败，已回滚并清暂存（tag 与 candidate 现场已复原）" >&2
+    exit 1; }
 fi
 
 git checkout main && git pull origin main || { rollback_promote; echo "error: checkout/pull main 失败" >&2; exit 1; }

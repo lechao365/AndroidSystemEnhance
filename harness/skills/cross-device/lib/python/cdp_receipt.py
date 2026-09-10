@@ -4,12 +4,14 @@
 趋势文件: data/verify-results/trend.md（每批一行，保留 _TREND_KEEP 行）
 注意: trend.md 不属于详情（文件名排序恒在最后，读取/老化必须显式排除）。
 """
+import contextlib
 import datetime
 import getpass
 import platform
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -65,12 +67,53 @@ _FIELDS = [
     # 两行 → from_text 默认空串，向后兼容
     ("operator", ""),
     ("host_env", ""),
+    # P0-C：本批 selfcheck 登记的 flake 数（ws_report 从 selfcheck 文本解析；
+    # 旧收据无此行 → 默认空，metrics 聚合容错）
+    ("flake_count", ""),
+    # P1-A：覆盖率采集证据（ws_coverage 自描述 JSON 单行；只记录不门禁，
+    # status 三态 ok/partial/unavailable）。旧收据无此行 → 默认空，兼容。
+    ("coverage", ""),
 ]
 
 # 自动采集字段进程级缓存：write_receipt 高频调用（老化单测单用例 55 次写），
 # operator/host_env 进程内不变——缓存避免逐写 2 次子进程 spawn 拖慢批量写
-# 收据路径（实测 55 写 × 2 spawn ≈ 2.1s，逼近单测 slow_guard 3s 墙）
+# 收据路径（实测 55 写 × 2 spawn ≈ 2.1s，逼近单测 slow_guard 3s 墙钟）
 _AUTOFILL_CACHE: dict = {}
+
+
+@contextlib.contextmanager
+def _trend_locked(trend: Path):
+    """trend.md 读→改→写区间跨进程互斥（CDP-08：并发 append_trend 丢行）。
+
+    与 cdp_timing._locked 同款实现口径（flock 非阻塞重试至多 10s、拿不到
+    降级直写、无 fcntl 平台降级）；本文件内同构实现而非 import 复用——
+    收据链不依赖打点链模块（cdp_timing），保持方向解耦。
+    """
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    lock_path = Path(f"{trend}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "a")
+    try:
+        deadline = time.monotonic() + 10.0
+        while True:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError):
+                if time.monotonic() >= deadline:
+                    break  # 拿锁超时降级不加锁直写
+                time.sleep(0.05)
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except (OSError, ValueError):
+            pass
+        fh.close()
 
 
 def _collect_operator() -> str:
@@ -100,8 +143,30 @@ def _collect_operator() -> str:
     return name or email or "unknown"
 
 
+def _fs_type(path) -> str:
+    """仓库所在文件系统类型（df -T 数据行第 2 列）；失败/非 Linux 降级 "?"。
+
+    方向 4：host_env 增报仓库文件系统类型——WSL2 drvfs(9p) 与本地 ext4 的
+    IO 语义差异显著（drvfs 上 rglob/子进程开销大，曾致 check_skill_refs
+    ~39s），收据带 fs 类型便于 emit 侧归因环境差异。
+    """
+    try:
+        r = subprocess.run(["df", "-T", str(path)], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return "?"
+    if r.returncode != 0:
+        return "?"
+    for ln in (r.stdout or "").splitlines()[1:]:  # 跳过标题行
+        parts = ln.split()
+        if len(parts) >= 2 and parts[1]:
+            return parts[1]
+    return "?"
+
+
 def collect_host_env() -> str:
-    """采集宿主环境单行摘要：python=<版本> | uname=<系统 机器> | user=<用户>。
+    """采集宿主环境单行摘要：python=<版本> | uname=<系统 机器> | user=<用户> | fs=<文件系统>。
 
     子项独立采集，任一失败降级为该项 "?"（如 uname 命令不存在），绝不让
     收据生成失败。
@@ -125,7 +190,8 @@ def collect_host_env() -> str:
         user = "?"
     return (f"python={platform.python_version()}"
             f" | uname={_run_first_line(['uname', '-s', '-m'])}"
-            f" | user={user}")
+            f" | user={user}"
+            f" | fs={_fs_type(project_root())}")
 
 
 def _autofill_audit_fields(receipt):
@@ -276,11 +342,15 @@ def append_trend(timestamp, batch_id, result, stage, summary, metrics="",
         line += f" | {metrics}"
     if timing:
         line += f" | {timing}"
-    # 原子写：读全量 → 追加新行 → 截断保留 _TREND_KEEP 行 → replace（避免先 append
-    # 再整体重写的非原子读-写，中断会留下半写/丢行态；写侧走统一原子原语）
-    lines = trend.read_text(encoding="utf-8").splitlines() if trend.exists() else []
-    lines.append(line)
-    atomic_write_text(trend, "\n".join(lines[-_TREND_KEEP:]) + "\n")
+    # 原子写 + flock 互斥（CDP-08）：读全量 → 追加新行 → 截断保留
+    # _TREND_KEEP 行 → replace；读改写区间用 _trend_locked 包住，防并发
+    # append_trend 交错丢行（后写者按旧快照整体重写覆盖先写者）；写侧走
+    # 统一原子原语
+    with _trend_locked(trend):
+        lines = trend.read_text(encoding="utf-8").splitlines() \
+            if trend.exists() else []
+        lines.append(line)
+        atomic_write_text(trend, "\n".join(lines[-_TREND_KEEP:]) + "\n")
 
 
 def read_trend_last(verify_dir=None):

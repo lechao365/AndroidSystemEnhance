@@ -1,0 +1,9 @@
+# C/C++ 风格（P0-B）：LLVM 基 + Allman 大括号 + 4 空格缩进 + 100 列。
+# 经 diff 驱动检查：仅对相对 origin/main 改动的 C/H 文件强制校验，
+# 存量文件不动（避免 code/ 业务源码改动触发 git-works-push 收据门禁）。
+BasedOnStyle: LLVM
+IndentWidth: 4
+ContinuationIndentWidth: 4
+ColumnLimit: 100
+SortIncludes: false
+BreakBeforeBraces: Allman

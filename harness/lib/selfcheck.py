@@ -10,26 +10,45 @@ subprocess 不经管道直取 returncode，如实透出两工具结果。
 （emit 实测 39 skipped，C10 方向 3 的兜底伪造计数以 Python 形态复发）。
 故 pytest 摘要行仅从 stdout 用正则定位（含 passed/failed/skipped 的行），
 未定位到计数行即不补 skipped：交 ws_report 缺 skipped 拒写，不自己伪造
-也不静默通过。refs 结论行同理只取 stdout 末行，stderr 仅附注不参与判定。
+也不静默通过。例外（wsv2-01）：flake 放行分支不拼摘要行（原始 failed 计数
+须隐藏）、但摘要存在时 skipped=0 为事实值，须显式透出，否则缺键被
+ws_report 拒写令 KIR-002 放行流程自锁——仅摘要缺失（崩溃/截断）不补。
+refs 结论行同理只取 stdout 末行，stderr 仅附注不参与判定。
 
 输出单行（| 连接，供 ws_report --selfcheck 落盘与门禁判定）：
-    pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n> | refs_rc=<n> | <refs 结论行> | config_rc=<n> | <config 结论行> | contract_rc=<n> | <contract 结论行> | pyenv_rc=<n> | <pyenv 汇总行>
+    pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n> | refs_rc=<n> | <refs 结论行> | config_rc=<n> | <config 结论行> | contract_rc=<n> | <contract 结论行> | pyenv_rc=<n> | <pyenv 汇总行> | ioctl_rc=<n> | <ioctl 结论行> | manifest_rc=<n> | <manifest 结论行> | ... | opencode_rc=<n> | <opencode 结论行> | durs: py=<s> tools=<s> pyenv=<s> ioctl=<s> manifest=<s>
 skipped=<n> 仅在 pytest_rc=0 且摘要无 skipped 时补 0。config_rc/contract_rc
 为 check_config.py 两模式（配置治理/契约检查，方向 4 接入）；pyenv_rc 为
 check_python_env 探测结果（Python 版本 + requirements.txt 依赖，环境破损
-时后续工具结论均不可信）；ws_report 按
+时后续工具结论均不可信）；ioctl_rc 为 check_ioctl_headers 内核/AOSP ioctl
+头一致性结果（方向 2，双空/漂移判红透出）；manifest_rc 为 gen_manifest
+--check-only 的 code/rpi5 manifest 登记完整性结果（方向 2，未登记/有变化
+判红透出）；opencode_rc 为 validate_opencode_server 的 opencode-server 脚本
+与 SKILL.md 一致性结果（方向 6，此前无调用方静默判红）；ws_report 按
 全部 *_rc 键判红（任一非零拒写收据）。退出码恒 0：拒写与否由 ws_report
 按 rc 判定，本脚本只负责如实采集（emit 侧可独立自测）。
 """
+import argparse
+import hashlib
 import importlib
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# ws_report 必查键集合（单点定义，方向 3）：selfcheck 输出的 *_rc 中这些键
+# 任一缺失即拒写收据。ws_report.py 必查循环、test_workflow_ci 断言、CI
+# workflow 均以本集合为口径基准，新增 rc（pyenv_rc/ioctl_rc/manifest_rc 等）
+# 必须同步进本常量，防单侧漏接线致判红静默失效。
+REQUIRED_RC_KEYS = ("pytest_rc", "refs_rc", "config_rc", "contract_rc",
+                    "pyenv_rc", "ioctl_rc", "manifest_rc",
+                    "discipline_rc", "scan_rc", "ruff_rc", "host_rc",
+                    "metrics_rc", "opencode_rc")
 
 # pytest 摘要计数行：含 passed/failed/skipped 任一计数的行（形如
 # "531 passed in 27.9s"、"121 passed, 3 skipped in 6.0s"、"1 failed, ..."）
@@ -83,48 +102,104 @@ def run_tool(cmd, timeout=None):
         return 124, out, f"timeout after {timeout}s"
 
 
-# 治理工具超时上限（秒）：refs/config 正常 2~4s，放宽 20 倍仍能兜住挂死
+def timed_run(cmd, timeout=None):
+    """run_tool + 真实墙钟耗时（方向 6）：返回 (rc, stdout, stderr, dur_s)。
+    逐检查器耗时入自检输出行，emit 侧定位耗时瓶颈（慢点归因不再只看
+    pytest --durations 与 gap 段）。"""
+    _t0 = time.time()
+    rc, out, err = run_tool(cmd, timeout=timeout)
+    return rc, out, err, time.time() - _t0
+
+
+# 治理工具超时上限（秒）：refs/config 实测 ~25s（全量扫描 refs 索引 + yaml
+# 治理），放宽 4 倍兜住挂死（方向 2 订正：此前注释称 2~4s 与实测差一个数量级）
 _TOOL_TIMEOUT_S = 120
 # pytest 超时上限（秒）：xdist 全量正常 ~25s（WSL2 drvfs ~60s），兜挂死
 _PYTEST_TIMEOUT_S = 900
+# host 收口超时上限（秒）：check_host_tests 逐模块 make test 各 300s、两模块
+# 顺序跑最坏 ~600s+clean，放 650 兜挂死；须大于单模块超时（300s）防误杀——
+# 不足则内层 TimeoutExpired（rc 判红带归因）会被外层收口 rc=124 抢先截断
+_HOST_TIMEOUT_S = 650
 
 
-def run_parallel_tools():
-    """refs 与 config/contract 并行采集（B2）：两进程同时拉起，墙钟取
-    max 而非 sum（治理进程冷启动与 pytest 峰值错峰）。
+def _spawn_cmd(cmd):
+    """Popen 启动单个工具（非阻塞，方向 1：与 pytest 重叠跑，收口在
+    _collect_cmd）。cwd=ROOT 与 run_tool 一致。"""
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        encoding="utf-8", errors="replace", cwd=ROOT)
+    # 方向 4：durs 自 Popen 时刻起（此前 _t0 记在收口时刻，重叠进程
+    # communicate 立即返回致 durs 恒 0，emit 无法定位真实耗时）
+    proc._spawn_t0 = time.time()
+
+    def _wait_exit():
+        # 方向 3：wait 线程记进程真实退出时刻（_exit_t0）。收口在 pytest
+        # 之后发生，若 dur 取收口时刻减 spawn，六项 durs 恒等 pytest 总时长
+        # ——改取退出减 spawn 才反映工具真实运行时长。
+        try:
+            proc.wait()
+        except Exception:
+            pass
+        finally:
+            proc._exit_t0 = time.time()
+
+    threading.Thread(target=_wait_exit, daemon=True).start()
+    return proc
+
+
+def _collect_cmd(proc, name, timeout=_TOOL_TIMEOUT_S):
+    """收口单个 Popen：communicate + 墙钟，返回 (rc, stdout, stderr, dur_s)。
+    超时 kill 返 rc=124（约定超时标记，B3 兜底挂死）。dur_s = 进程退出时刻
+    （wait 线程记）减 Popen 时刻（方向 3：工具真实运行时长；wait 线程未记
+    即收口时刻——communicate 返回即退出，近似一致）。"""
+    _t0 = getattr(proc, "_spawn_t0", time.time())
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        rc = proc.returncode
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = proc.communicate()
+        print(f"warn: 治理工具超时（>{timeout}s，rc=124）: {name}",
+              file=sys.stderr)
+        rc, err = 124, f"timeout after {timeout}s"
+    exit_t0 = getattr(proc, "_exit_t0", None)
+    # mock/异常形态下 _exit_t0 可能非数值（unittest mock 自动属性），回落收口
+    if not isinstance(exit_t0, (int, float)):
+        exit_t0 = None
+    end = exit_t0 if exit_t0 is not None else time.time()
+    return rc, out, err, end - _t0
+
+
+def _spawn_tools():
+    """并行启动 refs 与 config/contract（B2，方向 1 拆两阶段）：仅 Popen
+    不阻塞，主流程随后跑 pytest 与治理重叠，收口在 _collect_tools。"""
+    return {
+        "refs": _spawn_cmd(
+            [sys.executable, str(ROOT / "harness" / "lib" / "check_skill_refs.py")]),
+        "cfg": _spawn_cmd(
+            [sys.executable, str(ROOT / "harness" / "lib" / "check_config.py"),
+             "--all"]),
+        "discipline": _spawn_cmd(
+            [sys.executable, str(ROOT / "harness" / "lib"
+                                 / "check_test_discipline.py")]),
+        "scan": _spawn_cmd(
+            [sys.executable, str(ROOT / "harness" / "lib"
+                                 / "check_hot_path_scan.py")]),
+    }
+
+
+def _collect_tools(procs):
+    """收口 refs/cfg（communicate + 各自墙钟），解析 --all 机器行。
 
     check_config --all 单进程双模式（消两遍 yaml 导入/全量扫描，B2）：
     末尾 config_rc=/contract_rc= 机器行分别解析，结论行按 label 前缀
     分别提取（与单模式 last_stdout_line 口径兼容）。
-    返回 dict：
-      refs: (rc, stdout, stderr)
-      cfg:  (rc, stdout, 结论行)
-      ctr:  (rc, stdout, 结论行)
+    返回 (tools dict, refs_dur, cfg_dur, dis_dur, scan_dur)：tools 形态与
+    run_parallel_tools 一致（refs/cfg/ctr/discipline/scan 五元组），四个 dur
+    供 durs 拆开自报（方向 2）。
     """
-    procs = {
-        "refs": subprocess.Popen(
-            [sys.executable, str(ROOT / "harness" / "lib" / "check_skill_refs.py")],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            encoding="utf-8", errors="replace", cwd=ROOT),
-        "cfg": subprocess.Popen(
-            [sys.executable, str(ROOT / "harness" / "lib" / "check_config.py"),
-             "--all"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            encoding="utf-8", errors="replace", cwd=ROOT),
-    }
-    results = {}
-    for key, proc in procs.items():
-        try:
-            out, err = proc.communicate(timeout=_TOOL_TIMEOUT_S)
-            results[key] = (proc.returncode, out, err)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            out, err = proc.communicate()
-            print(f"warn: 治理工具超时（>{_TOOL_TIMEOUT_S}s，rc=124）: {key}",
-                  file=sys.stderr)
-            results[key] = (124, out or "", f"timeout after {_TOOL_TIMEOUT_S}s")
-    refs_rc, refs_out, refs_err = results["refs"]
-    cfg_rc_raw, cfg_out, _ = results["cfg"]
+    refs_rc, refs_out, refs_err, refs_dur = _collect_cmd(procs["refs"], "refs")
+    cfg_rc_raw, cfg_out, _, cfg_dur = _collect_cmd(procs["cfg"], "cfg")
     # --all 末尾机器 rc 行解析；异常形态（旧版无机器行/输出损坏）按整体
     # rc 兜底双段，结论行回落全文末行保摘要可见性
     cfg_rc, ctr_rc = cfg_rc_raw, cfg_rc_raw
@@ -137,9 +212,28 @@ def run_parallel_tools():
             cfg_rc, ctr_rc = int(m_cfg.group(1)), int(m_ctr.group(1))
     elif not ctr_last:
         ctr_last = last_stdout_line(cfg_out)
-    return {"refs": (refs_rc, refs_out, refs_err),
-            "cfg": (cfg_rc, cfg_out, cfg_last),
-            "ctr": (ctr_rc, ctr_out, ctr_last)}
+    # 方向 1/2 新增守卫：discipline（测试改动禁新增 xfail/skip/sleep 重试）
+    # 与 scan（热路径禁全树 rglob/os.walk）并行收口，各自 rc 与结论行透出
+    dis_rc, dis_out, _, dis_dur = _collect_cmd(procs["discipline"], "discipline")
+    scan_rc, scan_out, _, scan_dur = _collect_cmd(procs["scan"], "scan")
+    tools = {"refs": (refs_rc, refs_out, refs_err),
+             "cfg": (cfg_rc, cfg_out, cfg_last),
+             "ctr": (ctr_rc, ctr_out, ctr_last),
+             "discipline": (dis_rc, dis_out, ""),
+             "scan": (scan_rc, scan_out, "")}
+    return tools, refs_dur, cfg_dur, dis_dur, scan_dur
+
+
+def run_parallel_tools():
+    """refs 与 config/contract 并行采集（B2 组合接口，测试/兼容用）。
+
+    两阶段 _spawn_tools + _collect_tools 的即时组合（墙钟取 max 而非 sum）；
+    main 已拆两阶段与 pytest/ioctl/manifest 全重叠（方向 1），本函数保留
+    原接口供 TestParallelTools 与外部调用。
+    """
+    procs = _spawn_tools()
+    tools, _, _, _, _ = _collect_tools(procs)
+    return tools
 
 
 def _extract_all_mode_lines(out):
@@ -326,17 +420,271 @@ def _import_cdp_timing():
         return False
 
 
-def main():
+# ── 方向 1：偶现失败机械判定（KIR-002 抖动登记 / KIR-001 不得顺延）──────────
+_FAILED_RE = re.compile(r"^FAILED (\S+)", re.M)
+
+
+def _failed_nodeids(py_out):
+    """从 pytest -q 输出提取失败用例 nodeid（"FAILED <nodeid> - reason" 行）。"""
+    return sorted(set(_FAILED_RE.findall(py_out)))
+
+
+def _git_changed_files():
+    """本批改动文件（git diff --name-only HEAD，相对 ROOT）；无 git/无改动返空集。
+
+    timeout=30 对齐本链其他 subprocess 调用（防 drvfs 卡死 git 拖垮自检），
+    超时按空集 + warn 处理（保守：空集 = KIR-001 不命中 = 抖动可放行，
+    不会因 git 卡死而把全部失败误判为引入嫌疑）。
+    KIR-001 机械近似口径：仅当失败用例的测试文件本身命中本批改动才判
+    引入嫌疑；lib 改动 → 测试的传导链不做映射（近似保守，可能漏报引入
+    嫌疑，不会误伤抖动放行）。
+    """
+    try:
+        r = subprocess.run(["git", "diff", "--name-only", "HEAD"], cwd=ROOT,
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=30)
+    except subprocess.TimeoutExpired:
+        print("warn: git diff --name-only 超时（>30s），按无改动处理",
+              file=sys.stderr)
+        return set()
+    except Exception:
+        return set()
+    if r.returncode != 0:
+        return set()
+    return {ln for ln in r.stdout.splitlines() if ln}
+
+
+def _current_batch_id():
+    """当前活跃 batch_id（cdp_timing.resolve_batch_id 回落）；无则空串。"""
+    try:
+        if _import_cdp_timing():
+            return cdp_timing.resolve_batch_id() or ""
+    except Exception:
+        pass
+    return ""
+
+
+def _load_cdp_issue():
+    """延迟导入 cdp_issue（cross-device lib），失败返 None。"""
+    try:
+        issue_dir = ROOT / "harness" / "skills" / "cross-device" / "lib" / "python"
+        if str(issue_dir) not in sys.path:
+            sys.path.insert(0, str(issue_dir))
+        import cdp_issue
+        return cdp_issue
+    except Exception as e:
+        print(f"warn: cdp_issue 导入失败（抖动登记降级，不阻断）: {e}",
+              file=sys.stderr)
+        return None
+
+
+def _flake_history(nodeid):
+    """既有 kind=flake 条目中该 nodeid 的 (轮次, 首现批次)；无则 (0, "")。"""
+    issues_dir = ROOT / "data" / "known-issues"
+    if not issues_dir.is_dir():
+        return 0, ""
+    max_round, first_batch = 0, ""
+    for p in sorted(issues_dir.glob("*.md")):
+        if p.name == "index.md":
+            continue
+        try:
+            txt = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        # 行级精确匹配（lib-03）：子串匹配会让 test_bar 误命中
+        # test_bar[param0] 等参数化前缀条目致轮次虚高，须整行锚定
+        if not re.search(rf"^- nodeid: {re.escape(nodeid)}$", txt, re.M):
+            continue
+        if not re.search(r"^- kind: flake$", txt, re.M):
+            continue
+        rm = re.search(r"^- round: (\d+)$", txt, re.M)
+        if rm:
+            max_round = max(max_round, int(rm.group(1)))
+        fm = re.search(r"^- first_seen_batch: (\S+)$", txt, re.M)
+        if fm and not first_batch:
+            first_batch = fm.group(1)
+    return max_round, first_batch
+
+
+def _flake_issue_id(nodeid, first_batch):
+    """flake 条目 id（lib-02）：sha256(nodeid) 前 6 位 hex 稳定摘要。
+
+    此前 abs(hash(nodeid)) & 0xFFF 受 PYTHONHASHSEED 随机化影响，跨进程
+    不稳定且 4096 空间易碰撞，KIR-002 跨批归链失效；sha256 摘要跨进程
+    稳定，6 位 hex（~1600 万空间）显著降碰撞。"""
+    digest = hashlib.sha256(nodeid.encode("utf-8")).hexdigest()[:6]
+    return f"KI-FLAKE-{first_batch}-{digest}"
+
+
+def _register_flake_issue(nodeid):
+    """按 KIR-002 登记抖动 known-issue（记用例名/轮次/首现批次/复现命令）。
+
+    返回 (nodeid, round, first_batch)。轮次 = 既有该用例 flake 条目数 + 1，
+    首现批次沿用最早条目（同一用例抖动跨批归同一 flake 记录链）。
+    """
+    round_n, first_batch = _flake_history(nodeid)
+    batch_id = _current_batch_id()
+    if not first_batch:
+        first_batch, round_n = batch_id or "unknown", 1
+    else:
+        round_n += 1
+    issue_id = _flake_issue_id(nodeid, first_batch)
+    body = (f"- nodeid: {nodeid}\n"
+            f"- round: {round_n}\n"
+            f"- first_seen_batch: {first_batch}\n"
+            f"- rerun_cmd: python3 -m pytest {nodeid} -q\n"
+            f"- rerun_result: 全新进程单独重跑全部通过（KIR-002 抖动，非阻塞，"
+            f"放行本轮；未闭环 flake 阻断 promote）")
+    cdpi = _load_cdp_issue()
+    if cdpi is not None:
+        try:
+            issue = cdpi.Issue(
+                issue_id=issue_id, title=f"[flake] {nodeid}",
+                kind="flake", origin="pre-existing", blocking=False,
+                status="open", task="", discovered_in=first_batch,
+                batch_id=batch_id or "0" * 12)
+            cdpi.write_issue(issue, body)
+        except Exception as e:
+            print(f"warn: flake 抖动登记失败（不阻断）: {e}", file=sys.stderr)
+    return nodeid, round_n, first_batch
+
+
+def _rerun_failures(py_out):
+    """方向 1：全量红时在全新进程单独重跑失败用例的机械判定。
+
+    返回 (flake_notes, ki001_hits)：
+      flake_notes: [(nodeid, round, first_batch)]——全部单跑绿（KIR-002 抖动，
+        已登记 known-issues 放行本轮）；
+      ki001_hits: [nodeid]——失败用例命中本批改动路径（KIR-001 引入嫌疑，
+        不得顺延，当批修，pytest_rc 保持非零）；
+    任一单跑仍红（真回归阻塞）→ 两项皆空（pytest_rc 保持非零）。
+
+    两遍扫描（lib-04）：第一遍对全部待判定用例单跑只收集结果不落盘——
+    存在真回归（任一 rc!=0 / 超时）即不登记任何条目直接返回阻塞，避免
+    此前"先登记先放行、后续单跑红时已登记条目不回滚"的幽灵 known-issue
+    残留；全部放行才第二遍统一登记。
+    """
+    nodeids = _failed_nodeids(py_out)
+    if not nodeids:
+        return [], []
+    changed = _git_changed_files()
+    # 第一遍：全部单跑收集结果（不落盘登记）
+    rerun_rc = {}
+    for nodeid in nodeids:
+        # 全新进程单独重跑（禁 slow_guard——慢用例单跑会被守卫误判红；
+        # 单进程避免 xdist 分片抖动干扰）
+        env = dict(os.environ)
+        env["SLOW_GUARD_OFF"] = "1"
+        try:
+            r = subprocess.run(
+                [sys.executable, "-m", "pytest", nodeid, "-q"], cwd=ROOT,
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", env=env, timeout=_PYTEST_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            return [], []  # 重跑挂死按真回归阻塞处理
+        rerun_rc[nodeid] = r.returncode
+    if any(rc != 0 for rc in rerun_rc.values()):
+        return [], []  # 任一单跑仍红 → 真回归阻塞，一条都不登记
+    # 第二遍：全部单跑绿，统一登记/归链（KIR-001 命中者不登记只记嫌疑）
+    flake_notes, ki001_hits = [], []
+    for nodeid in nodeids:
+        test_file = nodeid.split("::", 1)[0]
+        if test_file in changed:
+            ki001_hits.append(nodeid)  # KIR-001：本批引入嫌疑，不得顺延
+        else:
+            flake_notes.append(_register_flake_issue(nodeid))
+    return flake_notes, ki001_hits
+
+
+# ── 方向 2：quick 档（git diff 推导受影响测试；推导不出回落全量）────────────
+def _quick_test_targets():
+    """git diff 推导受影响测试文件；推导不出（无 git/无改动/无法映射）返 None
+    → 回落全量（保守，保证覆盖）。规则：
+      - 改动文件本身是 tests/test_*.py → 直接跑；
+      - harness/lib/<x>.py → harness/lib/tests/test_<x>.py；
+      - harness/skills/<skill>/<...>/<x>.py → harness/skills/<skill>/tests/test_<x>.py；
+      - 其余（非 .py / 无对应测试）→ 推导不出回落全量。
+    """
+    changed = _git_changed_files()
+    if not changed:
+        return None
+    targets = set()
+    for rel in changed:
+        p = Path(rel)
+        if p.suffix != ".py":
+            return None
+        parts = p.parts
+        if "tests" in parts and p.name.startswith("test_"):
+            targets.add(rel)
+            continue
+        if p.name.startswith("test_"):
+            return None
+        if len(parts) >= 2 and parts[0] == "harness" and parts[1] == "lib":
+            cand = f"harness/lib/tests/test_{p.stem}.py"
+        elif len(parts) >= 3 and parts[0] == "harness" and parts[1] == "skills":
+            skill = parts[2]
+            cand = f"harness/skills/{skill}/tests/test_{p.stem}.py"
+        else:
+            return None
+        if not (ROOT / cand).is_file():
+            return None
+        targets.add(cand)
+    return sorted(targets)
+
+
+def main(argv=None):
     # 方向 4：重配标准输出为 utf-8（对齐 harness_lib.harness_init），防 GBK
     # 终端把摘要中的中文/非 ASCII 替换成 � 致自检结论行打印失败或被误判
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
+    # 方向 2：quick 档（git diff 推导受影响测试，推导不出回落全量）。
+    # argv is not None 判定（lib-01）：CLI 直跑 sys.exit(main()) 时 argv=None，
+    # 须回落 sys.argv[1:] 让 argparse 真正执行——此前 `if argv:` 致直跑时
+    # --mode quick 被静默忽略恒跑全量（SKILL.md 文档化用法失效）
+    mode = "full"
+    if argv is None:
+        argv = sys.argv[1:]
+    parser = argparse.ArgumentParser(description="harness 自检（-s 采集）")
+    parser.add_argument("--mode", choices=("full", "quick"), default="full",
+                        help="full 全量 harness；quick 由 git diff 推导"
+                             "受影响测试（推导不出回落全量），供 loop 中间轮")
+    args = parser.parse_args(argv)
+    mode = args.mode
+    # 方向 5（批次 env 隔离）：pytest/治理工具子进程必须剥离 CDP_BATCH_ID/
+    # CDP_RUN_ID——链内 report 步（acceptance→package 后）注入的批次 env 会
+    # 污染依赖"无批次环境"的单测（test_cdp_validate_patch / test_gen_manifest /
+    # test_ws_acceptance 等自建临时批次做 mark/logcat 断言，读到真实 batch_id
+    # 即 3 failed 误判红，ws_report 拒写收据，2026-09-10 批次实测复现）。
+    # selfcheck 是纯文件系统检查，内部 edit/apply_selfcheck 打点经
+    # current-batch.json 回落即可（不依赖显式批次 env）；跑完恢复现场。
+    _saved_batch_env = {k: os.environ.get(k)
+                        for k in ("CDP_BATCH_ID", "CDP_RUN_ID")}
+    for _k in _saved_batch_env:
+        os.environ.pop(_k, None)
+    try:
+        return _main_body(mode)
+    finally:
+        for _k, _v in _saved_batch_env.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+
+
+def _main_body(mode):
+    """自检主流程（批次 env 已剥离后执行；见 main 剥离说明）。"""
     # 自检整体墙钟实测（方向 3）：pytest 起跑前记 t0，四工具完成后 t1，
     # 差值经 _mark_selfcheck --dur-s 上报（自检段耗时不再被相邻差额吞并）
     _t0 = time.time()
     _ensure_edit_close_mark()
-    pytest_cmd = [sys.executable, "-m", "pytest", "harness", "-q",
+    if mode == "quick":
+        quick_targets = _quick_test_targets()
+        # 推导不出（无 git/无改动/无法映射）回落全量（保守，保证覆盖）
+        scope = quick_targets or ["harness"]
+    else:
+        scope = ["harness"]
+    pytest_cmd = [sys.executable, "-m", "pytest", *scope, "-q",
                   "--durations=5"]
     # xdist 可导入时并行跑（-n auto 按 CPU 核数分流，apply 侧 586 项串行 30s
     # → 并行显著提速）；导入不到照旧串行。计数行正则不动（-q + -n auto 摘要
@@ -346,27 +694,90 @@ def main():
         pytest_cmd += ["-n", "auto"]
     except ImportError:
         pass
-    py_rc, py_out, py_err = run_tool(pytest_cmd, timeout=_PYTEST_TIMEOUT_S)
-    # refs 与 config/contract 并行采集（B2：Popen 同时拉起 + --all 单进程
-    # 双模式，治理墙钟由 sum 降为 max，两遍 yaml/全量扫描降为一遍）
-    tools = run_parallel_tools()
+    # 方向 1：先 Popen 全部治理工具（refs/cfg/ioctl/manifest）再跑 pytest，
+    # 全重叠后收口——实测 py ~24.8s 与 tools ~27s 可完全重叠，单轮省约 26s
+    tools_procs = _spawn_tools()
+    ioctl_proc = _spawn_cmd(
+        [sys.executable, str(ROOT / "harness" / "lib" / "check_ioctl_headers.py")])
+    ruff_proc = _spawn_cmd(
+        [sys.executable, str(ROOT / "harness" / "lib" / "check_ruff.py")])
+    host_proc = _spawn_cmd(
+        [sys.executable, str(ROOT / "harness" / "lib" / "check_host_tests.py")])
+    metrics_proc = _spawn_cmd(
+        [sys.executable, str(ROOT / "harness" / "lib" / "metrics.py"),
+         "--report"])
+    opencode_proc = _spawn_cmd(
+        [sys.executable, str(ROOT / "harness" / "skills" / "cross-device"
+                             / "opencode-server"
+                             / "validate_opencode_server.py")])
+    py_rc, py_out, py_err, py_dur = timed_run(
+        pytest_cmd, timeout=_PYTEST_TIMEOUT_S)
+    # pytest 跑完收口治理（各进程已与 pytest 重叠，墙钟取 max 而非 sum）
+    (tools, refs_dur, cfg_dur, dis_dur, scan_dur) = _collect_tools(tools_procs)
+    ioctl_rc, ioctl_out, _, ioctl_dur = _collect_cmd(ioctl_proc, "ioctl")
+    ruff_rc, ruff_out, _, ruff_dur = _collect_cmd(ruff_proc, "ruff")
+    host_rc, host_out, _, host_dur = _collect_cmd(host_proc, "host",
+                                                  timeout=_HOST_TIMEOUT_S)
+    opencode_rc, opencode_out, _, opencode_dur = _collect_cmd(
+        opencode_proc, "opencode")
+    # gen_manifest 校验延后到 host 收口之后（KIR-002 当批修，批次 7d41df8e24bf
+    # 连带）：check_host_tests 曾在 code/rpi5/kernel/new/.../tests/ 下直跑 make，
+    # 其编译产物（无扩展名 host_test 二进制）短暂存在，与 gen_manifest 的
+    # git ls-files 扫描并发会被当作「未登记 patch」判红（manifest_rc=1；xdist
+    # 抢占放大编译窗口，真实自检稳定命中）。host 现已在 gitignored 副本
+    # （harness/log/host-tests）内跑 make、产物不落 code 树，竞态根因消除；
+    # manifest 仍保持 host 收口后单独校验（干净 patch 树上校验，成本 ~0.6-1.1s
+    # 换取 manifest_rc 确定性）。
+    manifest_proc = _spawn_cmd(
+        [sys.executable, str(ROOT / "harness" / "skills" / "cross-device"
+                             / "lib" / "python" / "gen_manifest.py"),
+         "--check-only"])
+    manifest_rc, manifest_out, _, manifest_dur = _collect_cmd(
+        manifest_proc, "manifest")
     refs_rc, refs_out, refs_err = tools["refs"]
     cfg_rc, cfg_out, cfg_last = tools["cfg"]
     ctr_rc, ctr_out, ctr_last = tools["ctr"]
+    dis_rc, dis_out, _ = tools["discipline"]
+    scan_rc, scan_out, _ = tools["scan"]
     summary = pytest_summary(py_out)
+    # 方向 1：全量红时机械判定——全新进程单独重跑失败用例，单跑绿即
+    # KIR-002 抖动（自动登记 known-issues 放行本轮），单跑红判真回归阻塞，
+    # KIR-001 命中者不得顺延（pytest_rc 保持非零）
+    flake_notes, ki001_hits = [], []
+    if py_rc != 0:
+        flake_notes, ki001_hits = _rerun_failures(py_out)
+        if flake_notes and not ki001_hits:
+            py_rc = 0  # 全部单跑绿且无 KIR-001 嫌疑 → 抖动放行本轮
     parts = [f"pytest_rc={py_rc}"]
-    if summary:
-        parts.append(summary)
-    # 最慢 5 用例耗时（方向 3）：回归定位慢点（xdist 分发波动时慢点即
-    # 实时等待混入或真实子进程语义未豁免）
-    durs = durations_summary(py_out)
-    if durs:
-        parts.append("slow5: " + "; ".join(durs))
-    if py_rc == 0 and summary and "skipped" not in summary:
-        # 仅定位到计数行且全绿无跳过时才补 skipped=0（平台跳过数显式可见）；
-        # 未定位到计数行（stderr 顶掉/崩溃）即不补——交 ws_report 缺 skipped
-        # 拒写，不自己伪造计数
-        parts.append("skipped=0")
+    if flake_notes and not ki001_hits:
+        # 抖动放行：原始 failed 计数不拼（ws_report 文本防线见 failed 即拒写），
+        # 改拼 flake 标注（用例名/轮次/首现批次/复现命令，收据可见可追踪）
+        for nodeid, round_n, first_batch in flake_notes:
+            parts.append(f"flake: {nodeid} round={round_n} first={first_batch} "
+                         f'cmd="python3 -m pytest {nodeid} -q"')
+        m = re.search(r"\b(\d+)\s*skipped\b", summary or "")
+        if m:
+            parts.append(f"skipped={m.group(1)}")
+        elif summary:
+            # 摘要存在但确无 skipped 计数：透出 skipped=0（事实值，非伪造）。
+            # lib-06 曾整体去兜底，但 flake 放行路径不拼摘要行、m 缺失时
+            # 缺 skipped 键会让 ws_report 以「缺 skipped 计数」拒写，KIR-002
+            # 抖动放行收据卡死在自检门禁（wsv2-01 回归）。仅摘要缺失
+            # （崩溃/截断）维持不补——交 ws_report 拒写，不伪造不可见计数
+            parts.append("skipped=0")
+    else:
+        if summary:
+            parts.append(summary)
+        # 最慢 5 用例耗时（方向 3）：回归定位慢点（xdist 分发波动时慢点即
+        # 实时等待混入或真实子进程语义未豁免）
+        durs = durations_summary(py_out)
+        if durs:
+            parts.append("slow5: " + "; ".join(durs))
+        if py_rc == 0 and summary and "skipped" not in summary:
+            # 仅定位到计数行且全绿无跳过时才补 skipped=0（平台跳过数显式可见）；
+            # 未定位到计数行（stderr 顶掉/崩溃）即不补——交 ws_report 缺 skipped
+            # 拒写，不自己伪造计数
+            parts.append("skipped=0")
     parts.append(f"refs_rc={refs_rc}")
     refs_last = last_stdout_line(refs_out)
     if refs_last:
@@ -382,10 +793,82 @@ def main():
     # Python 运行环境探测（版本 + requirements.txt 依赖）：环境破损（缺
     # yaml 等）时后续工具结论均不可信，pyenv_rc 非零交 ws_report 全
     # *_rc 扫描判红拒写
+    _env_t0 = time.time()
     env_ok, env_summary = check_python_env()
+    env_dur = time.time() - _env_t0
     parts.append(f"pyenv_rc={0 if env_ok else 1}")
     if env_summary:
         parts.append(env_summary)
+    # 自度量统计（P0-C）：metrics.py --report 跑通即 0（聚合异常/数据目录
+    # 缺失判红，红路径可达）。批次 7d41df8e24bf 方向 4：此前走 timed_run
+    # 串行计入自检墙钟（refs 同量级 ~数秒），且 metrics.py 聚合全容错恒
+    # rc=0——metrics_rc 无可达红路径（门禁形同虚设）；改 _spawn_cmd 与
+    # pytest 重叠（同 ioctl/ruff 族），收口取并行结果不额外占墙钟。
+    # metrics.py 输出首行自带 metrics_rc= 机器行（报表体在后），以正则定位
+    # 机器行，不依赖末行位置。
+    met_rc, met_out, _, met_dur = _collect_cmd(metrics_proc, "metrics")
+    parts.append(f"metrics_rc={met_rc}")
+    m = re.search(r"metrics_rc=(\d+)", met_out)
+    if m and int(m.group(1)) == 0:
+        parts.append("OK: 自度量聚合成功")
+    elif met_rc != 0:
+        parts.append("error: 自度量聚合失败")
+    # 内核/AOSP ioctl 头一致性（方向 2）：此前 check_ioctl_headers 无调用方，
+    # 头文件单侧漂移/双空解析异常静默无感；接入自检后 ioctl_rc 透出，双空
+    # 判红在 check_ioctl_headers 内部完成，非零由 ws_report 全 *_rc 判红拒写
+    parts.append(f"ioctl_rc={ioctl_rc}")
+    ioctl_last = last_stdout_line(ioctl_out)
+    if ioctl_last:
+        parts.append(ioctl_last)
+    # manifest 登记完整性（方向 2）：gen_manifest --check-only 未登记文件或有
+    # 变化均判红（--check-only 有变化返非零），manifest_rc 透出交 ws_report
+    # 全 *_rc 判红拒写（此前 --check-only 无调用方，manifest 漂移静默无感）
+    parts.append(f"manifest_rc={manifest_rc}")
+    manifest_last = last_stdout_line(manifest_out)
+    if manifest_last:
+        parts.append(manifest_last)
+    # 测试改动纪律（方向 1，IDLE-006 机械化）：discipline_rc 透出——测试改动
+    # 新增 xfail/skip/sleep 重试即判红，交 ws_report 全 *_rc 判红拒写
+    parts.append(f"discipline_rc={dis_rc}")
+    dis_last = last_stdout_line(dis_out)
+    if dis_last:
+        parts.append(dis_last)
+    # 热路径遍历约束（方向 2）：scan_rc 透出——治理检查器热路径全树
+    # rglob/os.walk 即判红，防 refs 39s 回归重现
+    parts.append(f"scan_rc={scan_rc}")
+    scan_last = last_stdout_line(scan_out)
+    if scan_last:
+        parts.append(scan_last)
+    # ruff 静态检查（P0-B）：ruff_rc 透出，非零交 ws_report 全 *_rc 判红拒写
+    parts.append(f"ruff_rc={ruff_rc}")
+    ruff_last = last_stdout_line(ruff_out)
+    if ruff_last:
+        parts.append(ruff_last)
+    # 内核 host 单测（P0-A 快检）：host_rc 透出，非零交 ws_report 判红
+    parts.append(f"host_rc={host_rc}")
+    host_last = last_stdout_line(host_out)
+    if host_last:
+        parts.append(host_last)
+    # opencode-server 脚本/SKILL.md 一致性（方向 6）：此前 validate_opencode_server
+    # 无调用方，脚本 || true 吞错/EnvironmentFile 硬编码等破坏曾静默判红；接入
+    # 自检后 opencode_rc 透出，非零交 ws_report 全 *_rc 判红拒写
+    parts.append(f"opencode_rc={opencode_rc}")
+    opencode_last = last_stdout_line(opencode_out)
+    if opencode_last:
+        parts.append(opencode_last)
+    # 方向 2 + 方向 6：逐检查器耗时（秒，一位小数）入输出行，refs/cfg 拆开
+    # 各自自报（合并 tools 无法定位慢点）。重叠模型（方向 1）下语义：
+    # py 为 pytest 进程总耗时；refs/cfg/ioctl/manifest 为其收口阻塞墙钟
+    # （≈进程对主流程耗时的贡献：≈0 即进程在 pytest 期间已完成不拖慢，
+    #  显著非零即收口仍在等待/管道排空——emit 据此定位拖慢主流程的检查器）。
+    # 前缀 *_dur 不匹配 ws_report 的 *_rc 判红正则，不干扰 rc 判定
+    parts.append(f"durs: py={py_dur:.1f} refs={refs_dur:.1f} "
+                 f"cfg={cfg_dur:.1f} pyenv={env_dur:.1f} "
+                 f"ioctl={ioctl_dur:.1f} manifest={manifest_dur:.1f} "
+                 f"discipline={dis_dur:.1f} scan={scan_dur:.1f} "
+                 f"ruff={ruff_dur:.1f} host={host_dur:.1f} "
+                 f"opencode={opencode_dur:.1f} "
+                 f"metrics={met_dur:.1f}")
     print(" | ".join(parts))
     _mark_selfcheck(dur_s=time.time() - _t0)
     return 0

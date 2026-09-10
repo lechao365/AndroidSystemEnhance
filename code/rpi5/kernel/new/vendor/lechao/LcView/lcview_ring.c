@@ -417,8 +417,19 @@ int lcview_ring_read(struct lcview_ring *ring,
             record_len > ring->size) {
             pr_warn_ratelimited(PREFIX "corrupted record at pos=%u, len=%u, skipping\n",
                                 rpos, record_len);
-            ring->read_pos = (rpos + LCVIEW_LEN_PREFIX_SIZE +
-                              sizeof(struct lcview_record_hdr)) % ring->size;
+            /*
+             * 损坏记录跳过量须按 record_len（写侧写入的长度前缀）前移：
+             * 记录在环中实际占用 record_len 字节，只前移前缀+头（20B）
+             * 会让 read_pos 落进记录体中间，把后续记录当损坏撕裂整个流。
+             * record_len 在环内可信（[前缀, ring->size]）时按 record_len
+             * 前移；不可信（<前缀 或 > ring->size，垃圾前缀）才用保守
+             * 默认跳过量（前缀 + 记录头），防止跳过头。判定内聚于 logic
+             * 层 ring_corrupt_skip_len 供单测判红。
+             */
+            ring->read_pos = (rpos + ring_corrupt_skip_len(
+                record_len, ring->size,
+                LCVIEW_LEN_PREFIX_SIZE + sizeof(struct lcview_record_hdr)))
+                % ring->size;
             spin_unlock_irqrestore(&ring->lock, flags);
             continue;
         }
@@ -426,7 +437,7 @@ int lcview_ring_read(struct lcview_ring *ring,
         /*
          * 如果这条记录太长以至于用户缓冲区放不下：
          * - 已有部分数据 → 保持 read_pos 不变（下次可继续读），返回已读部分
-         * - 无任何数据（首条就放不下）→ KRN-001：返回 -EINVAL 提示缓冲
+         * - 无任何数据（首条就放不下）→ KRN-001：返回 -EMSGSIZE 提示缓冲
          *   不足，禁止返回 0（POSIX 0=EOF 而 poll 恒报 POLLIN，消费者
          *   忙轮询或误判设备关闭，记录永久滞留卡死 reader）
          * 这确保了"大记录"不会被丢弃，只是拆到下次 read 调用。
@@ -436,7 +447,7 @@ int lcview_ring_read(struct lcview_ring *ring,
             if (fit != 0) {
                 spin_unlock_irqrestore(&ring->lock, flags);
                 if (fit < 0)
-                    return -EINVAL;
+                    return ring_read_fit_errno(fit);
                 break;
             }
         }
