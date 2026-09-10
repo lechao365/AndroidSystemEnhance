@@ -53,6 +53,21 @@ bool loadSchemaWithRetry(SchemaParser& schema, const std::string& path,
 bool shouldFlushBatch(size_t buffered, bool timedOut, bool ageExpired,
                       size_t bufferCapacity);
 
+// 预防性 flush 判定（丢数据收口 方向 1）：缓冲剩余空间不足以容纳内核
+// 单次读最小单位（minRead）时，须先强制 flush 清空缓冲——否则
+// waitAndRead 以 cap-offset 调内核 read，内核因剩余容量过小返回
+// -EINVAL，主循环退出交 init 重启形成退出环（数据持续丢失）。
+// 参数：buffered 当前缓冲字节数，bufferCapacity 缓冲上限，
+//   minRead 内核单次读最小容量。buffered>=bufferCapacity（满/越界）同样
+//   须 flush（剩余为 0）。
+bool shouldPreventiveFlush(size_t buffered, size_t bufferCapacity,
+                           size_t minRead);
+
+// 退出前强制 flush 判定（丢数据收口 方向 2）：缓冲尚有未落盘数据即须
+// 强制 flush（n=0 触发 timedOut 落盘）——致命读错误退出与优雅退出两条
+// 出口都不得丢弃已收数据。
+bool shouldFlushOnExit(size_t buffered);
+
 }  // namespace lcview
 }  // namespace lechao
 }  // namespace vendor

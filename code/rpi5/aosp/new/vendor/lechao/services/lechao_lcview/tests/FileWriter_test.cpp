@@ -581,6 +581,34 @@ TEST(FileWriterWriteInvalidTest, Rotate_SeqContinuesAfterRestart) {
     EXPECT_EQ(st0.st_size, 100);
 }
 
+TEST(FileWriterWriteInvalidTest, RotateRenameFail_KeepsInvalidSize) {
+    // 方向 3：rename 失败（目录只读）时不得归零 mInvalidSize——归零使
+    // 轮转阈值判定失效（invalid 无界增长），且后续失败恢复的
+    // rollbackFileTo(ftruncate) 以 0 为基准抹掉已有诊断
+    TempDir dir;
+    prewriteFile(dir.path() + "/invalid_records.log", 1024 * 1024);
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxInvalidFileSizeMb = 1;
+    FileWriter writer(cfg);
+    ASSERT_EQ(writer.mInvalidSize, 1024u * 1024u);
+
+    chmod(dir.path().c_str(), 0500);  // 目录只读：rename 无法创建目标
+
+    uint8_t data[] = {0x01};
+    writer.writeInvalid(data, 1, "norotate");
+
+    chmod(dir.path().c_str(), 0755);  // 恢复目录权限供 TempDir 清理
+    // rename 失败：无轮转文件生成，原文件继续追加，累计大小不得归零
+    std::string date = writer.makeDateStr();
+    EXPECT_NE(access((dir.path() + "/invalid_records_" + date + "_p0.log").c_str(), F_OK), 0);
+    struct stat st;
+    ASSERT_EQ(stat((dir.path() + "/invalid_records.log").c_str(), &st), 0);
+    EXPECT_GE(st.st_size, 1024 * 1024);
+    EXPECT_GE(writer.mInvalidSize, 1024u * 1024u);
+    SUCCEED();
+}
+
 TEST(FileWriterWriteInvalidTest, WriteFail_RollbackTruncatesPartialLine) {
     // LCV-07：首写部分落盘后失败，恢复重开前须回退到写前偏移——
     // 否则残留半行与下一条追加粘连成非法 JSONL（与 writeLineFlush
@@ -873,8 +901,9 @@ TEST(FileWriterWriteRecordTest, RetryWriteFails_Drops) {
 // conserve 判红后可定位丢在哪一条
 // ============================================================
 
-TEST(FileWriterDropCountTest, FormatOob_Counts) {
-    // formatJsonLine 字段越界（数据不足）→ formatOob +1，返回空串
+TEST(FileWriterDropCountTest, FormatOob_ReturnsEmpty_NoCount) {
+    // 方向 4：DROP 计数点收敛到 writeRecord——formatJsonLine 越界只返回
+    // 空串，不自行计数（避免与 writeRecord 的 formatEmpty 双计）
     TempDir dir;
     FileWriterConfig cfg;
     cfg.logDir = dir.path();
@@ -886,14 +915,14 @@ TEST(FileWriterDropCountTest, FormatOob_Counts) {
 
     auto line = writer.formatJsonLine(schema, &hdr, fields.data(), fields.size());
     EXPECT_TRUE(line.empty());
-    EXPECT_EQ(writer.dropCounters().formatOob, 1);
+    EXPECT_EQ(writer.dropCounters().formatOob, 0);
+    EXPECT_EQ(writer.dropCounters().formatEmpty, 0);
     SUCCEED();
 }
 
-TEST(FileWriterDropCountTest, WriteRecord_BadData_CountsFormat) {
-    // writeRecord 传坏数据：越界返回空 → 仅计 formatOob。
-    // LCV-18：同一次丢弃不再计 2 次（原 formatOob+formatEmpty 双计使
-    // 心跳 dropped 求和虚高一倍），formatEmpty 保留字段但无自增路径
+TEST(FileWriterDropCountTest, WriteRecord_BadData_CountsFormatEmpty) {
+    // 方向 4：writeRecord 传坏数据 → formatJsonLine 返回空 → 丢弃计数点
+    // 在此计 formatEmpty（唯一分类，不双计）；formatOob 无自增路径
     TempDir dir;
     FileWriterConfig cfg;
     cfg.logDir = dir.path();
@@ -903,8 +932,8 @@ TEST(FileWriterDropCountTest, WriteRecord_BadData_CountsFormat) {
     std::vector<uint8_t> fields = {LCVIEW_TYPE_INT64};  // 越界
 
     writer.writeRecord(schema, &hdr, fields.data(), fields.size());
-    EXPECT_EQ(writer.dropCounters().formatOob, 1);
-    EXPECT_EQ(writer.dropCounters().formatEmpty, 0);
+    EXPECT_EQ(writer.dropCounters().formatEmpty, 1);
+    EXPECT_EQ(writer.dropCounters().formatOob, 0);
     SUCCEED();
 }
 

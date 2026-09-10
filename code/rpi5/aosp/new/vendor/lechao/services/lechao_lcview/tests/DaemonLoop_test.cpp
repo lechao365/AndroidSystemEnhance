@@ -244,3 +244,30 @@ TEST(DaemonLoopHelperTest, Flush_TimeoutOrAge_TriggersFlush) {
     // 有数据 + 500ms 滞留窗到期 → flush
     EXPECT_TRUE(shouldFlushBatch(100, /*timedOut=*/false, /*ageExpired=*/true, 64 * 1024));
 }
+
+// ============================================================
+// 丢数据收口（方向 1/2）：读取前预防性 flush + 退出前强制 flush
+// ============================================================
+
+TEST(DaemonLoopHelperTest, PreventiveFlush_RemainingBelowMinRead_TriggersFlush) {
+    // 方向 1：缓冲剩余空间 < 内核最小读单位（4096）须先 flush——否则
+    // 内核 read 因 cap-offset 过小返 -EINVAL，主循环退出交 init 重启成环
+    const size_t cap = 64 * 1024;
+    const size_t minRead = 4096;
+    // 剩余恰好 4096：不 flush（边界闭合，>= minRead 合法）
+    EXPECT_FALSE(shouldPreventiveFlush(cap - minRead, cap, minRead));
+    // 剩余 4095：flush
+    EXPECT_TRUE(shouldPreventiveFlush(cap - minRead + 1, cap, minRead));
+    // 空缓冲：剩余满，不 flush
+    EXPECT_FALSE(shouldPreventiveFlush(0, cap, minRead));
+    // 满缓冲：剩余 0，须 flush
+    EXPECT_TRUE(shouldPreventiveFlush(cap, cap, minRead));
+}
+
+TEST(DaemonLoopHelperTest, ExitFlush_BufferedData_TriggersFlush) {
+    // 方向 2：致命读错误 / 优雅退出两条出口，缓冲有数据即强制 flush
+    // （n=0 触发落盘），不丢已收数据；空缓冲无需 flush
+    EXPECT_TRUE(shouldFlushOnExit(1));
+    EXPECT_TRUE(shouldFlushOnExit(64 * 1024));
+    EXPECT_FALSE(shouldFlushOnExit(0));
+}

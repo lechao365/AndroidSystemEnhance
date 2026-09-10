@@ -117,3 +117,16 @@ bool vendor::lechao::lcview::shouldFlushBatch(
     if (buffered == 0) return false;  // 空批不 flush（避免空批次写放大）
     return buffered >= bufferCapacity || timedOut || ageExpired;
 }
+
+bool vendor::lechao::lcview::shouldPreventiveFlush(
+    size_t buffered, size_t bufferCapacity, size_t minRead)
+{
+    // 满/越界（剩余 <=0）：必须 flush，防 (bufferCapacity - buffered) 下溢
+    if (buffered >= bufferCapacity) return true;
+    return (bufferCapacity - buffered) < minRead;
+}
+
+bool vendor::lechao::lcview::shouldFlushOnExit(size_t buffered)
+{
+    return buffered > 0;
+}

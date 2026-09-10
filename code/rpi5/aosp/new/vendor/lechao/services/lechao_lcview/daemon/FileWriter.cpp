@@ -402,17 +402,17 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
         if (ptr >= end) {
             ALOGE("FileWriter: formatJsonLine: out-of-bounds at field %zu (need 1, remain %zd)",
                   i, (ssize_t)(end - ptr));
-            mDrops.formatOob++;
+            // 方向 4：DROP 计数点收敛到 writeRecord（formatEmpty），本函数
+            // 只返回空串，不自行计数——避免同一丢弃在 format 与 write 双计
             return std::string();
         }
 
         DecodedField df;
         FieldDecodeResult r = decodeRecordField(&ptr, end, &df);
         if (r == FieldDecodeResult::kTruncated) {
-            // 越界：与 LCVIEW_NEED 失败同语义，记 formatOob 丢弃
+            // 越界：与 LCVIEW_NEED 失败同语义，返回空串交 writeRecord 计数
             ALOGE("FileWriter: formatJsonLine: truncated at field %zu",
                   i);
-            mDrops.formatOob++;
             return std::string();
         }
         // kUnknown：未知类型输出 null 继续（与历史 default 语义一致，
@@ -528,10 +528,10 @@ void FileWriter::writeRecord(const EventSchema& schema,
             std::chrono::steady_clock::now() - tFormatStart).count());
 
     if (line.empty()) {
-        // LCV-18：空串唯一来源是 formatJsonLine 的 OOB 路径（已计
-        // formatOob），此处不再重复计 formatEmpty（同一次丢弃计 2 次
-        // 使心跳 dropped 求和虚高一倍）。formatEmpty 字段保留供心跳
-        // 格式兼容，当前无自增路径
+        // 方向 4：DROP 计数点收敛到 writeRecord——空串是唯一丢弃分类，
+        // 此处计 formatEmpty 后再 return（formatJsonLine 不再自行计数，
+        // 同一次丢弃只计 1 次，心跳 dropped 不虚高）
+        mDrops.formatEmpty++;
         ALOGE("FileWriter: writeRecord: formatJsonLine returned empty for event %u, DROPPING", schema.id);
         return;
     }
@@ -552,7 +552,8 @@ void FileWriter::writeRecord(const EventSchema& schema,
 // → 重开新文件并清零累计大小。轮转后的旧文件不再被 mInvalidStream 持有，
 // enforceRetention 可正常淘汰（evictOldFiles 仅跳过当前 mInvalidFilename，
 // 轮转文件名不同天然参与淘汰）。rename 失败（目录只读等）时重开原文件
-// 继续追加保底不丢数据，累计大小保留待下轮重试
+// 继续追加保底不丢数据，累计大小保留待下轮重试（方向 3：仅 rename 成功
+// 才归零，失败从持久层恢复——归零会致无界增长且回滚抹诊断）
 void FileWriter::rotateInvalid()
 {
     mInvalidStream.flush();
@@ -561,7 +562,8 @@ void FileWriter::rotateInvalid()
     const std::string rotated = mCfg.logDir + "/invalid_records_" + date
                                 + "_p" + std::to_string(nextInvalidSeqFor(date))
                                 + ".log";
-    if (rename(mInvalidFilename.c_str(), rotated.c_str()) != 0)
+    const bool renamed = (rename(mInvalidFilename.c_str(), rotated.c_str()) == 0);
+    if (!renamed)
         ALOGE("FileWriter: rotateInvalid: rename to %s failed: %s",
               rotated.c_str(), strerror(errno));
     mInvalidStream.open(mInvalidFilename, std::ios::app);
@@ -571,8 +573,18 @@ void FileWriter::rotateInvalid()
               mInvalidFilename.c_str());
         return;
     }
-    mInvalidSize = 0;
-    ALOGI("FileWriter: rotated invalid log to %s", rotated.c_str());
+    if (renamed) {
+        mInvalidSize = 0;
+        ALOGI("FileWriter: rotated invalid log to %s", rotated.c_str());
+    } else {
+        // 方向 3：rename 失败时原文件内容仍在，从持久层恢复累计大小，
+        // 保持轮转阈值判定有效——归零会使 invalid 日志无界增长，且
+        // 后续失败恢复的 rollbackFileTo(ftruncate) 以 0 为基准抹掉已有
+        // 诊断（CXX-002）；stat 失败保留原值同样不清零
+        struct stat st;
+        if (stat(mInvalidFilename.c_str(), &st) == 0)
+            mInvalidSize = static_cast<size_t>(st.st_size);
+    }
 }
 
 // 扫描日志目录中 invalid_records_{date}_p<seq>.log 的最大轮转序号 +1。

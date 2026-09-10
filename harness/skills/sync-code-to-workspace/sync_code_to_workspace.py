@@ -133,7 +133,17 @@ def _git_check(*args: str, cwd: str | Path = ".", timeout: int = 300) -> bool:
 
 
 def _find_upstream_base(cwd: str | Path = ".") -> str | None:
-    ups_ref = _git_lines("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}", cwd=cwd)
+    """当前分支 upstream 与 HEAD 的 merge-base；无 upstream 返回 None。
+
+    用 _git_run 直接执行并静默处理失败：repo 按 tag 检出的 AOSP 项目是
+    detached HEAD，无 @{upstream} 属正常状态，不应逐项目刷 ERROR 日志
+    （调用方按上下文决定 warn/error）。此前用 _git_lines 会为每个
+    detached 项目打一条 ERROR（985 项目刷屏）。
+    """
+    r = _git_run(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], cwd)
+    if r.returncode != 0:
+        return None
+    ups_ref = [l.strip() for l in r.stdout.splitlines() if l.strip()]
     if not ups_ref:
         return None
     base = _git_lines("merge-base", "HEAD", ups_ref[0], cwd=cwd)
@@ -497,27 +507,50 @@ def _extra_aosp_worker(proj: str) -> tuple[list[str], int]:
         proj_ws = Path(_aosp_ws()) / proj
         if not (proj_ws / ".git").is_dir():
             return rows, 0
-        # 不以 git status --porcelain 空输出早退（sync-03）：已提交未归档
-        # 改动（HEAD 领先 upstream 且工作树干净）须由下方 git diff base
-        # 检出，与 kernel 侧扫描口径对齐
+        # 不以 git status --porcelain 空输出早退（sync-03）：有 upstream 的
+        # 项目，已提交未归档改动（HEAD 领先 upstream 且工作树干净）须由下方
+        # git diff base 检出，与 kernel 侧扫描口径对齐
         base = _find_upstream_base(cwd=proj_ws)
-        if not base:
-            log_warn(f"aosp:{proj}: 无法确定 upstream base")
-            return rows, 1
         covered = _coverage_aosp_project(proj)
-        ws_changes: set[str] = set()
-        ws_changes.update(_git_lines("diff", base, "--name-only", cwd=proj_ws))
-        ws_changes.update(_git_lines("ls-files", "--others", "--exclude-standard", cwd=proj_ws))
-        extra = sorted(ws_changes - covered)
-        for f in extra:
-            if not f or _is_excluded(f):
-                continue
-            if _git_check("cat-file", "-e", f"{base}:{f}", cwd=proj_ws):
-                rows.append(f"+\tEXTRA-MODIFIED\taosp:{proj}\t{f}\tsync\t未归档的 upstream 文件改动\n")
-            elif _git_check("ls-files", "--error-unmatch", f, cwd=proj_ws):
-                rows.append(f"+\tEXTRA-NEW-TRACKED\taosp:{proj}\t{f}\tdelete\t未归档 tracked 新文件（code 已删，删除对齐）\n")
-            else:
-                rows.append(f"+\tEXTRA-NEW-UNTRACKED\taosp:{proj}\t{f}\tdelete\t未归档 untracked 新文件（code 已删，删除对齐）\n")
+        if base:
+            ws_changes: set[str] = set()
+            ws_changes.update(_git_lines("diff", base, "--name-only", cwd=proj_ws))
+            ws_changes.update(_git_lines("ls-files", "--others", "--exclude-standard", cwd=proj_ws))
+            extra = sorted(ws_changes - covered)
+            for f in extra:
+                if not f or _is_excluded(f):
+                    continue
+                if _git_check("cat-file", "-e", f"{base}:{f}", cwd=proj_ws):
+                    rows.append(f"+\tEXTRA-MODIFIED\taosp:{proj}\t{f}\tsync\t未归档的 upstream 文件改动\n")
+                elif _git_check("ls-files", "--error-unmatch", f, cwd=proj_ws):
+                    rows.append(f"+\tEXTRA-NEW-TRACKED\taosp:{proj}\t{f}\tdelete\t未归档 tracked 新文件（code 已删，删除对齐）\n")
+                else:
+                    rows.append(f"+\tEXTRA-NEW-UNTRACKED\taosp:{proj}\t{f}\tdelete\t未归档 untracked 新文件（code 已删，删除对齐）\n")
+        else:
+            # 无 upstream（repo 按 tag 检出的 detached HEAD）：无法用
+            # git diff base 检出"已提交未归档"改动，回退工作树扫描（旧语义），
+            # 干净即无额外改动——不阻塞整批（此前对全部项目强制 upstream，
+            # 致 detached workspace 扫描整体失败）
+            r = _git_run(["status", "--porcelain"], cwd=proj_ws)
+            if r.returncode != 0:
+                log_error(f"aosp:{proj}: git status --porcelain 失败: {r.stderr.strip()}")
+                return rows, 1
+            ws_changes = set()
+            for line in r.stdout.splitlines():
+                if len(line) <= 3:
+                    continue
+                p = line[3:]
+                if " -> " in p:
+                    p = p.split(" -> ", 1)[1]
+                ws_changes.add(p.strip().strip('"'))
+            extra = sorted(ws_changes - covered)
+            for f in extra:
+                if not f or _is_excluded(f):
+                    continue
+                if _git_check("ls-files", "--error-unmatch", f, cwd=proj_ws):
+                    rows.append(f"+\tEXTRA-MODIFIED\taosp:{proj}\t{f}\tsync\t未归档的 upstream 文件改动\n")
+                else:
+                    rows.append(f"+\tEXTRA-NEW-UNTRACKED\taosp:{proj}\t{f}\tdelete\t未归档 untracked 新文件（code 已删，删除对齐）\n")
     except Exception as e:  # worker 异常不得让整批并发任务崩（归 error 计数）
         log_error(f"aosp:{proj}: 扫描异常: {e}")
         return rows, 1
