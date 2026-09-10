@@ -13,3 +13,9 @@ int lciod_nonblock_read_decision(int ring_empty, int shutdown)
         return shutdown ? 0 : 1;
     return -1;
 }
+
+int lciod_event_tail_rollback_ok(uint32_t tail_after, uint32_t consumed_pos,
+                                 uint32_t buf_size)
+{
+    return tail_after == (consumed_pos + 1) % buf_size;
+}

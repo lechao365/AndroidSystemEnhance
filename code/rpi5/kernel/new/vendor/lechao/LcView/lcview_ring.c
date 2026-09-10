@@ -426,7 +426,7 @@ int lcview_ring_read(struct lcview_ring *ring,
         /*
          * 如果这条记录太长以至于用户缓冲区放不下：
          * - 已有部分数据 → 保持 read_pos 不变（下次可继续读），返回已读部分
-         * - 无任何数据（首条就放不下）→ KRN-001：返回 -EINVAL 提示缓冲
+         * - 无任何数据（首条就放不下）→ KRN-001：返回 -EMSGSIZE 提示缓冲
          *   不足，禁止返回 0（POSIX 0=EOF 而 poll 恒报 POLLIN，消费者
          *   忙轮询或误判设备关闭，记录永久滞留卡死 reader）
          * 这确保了"大记录"不会被丢弃，只是拆到下次 read 调用。
@@ -436,7 +436,7 @@ int lcview_ring_read(struct lcview_ring *ring,
             if (fit != 0) {
                 spin_unlock_irqrestore(&ring->lock, flags);
                 if (fit < 0)
-                    return -EINVAL;
+                    return ring_read_fit_errno(fit);
                 break;
             }
         }

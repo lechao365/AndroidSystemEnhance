@@ -14,8 +14,11 @@
 #include <cerrno>
 #include <cstring>
 #include <cstdint>
+#include <csignal>
+#include <ctime>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/time.h>
 
 #include "device_io.h"
 #include "minor_utils.h"
@@ -125,6 +128,52 @@ TEST_F(DeviceIoTest, ReadEvent_PartialEvent_ReturnsEAGAIN) {
     errno = 0;
     EXPECT_EQ(read_event(mPipe[0], &out, 200), -1);
     EXPECT_EQ(errno, EAGAIN);
+}
+
+/* --- 方向 6：EINTR 重试按剩余扣减（不重新起算） --- */
+
+namespace {
+
+volatile sig_atomic_t g_alarmFired = 0;
+
+void handleTestSigAlarm(int) {
+    g_alarmFired = 1;
+}
+
+}  // namespace
+
+TEST_F(DeviceIoTest, ReadEvent_EintrRetry_DeductsRemainingTimeout) {
+    // 用 ITIMER_REAL 在 poll 阻塞期间发一次 SIGALRM 打断（EINTR），
+    // 断言 read_event 总耗时收敛到原始 timeout（≈400ms）。
+    // 修复前：每次重试都用原始 timeout_ms 重新起算 → 首次 poll 100ms
+    // 被打断后重试 400ms，总耗时 ≈500ms，多次 EINTR 叠加会突破
+    // clamp 上限 kMaxReadEventTimeoutMs。修复后按剩余扣减 ≈400ms。
+    struct sigaction sa{};
+    sa.sa_handler = handleTestSigAlarm;
+    sigemptyset(&sa.sa_mask);
+    ASSERT_EQ(sigaction(SIGALRM, &sa, nullptr), 0);
+
+    struct itimerval it{};
+    it.it_value.tv_usec = 100 * 1000;  // 100ms 后触发
+    ASSERT_EQ(setitimer(ITIMER_REAL, &it, nullptr), 0);
+
+    vendor_lechao_usbd_event out{};
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    errno = 0;
+    EXPECT_EQ(read_event(mPipe[0], &out, 400), -1);
+    EXPECT_EQ(errno, ETIMEDOUT);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long long elapsed = (t1.tv_sec - t0.tv_sec) * 1000LL +
+                        (t1.tv_nsec - t0.tv_nsec) / 1000000LL;
+    EXPECT_LT(elapsed, 480LL) << "elapsed=" << elapsed
+                              << "ms, EINTR 重试应按剩余扣减";
+
+    it.it_value.tv_sec = 0;
+    it.it_value.tv_usec = 0;
+    setitimer(ITIMER_REAL, &it, nullptr);
+    signal(SIGALRM, SIG_DFL);
+    EXPECT_TRUE(g_alarmFired) << "SIGALRM 未触发，本用例未实际覆盖 EINTR 路径";
 }
 
 /* --- open/close_device --- */

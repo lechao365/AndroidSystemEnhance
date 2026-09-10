@@ -44,12 +44,31 @@ static void test_nonempty_shutdown_drain(void)
     CHECK(lciod_nonblock_read_decision(0, 1) == -1);
 }
 
+/* lciod_event_tail_rollback_ok：copy_to_user 失败回滚守卫（方向 3 判红） */
+static void test_tail_rollback_guard(void)
+{
+    /* 与内核 lciod_usbd-ioctl.h 的 VENDOR_LECHAO_USBD_EVENT_BUF_SIZE 同步（恒 32） */
+    const uint32_t N = 32;
+
+    /* 未驱逐：tail 仍为读后推进位置 → 可回滚 */
+    CHECK(lciod_event_tail_rollback_ok((5 + 1) % N, 5, N) == 1);
+    /* 驱逐推进：tail 被写者推进 → 禁止回滚（防 tail==head 判空致
+     * 事件清零 / 多读者重复消费旧槽位） */
+    CHECK(lciod_event_tail_rollback_ok((5 + 2) % N, 5, N) == 0);
+    CHECK(lciod_event_tail_rollback_ok((5 + 3) % N, 5, N) == 0);
+    /* 环绕边界：槽位 31 读后 tail 回绕 0 */
+    CHECK(lciod_event_tail_rollback_ok(0, 31, N) == 1);
+    /* 环绕下驱逐推进 → 禁止回滚 */
+    CHECK(lciod_event_tail_rollback_ok(1, 31, N) == 0);
+}
+
 int main(void)
 {
     test_empty_alive();
     test_empty_shutdown();
     test_nonempty_alive();
     test_nonempty_shutdown_drain();
+    test_tail_rollback_guard();
     if (g_fails) {
         printf("FAIL: %d/%d checks failed\n", g_fails, g_checks);
         return 1;

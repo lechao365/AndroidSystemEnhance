@@ -34,6 +34,7 @@
  */
 
 #include "lcview_internal.h"
+#include "lcview_ring_logic.h"
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timekeeping.h>
@@ -164,7 +165,13 @@ static int builder_write_field(struct lcview_builder *b,
                                uint8_t type, const void *val, uint32_t val_len)
 {
     uint32_t field_total = 1 + val_len; /* type(1B) + value */
-    if (b->data_offset + field_total > LCVIEW_BUILDER_MAX_SIZE) {
+    /*
+     * 容量检查须把 4B 长度前缀计入上限：record 在环中存
+     * LCVIEW_LEN_PREFIX_SIZE + 内容，读侧以 record_len > MAX 判损坏。
+     * 若不扣前缀，内容写满 4096 时记录总长 4100 超限被读侧误判损坏跳过。
+     */
+    if (builder_write_fits(b->data_offset, field_total,
+                           LCVIEW_BUILDER_MAX_SIZE)) {
         LC_DBG("field overflow: remaining=%zu\n",
                (size_t)(LCVIEW_BUILDER_MAX_SIZE - b->data_offset));
         return -ENOSPC;
