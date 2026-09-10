@@ -51,7 +51,7 @@ else
 fi
 git checkout dev || exit 1
 git reset --hard origin/main || exit 1
-git push --force origin dev || { echo "error: force push 失败" >&2; exit 2; }
+git push --force-with-lease origin dev || { echo "error: force push（--force-with-lease）失败" >&2; exit 2; }
 
 # revert 收据统一走 ws_report.py（模式 B）：自动落盘 + trend.md 行，消除双份格式来源
 BODYF=$(mktemp)

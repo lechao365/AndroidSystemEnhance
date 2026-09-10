@@ -360,7 +360,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="baseline candidate/promoted 登记")
     ap.add_argument("action",
                     choices=["add-candidate", "promote", "revert-candidate",
-                             "check-issues", "verify-tree"])
+                             "check-issues", "check-approval", "verify-tree"])
     ap.add_argument("--baseline-id")
     ap.add_argument("--source-commit")
     ap.add_argument("--receipt-path")
@@ -388,6 +388,25 @@ def main(argv=None):
     # check-issues：known-issues 门禁（publish_main_base.sh 委托；不读写登记 yaml）
     if args.action == "check-issues":
         return check_issues_gate(task=args.task, issues_dir=args.known_issues_dir)
+
+    # check-approval：审批独立校验（方向 2，bash 建 verified tag 前 fail-fast）。
+    # 与 promote 登记内 _check_approval_independence 同源同参——缺 env/身份
+    # 不可用/审批人同执行人/token 不符等任一不过即返 1，publish_main_base.sh
+    # 在建 tag 之前调用，杜绝"tag 已推送才报缺 env、rollback 删 tag best-effort
+    # 残留误报 id 复用"的时序洞。
+    if args.action == "check-approval":
+        if not (args.approved_by or "").strip():
+            print("error: promote 必须传 --approved-by"
+                  "（审批凭据外部化，不再回落默认常量）", file=sys.stderr)
+            return 1
+        ok, aerr = _check_approval_independence(
+            args.approved_by, _collect_operator(),
+            os.environ.get("LC_PROMOTE_APPROVAL_TOKEN", ""),
+            args.approval_token_file or None)
+        if not ok:
+            print(f"error: {aerr}", file=sys.stderr)
+            return 1
+        return 0
 
     # verify-tree：树等价断言（publish_main_base.sh squash 后、push main 前委托）。
     # 比较 verified/<id> tag 与 main 的树，排除登记 yaml 与 docs 后必须无差异，

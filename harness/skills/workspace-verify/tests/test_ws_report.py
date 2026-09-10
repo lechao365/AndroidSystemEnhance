@@ -338,6 +338,60 @@ class TestWsReport(unittest.TestCase):
         self.assertIn("refs_rc=1", err.getvalue())
         self.assertFalse(self._dir.exists())
 
+    def _assert_rc_nonzero_rejected(self, rc_key):
+        # CDP-DOD-001 判红门禁（方向 3）：任一 REQUIRED_RC_KEYS 必查键非零
+        # → ws_report 返 2 拒写收据。构造该 rc=1、其余全 0 的 selfcheck 文本。
+        rcs = {k: "0" for k in
+               ("pytest_rc", "refs_rc", "config_rc", "contract_rc",
+                "pyenv_rc", "ioctl_rc", "manifest_rc", "discipline_rc",
+                "scan_rc", "ruff_rc", "host_rc", "metrics_rc",
+                "opencode_rc")}
+        rcs[rc_key] = "1"
+        line = " ".join(f"{k}={v}" for k, v in rcs.items())
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", f"{line} | "
+                                 "120 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 2, f"{rc_key} 非零应拒写收据")
+        self.assertIn("非零退出码", err.getvalue())
+        self.assertIn(f"{rc_key}=1", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_selfcheck_manifest_rc_nonzero_rejected(self):
+        # 死 rc 判红（方向 3）：gen_manifest 变化（manifest_rc=1）须拒写
+        self._assert_rc_nonzero_rejected("manifest_rc")
+
+    def test_selfcheck_scan_rc_nonzero_rejected(self):
+        # 死 rc 判红（方向 3）：热路径扫描违规（scan_rc=1）须拒写
+        self._assert_rc_nonzero_rejected("scan_rc")
+
+    def test_selfcheck_opencode_rc_nonzero_rejected(self):
+        # 死 rc 判红（方向 3）：opencode-server 脚本校验失败（opencode_rc=1）须拒写
+        self._assert_rc_nonzero_rejected("opencode_rc")
+
+    def test_selfcheck_pyenv_rc_nonzero_rejected(self):
+        self._assert_rc_nonzero_rejected("pyenv_rc")
+
+    def test_selfcheck_ioctl_rc_nonzero_rejected(self):
+        self._assert_rc_nonzero_rejected("ioctl_rc")
+
+    def test_selfcheck_discipline_rc_nonzero_rejected(self):
+        self._assert_rc_nonzero_rejected("discipline_rc")
+
+    def test_selfcheck_ruff_rc_nonzero_rejected(self):
+        self._assert_rc_nonzero_rejected("ruff_rc")
+
+    def test_selfcheck_host_rc_nonzero_rejected(self):
+        self._assert_rc_nonzero_rejected("host_rc")
+
+    def test_selfcheck_metrics_rc_nonzero_rejected(self):
+        self._assert_rc_nonzero_rejected("metrics_rc")
+
     def test_selfcheck_contradictory_refs_text_rejected(self):
         # 方向 4/5：rc 为 0 而文本仍含悬空引用字样（矛盾：工具已败却报 rc=0）
         # → 冗余文本防线拒写

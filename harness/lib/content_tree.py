@@ -77,7 +77,10 @@ def content_tree(exclude=EXCLUDE_PATHS, ref=None, repo_root=None):
             # 引用模式会被工作树污染冲掉 read-tree ref，需收进 else 分支）
             _run_git(["add", "-A"], env, cwd)
         for path in exclude:
-            _run_git(["rm", "--cached", "-r", "-q", "--ignore-unmatch",
+            # -f 强制删除索引内路径（KI-20260910-002）：ref 模式索引=ref 树，
+            # 排除路径在 ref 与工作树版本不同（如 trend.md）时无 -f 报
+            # staged content different 抛 RuntimeError，整树计算失败
+            _run_git(["rm", "--cached", "-r", "-q", "-f", "--ignore-unmatch",
                       "--", path], env, cwd)
         return _run_git(["write-tree"], env, cwd)
     finally:

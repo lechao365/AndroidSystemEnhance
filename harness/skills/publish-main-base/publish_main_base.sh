@@ -454,6 +454,16 @@ if ! git diff --name-only origin/main..dev | grep -q '^docs/'; then
   echo "warn: dev 相对 origin/main 无 docs/ 改动（若本批应同步设计文档，请先 /sync-code-to-doc --base origin/main 并 commit 到 dev）"
 fi
 
+# 方向 2：审批独立校验前移至建 verified tag 之前——缺 env/身份不可用/token
+# 不符时在此 fail-fast，不推 tag。此前排在 baseline_register promote 内
+# （:472 之后、tag 已推送），缺 env 报错时远端已留 tag 而 rollback 删 tag
+# 仅 best-effort，残留 tag 会让 :463 的 tag 存在检查误报 baseline_id 复用
+# （exit 3 死锁，须人工删 tag）。LC_PROMOTE_APPROVAL_TOKEN 由调用方 source
+# promote-approval.env 后注入（与 check-approval 同源校验逻辑）。
+python3 harness/skills/publish-main-base/baseline_register.py check-approval \
+  --approved-by "$APPROVED_BY" \
+  || { echo "error: 审批独立校验未过（缺 token/身份不可用/审批人同执行人），拒绝建 tag/promote" >&2; exit 1; }
+
 # checkout main 至 push main 间任一步失败回滚：调顶层 rollback_promote（与人工
 # --rollback 共用同一实现，状态推导见其函数头注——reset 仅在确有晋升元提交时执行）。
 # 关键：先清掉 main 上的 squash 暂存/提交（reset 到 origin/main，真正丢弃已 commit 的
@@ -514,8 +524,8 @@ git push origin main || { rollback_promote; echo "error: push main 失败（本�
 # 重建 dev（force push 一步覆盖，避免 delete-then-push 的非原子窗口——delete 成功而
 # push 失败会导致远程 dev 缺失，协作者引用断裂）
 git checkout dev && git reset --hard main || {
-  echo "error: dev 重建失败。main 已含基线，请人工完成：git checkout dev && git reset --hard main && git push -f origin dev（勿重跑 promote）" >&2; exit 2; }
-git push -f -u origin dev || { echo "error: dev 重建推送失败，请人工处理" >&2; exit 2; }
+  echo "error: dev 重建失败。main 已含基线，请人工完成：git checkout dev && git reset --hard main && git push --force-with-lease origin dev（勿重跑 promote）" >&2; exit 2; }
+git push --force-with-lease -u origin dev || { echo "error: dev 重建推送失败，请人工处理" >&2; exit 2; }
 
 echo "promote 完成；提示：本批次文档同步应在 promote 前以 /sync-code-to-doc --base origin/main 完成，promote 后工作区已 clean（git diff HEAD 无变动，勿再硬同步）"
 exit 0
