@@ -112,10 +112,20 @@ def compare(scope_str, status_lines, exclude=EXCLUDE_PREFIX):
         c = classify_status(ln, exclude)
         if c:
             actual_paths.add(c[1])
+    # 收据 scope 的 untracked 目录（git status 的 `?? dir/` 整目录项）须按前缀
+    # 匹配其下实际文件——提交面经 `git diff --cached` 展开为具体文件，目录项
+    # 与文件项直接集合差会误判"未声明"（2026-09-10 host_shim/ 目录批次）。
+    # 双向归一化：收据目录项下已有文件提交 → 目录视为已声明；
+    # 提交面文件落在收据目录项下 → 文件视为已声明（不再报"提交面未声明"）。
+    dir_scope = {p for p in receipt_paths if p.endswith("/")}
     diffs = []
     for p in sorted(receipt_paths - actual_paths):
+        if p.endswith("/") and any(a.startswith(p) for a in actual_paths):
+            continue  # 目录项下已有具体文件提交 → 已声明
         diffs.append(f"收据声明但不在提交面: {p}")
     for p in sorted(actual_paths - receipt_paths):
+        if any(p.startswith(d) for d in dir_scope):
+            continue  # 文件落在收据目录项下 → 已声明
         diffs.append(f"提交面存在但收据未声明: {p}")
     return diffs
 
