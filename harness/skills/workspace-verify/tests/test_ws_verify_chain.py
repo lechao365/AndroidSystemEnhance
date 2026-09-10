@@ -348,6 +348,50 @@ class TestChain(unittest.TestCase):
         self.assertGreaterEqual(el, 5, "elapsed_s 须反映链路真实总耗时")
         self.assertIn('"verify_start"', tj)
 
+    def test_chain_marks_each_standard_step(self):
+        # 方向 1 判红：链编排器每步完成自发 verify_<step>（真实耗时入账）——
+        # mock Popen 下子脚本不真跑不自发 mark，修复前 verify_sync/verify_push/
+        # verify_unit_test/verify_acceptance 缺失（被 ws_acceptance 盲目补零）。
+        from cdp_paths import log_apply_dir
+        old = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+        self.addCleanup(
+            lambda: os.environ.__setitem__("CDP_PROJECT_ROOT", old)
+            if old is not None else os.environ.pop("CDP_PROJECT_ROOT", None))
+        bid = wc.batch_id_from_text(self.batch.read_text(encoding="utf-8"))
+        rc, _, _ = self._run()
+        self.assertEqual(rc, 0)
+        data = json.loads((log_apply_dir()
+                           / f"timings-{bid}.json").read_text(encoding="utf-8"))
+        marks = {m["name"]: m for m in data.get("marks") or []}
+        for seg in ("verify_sync", "verify_push", "verify_unit_test",
+                    "verify_acceptance"):
+            self.assertIn(seg, marks,
+                          f"链步完成须自发 mark {seg}（真实耗时入账）")
+            self.assertIsNotNone(marks[seg].get("dur_s"),
+                                 f"{seg} 为执行步须带实测 dur_s 入账")
+
+    def test_chain_marks_skipped_standard_step_zero(self):
+        # 方向 1 判红：真跳过的标准步发 zero mark（补零只兜真跳过的步）——
+        # 链前序失败后 unit_test 等余步 skipped，其 verify_<step> 须为 zero
+        from cdp_paths import log_apply_dir
+        old = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+        self.addCleanup(
+            lambda: os.environ.__setitem__("CDP_PROJECT_ROOT", old)
+            if old is not None else os.environ.pop("CDP_PROJECT_ROOT", None))
+        bid = wc.batch_id_from_text(self.batch.read_text(encoding="utf-8"))
+        rc, result, _ = self._run(popen_rc=1)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("unit_test", result["skipped"])
+        data = json.loads((log_apply_dir()
+                           / f"timings-{bid}.json").read_text(encoding="utf-8"))
+        marks = {m["name"]: m for m in data.get("marks") or []}
+        self.assertIn("verify_unit_test", marks,
+                      "跳过的步须发 verify_<step> mark")
+        self.assertIsNone(marks["verify_unit_test"].get("dur_s"),
+                          "真跳过的步段零 mark 不带 dur_s（非实测耗时）")
+
     def test_lock_held_returns_3_no_run_json(self):
         # 编排锁被占用：exit 3，不执行任何步骤，运行态不落盘
         # （预跑线程仍会启动但被 mock——LockHeld 提前返回不等它收割）

@@ -732,12 +732,17 @@ def _write_cases(batch_id, cases_text):
 
 # 标准五段中的前四段（sync/build/push/unit_test）：跳过时补零 mark 占位，
 # 保证收据 timings 段完整可归因（缺段 vs 0 耗时语义不同：缺段=去向不明）
-_STANDARD_ZERO_SEGMENTS = ("verify_sync", "verify_build", "verify_push",
+# 真跳过的步才补零（方向 1 修正）：verify_sync/verify_push/verify_unit_test
+# 三个链步在链编排器/子脚本自发 mark 缺失时（独立 CLI 场景）确为"未执行"
+# 补零合理；verify_build 无链步且编译是否真跑由执行者 mark 决定——编译
+# 真跑数千秒却补零是伪造数据，从补零集移除（缺失时收据 timings missing
+# 如实暴露，emit 一眼可见而非假 0）。
+_STANDARD_ZERO_SEGMENTS = ("verify_sync", "verify_push",
                            "verify_unit_test")
 
 
 def _backfill_zero_marks(batch_id):
-    """标准四段缺失时补零 mark（跳过段记 0 耗时，收据段完整可归因）。
+    """标准三段缺失时补零 mark（跳过段记 0 耗时，收据段完整可归因）。
 
     上一批收据只有 verify_start 与 verify_acceptance 两段即因四段跳过时
     未发 mark；验收是最末验证阶段，由它兜底补齐。batch_id 缺失（三级

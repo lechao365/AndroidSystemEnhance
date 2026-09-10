@@ -479,18 +479,42 @@ def run_quick(use_locks=True):
     return result["exit_rc"], result
 
 
-def _chain_mark(name, batch_id):
-    """verify 链起止自发 mark（verify_start/verify_end，B1：脚本自发替代
-    AI 手打——旧 SKILL 手动 mark verify_start/verify_end 实测漂移且不在
-    段名常量表）。仅当批次归属明确（batch_id 解析成功）时打点，防把链段
-    打到 current-batch.json 回落的无关批次上；失败静默不阻断编排。"""
+def _chain_mark(name, batch_id, dur_s=None, zero=False):
+    """verify 链段自发 mark（B1：脚本自发替代 AI 手打）。
+
+    覆盖 verify_start/verify_end 与方向 1 新增的每步 verify_<step>：链编排器
+    在每步（sync/push/unit_test/acceptance）完成时以实测 dur_s 发 mark，跳过
+    的步以 zero 发——子脚本自发 mark 之外的双保险，杜绝"编译真跑数千秒却因
+    无 verify_build mark 被 ws_acceptance 补零"的伪造数据。仅当批次归属明确
+    （batch_id 解析成功）时打点，防把链段打到 current-batch.json 回落的无关
+    批次上；失败静默不阻断编排。
+    """
     if not batch_id:
         return
     try:
         import cdp_timing
-        cdp_timing.emit_mark(name, batch_id=batch_id)
+        cdp_timing.emit_mark(name, dur_s=dur_s, zero=zero, batch_id=batch_id)
     except Exception:
         pass
+
+
+# 链步 → 标准 verify_<step> 段名映射（方向 1）：仅映射 cdp_timing 常量表
+# 内已有的 verify_* 段；connect/package/report 无对应标准段不打点（连接量
+# 不到/打包只记录不门禁/收据即终点，既有口径）。verify_build 无链步——编译
+# 由执行者 mark 真实耗时，链编排器不补零（补零即伪造）。
+_VERIFY_STEP_SEGMENTS = {
+    "sync": "verify_sync",
+    "push": "verify_push",
+    "unit_test": "verify_unit_test",
+    "acceptance": "verify_acceptance",
+}
+
+
+def _mark_step(name, batch_id, dur_s=None, zero=False):
+    """链步完成/跳过 → verify_<step> 段 mark（仅标准四段）。"""
+    seg = _VERIFY_STEP_SEGMENTS.get(name)
+    if seg:
+        _chain_mark(seg, batch_id, dur_s=dur_s, zero=zero)
 
 
 def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
@@ -509,23 +533,28 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
     started_at = time.time()
     _chain_mark("verify_start", batch_id)
     for name in _CHAIN_STEPS:
-        # 无验收源/无收据源：确定性跳过（记账留痕，不算失败）
+        # 无验收源/无收据源：确定性跳过（记账留痕，不算失败）；跳过的标准
+        # 步以 zero mark 落 verify_<step>（方向 1：补零只兜真跳过的步）
         if name == "acceptance" and not (chain_args.get("case") or batch_file):
+            _mark_step(name, batch_id, zero=True)
             skipped.append(name)
             skip_reasons[name] = "缺验收源（--case/--batch-file 均未传）"
             continue
         if name == "report" and not batch_file:
+            _mark_step(name, batch_id, zero=True)
             skipped.append(name)
             skip_reasons[name] = "缺 --batch-file（模式 A 收据需批次源）"
             continue
         if name == "package" and not batch_file:
             # 方向 3：打包证据为收据补充，无批次源（收据必 skipped）时无
             # 消费方，跳过免白跑 3 分钟打包
+            _mark_step(name, batch_id, zero=True)
             skipped.append(name)
             skip_reasons[name] = "缺 --batch-file（打包证据随收据内嵌，无收据不打包）"
             continue
         if fail_stop and name != "report":
             # 链已停：余下验证步记 skipped；report 豁免（fail 收据落盘）
+            _mark_step(name, batch_id, zero=True)
             skipped.append(name)
             skip_reasons[name] = "链已停（前序步骤失败，收据仍落盘）"
             continue
@@ -546,6 +575,9 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
                       "end": time.time(),
                       "dur_s": round(time.monotonic() - t0m, 3),
                       "canceled": canceled})
+        # 方向 1：每步完成自发 verify_<step>（实测 dur_s 入账）——子脚本自发
+        # mark 之外的双保险，编译等链外环节不再被 ws_acceptance 盲目补零伪造
+        _mark_step(name, batch_id, dur_s=round(time.monotonic() - t0m, 3))
         canceled_any = canceled_any or canceled
         # 方向 3：package 是证据补充（打包失败只记步，ws_package 已如实落盘
         # evidence，report 内嵌真实 script_rc），不阻断链、不改 overall——
