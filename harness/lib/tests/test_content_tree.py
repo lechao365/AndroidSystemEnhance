@@ -93,6 +93,23 @@ class TestContentTree(unittest.TestCase):
         t2 = content_tree(ref="HEAD", repo_root=self.root)
         self.assertEqual(diff_paths(t1, t2, repo_root=self.root), ["b.txt"])
 
+    def test_ref_mode_ignores_worktree_untracked(self):
+        # 判红回归（KI-20260910-001）：引用模式只读 ref 树，工作树未跟踪
+        # 文件不得混入——修复前无条件 add -A 会把 b.txt 收进树（判红）
+        (self.root / "b.txt").write_text("2\n", encoding="utf-8")
+        tree = content_tree(ref="HEAD", repo_root=self.root)
+        self.assertEqual(self._tree_paths(tree), {"a.txt"})
+
+    def test_ref_mode_ignores_worktree_modification(self):
+        # 判红回归：引用模式不受工作树已跟踪文件改动影响（a.txt 改动
+        # 未提交），返回树须为 ref 原树
+        (self.root / "a.txt").write_text("modified\n", encoding="utf-8")
+        tree = content_tree(ref="HEAD", repo_root=self.root)
+        self.assertEqual(self._tree_paths(tree), {"a.txt"})
+        self.assertEqual(
+            self._git("ls-tree", "HEAD", "a.txt").stdout,
+            self._git("ls-tree", tree, "a.txt").stdout)
+
     def test_empty_repo_no_head(self):
         # 空仓（无 HEAD）：工作树模式从空 index 起步，仍可算树
         empty = Path(tempfile.mkdtemp(dir=self._tmp.name))
