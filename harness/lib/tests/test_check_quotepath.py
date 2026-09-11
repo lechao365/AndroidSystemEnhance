@@ -136,6 +136,27 @@ class TestCheckQuotepath(unittest.TestCase):
             out = cqp.scan(empty)
         self.assertTrue(any("git ls-files 失败" in o for o in out))
 
+    def test_scan_face_covers_all_four_forms(self):
+        # 方向 1（KI 2026-09-11 第二种形态）：扫描面完整性——四种拼法各造
+        # 一例断言判红。上批只证"判红有效"，未证"扫描完整"——检查器只认
+        # [git, diff...] 与 [git, *args]，漏 [git]+args 与 [git,-C,root,*args]
+        # 包装器（sync_code_to_workspace/sync_code_to_doc/cdp_apply/emit
+        # precheck），四个包装器下上百个调用点全不可见（quotepath_rc=0 假绿）
+        forms = [
+            'r = subprocess.run(["git", "diff", "--name-only", "a", "b"])\n',
+            'r = subprocess.run(["git", *args])\n',
+            'r = subprocess.run(["git"] + args)\n',
+            'r = subprocess.run(["git", "-C", str(root), *args])\n',
+        ]
+        for i, sample in enumerate(forms):
+            rel = f"harness/lib/w{i}.py"
+            self._add(rel, "import subprocess\n" + sample)
+        out = cqp.scan(self.repo)
+        for i in range(len(forms)):
+            self.assertTrue(
+                any(f"w{i}.py" in o for o in out),
+                f"拼法 {i + 1} 未判红（扫描面不完整）: {forms[i].strip()}")
+
     def test_sh_not_executable_reported(self):
         # 方向 3：.sh 以 100644 入库判红（drvfs 本机看着可执行、净克隆暴露）
         self._add("harness/tool.sh", "#!/bin/bash\necho hi\n")

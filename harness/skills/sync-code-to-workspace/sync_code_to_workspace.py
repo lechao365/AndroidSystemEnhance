@@ -107,7 +107,9 @@ def _git_run(args: list[str], cwd: str | Path, timeout: int = 300) -> subprocess
 
     timeout/异常时返回 returncode=-1 的 CompletedProcess，避免无限阻塞。
     """
-    cmd = ["git"] + args
+    # -c core.quotepath=false（KI 2026-09-11）：非 ASCII 路径输出默认带引号
+    # 八进制转义致调用方前缀匹配/树等价失效；包装器统一带，覆盖全部调用点
+    cmd = ["git", "-c", "core.quotepath=false"] + args
     try:
         return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(cwd), timeout=timeout)
     except subprocess.TimeoutExpired:

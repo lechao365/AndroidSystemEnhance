@@ -24,7 +24,10 @@ from harness.lib.role_guard import require_role  # noqa: E402
 
 
 def _git(root, *args):
-    return subprocess.run(["git", "-C", str(root), *args],
+    # -c core.quotepath=false（KI 2026-09-11）：非 ASCII 路径输出默认带引号
+    # 八进制转义致前缀匹配失效；包装器统一带，覆盖全部调用点
+    return subprocess.run(["git", "-c", "core.quotepath=false",
+                           "-C", str(root), *args],
                           capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=120)
 

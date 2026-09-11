@@ -182,6 +182,23 @@ case "$RESULT" in
   *) check_class RECEIPT_FAIL; echo "error: 最新收据 result=$RESULT 非 pass/skip（revert/fail 收据不可 promote）" >&2; exit 1 ;;
 esac
 
+# ── 方向 3：promote 前置 CI 门禁 ──────────────────────────────────────────
+# CI 已真绿（2026-09-11 实测 run conclusion success），把 run conclusion
+# 接进 promote 前置（推送前置上批已接 git-works-push）：dev HEAD 的 GitHub
+# Actions run conclusion 非失败才允许晋升（防"CI 红仍 promote"——收据验证
+# 通过但 CI 未绿时晋升内容未过全量自检门禁）。HEAD 未推送（无 run）回落
+# 查 origin/dev（prev-head）结论（与 git-works-push 同判据）；API 抖动降级
+# 不阻断、404 阻断（fail-closed 语义同 check_ci_head）。PROMOTE_SKIP_CI_CHECK=1
+# 显式跳过（人工裁决/无 CI 环境/自举死锁 origin/dev failure 需人工裁决）。
+if [ "${PROMOTE_SKIP_CI_CHECK:-0}" != "1" ]; then
+  HEAD_SHA=$(git rev-parse HEAD)
+  PREV_SHA=$(git rev-parse origin/dev 2>/dev/null || true)
+  if ! python3 harness/lib/check_ci_head.py --head "$HEAD_SHA" --prev-head "$PREV_SHA" 2>&1; then
+    echo "error: GitHub Actions run 存在失败结论或无法核实，阻断晋升（修复 CI 或人工裁决；确认无 CI 须显式 PROMOTE_SKIP_CI_CHECK=1）" >&2
+    exit 1
+  fi
+fi
+
 # ── 回溯定位最近内容提交 BH（跳过登记元提交与文档提交），PARENT 取 BH 父提交 ──────
 # （prepare 登记 candidate 的提交会使 HEAD^ 不再是 verified_commit；文档同步提交同理，
 #   故回溯须一并跳过；promote 必失败于 PARENT 校验）

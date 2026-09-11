@@ -36,8 +36,12 @@ _CMDS = ("diff", "ls-files", "status")
 # .py：直接调用 ["git", "diff|ls-files|status"（git 与子命令字面同列表，
 # 单/双引号均支持）
 _PY_DIRECT_RE = re.compile(r'\[["\']git["\']\s*,\s*["\'](?:diff|ls-files|status)["\']')
-# .py：通用封装 ["git", *args]（内部 subprocess 组装，须带 -c 覆盖全部调用点）
-_PY_WRAPPER_RE = re.compile(r'\[["\']git["\']\s*,\s*\*[a-z_]')
+# .py：*args 展开包装器（["git", *args] 或 ["git", "-C", <root>, *args]）——
+# 内部 subprocess 组装，须带 -c 覆盖全部调用点
+_PY_STAR_ARGS_RE = re.compile(
+    r'\[["\']git["\']\s*(?:,\s*["\']-C["\']\s*,\s*[^,\]]+\s*)?,\s*\*[a-z_]')
+# .py：+ args 拼接包装器（["git"] + args）同族，须带 -c 覆盖全部调用点
+_PY_CONCAT_RE = re.compile(r'\[["\']git["\']\]\s*\+\s*\w+')
 
 # .sh 命令位判定正则：git 后可选 --no-pager / -x 单选项，再子命令
 _SH_GIT_RE = re.compile(
@@ -153,7 +157,9 @@ def scan(repo: Path) -> list[str]:
             if "core.quotepath" in ln:
                 continue
             if rel.endswith(".py"):
-                hit = bool(_PY_DIRECT_RE.search(ln) or _PY_WRAPPER_RE.search(ln))
+                hit = bool(_PY_DIRECT_RE.search(ln)
+                           or _PY_STAR_ARGS_RE.search(ln)
+                           or _PY_CONCAT_RE.search(ln))
             else:
                 hit = _sh_command_hit(ln)
             if hit:

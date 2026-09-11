@@ -584,11 +584,13 @@ def _direction_report_count(body):
 
 
 def _enforce_direction_reports(direction, body_path):
-    """方向 3：CDP-DOD-003 收据逐方向自报门禁。
+    """方向 3 + 方向 2：CDP-DOD-003 收据逐方向自报门禁。
 
     长期 56 份收据仅 4 份写了逐方向自报，根因 -s 模板把 --body 直接设成
     批次原文（无自报段）；此处校验 body 内自报条数等于批次方向数，缺则
     返 2 拒写（收据不经人工逐方向核对即落盘，emit 复盘无信号）。
+    方向 2（2026-09-11）：三态门禁——每条自报须以 完成/部分/拒绝 之一
+    开头，拒绝条目须带理由；无三态前缀的"静默降级"（不声明完成度）判红。
     返回 0 通过 / 2 拒写（调用方在 main 打印 error 并 return）。
     """
     n = _direction_count(direction)
@@ -602,6 +604,23 @@ def _enforce_direction_reports(direction, body_path):
               f"请在 --body 文件补齐每条自报的调用方与验证后重跑",
               file=sys.stderr)
         return 2
+    # 方向 2：三态校验——每条自报须以 完成/部分/拒绝 之一开头，拒绝须带
+    # 理由；静默降级（无三态声明）判红，防"写了方向号但没自报完成度"
+    reports = re.findall(r"- 方向\d+:\s*(.*)$", text, re.M)
+    for i, rep in enumerate(reports, 1):
+        m = re.match(r"(完成|部分|拒绝)(?:[：:]\s*|\s+|$)", rep)
+        if not m:
+            print(f"error: 收据第 {i} 条方向自报缺三态前缀（须以 完成/部分/"
+                  f"拒绝 之一开头，静默降级判红）——CDP-DOD-003，请在 "
+                  f"--body 声明完成度后重跑", file=sys.stderr)
+            return 2
+        if m.group(1) == "拒绝":
+            reason = rep[m.end():].strip()
+            if len(reason) < 4:
+                print(f"error: 收据第 {i} 条方向自报为拒绝但未带理由"
+                      f"（拒绝须说明原因）——CDP-DOD-003，请在 --body "
+                      f"补充拒绝理由后重跑", file=sys.stderr)
+                return 2
     return 0
 
 

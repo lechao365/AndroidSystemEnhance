@@ -156,7 +156,8 @@ class TestWsReport(unittest.TestCase):
         # 方向 3：方向数 2 但正文仅 1 条自报 → 返 2（部分自报不算完成）
         batch = self._write(D2_S, ".cdp")
         body = self._write(
-            "## 逐方向自报\n- 方向1: 改动 ws_x（调用方 selfcheck；验证单测 A）\n")
+            "## 逐方向自报\n"
+            "- 方向1: 完成: 改动 ws_x（调用方 selfcheck；验证单测 A）\n")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
@@ -168,12 +169,12 @@ class TestWsReport(unittest.TestCase):
         self.assertIn("仅 1 条", err.getvalue())
 
     def test_receipt_full_direction_report_ok(self):
-        # 方向 3：方向数 2、正文逐方向自报齐全 → rc 0 收据落盘
+        # 方向 3 + 方向 2：方向数 2、正文逐方向自报齐全且带三态 → rc 0 收据落盘
         batch = self._write(D2_S, ".cdp")
         body = self._write(
             "## 逐方向自报\n"
-            "- 方向1: 改动 ws_x（调用方 selfcheck；验证单测 A）\n"
-            "- 方向2: 改动 ws_y（调用方 ws_report；验证单测 B）\n")
+            "- 方向1: 完成: 改动 ws_x（调用方 selfcheck；验证单测 A）\n"
+            "- 方向2: 部分: 改动 ws_y（调用方 ws_report；验证单测 B）\n")
         buf = io.StringIO()
         with redirect_stdout(buf):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
@@ -186,6 +187,57 @@ class TestWsReport(unittest.TestCase):
         content = details[0].read_text(encoding="utf-8")
         self.assertIn("方向1", content)
         self.assertIn("方向2", content)
+
+    def test_receipt_direction_report_missing_state_rejected(self):
+        # 方向 2：三态门禁——自报条目无 完成/部分/拒绝 前缀（静默降级）
+        # → 返 2 拒写（防"写了方向号但没自报完成度"）
+        batch = self._write(D2_S, ".cdp")
+        body = self._write(
+            "## 逐方向自报\n"
+            "- 方向1: 改动 ws_x（调用方 selfcheck；验证单测 A）\n"
+            "- 方向2: 改动 ws_y（调用方 ws_report；验证单测 B）\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", _selfcheck_ok()])
+        self.assertEqual(rc, 2)
+        self.assertIn("三态前缀", err.getvalue())
+        self.assertIn("静默降级", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_receipt_direction_report_rejected_without_reason(self):
+        # 方向 2：三态门禁——拒绝条目不带理由 → 返 2
+        batch = self._write(D2_S, ".cdp")
+        body = self._write(
+            "## 逐方向自报\n"
+            "- 方向1: 完成: 改动 ws_x（调用方 selfcheck；验证单测 A）\n"
+            "- 方向2: 拒绝\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", _selfcheck_ok()])
+        self.assertEqual(rc, 2)
+        self.assertIn("拒绝", err.getvalue())
+        self.assertIn("理由", err.getvalue())
+
+    def test_receipt_direction_report_rejected_with_reason_ok(self):
+        # 方向 2：拒绝条目带理由 → 放行（三态合法）
+        batch = self._write(D2_S, ".cdp")
+        body = self._write(
+            "## 逐方向自报\n"
+            "- 方向1: 完成: 改动 ws_x（调用方 selfcheck；验证单测 A）\n"
+            "- 方向2: 拒绝: 上板验证缺设备（需 -sv 批次补验）\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", _selfcheck_ok()])
+        self.assertEqual(rc, 0)
 
     _RC = ("pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 "
            "ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 "

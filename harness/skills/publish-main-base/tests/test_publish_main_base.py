@@ -53,6 +53,9 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self._shim_tmp = tempfile.TemporaryDirectory()
         self._env = dict(os.environ)
         self._env["CDP_PROJECT_ROOT"] = str(self.root)
+        # 方向 3：promote 前置 CI 门禁——fixture origin 是本地 bare（非 GitHub
+        # URL，check_ci_head 无法核实）→ 默认显式跳过；判红用例单独解除验证
+        self._env["PROMOTE_SKIP_CI_CHECK"] = "1"
         os.environ["CDP_PROJECT_ROOT"] = str(self.root)
         # harness 骨架拷贝（脚本内 python3 相对路径与 cdp 模块导入均落在临时根）
         shutil.copytree(REAL_CDP_LIB,
@@ -939,6 +942,27 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertIn("data/known-issues",
                       self._git("ls-tree", "-r", "--name-only", "main",
                                 "data/known-issues").stdout)
+
+    def test_promote_ci_gate_blocks_unverifiable(self):
+        # 方向 3：promote 前置 CI 门禁——未显式跳过且 origin 非 GitHub
+        # （本地 bare，check_ci_head 无法解析 slug，fail-closed 无法核实）→
+        # 阻断晋升。fixture 默认 PROMOTE_SKIP_CI_CHECK=1，此用例显式解除
+        # 验证门禁接线（CI 已真绿，run conclusion 须接进 promote 前置）。
+        self._setup_remote()
+        self._receipt_commit_c3(verify_mode="skip", package=PKG_JSON)
+        self._candidate_yaml()
+        self._git("add", "-A")
+        self._git("commit", "-m", "构建(baseline): candidate 登记")
+        self._git("push", "origin", "dev")
+        saved = self._env.get("PROMOTE_SKIP_CI_CHECK")
+        self._env.pop("PROMOTE_SKIP_CI_CHECK", None)
+        try:
+            r = self._promote()
+        finally:
+            if saved is not None:
+                self._env["PROMOTE_SKIP_CI_CHECK"] = saved
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("GitHub Actions run", r.stderr)
 
     def test_prepare_without_task_infers_ki_gate(self):
         # 方向 7：prepare 全不传（--task/--evidence-scope）走通——门禁无条件执行，
