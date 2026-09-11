@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""check_ci_head 单测：push 前置 CI 门禁（curl 免认证查 HEAD check-runs）。
+"""check_ci_head 单测：push 前置 CI 门禁（curl 免认证查 actions runs）。
 
-判红：CI 存在失败结论（failure/cancelled/timed_out）阻断；fail-open 于
-API 抖动（网络失败/限流/5xx/未知响应/非 JSON）与仓库非公开不可达（404
-登记放弃），均降级告警不阻断推送（不得静默丢弃也不拖垮主流程）。"""
+接口（方向 2）：弃 /commits/<sha>/check-runs（total_count 恒 0），改查
+/actions/runs?head_sha=；核对待推送 HEAD 与上一个已推送提交（prev-head，
+新 HEAD 未推送无 run 时以已推送提交为主判据）。
+
+判红：actions run conclusion 含 failure/cancelled/timed_out → 阻断；
+无 run 记录（新 commit 未推送 / 422）→ 放行；fail-open 于 API 抖动
+（网络失败/限流/5xx/未知响应/非 JSON）与仓库非公开不可达（404 登记放弃）。"""
 
 import re
 import sys
@@ -21,50 +25,76 @@ def _resp(code, body):
 
 class TestCheckCi(unittest.TestCase):
     def test_all_success_passes(self):
-        with _resp("200", '{"check_runs":[{"conclusion":"success"},'
-                           '{"conclusion":"neutral"}]}'):
-            self.assertEqual(cci.check_ci("a" * 40, "o/r"), 0)
+        with _resp("200", '{"workflow_runs":[{"id":1,"conclusion":"success"},'
+                           '{"id":2,"conclusion":"neutral"}]}'):
+            self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 0)
 
     def test_failure_conclusion_blocks(self):
         # 判红：conclusion=failure 阻断（fail-closed）
-        with _resp("200", '{"check_runs":[{"conclusion":"success"},'
-                           '{"conclusion":"failure"}]}'):
-            self.assertEqual(cci.check_ci("a" * 40, "o/r"), 1)
+        with _resp("200", '{"workflow_runs":[{"id":1,"conclusion":"success"},'
+                           '{"id":2,"conclusion":"failure"}]}'):
+            self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 1)
         # cancelled / timed_out 同为失败结论
         for c in ("cancelled", "timed_out"):
-            with _resp("200", '{"check_runs":[{"conclusion":"%s"}]}' % c):
-                self.assertEqual(cci.check_ci("a" * 40, "o/r"), 1)
+            with _resp("200", '{"workflow_runs":[{"conclusion":"%s"}]}' % c):
+                self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 1)
+
+    def test_prev_head_failure_blocks(self):
+        # 方向 2：上一个已推送提交（prev-head）CI 失败 → 阻断（主判据——
+        # 待推送新 HEAD 无 run 记录时须以已推送提交 CI 状态为准）
+        # 第一次调用 prev-head 返回 failure，第二次（HEAD）未触达
+        def _curl(url):
+            if "head_sha=b" in url:
+                return "200", '{"workflow_runs":[{"conclusion":"failure"}]}'
+            return "200", '{"workflow_runs":[]}'
+        with mock.patch.object(cci, "_curl", side_effect=_curl):
+            self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 1)
+
+    def test_new_head_no_runs_passes(self):
+        # 方向 2：待推送新 HEAD 无 run 记录（未推送）→ 放行，prev-head 无
+        # 失败 → 整体放行（422 场景同此，不再当 API 抖动阻断/误报）
+        def _curl(url):
+            return "200", '{"workflow_runs":[]}'
+        with mock.patch.object(cci, "_curl", side_effect=_curl):
+            self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 0)
+
+    def test_422_unknown_commit_passes(self):
+        # 方向 2：推送前 HEAD 在 GitHub 尚不存在（422）→ 放行（无 run 记录
+        # 是正常新提交场景，非 API 抖动）
+        with _resp("422", '{"message":"No commit found"}'):
+            self.assertEqual(cci.check_ci("a" * 40, None, "o/r"), 0)
+
+    def test_no_prev_head_skips_prev_check(self):
+        # prev-head 为空（origin/dev 不可解析）→ 只核对待推送 HEAD
+        with _resp("200", '{"workflow_runs":[{"conclusion":"success"}]}'):
+            self.assertEqual(cci.check_ci("a" * 40, None, "o/r"), 0)
 
     def test_network_failure_warns_not_blocks(self):
         # API 抖动：网络失败 → 降级告警不阻断
         with _resp(None, "curl: could not resolve host"):
-            self.assertEqual(cci.check_ci("a" * 40, "o/r"), 0)
+            self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 0)
 
     def test_rate_limit_warns_not_blocks(self):
         for code in ("403", "429"):
             with _resp(code, "rate limited"):
-                self.assertEqual(cci.check_ci("a" * 40, "o/r"), 0)
+                self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 0)
 
     def test_server_error_warns_not_blocks(self):
         with _resp("500", "boom"):
-            self.assertEqual(cci.check_ci("a" * 40, "o/r"), 0)
+            self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 0)
 
     def test_404_repo_not_public_warns_not_blocks(self):
         # 仓库非公开或不可达：登记放弃并写明（非静默），不阻断
         with _resp("404", '{"message":"Not Found"}'):
-            self.assertEqual(cci.check_ci("a" * 40, "o/r"), 0)
+            self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 0)
 
     def test_unknown_code_warns_not_blocks(self):
         with _resp("418", "teapot"):
-            self.assertEqual(cci.check_ci("a" * 40, "o/r"), 0)
+            self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 0)
 
     def test_non_json_body_warns_not_blocks(self):
         with _resp("200", "<html>not json</html>"):
-            self.assertEqual(cci.check_ci("a" * 40, "o/r"), 0)
-
-    def test_empty_runs_passes(self):
-        with _resp("200", '{"check_runs":[]}'):
-            self.assertEqual(cci.check_ci("a" * 40, "o/r"), 0)
+            self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 0)
 
     def test_slug_inferred_from_ssh_remote(self):
         r = cci._repo_slug_from_remote(".")  # 真实 remote 推断
@@ -85,6 +115,11 @@ class TestCheckCi(unittest.TestCase):
             rc = cci.main(["--head", "xyz", "--repo-slug", "o/r"])
         self.assertEqual(rc, 2)
         c.assert_not_called()
+
+    def test_bad_prev_head_param_returns_2(self):
+        rc = cci.main(["--head", "a" * 40, "--prev-head", "zz",
+                       "--repo-slug", "o/r"])
+        self.assertEqual(rc, 2)
 
     def test_missing_slug_blocks(self):
         with mock.patch.object(cci, "_repo_slug_from_remote", return_value=None):

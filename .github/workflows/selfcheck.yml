@@ -21,8 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     # 无打点指针降级（方向 5）：log/打点/收据落点全指 runner 临时目录，不污染检出树；
     # cdp_timing mark 无指针时 warn 返非零，selfcheck 捕获后不阻断
-    env:
-      CDP_PROJECT_ROOT: ${{ runner.temp }}/cdp-root
+    # 注（2026-09-11）：CDP_PROJECT_ROOT 原在 job 级 env 用 ${{ runner.temp }}
+    # ——runner 上下文仅 step 级可用，job 级 env 求值失败致工作流启动失败
+    # （89 次 run 全 failure 且零 job 起来）。改 step 级 env 用 $RUNNER_TEMP。
     steps:
       # actions/checkout v4.2.2（SHA 固定；禁浮动 tag）
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -31,6 +32,8 @@ jobs:
         run: python3 -m pip install --quiet pyyaml pytest pytest-xdist ruff
 
       - name: 自检
+        env:
+          CDP_PROJECT_ROOT: $RUNNER_TEMP/cdp-root
         run: |
           mkdir -p "$CDP_PROJECT_ROOT"
           out="$(python3 harness/lib/selfcheck.py)"

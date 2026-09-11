@@ -47,14 +47,22 @@ class TestSelfcheckWorkflow(unittest.TestCase):
                              f"{action} 未按 SHA 固定: {ref}")
 
     def test_runs_selfcheck_only_with_degraded_pointer(self):
-        # 唯一 job 只跑自检；显式注入 CDP_PROJECT_ROOT（无打点指针降级路径）
+        # 唯一 job 只跑自检；CDP_PROJECT_ROOT 在自检 step 级 env 注入
+        # （无打点指针降级路径）。方向 1 修正：原 job 级 env 用
+        # ${{ runner.temp }}——runner 上下文仅 step 级可用，job 级 env
+        # 求值失败致工作流启动失败（89 次 run 全 failure 且零 job），
+        # 改 step 内 $RUNNER_TEMP 环境变量
         job = self.doc["jobs"]["selfcheck"]
         steps = job["steps"]
         run_steps = [s.get("run", "") for s in steps]
         joined = "\n".join(run_steps)
         self.assertIn("selfcheck.py", joined)
-        self.assertEqual(job.get("env", {}).get("CDP_PROJECT_ROOT"),
-                         "${{ runner.temp }}/cdp-root")
+        # job 级 env 不得再用表达式上下文（runner.temp 在此不可用）
+        self.assertNotIn("runner.temp", str(job.get("env", {})))
+        # 自检 step 级 env 用 $RUNNER_TEMP（step 内环境变量可用）
+        selfcheck = next(s for s in steps if "selfcheck.py" in s.get("run", ""))
+        self.assertEqual(selfcheck.get("env", {}).get("CDP_PROJECT_ROOT"),
+                         "$RUNNER_TEMP/cdp-root")
 
     def test_ci_parses_required_rcs(self):
         # 方向 1 + 方向 3：selfcheck main 恒返 0（只采集不判定），CI 步骤必须

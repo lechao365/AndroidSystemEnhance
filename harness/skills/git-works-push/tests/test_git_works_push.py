@@ -206,7 +206,7 @@ class TestGitWorksPush(unittest.TestCase):
         r = self._run("--message-file", str(self._msg),
                       env_extra={"GWP_SKIP_CI_CHECK": "0"})
         self.assertEqual(r.returncode, 1)
-        self.assertIn("check-runs", r.stderr)
+        self.assertIn("Actions run", r.stderr)
 
     def test_baseline_not_registered_exits_1(self):
         # subject 首行声明未登记 BL → 拒绝提交
