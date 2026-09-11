@@ -426,8 +426,14 @@ def main(argv=None):
         if not tag_tree or not main_tree:
             print(f"error: 无法解析 {tag} 或 main 的树对象", file=sys.stderr)
             return 1
-        r = subprocess.run(["git", "diff", "--name-only", tag_tree, main_tree],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        # -c core.quotepath=false：git 默认（CI runner）对非 ASCII 路径（如
+        # 中文标题的 data/known-issues/*.md）输出带引号+八进制转义行，排除
+        # startswith 匹配不上带引号行→排除失效→树等价误红回滚（2026-09-11
+        # CI 实测定位；本地靠全局 quotepath=false 掩盖，CI 默认配置暴露）
+        r = subprocess.run(
+            ["git", "-c", "core.quotepath=false", "diff", "--name-only",
+             tag_tree, main_tree],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r.returncode != 0:
             print(f"error: 树对比失败: {r.stderr.strip()}", file=sys.stderr)
             return 1

@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -1693,7 +1693,13 @@ class TestConvertSince(unittest.TestCase):
         expect = (datetime.fromtimestamp(local_epoch, tz=timezone.utc)
                   .strftime("%m-%d %H:%M:%S.%f")[:-3])
         self.assertEqual(since, expect)
-        self.assertNotEqual(since, local_since)
+        # 仅当本地时区偏移非 0（如 CST）时，换算后的设备 UTC 表示才必然与
+        # 本地文本不同；CI runner 时区 UTC（偏移 0）时 since == local_since
+        # 属预期（PIT-5 场景是"本地 CST、设备 UTC"）。写死 assertNotEqual
+        # 使 CI 恒红（2026-09-11 实测 run 34559282497）
+        local_tz = datetime.now().astimezone().tzinfo
+        if local_tz is not None and local_tz.utcoffset(None) != timedelta(0):
+            self.assertNotEqual(since, local_since)
 
     def test_device_clock_behind_local(self):
         # PIT-5：设备时钟落后本地 1h → 换算后时间窗相应提前 1h
