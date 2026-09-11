@@ -51,9 +51,11 @@ jobs:
           done
           if [ -n "$fail" ]; then
             # 诊断可经 check-runs annotations 免认证读取（apply 机无 admin
-            # 下载 job 日志的权限，2026-09-11 续修定位用）
+            # 下载 job 日志的权限，2026-09-11 续修定位用）；单独跑 pytest
+            # 拿失败节点（selfcheck 汇总行不保留 FAILED 明细）
             echo "::error::自检失败 rc:$fail"
-            echo "$out" | grep -E "FAILED|error:|Error" | head -30 | sed 's/^/::error::/'
+            python3 -m pytest harness/ -q 2>&1 \
+              | grep -E "^FAILED|failed|passed" | head -30 | sed 's/^/::error::/'
             exit 1
           fi
 
