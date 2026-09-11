@@ -469,7 +469,10 @@ def emit_mark(name: str, dur_s=None, zero: bool = False, batch_id=None,
     stdout 静默（quiet）不污染调用方输出；失败仅返 False，不抛异常不阻断
     （打点诊断数据，非业务结果本身）。
 
-    定位：显式 timings_file > batch_id > CDP_BATCH_ID > current-batch.json；
+    定位（方向 2 收窄两级）：显式 timings_file/batch_id 参优先；未显式传
+    时默认两级回落（CDP_BATCH_ID > current-batch.json），不再探测打点目录
+    唯一 timings 文件（verify 链模式 A 恒注入 CDP_BATCH_ID，多余回落级对
+    其冗余，手工跑防残留误绑）；
     无活跃批（emit 侧独立自测等）返 False（与旧胶水"静默跳过"口径一致）。
     """
     path = _resolve_mark_target(batch_id=batch_id, timings_file=timings_file)

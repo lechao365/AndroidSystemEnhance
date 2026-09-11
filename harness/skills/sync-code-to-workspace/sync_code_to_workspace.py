@@ -1086,8 +1086,8 @@ _T0 = time.monotonic()
 
 
 def _mark_stage(name, dur_s=None):
-    """验证阶段自动打点：cdp_timing.py mark（batch 识别：CDP_BATCH_ID 环境变量
-    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。
+    """验证阶段自动打点：cdp_timing.py mark（batch 识别两级回落：CDP_BATCH_ID
+    环境变量 > current-batch.json 指针；均缺时静默跳过返 0，失败不阻断口径）。
 
     dur_s（方向 1）：调用方自测脚本内实测秒数，mark 段耗时取 dur_s，相邻差额
     减去 dur_s 后的余量落 gap_before_<name>——脚本启动前的 AI 活动时间不再

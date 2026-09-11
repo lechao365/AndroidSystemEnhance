@@ -74,9 +74,9 @@ stages:
    timings-<batch_id>.json）。**各验证阶段由脚本自动打点**（sync/build/push/
    unit_test/acceptance 各一段，脚本完成即 mark，失败不阻断口径不变）：
    - sync：sync_code_to_workspace.py --auto 闭环完成自动 mark verify_sync
-   - build：编译由执行者完成时触发（cdp_timing.py mark --name verify_build；
-     batch 识别走 CDP_BATCH_ID 环境变量 > log 目录唯一 timings 文件，均缺
-     静默跳过返 0，不阻断）
+    - build：编译由执行者完成时触发（cdp_timing.py mark --name verify_build；
+      batch 识别走两级回落 CDP_BATCH_ID 环境变量 > current-batch.json 指针，
+      均缺静默跳过返 0，不阻断）
    - push：ws_push.py 推送循环完成自动 mark verify_push（实际推送完成后
      打点；ensure 连接成功不再打点——连接就绪量不到推送）
    - unit_test：ws_upload_tests.py 执行完成自动 mark verify_unit_test
@@ -200,10 +200,11 @@ stages:
 
    **cases 自动落盘口径（2026-09-02 定）**：
    - ws_acceptance 验收完成把本次实跑 --case 标签写 log_apply_dir()/cases-<batch_id>.json
-     （batch 识别三级回落：显式 batch_id > 环境变量 CDP_BATCH_ID > log 目录唯一
-     timings 文件），ws_report 未传 --case 时自动探测该文件补全（显式传参优先，
-     与 timings 探测同源）——board pass 收据的 cases 字段由此自动落盘，杜绝空
-     cases 卡死 prepare 的 evidence-scope 推导。
+      （batch 识别两级回落：显式 batch_id > 环境变量 CDP_BATCH_ID，不再回落
+      log 目录唯一 timings 文件防手工跑残留误绑），ws_report 未传 --case 时
+      自动探测该文件补全（显式传参优先，与 timings 探测同源）——board pass
+      收据的 cases 字段由此自动落盘，杜绝空 cases 卡死 prepare 的
+      evidence-scope 推导。
    - **禁改历史收据文件**：收据一经落盘即证据，事后回填/改写属伪造证据链。
      board+pass 空 cases 由 ws_report 源头拒写（返 2）兜底，发现缺 cases 时
      只写新收据引用旧批次（如 -s 自检批 + 说明），禁止编辑旧收据补字段

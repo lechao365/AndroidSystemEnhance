@@ -168,12 +168,32 @@ class TestCdpTiming(unittest.TestCase):
         data = json.loads(self._path().read_text(encoding="utf-8"))
         self.assertEqual(data["marks"][0]["name"], "verify_sync")
 
-    def test_mark_uses_unique_timing_file(self):
-        # 目录仅一个 timings 文件且无 env → 自动识别该文件
+    def test_mark_uses_current_batch_pointer(self):
+        # 方向 2 收窄两级回落：无 --batch 无 env 时经 current-batch.json 指针
+        # 定位（start 落指针）；命名纠正——旧名"唯一 timings 文件"实为
+        # current-batch 命中，收窄后唯一 timings 不再作为回落源（见
+        # test_mark_ignores_orphan_unique_timing）
         self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
         self.assertEqual(cdp_timing.main(["mark", "--name", "verify_acceptance"]), 0)
         data = json.loads(self._path().read_text(encoding="utf-8"))
         self.assertEqual(data["marks"][0]["name"], "verify_acceptance")
+
+    def test_mark_ignores_orphan_unique_timing(self):
+        # 方向 2 收窄红灯：无 current-batch.json 且目录仅一个 timings 文件
+        # 残留（孤儿）、无 env → mark 不再自动识别该唯一文件（旧三级/四级
+        # 回落会误落；收窄后静默跳过），孤儿文件保持原样
+        orphan = self.batch
+        p = cdp_paths.log_apply_dir() / f"timings-{orphan}.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{\"batch_id\": \"" + orphan + "\", \"marks\": []}\n",
+                     encoding="utf-8")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = cdp_timing.main(["mark", "--name", "verify_sync"])
+        self.assertEqual(rc, 0)
+        self.assertIn("warn", err.getvalue())
+        data = json.loads(p.read_text(encoding="utf-8"))
+        self.assertEqual(data["marks"], [], "孤儿唯一 timings 不得被误写")
 
     def test_mark_multi_start_uses_latest_current_batch(self):
         # 多次 start 后 current-batch.json 指向最近批次，自动 mark 落到本批；

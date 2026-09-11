@@ -67,16 +67,20 @@ def _sha256(path):
 
 
 def _resolve_batch_id():
-    """batch_id 识别统一口径（方向 4）：委托 verify_common 四级回落
-    （显式参 > CDP_BATCH_ID > current-batch.json > 唯一 timings 文件）。
+    """batch_id 识别统一口径（方向 2 收窄）：委托 cdp_timing.resolve_batch_id
+    两级回落（CDP_BATCH_ID > current-batch.json）。
 
-    旧实现第三级取打点目录 mtime 最新——start 中断未归档时多文件残留会
-    绑错批次，而打包证据文件名以 batch_id 命名是证据依据；verify_common
-    多文件返 None 防误标，与 ws_acceptance/打包证据命名同源。
+    旧实现委托 verify_common.resolve_batch_id_fallback 四级（显式参 >
+    CDP_BATCH_ID > current-batch.json > 唯一 timings 文件）；收窄去掉唯一
+    timings 回落——verify 链模式 A 恒注入 CDP_BATCH_ID，回落级对其冗余，
+    手工跑（无批上下文）时打点目录唯一 timings 残留会把打包证据误绑当批
+    （与 ws_acceptance 同源收窄；多 timings 防误标语义由两级内 no-batch
+    兜底）。
     """
-    sys.path.insert(0, str(_SCRIPT_DIR.parents[1] / "lib"))
-    from verify_common import resolve_batch_id_fallback
-    return resolve_batch_id_fallback()
+    sys.path.insert(0, str(_SCRIPT_DIR.parents[1] / "skills" / "cross-device"
+                            / "lib" / "python"))
+    import cdp_timing
+    return cdp_timing.resolve_batch_id()
 
 
 def run_package(mode=0, evidence_file=None, timeout=900, aosp_ws=None,

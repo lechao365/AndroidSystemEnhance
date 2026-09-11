@@ -1490,10 +1490,10 @@ class TestBackfillZeroMarks(unittest.TestCase):
 
 
 class TestResolveRunBatchId(unittest.TestCase):
-    """main 内 batch_id 解析三级回落（显式 batch-file > CDP_BATCH_ID >
-    唯一 timings 文件）：--case 模式未解析出 batch_id 时回落识别，否则
-    _backfill_zero_marks 直接 return，verify_build 等标准段永远 missing
-    （0904 三批 missing=[verify_build] 的根因）。"""
+    """main 内 batch_id 解析两级回落（显式 batch-file > CDP_BATCH_ID，
+    方向 2 收窄：去掉唯一 timings 回落）：--case 模式未解析出 batch_id 时
+    回落识别，否则 _backfill_zero_marks 直接 return，verify_build 等标准段
+    永远 missing（0904 三批 missing=[verify_build] 的根因）。"""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -1607,7 +1607,7 @@ class TestMarkStageInProcess(unittest.TestCase):
 
 
 class TestWriteCases(unittest.TestCase):
-    """方向 1：本次实跑 case 标签落盘 cases-<batch_id>.json（三级回落识别 batch）。"""
+    """方向 1：本次实跑 case 标签落盘 cases-<batch_id>.json（两级回落识别 batch）。"""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

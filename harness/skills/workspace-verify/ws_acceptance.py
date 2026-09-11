@@ -710,7 +710,7 @@ def _write_cases(batch_id, cases_text):
     供 ws_report 未显式传 --case 时自动探测补全（与 timings 探测同源），
     杜绝 board pass 收据 cases 为空致 prepare evidence-scope 推导死锁
     （2026-09-02 BL-20260902-01 发布被迫回填 7833c640079a 的教训）。
-    batch 识别三级回落（显式 > 环境变量 > 唯一打点文件）；均不可得或
+    batch 识别两级回落（显式 > 环境变量）；均不可得或
     无实跑标签时静默跳过（不阻断，-s 无标签批/独立 CLI 属正常降级）。
     原子写：临时文件 + replace（对齐 cdp_timing 惯例，中断不留半写态）。
     """

@@ -66,6 +66,27 @@ def _load_exempt(repo: Path) -> set[str]:
             if ln.strip() and not ln.strip().startswith("#")}
 
 
+def _is_production_py(rel: str) -> bool:
+    """行为性改动判定对象：harness/lib 与 harness/skills 下的非测试 .py。
+    （方向 1，7.5 清单最后一条实质门禁——skills 加 73 行 0 测试照样绿）"""
+    return (rel.endswith(".py") and not _is_test_file(rel)
+            and (rel.startswith("harness/lib/")
+                 or rel.startswith("harness/skills/")))
+
+
+def _corresponding_test(rel: str) -> str:
+    """生产 .py → 期望对应测试文件路径（与 selfcheck._quick_test_targets
+    映射一致）；非 harness/lib|skills 返回空串（不判）。"""
+    stem = Path(rel).stem
+    if rel.startswith("harness/lib/"):
+        return f"harness/lib/tests/test_{stem}.py"
+    if rel.startswith("harness/skills/"):
+        parts = rel.split("/")
+        if len(parts) >= 3:
+            return f"harness/skills/{parts[2]}/tests/test_{stem}.py"
+    return ""
+
+
 def _git_lines(args: list[str], cwd: Path):
     """git 输出行列表；git 不可用/命令失败返回 None。"""
     try:
@@ -167,6 +188,24 @@ def scan(repo: Path, rev: str = "HEAD") -> list[str]:
                     f"{rel}: 用例数净减 {del_cases - add_cases}"
                     f"（删除 {del_cases} 新增 {add_cases}；正常重构合并用例"
                     f"须在 {_EXEMPT_FILE} 登记豁免）")
+    # 方向 1（7.5 清单最后一条实质门禁）：harness/lib 与 harness/skills 下
+    # .py 行为性改动须同批次带对应 tests/ 改动，否则判红——skills 加 73 行
+    # 0 测试照样绿的漏洞（discipline_rc 只扫测试文件本身，生产改动无测试
+    # 静默放行）。纯重构/文档注释改动走显式豁免通道（_EXEMPT_FILE 登记）。
+    changed_set = set(changed)
+    for rel in changed:
+        if rel in exempt:
+            continue
+        if not _is_production_py(rel):
+            continue
+        want = _corresponding_test(rel)
+        if not want:
+            continue
+        if not any(t == want or t.startswith(want) for t in changed_set):
+            findings.append(
+                f"{rel}: harness/lib|skills 下 .py 行为性改动须同批次带对应"
+                f" tests/ 改动（{want} 未在本批改动；纯重构/文档注释改动请"
+                f"在 {_EXEMPT_FILE} 登记豁免）")
     return findings
 
 
