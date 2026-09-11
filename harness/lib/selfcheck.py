@@ -48,7 +48,8 @@ ROOT = Path(__file__).resolve().parents[2]
 REQUIRED_RC_KEYS = ("pytest_rc", "refs_rc", "config_rc", "contract_rc",
                     "pyenv_rc", "ioctl_rc", "manifest_rc",
                     "discipline_rc", "scan_rc", "ruff_rc", "host_rc",
-                    "metrics_rc", "opencode_rc", "quotepath_rc")
+                    "metrics_rc", "opencode_rc", "quotepath_rc",
+                    "known_issues_rc")
 
 # pytest 摘要计数行：含 passed/failed/skipped 任一计数的行（形如
 # "531 passed in 27.9s"、"121 passed, 3 skipped in 6.0s"、"1 failed, ..."）
@@ -188,6 +189,9 @@ def _spawn_tools():
         "quotepath": _spawn_cmd(
             [sys.executable, str(ROOT / "harness" / "lib"
                                  / "check_quotepath.py")]),
+        "known_issues": _spawn_cmd(
+            [sys.executable, str(ROOT / "harness" / "lib"
+                                 / "check_known_issues.py")]),
     }
 
 
@@ -222,13 +226,16 @@ def _collect_tools(procs):
     dis_rc, dis_out, _, dis_dur = _collect_cmd(procs["discipline"], "discipline")
     scan_rc, scan_out, _, scan_dur = _collect_cmd(procs["scan"], "scan")
     qp_rc, qp_out, _, qp_dur = _collect_cmd(procs["quotepath"], "quotepath")
+    ki_rc, ki_out, _, ki_dur = _collect_cmd(procs["known_issues"],
+                                            "known_issues")
     tools = {"refs": (refs_rc, refs_out, refs_err),
              "cfg": (cfg_rc, cfg_out, cfg_last),
              "ctr": (ctr_rc, ctr_out, ctr_last),
              "discipline": (dis_rc, dis_out, ""),
              "scan": (scan_rc, scan_out, ""),
-             "quotepath": (qp_rc, qp_out, "")}
-    return tools, refs_dur, cfg_dur, dis_dur, scan_dur, qp_dur
+             "quotepath": (qp_rc, qp_out, ""),
+             "known_issues": (ki_rc, ki_out, "")}
+    return tools, refs_dur, cfg_dur, dis_dur, scan_dur, qp_dur, ki_dur
 
 
 def run_parallel_tools():
@@ -239,7 +246,7 @@ def run_parallel_tools():
     原接口供 TestParallelTools 与外部调用。
     """
     procs = _spawn_tools()
-    tools, _, _, _, _, _ = _collect_tools(procs)
+    tools, _, _, _, _, _, _ = _collect_tools(procs)
     return tools
 
 
@@ -549,7 +556,7 @@ def _register_flake_issue(nodeid):
             issue = cdpi.Issue(
                 issue_id=issue_id, title=f"[flake] {nodeid}",
                 kind="flake", origin="pre-existing", blocking=False,
-                status="open", task="", discovered_in=first_batch,
+                status="open", task="auto-flake", discovered_in=first_batch,
                 batch_id=batch_id or "0" * 12)
             cdpi.write_issue(issue, body)
         except Exception as e:
@@ -721,7 +728,7 @@ def _main_body(mode):
     py_rc, py_out, py_err, py_dur = timed_run(
         pytest_cmd, timeout=_PYTEST_TIMEOUT_S)
     # pytest 跑完收口治理（各进程已与 pytest 重叠，墙钟取 max 而非 sum）
-    (tools, refs_dur, cfg_dur, dis_dur, scan_dur, qp_dur) = \
+    (tools, refs_dur, cfg_dur, dis_dur, scan_dur, qp_dur, ki_dur) = \
         _collect_tools(tools_procs)
     ioctl_rc, ioctl_out, _, ioctl_dur = _collect_cmd(ioctl_proc, "ioctl")
     ruff_rc, ruff_out, _, ruff_dur = _collect_cmd(ruff_proc, "ruff")
@@ -749,6 +756,7 @@ def _main_body(mode):
     dis_rc, dis_out, _ = tools["discipline"]
     scan_rc, scan_out, _ = tools["scan"]
     qp_rc, qp_out, _ = tools["quotepath"]
+    ki_rc, ki_out, _ = tools["known_issues"]
     summary = pytest_summary(py_out)
     # 方向 1：全量红时机械判定——全新进程单独重跑失败用例，单跑绿即
     # KIR-002 抖动（自动登记 known-issues 放行本轮），单跑红判真回归阻塞，
@@ -857,6 +865,13 @@ def _main_body(mode):
     qp_last = last_stdout_line(qp_out)
     if qp_last:
         parts.append(qp_last)
+    # known_issues（CDP 2026-09-11 批次方向 2）：baseline-status.yaml 引用
+    # 的 KI 编号须有对应记录文件（promote 曾删文件致悬空引用断裂，KIR-006
+    # registry 不清零），悬空即判红，known_issues_rc 透出交 ws_report 判红
+    parts.append(f"known_issues_rc={ki_rc}")
+    ki_last = last_stdout_line(ki_out)
+    if ki_last:
+        parts.append(ki_last)
     # ruff 静态检查（P0-B）：ruff_rc 透出，非零交 ws_report 全 *_rc 判红拒写
     parts.append(f"ruff_rc={ruff_rc}")
     ruff_last = last_stdout_line(ruff_out)
@@ -884,8 +899,8 @@ def _main_body(mode):
                  f"cfg={cfg_dur:.1f} pyenv={env_dur:.1f} "
                  f"ioctl={ioctl_dur:.1f} manifest={manifest_dur:.1f} "
                  f"discipline={dis_dur:.1f} scan={scan_dur:.1f} "
-                 f"quotepath={qp_dur:.1f} "
-                 f"ruff={ruff_dur:.1f} host={host_dur:.1f} "
+                  f"quotepath={qp_dur:.1f} known_issues={ki_dur:.1f} "
+                  f"ruff={ruff_dur:.1f} host={host_dur:.1f} "
                  f"opencode={opencode_dur:.1f} "
                  f"metrics={met_dur:.1f}")
     print(" | ".join(parts))

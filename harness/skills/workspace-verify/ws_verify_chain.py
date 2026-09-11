@@ -186,6 +186,76 @@ def _aosp_root():
     return str(Path.home() / "workspace" / "aosp")
 
 
+def _build_validate(targets, lunch):
+    """build 拼命令 BLD-004/005 静态合规校验，违规返回错误串（None = 合规）。
+
+    BLD-004：lunch 前必须先 source build/envsetup.sh；lunch 后
+    ANDROID_PRODUCT_OUT 必须非空（实际执行由 dry-run 命令 test -n 验证）。
+    BLD-005：禁止独立 make 不带目标（m 须带 targets）；bootimage 必须在
+    systemimage/vendorimage 之前或同时编译（verify-cases modules 段目标
+    含 bootimage 时校验顺序）。
+    """
+    if not targets:
+        return "build 步缺编译目标（verify-cases.yaml modules 段 target 为空）"
+    if not lunch:
+        return f"build 步缺 lunch 目标（{_LUNCH_TARGETS} 未覆盖 product）"
+    if "bootimage" in targets:
+        for later in ("systemimage", "vendorimage"):
+            if later in targets and targets.index(later) < targets.index(
+                    "bootimage"):
+                return ("BLD-005: bootimage 须在 systemimage/vendorimage "
+                        "之前或同时编译（verify-cases.yaml targets 顺序）")
+    return None
+
+
+def run_build_dry_run(product):
+    """build 步秒级干跑（CDP 2026-09-11 批次方向 1）：只 source envsetup +
+    lunch 验证环境可用，不跑真 m 编译——build 步（8107948 新增）一次都没
+    执行过，首跑一小时赌不起，先干跑证明能跑通。
+
+    校验链：
+      1. _aosp_root 存在（路径解析成功 + 目录存在）；
+      2. _load_build_targets 非空（verify-cases.yaml modules 段有编译目标）；
+      3. BLD-004/005 静态合规（source 在 lunch 前 / m 带目标 / bootimage
+         顺序，_build_validate）；
+      4. 真执行 source build/envsetup.sh && lunch <lunch> && test -n
+         "$ANDROID_PRODUCT_OUT"（秒级；BLD-004 lunch 后 product out 非空）。
+    返回 rc：0 全通过 / 1 执行失败 / 2 前置校验失败。
+    """
+    root = _aosp_root()
+    if not root or not Path(root).is_dir():
+        print(f"error: build dry-run: _aosp_root 不存在或不可访问: {root}",
+              file=sys.stderr)
+        return 2
+    targets = _load_build_targets(
+        str(_SCRIPT_DIR.parents[1] / "config" / "verify-cases.yaml"))
+    lunch = _LUNCH_TARGETS.get(product, f"{product}-userdebug")
+    bad = _build_validate(targets, lunch)
+    if bad:
+        print(f"error: build dry-run: {bad}", file=sys.stderr)
+        return 2
+    # BLD-004 实际验证：lunch 后 ANDROID_PRODUCT_OUT 非空即环境可用
+    cmd = (f"source build/envsetup.sh && lunch {lunch} && "
+           r'test -n "$ANDROID_PRODUCT_OUT"')
+    print(f"build dry-run: {root} targets={len(targets)} "
+          f"lunch={lunch}（秒级验证，不跑真 m 编译）")
+    try:
+        r = subprocess.run(["bash", "-c", cmd], cwd=root,
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=300)
+    except subprocess.TimeoutExpired:
+        print("error: build dry-run: source envsetup/lunch 超时（300s），"
+              "环境疑似损坏", file=sys.stderr)
+        return 1
+    if r.returncode != 0:
+        print(f"error: build dry-run: source envsetup+lunch 失败 rc={r.returncode}"
+              f"\n{r.stderr[-2000:]}", file=sys.stderr)
+        return 1
+    print(f"OK: build 步可跑通（envsetup+lunch 成功，"
+          f"ANDROID_PRODUCT_OUT 非空，{len(targets)} 个编译目标就绪）")
+    return 0
+
+
 def _build_argv(name, product, out, chain_args):
     """步骤名 → 子脚本 argv（各子脚本参数均为真实支持的参数）。"""
     if name == "sync":
@@ -202,16 +272,15 @@ def _build_argv(name, product, out, chain_args):
         lunch = _LUNCH_TARGETS.get(product, f"{product}-userdebug")
         targets = _load_build_targets(
             str(_SCRIPT_DIR.parents[1] / "config" / "verify-cases.yaml"))
-        if not targets:
-            raise ValueError(
-                "build 步缺编译目标（verify-cases.yaml modules 段 target 为空）")
+        bad = _build_validate(targets, lunch)
+        if bad:
+            raise ValueError(bad)
         cmd = (f"source build/envsetup.sh && lunch {lunch} && "
                f"export USE_CCACHE=1 CCACHE_EXEC=$(which ccache) "
                f"CCACHE_DIR=out/ccache && "
                f"m {' '.join(targets)} -j$(nproc)")
         return ["bash", "-c", cmd]
-    if name == "connect":
-        # 连接 fail-fast：设备不可达时不浪费推送/单测轮次
+    if name == "connect":        # 连接 fail-fast：设备不可达时不浪费推送/单测轮次
         # （push/acceptance 内部仍各自 ensure，双保险不冲突）
         return [sys.executable, str(_SCRIPT_DIR / "ws_adb_connect.py"), "ensure"]
     if name == "package":
@@ -707,11 +776,18 @@ def main(argv=None):
                          "（AI 编辑纯逻辑后的廉价反馈，不占真机）")
     ap.add_argument("--coverage", action="store_true",
                     help="单测后采集覆盖率（ws_coverage；只记录不门禁）")
+    ap.add_argument("--build-dry-run", action="store_true",
+                    help="build 步秒级干跑：source envsetup+lunch 验证环境可用、"
+                         "_load_build_targets 非空、_aosp_root 存在、BLD-004/005"
+                         " 命令合规（不跑真 m 编译——build 步 8107948 新增以来"
+                         " 一次未执行，首跑一小时赌不起，先干跑证明能跑通）")
     args = ap.parse_args(argv)
     if args.quick:
         rc, result = run_quick()
         print(json.dumps(result, ensure_ascii=False))
         return rc
+    if args.build_dry_run:
+        return run_build_dry_run(args.product)
     rc, result = run_chain(args.product, args.out, args.result_file,
                            batch_file=args.batch_file, case=args.case,
                            wait_ready=args.wait_ready,

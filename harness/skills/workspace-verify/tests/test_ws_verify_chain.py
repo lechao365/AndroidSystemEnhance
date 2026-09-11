@@ -724,5 +724,79 @@ class TestQuickMode(unittest.TestCase):
             [i for i, n in enumerate(names) if n == "ws_upload_tests.py"][0])
 
 
+class TestBuildDryRun(unittest.TestCase):
+    """CDP 2026-09-11 方向 1：build 步秒级干跑（source envsetup+lunch 验证
+    环境，不跑真 m 编译——build 步 8107948 新增以来一次未执行，首跑一小时
+    赌不起）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.aosp = Path(self._tmp.name) / "aosp"
+        self.aosp.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_dry_run_success(self):
+        # 环境可用：targets 非空 + aosp 存在 + source/lunch 执行成功 → rc 0
+        run_mock = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(wc, "_aosp_root", return_value=str(self.aosp)), \
+                mock.patch.object(wc, "_load_build_targets",
+                                  return_value=["a", "b"]), \
+                mock.patch.object(wc.subprocess, "run", return_value=run_mock):
+            rc = wc.run_build_dry_run("rpi5")
+            call = wc.subprocess.run.call_args
+        self.assertEqual(rc, 0)
+        self.assertEqual(call.args[0][0], "bash")
+        self.assertIn("source build/envsetup.sh", call.args[0][2])
+        self.assertIn("lunch aosp_rpi5-bp1a-userdebug", call.args[0][2])
+        self.assertIn("ANDROID_PRODUCT_OUT", call.args[0][2])
+        self.assertNotIn("m ", call.args[0][2], "dry-run 不跑真编译")
+
+    def test_dry_run_missing_targets_returns_2(self):
+        # 前置校验红灯：verify-cases 无编译目标 → 返 2（拒干跑）
+        with mock.patch.object(wc, "_aosp_root", return_value=str(self.aosp)), \
+                mock.patch.object(wc, "_load_build_targets", return_value=[]):
+            rc = wc.run_build_dry_run("rpi5")
+        self.assertEqual(rc, 2)
+
+    def test_dry_run_missing_aosp_returns_2(self):
+        # 前置校验红灯：_aosp_root 目录不存在 → 返 2
+        with mock.patch.object(wc, "_aosp_root",
+                               return_value=str(self.aosp / "nope")):
+            rc = wc.run_build_dry_run("rpi5")
+        self.assertEqual(rc, 2)
+
+    def test_dry_run_envsetup_failure_returns_1(self):
+        # 执行红灯：source envsetup/lunch 失败 rc=1 → 返 1（环境不可用）
+        with mock.patch.object(wc, "_aosp_root", return_value=str(self.aosp)), \
+                mock.patch.object(wc, "_load_build_targets",
+                                  return_value=["a"]), \
+                mock.patch.object(wc.subprocess, "run",
+                                  return_value=mock.Mock(returncode=1,
+                                                         stdout="",
+                                                         stderr="boom")):
+            rc = wc.run_build_dry_run("rpi5")
+        self.assertEqual(rc, 1)
+
+    def test_build_validate_rules(self):
+        # BLD-004/005 静态校验：空 targets 拒；bootimage 在 systemimage 后拒
+        self.assertTrue(wc._build_validate([], "x"))
+        self.assertTrue(wc._build_validate(["a", "b"], ""))
+        self.assertIsNone(wc._build_validate(
+            ["bootimage", "systemimage", "vendorimage"], "l"),
+            "bootimage 先于 systemimage 合规")
+        bad = wc._build_validate(["systemimage", "bootimage"], "l")
+        self.assertTrue(bad and "BLD-005" in bad, "bootimage 后于 systemimage 违规")
+
+    def test_main_build_dry_run_flag(self):
+        # CLI --build-dry-run 走干跑并返回其 rc（不经整链）
+        with mock.patch.object(wc, "run_build_dry_run", return_value=0) as m, \
+                mock.patch.object(wc, "_aosp_root", return_value=str(self.aosp)):
+            rc = wc.main(["--build-dry-run"])
+        self.assertEqual(rc, 0)
+        m.assert_called_once_with("rpi5")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,8 @@ _FAKE_TOOLS = {
     "scan": (0, "OK: 热路径检查器无全树 rglob/os.walk\n", ""),
     "quotepath": (0, "OK: git 路径输出点均已带 -c core.quotepath=false，"
                      ".sh 均以 100755 入库\n", ""),
+    "known_issues": (0, "OK: baseline-status.yaml 引用的 KI 编号均有对应"
+                        "记录文件\n", ""),
 }
 
 
@@ -68,7 +70,7 @@ def _patched_parallel():
                            return_value={"refs": "p", "cfg": "p"}), \
             mock.patch.object(selfcheck, "_collect_tools",
                               return_value=(_fake_tools(), 1.0, 2.0, 0.1, 0.1,
-                                            0.1)), \
+                                            0.1, 0.1)), \
             mock.patch.object(selfcheck, "_spawn_cmd",
                               return_value="p"), \
             mock.patch.object(selfcheck, "_collect_cmd",
@@ -114,7 +116,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1)):
             with redirect_stdout(buf):
                 self.assertEqual(selfcheck.main(), 0)
         out = buf.getvalue()
@@ -202,7 +204,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1)):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -223,7 +225,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1)):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -336,6 +338,7 @@ class TestParallelTools(unittest.TestCase):
             ("OK: 测试改动无新增 xfail/skip/sleep 重试\n", ""),
             ("OK: 热路径检查器无全树 rglob/os.walk\n", ""),
             ("OK: git 路径输出点均已带 -c core.quotepath=false\n", ""),
+            ("OK: baseline-status.yaml 引用的 KI 编号均有对应记录文件\n", ""),
         ]
         with mock.patch.object(selfcheck.subprocess, "Popen",
                                return_value=proc):
@@ -357,24 +360,30 @@ class TestParallelTools(unittest.TestCase):
         scan_res = (0, "OK: 热路径无全树 rglob\n", "", 0.3)
         qp_res = (0, "OK: git 路径输出点均已带 -c core.quotepath=false\n",
                   "", 0.4)
+        ki_res = (0, "OK: baseline-status.yaml 引用的 KI 编号均有对应记录文件\n",
+                  "", 0.6)
         with mock.patch.object(selfcheck, "_collect_cmd",
                                side_effect=[refs_res, cfg_res,
-                                            dis_res, scan_res, qp_res]):
-            (tools, refs_dur, cfg_dur, dis_dur, scan_dur, qp_dur) = \
+                                            dis_res, scan_res, qp_res,
+                                            ki_res]):
+            (tools, refs_dur, cfg_dur, dis_dur, scan_dur, qp_dur, ki_dur) = \
                 selfcheck._collect_tools({"refs": "p", "cfg": "p",
                                           "discipline": "p", "scan": "p",
-                                          "quotepath": "p"})
+                                          "quotepath": "p",
+                                          "known_issues": "p"})
         self.assertEqual(refs_dur, 0.5)
         self.assertEqual(cfg_dur, 2.5)
         self.assertEqual(dis_dur, 0.2)
         self.assertEqual(scan_dur, 0.3)
         self.assertEqual(qp_dur, 0.4)
+        self.assertEqual(ki_dur, 0.6)
         self.assertEqual(tools["refs"][0], 1)
         self.assertEqual(tools["cfg"][0], 1)
         self.assertEqual(tools["ctr"][0], 0)
         self.assertEqual(tools["discipline"][0], 0)
         self.assertEqual(tools["scan"][0], 0)
         self.assertEqual(tools["quotepath"][0], 0)
+        self.assertEqual(tools["known_issues"][0], 0)
 
     def test_collect_cmd_timeout_kills_124(self):
         # 方向 1：_collect_cmd 超时 → kill + rc=124（约定超时标记，不无限
@@ -972,6 +981,28 @@ class TestRerunTwoPass(unittest.TestCase):
         self.assertEqual(len(notes), 2)
         self.assertEqual(ki001, [])
         self.assertEqual(reg.call_count, 2)
+
+    def test_flake_issue_task_nonempty(self):
+        # CDP 2026-09-11：flake 自动登记 task 用非空占位（auto-flake）——
+        # 空 task 写 index 时双空格，read_index 的 split() 吞空串致 len<5
+        # 跳过该行，validate_issue 判"index 缺文件条目"，test_cdp_issue 全仓
+        # 校验失败又触发 flake 登记→再失败，死循环卡死 selfcheck
+        written = {}
+
+        class FakeIssue:
+            def __init__(self, **kw):
+                written.update(kw)
+
+        fake_cdpi = mock.Mock()
+        fake_cdpi.Issue = FakeIssue
+        with mock.patch.object(selfcheck, "_load_cdp_issue",
+                               return_value=fake_cdpi), \
+                mock.patch.object(selfcheck, "_current_batch_id",
+                                  return_value="aaa111bbb222"):
+            selfcheck._register_flake_issue("pkg::TestX::test_a")
+        self.assertEqual(written["task"], "auto-flake")
+        self.assertEqual(written["kind"], "flake")
+        fake_cdpi.write_issue.assert_called_once()
 
 
 class TestGitChangedFilesTimeout(unittest.TestCase):
