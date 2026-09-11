@@ -33,7 +33,10 @@ jobs:
 
       - name: 自检
         env:
-          CDP_PROJECT_ROOT: $RUNNER_TEMP/cdp-root
+          # step 级 env 用 ${{ runner.temp }} 表达式（step 内 runner 上下文
+          # 可用）：Actions env 不做 shell 展开，$RUNNER_TEMP 是字面量会在
+          # 检出树建同名目录污染检出树（2026-09-11 修正）
+          CDP_PROJECT_ROOT: ${{ runner.temp }}/cdp-root
         run: |
           mkdir -p "$CDP_PROJECT_ROOT"
           out="$(python3 harness/lib/selfcheck.py)"

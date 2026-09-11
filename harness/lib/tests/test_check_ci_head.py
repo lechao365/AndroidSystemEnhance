@@ -97,9 +97,17 @@ class TestCheckCi(unittest.TestCase):
             self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 0)
 
     def test_slug_inferred_from_ssh_remote(self):
-        r = cci._repo_slug_from_remote(".")  # 真实 remote 推断
-        self.assertIsInstance(r, str)
-        self.assertIn("/", r)
+        # 从 remote.origin.url 推断 owner/repo：临时仓显式设 origin（ssh 格式），
+        # 不依赖真实仓（净克隆/CI 中 origin 各异的假失败已剔除）
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "-C", d, "init", "-q"], check=True)
+            subprocess.run(["git", "-C", d, "remote", "add", "origin",
+                            "git@github.com:lechao365/AndroidSystemEnhance.git"],
+                           check=True)
+            self.assertEqual(
+                cci._repo_slug_from_remote(d), "lechao365/AndroidSystemEnhance")
 
     def test_slug_regex_variants(self):
         pat = r"(?:github\.com[:/])([^/\s]+/[^/\s]+?)(?:\.git)?$"
