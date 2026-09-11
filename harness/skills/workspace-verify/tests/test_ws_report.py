@@ -22,10 +22,24 @@ VALID_S = """-s base:1a2b3c4d5e6f
 """
 
 VALID_SV = """-sv base:1a2b3c4d5e6f
-意图: 上板验证
-验收: svc:lechao_lcview boot
-方向: 验证 1 处
+ 意图: 上板验证
+ 验收: svc:lechao_lcview boot
+ 方向: 验证 1 处
 """
+
+# 双方向编号批次（CDP-DOD-003 逐方向自报门禁用：方向数可机器解析）
+D2_S = """-s base:1a2b3c4d5e6f
+意图: 双方向自报门禁测试批次，用于 CDP-DOD-003 判红用例无实际编辑意图仅验证收据逐方向自报门禁。
+验收: 无
+方向: 1 方向一改动（调用方 selfcheck，验证单测 A）。2 方向二改动（调用方 ws_report，验证单测 B）。
+"""
+
+
+def _selfcheck_ok():
+    return ("pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 "
+            "ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 "
+            "ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 | "
+            "120 passed, 2 skipped in 5.0s")
 
 
 class TestWsReport(unittest.TestCase):
@@ -121,6 +135,57 @@ class TestWsReport(unittest.TestCase):
         self.assertIn("batch_id: ", content)
         self.assertIn("## body", content)
         self.assertIn("adb 失败", content)
+
+    def test_receipt_requires_per_direction_report(self):
+        # 方向 3（CDP-DOD-003 判红）：批次方向数 2、正文无逐方向自报 →
+        # 返 2 拒写（长期只有少数收据写了自报，根因 -s 模板把 --body 直接
+        # 设成批次原文；门禁堵住源头）
+        batch = self._write(D2_S, ".cdp")
+        body = self._write("## 现场\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", _selfcheck_ok()])
+        self.assertEqual(rc, 2)
+        self.assertIn("逐方向自报", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_receipt_partial_direction_report_rejected(self):
+        # 方向 3：方向数 2 但正文仅 1 条自报 → 返 2（部分自报不算完成）
+        batch = self._write(D2_S, ".cdp")
+        body = self._write(
+            "## 逐方向自报\n- 方向1: 改动 ws_x（调用方 selfcheck；验证单测 A）\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", _selfcheck_ok()])
+        self.assertEqual(rc, 2)
+        self.assertIn("逐方向自报", err.getvalue())
+        self.assertIn("仅 1 条", err.getvalue())
+
+    def test_receipt_full_direction_report_ok(self):
+        # 方向 3：方向数 2、正文逐方向自报齐全 → rc 0 收据落盘
+        batch = self._write(D2_S, ".cdp")
+        body = self._write(
+            "## 逐方向自报\n"
+            "- 方向1: 改动 ws_x（调用方 selfcheck；验证单测 A）\n"
+            "- 方向2: 改动 ws_y（调用方 ws_report；验证单测 B）\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", _selfcheck_ok()])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        self.assertEqual(len(details), 1)
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("方向1", content)
+        self.assertIn("方向2", content)
 
     _RC = ("pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 "
            "ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 "
@@ -2166,6 +2231,33 @@ class TestPhaseSummary(unittest.TestCase):
         segs = [{"name": "edit", "elapsed_s": 1.23456}]
         self.assertEqual(self._ph(segs)["edit"], 1.235)
 
+
+
+class TestDirectionParsing(unittest.TestCase):
+    """方向 3 辅助解析纯函数：方向数（1..N 连续）与正文自报条数。"""
+
+    def test_count_consecutive_from_one(self):
+        self.assertEqual(ws_report._direction_count(
+            "1 方向一。2 方向二。3 方向三"), 3)
+        self.assertEqual(ws_report._direction_count("1 单方向"), 1)
+
+    def test_count_stops_at_first_gap(self):
+        # 从 1 起连续即停：内容内偶发的"。N "不干扰（非前缀延续）
+        self.assertEqual(ws_report._direction_count(
+            "1 a。3 无关编号"), 1)
+        self.assertEqual(ws_report._direction_count(
+            "2 不从 1 起"), 0)
+
+    def test_count_ignores_bare_text(self):
+        self.assertEqual(ws_report._direction_count("补充说明无编号"), 0)
+        self.assertEqual(ws_report._direction_count(""), 0)
+
+    def test_report_count_counts_direction_prefix_lines(self):
+        body = ("## 逐方向自报\n"
+                "- 方向1: 改动 A\n"
+                "- 方向2: 改动 B\n")
+        self.assertEqual(ws_report._direction_report_count(body), 2)
+        self.assertEqual(ws_report._direction_report_count("## 现场\n"), 0)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,8 @@
 # 进程隔离：每步子进程 start_new_session 独立进程组；单步超时 killpg
 #   有界 teardown（TERM→宽限 10s→KILL），被杀步骤 rc=None + canceled=true。
 # 打点：链起止自发 verify_start/verify_end（batch 归属明确时）；各子脚本
-#   自发 mark（verify_sync/push/unit_test/acceptance 口径不变）；
+#   自发 mark（verify_sync/push/unit_test/acceptance 口径不变）；build 链步
+#   由编排器锁内直跑 AOSP 编译并自发 verify_build（实测 dur_s，B1）；
 #   connect/report 不打点（连接量不到、收据即终点）。
 # 子步骤产物共享 run_id：编排器把 run_id 注入 CDP_RUN_ID 环境变量，push/
 #   unit_test/acceptance 产物同批同 run_id（ws_report PASS 同批核验依赖）。
@@ -60,13 +61,15 @@ import ws_lock  # noqa: E402
 # ws_package.py 打包（绕 NoNewPrivileges，sudo_n 真实探测），落盘
 # package-<batch_id>.json 供 report 内嵌——打包是证据补充（非上板门禁），
 # 失败不阻断链、不置 overall=fail，只记步。
-_CHAIN_STEPS = ("sync", "connect", "push", "unit_test", "acceptance",
+_CHAIN_STEPS = ("sync", "build", "connect", "push", "unit_test", "acceptance",
                 "package", "report")
 
 # 单步超时（秒）：覆盖各子脚本内部 timeout 之上的一层编排护栏；
 # 超时走 killpg 有界 teardown，防止子脚本挂死拖垮整链
 _STEP_TIMEOUTS = {
     "sync": 900,        # 同步含增量 rsync，历史上 <300s
+    "build": 3600,      # AOSP 增量编译护栏（BLD-005 禁裸 make；INC-001 禁 clean；
+                        # 长编译/重试不误伤，上限放宽到 1 小时防整链悬挂）
     "connect": 420,     # ensure 含 mDNS 发现 + 静态 fallback + rescue 重试
     "push": 1800,       # 推送含 reboot_and_wait（boot_timeout 240s）
     "unit_test": 1500,  # 全量 gtest 上板执行
@@ -116,14 +119,16 @@ def _ensure_timings_started(batch_id):
     return path
 
 
-def _run_step(argv, timeout):
+def _run_step(argv, timeout, cwd=None):
     """独立进程组执行一步；返回 (rc, canceled)。
 
     start_new_session 使子进程自成进程组：超时可 killpg 整组回收
     （子脚本再 spawn 的 adb/make 孙进程一并终止，不留孤儿占用设备）。
+    cwd：build 步编译须在 AOSP 工作区根执行（envsetup 相对路径依赖），
+    其余步默认进程继承调用方 cwd（None）。
     stdout/stderr 不 capture：直通终端，rc 真实。
     """
-    proc = subprocess.Popen(argv, start_new_session=True)
+    proc = subprocess.Popen(argv, start_new_session=True, cwd=cwd)
     try:
         return proc.wait(timeout=timeout), False
     except subprocess.TimeoutExpired:
@@ -143,11 +148,68 @@ def _run_step(argv, timeout):
         return None, True
 
 
+# product → AOSP lunch 目标映射（BLD-004：lunch 前必须先 source envsetup）
+_LUNCH_TARGETS = {"rpi5": "aosp_rpi5-bp1a-userdebug"}
+
+
+def _load_build_targets(cases_path):
+    """verify-cases.yaml modules 段编译目标并集（targets + test_targets 去重保序）。
+
+    build 链步编译目标与部署/测试映射同源（verify-cases.yaml 单一事实源），
+    不再由执行者手敲目标列表；文件缺失/解析失败返空（调用方拒跑 build）。
+    """
+    try:
+        import yaml
+        data = yaml.safe_load(Path(cases_path).read_text(encoding="utf-8")) or {}
+    except OSError:
+        return []
+    mods = data.get("modules") or {}
+    seen, out = set(), []
+    for mod in mods.values():
+        for t in (mod.get("targets") or []) + (mod.get("test_targets") or []):
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+    return out
+
+
+def _aosp_root():
+    """AOSP 工作区根：AOSP_WS env 优先（paths.conf 单一事实源），缺省
+    ~/workspace/aosp（ws_push 同口径）；build 步 cwd 使用。"""
+    try:
+        from paths import env_path
+        aosp = env_path("AOSP_WS")
+        if aosp:
+            return str(aosp)
+    except Exception:
+        pass
+    return str(Path.home() / "workspace" / "aosp")
+
+
 def _build_argv(name, product, out, chain_args):
     """步骤名 → 子脚本 argv（各子脚本参数均为真实支持的参数）。"""
     if name == "sync":
         # code→workspace 同步与 AOSP out 无关，仅 --auto
         return [sys.executable, str(_SYNC), "--auto"]
+    if name == "build":
+        # 方向 1：编译链步化（勿用包装器）——不另包 ws_build 脚本，直接
+        # bash -c 拼 AOSP 增量编译命令在锁内跑并自发实测 dur_s（verify_build
+        # 由链步 mark，消灭 apply 手打 verify_build 的 B1 相悖行为）。
+        # BLD-004/005/009/010 约束内联：source build/envsetup.sh → lunch →
+        # CCACHE_DIR=out/ccache → m targets（verify-cases modules 段并集）；
+        # INC-001 禁 make clean/clobber（m 即增量，不触发）。cwd 由编排器
+        # 在 _run_chain_locked 注入 AOSP 根（见 build 分支）。
+        lunch = _LUNCH_TARGETS.get(product, f"{product}-userdebug")
+        targets = _load_build_targets(
+            str(_SCRIPT_DIR.parents[1] / "config" / "verify-cases.yaml"))
+        if not targets:
+            raise ValueError(
+                "build 步缺编译目标（verify-cases.yaml modules 段 target 为空）")
+        cmd = (f"source build/envsetup.sh && lunch {lunch} && "
+               f"export USE_CCACHE=1 CCACHE_EXEC=$(which ccache) "
+               f"CCACHE_DIR=out/ccache && "
+               f"m {' '.join(targets)} -j$(nproc)")
+        return ["bash", "-c", cmd]
     if name == "connect":
         # 连接 fail-fast：设备不可达时不浪费推送/单测轮次
         # （push/acceptance 内部仍各自 ensure，双保险不冲突）
@@ -483,9 +545,9 @@ def _chain_mark(name, batch_id, dur_s=None, zero=False):
     """verify 链段自发 mark（B1：脚本自发替代 AI 手打）。
 
     覆盖 verify_start/verify_end 与方向 1 新增的每步 verify_<step>：链编排器
-    在每步（sync/push/unit_test/acceptance）完成时以实测 dur_s 发 mark，跳过
-    的步以 zero 发——子脚本自发 mark 之外的双保险，杜绝"编译真跑数千秒却因
-    无 verify_build mark 被 ws_acceptance 补零"的伪造数据。仅当批次归属明确
+    在每步（build/sync/push/unit_test/acceptance）完成时以实测 dur_s 发 mark，
+    跳过的步以 zero 发——子脚本自发 mark 之外的双保险，杜绝"编译真跑数千秒
+    却无 verify_build mark 被 ws_acceptance 补零"的伪造数据。仅当批次归属明确
     （batch_id 解析成功）时打点，防把链段打到 current-batch.json 回落的无关
     批次上；失败静默不阻断编排。
     """
@@ -500,9 +562,11 @@ def _chain_mark(name, batch_id, dur_s=None, zero=False):
 
 # 链步 → 标准 verify_<step> 段名映射（方向 1）：仅映射 cdp_timing 常量表
 # 内已有的 verify_* 段；connect/package/report 无对应标准段不打点（连接量
-# 不到/打包只记录不门禁/收据即终点，既有口径）。verify_build 无链步——编译
-# 由执行者 mark 真实耗时，链编排器不补零（补零即伪造）。
+# 不到/打包只记录不门禁/收据即终点，既有口径）。verify_build 现为 build
+# 链步自发（真实 dur_s）——编译在锁内跑完由链 mark，不再执行者手打，也不
+# 补零（补零即伪造）。
 _VERIFY_STEP_SEGMENTS = {
+    "build": "verify_build",
     "sync": "verify_sync",
     "push": "verify_push",
     "unit_test": "verify_unit_test",
@@ -511,7 +575,7 @@ _VERIFY_STEP_SEGMENTS = {
 
 
 def _mark_step(name, batch_id, dur_s=None, zero=False):
-    """链步完成/跳过 → verify_<step> 段 mark（仅标准四段）。"""
+    """链步完成/跳过 → verify_<step> 段 mark（仅标准五段，含 build）。"""
     seg = _VERIFY_STEP_SEGMENTS.get(name)
     if seg:
         _chain_mark(seg, batch_id, dur_s=dur_s, zero=zero)
@@ -567,10 +631,13 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
             chain_args["selfcheck"] = _join_selfcheck_preflight(
                 selfcheck_thread, selfcheck_result)
             argv = _build_report_argv(chain_args, derive)
+            step_cwd = None
         else:
             argv = _build_argv(name, product, out, chain_args)
+            # 方向 1：build 步须在 AOSP 工作区根执行（envsetup 相对路径依赖）
+            step_cwd = _aosp_root() if name == "build" else None
         t0m, t0 = time.monotonic(), time.time()
-        rc, canceled = _run_step(argv, timeout_map[name])
+        rc, canceled = _run_step(argv, timeout_map[name], cwd=step_cwd)
         steps.append({"name": name, "rc": rc, "start": t0,
                       "end": time.time(),
                       "dur_s": round(time.monotonic() - t0m, 3),

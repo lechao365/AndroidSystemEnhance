@@ -730,13 +730,13 @@ def _write_cases(batch_id, cases_text):
         print(f"warn: cases 落盘失败（不阻断）: {e}", file=sys.stderr)
 
 
-# 标准五段中的前四段（sync/build/push/unit_test）：跳过时补零 mark 占位，
+# 标准五段中的前四段（build/sync/push/unit_test）：跳过时补零 mark 占位，
 # 保证收据 timings 段完整可归因（缺段 vs 0 耗时语义不同：缺段=去向不明）
 # 真跳过的步才补零（方向 1 修正）：verify_sync/verify_push/verify_unit_test
 # 三个链步在链编排器/子脚本自发 mark 缺失时（独立 CLI 场景）确为"未执行"
-# 补零合理；verify_build 无链步且编译是否真跑由执行者 mark 决定——编译
-# 真跑数千秒却补零是伪造数据，从补零集移除（缺失时收据 timings missing
-# 如实暴露，emit 一眼可见而非假 0）。
+# 补零合理；verify_build 现由链内 build 步自发实测 mark（方向 1 编译链步化），
+# 独立 CLI 场景缺失时收据 timings missing 如实暴露（emit 一眼可见而非假 0），
+# 从补零集移除——编译真跑数千秒却补零是伪造数据。
 _STANDARD_ZERO_SEGMENTS = ("verify_sync", "verify_push",
                            "verify_unit_test")
 

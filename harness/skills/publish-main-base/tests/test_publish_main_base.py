@@ -1,5 +1,6 @@
 import os
 import pytest
+import re
 import shutil
 import subprocess
 import sys
@@ -997,6 +998,37 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertIn("refs/tags/verified/BL-TEST-01",
                       self._git("ls-remote", "origin",
                                 "refs/tags/verified/BL-TEST-01").stdout)
+
+
+class TestPublishStaticOrder(unittest.TestCase):
+    """方向 2：静态断言 check-approval 排建 verified tag 前（读 sh 比行号）。
+
+    审批独立校验前移（c21a13cac2a5）此前无用例锁定顺序——整段调用
+    publish_main_base.sh 的集成测试已删除（依赖 bash 全环境 + promote 全链
+    路，昂贵脆弱，无法在 CI 快速锁定时序）。改为读脚本文本比较行号：纯
+    文件系统检查，不执行 bash、不依赖 git 解释器。
+    """
+
+    SCRIPT = REAL_SKILL_DIR / "publish_main_base.sh"
+
+    def _line_of(self, pattern):
+        for i, line in enumerate(self.SCRIPT.read_text(encoding="utf-8").splitlines()):
+            if re.search(pattern, line):
+                return i + 1
+        self.fail(f"脚本中未找到匹配 {pattern!r} 的行")
+
+    def test_check_approval_static_before_tag(self):
+        check_approval = self._line_of(r"baseline_register\.py check-approval")
+        tag = self._line_of(r'git tag -a "verified/')
+        self.assertLess(
+            check_approval, tag,
+            "check-approval 必须排在建 verified tag 之前（缺 token 须先 fail-fast 拒 tag）")
+
+    def test_tag_guarded_by_existence_check_before_create(self):
+        # tag 复用防线：同名 tag 存在检查先于打 tag（重复 promote 拒 3）
+        guard = self._line_of(r'rev-parse -q --verify "refs/tags/verified/\$BID"')
+        tag = self._line_of(r'git tag -a "verified/')
+        self.assertLess(guard, tag, "tag 存在检查必须排在建 tag 之前")
 
 
 if __name__ == "__main__":

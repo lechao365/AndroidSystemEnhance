@@ -121,9 +121,11 @@ stages:
      INC-006 Image+dtbs+overlays 同源；INC-009 android_rpi5_defconfig；INC-007 VINTF）
    - 打包：mk_rpi5_full_image.sh -mode 2|3|4（BLD-007 sudo 打包显式传
      TARGET_PRODUCT+ANDROID_PRODUCT_OUT；BLD-008 选对 mode）
-   - 全程：INC-001 禁 make clean/clobber；BLD-009 CCACHE_DIR=out/ccache
-   编译段打点（verify_build）：编译完成由执行者触发
-   （cdp_timing.py mark --name verify_build，失败不阻断）
+    - 全程：INC-001 禁 make clean/clobber；BLD-009 CCACHE_DIR=out/ccache
+    编译段打点（verify_build）：-sv 链式模式由 ws_verify_chain build 链步
+    锁内直跑并自发实测 mark（方向 1 编译链步化，勿再手打 verify_build）；
+    独立 CLI 模式编译仍由执行者完成时触发
+    （cdp_timing.py mark --name verify_build，失败不阻断）
 4. adb 推送：python3 harness/skills/workspace-verify/ws_push.py
    [--modules <模块名...>]（默认推送 verify-cases.yaml modules 段全部
    push 映射，映射即执行的唯一事实源，取代手敲 adb push；本步中止则
