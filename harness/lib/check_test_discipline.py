@@ -38,6 +38,14 @@ _BANNED = [
                 r"|asyncio\.sleep\s*\("), "sleep"),
 ]
 
+# 测试用例定义（def test_*）识别：用例数净减判红的计数口径
+_CASE_RE = re.compile(r"def\s+test_\w+\s*\(")
+
+# 测试删除/用例净减豁免清单路径（相对 repo）：显式豁免通道——正常重构
+# 删测试或合并用例须在该清单登记（每行一个相对路径，# 注释），防守卫卡死
+# 合法重构，同时杜绝"删测试换绿"的静默流失
+_EXEMPT_FILE = "harness/config/test-delete-exempt.txt"
+
 
 def _is_test_file(rel: str) -> bool:
     """测试文件判定：路径含 /tests/、test_ 前缀、_test.py 后缀或 conftest.py
@@ -45,6 +53,17 @@ def _is_test_file(rel: str) -> bool:
     name = Path(rel).name
     return ("/tests/" in rel or name.startswith("test_")
             or name.endswith("_test.py") or name == "conftest.py")
+
+
+def _load_exempt(repo: Path) -> set[str]:
+    """读取测试删除/用例净减豁免清单（不存在即空集）。"""
+    path = repo / _EXEMPT_FILE
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    return {ln.strip() for ln in lines
+            if ln.strip() and not ln.strip().startswith("#")}
 
 
 def _git_lines(args: list[str], cwd: Path):
@@ -71,6 +90,14 @@ def scan(repo: Path, rev: str = "HEAD") -> list[str]:
         print(f"error: git diff --name-only {rev} 失败（仓库异常/命令不可用），"
               "无法扫描测试改动，判红", file=sys.stderr)
         return [f"{repo}: git diff 失败，无法扫描（按违规判红）"]
+    # 方向 2：删除文件单独列出（git diff --name-only 虽含 D，--diff-filter=D
+    # 更明确；删除的测试文件此前只扫新增行完全不可见——删测试换绿可静默
+    # 通过 discipline_rc=0，本批删 308 行即证）
+    deleted = _git_lines(["diff", "--diff-filter=D", "--name-only", rev], repo)
+    if deleted is None:
+        print(f"error: git diff --diff-filter=D {rev} 失败（仓库异常/命令不可用），"
+              "无法扫描测试文件删除，判红", file=sys.stderr)
+        return [f"{repo}: git diff 删除列表失败，无法扫描（按违规判红）"]
     untracked = _git_lines(["ls-files", "--others", "--exclude-standard"],
                            repo)
     if untracked is None:
@@ -83,10 +110,21 @@ def scan(repo: Path, rev: str = "HEAD") -> list[str]:
     # --exclude-standard 让 .gitignore 生效；两路输出均相对 repo（路径基准
     # 一致），去重后统一排序。
     untracked_set = set(untracked)
+    deleted_set = set(deleted or [])
+    exempt = _load_exempt(repo)
     changed = sorted(set(tracked) | untracked_set)
     findings: list[str] = []
     for rel in changed:
         if not rel.endswith(".py") or not _is_test_file(rel):
+            continue
+        if rel in exempt:
+            # 显式豁免通道：登记的重构删减/合并用例放行（理由须随 commit
+            # message 说明，禁以删测试换绿）
+            continue
+        if rel in deleted_set:
+            findings.append(
+                f"{rel}: 测试文件删除未登记豁免"
+                f"（正常重构删测试须在 {_EXEMPT_FILE} 登记）")
             continue
         if rel in untracked_set:
             # 未跟踪新文件整体视作新增行（git diff 不展示未跟踪内容）
@@ -112,12 +150,30 @@ def scan(repo: Path, rev: str = "HEAD") -> list[str]:
             for pat, kind in _BANNED:
                 if pat.search(added):
                     findings.append(f"{rel}: {kind}: 新增 {added.strip()[:80]}")
+        # 方向 2：用例数净减判红（def test_ 删除 > 新增）——删测试用例换绿
+        # 同样静默流失覆盖，须显式豁免。未跟踪新文件视为纯新增（无净减）
+        if rel not in untracked_set:
+            add_cases = sum(
+                1 for ln in file_lines
+                if ln.startswith("+") and not ln.startswith("+++")
+                and _CASE_RE.search(ln))
+            del_cases = sum(
+                1 for ln in file_lines
+                if ln.startswith("-") and not ln.startswith("---")
+                and _CASE_RE.search(ln))
+            if del_cases > add_cases:
+                findings.append(
+                    f"{rel}: 用例数净减 {del_cases - add_cases}"
+                    f"（删除 {del_cases} 新增 {add_cases}；正常重构合并用例"
+                    f"须在 {_EXEMPT_FILE} 登记豁免）")
     return findings
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
-        description="测试改动纪律机械守卫（禁新增 xfail/skip/sleep 重试）")
+        description="测试改动纪律机械守卫（禁新增 xfail/skip/sleep 重试、"
+                    "禁静默删除测试文件或用例数净减——正常重构须登记 "
+                    "harness/config/test-delete-exempt.txt 豁免）")
     ap.add_argument("--repo", default=str(_ROOT), help="仓根（默认脚本相对推断）")
     ap.add_argument("--rev", default="HEAD", help="比对基线（默认 HEAD）")
     args = ap.parse_args(argv)

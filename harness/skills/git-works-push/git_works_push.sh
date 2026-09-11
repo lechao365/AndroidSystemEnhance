@@ -243,6 +243,19 @@ fi
 if [ "$MODE" = "push-only" ]; then
   check_commit_scope pushed
 fi
+# 方向 3：push 前置 CI 门禁——gh 已确认未装未认证，用 curl 免认证查 HEAD
+# 对应 GitHub check-runs conclusion。CI 存在失败结论 → 阻断（fail-closed）；
+# API 抖动（网络失败/429/5xx/未知响应/非 JSON）→ 脚本内降级告警不阻断；
+# 仓库非公开或不可达（404）→ 登记放弃并写明不静默。dry-run 已提前退出，
+# 此门禁只对 normal/push-only 生效。GWP_SKIP_CI_CHECK=1 显式跳过（测试
+# fixture 无 origin remote 场景；生产默认开启）。
+if [ "${GWP_SKIP_CI_CHECK:-0}" != "1" ]; then
+  HEAD_SHA=$(git rev-parse HEAD)
+  if ! python3 harness/lib/check_ci_head.py --head "$HEAD_SHA" 2>&1; then
+    err "error: HEAD 对应 GitHub check-runs 存在失败结论或无法核实，阻断推送（修复 CI 或登记放弃后重试；确认无 CI 须显式 GWP_SKIP_CI_CHECK=1）"
+    exit 1
+  fi
+fi
 PUSH_T0=$(date +%s.%N)
 push_dur() { awk -v a="$1" -v b="$(date +%s.%N)" 'BEGIN{printf "%.3f", b-a}'; }
 if ! PUSH_OUTPUT=$(git push -u origin "$BRANCH" 2>&1); then

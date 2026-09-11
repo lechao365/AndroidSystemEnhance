@@ -117,6 +117,44 @@ class TestDiscipline(unittest.TestCase):
                 out = ctd.scan(self.repo)
                 self.assertTrue(any(kind in o for o in out), out)
 
+    def test_deleted_test_file_flagged_without_exempt(self):
+        # 方向 2 红灯：删除测试文件（此前只扫新增行完全不可见，删测试换绿
+        # 静默通过 discipline_rc=0）→ 未登记豁免即判红
+        self.testfile.unlink()
+        out = ctd.scan(self.repo)
+        self.assertTrue(any("测试文件删除未登记豁免" in o for o in out), out)
+
+    def test_exempt_allows_deleted_test_file(self):
+        # 方向 2 豁免通道：删除的测试文件在豁免清单登记 → 放行（正常重构
+        # 删测试不卡死；理由须随 commit message 说明）
+        exempt = self.repo / "harness" / "config" / "test-delete-exempt.txt"
+        exempt.parent.mkdir(parents=True, exist_ok=True)
+        exempt.write_text(
+            "# 正常重构豁免登记（理由随 commit message）\n"
+            "harness/lib/tests/test_x.py\n")
+        self.testfile.unlink()
+        self.assertEqual(ctd.scan(self.repo), [])
+
+    def test_case_count_net_decrease_flagged(self):
+        # 方向 2 红灯：用例数净减（HEAD 3 用例 → 工作树 2 用例，删 1 加 0）
+        # → 判红（删测试用例换绿静默流失，不再只盯新增行）
+        self.testfile.write_text(
+            "def test_a():\n    pass\n\n"
+            "def test_b():\n    pass\n\n"
+            "def test_c():\n    pass\n")
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-qm", "three")
+        self.testfile.write_text(
+            "def test_a():\n    pass\n\n"
+            "def test_c():\n    pass\n")
+        out = ctd.scan(self.repo)
+        self.assertTrue(any("用例数净减" in o and "净减 1" in o for o in out), out)
+
+    def test_case_count_equal_ok(self):
+        # 用例数不净减（等价重命名 1→1）→ 放行
+        self.testfile.write_text("def test_renamed():\n    pass\n")
+        self.assertEqual(ctd.scan(self.repo), [])
+
 
 class TestDisciplineMain(unittest.TestCase):
     def test_non_git_repo_skips(self):
