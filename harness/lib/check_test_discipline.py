@@ -69,7 +69,8 @@ def _load_exempt(repo: Path) -> set[str]:
 def _git_lines(args: list[str], cwd: Path):
     """git 输出行列表；git 不可用/命令失败返回 None。"""
     try:
-        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+        r = subprocess.run(["git", "-c", "core.quotepath=false", *args],
+                           cwd=cwd, capture_output=True,
                            text=True, encoding="utf-8", errors="replace",
                            timeout=30)
     except (OSError, subprocess.SubprocessError):

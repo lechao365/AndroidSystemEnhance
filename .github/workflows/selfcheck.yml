@@ -45,7 +45,7 @@ jobs:
           # 输出中全部 *_rc（含 pyenv_rc/ioctl_rc）任一非零即失败——否则测试
           # 失败也绿（CI 只跑不判）；键集合与 ws_report 必查键同源
           fail=""
-          for rc_name in pytest_rc refs_rc config_rc contract_rc pyenv_rc ioctl_rc manifest_rc discipline_rc scan_rc ruff_rc host_rc metrics_rc opencode_rc; do
+          for rc_name in pytest_rc refs_rc config_rc contract_rc pyenv_rc ioctl_rc manifest_rc discipline_rc scan_rc ruff_rc host_rc metrics_rc opencode_rc quotepath_rc; do
             echo "$out" | grep -Eq "${rc_name}=0" \
               || { echo "error: ${rc_name} 非零，自检失败"; fail="$fail $rc_name"; }
           done

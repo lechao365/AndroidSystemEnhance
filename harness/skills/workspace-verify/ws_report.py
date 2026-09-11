@@ -929,7 +929,8 @@ def main(argv=None):
     try:
         verified_tree = content_tree()
         status_out = subprocess.run(
-            ["git", "status", "--porcelain"], capture_output=True, text=True,
+            ["git", "-c", "core.quotepath=false", "status", "--porcelain"],
+            capture_output=True, text=True,
             encoding="utf-8", errors="replace", check=True)
         commit_scope = format_scope([
             porcelain_to_name_status(l)

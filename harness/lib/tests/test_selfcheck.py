@@ -27,6 +27,8 @@ _FAKE_TOOLS = {
             "OK: contract 检查通过，无违规。"),
     "discipline": (0, "OK: 测试改动无新增 xfail/skip/sleep 重试\n", ""),
     "scan": (0, "OK: 热路径检查器无全树 rglob/os.walk\n", ""),
+    "quotepath": (0, "OK: git 路径输出点均已带 -c core.quotepath=false，"
+                     ".sh 均以 100755 入库\n", ""),
 }
 
 
@@ -65,7 +67,8 @@ def _patched_parallel():
     with mock.patch.object(selfcheck, "_spawn_tools",
                            return_value={"refs": "p", "cfg": "p"}), \
             mock.patch.object(selfcheck, "_collect_tools",
-                              return_value=(_fake_tools(), 1.0, 2.0, 0.1, 0.1)), \
+                              return_value=(_fake_tools(), 1.0, 2.0, 0.1, 0.1,
+                                            0.1)), \
             mock.patch.object(selfcheck, "_spawn_cmd",
                               return_value="p"), \
             mock.patch.object(selfcheck, "_collect_cmd",
@@ -111,7 +114,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1)):
             with redirect_stdout(buf):
                 self.assertEqual(selfcheck.main(), 0)
         out = buf.getvalue()
@@ -199,7 +202,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1)):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -220,7 +223,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1)):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -332,6 +335,7 @@ class TestParallelTools(unittest.TestCase):
             ("OK: config 检查通过，无违规。\nconfig_rc=0\ncontract_rc=0\n", ""),
             ("OK: 测试改动无新增 xfail/skip/sleep 重试\n", ""),
             ("OK: 热路径检查器无全树 rglob/os.walk\n", ""),
+            ("OK: git 路径输出点均已带 -c core.quotepath=false\n", ""),
         ]
         with mock.patch.object(selfcheck.subprocess, "Popen",
                                return_value=proc):
@@ -343,7 +347,7 @@ class TestParallelTools(unittest.TestCase):
 
     def test_collect_tools_returns_split_durs(self):
         # 方向 2：_collect_tools 返回 (tools, refs_dur, cfg_dur, dis_dur,
-        # scan_dur)，durs 拆开 refs/cfg/discipline/scan 各自自报（合并 tools
+        # scan_dur, quotepath_dur)，durs 拆开各检查器各自自报（合并 tools
         # 无法定位慢点归因）；收口顺序 refs 先、cfg 后，用 side_effect 逐个注入
         out = ("[VIOLATION] x\n==== config: 共 1 处违规（判红）====\n"
                "OK: contract 检查通过，无违规。\nconfig_rc=1\ncontract_rc=0\n")
@@ -351,21 +355,26 @@ class TestParallelTools(unittest.TestCase):
         cfg_res = (1, out, "", 2.5)
         dis_res = (0, "OK: 测试改动无新增禁戒\n", "", 0.2)
         scan_res = (0, "OK: 热路径无全树 rglob\n", "", 0.3)
+        qp_res = (0, "OK: git 路径输出点均已带 -c core.quotepath=false\n",
+                  "", 0.4)
         with mock.patch.object(selfcheck, "_collect_cmd",
                                side_effect=[refs_res, cfg_res,
-                                            dis_res, scan_res]):
-            (tools, refs_dur, cfg_dur, dis_dur, scan_dur) = \
+                                            dis_res, scan_res, qp_res]):
+            (tools, refs_dur, cfg_dur, dis_dur, scan_dur, qp_dur) = \
                 selfcheck._collect_tools({"refs": "p", "cfg": "p",
-                                          "discipline": "p", "scan": "p"})
+                                          "discipline": "p", "scan": "p",
+                                          "quotepath": "p"})
         self.assertEqual(refs_dur, 0.5)
         self.assertEqual(cfg_dur, 2.5)
         self.assertEqual(dis_dur, 0.2)
         self.assertEqual(scan_dur, 0.3)
+        self.assertEqual(qp_dur, 0.4)
         self.assertEqual(tools["refs"][0], 1)
         self.assertEqual(tools["cfg"][0], 1)
         self.assertEqual(tools["ctr"][0], 0)
         self.assertEqual(tools["discipline"][0], 0)
         self.assertEqual(tools["scan"][0], 0)
+        self.assertEqual(tools["quotepath"][0], 0)
 
     def test_collect_cmd_timeout_kills_124(self):
         # 方向 1：_collect_cmd 超时 → kill + rc=124（约定超时标记，不无限

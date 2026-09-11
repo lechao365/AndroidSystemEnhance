@@ -31,7 +31,7 @@ HEAD12=$(git rev-parse --short=12 dev)
 [ "$CONFIRM" = "$HEAD12" ] || {
   echo "error: --confirm（$CONFIRM）!= 当前 dev 前12位（$HEAD12），拒绝执行" >&2; exit 1; }
 # 工作树预检：未提交改动会被 reset --hard 静默销毁
-[ -z "$(git status --porcelain)" ] || {
+[ -z "$(git -c core.quotepath=false status --porcelain)" ] || {
   echo "error: 工作树非空（未提交改动将被销毁），请先提交或 stash" >&2; exit 1; }
 
 OLD=$(git rev-parse dev)
@@ -69,7 +69,7 @@ RCPT=$(echo "$WS_OUT" | sed -n 's/^receipt: //p')
 [ -n "$RCPT" ] || { echo "error: ws_report 未输出收据路径" >&2; exit 1; }
 # 收据随 dev 提交推送（trend.md 由 ws_report append_trend 写入，须一并入提交，否则脏树使下次预检必败）
 git add "$RCPT" data/verify-results/trend.md
-if git diff --cached --quiet; then
+if git -c core.quotepath=false diff --cached --quiet; then
   echo "warn: 无收据变更，跳过提交"
 else
   git commit -m "杂项(dev): 回退 dev 至 main 基线（丢弃 ${CNT} 提交）" || {

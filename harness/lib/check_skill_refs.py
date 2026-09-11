@@ -157,7 +157,8 @@ def _git_ls_files() -> list[Path] | None:
     if key in _GIT_LS_CACHE:
         return _GIT_LS_CACHE[key]
     try:
-        r = subprocess.run(["git", "ls-files", "--cached", "--others",
+        r = subprocess.run(["git", "-c", "core.quotepath=false",
+                            "ls-files", "--cached", "--others",
                             "--exclude-standard"], cwd=ROOT,
                            capture_output=True, text=True, encoding="utf-8",
                            errors="replace")

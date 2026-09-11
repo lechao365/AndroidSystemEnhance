@@ -131,7 +131,7 @@ done
 # ── 工作树预检（prepare/promote；check-only 干跑不做 add/commit/squash，脏树无害）───
 # 未提交改动会被后续 git add/commit/squash 静默吞并，先拒绝
 if [ "$MODE" != "check-only" ]; then
-  [ -z "$(git status --porcelain)" ] || {
+  [ -z "$(git -c core.quotepath=false status --porcelain)" ] || {
     echo "error: 工作树非空（未提交改动将干扰 promote/登记提交），请先提交或 stash" >&2; exit 1; }
 fi
 
@@ -323,7 +323,7 @@ PYEOF
     || { echo "error: candidate 登记失败" >&2; exit 1; }
   # 登记随 dev 提交推送（避免弄脏工作树阻塞后续 precheck）
   git add harness/config/baseline-status.yaml
-  if git diff --cached --quiet; then
+  if git -c core.quotepath=false diff --cached --quiet; then
     echo "warn: baseline-status.yaml 无变更，跳过登记提交"
   else
     git commit -m "构建(baseline): 登记 candidate（receipt=$(basename "$EVIDENCE_RECEIPT")）" || {
@@ -425,7 +425,8 @@ PYEOF
   if [ "$PROMOTE_TREE" != "$BOARD_VTREE" ]; then
     echo "error: 收据 verified_tree 与晋升内容树不一致（发布内容≠验证内容）：" >&2
     # 树对象不可解析（假树/被 gc）时 diff 失败——pipefail 下须容错，主结论已定
-    git diff --name-only "$BOARD_VTREE" "$PROMOTE_TREE" 2>/dev/null | sed 's/^/  /' >&2 \
+    # -c core.quotepath=false：差异路径含中文标题（known-issues/docs）不转义
+    git -c core.quotepath=false diff --name-only "$BOARD_VTREE" "$PROMOTE_TREE" 2>/dev/null | sed 's/^/  /' >&2 \
       || echo "  （树对象不可解析，无法列出差异路径）" >&2
     exit 1
   fi
@@ -450,7 +451,9 @@ fi
 # 文档同步遗漏提示（warn 不阻断）：dev 相对 origin/main 无 docs/ 改动时提示
 # （pub2-02：与 code 门禁同用两点差 origin/main..dev——三点对称差在 main
 # 领先 dev 时会混入 main 侧提交，docs 提示口径漂移）
-if ! git diff --name-only origin/main..dev | grep -q '^docs/'; then
+# -c core.quotepath=false：docs/ 下中文路径（01-打点增强 等）默认转义致
+# '^docs/' 前缀匹配恒 miss——文档同步提示失灵（KI 2026-09-11 同源）
+if ! git -c core.quotepath=false diff --name-only origin/main..dev | grep -q '^docs/'; then
   echo "warn: dev 相对 origin/main 无 docs/ 改动（若本批应同步设计文档，请先 /sync-code-to-doc --base origin/main 并 commit 到 dev）"
 fi
 
@@ -497,7 +500,7 @@ if [ -d data/known-issues ]; then
   git add -A data/known-issues || {
     rollback_promote; git reset -q; echo "error: add data/known-issues 失败，已回滚并清暂存" >&2; exit 1; }
 fi
-if git diff --cached --quiet; then
+if git -c core.quotepath=false diff --cached --quiet; then
   echo "warn: baseline-status.yaml 无变更，跳过晋升提交"
 else
   # pub2-01：晋升登记提交失败也须接 rollback_promote——此前仅 exit 1，tag 已
@@ -513,7 +516,7 @@ fi
 git checkout main && git pull origin main || { rollback_promote; echo "error: checkout/pull main 失败" >&2; exit 1; }
 git merge --squash dev || { rollback_promote; echo "error: merge --squash 失败" >&2; exit 1; }
 # 一致性检查在 commit 前：暂存区须与 dev tree 一致（此时 main 尚无 commit，rollback 可干净撤销）
-git diff --cached --quiet dev || { rollback_promote; echo "error: squash 暂存与 dev 内容不一致" >&2; exit 1; }
+git -c core.quotepath=false diff --cached --quiet dev || { rollback_promote; echo "error: squash 暂存与 dev 内容不一致" >&2; exit 1; }
 git commit -F "$MSG_FILE" || { rollback_promote; echo "error: squash commit 失败" >&2; exit 1; }
 # 树等价断言：tag verified/$BID 与 main 树（排除登记 yaml 与 docs）必须无差异，
 # 防未验证内容借 meta/doc 提交夹带进 main；失败走 rollback（含删 tag）退 1
