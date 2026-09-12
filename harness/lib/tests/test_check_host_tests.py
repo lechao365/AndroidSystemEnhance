@@ -21,11 +21,10 @@ _MAKEFILE = "test:\n\t@true\nclean:\n\t@true\n"
 
 
 def _make_repo(root: Path, *modules):
-    """构造最小仓：<repo>/code/rpi5/kernel/new/vendor/lechao/<module>/tests/Makefile。"""
+    """构造最小仓：<module_dir>/<module>/tests/Makefile。"""
     repo = Path(root)
     for module in modules:
-        d = (repo / "code" / "rpi5" / "kernel" / "new"
-             / "vendor" / "lechao" / module / "tests")
+        d = cht._module_dir(repo) / module / "tests"
         d.mkdir(parents=True)
         (d / "Makefile").write_text(_MAKEFILE, encoding="utf-8")
     return repo
@@ -36,8 +35,7 @@ class TestCheckHostTests(unittest.TestCase):
         td = tempfile.TemporaryDirectory()
         self.addCleanup(td.cleanup)
         self.repo = _make_repo(td.name, "LcView", "LcIod")
-        self.src_tests = (self.repo / "code" / "rpi5" / "kernel" / "new"
-                          / "vendor" / "lechao" / "LcView" / "tests")
+        self.src_tests = cht._module_dir(self.repo) / "LcView" / "tests"
 
     def test_run_one_make_test_success(self):
         with mock.patch.object(cht.subprocess, "run") as m:
@@ -81,13 +79,11 @@ class TestCheckHostTests(unittest.TestCase):
         with mock.patch.object(cht.subprocess, "run", side_effect=_fake_run):
             rc, out = cht._run_make_test("LcView", self.repo)
         self.assertEqual(rc, 0)
-        stage_tests = (self.repo / "harness" / "log" / "host-tests"
-                       / "lechao" / "LcView" / "tests")
+        stage_tests = cht._host_stage_root(self.repo) / "LcView" / "tests"
         for cwd in cwds:
             self.assertEqual(Path(cwd), stage_tests)
         # 副本收尾回收、源码树无产物无残留
-        self.assertFalse((self.repo / "harness" / "log" / "host-tests"
-                          / "lechao").exists())
+        self.assertFalse(cht._host_stage_root(self.repo).exists())
         self.assertTrue((self.src_tests / "Makefile").is_file())
 
     # ── main 判红（方向 2）：make 缺失 / 超时 / rc 非零三种场景 ────────────
@@ -108,7 +104,7 @@ class TestCheckHostTests(unittest.TestCase):
     def test_main_red_when_make_timeout(self):
         # make test 超时（内层 TimeoutExpired）→ 短路判红带归因（超时路径
         # 在 clean 前返回，每模块只消耗一次 subprocess 调用）
-        te = cht.subprocess.TimeoutExpired("make test", 300)
+        te = cht.subprocess.TimeoutExpired("make test", cht._MAKE_TEST_TIMEOUT_S)
         rc, out = self._run_main_capture([te, te])
         self.assertEqual(rc, 1)
         self.assertEqual(out.count("make test 超时"), 2)
@@ -122,6 +118,42 @@ class TestCheckHostTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(out.count("host_rc=1"), 2)
         self.assertIn("FAIL", out)
+
+    # ── KI-20260912-001：副本根 pid+tid 隔离并发路 ────────────────────────
+    def test_host_stage_root_includes_pid(self):
+        with mock.patch.object(cht.os, "getpid", return_value=12345), \
+                mock.patch.object(cht.threading, "get_ident", return_value=777):
+            root = cht._host_stage_root(self.repo)
+        self.assertIn("lechao-12345-777", str(root))
+
+    # ── KI-20260912-006：复制失败归因透出 host_rc ─────────────────────────
+    def test_stage_copy_failure_returns_host_rc(self):
+        with mock.patch.object(cht.shutil, "copytree",
+                               side_effect=OSError("boom")):
+            rc, out = cht._run_make_test("LcView", self.repo)
+        self.assertEqual(rc, 1)
+        self.assertIn("host_rc=1", out)
+        self.assertIn("副本复制失败", out)
+
+    def test_main_red_when_stage_copy_fails(self):
+        with mock.patch.object(cht.shutil, "copytree",
+                               side_effect=OSError("boom")):
+            rc, out = self._run_main_capture(FileNotFoundError)
+        self.assertEqual(rc, 1)
+        self.assertIn("host_rc=1", out)
+        self.assertTrue(out.strip())
+        self.assertIn("FAIL", out)
+
+    # ── KI-20260912-002：整树拷贝，顶层头文件随副本存在 ──────────────────
+    def test_stage_copy_includes_top_level_kernel_header(self):
+        header = cht._module_dir(self.repo) / "kernel_lechao_log.h"
+        header.write_text("/* test */\n", encoding="utf-8")
+        root = cht._host_stage_root(self.repo)
+        self.addCleanup(cht.shutil.rmtree, root, ignore_errors=True)
+        cht._stage_module_copy(self.repo, "LcView")
+        self.assertTrue((root / "kernel_lechao_log.h").is_file())
+        self.assertTrue((root / "LcView" / "tests" / "Makefile").is_file())
+        self.assertTrue((root / "LcIod").is_dir())
 
 
 if __name__ == "__main__":

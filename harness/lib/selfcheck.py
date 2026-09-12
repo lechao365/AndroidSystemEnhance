@@ -39,6 +39,8 @@ import threading
 import time
 from pathlib import Path
 
+from check_host_tests import _HOST_TEST_WORST_S
+
 ROOT = Path(__file__).resolve().parents[2]
 
 # ws_report 必查键集合（单点定义，方向 3）：selfcheck 输出的 *_rc 中这些键
@@ -117,10 +119,13 @@ def timed_run(cmd, timeout=None):
 _TOOL_TIMEOUT_S = 120
 # pytest 超时上限（秒）：xdist 全量正常 ~25s（WSL2 drvfs ~60s），兜挂死
 _PYTEST_TIMEOUT_S = 900
-# host 收口超时上限（秒）：check_host_tests 逐模块 make test 各 300s、两模块
-# 顺序跑最坏 ~600s+clean，放 650 兜挂死；须大于单模块超时（300s）防误杀——
-# 不足则内层 TimeoutExpired（rc 判红带归因）会被外层收口 rc=124 抢先截断
-_HOST_TIMEOUT_S = 650
+# host 收口超时上限（秒）：check_host_tests 内部最坏 = 2 模块 ×（make test
+# 300s + make clean 60s）= 720s（_HOST_TEST_WORST_S 单点定义），外层取
+# 720+60 缓冲兜挂死；须大于单模块超时（300s）防误杀——不足则内层
+# TimeoutExpired（rc 判红带归因）会被外层收口 rc=124 抢先截断。该 timeout
+# 从「收口时刻」起算，而 host 进程与 pytest 重叠启动（_spawn 先于收口），
+# 故实际重叠等待不占用满额。
+_HOST_TIMEOUT_S = _HOST_TEST_WORST_S + 60
 
 
 def _spawn_cmd(cmd):

@@ -14,6 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import selfcheck
+import check_host_tests as cht
 
 # 治理工具默认 fake 结果（run_parallel_tools 返回形态，B2 并行采集后
 # 治理段与 pytest 段解耦 mock：用例专注 pytest 序列，治理 rc/结论行由
@@ -281,10 +282,10 @@ class TestSelfcheck(unittest.TestCase):
         self.assertIn("pytest_rc=124", buf.getvalue())
 
     def test_host_collect_timeout_above_module_timeout(self):
-        # 方向 2：host 收口超时 = _HOST_TIMEOUT_S（650）透传 _collect_cmd，
-        # 仍须大于 check_host_tests 单模块 make 超时（300s）——否则外层收口
-        # rc=124 抢先截断内层 TimeoutExpired，丢失超时归因（判红同效但诊断
-        # 退化）；650 也兜住两模块顺序跑最坏 ~600s
+        # 方向 2：host 收口超时 = _HOST_TIMEOUT_S 透传 _collect_cmd，取内部
+        # 最坏值（2 模块 ×（make test 300s + make clean 60s）= 720s）加 60
+        # 缓冲 = 780s；仍须大于 check_host_tests 单模块 make 超时（300s）——
+        # 否则外层收口 rc=124 抢先截断内层 TimeoutExpired，丢失超时归因
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
         ])
@@ -300,8 +301,10 @@ class TestSelfcheck(unittest.TestCase):
                                   side_effect=_collect):
             with redirect_stdout(buf):
                 selfcheck.main()
-        self.assertEqual(selfcheck._HOST_TIMEOUT_S, 650)
-        self.assertEqual(seen.get("host"), 650)
+        self.assertEqual(selfcheck._HOST_TIMEOUT_S, 780)
+        self.assertEqual(seen.get("host"), 780)
+        self.assertGreater(selfcheck._HOST_TIMEOUT_S,
+                           cht._HOST_TEST_WORST_S)
         self.assertGreater(seen.get("host"), 300)
 
 

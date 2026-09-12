@@ -6,9 +6,9 @@
 - severity: P1
 - blocking: False
 - blocking_reason: 
-- status: open
+- status: fixed
 - task: content-tree
-- resolved_in: 
+- resolved_in: cba533c
 - archived_in: 
 - kind: 
 
@@ -18,3 +18,4 @@
 - 缺陷归属: KIR-001 回退验证——rm --cached 行系 content_tree.py 历史代码非本批新增；上批（5a52d36 修 KI-20260910-001 把 add -A 收进 else）使 ref 模式索引=ref 树，排除路径与工作树差异开始暴露此脆弱性，属「上批改动提高发作概率、缺陷本体早已存在」场景，非本批引入、不阻塞本批。
 - 影响: ref 模式下若排除集合内路径在 ref 树与工作树有差异即整树计算失败，promote 树等价断言（dev HEAD^{tree} vs board verified_tree）在比对祖先 ref 时可能因 trend.md 等运行态文件崩，需 -f 强制删除。
 - 修法方向: rm --cached 补 -f（git rm --cached -r -q -f --ignore-unmatch），ref 模式只删除索引内路径不影响工作树文件；并补 ref 模式排除路径差异的判红测试（现测试未覆盖）。
+- 闭环: 已于 cba533c 修复：rm --cached 补 -f。
