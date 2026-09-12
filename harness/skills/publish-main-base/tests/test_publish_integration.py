@@ -91,6 +91,9 @@ class TestSyncModifyIntegration(unittest.TestCase):
     def _run_script(self, *args):
         env = dict(os.environ)
         env["CDP_PROJECT_ROOT"] = str(self.work)
+        # 方向 3：promote 前置 CI 门禁——fixture origin 是本地 bare（非 GitHub
+        # URL，check_ci_head 无法核实）→ 默认显式跳过；判红用例单独解除验证
+        env["PROMOTE_SKIP_CI_CHECK"] = "1"
         # P1-B 审批独立（KI-20260907-001）：token 非占位符且临时根
         # promote-approval.env 预设一致（fail-closed：缺预设即判红）
         env["LC_PROMOTE_APPROVAL_TOKEN"] = "tok-test"

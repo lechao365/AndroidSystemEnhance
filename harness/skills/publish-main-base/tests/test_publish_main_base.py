@@ -1,5 +1,6 @@
 import os
 import pytest
+import re
 import shutil
 import subprocess
 import sys
@@ -52,6 +53,9 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self._shim_tmp = tempfile.TemporaryDirectory()
         self._env = dict(os.environ)
         self._env["CDP_PROJECT_ROOT"] = str(self.root)
+        # 方向 3：promote 前置 CI 门禁——fixture origin 是本地 bare（非 GitHub
+        # URL，check_ci_head 无法核实）→ 默认显式跳过；判红用例单独解除验证
+        self._env["PROMOTE_SKIP_CI_CHECK"] = "1"
         os.environ["CDP_PROJECT_ROOT"] = str(self.root)
         # harness 骨架拷贝（脚本内 python3 相对路径与 cdp 模块导入均落在临时根）
         shutil.copytree(REAL_CDP_LIB,
@@ -331,6 +335,16 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("前置校验通过", r.stdout)
         self.assertIn(f"PARENT={self.parent_vc}", r.stdout)
+
+    def test_check_bh_equals_vc_passes(self):
+        # 方向 20260912-180220：验证批无内容改动时 BH 即 VC（最近内容提交==
+        # 验证起点），其父必 ≠ VC，单点 PARENT==VC 恒 false 误拒；放宽后
+        # BH==VC 亦放行（与 promote 侧 CODE_HEAD 父等价同族）
+        self._write_receipt(self.head_vc, batch_id="000000000002")
+        r = self._run("--check-only")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("前置校验通过", r.stdout)
+        self.assertIn(f"BH={self.head_vc}", r.stdout)
 
     def test_rejects_mismatched_cdp_project_root(self):
         # 方向 4：CDP_PROJECT_ROOT 已设且不等于 git 顶层目录 → 收据查找前拒绝，
@@ -845,6 +859,93 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertIn("verified/BL-TEST-01",
                       self._git("tag", "-l", "verified/BL-TEST-01").stdout)
 
+    def test_promote_passes_code_head_parent_equals_vc(self):
+        # 方向（20260912-142358）：覆盖判定放宽为父等价亦放行。真实时序：
+        # 验证起点 VC → 上板收据 verified_commit=VC、verified_tree=内容树
+        # （验证时刻工作树=编辑后内容）→ 内容提交 c3（父=VC）→ 登记元提交
+        # （回溯跳过）→ promote 时 is-ancestor(c3, VC) 恒 false（c3 是 VC
+        # 后代），父等价（c3^==VC）须放行，最终以 verified_tree 树等价把关。
+        self._setup_remote()
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
+        vc = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        (self.root / "code").mkdir()
+        (self.root / "code" / "foo.txt").write_text("x\n", encoding="utf-8")
+        # board 收据在内容提交前落盘（验证时刻工作树=内容树）：verified_commit=
+        # 验证起点 VC，verified_tree 默认实算当前工作树（含 code/foo.txt）
+        self._write_receipt(vc, batch_id="000000000001",
+                            cases=_FULL_CASES, verify_mode="board",
+                            package=PKG_JSON)
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): code 改动")
+        self._git("push", "origin", "dev")
+        code_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        (self.root / "harness" / "config" / "baseline-status.yaml").write_text(
+            "baselines:\n"
+            f"  - baseline_id: BL-TEST-01\n"
+            f"    status: candidate\n"
+            f"    source_commit: {code_head}\n"
+            f"    sync_manifest: data/verify-results/20260831-100000-000000000001.md\n"
+            f"    build_result: PASS\n"
+            f"    package_result: PASS\n"
+            f"    board_verify: PASS\n"
+            f"    evidence:\n"
+            f"      ki_gate: pass\n",
+            encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "构建(baseline): 登记 candidate")
+        self._git("push", "origin", "dev")
+        r = self._promote()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("promote 完成", r.stdout)
+        self.assertIn("verified/BL-TEST-01",
+                      self._git("tag", "-l", "verified/BL-TEST-01").stdout)
+
+    def test_promote_rejects_code_head_unrelated_vc(self):
+        # 方向（20260912-142358）红灯：board 收据 verified_commit 与 CODE_HEAD
+        # 无父子关系（伪造，既非祖先也非父等价），而 LATEST skip 收据
+        # verified_commit==最近内容提交父使前置 PARENT 校验通过 → 覆盖判定
+        # 拒绝（RECEIPT_FAIL），证明父等价放宽未被伪造绕过。
+        self._setup_remote()
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
+        (self.root / "code").mkdir()
+        (self.root / "code" / "foo.txt").write_text("x\n", encoding="utf-8")
+        self._write_receipt("deadbeefdead", batch_id="000000000001",
+                            cases=_FULL_CASES, verify_mode="board",
+                            package=PKG_JSON)
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): code 改动")
+        self._git("push", "origin", "dev")
+        code_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        (self.root / "harness" / "config" / "baseline-status.yaml").write_text(
+            "baselines:\n"
+            f"  - baseline_id: BL-TEST-01\n"
+            f"    status: candidate\n"
+            f"    source_commit: {code_head}\n"
+            f"    sync_manifest: data/verify-results/20260831-100000-000000000001.md\n"
+            f"    build_result: PASS\n"
+            f"    package_result: PASS\n"
+            f"    board_verify: PASS\n"
+            f"    evidence:\n"
+            f"      ki_gate: pass\n",
+            encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "构建(baseline): 登记 candidate")
+        self._git("push", "origin", "dev")
+        board_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        # LATEST 收据（skip）verified_commit=board_head（=最近内容提交的父，
+        # 前置 PARENT 校验通过；覆盖判定用 latest_board_receipt 的伪造 VC）
+        self._write_receipt(board_head, batch_id="000000000002",
+                            cases="", verify_mode="skip")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): skip 收据入库")
+        self._git("push", "origin", "dev")
+        r = self._promote()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("check_class=RECEIPT_FAIL", r.stderr)
+        self.assertIn("被最新 board 收据覆盖", r.stderr)
+
     def test_promote_passes_zero_code_change(self):
         # 方向 2 零改动豁免：verify_mode=skip 但无 code/ 改动 → warn 豁免 + e2e promote 完成
         self._setup_remote()
@@ -939,6 +1040,27 @@ class TestSyncModifyToMainBase(unittest.TestCase):
                       self._git("ls-tree", "-r", "--name-only", "main",
                                 "data/known-issues").stdout)
 
+    def test_promote_ci_gate_blocks_unverifiable(self):
+        # 方向 3：promote 前置 CI 门禁——未显式跳过且 origin 非 GitHub
+        # （本地 bare，check_ci_head 无法解析 slug，fail-closed 无法核实）→
+        # 阻断晋升。fixture 默认 PROMOTE_SKIP_CI_CHECK=1，此用例显式解除
+        # 验证门禁接线（CI 已真绿，run conclusion 须接进 promote 前置）。
+        self._setup_remote()
+        self._receipt_commit_c3(verify_mode="skip", package=PKG_JSON)
+        self._candidate_yaml()
+        self._git("add", "-A")
+        self._git("commit", "-m", "构建(baseline): candidate 登记")
+        self._git("push", "origin", "dev")
+        saved = self._env.get("PROMOTE_SKIP_CI_CHECK")
+        self._env.pop("PROMOTE_SKIP_CI_CHECK", None)
+        try:
+            r = self._promote()
+        finally:
+            if saved is not None:
+                self._env["PROMOTE_SKIP_CI_CHECK"] = saved
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("GitHub Actions run", r.stderr)
+
     def test_prepare_without_task_infers_ki_gate(self):
         # 方向 7：prepare 全不传（--task/--evidence-scope）走通——门禁无条件执行，
         # 缺省从唯一活跃 task 推断（KIGATE=inferred），scope 从收据 cases 推导
@@ -997,6 +1119,83 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertIn("refs/tags/verified/BL-TEST-01",
                       self._git("ls-remote", "origin",
                                 "refs/tags/verified/BL-TEST-01").stdout)
+
+
+class TestPublishStaticOrder(unittest.TestCase):
+    """方向 2：静态断言 check-approval 排建 verified tag 前（读 sh 比行号）。
+
+    审批独立校验前移（c21a13cac2a5）此前无用例锁定顺序——整段调用
+    publish_main_base.sh 的集成测试已删除（依赖 bash 全环境 + promote 全链
+    路，昂贵脆弱，无法在 CI 快速锁定时序）。改为读脚本文本比较行号：纯
+    文件系统检查，不执行 bash、不依赖 git 解释器。
+    """
+
+    SCRIPT = REAL_SKILL_DIR / "publish_main_base.sh"
+
+    def _line_of(self, pattern):
+        for i, line in enumerate(self.SCRIPT.read_text(encoding="utf-8").splitlines()):
+            if re.search(pattern, line):
+                return i + 1
+        self.fail(f"脚本中未找到匹配 {pattern!r} 的行")
+
+    def test_check_approval_static_before_tag(self):
+        check_approval = self._line_of(r"baseline_register\.py check-approval")
+        tag = self._line_of(r'git tag -a "verified/')
+        self.assertLess(
+            check_approval, tag,
+            "check-approval 必须排在建 verified tag 之前（缺 token 须先 fail-fast 拒 tag）")
+
+    def test_approval_env_sourced_before_check_approval(self):
+        # 方向 3（20260912-142358）：promote 前置自动 source promote-approval.env
+        # 必须排在 check-approval 之前——token 注入后才能与预设比对，缺注入时
+        # check-approval 判「缺 LC_PROMOTE_APPROVAL_TOKEN」fail-closed 拒绝
+        source_line = self._line_of(r"promote-approval\.env")
+        check_approval = self._line_of(r"baseline_register\.py check-approval")
+        self.assertLess(
+            source_line, check_approval,
+            "promote 前置 source promote-approval.env 必须在 check-approval 之前")
+
+    def test_tag_guarded_by_existence_check_before_create(self):
+        # tag 复用防线：同名 tag 存在检查先于打 tag（重复 promote 拒 3）
+        guard = self._line_of(r'rev-parse -q --verify "refs/tags/verified/\$BID"')
+        tag = self._line_of(r'git tag -a "verified/')
+        self.assertLess(guard, tag, "tag 存在检查必须排在建 tag 之前")
+
+    def test_approval_env_source_uses_auto_export(self):
+        # 20260912 promote 被拦根因：source promote-approval.env 无 export，
+        # token 进不了 python3 子进程 env → check-approval 读空 fail-closed。
+        # set -a 包裹使 source 的变量自动 export（与 check-approval 调用紧邻，
+        # 防后续改动把 export 语义拆散到调用后）
+        set_a = self._line_of(r"^  set -a\b")
+        source = self._line_of(r"^  \. harness/config/promote-approval\.env")
+        set_plus_a = self._line_of(r"^  set \+a")
+        self.assertLess(set_a, source, "set -a 必须排 source 之前")
+        self.assertLess(source, set_plus_a, "set +a 必须排 source 之后")
+        self.assertLess(
+            set_plus_a, self._line_of(r"baseline_register\.py check-approval"),
+            "set +a 必须排 check-approval 调用之前（token 需在调用时已 export）")
+
+    def test_approval_token_visible_to_subprocess_after_source(self):
+        # 动态验证 set -a 语义：source 的 token 真正 export 到 python3 子进程
+        # env（缺 export 时 os.environ 读不到，check-approval 判缺 token 拒）
+        if not BASH:
+            self.skipTest("需要 bash 解释器（Windows 环境跳过）")
+        with tempfile.TemporaryDirectory() as d:
+            envf = Path(d) / "promote-approval.env"
+            envf.write_text('LC_PROMOTE_APPROVAL_TOKEN="vis-tok"\n',
+                            encoding="utf-8")
+            probe = (
+                'set -a; . "$1"; set +a; '
+                '"$2" -c "import os,sys; '
+                "v=os.environ.get('LC_PROMOTE_APPROVAL_TOKEN', ''); "
+                "sys.exit(0 if v == 'vis-tok' else 1)\"")
+            r = subprocess.run(
+                [BASH, "-c", probe, "bash", str(envf), sys.executable],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", env=os.environ.copy())
+            self.assertEqual(
+                r.returncode, 0,
+                f"token 未 export 到子进程 env: {r.stdout}{r.stderr}")
 
 
 if __name__ == "__main__":

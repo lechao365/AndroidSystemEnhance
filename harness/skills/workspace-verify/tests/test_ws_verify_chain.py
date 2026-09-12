@@ -73,9 +73,9 @@ class TestChain(unittest.TestCase):
         self.assertEqual(result["overall"], "pass")
         self.assertEqual(result["exit_rc"], 0)
         self.assertEqual([s["name"] for s in result["steps"]],
-                         ["sync", "connect", "push", "unit_test",
+                         ["sync", "build", "connect", "push", "unit_test",
                           "acceptance", "package", "report"])
-        self.assertEqual([s["rc"] for s in result["steps"]], [0] * 7)
+        self.assertEqual([s["rc"] for s in result["steps"]], [0] * 8)
         self.assertEqual(result["skipped"], [])
 
     def test_package_step_uses_systemd_run_with_batch_id_evidence(self):
@@ -224,8 +224,8 @@ class TestChain(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(result["overall"], "fail")
         self.assertEqual([s["name"] for s in result["steps"]],
-                         ["sync", "connect", "push", "report"])
-        self.assertEqual([s["rc"] for s in result["steps"]], [0, 0, 1, 0])
+                         ["sync", "build", "connect", "push", "report"])
+        self.assertEqual([s["rc"] for s in result["steps"]], [0, 0, 0, 1, 0])
         self.assertEqual(result["skipped"], ["unit_test", "acceptance", "package"])
         self.assertIn("unit_test", result["skip_reasons"])
         self.assertIn("链已停", result["skip_reasons"]["unit_test"])
@@ -282,7 +282,8 @@ class TestChain(unittest.TestCase):
         self.assertTrue(killed["canceled"])
         # A1 后 report 步执行落 fail 收据（不在 skipped 内）
         self.assertEqual(result["skipped"],
-                         ["connect", "push", "unit_test", "acceptance", "package"])
+                         ["build", "connect", "push", "unit_test",
+                          "acceptance", "package"])
 
     def test_run_state_json_written(self):
         # 运行态落盘（仅编排器写）：runs/<run_id>.json 记真实 rc/起止/canceled
@@ -348,6 +349,107 @@ class TestChain(unittest.TestCase):
         self.assertGreaterEqual(el, 5, "elapsed_s 须反映链路真实总耗时")
         self.assertIn('"verify_start"', tj)
 
+    def test_chain_marks_each_standard_step(self):
+        # 方向 1 判红：链编排器每步完成自发 verify_<step>（真实耗时入账）——
+        # mock Popen 下子脚本不真跑不自发 mark，修复前 verify_sync/verify_push/
+        # verify_unit_test/verify_acceptance 缺失（被 ws_acceptance 盲目补零）。
+        from cdp_paths import log_apply_dir
+        old = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+        self.addCleanup(
+            lambda: os.environ.__setitem__("CDP_PROJECT_ROOT", old)
+            if old is not None else os.environ.pop("CDP_PROJECT_ROOT", None))
+        bid = wc.batch_id_from_text(self.batch.read_text(encoding="utf-8"))
+        rc, _, _ = self._run()
+        self.assertEqual(rc, 0)
+        data = json.loads((log_apply_dir()
+                           / f"timings-{bid}.json").read_text(encoding="utf-8"))
+        marks = {m["name"]: m for m in data.get("marks") or []}
+        for seg in ("verify_build", "verify_sync", "verify_push",
+                    "verify_unit_test", "verify_acceptance"):
+            self.assertIn(seg, marks,
+                          f"链步完成须自发 mark {seg}（真实耗时入账）")
+            self.assertIsNotNone(marks[seg].get("dur_s"),
+                                 f"{seg} 为执行步须带实测 dur_s 入账")
+
+    def test_chain_marks_skipped_standard_step_zero(self):
+        # 方向 1 判红：真跳过的标准步发 zero mark（补零只兜真跳过的步）——
+        # 链前序失败后 unit_test 等余步 skipped，其 verify_<step> 须为 zero
+        from cdp_paths import log_apply_dir
+        old = os.environ.get("CDP_PROJECT_ROOT")
+        os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
+        self.addCleanup(
+            lambda: os.environ.__setitem__("CDP_PROJECT_ROOT", old)
+            if old is not None else os.environ.pop("CDP_PROJECT_ROOT", None))
+        bid = wc.batch_id_from_text(self.batch.read_text(encoding="utf-8"))
+        rc, result, _ = self._run(popen_rc=1)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("unit_test", result["skipped"])
+        data = json.loads((log_apply_dir()
+                           / f"timings-{bid}.json").read_text(encoding="utf-8"))
+        marks = {m["name"]: m for m in data.get("marks") or []}
+        self.assertIn("verify_unit_test", marks,
+                      "跳过的步须发 verify_<step> mark")
+        self.assertIsNone(marks["verify_unit_test"].get("dur_s"),
+                          "真跳过的步段零 mark 不带 dur_s（非实测耗时）")
+
+    def test_build_step_compiles_in_aosp_cwd(self):
+        # 方向 1 判红：build 链步在锁内直跑 AOSP 编译（勿用包装器）——
+        # argv 为 bash -c 拼 envsetup+lunch+CCACHE+m targets（verify-cases
+        # modules 段并集），cwd=AOSP 工作区根；verify_build 由链步自发实测
+        #（见 test_chain_marks_each_standard_step 的 verify_build 断言）
+        calls = []
+        ctor = mock.Mock(side_effect=lambda argv, **kw: (
+            calls.append((argv, kw.get("cwd"))),
+            mock.Mock(wait=mock.Mock(return_value=0)))[1])
+        with mock.patch.object(wc.subprocess, "Popen", ctor), \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK), \
+                mock.patch.object(wc, "_aosp_root",
+                                  return_value="/tmp/fake-aosp"):
+            rc, result = wc.run_chain(batch_file=str(self.batch),
+                                      use_locks=False)
+        self.assertEqual(rc, 0)
+        build = next((argv, cwd) for argv, cwd in calls
+                     if argv[:2] == ["bash", "-c"])
+        argv, cwd = build
+        self.assertEqual(cwd, "/tmp/fake-aosp",
+                         "build 步须在 AOSP 工作区根编译")
+        cmd = argv[2]
+        self.assertIn("source build/envsetup.sh", cmd)
+        self.assertIn("lunch aosp_rpi5-bp1a-userdebug", cmd)
+        self.assertIn("CCACHE_DIR=out/ccache", cmd)
+        self.assertNotIn("clean", cmd, "INC-001 禁 make clean/clobber")
+        import yaml
+        cases = yaml.safe_load(Path(
+            wc._SCRIPT_DIR.parents[1] / "config" / "verify-cases.yaml"
+        ).read_text(encoding="utf-8"))
+        for mod in cases["modules"].values():
+            for t in (mod.get("targets") or []) + (mod.get("test_targets") or []):
+                self.assertIn(t, cmd, f"编译目标 {t} 须入 m 命令")
+
+    def test_build_failure_stops_chain(self):
+        # 方向 1 判红：build 步失败即停链（编译不可信时推送/上板无意义），
+        # 余验证步记 skipped，report 仍执行落 fail 收据（A1 失败收据契约）
+        def run(argv, **kw):
+            if argv[:2] == ["bash", "-c"]:
+                return mock.Mock(wait=mock.Mock(return_value=1))
+            return mock.Mock(wait=mock.Mock(return_value=0))
+        ctor = mock.Mock(side_effect=run)
+        with mock.patch.object(wc.subprocess, "Popen", ctor), \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(batch_file=str(self.batch),
+                                      use_locks=False)
+        self.assertEqual(rc, 1)
+        self.assertEqual(result["overall"], "fail")
+        self.assertEqual([s["name"] for s in result["steps"]],
+                         ["sync", "build", "report"])
+        for n in ("connect", "push", "unit_test", "acceptance", "package"):
+            self.assertIn(n, result["skipped"], f"build 失败后 {n} 须记 skipped")
+
     def test_lock_held_returns_3_no_run_json(self):
         # 编排锁被占用：exit 3，不执行任何步骤，运行态不落盘
         # （预跑线程仍会启动但被 mock——LockHeld 提前返回不等它收割）
@@ -383,7 +485,7 @@ class TestChain(unittest.TestCase):
         rc, result, _ = self._run(batch_file=None)
         self.assertEqual(rc, 0)
         self.assertEqual([s["name"] for s in result["steps"]],
-                         ["sync", "connect", "push", "unit_test"])
+                         ["sync", "build", "connect", "push", "unit_test"])
         self.assertEqual(result["skipped"], ["acceptance", "package", "report"])
         self.assertIn("acceptance", result["skip_reasons"])
         self.assertIn("report", result["skip_reasons"])
@@ -402,7 +504,7 @@ class TestChain(unittest.TestCase):
                                       use_locks=False)
         self.assertEqual(rc, 0)
         self.assertEqual([s["name"] for s in result["steps"]],
-                         ["sync", "connect", "push", "unit_test",
+                         ["sync", "build", "connect", "push", "unit_test",
                           "acceptance"])
         self.assertEqual(result["skipped"], ["package", "report"])
         acc = next(c for c in calls if "ws_acceptance.py" in c[1])
@@ -620,6 +722,80 @@ class TestQuickMode(unittest.TestCase):
         self.assertGreater(
             [i for i, n in enumerate(names) if n == "ws_coverage.py"][0],
             [i for i, n in enumerate(names) if n == "ws_upload_tests.py"][0])
+
+
+class TestBuildDryRun(unittest.TestCase):
+    """CDP 2026-09-11 方向 1：build 步秒级干跑（source envsetup+lunch 验证
+    环境，不跑真 m 编译——build 步 8107948 新增以来一次未执行，首跑一小时
+    赌不起）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.aosp = Path(self._tmp.name) / "aosp"
+        self.aosp.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_dry_run_success(self):
+        # 环境可用：targets 非空 + aosp 存在 + source/lunch 执行成功 → rc 0
+        run_mock = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(wc, "_aosp_root", return_value=str(self.aosp)), \
+                mock.patch.object(wc, "_load_build_targets",
+                                  return_value=["a", "b"]), \
+                mock.patch.object(wc.subprocess, "run", return_value=run_mock):
+            rc = wc.run_build_dry_run("rpi5")
+            call = wc.subprocess.run.call_args
+        self.assertEqual(rc, 0)
+        self.assertEqual(call.args[0][0], "bash")
+        self.assertIn("source build/envsetup.sh", call.args[0][2])
+        self.assertIn("lunch aosp_rpi5-bp1a-userdebug", call.args[0][2])
+        self.assertIn("ANDROID_PRODUCT_OUT", call.args[0][2])
+        self.assertNotIn("m ", call.args[0][2], "dry-run 不跑真编译")
+
+    def test_dry_run_missing_targets_returns_2(self):
+        # 前置校验红灯：verify-cases 无编译目标 → 返 2（拒干跑）
+        with mock.patch.object(wc, "_aosp_root", return_value=str(self.aosp)), \
+                mock.patch.object(wc, "_load_build_targets", return_value=[]):
+            rc = wc.run_build_dry_run("rpi5")
+        self.assertEqual(rc, 2)
+
+    def test_dry_run_missing_aosp_returns_2(self):
+        # 前置校验红灯：_aosp_root 目录不存在 → 返 2
+        with mock.patch.object(wc, "_aosp_root",
+                               return_value=str(self.aosp / "nope")):
+            rc = wc.run_build_dry_run("rpi5")
+        self.assertEqual(rc, 2)
+
+    def test_dry_run_envsetup_failure_returns_1(self):
+        # 执行红灯：source envsetup/lunch 失败 rc=1 → 返 1（环境不可用）
+        with mock.patch.object(wc, "_aosp_root", return_value=str(self.aosp)), \
+                mock.patch.object(wc, "_load_build_targets",
+                                  return_value=["a"]), \
+                mock.patch.object(wc.subprocess, "run",
+                                  return_value=mock.Mock(returncode=1,
+                                                         stdout="",
+                                                         stderr="boom")):
+            rc = wc.run_build_dry_run("rpi5")
+        self.assertEqual(rc, 1)
+
+    def test_build_validate_rules(self):
+        # BLD-004/005 静态校验：空 targets 拒；bootimage 在 systemimage 后拒
+        self.assertTrue(wc._build_validate([], "x"))
+        self.assertTrue(wc._build_validate(["a", "b"], ""))
+        self.assertIsNone(wc._build_validate(
+            ["bootimage", "systemimage", "vendorimage"], "l"),
+            "bootimage 先于 systemimage 合规")
+        bad = wc._build_validate(["systemimage", "bootimage"], "l")
+        self.assertTrue(bad and "BLD-005" in bad, "bootimage 后于 systemimage 违规")
+
+    def test_main_build_dry_run_flag(self):
+        # CLI --build-dry-run 走干跑并返回其 rc（不经整链）
+        with mock.patch.object(wc, "run_build_dry_run", return_value=0) as m, \
+                mock.patch.object(wc, "_aosp_root", return_value=str(self.aosp)):
+            rc = wc.main(["--build-dry-run"])
+        self.assertEqual(rc, 0)
+        m.assert_called_once_with("rpi5")
 
 
 if __name__ == "__main__":

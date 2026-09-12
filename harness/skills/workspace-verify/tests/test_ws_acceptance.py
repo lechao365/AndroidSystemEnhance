@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -1434,8 +1434,8 @@ class TestBackfillZeroMarks(unittest.TestCase):
     def _timing(self):
         return wa.cdp_paths.log_apply_dir() / f"timings-{self.batch}.json"
 
-    def test_fills_missing_four_segments_zero(self):
-        # 四段均缺失：以最近 mark 同刻补零，收据 timings 五段齐全
+    def test_fills_missing_three_segments_zero(self):
+        # 三段均缺失：以最近 mark 同刻补零，收据 timings 段齐全
         wa.cdp_timing.main(["start", "--batch", self.batch])
         wa.cdp_timing.main(["mark", "--batch", self.batch, "--name",
                             "verify_acceptance"])
@@ -1443,8 +1443,7 @@ class TestBackfillZeroMarks(unittest.TestCase):
         data = json.loads(self._timing().read_text(encoding="utf-8"))
         names = [m["name"] for m in data["marks"]]
         self.assertEqual(names, ["verify_acceptance", "verify_sync",
-                                 "verify_build", "verify_push",
-                                 "verify_unit_test"])
+                                 "verify_push", "verify_unit_test"])
         last_wall = data["marks"][0]["wall"]
         for m in data["marks"][1:]:
             self.assertEqual(m["wall"], last_wall, "补零段须与最近 mark 同刻")
@@ -1452,9 +1451,21 @@ class TestBackfillZeroMarks(unittest.TestCase):
         wa.cdp_timing.main(["finish", "--batch", self.batch])
         data = json.loads(self._timing().read_text(encoding="utf-8"))
         segs = {s["name"]: s["elapsed_s"] for s in data["segments"]}
-        for seg in ("verify_sync", "verify_build", "verify_push",
-                    "verify_unit_test"):
+        for seg in ("verify_sync", "verify_push", "verify_unit_test"):
             self.assertEqual(segs[seg], 0)
+
+    def test_verify_build_not_backfilled(self):
+        # 判红回归（方向 1）：verify_build 从补零集移除——编译是否真跑由
+        # 执行者 mark 决定，缺失不得盲目补零（编译真跑数千秒补零=伪造数据）。
+        # 修复前 _STANDARD_ZERO_SEGMENTS 含 verify_build，缺失即补 0。
+        wa.cdp_timing.main(["start", "--batch", self.batch])
+        wa.cdp_timing.main(["mark", "--batch", self.batch, "--name",
+                            "verify_acceptance"])
+        wa._backfill_zero_marks(self.batch)
+        data = json.loads(self._timing().read_text(encoding="utf-8"))
+        names = [m["name"] for m in data["marks"]]
+        self.assertNotIn("verify_build", names,
+                         "verify_build 不得被盲目补零（须执行者 mark 真实耗时）")
 
     def test_existing_segments_not_overwritten(self):
         # 已有真实 mark 的段不重复补零（真实耗时保留）
@@ -1464,8 +1475,8 @@ class TestBackfillZeroMarks(unittest.TestCase):
         wa._backfill_zero_marks(self.batch)
         data = json.loads(self._timing().read_text(encoding="utf-8"))
         names = [m["name"] for m in data["marks"]]
-        self.assertEqual(names, ["verify_sync", "verify_build",
-                                 "verify_push", "verify_unit_test"])
+        self.assertEqual(names, ["verify_sync", "verify_push",
+                                 "verify_unit_test"])
         self.assertEqual(data["marks"][0]["wall"],
                          data["marks"][1]["wall"])
 
@@ -1479,10 +1490,10 @@ class TestBackfillZeroMarks(unittest.TestCase):
 
 
 class TestResolveRunBatchId(unittest.TestCase):
-    """main 内 batch_id 解析三级回落（显式 batch-file > CDP_BATCH_ID >
-    唯一 timings 文件）：--case 模式未解析出 batch_id 时回落识别，否则
-    _backfill_zero_marks 直接 return，verify_build 等标准段永远 missing
-    （0904 三批 missing=[verify_build] 的根因）。"""
+    """main 内 batch_id 解析两级回落（显式 batch-file > CDP_BATCH_ID，
+    方向 2 收窄：去掉唯一 timings 回落）：--case 模式未解析出 batch_id 时
+    回落识别，否则 _backfill_zero_marks 直接 return，verify_build 等标准段
+    永远 missing（0904 三批 missing=[verify_build] 的根因）。"""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -1596,7 +1607,7 @@ class TestMarkStageInProcess(unittest.TestCase):
 
 
 class TestWriteCases(unittest.TestCase):
-    """方向 1：本次实跑 case 标签落盘 cases-<batch_id>.json（三级回落识别 batch）。"""
+    """方向 1：本次实跑 case 标签落盘 cases-<batch_id>.json（两级回落识别 batch）。"""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -1682,7 +1693,13 @@ class TestConvertSince(unittest.TestCase):
         expect = (datetime.fromtimestamp(local_epoch, tz=timezone.utc)
                   .strftime("%m-%d %H:%M:%S.%f")[:-3])
         self.assertEqual(since, expect)
-        self.assertNotEqual(since, local_since)
+        # 仅当本地时区偏移非 0（如 CST）时，换算后的设备 UTC 表示才必然与
+        # 本地文本不同；CI runner 时区 UTC（偏移 0）时 since == local_since
+        # 属预期（PIT-5 场景是"本地 CST、设备 UTC"）。写死 assertNotEqual
+        # 使 CI 恒红（2026-09-11 实测 run 34559282497）
+        local_tz = datetime.now().astimezone().tzinfo
+        if local_tz is not None and local_tz.utcoffset(None) != timedelta(0):
+            self.assertNotEqual(since, local_since)
 
     def test_device_clock_behind_local(self):
         # PIT-5：设备时钟落后本地 1h → 换算后时间窗相应提前 1h

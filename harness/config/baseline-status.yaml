@@ -384,3 +384,127 @@ baselines:
       archived_in: ''
   approved_by: lechao
   approved_at: '2026-09-10T19:18:45+08:00'
+- baseline_id: BL-20260912-01
+  status: candidate
+  source_branch: dev
+  source_commit: 3cef2d38fbbb
+  sync_manifest: data/verify-results/20260912-112245-d6daed24110b.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260912-112245-d6daed24110b.md
+    ki_gate: pass
+    evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+    known_issues_carried: KI-FLAKE-d6daed24110b-6b8d79
+    package_evidence: data/verify-results/20260912-112245-d6daed24110b.md
+    package_rc: 0
+    cases_coverage:
+      result: full
+      missing: []
+      run_count: 11
+- baseline_id: BL-20260912-02
+  status: candidate
+  source_branch: dev
+  source_commit: f9f87db68309
+  sync_manifest: data/verify-results/20260912-154220-89b62e4553fd.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260912-154220-89b62e4553fd.md
+    ki_gate: pass
+    evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+    known_issues_carried: KI-20260910-001,KI-20260910-002
+    package_evidence: data/verify-results/20260912-154220-89b62e4553fd.md
+    package_rc: 0
+    cases_coverage:
+      result: full
+      missing: []
+      run_count: 11
+- baseline_id: BL-20260912-03
+  status: promoted
+  source_branch: dev
+  source_commit: f8aa81ba89da
+  sync_manifest: data/verify-results/20260912-181227-b69c438c75cd.md
+  build_result: SKIP
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+  evidence:
+    build_result: SKIP
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260912-181227-b69c438c75cd.md
+    ki_gate: pass
+    evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+    known_issues_carried: KI-20260910-001,KI-20260910-002
+    package_evidence: data/verify-results/20260912-181227-b69c438c75cd.md
+    package_rc: 0
+    cases_coverage:
+      result: full
+      missing: []
+      run_count: 11
+    known_issues_closed:
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+  approved_by: lechao
+  approved_at: '2026-09-12T18:14:35+08:00'

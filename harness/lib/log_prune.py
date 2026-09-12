@@ -31,9 +31,14 @@ _LIB_DIR = Path(__file__).resolve().parent
 # 此前误取 parents[0] 得到 harness/，致 DEFAULT_TARGETS 以"harness/log/..."
 # 相对根 glob 恒零命中仍返 0（scanned=0 静默假成功），修整后锚定真仓根
 # （test_repo_root_is_repo_root 不 patch REPO_ROOT 自证，防回归）
+# 覆盖仅当 CDP_PROJECT_ROOT 是 git 仓时生效（2026-09-11 CI 自检 step 注入
+# CDP_PROJECT_ROOT=runner 空临时目录——非 git 仓若覆盖会把 REPO_ROOT 锚到
+# 空目录，test_repo_root_is_repo_root 断言失败致 CI 红；隔离语义本面向
+# 临时 git 仓）
 REPO_ROOT = _LIB_DIR.parents[1]
-if os.environ.get("CDP_PROJECT_ROOT", "").strip():
-    REPO_ROOT = Path(os.environ["CDP_PROJECT_ROOT"].strip())
+_cdp_proj = os.environ.get("CDP_PROJECT_ROOT", "").strip()
+if _cdp_proj and (Path(_cdp_proj) / ".git").exists():
+    REPO_ROOT = Path(_cdp_proj)
 
 # 默认清理目标（相对仓库根的 glob）：各工作流运行产物
 DEFAULT_TARGETS = [

@@ -267,6 +267,53 @@ def sync_index(issues_dir=None):
                       "\n".join(lines) + ("\n" if lines else ""))
 
 
+def _file_field_errs(p, fields):
+    """文件级字段/枚举校验（不含 index 一致性），返回错误列表。"""
+    errs = []
+    if not _NAME_RE.match(p.name):
+        errs.append(f"文件名式样非法: {p.name}（须 <YYYYMMDD>-<HHMMSS>-<12hex>-<slug>.md）")
+    for f in _FIELDS:
+        if f not in fields:
+            # kind 可选（方向 3）：旧条目无 flake 分类 = 普通，缺失不判
+            # 畸形（否则历史 known-issues 文件全红阻塞 check-issues 门禁）
+            if f == "kind":
+                continue
+            errs.append(f"头字段缺失: {f}")
+    origin = fields.get("origin", _ORIGIN_DEFAULT)
+    if origin not in _ORIGINS:
+        errs.append(f"origin 非法: {origin!r}，允许 {_ORIGINS}")
+    severity = fields.get("severity", _SEVERITY_DEFAULT)
+    if severity not in _SEVERITIES:
+        errs.append(f"severity 非法: {severity!r}，允许 {_SEVERITIES}")
+    status = fields.get("status", _STATUS_DEFAULT)
+    if status not in _STATUSES:
+        errs.append(f"status 非法: {status!r}，允许 {_STATUSES}")
+    kind = fields.get("kind", _KIND_DEFAULT)
+    if kind not in _KINDS:
+        errs.append(f"kind 非法: {kind!r}，允许 {_KINDS}")
+    blocking = fields.get("blocking", "false").lower() in ("true", "1", "yes")
+    if blocking and not fields.get("blocking_reason", ""):
+        errs.append("blocking=true 但 blocking_reason 为空")
+    # task 含空白判红：read_index 按空格切分 index 行，task 内空白会列错位
+    if re.search(r"\s", fields.get("task", "")):
+        errs.append(f"task 含空白: {fields['task']!r}（index 按空格切分会错位）")
+    return errs
+
+
+def _index_consistency_errs(d, idx_by_id, file_ids):
+    """index 与文件集一致（双向），返回错误列表。"""
+    errs = []
+    index_ids = set(idx_by_id)
+    if index_ids != file_ids:
+        only_idx = index_ids - file_ids
+        only_file = file_ids - index_ids
+        if only_idx:
+            errs.append(f"index 有多余条目(无对应文件): {sorted(only_idx)}")
+        if only_file:
+            errs.append(f"index 缺文件条目: {sorted(only_file)}")
+    return errs
+
+
 def validate_issue(path, issues_dir=None):
     """判红已知问题文件，返回错误列表（空即通过）。
 
@@ -275,45 +322,15 @@ def validate_issue(path, issues_dir=None):
     """
     d = Path(issues_dir) if issues_dir else data_known_issues_dir()
     p = Path(path)
-    errs = []
-    if not _NAME_RE.match(p.name):
-        errs.append(f"文件名式样非法: {p.name}（须 <YYYYMMDD>-<HHMMSS>-<12hex>-<slug>.md）")
-    text = None
     try:
         text = p.read_text(encoding="utf-8")
     except OSError as e:
-        errs.append(f"文件不可读: {e}")
+        errs = [f"文件不可读: {e}"]
+        text = None
     if text is not None:
         header, sep, body = text.partition("\n## body")
         fields = {m.group(1): m.group(2).strip() for m in _FIELD_RE.finditer(header)}
-
-        for f in _FIELDS:
-            if f not in fields:
-                # kind 可选（方向 3）：旧条目无 flake 分类 = 普通，缺失不判
-                # 畸形（否则历史 known-issues 文件全红阻塞 check-issues 门禁）
-                if f == "kind":
-                    continue
-                errs.append(f"头字段缺失: {f}")
-
-        origin = fields.get("origin", _ORIGIN_DEFAULT)
-        if origin not in _ORIGINS:
-            errs.append(f"origin 非法: {origin!r}，允许 {_ORIGINS}")
-        severity = fields.get("severity", _SEVERITY_DEFAULT)
-        if severity not in _SEVERITIES:
-            errs.append(f"severity 非法: {severity!r}，允许 {_SEVERITIES}")
-        status = fields.get("status", _STATUS_DEFAULT)
-        if status not in _STATUSES:
-            errs.append(f"status 非法: {status!r}，允许 {_STATUSES}")
-        kind = fields.get("kind", _KIND_DEFAULT)
-        if kind not in _KINDS:
-            errs.append(f"kind 非法: {kind!r}，允许 {_KINDS}")
-        blocking = fields.get("blocking", "false").lower() in ("true", "1", "yes")
-        if blocking and not fields.get("blocking_reason", ""):
-            errs.append("blocking=true 但 blocking_reason 为空")
-        # task 含空白判红：read_index 按空格切分 index 行，task 内空白会列错位
-        if re.search(r"\s", fields.get("task", "")):
-            errs.append(f"task 含空白: {fields['task']!r}（index 按空格切分会错位）")
-
+        errs = _file_field_errs(p, fields)
     # index 与文件集一致（文件缺失/多余均检出；目标文件字段须与 index 匹配）
     entries = read_index(d)
     idx_by_id = {e["issue_id"]: e for e in entries}
@@ -321,7 +338,7 @@ def validate_issue(path, issues_dir=None):
     for f in issue_files(d):
         i = read_issue(f)
         file_ids.add(i.issue_id)
-        if text is not None and p.resolve() == f.resolve():
+        if p.resolve() == f.resolve():
             entry = idx_by_id.get(i.issue_id)
             if entry is None:
                 errs.append(f"index 缺该问题条目: {i.issue_id}")
@@ -332,15 +349,47 @@ def validate_issue(path, issues_dir=None):
                         errs.append(f"index[{key}]={entry[key]} != 文件头 {cur}")
                 if entry["blocking"] != i.blocking:
                     errs.append(f"index[blocking]={entry['blocking']} != 文件头 {i.blocking}")
-    index_ids = set(idx_by_id)
-    if index_ids != file_ids:
-        only_idx = index_ids - file_ids
-        only_file = file_ids - index_ids
-        if only_idx:
-            errs.append(f"index 有多余条目(无对应文件): {sorted(only_idx)}")
-        if only_file:
-            errs.append(f"index 缺文件条目: {sorted(only_file)}")
+    errs.extend(_index_consistency_errs(d, idx_by_id, file_ids))
     return errs
+
+
+def validate_all(issues_dir=None):
+    """批量校验整个 known-issues 目录，返回 [(path, errs)]（index 级错误 path=None）。
+
+    修 O(N²) 根因（KIR-002 flake，20260912）：逐文件 validate_issue 每次都会全量
+    扫 index 做一致性（O(N) per call），全目录遍历变 O(N²)，真实仓 26+ 条目在
+    drvfs 下超 slow guard 3s 判红（tst-07 抖动源）。本函数单次读取全部文件 +
+    index 一致性只扫一次（O(N) 总），用于仓库级全量校验。
+    """
+    d = Path(issues_dir) if issues_dir else data_known_issues_dir()
+    entries = read_index(d)
+    idx_by_id = {e["issue_id"]: e for e in entries}
+    file_ids = set()
+    out = []
+    for p in issue_files(d):
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError as e:
+            out.append((p, [f"文件不可读: {e}"]))
+            continue
+        header, sep, body = text.partition("\n## body")
+        fields = {m.group(1): m.group(2).strip() for m in _FIELD_RE.finditer(header)}
+        errs = _file_field_errs(p, fields)
+        i = Issue.from_text(text)
+        file_ids.add(i.issue_id)
+        entry = idx_by_id.get(i.issue_id)
+        if entry is None:
+            errs.append(f"index 缺该问题条目: {i.issue_id}")
+        else:
+            for key, cur in (("origin", i.origin), ("task", i.task),
+                             ("status", i.status)):
+                if entry[key] != cur:
+                    errs.append(f"index[{key}]={entry[key]} != 文件头 {cur}")
+            if entry["blocking"] != i.blocking:
+                errs.append(f"index[blocking]={entry['blocking']} != 文件头 {i.blocking}")
+        out.append((p, errs))
+    out.append((None, _index_consistency_errs(d, idx_by_id, file_ids)))
+    return out
 
 
 def template_path() -> Path:

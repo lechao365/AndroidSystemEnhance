@@ -47,13 +47,22 @@ class TestSelfcheckWorkflow(unittest.TestCase):
                              f"{action} 未按 SHA 固定: {ref}")
 
     def test_runs_selfcheck_only_with_degraded_pointer(self):
-        # 唯一 job 只跑自检；显式注入 CDP_PROJECT_ROOT（无打点指针降级路径）
+        # 唯一 job 只跑自检；CDP_PROJECT_ROOT 在自检 step 级 env 注入
+        # （无打点指针降级路径）。runner 上下文仅 step 级可用：job 级 env
+        # 用 ${{ runner.temp }} 会致工作流启动失败（89 run 零 job），step 级
+        # env 用 ${{ runner.temp }} 表达式正确（Actions env 不做 shell 展开，
+        # $RUNNER_TEMP 字面量会在检出树建同名目录污染检出树）
         job = self.doc["jobs"]["selfcheck"]
         steps = job["steps"]
         run_steps = [s.get("run", "") for s in steps]
         joined = "\n".join(run_steps)
         self.assertIn("selfcheck.py", joined)
-        self.assertEqual(job.get("env", {}).get("CDP_PROJECT_ROOT"),
+        # job 级 env 不得用表达式上下文（runner.temp 在 job 级不可用）
+        self.assertNotIn("runner.temp", str(job.get("env", {})))
+        # 自检 step 级 env 用 ${{ runner.temp }} 表达式（step 内可用，
+        # 求值为真实临时路径；字面量 $RUNNER_TEMP 是 bug）
+        selfcheck = next(s for s in steps if "selfcheck.py" in s.get("run", ""))
+        self.assertEqual(selfcheck.get("env", {}).get("CDP_PROJECT_ROOT"),
                          "${{ runner.temp }}/cdp-root")
 
     def test_ci_parses_required_rcs(self):
@@ -121,6 +130,30 @@ class TestSelfcheckWorkflow(unittest.TestCase):
         self.assertIsNone(
             re.search(r"for\s+rc_name\s+in\s+([^;\n]+);", stripped2),
             "整体注释掉的判定段剥注释后须无键集合（不得判绿）")
+
+    def test_every_required_rc_has_ws_report_red_case(self):
+        # CDP-DOD-001 门禁化（方向 3）：REQUIRED_RC_KEYS 每个必查 rc 都须有
+        # ws_report 侧判红用例——制造破坏→该 rc=1→ws_report 返 2 拒写收据。
+        # 防新增检查器接入必查键却无判红用例（接了不判=假绿）。
+        # 覆盖来源两类（取并集）：
+        #   1) 字面量判红：源码存在 "{rc}=1" 文本（手写用例，如 config_rc=1）
+        #   2) 模板注册：_assert_rc_nonzero_rejected("<rc>") 调用（模板化构造，
+        #      运行时拼 {rc}=1，源码无字面量）
+        src = (REPO_ROOT / "harness" / "skills" / "workspace-verify"
+               / "tests" / "test_ws_report.py").read_text(encoding="utf-8")
+        # 剥整行 # 注释再扫描——注释掉的模板注册/判红构造不得判绿（与
+        # test_strip_comments_before_gate_check 同款防注释伪满足教训）
+        clean = "\n".join(ln for ln in src.splitlines()
+                          if not ln.lstrip().startswith("#"))
+        literal = {m.group(1) for m in re.finditer(r"(\w+_rc)=1\b", clean)}
+        registered = set(re.findall(
+            r'_assert_rc_nonzero_rejected\("(\w+_rc)"\)', clean))
+        covered = literal | registered
+        missing = [rc for rc in REQUIRED_RC_KEYS if rc not in covered]
+        self.assertEqual(
+            missing, [],
+            f"以下必查 rc 缺 ws_report 判红用例（须制造破坏→该 rc=1→拒写收据，"
+            f"可并入 _assert_rc_nonzero_rejected 模板）: {sorted(missing)}")
 
 
 if __name__ == "__main__":

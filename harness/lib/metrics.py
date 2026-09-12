@@ -26,6 +26,11 @@ _TREND_RESULT_RE = re.compile(r"^\S+\s+\S+\s+(\S+)\s+(\S+)\s+(.*)$")
 # known-issues 头字段
 _KI_FIELD_RE = re.compile(r"^- (\w+): (.*)$", re.MULTILINE)
 
+# 近 N 批 fail 率恒 0 判可疑窗口（方向 2）：窗口内收据无 fail/revert 即标记
+# 可疑——防失败轮次不入账使证据链只见绿（元监控；告警不阻断，全绿健康态
+# 不得反向判红 metrics_rc 死锁）。
+_SUSPICIOUS_WINDOW = 10
+
 
 def load_receipts(verify_dir: Path) -> list[dict]:
     """读 verify-results/*.md，返回字段 dict 列表（排除 trend.md；解析容错）。"""
@@ -103,6 +108,13 @@ def compute(receipts, trend_lines, issues) -> dict:
     total_pass = counts["pass"]
     pass_rate = total_pass / total if total else 0.0
     flake_count = sum(1 for i in issues if i.get("kind") == "flake")
+    # 近 N 批 fail 率恒 0 判可疑（方向 2）：窗口内收据齐全（>=N）且无
+    # fail/revert → 证据链只见绿，可疑为失败轮次未入账；不足 N 批/含失败
+    # 不判可疑（数据不足或失败已入账）。
+    recent = receipts[-_SUSPICIOUS_WINDOW:]
+    suspicious = (len(recent) >= _SUSPICIOUS_WINDOW
+                  and not any((r.get("result") or "").lower()
+                              in ("fail", "revert") for r in recent))
     return {
         "total": total,
         "pass": counts["pass"], "fail": counts["fail"],
@@ -116,6 +128,7 @@ def compute(receipts, trend_lines, issues) -> dict:
         "trend_total": len(trend_lines),
         "flake_count": flake_count,
         "known_issues_total": len(issues),
+        "suspicious_fail_hidden": suspicious,
     }
 
 
@@ -135,7 +148,7 @@ def render_stats(stats: dict, as_json: bool = False) -> str:
     if as_json:
         return json.dumps(stats, ensure_ascii=False, sort_keys=True,
                           indent=2)
-    return "\n".join([
+    lines = [
         f"verify 收据总数: {stats['total']}",
         f"  pass={stats['pass']} fail={stats['fail']} "
         f"skip={stats['skip']} revert={stats['revert']}",
@@ -145,7 +158,12 @@ def render_stats(stats: dict, as_json: bool = False) -> str:
         f"trend 行数: {stats['trend_total']}",
         f"flake known-issues: {stats['flake_count']}  "
         f"known-issues 总数: {stats['known_issues_total']}",
-    ])
+    ]
+    if stats.get("suspicious_fail_hidden"):
+        lines.append(
+            f"警告: 近{_SUSPICIOUS_WINDOW}批收据无 fail/revert，失败轮次"
+            "可能未入账（证据链只见绿），判可疑——请核对失败轮次收据落盘")
+    return "\n".join(lines)
 
 
 def main(argv=None) -> int:

@@ -21,8 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     # 无打点指针降级（方向 5）：log/打点/收据落点全指 runner 临时目录，不污染检出树；
     # cdp_timing mark 无指针时 warn 返非零，selfcheck 捕获后不阻断
-    env:
-      CDP_PROJECT_ROOT: ${{ runner.temp }}/cdp-root
+    # 注（2026-09-11）：CDP_PROJECT_ROOT 原在 job 级 env 用 ${{ runner.temp }}
+    # ——runner 上下文仅 step 级可用，job 级 env 求值失败致工作流启动失败
+    # （89 次 run 全 failure 且零 job 起来）。改 step 级 env 用 $RUNNER_TEMP。
     steps:
       # actions/checkout v4.2.2（SHA 固定；禁浮动 tag）
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -31,17 +32,32 @@ jobs:
         run: python3 -m pip install --quiet pyyaml pytest pytest-xdist ruff
 
       - name: 自检
+        env:
+          # step 级 env 用 ${{ runner.temp }} 表达式（step 内 runner 上下文
+          # 可用）：Actions env 不做 shell 展开，$RUNNER_TEMP 是字面量会在
+          # 检出树建同名目录污染检出树（2026-09-11 修正）
+          CDP_PROJECT_ROOT: ${{ runner.temp }}/cdp-root
         run: |
           mkdir -p "$CDP_PROJECT_ROOT"
-          out="$(python3 harness/lib/selfcheck.py)"
+          out="$(python3 harness/lib/selfcheck.py 2>&1)"
           echo "$out"
           # 方向 1 + 方向 3：selfcheck main 恒返 0（只采集不判定），必须解析
           # 输出中全部 *_rc（含 pyenv_rc/ioctl_rc）任一非零即失败——否则测试
           # 失败也绿（CI 只跑不判）；键集合与 ws_report 必查键同源
-          for rc_name in pytest_rc refs_rc config_rc contract_rc pyenv_rc ioctl_rc manifest_rc discipline_rc scan_rc ruff_rc host_rc metrics_rc opencode_rc; do
+          fail=""
+          for rc_name in pytest_rc refs_rc config_rc contract_rc pyenv_rc ioctl_rc manifest_rc discipline_rc scan_rc ruff_rc host_rc metrics_rc opencode_rc quotepath_rc known_issues_rc; do
             echo "$out" | grep -Eq "${rc_name}=0" \
-              || { echo "error: ${rc_name} 非零，自检失败"; exit 1; }
+              || { echo "error: ${rc_name} 非零，自检失败"; fail="$fail $rc_name"; }
           done
+          if [ -n "$fail" ]; then
+            # 诊断可经 check-runs annotations 免认证读取（apply 机无 admin
+            # 下载 job 日志的权限，2026-09-11 续修定位用）；单独跑 pytest
+            # 拿失败节点（selfcheck 汇总行不保留 FAILED 明细）
+            echo "::error::自检失败 rc:$fail"
+            python3 -m pytest harness/ -q 2>&1 \
+              | grep -E "^FAILED|failed|passed" | head -30 | sed 's/^/::error::/'
+            exit 1
+          fi
 
   # P0-A 业务快检作业：内核 host 单测 + diff 驱动 C/C++ 静态检查（P0-B）。
   # 约束同上（GitHub 托管、最小权限、无 secrets、action SHA 固定）。

@@ -25,6 +25,9 @@ COMMIT_MSG_HOOK = HOOKS_DIR / "commit-msg"
 # rev-parse --show-toplevel → echo "$PWD"：适配入口仓库根锚定（sync-09）
 MOCK_GIT_EMPTY = """#!/usr/bin/env bash
 case "$1" in
+  # git -c core.quotepath=false <subcmd>：规范化剥离配置段，exec 重调自身
+  # 让真实子命令进入对应分支（case 单次匹配，shift 后须重进 case）
+  -c) shift; shift; exec "$0" "$@" ;;
   branch) echo dev ;;
   status) echo " M mock.txt" ;;
   add) exit 0 ;;
@@ -41,6 +44,9 @@ esac
 # ls-remote 正常输出且与本地 HEAD 一致：正常完成路径
 MOCK_GIT_OK = """#!/usr/bin/env bash
 case "$1" in
+  # git -c core.quotepath=false <subcmd>：规范化剥离配置段，exec 重调自身
+  # 让真实子命令进入对应分支（case 单次匹配，shift 后须重进 case）
+  -c) shift; shift; exec "$0" "$@" ;;
   branch) echo dev ;;
   status) echo " M mock.txt" ;;
   add) exit 0 ;;
@@ -58,6 +64,9 @@ esac
 # push 被拒（non-fast-forward / [rejected]）：触发 push 失败分类提示
 MOCK_GIT_PUSH_REJECTED = """#!/usr/bin/env bash
 case "$1" in
+  # git -c core.quotepath=false <subcmd>：规范化剥离配置段，exec 重调自身
+  # 让真实子命令进入对应分支（case 单次匹配，shift 后须重进 case）
+  -c) shift; shift; exec "$0" "$@" ;;
   branch) echo dev ;;
   status) echo " M mock.txt" ;;
   add) exit 0 ;;
@@ -74,6 +83,9 @@ esac
 # 工作树干净：触发 "working tree clean"（exit 4）
 MOCK_GIT_CLEAN = """#!/usr/bin/env bash
 case "$1" in
+  # git -c core.quotepath=false <subcmd>：规范化剥离配置段，exec 重调自身
+  # 让真实子命令进入对应分支（case 单次匹配，shift 后须重进 case）
+  -c) shift; shift; exec "$0" "$@" ;;
   branch) echo dev ;;
   status) exit 0 ;;
   rev-parse) if [ "$2" = "--show-toplevel" ]; then echo "$PWD"; else exit 0; fi ;;
@@ -85,6 +97,9 @@ esac
 # diff 分支区分 --name-status（提交面比对取清单）与 -U0（凭据扫描取 diff 文本）
 MOCK_GIT_CODE_STAGED = """#!/usr/bin/env bash
 case "$1" in
+  # git -c core.quotepath=false <subcmd>：规范化剥离配置段，exec 重调自身
+  # 让真实子命令进入对应分支（case 单次匹配，shift 后须重进 case）
+  -c) shift; shift; exec "$0" "$@" ;;
   branch) echo dev ;;
   status) echo "A  code/rpi5/aosp/new_file.c" ;;
   diff)
@@ -107,6 +122,9 @@ esac
 # 门禁旁路封堵：暂存面仅 docs/ 非业务路径（无收据 → 维持 warn 放行）
 MOCK_GIT_DOCS_STAGED = """#!/usr/bin/env bash
 case "$1" in
+  # git -c core.quotepath=false <subcmd>：规范化剥离配置段，exec 重调自身
+  # 让真实子命令进入对应分支（case 单次匹配，shift 后须重进 case）
+  -c) shift; shift; exec "$0" "$@" ;;
   branch) echo dev ;;
   status) echo "A  docs/x.md" ;;
   diff)
@@ -175,6 +193,9 @@ class TestGitWorksPush(unittest.TestCase):
             # 变 TypeError（Windows 未设 LC_HARNESS_WIN_BASH 时触发）
             self.skipTest("无 bash（find_bash 返 None）")
         env = dict(os.environ)
+        # 方向 3：push 前置 CI 门禁默认跳过（fixture git mock 对 remote 返空，
+        # check_ci_head 无法解析 slug）；env_extra 可覆盖为 0 验证门禁接线
+        env.setdefault("GWP_SKIP_CI_CHECK", "1")
         # env_extra：按用例注入额外环境变量（如 LGW_ALLOW_NO_RECEIPT 逃生门）
         if env_extra:
             env.update(env_extra)
@@ -195,6 +216,15 @@ class TestGitWorksPush(unittest.TestCase):
         r = self._run("--message-file", str(self._msg))
         self.assertEqual(r.returncode, 0)
         self.assertIn("pushed: dev 0123456789ab", r.stdout)
+
+    def test_ci_gate_enforced_unless_skipped(self):
+        # 方向 3：push 前置 CI 门禁接线——GWP_SKIP_CI_CHECK=0 时 check_ci_head
+        # 必须被调用（fixture 无 GitHub origin remote，slug 解析失败返 2
+        # fail-closed → 阻断推送）；默认跳过开关保证既有用例不受网络影响
+        r = self._run("--message-file", str(self._msg),
+                      env_extra={"GWP_SKIP_CI_CHECK": "0"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("Actions run", r.stderr)
 
     def test_baseline_not_registered_exits_1(self):
         # subject 首行声明未登记 BL → 拒绝提交
@@ -350,6 +380,7 @@ class TestCommitMsgHook(unittest.TestCase):
         env = dict(os.environ)
         env["GIT_AUTHOR_NAME"] = env["GIT_COMMITTER_NAME"] = "t"
         env["GIT_AUTHOR_EMAIL"] = env["GIT_COMMITTER_EMAIL"] = "t@t"
+        env["GWP_SKIP_CI_CHECK"] = "1"  # 方向 3：测试 fixture 跳过 CI 门禁
         self._env = env
         r = subprocess.run(["git", "-c", "init.defaultBranch=dev", "init"],
                            cwd=self._repo, capture_output=True, text=True,
@@ -461,6 +492,7 @@ class TestCommitFaceNarrow(unittest.TestCase):
         env["GIT_AUTHOR_NAME"] = env["GIT_COMMITTER_NAME"] = "t"
         env["GIT_AUTHOR_EMAIL"] = env["GIT_COMMITTER_EMAIL"] = "t@t"
         env["CDP_PROJECT_ROOT"] = str(self._repo)
+        env["GWP_SKIP_CI_CHECK"] = "1"  # 方向 3：测试 fixture 跳过 CI 门禁
         self._env = env
         r = subprocess.run(["git", "-c", "init.defaultBranch=dev", "init"],
                            cwd=self._repo, capture_output=True, text=True,

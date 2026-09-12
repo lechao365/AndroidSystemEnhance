@@ -41,7 +41,8 @@ cc_binary {
 }
 
 // filegroup lechao_lcview_daemon_sources — 供 tests/Android.bp 的 cc_test 复用 daemon 源码
-// （不含 lechao_lcview.cpp 主入口，避免与 gtest 主函数冲突）
+// （不含 lechao_lcview.cpp 主入口，避免与 gtest 主函数冲突；
+//   main_loop.cpp 含 runMainLoop 可测边界，须编入 filegroup 使单测可链接）
 filegroup {
     name: "lechao_lcview_daemon_sources",
     srcs: [
@@ -49,6 +50,7 @@ filegroup {
         "FileWriter.cpp",
         "batch_parser.cpp",
         "record_codec.cpp",
+        "main_loop.cpp",
     ],
 }
 

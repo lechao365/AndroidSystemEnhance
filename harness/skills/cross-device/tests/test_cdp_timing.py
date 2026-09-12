@@ -168,12 +168,32 @@ class TestCdpTiming(unittest.TestCase):
         data = json.loads(self._path().read_text(encoding="utf-8"))
         self.assertEqual(data["marks"][0]["name"], "verify_sync")
 
-    def test_mark_uses_unique_timing_file(self):
-        # 目录仅一个 timings 文件且无 env → 自动识别该文件
+    def test_mark_uses_current_batch_pointer(self):
+        # 方向 2 收窄两级回落：无 --batch 无 env 时经 current-batch.json 指针
+        # 定位（start 落指针）；命名纠正——旧名"唯一 timings 文件"实为
+        # current-batch 命中，收窄后唯一 timings 不再作为回落源（见
+        # test_mark_ignores_orphan_unique_timing）
         self.assertEqual(cdp_timing.main(["start", "--batch", self.batch]), 0)
         self.assertEqual(cdp_timing.main(["mark", "--name", "verify_acceptance"]), 0)
         data = json.loads(self._path().read_text(encoding="utf-8"))
         self.assertEqual(data["marks"][0]["name"], "verify_acceptance")
+
+    def test_mark_ignores_orphan_unique_timing(self):
+        # 方向 2 收窄红灯：无 current-batch.json 且目录仅一个 timings 文件
+        # 残留（孤儿）、无 env → mark 不再自动识别该唯一文件（旧三级/四级
+        # 回落会误落；收窄后静默跳过），孤儿文件保持原样
+        orphan = self.batch
+        p = cdp_paths.log_apply_dir() / f"timings-{orphan}.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{\"batch_id\": \"" + orphan + "\", \"marks\": []}\n",
+                     encoding="utf-8")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = cdp_timing.main(["mark", "--name", "verify_sync"])
+        self.assertEqual(rc, 0)
+        self.assertIn("warn", err.getvalue())
+        data = json.loads(p.read_text(encoding="utf-8"))
+        self.assertEqual(data["marks"], [], "孤儿唯一 timings 不得被误写")
 
     def test_mark_multi_start_uses_latest_current_batch(self):
         # 多次 start 后 current-batch.json 指向最近批次，自动 mark 落到本批；
@@ -432,6 +452,56 @@ class TestCdpTiming(unittest.TestCase):
         self.assertAlmostEqual(segs[2]["elapsed_s"], 93.0)  # 99-6 异常段
         self.assertEqual(segs[2]["reason"], "dur_s>interval")
         self.assertAlmostEqual(segs[3]["elapsed_s"], 5.0)   # c 非数值回退
+
+    # ── 方向 2（补）：dur_s 数值下限判红 ─────────────────────────────
+    def test_compute_segments_dur_s_below_floor_flagged(self):
+        # dur_s < DUR_FLOOR（0.05）：主段照落但另落 <name>_dur_floor
+        # 异常段判红（防补零造假复现——历史存在 dur_s=0.0 伪造实例）
+        data = {
+            "batch_id": self.batch,
+            "start_wall": 1000.0,
+            "marks": [
+                {"name": "a", "wall": 1001.0},
+                {"name": "b", "wall": 1007.0, "dur_s": 0.0},
+            ],
+        }
+        segs = cdp_timing.compute_segments(data)
+        self.assertEqual([s["name"] for s in segs],
+                         ["a", "b_dur_floor", "gap_before_b", "b", "finish"])
+        self.assertEqual(segs[1]["name"], "b_dur_floor")
+        self.assertAlmostEqual(segs[1]["elapsed_s"], 0.0)
+        self.assertEqual(segs[1]["reason"], "dur_s<0.05")
+        self.assertAlmostEqual(segs[3]["elapsed_s"], 0.0)  # 主段照落
+
+    def test_compute_segments_dur_s_above_floor_not_flagged(self):
+        # dur_s >= DUR_FLOOR（含边界 0.05）：不落 dur_floor 异常段
+        data = {
+            "batch_id": self.batch,
+            "start_wall": 1000.0,
+            "marks": [
+                {"name": "a", "wall": 1001.0},
+                {"name": "b", "wall": 1007.0, "dur_s": 0.05},
+            ],
+        }
+        segs = cdp_timing.compute_segments(data)
+        self.assertNotIn("b_dur_floor", [s["name"] for s in segs])
+
+    def test_compute_segments_dur_s_floor_with_gap(self):
+        # dur_s=0 造假且 interval 大：主段 0 + dur_floor 判红 +
+        # 余量落 gap_before 段（防补零同时归因完整性不丢）
+        data = {
+            "batch_id": self.batch,
+            "start_wall": 1000.0,
+            "marks": [
+                {"name": "a", "wall": 1001.0},
+                {"name": "b", "wall": 1030.0, "dur_s": 0.0},
+            ],
+        }
+        segs = cdp_timing.compute_segments(data)
+        names = [s["name"] for s in segs]
+        self.assertIn("gap_before_b", names)
+        self.assertIn("b_dur_floor", names)
+        self.assertAlmostEqual(segs[names.index("gap_before_b")]["elapsed_s"], 29.0)
 
     # ── 方向 4：同名段名 #n + 剥序号校验 + gap 段忽略 ─────────────────
     def test_compute_segments_duplicate_name_numbered(self):

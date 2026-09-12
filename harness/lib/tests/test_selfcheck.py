@@ -27,6 +27,10 @@ _FAKE_TOOLS = {
             "OK: contract 检查通过，无违规。"),
     "discipline": (0, "OK: 测试改动无新增 xfail/skip/sleep 重试\n", ""),
     "scan": (0, "OK: 热路径检查器无全树 rglob/os.walk\n", ""),
+    "quotepath": (0, "OK: git 路径输出点均已带 -c core.quotepath=false，"
+                     ".sh 均以 100755 入库\n", ""),
+    "known_issues": (0, "OK: baseline-status.yaml 引用的 KI 编号均有对应"
+                        "记录文件\n", ""),
 }
 
 
@@ -65,7 +69,8 @@ def _patched_parallel():
     with mock.patch.object(selfcheck, "_spawn_tools",
                            return_value={"refs": "p", "cfg": "p"}), \
             mock.patch.object(selfcheck, "_collect_tools",
-                              return_value=(_fake_tools(), 1.0, 2.0, 0.1, 0.1)), \
+                              return_value=(_fake_tools(), 1.0, 2.0, 0.1, 0.1,
+                                            0.1, 0.1)), \
             mock.patch.object(selfcheck, "_spawn_cmd",
                               return_value="p"), \
             mock.patch.object(selfcheck, "_collect_cmd",
@@ -111,7 +116,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1)):
             with redirect_stdout(buf):
                 self.assertEqual(selfcheck.main(), 0)
         out = buf.getvalue()
@@ -199,7 +204,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1)):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -220,7 +225,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1)):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -332,6 +337,8 @@ class TestParallelTools(unittest.TestCase):
             ("OK: config 检查通过，无违规。\nconfig_rc=0\ncontract_rc=0\n", ""),
             ("OK: 测试改动无新增 xfail/skip/sleep 重试\n", ""),
             ("OK: 热路径检查器无全树 rglob/os.walk\n", ""),
+            ("OK: git 路径输出点均已带 -c core.quotepath=false\n", ""),
+            ("OK: baseline-status.yaml 引用的 KI 编号均有对应记录文件\n", ""),
         ]
         with mock.patch.object(selfcheck.subprocess, "Popen",
                                return_value=proc):
@@ -343,7 +350,7 @@ class TestParallelTools(unittest.TestCase):
 
     def test_collect_tools_returns_split_durs(self):
         # 方向 2：_collect_tools 返回 (tools, refs_dur, cfg_dur, dis_dur,
-        # scan_dur)，durs 拆开 refs/cfg/discipline/scan 各自自报（合并 tools
+        # scan_dur, quotepath_dur)，durs 拆开各检查器各自自报（合并 tools
         # 无法定位慢点归因）；收口顺序 refs 先、cfg 后，用 side_effect 逐个注入
         out = ("[VIOLATION] x\n==== config: 共 1 处违规（判红）====\n"
                "OK: contract 检查通过，无违规。\nconfig_rc=1\ncontract_rc=0\n")
@@ -351,21 +358,32 @@ class TestParallelTools(unittest.TestCase):
         cfg_res = (1, out, "", 2.5)
         dis_res = (0, "OK: 测试改动无新增禁戒\n", "", 0.2)
         scan_res = (0, "OK: 热路径无全树 rglob\n", "", 0.3)
+        qp_res = (0, "OK: git 路径输出点均已带 -c core.quotepath=false\n",
+                  "", 0.4)
+        ki_res = (0, "OK: baseline-status.yaml 引用的 KI 编号均有对应记录文件\n",
+                  "", 0.6)
         with mock.patch.object(selfcheck, "_collect_cmd",
                                side_effect=[refs_res, cfg_res,
-                                            dis_res, scan_res]):
-            (tools, refs_dur, cfg_dur, dis_dur, scan_dur) = \
+                                            dis_res, scan_res, qp_res,
+                                            ki_res]):
+            (tools, refs_dur, cfg_dur, dis_dur, scan_dur, qp_dur, ki_dur) = \
                 selfcheck._collect_tools({"refs": "p", "cfg": "p",
-                                          "discipline": "p", "scan": "p"})
+                                          "discipline": "p", "scan": "p",
+                                          "quotepath": "p",
+                                          "known_issues": "p"})
         self.assertEqual(refs_dur, 0.5)
         self.assertEqual(cfg_dur, 2.5)
         self.assertEqual(dis_dur, 0.2)
         self.assertEqual(scan_dur, 0.3)
+        self.assertEqual(qp_dur, 0.4)
+        self.assertEqual(ki_dur, 0.6)
         self.assertEqual(tools["refs"][0], 1)
         self.assertEqual(tools["cfg"][0], 1)
         self.assertEqual(tools["ctr"][0], 0)
         self.assertEqual(tools["discipline"][0], 0)
         self.assertEqual(tools["scan"][0], 0)
+        self.assertEqual(tools["quotepath"][0], 0)
+        self.assertEqual(tools["known_issues"][0], 0)
 
     def test_collect_cmd_timeout_kills_124(self):
         # 方向 1：_collect_cmd 超时 → kill + rc=124（约定超时标记，不无限
@@ -927,6 +945,68 @@ class TestFlakeHistory(unittest.TestCase):
                              (3, "b9"))
 
 
+class TestFlakeSameBatchDedup(unittest.TestCase):
+    """方向 2（20260912-142358）：同批内同 nodeid flake 只登一条。
+
+    loop 多轮 selfcheck（修复验证轮 quick + 末轮 full）对同一 flake 重复
+    触发 _register_flake_issue：同一批次内已登记过该 nodeid 时不重复写盘，
+    直接复用既有记录（此前同批 round 递增重复登记，本批实测 3 条）。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        issues = self.root / "data" / "known-issues"
+        issues.mkdir(parents=True)
+        self.nodeid = "harness/lib/tests/test_x.py::TestX::test_y"
+        self.batch = "abc123abc123"
+        (issues / f"20260912-100000-{self.batch}-flake-test-y.md").write_text(
+            f"- nodeid: {self.nodeid}\n"
+            "- kind: flake\n"
+            "- round: 2\n"
+            "- first_seen_batch: b9\n",
+            encoding="utf-8")
+
+    def test_same_batch_same_nodeid_skips_duplicate(self):
+        # 同批已登记（文件名 batch_id 命中）→ 不重复写盘，复用既有 (round, first)
+        cdpi = mock.Mock()
+        with mock.patch.object(selfcheck, "ROOT", self.root), \
+                mock.patch.object(selfcheck, "_current_batch_id",
+                                  return_value=self.batch), \
+                mock.patch.object(selfcheck, "_load_cdp_issue",
+                                  return_value=cdpi):
+            got = selfcheck._register_flake_issue(self.nodeid)
+        self.assertEqual(got, (self.nodeid, 2, "b9"))
+        cdpi.write_issue.assert_not_called()
+        self.assertEqual(
+            len(list((self.root / "data" / "known-issues").glob("*.md"))), 1)
+
+    def test_different_batch_still_registers(self):
+        # 跨批（batch_id 不同）→ 不命中同批去重，按既有 round 递增归链写盘
+        cdpi = mock.Mock()
+        with mock.patch.object(selfcheck, "ROOT", self.root), \
+                mock.patch.object(selfcheck, "_current_batch_id",
+                                  return_value="ffffffffffff"), \
+                mock.patch.object(selfcheck, "_load_cdp_issue",
+                                  return_value=cdpi):
+            got = selfcheck._register_flake_issue(self.nodeid)
+        self.assertEqual(got, (self.nodeid, 3, "b9"))
+        cdpi.write_issue.assert_called_once()
+
+    def test_no_batch_id_keeps_legacy_behavior(self):
+        # batch_id 取不到（非批次环境）→ 不做同批去重，正常登记
+        cdpi = mock.Mock()
+        with mock.patch.object(selfcheck, "ROOT", self.root), \
+                mock.patch.object(selfcheck, "_current_batch_id",
+                                  return_value=""), \
+                mock.patch.object(selfcheck, "_load_cdp_issue",
+                                  return_value=cdpi):
+            got = selfcheck._register_flake_issue(self.nodeid)
+        self.assertEqual(got, (self.nodeid, 3, "b9"))
+        cdpi.write_issue.assert_called_once()
+
+
 class TestRerunTwoPass(unittest.TestCase):
     """lib-04：_rerun_failures 两遍扫描——存在真回归时不登记任何条目。"""
 
@@ -963,6 +1043,28 @@ class TestRerunTwoPass(unittest.TestCase):
         self.assertEqual(len(notes), 2)
         self.assertEqual(ki001, [])
         self.assertEqual(reg.call_count, 2)
+
+    def test_flake_issue_task_nonempty(self):
+        # CDP 2026-09-11：flake 自动登记 task 用非空占位（auto-flake）——
+        # 空 task 写 index 时双空格，read_index 的 split() 吞空串致 len<5
+        # 跳过该行，validate_issue 判"index 缺文件条目"，test_cdp_issue 全仓
+        # 校验失败又触发 flake 登记→再失败，死循环卡死 selfcheck
+        written = {}
+
+        class FakeIssue:
+            def __init__(self, **kw):
+                written.update(kw)
+
+        fake_cdpi = mock.Mock()
+        fake_cdpi.Issue = FakeIssue
+        with mock.patch.object(selfcheck, "_load_cdp_issue",
+                               return_value=fake_cdpi), \
+                mock.patch.object(selfcheck, "_current_batch_id",
+                                  return_value="aaa111bbb222"):
+            selfcheck._register_flake_issue("pkg::TestX::test_a")
+        self.assertEqual(written["task"], "auto-flake")
+        self.assertEqual(written["kind"], "flake")
+        fake_cdpi.write_issue.assert_called_once()
 
 
 class TestGitChangedFilesTimeout(unittest.TestCase):

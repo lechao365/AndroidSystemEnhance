@@ -107,7 +107,9 @@ def _git_run(args: list[str], cwd: str | Path, timeout: int = 300) -> subprocess
 
     timeout/异常时返回 returncode=-1 的 CompletedProcess，避免无限阻塞。
     """
-    cmd = ["git"] + args
+    # -c core.quotepath=false（KI 2026-09-11）：非 ASCII 路径输出默认带引号
+    # 八进制转义致调用方前缀匹配/树等价失效；包装器统一带，覆盖全部调用点
+    cmd = ["git", "-c", "core.quotepath=false"] + args
     try:
         return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(cwd), timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -1084,8 +1086,8 @@ _T0 = time.monotonic()
 
 
 def _mark_stage(name, dur_s=None):
-    """验证阶段自动打点：cdp_timing.py mark（batch 识别：CDP_BATCH_ID 环境变量
-    > log 目录唯一 timings 文件；均缺时静默跳过返 0，失败不阻断口径）。
+    """验证阶段自动打点：cdp_timing.py mark（batch 识别两级回落：CDP_BATCH_ID
+    环境变量 > current-batch.json 指针；均缺时静默跳过返 0，失败不阻断口径）。
 
     dur_s（方向 1）：调用方自测脚本内实测秒数，mark 段耗时取 dur_s，相邻差额
     减去 dur_s 后的余量落 gap_before_<name>——脚本启动前的 AI 活动时间不再

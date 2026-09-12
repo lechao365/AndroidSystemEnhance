@@ -404,6 +404,13 @@ class TestMarkStageDurS(unittest.TestCase):
         args = self._capture(dur_s=None)
         self.assertNotIn("--dur-s", args)
 
+    def test_two_level_batch_resolution(self):
+        # 方向 2：batch 识别两级回落——不显式传 --batch，依赖 CDP_BATCH_ID
+        # 环境变量（verify 链模式 A 注入）；docstring 与实现一致不再提唯一
+        # timings 回落
+        args = self._capture(dur_s=None)
+        self.assertNotIn("--batch", args)
+
 
 class TestResolveWorkspaceTarget(unittest.TestCase):
     """sync-01：包含性校验——绝对路径/.. 越界判红拒绝，正常路径与 scope 前缀不回归。"""

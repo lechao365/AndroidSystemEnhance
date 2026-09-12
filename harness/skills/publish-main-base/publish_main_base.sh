@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # publish-main-base：基线发布编排器末两步（candidate 登记 + dev → main squash promote）。
-# 前置：最新收据 result∈{pass,skip} 且 最近内容提交的父(short=12) == verified_commit；
+# 前置：最新收据 result∈{pass,skip} 且 最近内容提交或其父(short=12) == verified_commit；
 #       known-issues 门禁无条件执行（实现下移 baseline_register.py check-issues）：
 #       先判登记畸形（validate_issue 有红即拒），--task 缺省时从 status 非 fixed 条目
 #       的 task 集合自动推断，再判目标任务下存在 origin=introduced 或 blocking 且
@@ -23,7 +23,7 @@
 #   - 登记元提交：subject 以「构建(baseline):」开头（prepare/promote 自动产生，免验证）
 #   - 文档提交：subject 以「文档(」开头，且仅改动 docs/**（promote 前 /sync-code-to-doc 产生；
 #     须通过 docs/** 路径校验，防「文档(」前缀夹带未验证代码随 squash 混入 main）
-#   - 内容提交：其余（须经验证；最近内容提交的父须等于 verified_commit）
+#   - 内容提交：其余（须经验证；最近内容提交或其父须等于 verified_commit）
 set -euo pipefail
 MODE=""; MSG_FILE=""; BID=""; TASK=""; APPROVED_BY=""; EVIDENCE_SCOPE=""
 # check 模式失败分类输出（stderr；prepare/promote 亦输出，不影响既有行为与退出码）
@@ -131,7 +131,7 @@ done
 # ── 工作树预检（prepare/promote；check-only 干跑不做 add/commit/squash，脏树无害）───
 # 未提交改动会被后续 git add/commit/squash 静默吞并，先拒绝
 if [ "$MODE" != "check-only" ]; then
-  [ -z "$(git status --porcelain)" ] || {
+  [ -z "$(git -c core.quotepath=false status --porcelain)" ] || {
     echo "error: 工作树非空（未提交改动将干扰 promote/登记提交），请先提交或 stash" >&2; exit 1; }
 fi
 
@@ -182,6 +182,23 @@ case "$RESULT" in
   *) check_class RECEIPT_FAIL; echo "error: 最新收据 result=$RESULT 非 pass/skip（revert/fail 收据不可 promote）" >&2; exit 1 ;;
 esac
 
+# ── 方向 3：promote 前置 CI 门禁 ──────────────────────────────────────────
+# CI 已真绿（2026-09-11 实测 run conclusion success），把 run conclusion
+# 接进 promote 前置（推送前置上批已接 git-works-push）：dev HEAD 的 GitHub
+# Actions run conclusion 非失败才允许晋升（防"CI 红仍 promote"——收据验证
+# 通过但 CI 未绿时晋升内容未过全量自检门禁）。HEAD 未推送（无 run）回落
+# 查 origin/dev（prev-head）结论（与 git-works-push 同判据）；API 抖动降级
+# 不阻断、404 阻断（fail-closed 语义同 check_ci_head）。PROMOTE_SKIP_CI_CHECK=1
+# 显式跳过（人工裁决/无 CI 环境/自举死锁 origin/dev failure 需人工裁决）。
+if [ "${PROMOTE_SKIP_CI_CHECK:-0}" != "1" ]; then
+  HEAD_SHA=$(git rev-parse HEAD)
+  PREV_SHA=$(git rev-parse origin/dev 2>/dev/null || true)
+  if ! python3 harness/lib/check_ci_head.py --head "$HEAD_SHA" --prev-head "$PREV_SHA" 2>&1; then
+    echo "error: GitHub Actions run 存在失败结论或无法核实，阻断晋升（修复 CI 或人工裁决；确认无 CI 须显式 PROMOTE_SKIP_CI_CHECK=1）" >&2
+    exit 1
+  fi
+fi
+
 # ── 回溯定位最近内容提交 BH（跳过登记元提交与文档提交），PARENT 取 BH 父提交 ──────
 # （prepare 登记 candidate 的提交会使 HEAD^ 不再是 verified_commit；文档同步提交同理，
 #   故回溯须一并跳过；promote 必失败于 PARENT 校验）
@@ -224,9 +241,14 @@ if [ "$MODE" = "prepare" ] && [ "$SKIP_DOC" -gt 0 ]; then
   exit 1
 fi
 PARENT=$(git rev-parse --short=12 "$BH^" 2>/dev/null || echo "")
-[ "$PARENT" = "$VC" ] || {
+BH_SHORT=$(git rev-parse --short=12 "$BH")
+# 覆盖判定（方向 20260912-180220）：与 promote 侧 CODE_HEAD 父等价同族放宽——
+# 验证批无内容改动时 BH 即 VC（最近内容提交==验证起点），其父必 ≠ VC，单点
+# PARENT==VC 恒 false 误拒验证批。放宽为「BH==VC 或 BH^==VC」均视为验证覆盖；
+# 最终把关交给 verified_tree 树等价断言（发布内容树==验证内容树）
+[ "$BH_SHORT" = "$VC" ] || [ "$PARENT" = "$VC" ] || {
   check_class NEED_VERIFY
-  echo "error: 最近内容提交父($PARENT) != verified_commit($VC)：dev 存在未验证改动（跳过 meta=$SKIP_META doc=$SKIP_DOC）" >&2; exit 1; }
+  echo "error: 最近内容提交($BH_SHORT)及其父($PARENT)均 != verified_commit($VC)：dev 存在未验证改动（跳过 meta=$SKIP_META doc=$SKIP_DOC）" >&2; exit 1; }
 
 # ── known-issues 门禁（prepare/promote/check-only 共用，无条件执行）────────
 # 门禁实现下移 baseline_register.py check-issues：先判畸形登记（validate_issue
@@ -263,7 +285,7 @@ else
 fi
 
 if [ "$MODE" = "check-only" ]; then
-  echo "前置校验通过：PARENT=$PARENT verified_commit=$VC result=$RESULT"
+  echo "前置校验通过：BH=$BH_SHORT PARENT=$PARENT verified_commit=$VC result=$RESULT"
   [ "$SKIP_META" -gt 0 ] && echo "  跳过登记元提交: $SKIP_META"
   [ "$SKIP_DOC" -gt 0 ] && echo "  跳过文档提交: $SKIP_DOC（docs/** 路径校验通过）"
   exit 0
@@ -323,7 +345,7 @@ PYEOF
     || { echo "error: candidate 登记失败" >&2; exit 1; }
   # 登记随 dev 提交推送（避免弄脏工作树阻塞后续 precheck）
   git add harness/config/baseline-status.yaml
-  if git diff --cached --quiet; then
+  if git -c core.quotepath=false diff --cached --quiet; then
     echo "warn: baseline-status.yaml 无变更，跳过登记提交"
   else
     git commit -m "构建(baseline): 登记 candidate（receipt=$(basename "$EVIDENCE_RECEIPT")）" || {
@@ -349,7 +371,9 @@ printf '%s\n' "$DEV_HEAD_BEFORE" > "$(promote_state_file "$BID")"
 # 推断失败时门禁段 exit 1 拒绝），显式 --task 仅作白名单确认
 git fetch origin || { echo "error: fetch 失败" >&2; exit 1; }
 # promote 收紧（基线晋升须上板证据）：dev 相对 origin/main 的 code/ 改动须被
-# 最新 board 收据覆盖（其 verified_commit 为该 code 改动提交的后代或自身）；
+# 最新 board 收据覆盖——覆盖判定放宽为「verified_commit 为 CODE_HEAD 的祖先
+# 或自身，或 CODE_HEAD 的父 == verified_commit」（父等价，对应验证起点在内容
+# 提交之前的真实时序；最终以 verified_tree 树等价断言把关）；
 # 最新收据可能是 -s skip 的 harness 批（verify_mode=none），上板证据锚点回溯
 # latest_board_receipt，不被 skip 批干扰。dev 无 code/ 改动时豁免放行并 warn，
 # 且证据范围改写为 no-code-change（本批无代码改动，原 scope 不适用）；
@@ -386,10 +410,23 @@ if r.result != "pass" or r.verify_mode != "board":
     print("ERR_RESULT")
     print("")
     sys.exit(0)
+# 覆盖判定（方向 20260912-142358）：登记门禁要求「最近内容提交的父 ==
+# verified_commit」（父等价），而 is-ancestor(CODE_HEAD, verified_commit)
+# 在 CODE_HEAD 恰为内容提交（VC 的后代）时恒 false——验证起点 VC 在内容
+# 提交之前，改 code 批发不出基线。放宽：is-ancestor 成立或 CODE_HEAD 的父
+# == verified_commit 均视为覆盖；最终把关交给下方 verified_tree 树等价断言
+# （发布内容树 == 验证内容树，防父等价放宽被伪造 VC 绕过）。
 r0 = subprocess.run(["git", "merge-base", "--is-ancestor",
                      os.environ["CODE_HEAD"], r.verified_commit],
                     capture_output=True)
-print("1" if r0.returncode == 0 else "0")
+covered = "1" if r0.returncode == 0 else "0"
+if covered != "1":
+    p1 = subprocess.run(["git", "rev-parse", "--short=12",
+                         os.environ["CODE_HEAD"] + "^"],
+                        capture_output=True, text=True)
+    if p1.returncode == 0 and p1.stdout.strip() == r.verified_commit:
+        covered = "1"
+print(covered)
 print(r.verified_tree)
 PYEOF
   ) || true
@@ -425,7 +462,8 @@ PYEOF
   if [ "$PROMOTE_TREE" != "$BOARD_VTREE" ]; then
     echo "error: 收据 verified_tree 与晋升内容树不一致（发布内容≠验证内容）：" >&2
     # 树对象不可解析（假树/被 gc）时 diff 失败——pipefail 下须容错，主结论已定
-    git diff --name-only "$BOARD_VTREE" "$PROMOTE_TREE" 2>/dev/null | sed 's/^/  /' >&2 \
+    # -c core.quotepath=false：差异路径含中文标题（known-issues/docs）不转义
+    git -c core.quotepath=false diff --name-only "$BOARD_VTREE" "$PROMOTE_TREE" 2>/dev/null | sed 's/^/  /' >&2 \
       || echo "  （树对象不可解析，无法列出差异路径）" >&2
     exit 1
   fi
@@ -450,9 +488,32 @@ fi
 # 文档同步遗漏提示（warn 不阻断）：dev 相对 origin/main 无 docs/ 改动时提示
 # （pub2-02：与 code 门禁同用两点差 origin/main..dev——三点对称差在 main
 # 领先 dev 时会混入 main 侧提交，docs 提示口径漂移）
-if ! git diff --name-only origin/main..dev | grep -q '^docs/'; then
+# -c core.quotepath=false：docs/ 下中文路径（01-打点增强 等）默认转义致
+# '^docs/' 前缀匹配恒 miss——文档同步提示失灵（KI 2026-09-11 同源）
+if ! git -c core.quotepath=false diff --name-only origin/main..dev | grep -q '^docs/'; then
   echo "warn: dev 相对 origin/main 无 docs/ 改动（若本批应同步设计文档，请先 /sync-code-to-doc --base origin/main 并 commit 到 dev）"
 fi
+
+# 方向 3（20260912-142358）：promote 前置自动 source promote-approval.env
+# （审批凭据外部化；评审人独立持有、gitignore 不入库）。存在即 source 注入
+# LC_PROMOTE_APPROVAL_TOKEN，调用方无需再手工 source；文件缺失保持
+# fail-closed，由下方 check-approval 判红拒绝（缺预设即拒，不静默放行）。
+if [ -f harness/config/promote-approval.env ]; then
+  # shellcheck disable=SC1091
+  set -a   # 自动 export source 的变量（缺 export 时 token 到不了下方
+           # python3 子进程 check-approval——20260912 promote 被拦根因）
+  . harness/config/promote-approval.env
+  set +a
+fi
+# 方向 2：审批独立校验前移至建 verified tag 之前——缺 env/身份不可用/token
+# 不符时在此 fail-fast，不推 tag。此前排在 baseline_register promote 内
+# （:472 之后、tag 已推送），缺 env 报错时远端已留 tag 而 rollback 删 tag
+# 仅 best-effort，残留 tag 会让 :463 的 tag 存在检查误报 baseline_id 复用
+# （exit 3 死锁，须人工删 tag）。LC_PROMOTE_APPROVAL_TOKEN 由上方自动
+# source promote-approval.env 注入（与 check-approval 同源校验逻辑）。
+python3 harness/skills/publish-main-base/baseline_register.py check-approval \
+  --approved-by "$APPROVED_BY" \
+  || { echo "error: 审批独立校验未过（缺 token/身份不可用/审批人同执行人），拒绝建 tag/promote" >&2; exit 1; }
 
 # checkout main 至 push main 间任一步失败回滚：调顶层 rollback_promote（与人工
 # --rollback 共用同一实现，状态推导见其函数头注——reset 仅在确有晋升元提交时执行）。
@@ -487,7 +548,7 @@ if [ -d data/known-issues ]; then
   git add -A data/known-issues || {
     rollback_promote; git reset -q; echo "error: add data/known-issues 失败，已回滚并清暂存" >&2; exit 1; }
 fi
-if git diff --cached --quiet; then
+if git -c core.quotepath=false diff --cached --quiet; then
   echo "warn: baseline-status.yaml 无变更，跳过晋升提交"
 else
   # pub2-01：晋升登记提交失败也须接 rollback_promote——此前仅 exit 1，tag 已
@@ -503,7 +564,7 @@ fi
 git checkout main && git pull origin main || { rollback_promote; echo "error: checkout/pull main 失败" >&2; exit 1; }
 git merge --squash dev || { rollback_promote; echo "error: merge --squash 失败" >&2; exit 1; }
 # 一致性检查在 commit 前：暂存区须与 dev tree 一致（此时 main 尚无 commit，rollback 可干净撤销）
-git diff --cached --quiet dev || { rollback_promote; echo "error: squash 暂存与 dev 内容不一致" >&2; exit 1; }
+git -c core.quotepath=false diff --cached --quiet dev || { rollback_promote; echo "error: squash 暂存与 dev 内容不一致" >&2; exit 1; }
 git commit -F "$MSG_FILE" || { rollback_promote; echo "error: squash commit 失败" >&2; exit 1; }
 # 树等价断言：tag verified/$BID 与 main 树（排除登记 yaml 与 docs）必须无差异，
 # 防未验证内容借 meta/doc 提交夹带进 main；失败走 rollback（含删 tag）退 1
@@ -514,8 +575,8 @@ git push origin main || { rollback_promote; echo "error: push main 失败（本�
 # 重建 dev（force push 一步覆盖，避免 delete-then-push 的非原子窗口——delete 成功而
 # push 失败会导致远程 dev 缺失，协作者引用断裂）
 git checkout dev && git reset --hard main || {
-  echo "error: dev 重建失败。main 已含基线，请人工完成：git checkout dev && git reset --hard main && git push -f origin dev（勿重跑 promote）" >&2; exit 2; }
-git push -f -u origin dev || { echo "error: dev 重建推送失败，请人工处理" >&2; exit 2; }
+  echo "error: dev 重建失败。main 已含基线，请人工完成：git checkout dev && git reset --hard main && git push --force-with-lease origin dev（勿重跑 promote）" >&2; exit 2; }
+git push --force-with-lease -u origin dev || { echo "error: dev 重建推送失败，请人工处理" >&2; exit 2; }
 
 echo "promote 完成；提示：本批次文档同步应在 promote 前以 /sync-code-to-doc --base origin/main 完成，promote 后工作区已 clean（git diff HEAD 无变动，勿再硬同步）"
 exit 0

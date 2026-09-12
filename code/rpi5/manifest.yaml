@@ -251,6 +251,10 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lcview/daemon/lechao_lcview.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/daemon/lechao_lcview.rc
       source: aosp/vendor/lechao/services/lechao_lcview/daemon/lechao_lcview.rc
+    - patch: aosp/new/vendor/lechao/services/lechao_lcview/daemon/main_loop.cpp
+      source: aosp/vendor/lechao/services/lechao_lcview/daemon/main_loop.cpp
+    - patch: aosp/new/vendor/lechao/services/lechao_lcview/daemon/main_loop.h
+      source: aosp/vendor/lechao/services/lechao_lcview/daemon/main_loop.h
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/daemon/record_codec.cpp
       source: aosp/vendor/lechao/services/lechao_lcview/daemon/record_codec.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/daemon/record_codec.h
@@ -267,6 +271,8 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lcview/tests/DeviceReader_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/tests/FileWriter_test.cpp
       source: aosp/vendor/lechao/services/lechao_lcview/tests/FileWriter_test.cpp
+    - patch: aosp/new/vendor/lechao/services/lechao_lcview/tests/MainLoop_test.cpp
+      source: aosp/vendor/lechao/services/lechao_lcview/tests/MainLoop_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/tests/SchemaParser_test.cpp
       source: aosp/vendor/lechao/services/lechao_lcview/tests/SchemaParser_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/tests/record_codec_test.cpp

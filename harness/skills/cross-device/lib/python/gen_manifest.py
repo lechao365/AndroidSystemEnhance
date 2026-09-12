@@ -29,8 +29,8 @@ def _git_ls_files(patch_root: Path) -> list[Path] | None:
     覆盖工作树新 patch 未提交场景；非 git 仓返回 None（回落 rglob）。"""
     try:
         r = subprocess.run(
-            ["git", "ls-files", "--cached", "--others", "--exclude-standard",
-             "--", "."],
+            ["git", "-c", "core.quotepath=false", "ls-files", "--cached",
+             "--others", "--exclude-standard", "--", "."],
             cwd=patch_root, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=30)
     except (OSError, subprocess.SubprocessError):

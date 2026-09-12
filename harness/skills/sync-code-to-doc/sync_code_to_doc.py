@@ -329,7 +329,7 @@ def _git_result(args: list[str], timeout: int = 300) -> subprocess.CompletedProc
     """执行 git 命令，返回 CompletedProcess。失败时 log_error 并返回失败对象。"""
     try:
         return subprocess.run(
-            ["git"] + args,
+            ["git", "-c", "core.quotepath=false"] + args,
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
             cwd=repo_root(),

@@ -94,10 +94,60 @@ class TestDiscipline(unittest.TestCase):
         self.assertTrue(any("sleep" in o for o in out))
 
     def test_non_test_file_not_scanned(self):
-        # 非测试文件（无 tests/ 且非 test 命名）新增 xfail 不扫（守卫面=测试）
+        # 非测试文件（无 tests/ 且非 test 命名）新增 xfail 不扫（守卫面=测试，
+        # xfail/skip/sleep 禁令只管测试文件）；但方向 1 门禁会判"生产改动须带
+        # 测试"——此处验证两条语义分离：违规是"须带对应 tests"，不是 xfail
         src = self.repo / "harness" / "lib" / "foo.py"
         src.parent.mkdir(parents=True, exist_ok=True)
         src.write_text("import pytest\nxfail = pytest.mark.xfail\n")
+        out = ctd.scan(self.repo)
+        self.assertTrue(any("行为性改动" in o and "foo.py" in o for o in out), out)
+        self.assertFalse(any("xfail" in o for o in out), out)
+
+    # ── 方向 1：harness/lib|skills 下 .py 行为性改动须带对应 tests/ 改动 ──
+    def test_production_change_without_test_reported(self):
+        # 红灯：harness/lib 下生产 .py 新增，同批次无对应 tests/ 改动 → 判红
+        # （skills 加 73 行 0 测试照样绿的漏洞，7.5 清单最后一条实质门禁）
+        src = self.repo / "harness" / "lib" / "foo.py"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("def f():\n    return 1\n")
+        out = ctd.scan(self.repo)
+        self.assertTrue(
+            any("foo.py" in o and "行为性改动" in o
+                and "test_foo.py" in o for o in out), out)
+
+    def test_skills_production_change_without_test_reported(self):
+        # 红灯：harness/skills 下生产 .py 改动（skill 加 73 行 0 测试场景）
+        src = self.repo / "harness" / "skills" / "ws_x" / "ws_x.py"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("def f():\n    return 1\n")
+        out = ctd.scan(self.repo)
+        self.assertTrue(any("ws_x.py" in o and "行为性改动" in o for o in out), out)
+
+    def test_production_change_with_test_ok(self):
+        # 生产 .py 与对应 tests/ 文件同批改动 → 放行
+        src = self.repo / "harness" / "lib" / "foo.py"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("def f():\n    return 2\n")
+        tst = self.repo / "harness" / "lib" / "tests" / "test_foo.py"
+        tst.write_text("def test_f():\n    assert True\n")
+        self.assertEqual(ctd.scan(self.repo), [])
+
+    def test_production_change_exempt_ok(self):
+        # 豁免通道：纯重构/文档注释改动的生产 .py 登记豁免 → 放行（防卡死）
+        exempt = self.repo / "harness" / "config" / "test-delete-exempt.txt"
+        exempt.parent.mkdir(parents=True, exist_ok=True)
+        exempt.write_text("harness/lib/foo.py\n")
+        src = self.repo / "harness" / "lib" / "foo.py"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("def f():\n    return 3\n")
+        self.assertEqual(ctd.scan(self.repo), [])
+
+    def test_non_harness_py_not_scanned(self):
+        # 守卫面只 harness/lib 与 harness/skills；其余 .py（如 scripts/）不判
+        src = self.repo / "scripts" / "tool.py"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("def f():\n    return 1\n")
         self.assertEqual(ctd.scan(self.repo), [])
 
     def test_untracked_new_test_file_reported(self):
@@ -116,6 +166,44 @@ class TestDiscipline(unittest.TestCase):
                 f.write_text(content)
                 out = ctd.scan(self.repo)
                 self.assertTrue(any(kind in o for o in out), out)
+
+    def test_deleted_test_file_flagged_without_exempt(self):
+        # 方向 2 红灯：删除测试文件（此前只扫新增行完全不可见，删测试换绿
+        # 静默通过 discipline_rc=0）→ 未登记豁免即判红
+        self.testfile.unlink()
+        out = ctd.scan(self.repo)
+        self.assertTrue(any("测试文件删除未登记豁免" in o for o in out), out)
+
+    def test_exempt_allows_deleted_test_file(self):
+        # 方向 2 豁免通道：删除的测试文件在豁免清单登记 → 放行（正常重构
+        # 删测试不卡死；理由须随 commit message 说明）
+        exempt = self.repo / "harness" / "config" / "test-delete-exempt.txt"
+        exempt.parent.mkdir(parents=True, exist_ok=True)
+        exempt.write_text(
+            "# 正常重构豁免登记（理由随 commit message）\n"
+            "harness/lib/tests/test_x.py\n")
+        self.testfile.unlink()
+        self.assertEqual(ctd.scan(self.repo), [])
+
+    def test_case_count_net_decrease_flagged(self):
+        # 方向 2 红灯：用例数净减（HEAD 3 用例 → 工作树 2 用例，删 1 加 0）
+        # → 判红（删测试用例换绿静默流失，不再只盯新增行）
+        self.testfile.write_text(
+            "def test_a():\n    pass\n\n"
+            "def test_b():\n    pass\n\n"
+            "def test_c():\n    pass\n")
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-qm", "three")
+        self.testfile.write_text(
+            "def test_a():\n    pass\n\n"
+            "def test_c():\n    pass\n")
+        out = ctd.scan(self.repo)
+        self.assertTrue(any("用例数净减" in o and "净减 1" in o for o in out), out)
+
+    def test_case_count_equal_ok(self):
+        # 用例数不净减（等价重命名 1→1）→ 放行
+        self.testfile.write_text("def test_renamed():\n    pass\n")
+        self.assertEqual(ctd.scan(self.repo), [])
 
 
 class TestDisciplineMain(unittest.TestCase):

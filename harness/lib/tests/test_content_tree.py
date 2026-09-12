@@ -110,6 +110,21 @@ class TestContentTree(unittest.TestCase):
             self._git("ls-tree", "HEAD", "a.txt").stdout,
             self._git("ls-tree", tree, "a.txt").stdout)
 
+    def test_ref_mode_excluded_path_diff_worktree_ok(self):
+        # 判红回归（KI-20260910-002）：排除路径在 ref 与工作树有差异（trend.md
+        # 被后续提交改版本）时，rm --cached 缺 -f 报 staged content different
+        # 抛 RuntimeError——补 -f 后 ref 模式须正常出树而非崩
+        d = self.root / "data" / "verify-results"
+        d.mkdir(parents=True)
+        (d / "trend.md").write_text("v1\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "c2-with-trend")
+        (d / "trend.md").write_text("v2\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "c3-update-trend")
+        tree = content_tree(ref="HEAD^", repo_root=self.root)
+        self.assertEqual(self._tree_paths(tree), {"a.txt"})
+
     def test_empty_repo_no_head(self):
         # 空仓（无 HEAD）：工作树模式从空 index 起步，仍可算树
         empty = Path(tempfile.mkdtemp(dir=self._tmp.name))

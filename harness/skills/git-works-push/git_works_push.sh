@@ -90,11 +90,11 @@ fi
 if [ "$MODE" = "dry-run" ]; then
   out "== dry-run：改动预览（不执行 add/commit/push）=="
   out "== 工作树状态（status --porcelain）=="
-  git status --porcelain | tee -a "$LOG_FILE"
+  git -c core.quotepath=false status --porcelain | tee -a "$LOG_FILE"
   out "== diff --stat（完整）=="
-  git diff HEAD --stat | tee -a "$LOG_FILE"
+  git -c core.quotepath=false diff HEAD --stat | tee -a "$LOG_FILE"
   out "== 未跟踪/新增文件（untracked）=="
-  git ls-files --others --exclude-standard | tee -a "$LOG_FILE"
+  git -c core.quotepath=false ls-files --others --exclude-standard | tee -a "$LOG_FILE"
   exit 0
 fi
 
@@ -106,9 +106,9 @@ fi
 check_commit_scope() {
   local status_out
   if [ "$1" = "staged" ]; then
-    status_out=$(git diff --cached --name-status --no-renames) || status_out=""
+    status_out=$(git -c core.quotepath=false diff --cached --name-status --no-renames) || status_out=""
   else
-    status_out=$(git diff --name-status --no-renames "origin/$BRANCH"..HEAD 2>/dev/null) || status_out=""
+    status_out=$(git -c core.quotepath=false diff --name-status --no-renames "origin/$BRANCH"..HEAD 2>/dev/null) || status_out=""
     [ -n "$status_out" ] || return 0   # 无待推提交，无比对对象
   fi
   local latest_scope diffs
@@ -152,7 +152,7 @@ check_commit_scope() {
 
 if [ "$MODE" = "normal" ]; then
   [ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || { err "error: 需 --message-file 且文件存在"; exit 3; }
-  [ -n "$(git status --porcelain)" ] || { err "working tree clean"; exit 4; }
+  [ -n "$(git -c core.quotepath=false status --porcelain)" ] || { err "working tree clean"; exit 4; }
   # 提交信息中文前缀校验（commit-message-format.md）：首行须为
   # <中文type>(<scope>): <subject>，中文 type 词表限定；英文前缀（feat/fix 等）
   # 一律拒绝，防提交风格漂移（曾出现 feat(harness) 英文前缀混入）
@@ -215,7 +215,7 @@ if [ "$MODE" = "normal" ]; then
     else
       REJECT+=("$f")
     fi
-  done < <(git ls-files --others --exclude-standard)
+  done < <(git -c core.quotepath=false ls-files --others --exclude-standard)
   if [ ${#REJECT[@]} -gt 0 ]; then
     err "error: 未跟踪文件不在提交白名单（${UNTRACKED_ALLOW[*]}），不在本批提交面："
     printf '  %s\n' "${REJECT[@]}" >&2
@@ -224,7 +224,7 @@ if [ "$MODE" = "normal" ]; then
   # 凭据扫描：暂存区新增行命中敏感赋值（含低熵 psk 形态，键词+赋值+值 4 字符起）即拒；
   # 占位符白名单（placeholder/change_me/your_/xxxx/变量引用等）放行
   # （BL-20260624-01 教训：wifi.conf 真实 psk 曾随批入库）
-  LEAK=$(git diff --cached -U0 | grep '^+' | grep -v '^+++' \
+  LEAK=$(git -c core.quotepath=false diff --cached -U0 | grep '^+' | grep -v '^+++' \
     | grep -iE '\b(psk|password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)\b[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9/+=._-]{4,}' \
     | grep -viE 'placeholder|change[-_]?me|replace[-_]?me|your[_-]|xxxx|todo|fixme|dummy|sample|example|\$\{' || true)
   if [ -n "$LEAK" ]; then
@@ -242,6 +242,23 @@ fi
 # 与 normal 模式共用 check_commit_scope——两种模式下均生效）
 if [ "$MODE" = "push-only" ]; then
   check_commit_scope pushed
+fi
+# 方向 3：push 前置 CI 门禁——gh 已确认未装未认证，用 curl 免认证查
+# /actions/runs?head_sha=（方向 2 修正：/commits/<sha>/check-runs 实测
+# total_count 恒 0，真结论在 /actions/runs）。待推送 HEAD 未推送时 GitHub
+# 无其 run，故核对上一个已推送提交（origin/dev）的 CI 状态为主判据。
+# CI 存在失败结论 → 阻断（fail-closed）；API 抖动（网络失败/429/5xx/未知
+# 响应/非 JSON）→ 脚本内降级告警不阻断；仓库非公开或不可达（404）→ 登记
+# 放弃并写明不静默；无 run 记录（新提交未推送）→ 放行。dry-run 已提前
+# 退出，此门禁只对 normal/push-only 生效。GWP_SKIP_CI_CHECK=1 显式跳过
+# （测试 fixture 无 origin remote 场景；生产默认开启）。
+if [ "${GWP_SKIP_CI_CHECK:-0}" != "1" ]; then
+  HEAD_SHA=$(git rev-parse HEAD)
+  PREV_SHA=$(git rev-parse origin/dev 2>/dev/null || true)
+  if ! python3 harness/lib/check_ci_head.py --head "$HEAD_SHA" --prev-head "$PREV_SHA" 2>&1; then
+    err "error: GitHub Actions run 存在失败结论或无法核实，阻断推送（修复 CI 或登记放弃后重试；确认无 CI 须显式 GWP_SKIP_CI_CHECK=1）"
+    exit 1
+  fi
 fi
 PUSH_T0=$(date +%s.%N)
 push_dur() { awk -v a="$1" -v b="$(date +%s.%N)" 'BEGIN{printf "%.3f", b-a}'; }

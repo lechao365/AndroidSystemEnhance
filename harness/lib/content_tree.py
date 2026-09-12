@@ -43,7 +43,11 @@ EXCLUDE_PATHS = (
 
 
 def _run_git(args, env, cwd):
-    r = subprocess.run(["git", *args], capture_output=True, text=True,
+    # -c core.quotepath=false：路径输出命令（diff/ls-files/status 经封装）对
+    # 非 ASCII 路径（中文标题 docs/known-issues）默认转义成带引号八进制串，
+    # 前缀匹配/树等价引擎全被打断（KI 2026-09-11，quotepath_rc 门禁强制）
+    r = subprocess.run(["git", "-c", "core.quotepath=false", *args],
+                       capture_output=True, text=True,
                        encoding="utf-8", errors="replace", env=env, cwd=cwd)
     if r.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} 失败: {r.stderr.strip()}")
@@ -77,7 +81,10 @@ def content_tree(exclude=EXCLUDE_PATHS, ref=None, repo_root=None):
             # 引用模式会被工作树污染冲掉 read-tree ref，需收进 else 分支）
             _run_git(["add", "-A"], env, cwd)
         for path in exclude:
-            _run_git(["rm", "--cached", "-r", "-q", "--ignore-unmatch",
+            # -f 强制删除索引内路径（KI-20260910-002）：ref 模式索引=ref 树，
+            # 排除路径在 ref 与工作树版本不同（如 trend.md）时无 -f 报
+            # staged content different 抛 RuntimeError，整树计算失败
+            _run_git(["rm", "--cached", "-r", "-q", "-f", "--ignore-unmatch",
                       "--", path], env, cwd)
         return _run_git(["write-tree"], env, cwd)
     finally:
@@ -88,7 +95,10 @@ def content_tree(exclude=EXCLUDE_PATHS, ref=None, repo_root=None):
 def diff_paths(tree_a, tree_b, repo_root=None):
     """两树对象的差异路径列表（归因用）；任一树不可解析返 None。"""
     cwd = str(repo_root) if repo_root else os.getcwd()
-    r = subprocess.run(["git", "diff", "--name-only", tree_a, tree_b],
+    # -c core.quotepath=false（KI 2026-09-11）：差异路径含非 ASCII（中文标题
+    # known-issues/docs）时默认输出带引号八进制串，归因/前缀匹配被打断
+    r = subprocess.run(["git", "-c", "core.quotepath=false", "diff",
+                        "--name-only", tree_a, tree_b],
                        capture_output=True, text=True,
                        encoding="utf-8", errors="replace", cwd=cwd)
     if r.returncode != 0:

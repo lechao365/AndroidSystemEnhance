@@ -74,9 +74,9 @@ stages:
    timings-<batch_id>.json）。**各验证阶段由脚本自动打点**（sync/build/push/
    unit_test/acceptance 各一段，脚本完成即 mark，失败不阻断口径不变）：
    - sync：sync_code_to_workspace.py --auto 闭环完成自动 mark verify_sync
-   - build：编译由执行者完成时触发（cdp_timing.py mark --name verify_build；
-     batch 识别走 CDP_BATCH_ID 环境变量 > log 目录唯一 timings 文件，均缺
-     静默跳过返 0，不阻断）
+    - build：编译由执行者完成时触发（cdp_timing.py mark --name verify_build；
+      batch 识别走两级回落 CDP_BATCH_ID 环境变量 > current-batch.json 指针，
+      均缺静默跳过返 0，不阻断）
    - push：ws_push.py 推送循环完成自动 mark verify_push（实际推送完成后
      打点；ensure 连接成功不再打点——连接就绪量不到推送）
    - unit_test：ws_upload_tests.py 执行完成自动 mark verify_unit_test
@@ -121,9 +121,11 @@ stages:
      INC-006 Image+dtbs+overlays 同源；INC-009 android_rpi5_defconfig；INC-007 VINTF）
    - 打包：mk_rpi5_full_image.sh -mode 2|3|4（BLD-007 sudo 打包显式传
      TARGET_PRODUCT+ANDROID_PRODUCT_OUT；BLD-008 选对 mode）
-   - 全程：INC-001 禁 make clean/clobber；BLD-009 CCACHE_DIR=out/ccache
-   编译段打点（verify_build）：编译完成由执行者触发
-   （cdp_timing.py mark --name verify_build，失败不阻断）
+    - 全程：INC-001 禁 make clean/clobber；BLD-009 CCACHE_DIR=out/ccache
+    编译段打点（verify_build）：-sv 链式模式由 ws_verify_chain build 链步
+    锁内直跑并自发实测 mark（方向 1 编译链步化，勿再手打 verify_build）；
+    独立 CLI 模式编译仍由执行者完成时触发
+    （cdp_timing.py mark --name verify_build，失败不阻断）
 4. adb 推送：python3 harness/skills/workspace-verify/ws_push.py
    [--modules <模块名...>]（默认推送 verify-cases.yaml modules 段全部
    push 映射，映射即执行的唯一事实源，取代手敲 adb push；本步中止则
@@ -198,10 +200,11 @@ stages:
 
    **cases 自动落盘口径（2026-09-02 定）**：
    - ws_acceptance 验收完成把本次实跑 --case 标签写 log_apply_dir()/cases-<batch_id>.json
-     （batch 识别三级回落：显式 batch_id > 环境变量 CDP_BATCH_ID > log 目录唯一
-     timings 文件），ws_report 未传 --case 时自动探测该文件补全（显式传参优先，
-     与 timings 探测同源）——board pass 收据的 cases 字段由此自动落盘，杜绝空
-     cases 卡死 prepare 的 evidence-scope 推导。
+      （batch 识别两级回落：显式 batch_id > 环境变量 CDP_BATCH_ID，不再回落
+      log 目录唯一 timings 文件防手工跑残留误绑），ws_report 未传 --case 时
+      自动探测该文件补全（显式传参优先，与 timings 探测同源）——board pass
+      收据的 cases 字段由此自动落盘，杜绝空 cases 卡死 prepare 的
+      evidence-scope 推导。
    - **禁改历史收据文件**：收据一经落盘即证据，事后回填/改写属伪造证据链。
      board+pass 空 cases 由 ws_report 源头拒写（返 2）兜底，发现缺 cases 时
      只写新收据引用旧批次（如 -s 自检批 + 说明），禁止编辑旧收据补字段

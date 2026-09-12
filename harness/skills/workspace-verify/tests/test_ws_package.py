@@ -162,15 +162,16 @@ class TestWsPackage(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("AOSP_WS", ev["error"])
 
-    def test_resolve_batch_id_delegates_verify_common(self):
-        # 方向 4：batch_id 回落委托 verify_common 统一口径——current-batch
-        # 指针命中；多 timings 文件残留返 None 防误绑（不再 mtime 最新，
-        # 打包证据不落错批次 id）
+    def test_resolve_batch_id_narrowed_two_level(self):
+        # 方向 2：batch_id 回落收窄两级（CDP_BATCH_ID > current-batch.json），
+        # 去掉唯一 timings 回落——手工跑（无批上下文）打点目录残留不再误绑
+        # 当批（与 ws_acceptance 同源收窄，防打包证据落错批次 id）
         logdir = Path(self._tmp.name) / "harness" / "log" / "cross-device"
         logdir.mkdir(parents=True)
         (logdir / "current-batch.json").write_text(
             json.dumps({"batch_id": "fedcba654321"}), encoding="utf-8")
         self.assertEqual(wp._resolve_batch_id(), "fedcba654321")
+        # 无 current-batch 指针：唯一/多个 timings 文件均不再回落（两级收窄）
         (logdir / "current-batch.json").unlink()
         for bid in ("aaa111bbb222", "ccc333ddd444"):
             (logdir / f"timings-{bid}.json").write_text("{}",

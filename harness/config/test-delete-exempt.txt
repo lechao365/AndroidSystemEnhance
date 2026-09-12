@@ -1,0 +1,10 @@
+# 测试纪律豁免清单（check_test_discipline.py 显式豁免通道）
+# 语义：整文件豁免测试纪律扫描（删除判红 / 用例数净减判红 / 新增禁戒
+# xfail/skip/sleep）——正常重构删除测试、合并用例、按历史原样恢复被删
+# 测试文件时登记；豁免理由须随 commit message 说明，禁以删测试换绿。
+
+# 2026-09-11：按 388d747 原样恢复（上批误删，本批取回 7 用例）。文件含
+# 既有 @unittest.skipUnless(BASH...) 门禁（388d747 时代即存在，非本批
+# 新增掩盖），恢复即整文件新增行被扫禁戒误判；按方向 1 不得改写原样，
+# 故整文件豁免纪律扫描。
+harness/skills/publish-main-base/tests/test_publish_integration.py

@@ -710,7 +710,7 @@ def _write_cases(batch_id, cases_text):
     供 ws_report 未显式传 --case 时自动探测补全（与 timings 探测同源），
     杜绝 board pass 收据 cases 为空致 prepare evidence-scope 推导死锁
     （2026-09-02 BL-20260902-01 发布被迫回填 7833c640079a 的教训）。
-    batch 识别三级回落（显式 > 环境变量 > 唯一打点文件）；均不可得或
+    batch 识别两级回落（显式 > 环境变量）；均不可得或
     无实跑标签时静默跳过（不阻断，-s 无标签批/独立 CLI 属正常降级）。
     原子写：临时文件 + replace（对齐 cdp_timing 惯例，中断不留半写态）。
     """
@@ -730,14 +730,19 @@ def _write_cases(batch_id, cases_text):
         print(f"warn: cases 落盘失败（不阻断）: {e}", file=sys.stderr)
 
 
-# 标准五段中的前四段（sync/build/push/unit_test）：跳过时补零 mark 占位，
+# 标准五段中的前四段（build/sync/push/unit_test）：跳过时补零 mark 占位，
 # 保证收据 timings 段完整可归因（缺段 vs 0 耗时语义不同：缺段=去向不明）
-_STANDARD_ZERO_SEGMENTS = ("verify_sync", "verify_build", "verify_push",
+# 真跳过的步才补零（方向 1 修正）：verify_sync/verify_push/verify_unit_test
+# 三个链步在链编排器/子脚本自发 mark 缺失时（独立 CLI 场景）确为"未执行"
+# 补零合理；verify_build 现由链内 build 步自发实测 mark（方向 1 编译链步化），
+# 独立 CLI 场景缺失时收据 timings missing 如实暴露（emit 一眼可见而非假 0），
+# 从补零集移除——编译真跑数千秒却补零是伪造数据。
+_STANDARD_ZERO_SEGMENTS = ("verify_sync", "verify_push",
                            "verify_unit_test")
 
 
 def _backfill_zero_marks(batch_id):
-    """标准四段缺失时补零 mark（跳过段记 0 耗时，收据段完整可归因）。
+    """标准三段缺失时补零 mark（跳过段记 0 耗时，收据段完整可归因）。
 
     上一批收据只有 verify_start 与 verify_acceptance 两段即因四段跳过时
     未发 mark；验收是最末验证阶段，由它兜底补齐。batch_id 缺失（三级

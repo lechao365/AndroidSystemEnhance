@@ -92,9 +92,10 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
         --goal "<批次意图>" --batch-file <批次文件>
       按 loop SKILL 执行收敛循环（run verify 工作流 → done 记账 → 失败分析
       修复重试，patience/total 上限退出）；loop 终结回传末轮收据+归因+attempt 数
-      （session 丢失/异常时降级：直接执行 /workspace-verify 模式 A，基线行为）
-      末轮收据正文必须含 CDP 原文 + 失败现场（--body；超限终结批并含诊断报告）
-      （verify_start/verify_end 由 verify 链自发 mark，无需手动打点）
+       （session 丢失/异常时降级：直接执行 /workspace-verify 模式 A，基线行为）
+       末轮收据正文必须含 CDP 原文 + 失败现场 + 逐方向自报（--body；
+       超限终结批并含诊断报告）
+       （verify_start/verify_end 由 verify 链自发 mark，无需手动打点）
       **自检分层（方向 2）**：loop 中间轮（修复验证轮）selfcheck 用 quick 档
       `python3 harness/lib/selfcheck.py --mode quick`（git diff 推导受影响
       测试，推导不出回落全量，提速中间轮）；末轮必须 full 全量
@@ -113,9 +114,13 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
      （2026-09-02 BL-20260902-01 发布被迫回填 7833c640079a 的教训）。
 - -s → 写 skip 收据（先自检，证据随收据落地；rc 为主判据，缺 rc/任一非零即拒写）：
       SELFCHECK=$(python3 harness/lib/selfcheck.py)
-      python3 harness/skills/workspace-verify/ws_report.py --batch-file <批次文件> --result skip --build skip --board skip --summary "<意图首句>（-s 无需上板）" --selfcheck "$SELFCHECK" --body <批次文件>
+      python3 harness/skills/workspace-verify/ws_report.py --batch-file <批次文件> --result skip --build skip --board skip --summary "<意图首句>（-s 无需上板）" --selfcheck "$SELFCHECK" --body <逐方向自报文件>
     （selfcheck.py 用 subprocess 直取 pytest/check_skill_refs 的 returncode：
      命令替换赋值会把 PIPESTATUS 重置为 0，shell 内联取 rc 恒零，禁回退内联写法；
+     --body 禁止再直接设成批次原文——CDP-DOD-003 门禁（方向 3）：收据正文须
+     对批次每个方向逐条自报调用方与验证，条目格式 "- 方向<N>: <自报>"，条数须
+     等于批次方向数，缺则 ws_report 返 2 拒写；自报文件可含 CDP 原文 + 每方向
+     自报段，模板见 [harness/rules/cdp-apply-dod.md](../../../rules/cdp-apply-dod.md)）
      timings 由 ws_report 自动探测，无需手动传 --timings-file）
     verify 无论 pass/fail，收据落盘后必须执行下一步骤（git-works-push）
 6. 显式执行 /git-works-push（收据+代码统一 commit push）

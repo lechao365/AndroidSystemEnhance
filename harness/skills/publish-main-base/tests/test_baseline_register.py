@@ -1118,6 +1118,56 @@ class TestApprovalTokenNoStub(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("不一致", err)
 
+    # ── 方向 2：check-approval 独立 action（bash 建 verified tag 前 fail-fast）──
+    # 本类无 _run helper（不依赖临时仓 issues/receipt），直接 br.main 调用；
+    # check-approval 只读 env/身份，参数面最小。
+
+    def _check_approval_main(self, *args):
+        buf = io.StringIO()
+        err = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(err):
+            rc = br.main(list(args))
+        return rc, buf.getvalue() + err.getvalue()
+
+    def test_check_approval_action_missing_approved_by_rejects(self):
+        # 缺 --approved-by 即拒（与 promote 登记同口径）
+        rc, out = self._check_approval_main("check-approval")
+        self.assertEqual(rc, 1)
+        self.assertIn("--approved-by", out)
+
+    def test_check_approval_action_missing_token_env_rejects(self):
+        # 缺 LC_PROMOTE_APPROVAL_TOKEN env 即拒——前移后在此 fail-fast，
+        # 不再推完 verified tag 才报缺 env（残留 tag 误报 id 复用）
+        with mock.patch.object(br, "_read_approval_token",
+                               return_value="preset-tok"), \
+             mock.patch.object(br, "_collect_operator", return_value="lechao"):
+            rc, out = self._check_approval_main(
+                "check-approval", "--approved-by", "reviewer")
+        self.assertEqual(rc, 1)
+        self.assertIn("LC_PROMOTE_APPROVAL_TOKEN", out)
+
+    def test_check_approval_action_token_mismatch_rejects(self):
+        # token 与预设不一致即拒
+        with mock.patch.object(br, "_read_approval_token",
+                               return_value="preset-tok"), \
+             mock.patch.object(br, "_collect_operator", return_value="lechao"), \
+             mock.patch.dict(os.environ, {"LC_PROMOTE_APPROVAL_TOKEN": "wrong"}):
+            rc, out = self._check_approval_main(
+                "check-approval", "--approved-by", "reviewer")
+        self.assertEqual(rc, 1)
+        self.assertIn("不一致", out)
+
+    def test_check_approval_action_match_ok(self):
+        # 审批独立 + token 匹配 → rc 0（bash 前移调用通过后进入建 tag 阶段）
+        with mock.patch.object(br, "_read_approval_token",
+                               return_value="preset-tok"), \
+             mock.patch.object(br, "_collect_operator", return_value="lechao"), \
+             mock.patch.dict(os.environ,
+                             {"LC_PROMOTE_APPROVAL_TOKEN": "preset-tok"}):
+            rc, out = self._check_approval_main(
+                "check-approval", "--approved-by", "reviewer")
+        self.assertEqual(rc, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -65,7 +65,7 @@ sync-code-to-doc**——不复制任何子 skill 的实现逻辑。
 - promote 中 push/merge/squash 失败：脚本已跑 rollback_promote（main 本地 reset 回
   origin/main 丢弃 squash commit、dev 回退 HEAD^ 并 revert-candidate），人工核对后重试
 - dev 重建失败：main 已含基线，仅需人工 `git checkout dev && git reset --hard main
-  && git push -f origin dev`（勿重跑 promote）
+  && git push --force-with-lease origin dev`（勿重跑 promote）
 - 文档同步遗漏：promote 已把代码 commit 进 main，`git diff HEAD` 无变动；
   只能等下批次 promote 前补（勿在 promote 后硬同步）
 ## Related policy IDs（关联规则 ID）
@@ -132,6 +132,14 @@ bash harness/skills/publish-main-base/publish_main_base.sh --prepare [--task <id
 到 dev 且仅动 `docs/**`——promote 脚本会校验防夹带）
 
 ### 阶段 6：promote
+流程顺序（方向 3）：**必须先上板验证（阶段 2）→ 再 --prepare 登记（阶段 3）
+→ 最后 --promote 晋升**——promote 要求 dev 的 code/ 改动被最新 board 收据覆盖
+（覆盖判定已放宽：verified_commit 为 CODE_HEAD 祖先/自身，或 CODE_HEAD 的父
+== verified_commit 亦放行，最终以 verified_tree 树等价断言把关）。
+脚本已自动 source `harness/config/promote-approval.env.example` 所指定位置的
+promote-approval.env（真名文件 gitignore 不入库，评审人独立持有；存在即注入
+`LC_PROMOTE_APPROVAL_TOKEN`，调用方无需手工 source；文件缺失或 token 与
+预设不符时 check-approval fail-closed 拒绝）：
 ```bash
 bash harness/skills/publish-main-base/publish_main_base.sh --promote \
   --baseline-id <id> --message-file <f> --approved-by <id> [--task <id>]

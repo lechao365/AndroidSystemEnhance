@@ -564,6 +564,67 @@ def _sanitize(text: str) -> str:
     return text
 
 
+def _direction_count(direction):
+    """批次方向条目数：方向文本形如"1 xxx。2 yyy。3 zzz"，条目以句号/
+    行尾分隔、编号 1..N 连续递增。只认从 1 起的最长连续编号前缀（方向
+    内容内偶发的"。N "不干扰——它不会是前缀 1..k 的延续且必被 1 起断链
+    截断）。"""
+    nums = {int(m.group(1)) for m in
+            re.finditer(r"(?:^|。)\s*(\d+)\s", direction or "")}
+    n = 0
+    while (n + 1) in nums:
+        n += 1
+    return n
+
+
+def _direction_report_count(body):
+    """收据正文逐方向自报条数：每条形如"- 方向<N>: ..."（CDP-DOD-003
+    约定，与批次方向编号对应；N 不必连续，缺号即被视为未自报该方向）。"""
+    return len(re.findall(r"-\s*方向\d+\s*:", body or ""))
+
+
+def _enforce_direction_reports(direction, body_path):
+    """方向 3 + 方向 2：CDP-DOD-003 收据逐方向自报门禁。
+
+    长期 56 份收据仅 4 份写了逐方向自报，根因 -s 模板把 --body 直接设成
+    批次原文（无自报段）；此处校验 body 内自报条数等于批次方向数，缺则
+    返 2 拒写（收据不经人工逐方向核对即落盘，emit 复盘无信号）。
+    方向 2（2026-09-11）：三态门禁——每条自报须以 完成/部分/拒绝 之一
+    开头，拒绝条目须带理由；无三态前缀的"静默降级"（不声明完成度）判红。
+    返回 0 通过 / 2 拒写（调用方在 main 打印 error 并 return）。
+    """
+    n = _direction_count(direction)
+    if n <= 0:
+        return 0  # 方向文本不可解析（历史/异常批次）不阻断，避免误伤
+    text = Path(body_path).read_text(encoding="utf-8")
+    have = _direction_report_count(text)
+    if have < n:
+        print(f"error: 收据正文须逐方向自报（批次方向数 {n}，"
+              f"正文仅 {have} 条 '- 方向<N>:' 自报）——CDP-DOD-003，"
+              f"请在 --body 文件补齐每条自报的调用方与验证后重跑",
+              file=sys.stderr)
+        return 2
+    # 方向 2：三态校验——每条自报须以 完成/部分/拒绝 之一开头，拒绝须带
+    # 理由；静默降级（无三态声明）判红，防"写了方向号但没自报完成度"
+    reports = re.findall(r"- 方向\d+:\s*(.*)$", text, re.M)
+    for i, rep in enumerate(reports, 1):
+        m = re.match(r"(完成|部分|拒绝)(?:[：:]\s*|\s+|$)", rep)
+        if not m:
+            print(f"error: 收据第 {i} 条方向自报缺三态前缀（须以 完成/部分/"
+                  f"拒绝 之一开头，静默降级判红）——CDP-DOD-003，请在 "
+                  f"--body 声明完成度后重跑", file=sys.stderr)
+            return 2
+        if m.group(1) == "拒绝":
+            reason = rep[m.end():].strip()
+            if len(reason) < 4:
+                print(f"error: 收据第 {i} 条方向自报为拒绝但未带理由"
+                      f"（拒绝须说明原因）——CDP-DOD-003，请在 --body "
+                      f"补充拒绝理由后重跑", file=sys.stderr)
+                return 2
+    return 0
+
+
+
 def _forensics_summary_lines(manifest_path):
     """取证 manifest → 收据正文轻量摘要（一两行）。
 
@@ -668,6 +729,12 @@ def main(argv=None):
             if not softened:
                 return 2
         b = parse_batch(text)
+        # 方向 3：CDP-DOD-003 逐方向自报门禁（-s/-sv 收据 body 须对每个
+        # 方向逐条自报调用方与验证，缺则拒写）——校验在批次解析后、收据
+        # 落盘前 fail-fast
+        rc = _enforce_direction_reports(b.direction, args.body)
+        if rc != 0:
+            return rc
         if b.mode == "sv" and not args.acceptance and not args.acceptance_file:
             # -sv 批次必须带验收逐项证据，否则 promote 时 baseline 证据链有洞
             # （PASS 走产物文件 --acceptance-file，fail 仍可用 --acceptance 直传）
@@ -881,7 +948,8 @@ def main(argv=None):
     try:
         verified_tree = content_tree()
         status_out = subprocess.run(
-            ["git", "status", "--porcelain"], capture_output=True, text=True,
+            ["git", "-c", "core.quotepath=false", "status", "--porcelain"],
+            capture_output=True, text=True,
             encoding="utf-8", errors="replace", check=True)
         commit_scope = format_scope([
             porcelain_to_name_status(l)

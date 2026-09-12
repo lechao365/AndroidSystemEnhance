@@ -94,6 +94,40 @@ class TestMetrics(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("metrics_rc=0", buf.getvalue())
 
+    def test_suspicious_when_window_all_green(self):
+        # 近 N 批无 fail/revert → suspicious_fail_hidden=True（证据链只见绿
+        # 可疑为失败轮次未入账）；渲染输出含警告行，但 metrics_rc 仍 0
+        # （健康全绿不得反向判红死锁）
+        for i in range(mt._SUSPICIOUS_WINDOW):
+            _receipt(self.verify, f"p{i:02d}", "pass", 30 + i)
+        stats = mt.compute(mt.load_receipts(self.verify),
+                           mt.load_trend(self.verify), [])
+        self.assertTrue(stats["suspicious_fail_hidden"])
+        self.assertIn("判可疑", mt.render_stats(stats))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = mt.main(["--report", "--verify-dir", str(self.verify),
+                          "--issues-dir", str(self.issues)])
+        self.assertEqual(rc, 0, "可疑仅告警不阻断 metrics_rc")
+
+    def test_not_suspicious_when_fail_present(self):
+        # 窗口内含 fail → 失败已入账，不判可疑
+        for i in range(mt._SUSPICIOUS_WINDOW):
+            _receipt(self.verify, f"p{i:02d}",
+                     "fail" if i == 0 else "pass", 30 + i)
+        stats = mt.compute(mt.load_receipts(self.verify),
+                           mt.load_trend(self.verify), [])
+        self.assertFalse(stats["suspicious_fail_hidden"])
+        self.assertNotIn("判可疑", mt.render_stats(stats))
+
+    def test_not_suspicious_when_window_short(self):
+        # 不足 N 批（数据不足）不判可疑
+        for i in range(mt._SUSPICIOUS_WINDOW - 1):
+            _receipt(self.verify, f"p{i:02d}", "pass", 30 + i)
+        stats = mt.compute(mt.load_receipts(self.verify),
+                           mt.load_trend(self.verify), [])
+        self.assertFalse(stats["suspicious_fail_hidden"])
+
 
 if __name__ == "__main__":
     unittest.main()
