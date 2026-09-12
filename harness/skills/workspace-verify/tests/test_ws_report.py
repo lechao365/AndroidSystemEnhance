@@ -136,6 +136,28 @@ class TestWsReport(unittest.TestCase):
         self.assertIn("## body", content)
         self.assertIn("adb 失败", content)
 
+    def test_receipt_coverage_filled_from_cases(self):
+        # 方向 20260912：无 --coverage-file 时收据 coverage 不得恒空——用验收
+        # cases 算发布全量组覆盖摘要填充（与 add-candidate cases_coverage 同源）
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s 说明",
+                                 "--case", "lcview-liveness",
+                                 "--selfcheck", _selfcheck_ok()])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        m = re.search(r"^- coverage: (\{.*\})$", content, re.M)
+        self.assertIsNotNone(m, f"coverage 字段不应恒空:\n{content}")
+        cov = json.loads(m.group(1))
+        self.assertIn("cases", cov)
+        self.assertEqual(cov["cases"], "partial")  # 单 case 未覆盖全量组
+        self.assertEqual(cov["run_count"], 1)
+
     def test_receipt_requires_per_direction_report(self):
         # 方向 3（CDP-DOD-003 判红）：批次方向数 2、正文无逐方向自报 →
         # 返 2 拒写（长期只有少数收据写了自报，根因 -s 模板把 --body 直接

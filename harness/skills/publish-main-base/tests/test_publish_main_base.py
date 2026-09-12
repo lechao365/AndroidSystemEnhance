@@ -563,6 +563,16 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertEqual(set(carried_issue_ids("t1", self.root / "data" / "known-issues")),
                          {"KI-OPEN", "KI-SCHED"})
 
+    def test_carried_issue_ids_dedup_by_issue_id(self):
+        # 20260912：同一 issue_id 多个登记文件（flake 跨批 round 递增同 id）
+        # 携带清单只记一条——防 candidate evidence 同 id 重复 N 遍
+        for tag in ("x", "y", "z"):
+            cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                                 blocking=False, issue_id="KI-DUP"),
+                                  tag)
+        from baseline_register import carried_issue_ids
+        self.assertEqual(carried_issue_ids("t1"), ["KI-DUP"])
+
     # ── 方向 5：promote 收紧与 ki_gate 证据链（bare 远端 e2e）────────────
     def _receipt_commit_c3(self, batch_id="000000000002", **kw):
         # 收据入库为 c3（内容提交，父=c2==VC），保证 promote/prepare 工作树干净
@@ -653,7 +663,10 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         r = self._promote()
         self.assertEqual(r.returncode, 1)
         self.assertIn("check_class=RECEIPT_FAIL", r.stderr)
-        self.assertIn("非 pass", r.stderr)
+        # 20260912：latest_board_receipt 跳过 result!=pass 的 board 收据——fail
+        # board 收据（cases 失败）不作晋升上板证据（fail-closed），缺失 pass
+        # board 收据时按「未被 board 收据覆盖」拒绝
+        self.assertIn("被最新 board 收据覆盖", r.stderr)
 
     def _candidate_yaml_pkg(self, package_result):
         """candidate 登记模板（可变 package_result，供方向 3 门禁两态用例）。"""

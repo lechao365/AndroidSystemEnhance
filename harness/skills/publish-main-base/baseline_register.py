@@ -176,8 +176,11 @@ def carried_issue_ids(task, issues_dir=None):
     """
     if not task:
         return []
-    return [e["issue_id"] for e in read_index(issues_dir)
-            if e["status"] in ("open", "scheduled") and e["task"] == task]
+    # 按 issue_id 去重（20260912）：flake 跨批 round 递增同 id 在 index 多行，
+    # 携带清单只记一条，防 candidate evidence 里同 id 重复 N 遍
+    return list(dict.fromkeys(
+        e["issue_id"] for e in read_index(issues_dir)
+        if e["status"] in ("open", "scheduled") and e["task"] == task))
 
 
 def _real_known_issues_dir():

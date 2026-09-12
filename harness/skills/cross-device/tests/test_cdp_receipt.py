@@ -179,6 +179,8 @@ class TestReceipt(unittest.TestCase):
     def test_prune_dedupes_same_batch_keeps_newest(self):
         # 方向 4：同 batch_id 只留最新一份（重检重推的中间态不占配额）——
         # 3 份同批（1 pass + 2 fail 中间态）去重后仅存最新；被引用文件仍护
+        # 20260912 修订：按 (batch_id, result) 分组——fail 组去重留最新 fail，
+        # pass 与 fail 两份并存（fail 不得顶掉 pass）
         names = [f"2026010{i}-000000-111111111111.md" for i in (1, 2, 3)]
         for i, n in enumerate(names):
             p = self._dir / n
@@ -187,8 +189,9 @@ class TestReceipt(unittest.TestCase):
                 f"- result: {'pass' if i == 2 else 'fail'}\n\n## body\n",
                 encoding="utf-8")
         cdp_receipt.prune_details(self._dir)
-        left = [f.name for f in self._dir.glob("*111111111111*.md")]
-        self.assertEqual(left, [names[2]])
+        left = sorted(f.name for f in self._dir.glob("*111111111111*.md"))
+        self.assertEqual(left, sorted([names[1], names[2]]),
+                         "同批 fail 去重留最新 fail，且与 pass 两份并存")
 
     def test_prune_dedupe_spares_referred_old_version(self):
         # 同批去重时被 baseline-status 引用的旧版本按名保留（证据链优先）
@@ -322,8 +325,11 @@ class TestReceipt(unittest.TestCase):
         """同秒同 batch_id 写入两份：文件名唯一不覆盖；latest 取最新写入。
 
         （批次 261f10265269 方向 4 调整：write_receipt 仍防覆盖，但落盘
-        后的老化去重使同批只留最新一份——最新收据代表该批终态，中间态
-        不占配额；跨批 fail 归因由非 pass 护窗承担）
+         后的老化去重使同批只留最新一份——最新收据代表该批终态，中间态
+         不占配额；跨批 fail 归因由非 pass 护窗承担。
+         20260912 修订：同批去重按 (batch_id, result) 分组——fail 与 pass
+         两份并存（fail 不得顶掉 pass，否则最新 board 收据成 fail 反挡后续
+         发布），仅同 result 的重检中间态去重）
         """
         r1 = _mk_receipt(result="fail")
         p1 = cdp_receipt.write_receipt(r1, "第一次失败现场")
@@ -333,12 +339,29 @@ class TestReceipt(unittest.TestCase):
         self.assertTrue(p2.exists())
         left = sorted(f.name for f in self._dir.glob("*abc123def456*.md")
                       if f.name != "trend.md")
-        self.assertEqual(left, [p2.name], "同批去重后只留最新一份")
+        self.assertEqual(left, sorted([p1.name, p2.name]),
+                         "fail 与 pass 同批须两份并存（fail 不得顶掉 pass）")
+        self.assertEqual(cdp_receipt.read_receipt(p1)[0].result, "fail")
         self.assertEqual(cdp_receipt.read_receipt(p2)[0].result, "pass")
         latest, errs = cdp_receipt.read_latest_receipt(self._dir)
         self.assertEqual(errs, [])
         self.assertEqual(latest.batch_id, "abc123def456")
         self.assertEqual(latest.result, "pass", "latest 应取最新写入的收据")
+
+    def test_prune_keeps_board_pass_with_same_batch_fail(self):
+        # 20260912 方向 3：同批 board pass 收据与 promote 失败落盘的 fail
+        # 收据两份并存——fail 不得顶掉 pass，否则最新 board 收据成 fail 反挡
+        # 后续发布；latest_board_receipt 仍须命中 pass 收据
+        r1 = _mk_receipt(result="pass")          # board pass（先落盘）
+        p1 = cdp_receipt.write_receipt(r1, "上板通过")
+        r2 = _mk_receipt(result="fail")          # 同批 promote 失败 fail 收据
+        p2 = cdp_receipt.write_receipt(r2, "promote 被拒现场")
+        self.assertTrue(p1.exists(), "board pass 收据不得被同批 fail 顶掉")
+        self.assertTrue(p2.exists())
+        bp, br, errs = cdp_receipt.latest_board_receipt(self._dir)
+        self.assertEqual(errs, [])
+        self.assertEqual(bp.name, p1.name, "latest_board_receipt 应命中 pass 收据")
+        self.assertEqual(br.result, "pass")
 
     def test_append_trend_truncates_to_keep(self):
         """trend 超过 _TREND_KEEP 行时截断保留最新（原子写语义不变）。"""

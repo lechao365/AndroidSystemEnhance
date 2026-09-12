@@ -939,6 +939,23 @@ def main(argv=None):
         except (OSError, ValueError, json.JSONDecodeError) as e:
             print(f"warn: --coverage-file 读取失败（不入收据）: {e}",
                   file=sys.stderr)
+    else:
+        # 方向 20260912：收据 coverage 恒空字段补齐——无 ws_coverage JSON 时
+        # 用验收 cases 算发布全量组覆盖摘要填充（与 add-candidate cases_coverage
+        # 同源同口径），board pass 收据 coverage 不再恒空；失败仅 warn 不阻断
+        try:
+            data = yaml.safe_load(
+                Path(_CASES_PATH).read_text(encoding="utf-8")) or {}
+            all_ids = list((data.get("cases") or {}).keys())
+            got = {c.strip() for c in (args.case or "").split(",") if c.strip()}
+            missing = [c for c in all_ids if c not in got]
+            result = "missing" if not got else ("partial" if missing else "full")
+            coverage = json.dumps(
+                {"cases": result, "run_count": len(got),
+                 "missing": missing}, ensure_ascii=False, separators=(",", ":"))
+        except (OSError, ValueError, yaml.YAMLError) as e:
+            print(f"warn: coverage 自动填充失败（留空不阻断）: {e}",
+                  file=sys.stderr)
 
     # 发布内容与验证内容绑定（批次 261f10265269 方向 1）：verified_tree 为
     # 落盘时刻排除统一集合后的内容树（git 树对象 id，可复算）；commit_scope

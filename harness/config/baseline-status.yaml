@@ -458,53 +458,5 @@ baselines:
       resolved_in: 20260912-494cb5191b53
       title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
       archived_in: ''
-    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
-      resolved_in: 20260912-494cb5191b53
-      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
-      archived_in: ''
-    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
-      resolved_in: 20260912-494cb5191b53
-      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
-      archived_in: ''
-    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
-      resolved_in: 20260912-494cb5191b53
-      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
-      archived_in: ''
-    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
-      resolved_in: 20260912-494cb5191b53
-      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
-      archived_in: ''
-    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
-      resolved_in: 20260912-494cb5191b53
-      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
-      archived_in: ''
-    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
-      resolved_in: 20260912-494cb5191b53
-      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
-      archived_in: ''
-    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
-      resolved_in: 20260912-494cb5191b53
-      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
-      archived_in: ''
-    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
-      resolved_in: 20260912-494cb5191b53
-      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
-      archived_in: ''
-    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
-      resolved_in: 20260912-494cb5191b53
-      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
-      archived_in: ''
-    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
-      resolved_in: 20260912-494cb5191b53
-      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
-      archived_in: ''
-    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
-      resolved_in: 20260912-494cb5191b53
-      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
-      archived_in: ''
-    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
-      resolved_in: 20260912-494cb5191b53
-      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
-      archived_in: ''
   approved_by: lechao
   approved_at: '2026-09-12T18:14:35+08:00'

@@ -309,11 +309,15 @@ def latest_receipt_with_path(verify_dir=None):
 
 
 def latest_board_receipt(verify_dir=None):
-    """取最新 verify_mode=board 的收据（从最新往旧扫，跳过 skip/非 board）。
+    """取最新 verify_mode=board 且 result=pass 的收据（从最新往旧扫，跳过
+    skip/非 board/result 非 pass）。
 
     evidence-scope 推导锚点：登记时须以上板验证收据为准——最新收据可能
     是 -s skip 或非 board 的文档批，其 cases 不代表真实上板证据范围。
-    返回 (路径, Receipt, parse_errors)；无 board 收据返回 (None, None, [])。
+    20260912：同批 promote 失败落盘的 fail 收据同样 verify_mode=board（-sv
+    fail 收据），若最新优先会抢先挡住 pass 收据——result 非 pass 一并跳过
+    （fail 收据不是上板通过证据），pass 收据两份并存后仍可命中。
+    返回 (路径, Receipt, parse_errors)；无有效 board 收据返回 (None, None, [])。
     parse_errors 不再丢弃（损坏收据的 result/verify_mode/verified_tree 字段
     不可信，据其做覆盖判定与树绑定会掩盖证据断裂）——调用方（publish 侧）
     解析有错即拒，由本函数如实上抛。
@@ -321,7 +325,7 @@ def latest_board_receipt(verify_dir=None):
     d = verify_dir or data_verify_results_dir()
     for f in reversed(_detail_files(d)):
         r, rerrs = read_receipt(f)
-        if r.verify_mode == "board":
+        if r.verify_mode == "board" and r.result == "pass":
             return (f, r, rerrs)
     return (None, None, [])
 
@@ -436,16 +440,25 @@ def prune_details(verify_dir=None):
         return  # 引用解析失败（yaml 不可读）：保守不删任何文件
     # 同 batch_id 去重（方向 4）：每组保文件名最新一份；解析失败/被引用
     # 的文件保守跳过。去重后重取文件列表再进配额老化。
+    # 方向 20260912：按 (batch_id, result) 分组——board pass 收据与同批后续
+    # promote 失败落盘的 fail 收据须两份并存（fail 不得顶掉 pass，否则最新
+    # board 收据成 fail 反挡后续发布）；仅同 result 的重检中间态去重。
     by_batch = {}
     for f in files:
         by_batch.setdefault(_receipt_batch_id(f), []).append(f)
     dedup_removed = 0
     for fs in by_batch.values():
-        for old in fs[:-1]:
-            if old.name in referred or _receipt_batch_id(old) is None:
-                continue
-            old.unlink()
-            dedup_removed += 1
+        by_result = {}
+        for f in fs:
+            r, errs = read_receipt(f)
+            key = r.result if (r is not None and not errs) else "?parse"
+            by_result.setdefault(key, []).append(f)
+        for group in by_result.values():
+            for old in group[:-1]:
+                if old.name in referred or _receipt_batch_id(old) is None:
+                    continue
+                old.unlink()
+                dedup_removed += 1
     if dedup_removed:
         print(f"info: 同 batch_id 中间态收据去重 {dedup_removed} 份（只留最新）",
               file=sys.stderr)
