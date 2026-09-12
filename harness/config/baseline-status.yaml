@@ -384,3 +384,26 @@ baselines:
       archived_in: ''
   approved_by: lechao
   approved_at: '2026-09-10T19:18:45+08:00'
+- baseline_id: BL-20260912-01
+  status: candidate
+  source_branch: dev
+  source_commit: 3cef2d38fbbb
+  sync_manifest: data/verify-results/20260912-112245-d6daed24110b.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260912-112245-d6daed24110b.md
+    ki_gate: pass
+    evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+    known_issues_carried: KI-FLAKE-d6daed24110b-6b8d79,KI-FLAKE-d6daed24110b-6b8d79,KI-FLAKE-d6daed24110b-6b8d79,KI-FLAKE-d6daed24110b-6b8d79,KI-FLAKE-d6daed24110b-6b8d79,KI-FLAKE-d6daed24110b-6b8d79
+    package_evidence: data/verify-results/20260912-112245-d6daed24110b.md
+    package_rc: 0
+    cases_coverage:
+      result: full
+      missing: []
+      run_count: 11
