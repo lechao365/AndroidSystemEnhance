@@ -400,7 +400,7 @@ baselines:
     sync_manifest: data/verify-results/20260912-112245-d6daed24110b.md
     ki_gate: pass
     evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
-    known_issues_carried: KI-FLAKE-d6daed24110b-6b8d79,KI-FLAKE-d6daed24110b-6b8d79,KI-FLAKE-d6daed24110b-6b8d79,KI-FLAKE-d6daed24110b-6b8d79,KI-FLAKE-d6daed24110b-6b8d79,KI-FLAKE-d6daed24110b-6b8d79
+    known_issues_carried: KI-FLAKE-d6daed24110b-6b8d79
     package_evidence: data/verify-results/20260912-112245-d6daed24110b.md
     package_rc: 0
     cases_coverage:
