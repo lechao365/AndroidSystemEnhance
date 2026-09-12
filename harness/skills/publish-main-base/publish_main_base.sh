@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # publish-main-base：基线发布编排器末两步（candidate 登记 + dev → main squash promote）。
-# 前置：最新收据 result∈{pass,skip} 且 最近内容提交的父(short=12) == verified_commit；
+# 前置：最新收据 result∈{pass,skip} 且 最近内容提交或其父(short=12) == verified_commit；
 #       known-issues 门禁无条件执行（实现下移 baseline_register.py check-issues）：
 #       先判登记畸形（validate_issue 有红即拒），--task 缺省时从 status 非 fixed 条目
 #       的 task 集合自动推断，再判目标任务下存在 origin=introduced 或 blocking 且
@@ -23,7 +23,7 @@
 #   - 登记元提交：subject 以「构建(baseline):」开头（prepare/promote 自动产生，免验证）
 #   - 文档提交：subject 以「文档(」开头，且仅改动 docs/**（promote 前 /sync-code-to-doc 产生；
 #     须通过 docs/** 路径校验，防「文档(」前缀夹带未验证代码随 squash 混入 main）
-#   - 内容提交：其余（须经验证；最近内容提交的父须等于 verified_commit）
+#   - 内容提交：其余（须经验证；最近内容提交或其父须等于 verified_commit）
 set -euo pipefail
 MODE=""; MSG_FILE=""; BID=""; TASK=""; APPROVED_BY=""; EVIDENCE_SCOPE=""
 # check 模式失败分类输出（stderr；prepare/promote 亦输出，不影响既有行为与退出码）
@@ -241,9 +241,14 @@ if [ "$MODE" = "prepare" ] && [ "$SKIP_DOC" -gt 0 ]; then
   exit 1
 fi
 PARENT=$(git rev-parse --short=12 "$BH^" 2>/dev/null || echo "")
-[ "$PARENT" = "$VC" ] || {
+BH_SHORT=$(git rev-parse --short=12 "$BH")
+# 覆盖判定（方向 20260912-180220）：与 promote 侧 CODE_HEAD 父等价同族放宽——
+# 验证批无内容改动时 BH 即 VC（最近内容提交==验证起点），其父必 ≠ VC，单点
+# PARENT==VC 恒 false 误拒验证批。放宽为「BH==VC 或 BH^==VC」均视为验证覆盖；
+# 最终把关交给 verified_tree 树等价断言（发布内容树==验证内容树）
+[ "$BH_SHORT" = "$VC" ] || [ "$PARENT" = "$VC" ] || {
   check_class NEED_VERIFY
-  echo "error: 最近内容提交父($PARENT) != verified_commit($VC)：dev 存在未验证改动（跳过 meta=$SKIP_META doc=$SKIP_DOC）" >&2; exit 1; }
+  echo "error: 最近内容提交($BH_SHORT)及其父($PARENT)均 != verified_commit($VC)：dev 存在未验证改动（跳过 meta=$SKIP_META doc=$SKIP_DOC）" >&2; exit 1; }
 
 # ── known-issues 门禁（prepare/promote/check-only 共用，无条件执行）────────
 # 门禁实现下移 baseline_register.py check-issues：先判畸形登记（validate_issue
@@ -280,7 +285,7 @@ else
 fi
 
 if [ "$MODE" = "check-only" ]; then
-  echo "前置校验通过：PARENT=$PARENT verified_commit=$VC result=$RESULT"
+  echo "前置校验通过：BH=$BH_SHORT PARENT=$PARENT verified_commit=$VC result=$RESULT"
   [ "$SKIP_META" -gt 0 ] && echo "  跳过登记元提交: $SKIP_META"
   [ "$SKIP_DOC" -gt 0 ] && echo "  跳过文档提交: $SKIP_DOC（docs/** 路径校验通过）"
   exit 0

@@ -336,6 +336,16 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertIn("前置校验通过", r.stdout)
         self.assertIn(f"PARENT={self.parent_vc}", r.stdout)
 
+    def test_check_bh_equals_vc_passes(self):
+        # 方向 20260912-180220：验证批无内容改动时 BH 即 VC（最近内容提交==
+        # 验证起点），其父必 ≠ VC，单点 PARENT==VC 恒 false 误拒；放宽后
+        # BH==VC 亦放行（与 promote 侧 CODE_HEAD 父等价同族）
+        self._write_receipt(self.head_vc, batch_id="000000000002")
+        r = self._run("--check-only")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("前置校验通过", r.stdout)
+        self.assertIn(f"BH={self.head_vc}", r.stdout)
+
     def test_rejects_mismatched_cdp_project_root(self):
         # 方向 4：CDP_PROJECT_ROOT 已设且不等于 git 顶层目录 → 收据查找前拒绝，
         # 防收据目录被环境变量改道（CDP_PROJECT_ROOT=root 时正常放行）
