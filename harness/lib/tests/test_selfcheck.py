@@ -945,6 +945,68 @@ class TestFlakeHistory(unittest.TestCase):
                              (3, "b9"))
 
 
+class TestFlakeSameBatchDedup(unittest.TestCase):
+    """方向 2（20260912-142358）：同批内同 nodeid flake 只登一条。
+
+    loop 多轮 selfcheck（修复验证轮 quick + 末轮 full）对同一 flake 重复
+    触发 _register_flake_issue：同一批次内已登记过该 nodeid 时不重复写盘，
+    直接复用既有记录（此前同批 round 递增重复登记，本批实测 3 条）。
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        issues = self.root / "data" / "known-issues"
+        issues.mkdir(parents=True)
+        self.nodeid = "harness/lib/tests/test_x.py::TestX::test_y"
+        self.batch = "abc123abc123"
+        (issues / f"20260912-100000-{self.batch}-flake-test-y.md").write_text(
+            f"- nodeid: {self.nodeid}\n"
+            "- kind: flake\n"
+            "- round: 2\n"
+            "- first_seen_batch: b9\n",
+            encoding="utf-8")
+
+    def test_same_batch_same_nodeid_skips_duplicate(self):
+        # 同批已登记（文件名 batch_id 命中）→ 不重复写盘，复用既有 (round, first)
+        cdpi = mock.Mock()
+        with mock.patch.object(selfcheck, "ROOT", self.root), \
+                mock.patch.object(selfcheck, "_current_batch_id",
+                                  return_value=self.batch), \
+                mock.patch.object(selfcheck, "_load_cdp_issue",
+                                  return_value=cdpi):
+            got = selfcheck._register_flake_issue(self.nodeid)
+        self.assertEqual(got, (self.nodeid, 2, "b9"))
+        cdpi.write_issue.assert_not_called()
+        self.assertEqual(
+            len(list((self.root / "data" / "known-issues").glob("*.md"))), 1)
+
+    def test_different_batch_still_registers(self):
+        # 跨批（batch_id 不同）→ 不命中同批去重，按既有 round 递增归链写盘
+        cdpi = mock.Mock()
+        with mock.patch.object(selfcheck, "ROOT", self.root), \
+                mock.patch.object(selfcheck, "_current_batch_id",
+                                  return_value="ffffffffffff"), \
+                mock.patch.object(selfcheck, "_load_cdp_issue",
+                                  return_value=cdpi):
+            got = selfcheck._register_flake_issue(self.nodeid)
+        self.assertEqual(got, (self.nodeid, 3, "b9"))
+        cdpi.write_issue.assert_called_once()
+
+    def test_no_batch_id_keeps_legacy_behavior(self):
+        # batch_id 取不到（非批次环境）→ 不做同批去重，正常登记
+        cdpi = mock.Mock()
+        with mock.patch.object(selfcheck, "ROOT", self.root), \
+                mock.patch.object(selfcheck, "_current_batch_id",
+                                  return_value=""), \
+                mock.patch.object(selfcheck, "_load_cdp_issue",
+                                  return_value=cdpi):
+            got = selfcheck._register_flake_issue(self.nodeid)
+        self.assertEqual(got, (self.nodeid, 3, "b9"))
+        cdpi.write_issue.assert_called_once()
+
+
 class TestRerunTwoPass(unittest.TestCase):
     """lib-04：_rerun_failures 两遍扫描——存在真回归时不登记任何条目。"""
 

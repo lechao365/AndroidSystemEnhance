@@ -132,6 +132,13 @@ bash harness/skills/publish-main-base/publish_main_base.sh --prepare [--task <id
 到 dev 且仅动 `docs/**`——promote 脚本会校验防夹带）
 
 ### 阶段 6：promote
+流程顺序（方向 3）：**必须先上板验证（阶段 2）→ 再 --prepare 登记（阶段 3）
+→ 最后 --promote 晋升**——promote 要求 dev 的 code/ 改动被最新 board 收据覆盖
+（覆盖判定已放宽：verified_commit 为 CODE_HEAD 祖先/自身，或 CODE_HEAD 的父
+== verified_commit 亦放行，最终以 verified_tree 树等价断言把关）。
+脚本已自动 source `harness/config/promote-approval.env`（存在即注入
+`LC_PROMOTE_APPROVAL_TOKEN`，调用方无需手工 source；文件缺失或 token 与
+预设不符时 check-approval fail-closed 拒绝——评审人独立持有，gitignore 不入库）：
 ```bash
 bash harness/skills/publish-main-base/publish_main_base.sh --promote \
   --baseline-id <id> --message-file <f> --approved-by <id> [--task <id>]

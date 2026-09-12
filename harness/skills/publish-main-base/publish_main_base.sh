@@ -366,7 +366,9 @@ printf '%s\n' "$DEV_HEAD_BEFORE" > "$(promote_state_file "$BID")"
 # 推断失败时门禁段 exit 1 拒绝），显式 --task 仅作白名单确认
 git fetch origin || { echo "error: fetch 失败" >&2; exit 1; }
 # promote 收紧（基线晋升须上板证据）：dev 相对 origin/main 的 code/ 改动须被
-# 最新 board 收据覆盖（其 verified_commit 为该 code 改动提交的后代或自身）；
+# 最新 board 收据覆盖——覆盖判定放宽为「verified_commit 为 CODE_HEAD 的祖先
+# 或自身，或 CODE_HEAD 的父 == verified_commit」（父等价，对应验证起点在内容
+# 提交之前的真实时序；最终以 verified_tree 树等价断言把关）；
 # 最新收据可能是 -s skip 的 harness 批（verify_mode=none），上板证据锚点回溯
 # latest_board_receipt，不被 skip 批干扰。dev 无 code/ 改动时豁免放行并 warn，
 # 且证据范围改写为 no-code-change（本批无代码改动，原 scope 不适用）；
@@ -403,10 +405,23 @@ if r.result != "pass" or r.verify_mode != "board":
     print("ERR_RESULT")
     print("")
     sys.exit(0)
+# 覆盖判定（方向 20260912-142358）：登记门禁要求「最近内容提交的父 ==
+# verified_commit」（父等价），而 is-ancestor(CODE_HEAD, verified_commit)
+# 在 CODE_HEAD 恰为内容提交（VC 的后代）时恒 false——验证起点 VC 在内容
+# 提交之前，改 code 批发不出基线。放宽：is-ancestor 成立或 CODE_HEAD 的父
+# == verified_commit 均视为覆盖；最终把关交给下方 verified_tree 树等价断言
+# （发布内容树 == 验证内容树，防父等价放宽被伪造 VC 绕过）。
 r0 = subprocess.run(["git", "merge-base", "--is-ancestor",
                      os.environ["CODE_HEAD"], r.verified_commit],
                     capture_output=True)
-print("1" if r0.returncode == 0 else "0")
+covered = "1" if r0.returncode == 0 else "0"
+if covered != "1":
+    p1 = subprocess.run(["git", "rev-parse", "--short=12",
+                         os.environ["CODE_HEAD"] + "^"],
+                        capture_output=True, text=True)
+    if p1.returncode == 0 and p1.stdout.strip() == r.verified_commit:
+        covered = "1"
+print(covered)
 print(r.verified_tree)
 PYEOF
   ) || true
@@ -474,12 +489,20 @@ if ! git -c core.quotepath=false diff --name-only origin/main..dev | grep -q '^d
   echo "warn: dev 相对 origin/main 无 docs/ 改动（若本批应同步设计文档，请先 /sync-code-to-doc --base origin/main 并 commit 到 dev）"
 fi
 
+# 方向 3（20260912-142358）：promote 前置自动 source promote-approval.env
+# （审批凭据外部化；评审人独立持有、gitignore 不入库）。存在即 source 注入
+# LC_PROMOTE_APPROVAL_TOKEN，调用方无需再手工 source；文件缺失保持
+# fail-closed，由下方 check-approval 判红拒绝（缺预设即拒，不静默放行）。
+if [ -f harness/config/promote-approval.env ]; then
+  # shellcheck disable=SC1091
+  . harness/config/promote-approval.env
+fi
 # 方向 2：审批独立校验前移至建 verified tag 之前——缺 env/身份不可用/token
 # 不符时在此 fail-fast，不推 tag。此前排在 baseline_register promote 内
 # （:472 之后、tag 已推送），缺 env 报错时远端已留 tag 而 rollback 删 tag
 # 仅 best-effort，残留 tag 会让 :463 的 tag 存在检查误报 baseline_id 复用
-# （exit 3 死锁，须人工删 tag）。LC_PROMOTE_APPROVAL_TOKEN 由调用方 source
-# promote-approval.env 后注入（与 check-approval 同源校验逻辑）。
+# （exit 3 死锁，须人工删 tag）。LC_PROMOTE_APPROVAL_TOKEN 由上方自动
+# source promote-approval.env 注入（与 check-approval 同源校验逻辑）。
 python3 harness/skills/publish-main-base/baseline_register.py check-approval \
   --approved-by "$APPROVED_BY" \
   || { echo "error: 审批独立校验未过（缺 token/身份不可用/审批人同执行人），拒绝建 tag/promote" >&2; exit 1; }

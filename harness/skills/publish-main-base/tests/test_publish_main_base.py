@@ -849,6 +849,93 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertIn("verified/BL-TEST-01",
                       self._git("tag", "-l", "verified/BL-TEST-01").stdout)
 
+    def test_promote_passes_code_head_parent_equals_vc(self):
+        # 方向（20260912-142358）：覆盖判定放宽为父等价亦放行。真实时序：
+        # 验证起点 VC → 上板收据 verified_commit=VC、verified_tree=内容树
+        # （验证时刻工作树=编辑后内容）→ 内容提交 c3（父=VC）→ 登记元提交
+        # （回溯跳过）→ promote 时 is-ancestor(c3, VC) 恒 false（c3 是 VC
+        # 后代），父等价（c3^==VC）须放行，最终以 verified_tree 树等价把关。
+        self._setup_remote()
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
+        vc = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        (self.root / "code").mkdir()
+        (self.root / "code" / "foo.txt").write_text("x\n", encoding="utf-8")
+        # board 收据在内容提交前落盘（验证时刻工作树=内容树）：verified_commit=
+        # 验证起点 VC，verified_tree 默认实算当前工作树（含 code/foo.txt）
+        self._write_receipt(vc, batch_id="000000000001",
+                            cases=_FULL_CASES, verify_mode="board",
+                            package=PKG_JSON)
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): code 改动")
+        self._git("push", "origin", "dev")
+        code_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        (self.root / "harness" / "config" / "baseline-status.yaml").write_text(
+            "baselines:\n"
+            f"  - baseline_id: BL-TEST-01\n"
+            f"    status: candidate\n"
+            f"    source_commit: {code_head}\n"
+            f"    sync_manifest: data/verify-results/20260831-100000-000000000001.md\n"
+            f"    build_result: PASS\n"
+            f"    package_result: PASS\n"
+            f"    board_verify: PASS\n"
+            f"    evidence:\n"
+            f"      ki_gate: pass\n",
+            encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "构建(baseline): 登记 candidate")
+        self._git("push", "origin", "dev")
+        r = self._promote()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("promote 完成", r.stdout)
+        self.assertIn("verified/BL-TEST-01",
+                      self._git("tag", "-l", "verified/BL-TEST-01").stdout)
+
+    def test_promote_rejects_code_head_unrelated_vc(self):
+        # 方向（20260912-142358）红灯：board 收据 verified_commit 与 CODE_HEAD
+        # 无父子关系（伪造，既非祖先也非父等价），而 LATEST skip 收据
+        # verified_commit==最近内容提交父使前置 PARENT 校验通过 → 覆盖判定
+        # 拒绝（RECEIPT_FAIL），证明父等价放宽未被伪造绕过。
+        self._setup_remote()
+        cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                             blocking=False), "现场")
+        (self.root / "code").mkdir()
+        (self.root / "code" / "foo.txt").write_text("x\n", encoding="utf-8")
+        self._write_receipt("deadbeefdead", batch_id="000000000001",
+                            cases=_FULL_CASES, verify_mode="board",
+                            package=PKG_JSON)
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): code 改动")
+        self._git("push", "origin", "dev")
+        code_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        (self.root / "harness" / "config" / "baseline-status.yaml").write_text(
+            "baselines:\n"
+            f"  - baseline_id: BL-TEST-01\n"
+            f"    status: candidate\n"
+            f"    source_commit: {code_head}\n"
+            f"    sync_manifest: data/verify-results/20260831-100000-000000000001.md\n"
+            f"    build_result: PASS\n"
+            f"    package_result: PASS\n"
+            f"    board_verify: PASS\n"
+            f"    evidence:\n"
+            f"      ki_gate: pass\n",
+            encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "构建(baseline): 登记 candidate")
+        self._git("push", "origin", "dev")
+        board_head = self._git("rev-parse", "--short=12", "HEAD").stdout.strip()
+        # LATEST 收据（skip）verified_commit=board_head（=最近内容提交的父，
+        # 前置 PARENT 校验通过；覆盖判定用 latest_board_receipt 的伪造 VC）
+        self._write_receipt(board_head, batch_id="000000000002",
+                            cases="", verify_mode="skip")
+        self._git("add", "-A")
+        self._git("commit", "-m", "修复(test): skip 收据入库")
+        self._git("push", "origin", "dev")
+        r = self._promote()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("check_class=RECEIPT_FAIL", r.stderr)
+        self.assertIn("被最新 board 收据覆盖", r.stderr)
+
     def test_promote_passes_zero_code_change(self):
         # 方向 2 零改动豁免：verify_mode=skip 但无 code/ 改动 → warn 豁免 + e2e promote 完成
         self._setup_remote()
@@ -1047,6 +1134,16 @@ class TestPublishStaticOrder(unittest.TestCase):
         self.assertLess(
             check_approval, tag,
             "check-approval 必须排在建 verified tag 之前（缺 token 须先 fail-fast 拒 tag）")
+
+    def test_approval_env_sourced_before_check_approval(self):
+        # 方向 3（20260912-142358）：promote 前置自动 source promote-approval.env
+        # 必须排在 check-approval 之前——token 注入后才能与预设比对，缺注入时
+        # check-approval 判「缺 LC_PROMOTE_APPROVAL_TOKEN」fail-closed 拒绝
+        source_line = self._line_of(r"promote-approval\.env")
+        check_approval = self._line_of(r"baseline_register\.py check-approval")
+        self.assertLess(
+            source_line, check_approval,
+            "promote 前置 source promote-approval.env 必须在 check-approval 之前")
 
     def test_tag_guarded_by_existence_check_before_create(self):
         # tag 复用防线：同名 tag 存在检查先于打 tag（重复 promote 拒 3）

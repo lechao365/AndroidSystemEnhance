@@ -531,14 +531,54 @@ def _flake_issue_id(nodeid, first_batch):
     return f"KI-FLAKE-{first_batch}-{digest}"
 
 
+# flake 条目文件名式样：<YYYYMMDD>-<HHMMSS>-<12hex batch_id>-<slug>.md
+# （cdp_issue 命名元数据，batch_id 在文件名第 3 段，非头字段）
+_FLAKE_NAME_RE = re.compile(r"^\d{8}-\d{6}-([0-9a-f]{12})-.+\.md$")
+
+
+def _flake_registered_in_batch(nodeid, batch_id):
+    """该 nodeid 在当前批次（batch_id）是否已有 flake 条目。
+
+    方向 2（20260912-142358）：同批内同 nodeid 只登一条——loop 多轮
+    selfcheck（修复验证轮 quick + 末轮 full）对同一 flake 重复登记会产生
+    同批多条 round 递增记录（本批 3 条根因）。batch_id 空时无法归批，返
+    False 保持登记（跨批仍按既有 round 递增归链）。
+    """
+    if not batch_id:
+        return False
+    issues_dir = ROOT / "data" / "known-issues"
+    if not issues_dir.is_dir():
+        return False
+    for p in sorted(issues_dir.glob("*.md")):
+        if p.name == "index.md":
+            continue
+        m = _FLAKE_NAME_RE.match(p.name)
+        if not m or m.group(1) != batch_id:
+            continue
+        try:
+            txt = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        # 行级精确匹配 + kind=flake（与 _flake_history 同口径，防参数化误命中）
+        if not re.search(rf"^- nodeid: {re.escape(nodeid)}$", txt, re.M):
+            continue
+        if re.search(r"^- kind: flake$", txt, re.M):
+            return True
+    return False
+
+
 def _register_flake_issue(nodeid):
     """按 KIR-002 登记抖动 known-issue（记用例名/轮次/首现批次/复现命令）。
 
     返回 (nodeid, round, first_batch)。轮次 = 既有该用例 flake 条目数 + 1，
     首现批次沿用最早条目（同一用例抖动跨批归同一 flake 记录链）。
+    同批内同 nodeid 已登记（loop 多轮 selfcheck 重复触发）时不重复写盘，
+    直接复用既有记录（方向 2：同批同 nodeid 只登一条）。
     """
     round_n, first_batch = _flake_history(nodeid)
     batch_id = _current_batch_id()
+    if batch_id and _flake_registered_in_batch(nodeid, batch_id):
+        return nodeid, round_n, first_batch
     if not first_batch:
         first_batch, round_n = batch_id or "unknown", 1
     else:
