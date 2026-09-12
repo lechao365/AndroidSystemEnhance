@@ -1151,6 +1151,42 @@ class TestPublishStaticOrder(unittest.TestCase):
         tag = self._line_of(r'git tag -a "verified/')
         self.assertLess(guard, tag, "tag 存在检查必须排在建 tag 之前")
 
+    def test_approval_env_source_uses_auto_export(self):
+        # 20260912 promote 被拦根因：source promote-approval.env 无 export，
+        # token 进不了 python3 子进程 env → check-approval 读空 fail-closed。
+        # set -a 包裹使 source 的变量自动 export（与 check-approval 调用紧邻，
+        # 防后续改动把 export 语义拆散到调用后）
+        set_a = self._line_of(r"^  set -a\b")
+        source = self._line_of(r"^  \. harness/config/promote-approval\.env")
+        set_plus_a = self._line_of(r"^  set \+a")
+        self.assertLess(set_a, source, "set -a 必须排 source 之前")
+        self.assertLess(source, set_plus_a, "set +a 必须排 source 之后")
+        self.assertLess(
+            set_plus_a, self._line_of(r"baseline_register\.py check-approval"),
+            "set +a 必须排 check-approval 调用之前（token 需在调用时已 export）")
+
+    def test_approval_token_visible_to_subprocess_after_source(self):
+        # 动态验证 set -a 语义：source 的 token 真正 export 到 python3 子进程
+        # env（缺 export 时 os.environ 读不到，check-approval 判缺 token 拒）
+        if not BASH:
+            self.skipTest("需要 bash 解释器（Windows 环境跳过）")
+        with tempfile.TemporaryDirectory() as d:
+            envf = Path(d) / "promote-approval.env"
+            envf.write_text('LC_PROMOTE_APPROVAL_TOKEN="vis-tok"\n',
+                            encoding="utf-8")
+            probe = (
+                'set -a; . "$1"; set +a; '
+                '"$2" -c "import os,sys; '
+                "v=os.environ.get('LC_PROMOTE_APPROVAL_TOKEN', ''); "
+                "sys.exit(0 if v == 'vis-tok' else 1)\"")
+            r = subprocess.run(
+                [BASH, "-c", probe, "bash", str(envf), sys.executable],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", env=os.environ.copy())
+            self.assertEqual(
+                r.returncode, 0,
+                f"token 未 export 到子进程 env: {r.stdout}{r.stderr}")
+
 
 if __name__ == "__main__":
     unittest.main()

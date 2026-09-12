@@ -495,7 +495,10 @@ fi
 # fail-closed，由下方 check-approval 判红拒绝（缺预设即拒，不静默放行）。
 if [ -f harness/config/promote-approval.env ]; then
   # shellcheck disable=SC1091
+  set -a   # 自动 export source 的变量（缺 export 时 token 到不了下方
+           # python3 子进程 check-approval——20260912 promote 被拦根因）
   . harness/config/promote-approval.env
+  set +a
 fi
 # 方向 2：审批独立校验前移至建 verified tag 之前——缺 env/身份不可用/token
 # 不符时在此 fail-fast，不推 tag。此前排在 baseline_register promote 内

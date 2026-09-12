@@ -6,9 +6,9 @@
 - severity: P2
 - blocking: False
 - blocking_reason: 
-- status: open
+- status: fixed
 - task: auto-flake
-- resolved_in: 
+- resolved_in: 20260912-494cb5191b53
 - archived_in: 
 - kind: flake
 
