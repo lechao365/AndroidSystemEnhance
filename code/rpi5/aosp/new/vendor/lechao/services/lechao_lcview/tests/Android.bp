@@ -29,6 +29,7 @@ cc_test {
         "record_codec_test.cpp",
         "DaemonLoop_test.cpp",
         "DeviceReader_test.cpp",
+        "MainLoop_test.cpp",
         ":lechao_lcview_daemon_sources",
         ":lechao_lcview_device_sources",
     ],

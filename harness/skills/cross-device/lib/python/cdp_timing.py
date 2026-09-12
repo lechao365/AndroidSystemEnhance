@@ -127,6 +127,12 @@ BATCH_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 # 归因，方向 2 定）。
 GAP_THRESHOLD = 1.0
 
+# dur_s 数值下限（秒）：自测真实耗时小于该值判红（方向 2 补，全仓实测无）——
+# 一段真实工作（编译/自检/验证链步）不可能在 50ms 内完成，dur_s < 0.05 属
+# 补零造假（历史打点存在 edit_item/edit_plan dur_s=0.0 伪造实例）。段耗时
+# 须不小于 0.05，否则落 <name>_dur_floor 异常段判红（emit 侧可见）。
+DUR_FLOOR = 0.05
+
 # 同名 mark 重复次数后缀（方向 4）：第 n 次同名段名为 name#n（首次无序号），
 # 返工轮次可数。gap_before_* 为派生段，剥序号判定（missing/段名表校验）时
 # 一律忽略。
@@ -323,6 +329,13 @@ def compute_segments(data) -> list[dict]:
         interval = max(_t(m) - prev, 0.0)
         dur = m.get("dur_s")
         if isinstance(dur, (int, float)) and 0 <= dur <= interval:
+            # 方向 2（补）：dur_s 数值下限判红——自测耗时 < DUR_FLOOR 属
+            # 补零造假（真实工作不可能 50ms 内完成），主段照落但另落
+            # <name>_dur_floor 异常段判红（emit 侧可见，防造假复现）
+            if dur < DUR_FLOOR:
+                segs.append({"name": f"{seg_name}_dur_floor",
+                             "elapsed_s": round(dur, 3),
+                             "reason": f"dur_s<{DUR_FLOOR}"})
             gap = interval - dur
             if gap >= GAP_THRESHOLD:
                 segs.append({"name": f"gap_before_{seg_name}",

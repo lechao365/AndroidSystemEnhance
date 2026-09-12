@@ -453,6 +453,56 @@ class TestCdpTiming(unittest.TestCase):
         self.assertEqual(segs[2]["reason"], "dur_s>interval")
         self.assertAlmostEqual(segs[3]["elapsed_s"], 5.0)   # c 非数值回退
 
+    # ── 方向 2（补）：dur_s 数值下限判红 ─────────────────────────────
+    def test_compute_segments_dur_s_below_floor_flagged(self):
+        # dur_s < DUR_FLOOR（0.05）：主段照落但另落 <name>_dur_floor
+        # 异常段判红（防补零造假复现——历史存在 dur_s=0.0 伪造实例）
+        data = {
+            "batch_id": self.batch,
+            "start_wall": 1000.0,
+            "marks": [
+                {"name": "a", "wall": 1001.0},
+                {"name": "b", "wall": 1007.0, "dur_s": 0.0},
+            ],
+        }
+        segs = cdp_timing.compute_segments(data)
+        self.assertEqual([s["name"] for s in segs],
+                         ["a", "b_dur_floor", "gap_before_b", "b", "finish"])
+        self.assertEqual(segs[1]["name"], "b_dur_floor")
+        self.assertAlmostEqual(segs[1]["elapsed_s"], 0.0)
+        self.assertEqual(segs[1]["reason"], "dur_s<0.05")
+        self.assertAlmostEqual(segs[3]["elapsed_s"], 0.0)  # 主段照落
+
+    def test_compute_segments_dur_s_above_floor_not_flagged(self):
+        # dur_s >= DUR_FLOOR（含边界 0.05）：不落 dur_floor 异常段
+        data = {
+            "batch_id": self.batch,
+            "start_wall": 1000.0,
+            "marks": [
+                {"name": "a", "wall": 1001.0},
+                {"name": "b", "wall": 1007.0, "dur_s": 0.05},
+            ],
+        }
+        segs = cdp_timing.compute_segments(data)
+        self.assertNotIn("b_dur_floor", [s["name"] for s in segs])
+
+    def test_compute_segments_dur_s_floor_with_gap(self):
+        # dur_s=0 造假且 interval 大：主段 0 + dur_floor 判红 +
+        # 余量落 gap_before 段（防补零同时归因完整性不丢）
+        data = {
+            "batch_id": self.batch,
+            "start_wall": 1000.0,
+            "marks": [
+                {"name": "a", "wall": 1001.0},
+                {"name": "b", "wall": 1030.0, "dur_s": 0.0},
+            ],
+        }
+        segs = cdp_timing.compute_segments(data)
+        names = [s["name"] for s in segs]
+        self.assertIn("gap_before_b", names)
+        self.assertIn("b_dur_floor", names)
+        self.assertAlmostEqual(segs[names.index("gap_before_b")]["elapsed_s"], 29.0)
+
     # ── 方向 4：同名段名 #n + 剥序号校验 + gap 段忽略 ─────────────────
     def test_compute_segments_duplicate_name_numbered(self):
         # 同名 mark 第 n 次段名 name#n（首次不加序号），返工轮次可数

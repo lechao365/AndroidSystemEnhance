@@ -49,6 +49,12 @@ public:
     // overrun 覆盖的记录）；与 getOverrun 互补支撑守恒校验（失败返回 0）
     virtual uint32_t getTotalRecords() = 0;
 
+    // LCV-16/17：诊断计数（心跳可见性，失败返 0 与真实 0 可区分）。
+    // 提上抽象接口：emitHeartbeat 经抽象 DeviceReader 注入（main_loop
+    // 可测边界）即可读取，不再依赖具体 EpollDeviceReader。
+    virtual uint64_t ioctlErr() const = 0;
+    virtual uint64_t eofCount() const = 0;
+
     // 关闭设备（幂等，可重复调用）
     virtual void close() = 0;
 };
@@ -71,8 +77,8 @@ public:
     void close() override;
 
     // LCV-16/17：诊断计数（心跳可见性，失败返 0 与真实 0 可区分）
-    uint64_t ioctlErr() const { return mIoctlErr; }
-    uint64_t eofCount() const { return mEofCount; }
+    uint64_t ioctlErr() const override { return mIoctlErr; }
+    uint64_t eofCount() const override { return mEofCount; }
 
 private:
     int mFd = -1;
