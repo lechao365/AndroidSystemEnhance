@@ -23,3 +23,9 @@ KI-FLAKE-d6daed24110b-6b8d79 pre-existing false auto-flake fixed
 KI-FLAKE-d6daed24110b-6b8d79 pre-existing false auto-flake fixed
 KI-FLAKE-d6daed24110b-6b8d79 pre-existing false auto-flake fixed
 KI-FLAKE-d6daed24110b-6b8d79 pre-existing false auto-flake fixed
+KI-20260912-005 pre-existing false checker-hardening open
+KI-20260912-002 pre-existing false checker-hardening open
+KI-20260912-001 pre-existing false checker-hardening open
+KI-20260912-006 pre-existing false checker-hardening open
+KI-20260912-003 pre-existing false checker-hardening open
+KI-20260912-004 pre-existing false checker-hardening open
