@@ -170,3 +170,4 @@
 2026-09-14 12:45:20 manual-2609141245 skip build=skip board=skip acc=- 收窄构建( 豁免的连带补齐：历史发布提交 cba533c 夹带代码补收据覆盖（区
 2026-09-14 12:48:33 63abd204c4be skip build=skip board=skip acc=- 覆盖门禁仍可绕，收窄豁免与证据来源（-s 无需上板） | {"elapsed_s":1028,"segs":{"edit_plan":8.949,"edit":393.081,"apply_selfcheck":35.712,"apply_selfcheck_dur_exceed":0.133,"report":364.87,"edit#2":176.544,"apply_selfcheck#2":31.795,"apply_selfcheck#2_dur_exceed":0.143,"report#2":11.422,"report_post":5.912,"finish":0.016}}
 2026-09-14 14:54:00 2885674bde1a skip build=skip board=skip acc=- 收窄反噬发布链路，解三处自锁（-s 无需上板） | {"elapsed_s":1039,"segs":{"precheck":0.346,"edit_plan":7.58,"edit":953.117,"apply_selfcheck":35.799,"apply_selfcheck_dur_exceed":0.144,"report":36.321,"report_post":5.94,"finish":0.016}}
+2026-09-14 16:39:37 manual-2609141638 skip build=skip board=skip acc=- 闭环 KI-FLAKE-c3869bdc645e-377de5（KIR-002 
