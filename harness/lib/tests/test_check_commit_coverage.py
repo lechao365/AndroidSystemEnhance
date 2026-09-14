@@ -60,10 +60,12 @@ def _mk_receipt(repo: Path, scope: str):
     f.write_text(f"- schema_version: 1\n- batch_id: manual-test\n"
                  f"- result: skip\n- commit_scope: {scope}\n\n## body\nx\n",
                  encoding="utf-8")
-    # fail-open 修复（批次 e503284f97b9 方向 2）：收据须 git 跟踪才算证据，
-    # 未跟踪手写 md 被检查器判"未跟踪（手写收据不作覆盖证据）"判红
+    # 证据只认 HEAD 中已提交的收据（批次 b410b688d206 方向 2）：git add 不
+    # commit 即授予覆盖是漏洞——收据须 commit 到 HEAD 才算覆盖证据
     subprocess.run(["git", "-C", str(repo), "add", "--", f.as_posix()],
                    check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                    "构建(baseline): 收据登记"], check=True)
 
 
 class TestUncoveredScan(unittest.TestCase):
@@ -97,14 +99,178 @@ class TestUncoveredScan(unittest.TestCase):
         self.assertEqual(ccc.uncovered_commits(self.repo), [])
 
     def test_meta_commit_exempt(self):
-        # meta 提交（构建/文档）豁免，不改动文件也豁免
+        # meta 提交（构建/文档）豁免：构建(baseline) 提交改动面限于
+        # baseline-status.yaml（发布/晋升本职）、文档(x) 提交改文档文件
         shas = _mk_git(self.repo, commits=[
             ("构建(baseline): 基线发布", "base.txt"),
             ("文档(docs): 纯文档更新", "doc.md"),
-            ("构建(baseline): 再次发布", "base2.txt"),
         ])
         _mk_baseline(self.repo, shas[0])
+        cfg = self.repo / "harness" / "config" / "baseline-status.yaml"
+        cfg.write_text(
+            "baselines:\n- baseline_id: BL-B\n  status: promoted\n"
+            f"  source_commit: {shas[1]}\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "--",
+                        cfg.as_posix()], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-q", "-m",
+                        "构建(baseline): 再次发布"], check=True)
         self.assertEqual(ccc.uncovered_commits(self.repo), [])
+
+    def test_build_meta_smuggles_code_red(self):
+        # 方向 1（批次 b410b688d206）：构建( 无条件豁免收窄——构建(baseline)
+        # 标题夹带代码文件（非 baseline-status.yaml/收据目录改动面）→ 不豁免判红
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+            ("构建(baseline): 夹带 harness 代码", "harness/lib/checker.py"),
+        ])
+        _mk_baseline(self.repo, shas[0])
+        out = ccc.uncovered_commits(self.repo)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][0][:12], shas[1])
+
+    def test_docs_prefix_code_not_doc_red(self):
+        # 方向 1：docs/ 前缀不再不看扩展名——docs/ 下代码文件按非文档判红
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+            ("文档(docs): 顺手改代码", "docs/tool.py"),
+        ])
+        _mk_baseline(self.repo, shas[0])
+        out = ccc.uncovered_commits(self.repo)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][0][:12], shas[1])
+
+    def test_harness_rules_md_not_doc_red(self):
+        # 方向 1：harness/rules/ 下被程序读取的判据 md 不算文档——文档(x)
+        # 标题夹带改判据判红
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+            ("文档(rules): 顺手改判据", "harness/rules/known-issues.md"),
+        ])
+        _mk_baseline(self.repo, shas[0])
+        out = ccc.uncovered_commits(self.repo)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][0][:12], shas[1])
+
+    def test_known_issues_md_not_doc_red(self):
+        # 方向 1：data/known-issues/ 下被程序读取的 known-issue md 不算文档
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+            ("文档(ki): 顺手关 known-issue", "data/known-issues/ki-001.md"),
+        ])
+        _mk_baseline(self.repo, shas[0])
+        out = ccc.uncovered_commits(self.repo)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][0][:12], shas[1])
+
+    def test_untracked_handwritten_receipt_red(self):
+        # fail-open 修复：收据 glob 扫未跟踪 md——手写一份未跟踪收据即免检
+        # 是漏洞。未跟踪收据不作覆盖证据，判红
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+            ("修复(harness): 修复", "fix.py"),
+        ])
+        _mk_baseline(self.repo, shas[0])
+        d = self.repo / "data" / "verify-results"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "20260912-000000-handwritten.md").write_text(
+            "- schema_version: 1\n- batch_id: hw\n- result: skip\n"
+            "- commit_scope: add=1 mod=0 del=0 | fix.py\n", encoding="utf-8")
+        out = ccc.uncovered_commits(self.repo)
+        self.assertEqual(len(out), 2)  # 未跟踪收据错误 + fix.py 未被有效覆盖
+        self.assertIn("<receipt-invalid>", out[0][0])
+        self.assertIn("未跟踪", out[0][1])
+
+    def test_fail_receipt_not_evidence_red(self):
+        # fail-open 修复：不滤 result=fail 收据——失败收据不能证明覆盖，
+        # 跳过并判红（此前静默当作证据=免检）
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+            ("修复(harness): 修复", "fix.py"),
+        ])
+        _mk_baseline(self.repo, shas[0])
+        d = self.repo / "data" / "verify-results"
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / "20260912-000000-fail.md"
+        f.write_text("- schema_version: 1\n- batch_id: fail\n- result: fail\n"
+                     "- commit_scope: add=1 mod=0 del=0 | fix.py\n",
+                     encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "--", f.as_posix()],
+                       check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-q", "-m",
+                        "构建(baseline): 收据登记"], check=True)
+        out = ccc.uncovered_commits(self.repo)
+        # fail 收据跳过不作覆盖证据（不判红收据本身），fix.py 因此无覆盖判红
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][0][:12], shas[1])
+
+    def test_uppercase_fail_result_receipt_red(self):
+        # 方向 2（批次 b410b688d206）：result 白名单仅 pass/skip——result=FAIL
+        # （大写）不作覆盖证据，判红（此前只精确匹配小写 fail 才跳过）
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+            ("修复(harness): 修复", "fix.py"),
+        ])
+        _mk_baseline(self.repo, shas[0])
+        d = self.repo / "data" / "verify-results"
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / "20260912-000000-uppercase.md"
+        f.write_text("- schema_version: 1\n- batch_id: up\n- result: FAIL\n"
+                     "- commit_scope: add=1 mod=0 del=0 | fix.py\n",
+                     encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "--", f.as_posix()],
+                       check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-q", "-m",
+                        "构建(baseline): 收据登记"], check=True)
+        out = ccc.uncovered_commits(self.repo)
+        # FAIL 收据判红（result 非法）+ fix.py 无有效覆盖
+        self.assertEqual(len(out), 2)
+        self.assertIn("<receipt-invalid>", out[0][0])
+        self.assertIn("result 非法", out[0][1])
+
+    def test_workspace_modified_receipt_not_evidence(self):
+        # 方向 2：收据内容从 git show HEAD 读——工作区未提交修改不改判定
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+            ("修复(harness): 修复", "fix.py"),
+        ])
+        _mk_baseline(self.repo, shas[0])
+        d = self.repo / "data" / "verify-results"
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / "20260912-000000-scope.md"
+        f.write_text("- schema_version: 1\n- batch_id: ok\n- result: skip\n"
+                     "- commit_scope: add=1 mod=0 del=0 | fix.py\n",
+                     encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "--", f.as_posix()],
+                       check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-q", "-m",
+                        "构建(baseline): 收据登记"], check=True)
+        self.assertEqual(ccc.uncovered_commits(self.repo), [])
+        # 工作区把 scope 改成空/伪造 → HEAD 不变仍按 HEAD 判定，覆盖不失效
+        f.write_text("- schema_version: 1\n- batch_id: ok\n- result: skip\n"
+                     "- commit_scope: add=0 mod=0 del=0 |\n", encoding="utf-8")
+        self.assertEqual(ccc.uncovered_commits(self.repo), [])
+
+    def test_broken_receipt_parse_red(self):
+        # fail-open 修复：收据解析失败丢错误——坏收据静默丢弃等于免检。
+        # 解析失败判红
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+            ("修复(harness): 修复", "fix.py"),
+        ])
+        _mk_baseline(self.repo, shas[0])
+        d = self.repo / "data" / "verify-results"
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / "20260912-000000-broken.md"
+        f.write_text("- schema_version: 999\n- batch_id: broken\n"
+                     "- result: skip\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "--", f.as_posix()],
+                       check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-q", "-m",
+                        "构建(baseline): 收据登记"], check=True)
+        out = ccc.uncovered_commits(self.repo)
+        self.assertEqual(len(out), 2)  # 坏收据错误 + fix.py 未被有效覆盖
+        self.assertIn("<receipt-invalid>", out[0][0])
+        self.assertIn("解析失败", out[0][1])
 
     def test_verify_dir_self_exempt(self):
         # 收据目录自引用豁免：提交只改 data/verify-results/ 不算改动面
@@ -147,65 +313,6 @@ class TestUncoveredScan(unittest.TestCase):
         ])
         _mk_baseline(self.repo, shas[0])
         self.assertEqual(ccc.uncovered_commits(self.repo), [])
-
-    def test_untracked_handwritten_receipt_red(self):
-        # fail-open 修复：收据 glob 扫未跟踪 md——手写一份未跟踪收据即免检
-        # 是漏洞。未跟踪收据不作覆盖证据，判红
-        shas = _mk_git(self.repo, commits=[
-            ("构建(baseline): 基线发布", "base.txt"),
-            ("修复(harness): 修复", "fix.py"),
-        ])
-        _mk_baseline(self.repo, shas[0])
-        d = self.repo / "data" / "verify-results"
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "20260912-000000-handwritten.md").write_text(
-            "- schema_version: 1\n- batch_id: hw\n- result: skip\n"
-            "- commit_scope: add=1 mod=0 del=0 | fix.py\n", encoding="utf-8")
-        out = ccc.uncovered_commits(self.repo)
-        self.assertEqual(len(out), 2)  # 未跟踪收据错误 + fix.py 未被有效覆盖
-        self.assertIn("<receipt-invalid>", out[0][0])
-        self.assertIn("未跟踪", out[0][1])
-
-    def test_fail_receipt_not_evidence_red(self):
-        # fail-open 修复：不滤 result=fail 收据——失败收据不能证明覆盖，
-        # 跳过并判红（此前静默当作证据=免检）
-        shas = _mk_git(self.repo, commits=[
-            ("构建(baseline): 基线发布", "base.txt"),
-            ("修复(harness): 修复", "fix.py"),
-        ])
-        _mk_baseline(self.repo, shas[0])
-        d = self.repo / "data" / "verify-results"
-        d.mkdir(parents=True, exist_ok=True)
-        f = d / "20260912-000000-fail.md"
-        f.write_text("- schema_version: 1\n- batch_id: fail\n- result: fail\n"
-                     "- commit_scope: add=1 mod=0 del=0 | fix.py\n",
-                     encoding="utf-8")
-        subprocess.run(["git", "-C", str(self.repo), "add", "--", f.as_posix()],
-                       check=True)
-        out = ccc.uncovered_commits(self.repo)
-        # fail 收据跳过不作覆盖证据（不判红收据本身），fix.py 因此无覆盖判红
-        self.assertEqual(len(out), 1)
-        self.assertEqual(out[0][0][:12], shas[1])
-
-    def test_broken_receipt_parse_red(self):
-        # fail-open 修复：收据解析失败丢错误——坏收据静默丢弃等于免检。
-        # 解析失败判红
-        shas = _mk_git(self.repo, commits=[
-            ("构建(baseline): 基线发布", "base.txt"),
-            ("修复(harness): 修复", "fix.py"),
-        ])
-        _mk_baseline(self.repo, shas[0])
-        d = self.repo / "data" / "verify-results"
-        d.mkdir(parents=True, exist_ok=True)
-        f = d / "20260912-000000-broken.md"
-        f.write_text("- schema_version: 999\n- batch_id: broken\n"
-                     "- result: skip\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(self.repo), "add", "--", f.as_posix()],
-                       check=True)
-        out = ccc.uncovered_commits(self.repo)
-        self.assertEqual(len(out), 2)  # 坏收据错误 + fix.py 未被有效覆盖
-        self.assertIn("<receipt-invalid>", out[0][0])
-        self.assertIn("解析失败", out[0][1])
 
     def test_no_baseline_skips(self):
         # fail-open 修复（批次 e503284f97b9 方向 2）：无 promoted baseline
@@ -250,6 +357,50 @@ class TestUncoveredScan(unittest.TestCase):
         self.assertIn("ws_report.py --manual", cmd)
         self.assertIn(shas[0], cmd)
         self.assertIn("--result skip", cmd)
+
+    def test_range_uncovered_fully_covered(self):
+        # 方向 3（批次 b410b688d206）：区间内每个未覆盖 sha 均被 scope 覆盖
+        # → 豁免可证（True）
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+            ("修复(harness): 修复a", "fixa.py"),
+            ("修复(harness): 修复b", "fixb.py"),
+        ])
+        _mk_baseline(self.repo, shas[0])
+        self.assertTrue(ccc.range_uncovered_fully_covered(
+            shas[0], shas[2], "add=2 mod=0 del=0 | fixa.py, fixb.py",
+            self.repo))
+
+    def test_range_partial_scope_red(self):
+        # 方向 3：只补一半（scope 只覆盖区间内部分未覆盖提交）→ 不豁免。
+        # 存在性检查在此场景仍返回"有缺口"放行，逐 sha 判定须拦下
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+            ("修复(harness): 修复a", "fixa.py"),
+            ("修复(harness): 修复b", "fixb.py"),
+        ])
+        _mk_baseline(self.repo, shas[0])
+        self.assertFalse(ccc.range_uncovered_fully_covered(
+            shas[0], shas[2], "add=1 mod=0 del=0 | fixa.py", self.repo))
+
+    def test_range_no_gap_returns_false(self):
+        # 方向 3：区间内无未覆盖提交（全 meta）→ 不豁免（rc=1 属静音/伪造）
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+        ])
+        _mk_baseline(self.repo, shas[0])
+        self.assertFalse(ccc.range_uncovered_fully_covered(
+            shas[0], shas[0], "add=0 mod=0 del=0 |", self.repo))
+
+    def test_range_bad_scope_returns_false(self):
+        # 方向 3：scope 非法 → 不豁免（fail-closed）
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+            ("修复(harness): 修复a", "fixa.py"),
+        ])
+        _mk_baseline(self.repo, shas[0])
+        self.assertFalse(ccc.range_uncovered_fully_covered(
+            shas[0], shas[1], "非法scope", self.repo))
 
 
 class TestMain(unittest.TestCase):

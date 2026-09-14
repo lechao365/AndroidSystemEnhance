@@ -35,6 +35,18 @@ _NON_META_TYPE_RE = re.compile(r"^(新增|修复|重构|杂项)\(")
 _DOC_SUFFIXES = {".md", ".txt", ".rst"}
 _DOC_PREFIXES = ("docs/", "doc/")
 
+# 构建元文件豁免面（批次 b410b688d206 方向 1 收窄）：构建(baseline) 等
+# 发布/晋升提交仅当改动面限于 baseline-status.yaml（收据目录 data/verify-results/
+# 已由 commit_files 排除自引用）才豁免——此前 subject.startswith("构建(")
+# 无条件豁免，写 构建(任意词) 即可零收据挟带任意 harness 代码（实测连检查器
+# 自身都能换成恒绿桩）
+_BUILD_META_EXEMPT_PATHS = frozenset({"harness/config/baseline-status.yaml"})
+
+# 程序读取的 md 面（批次 b410b688d206 方向 1 收窄）：harness/rules/ 是判据、
+# data/known-issues/ 是 known-issue 数据，被程序读取的 md 改动即改判据/关
+# known-issue，不得按纯文档豁免（否则 文档(x): 标题即可零收据改判据）
+_PROGRAM_MD_PREFIXES = ("harness/rules/", "data/known-issues/")
+
 # 收据目录自引用豁免：commit_scope 生成侧排除 data/verify-results/，判定侧同排除
 _VERIFY_PREFIX = "data/verify-results"
 
@@ -88,11 +100,18 @@ def is_meta_subject(subject: str) -> bool:
 
 
 def _is_doc_file(path: str) -> bool:
-    """路径是否文档类文件（meta 提交豁免的改动面判据）。"""
+    """路径是否文档类文件（meta 提交豁免的改动面判据）。
+
+    批次 b410b688d206 方向 1 收窄：
+      - docs/ 前缀不再不看扩展名——docs/ 下 .py/.sh 等非文档文件不得豁免；
+      - harness/rules/ 与 data/known-issues/ 下被程序读取的 md 不算文档。
+    """
     if path == _VERIFY_PREFIX or path.startswith(_VERIFY_PREFIX + "/"):
         return True  # 收据目录自引用豁免（上层已排除，双保险）
+    if path.startswith(_PROGRAM_MD_PREFIXES):
+        return False
     if path.startswith(_DOC_PREFIXES):
-        return True
+        return any(path.endswith(s) for s in _DOC_SUFFIXES)
     return any(path.endswith(s) for s in _DOC_SUFFIXES)
 
 
@@ -102,7 +121,9 @@ def _commit_is_meta_exempt(sha: str, cwd: Path) -> bool:
     fail-open 修复（批次 e503284f97b9 方向 2）：仅凭标题豁免是漏洞——写
     文档(x): 标题即可把代码改动夹带进 meta 提交逃过收据覆盖。分两类：
       - 构建(baseline/...)：发布/晋升提交本职即收口整个变更（含代码），
-        豁免保留（已发布基线因历史发布提交而恒红会自锁，与解自锁目标矛盾）；
+        豁免须改动面限于 baseline-status.yaml 与收据目录（收窄，批次
+        b410b688d206 方向 1）——此前无条件豁免，写 构建(任意词) 即可
+        零收据挟带任意 harness 代码；
       - 文档(...)：标题文档但改动含非文档文件（.py/.sh/.yml 等）时按非
         meta 处理（须被收据覆盖）；改动文件读不到时 fail-closed 不豁免
         （无法证实是纯文档）。
@@ -111,7 +132,10 @@ def _commit_is_meta_exempt(sha: str, cwd: Path) -> bool:
     if not is_meta_subject(subject):
         return False
     if subject.startswith("构建("):
-        return True
+        files = commit_files(sha, cwd)
+        if files is None:
+            return False
+        return files <= _BUILD_META_EXEMPT_PATHS
     files = commit_files(sha, cwd)
     if files is None:
         return False
@@ -215,30 +239,40 @@ def _receipt_scopes(root: Path) -> tuple[list[set[str]], list[str]]:
     d = root / "data" / "verify-results"
     if not d.is_dir():
         return scopes, errors
-    # 只认 git 跟踪的收据（git ls-files），未跟踪手写 md 不作覆盖证据
-    r = _git(["ls-files", _VERIFY_PREFIX], root)
-    tracked = set()
-    if r is not None and r.returncode == 0:
-        for ln in (r.stdout or "").splitlines():
-            tracked.add(ln.strip())
-    for f in sorted(d.glob("*.md")):
-        if f.name == "trend.md":
+    # 证据只认 HEAD 中已提交的收据（git ls-tree HEAD，内容经 git show 读）：
+    # 此前 ls-files 查索引（git add 不 commit 即授予覆盖）与 read_text 读工作区
+    # （只改工作区内容即改判定）都不是 HEAD——两处一起收窄为 git show HEAD
+    # 读（批次 b410b688d206 方向 2），未提交/仅索引/工作区改动的收据不作证据。
+    r = _git(["ls-tree", "-r", "--name-only", "HEAD", "--", _VERIFY_PREFIX],
+             root)
+    if r is None or r.returncode != 0:
+        # git ls-tree 失败 fail-closed：无法证实 HEAD 收据面即判红，不静默放行
+        errors.append("<ls-tree-failed>: git ls-tree HEAD 枚举收据失败，"
+                      "无法证实覆盖证据")
+        return scopes, errors
+    # 工作区未跟踪收据补充判红（不在 HEAD 但存在的手写收据须显式提示，
+    # 审计链要求坏证据可见——手写未跟踪收据仍不作证据，且不静默无视）
+    r_untracked = _git(["ls-files", "--others", "--exclude-standard", "--",
+                        _VERIFY_PREFIX], root)
+    if r_untracked is not None and r_untracked.returncode == 0:
+        for ln in (r_untracked.stdout or "").splitlines():
+            rel = ln.strip()
+            if rel and rel.endswith(".md") and not rel.endswith("/trend.md"):
+                errors.append(f"{rel}: 未跟踪（手写收据不作覆盖证据）")
+    for rel in sorted(ln.strip() for ln in (r.stdout or "").splitlines()
+                      if ln.strip()):
+        if not rel.startswith(_VERIFY_PREFIX + "/"):
             continue
-        try:
-            rel = f.relative_to(root).as_posix()
-        except ValueError:
-            rel = f.as_posix()
-        if rel not in tracked:
-            errors.append(f"{rel}: 未跟踪（手写收据不作覆盖证据）")
+        if not rel.endswith(".md") or rel.endswith("/trend.md"):
             continue
-        try:
-            txt = f.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as e:
-            errors.append(f"{rel}: 读取失败（{e}）")
+        g = _git(["show", f"HEAD:{rel}"], root)
+        if g is None or g.returncode != 0:
+            errors.append(f"{rel}: 从 HEAD 读取失败（git show）")
             continue
+        txt = g.stdout or ""
         # 非收据文件（不含收据头 key-value，如测试夹具/文档）跳过不判红——
         # 只有形如收据的 md 才是覆盖证据候选；手写伪造收据若模仿头仍会被
-        # 后续解析/跟踪/result 判定拦截（fail-open 修复方向 2）
+        # 后续解析/result 白名单判定拦截（方向 2）
         if "batch_id:" not in txt and "schema_version:" not in txt:
             continue
         try:
@@ -250,9 +284,15 @@ def _receipt_scopes(root: Path) -> tuple[list[set[str]], list[str]]:
             errors.append(f"{rel}: 解析失败")
             continue
         if rpt.result == "fail":
-            # fail-open 修复（方向 2）：fail 收据不作覆盖证据——此前被 glob
-            # 扫到即参与覆盖判定，失败收据能"覆盖"提交是漏洞；跳过（不判红，
-            # 合法失败记录），依赖它的提交会因无覆盖而判红
+            # fail 收据不作覆盖证据（合法失败记录，跳过不判红），依赖它的
+            # 提交会因无覆盖而判红
+            continue
+        if rpt.result not in ("pass", "skip"):
+            # 白名单（方向 2，批次 b410b688d206）：仅 pass/skip 可作覆盖
+            # 证据——此前只精确匹配小写 fail 才跳过，FAIL/空/尾空格等非
+            # 标准 result 全被放行，改判据/关 known-issue 可零收据通关
+            errors.append(f"{rel}: result 非法（仅 pass/skip 可作覆盖证据，"
+                          f"实际 {rpt.result!r}）")
             continue
         if not (rpt.commit_scope or "").strip():
             # commit_scope 字段引入前的历史收据（无此字段）合法，跳过不判红
@@ -304,6 +344,50 @@ def uncovered_commits(root: Path) -> list[tuple[str, str]]:
         if not any(_covered_by_scope(files, sp) for sp in scopes):
             out.append((sha, _subject(sha, root)))
     return out
+
+
+def range_uncovered_fully_covered(base12: str, head12: str, scope_str: str,
+                                  root: Path) -> bool:
+    """区间内每个未覆盖 sha 均被 scope 单行覆盖 → 豁免可证（方向 3）。
+
+    供 ws_report --manual 的 commit_coverage_rc 豁免判据。此前 _manual_gap_exists
+    是存在性检查——区间内有任一未覆盖提交即豁免整个 rc，收据 scope 只补一半
+    （覆盖部分提交）照样静音其余判红。改为逐 sha 判定：
+      - 区间内每个未覆盖提交（uncovered_commits 命中且落在区间）的改动
+        文件集均被本收据 scope 覆盖才返 True；
+      - 任一未覆盖提交未被本 scope 覆盖 / 区间无未覆盖提交（rc=1 属静音
+        或伪造）/ scope 非法 / git 枚举失败（fail-closed）→ 返 False 不豁免。
+    """
+    here = Path(__file__).resolve().parent
+    cdp_lib = here.parent / "skills" / "cross-device" / "lib" / "python"
+    if str(cdp_lib) not in sys.path:
+        sys.path.insert(0, str(cdp_lib))
+    from commit_scope import parse_scope  # noqa: E402
+
+    _counts, scope_paths = parse_scope(scope_str)
+    if not scope_paths:
+        return False
+    uncov = uncovered_commits(root)
+    if not uncov:
+        return False
+    r = _git(["rev-list", "--no-merges", f"{base12}..{head12}"], root)
+    if r is None or r.returncode != 0:
+        return False
+    in_range = {ln.strip() for ln in (r.stdout or "").splitlines()
+                if ln.strip()}
+    in_range_gap = False
+    for sha, _ in uncov:
+        if sha not in in_range:
+            continue
+        in_range_gap = True
+        files = commit_files(sha, root)
+        if files is None:
+            return False
+        if not files:
+            continue
+        if not _covered_by_scope(files, scope_paths):
+            return False
+    return in_range_gap
 
 
 def fix_cmd(root: Path, head: str = "HEAD") -> str:

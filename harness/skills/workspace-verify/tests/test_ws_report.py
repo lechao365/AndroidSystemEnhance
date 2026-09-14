@@ -1305,6 +1305,49 @@ class TestWsReport(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("存在非零退出码", err.getvalue())
 
+    def test_mode_m_rc1_partial_scope_rejected(self):
+        # 方向 3（批次 b410b688d206）：只补一半照样静音——区间内 2 个未覆盖
+        # 提交，本收据 scope 只覆盖其中 1 个（mock 回填只含 f1.py）→ 不豁免，
+        # commit_coverage_rc=1 拒写（存在性检查在此场景会放行）
+        repo, base, head = self._mk_manual_git(
+            commits=("构建(baseline): 基线", "修复(harness): 修复a",
+                     "修复(harness): 修复b"))
+        os.environ["CDP_PROJECT_ROOT"] = repo
+        self.addCleanup(lambda: os.environ.update(
+            {"CDP_PROJECT_ROOT": self._tmp.name}))
+        body = self._write("## 自报\n- 完成：修复 harness 逻辑，验证单测绿\n")
+        err = io.StringIO()
+        with mock.patch.object(ws_report, "range_non_meta_name_status",
+                               return_value=["A\tf1.py"]):
+            with contextlib.redirect_stderr(err):
+                rc = ws_report.main(["--manual", f"{base}..{head}",
+                                     "--result", "skip", "--build", "skip",
+                                     "--board", "skip", "--summary", "直连开发",
+                                     "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 quotepath_rc=0 known_issues_rc=0 commit_coverage_rc=1 | 120 passed, 2 skipped in 5.0s",
+                                     "--body", body])
+        self.assertEqual(rc, 2)
+        self.assertIn("存在非零退出码", err.getvalue())
+
+    def test_mode_m_rc1_full_scope_exempted(self):
+        # 方向 3：区间内 2 个未覆盖提交均被本收据 scope 覆盖 → 豁免，rc=0
+        repo, base, head = self._mk_manual_git(
+            commits=("构建(baseline): 基线", "修复(harness): 修复a",
+                     "修复(harness): 修复b"))
+        os.environ["CDP_PROJECT_ROOT"] = repo
+        self.addCleanup(lambda: os.environ.update(
+            {"CDP_PROJECT_ROOT": self._tmp.name}))
+        body = self._write("## 自报\n- 完成：修复 harness 逻辑，验证单测绿\n")
+        buf = io.StringIO()
+        with mock.patch.object(ws_report, "range_non_meta_name_status",
+                               return_value=["A\tf1.py", "A\tf2.py"]):
+            with redirect_stdout(buf):
+                rc = ws_report.main(["--manual", f"{base}..{head}",
+                                     "--result", "skip", "--build", "skip",
+                                     "--board", "skip", "--summary", "直连开发",
+                                     "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 quotepath_rc=0 known_issues_rc=0 commit_coverage_rc=1 | 120 passed, 2 skipped in 5.0s",
+                                     "--body", body])
+        self.assertEqual(rc, 0, buf.getvalue())
+
     def test_pass_without_acceptance_rejected(self):
         # result=pass 而无 --acceptance-file → 返 2 拒写（堵零验收证据假绿）
         batch = self._write(VALID_S, ".cdp")

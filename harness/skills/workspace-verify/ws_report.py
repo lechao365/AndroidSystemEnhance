@@ -50,10 +50,13 @@ from selfcheck import REQUIRED_RC_KEYS  # noqa: E402 方向 3：必查键单点�
 # meta 提交判定与 git 区间改动收集（单点定义，ws_report 与检查器同源不漂移）
 # 方向 3（批次 e503284f97b9）：manual 收据的 commit_coverage_rc 豁免须"仅确
 # 覆盖缺口才免"——uncovered_commits 用于验证缺口真实存在，杜绝加 --manual
-# 即静音判红的 fail-open（此前无条件 pop）
+# 即静音判红的 fail-open（此前无条件 pop）。批次 b410b688d206 方向 3 再收窄：
+# 存在性检查（区间内有任一缺口即 pop 整个 rc）致只补一半照样静音，改为逐
+# sha 判定——区间内每个未覆盖 sha 均被本收据 scope 覆盖才免（单点定义于
+# check_commit_coverage.range_uncovered_fully_covered，不漂移）
 from check_commit_coverage import (range_non_meta_name_status,  # noqa: E402
-                                   recent_promoted_baseline_commit,
-                                   uncovered_commits)
+                                   range_uncovered_fully_covered,
+                                   recent_promoted_baseline_commit)
 
 
 _HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -537,29 +540,21 @@ def _acceptance_device_dirty(path):
     return ""
 
 
-def _manual_gap_exists(base12: str, head12: str) -> bool:
-    """manual 收据区间内是否存在真实覆盖缺口（方向 3，批次 e503284f97b9）。
+def _manual_gap_exists(base12: str, head12: str, manual_scope: str) -> bool:
+    """manual 收据区间内每个未覆盖 sha 均被本收据 scope 覆盖才免（方向 3）。
 
-    check_commit_coverage.uncovered_commits 给出自最近 promoted baseline 起
-    全库判红清单；若其中任一 sha 落在 <base12>..<head12> 区间内，即缺口真实
-    存在（本收据正是补齐动作，豁免 commit_coverage_rc 判红合理）；否则
-    rc=1 却无区间内缺口属静音判红，不得豁免。区间无法枚举/执行失败按
-    fail-closed 保守视为无缺口（不豁免）。
+    批次 b410b688d206 方向 3 收窄：存在性检查（区间内有任一缺口就 pop 整个
+    commit_coverage_rc）允许收据 scope 只补一半——其余未覆盖提交的判红被
+    一并静音。改为逐 sha 判定：区间内每个未覆盖提交的改动文件集均被本收据
+    commit_scope 覆盖才豁免；任一未被本 scope 覆盖或区间无未覆盖提交
+    （rc=1 属静音/伪造）不豁免。判定单点委托 check_commit_coverage（与
+    检查器同源不漂移）；区间无法枚举/scope 非法按 fail-closed 不豁免。
     """
     try:
-        uncov = uncovered_commits(project_root())
+        return range_uncovered_fully_covered(
+            base12, head12, manual_scope or "", project_root())
     except Exception:
         return False
-    if not uncov:
-        return False
-    r = subprocess.run(["git", "-c", "core.quotepath=false", "rev-list",
-                        "--no-merges", f"{base12}..{head12}"],
-                       cwd=project_root(), capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", timeout=30)
-    if r.returncode != 0:
-        return False
-    in_range = {ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()}
-    return any(sha in in_range for sha, _ in uncov)
 
 
 def _split_manual_range(arg: str):
@@ -993,7 +988,7 @@ def main(argv=None):
             # （收据正是补齐动作，落盘后 rc 自转 0）；无区间内缺口却报
             # rc=1 属矛盾/伪造，不豁免走下方拒写。
             if bad.get("commit_coverage_rc") and _manual_gap_exists(
-                    base12, head12):
+                    base12, head12, manual_scope or ""):
                 bad.pop("commit_coverage_rc", None)
         if bad:
             detail = " ".join(f"{k}={v}" for k, v in sorted(bad.items()))
