@@ -463,7 +463,7 @@ baselines:
 - baseline_id: BL-20260914-01
   status: promoted
   source_branch: dev
-  source_commit: c1df806bd31a
+  source_commit: 0a41444cb264
   sync_manifest: data/verify-results/20260912-181227-b69c438c75cd.md
   build_result: SKIP
   package_result: PASS
