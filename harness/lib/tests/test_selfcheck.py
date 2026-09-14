@@ -14,6 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import selfcheck
+import check_host_tests as cht
 
 # 治理工具默认 fake 结果（run_parallel_tools 返回形态，B2 并行采集后
 # 治理段与 pytest 段解耦 mock：用例专注 pytest 序列，治理 rc/结论行由
@@ -31,6 +32,8 @@ _FAKE_TOOLS = {
                      ".sh 均以 100755 入库\n", ""),
     "known_issues": (0, "OK: baseline-status.yaml 引用的 KI 编号均有对应"
                         "记录文件\n", ""),
+    "commit_coverage": (0, "OK: 自最近 promoted baseline 起非 meta 提交均被"
+                          "收据 commit_scope 覆盖\n", ""),
 }
 
 
@@ -70,7 +73,7 @@ def _patched_parallel():
                            return_value={"refs": "p", "cfg": "p"}), \
             mock.patch.object(selfcheck, "_collect_tools",
                               return_value=(_fake_tools(), 1.0, 2.0, 0.1, 0.1,
-                                            0.1, 0.1)), \
+                                            0.1, 0.1, 0.1)), \
             mock.patch.object(selfcheck, "_spawn_cmd",
                               return_value="p"), \
             mock.patch.object(selfcheck, "_collect_cmd",
@@ -116,7 +119,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1, 0.1)):
             with redirect_stdout(buf):
                 self.assertEqual(selfcheck.main(), 0)
         out = buf.getvalue()
@@ -204,7 +207,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1, 0.1)):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -225,7 +228,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1, 0.1)):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -281,10 +284,10 @@ class TestSelfcheck(unittest.TestCase):
         self.assertIn("pytest_rc=124", buf.getvalue())
 
     def test_host_collect_timeout_above_module_timeout(self):
-        # 方向 2：host 收口超时 = _HOST_TIMEOUT_S（650）透传 _collect_cmd，
-        # 仍须大于 check_host_tests 单模块 make 超时（300s）——否则外层收口
-        # rc=124 抢先截断内层 TimeoutExpired，丢失超时归因（判红同效但诊断
-        # 退化）；650 也兜住两模块顺序跑最坏 ~600s
+        # 方向 2：host 收口超时 = _HOST_TIMEOUT_S 透传 _collect_cmd，取内部
+        # 最坏值（2 模块 ×（make test 300s + make clean 60s）= 720s）加 60
+        # 缓冲 = 780s；仍须大于 check_host_tests 单模块 make 超时（300s）——
+        # 否则外层收口 rc=124 抢先截断内层 TimeoutExpired，丢失超时归因
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
         ])
@@ -300,8 +303,10 @@ class TestSelfcheck(unittest.TestCase):
                                   side_effect=_collect):
             with redirect_stdout(buf):
                 selfcheck.main()
-        self.assertEqual(selfcheck._HOST_TIMEOUT_S, 650)
-        self.assertEqual(seen.get("host"), 650)
+        self.assertEqual(selfcheck._HOST_TIMEOUT_S, 780)
+        self.assertEqual(seen.get("host"), 780)
+        self.assertGreater(selfcheck._HOST_TIMEOUT_S,
+                           cht._HOST_TEST_WORST_S)
         self.assertGreater(seen.get("host"), 300)
 
 
@@ -331,7 +336,7 @@ class TestParallelTools(unittest.TestCase):
     def test_all_mode_tool_timeout_returns_124(self):
         # 治理工具挂起超时 → kill + rc=124（不无限阻塞自检）
         proc = mock.Mock()
-        # refs 超时路径：communicate×2（首超时 + kill 后回收）；其余三进程正常
+        # refs 超时路径：communicate×2（首超时 + kill 后回收）；其余进程正常
         proc.communicate.side_effect = [
             selfcheck.subprocess.TimeoutExpired("cmd", 120), ("", ""),
             ("OK: config 检查通过，无违规。\nconfig_rc=0\ncontract_rc=0\n", ""),
@@ -339,6 +344,8 @@ class TestParallelTools(unittest.TestCase):
             ("OK: 热路径检查器无全树 rglob/os.walk\n", ""),
             ("OK: git 路径输出点均已带 -c core.quotepath=false\n", ""),
             ("OK: baseline-status.yaml 引用的 KI 编号均有对应记录文件\n", ""),
+            ("OK: 自最近 promoted baseline 起非 meta 提交均被收据 commit_scope "
+             "覆盖\n", ""),
         ]
         with mock.patch.object(selfcheck.subprocess, "Popen",
                                return_value=proc):
@@ -350,8 +357,9 @@ class TestParallelTools(unittest.TestCase):
 
     def test_collect_tools_returns_split_durs(self):
         # 方向 2：_collect_tools 返回 (tools, refs_dur, cfg_dur, dis_dur,
-        # scan_dur, quotepath_dur)，durs 拆开各检查器各自自报（合并 tools
-        # 无法定位慢点归因）；收口顺序 refs 先、cfg 后，用 side_effect 逐个注入
+        # scan_dur, quotepath_dur, known_issues_dur, commit_coverage_dur)，
+        # durs 拆开各检查器各自自报（合并 tools 无法定位慢点归因）；收口顺序
+        # refs 先、cfg 后，用 side_effect 逐个注入
         out = ("[VIOLATION] x\n==== config: 共 1 处违规（判红）====\n"
                "OK: contract 检查通过，无违规。\nconfig_rc=1\ncontract_rc=0\n")
         refs_res = (1, "==== 共 3 处悬空引用 ====\n", "", 0.5)
@@ -362,21 +370,26 @@ class TestParallelTools(unittest.TestCase):
                   "", 0.4)
         ki_res = (0, "OK: baseline-status.yaml 引用的 KI 编号均有对应记录文件\n",
                   "", 0.6)
+        cc_res = (0, "OK: 自最近 promoted baseline 起非 meta 提交均被收据"
+                     " commit_scope 覆盖\n", "", 0.7)
         with mock.patch.object(selfcheck, "_collect_cmd",
                                side_effect=[refs_res, cfg_res,
                                             dis_res, scan_res, qp_res,
-                                            ki_res]):
-            (tools, refs_dur, cfg_dur, dis_dur, scan_dur, qp_dur, ki_dur) = \
+                                            ki_res, cc_res]):
+            (tools, refs_dur, cfg_dur, dis_dur, scan_dur, qp_dur, ki_dur,
+             cc_dur) = \
                 selfcheck._collect_tools({"refs": "p", "cfg": "p",
                                           "discipline": "p", "scan": "p",
                                           "quotepath": "p",
-                                          "known_issues": "p"})
+                                          "known_issues": "p",
+                                          "commit_coverage": "p"})
         self.assertEqual(refs_dur, 0.5)
         self.assertEqual(cfg_dur, 2.5)
         self.assertEqual(dis_dur, 0.2)
         self.assertEqual(scan_dur, 0.3)
         self.assertEqual(qp_dur, 0.4)
         self.assertEqual(ki_dur, 0.6)
+        self.assertEqual(cc_dur, 0.7)
         self.assertEqual(tools["refs"][0], 1)
         self.assertEqual(tools["cfg"][0], 1)
         self.assertEqual(tools["ctr"][0], 0)
@@ -384,6 +397,7 @@ class TestParallelTools(unittest.TestCase):
         self.assertEqual(tools["scan"][0], 0)
         self.assertEqual(tools["quotepath"][0], 0)
         self.assertEqual(tools["known_issues"][0], 0)
+        self.assertEqual(tools["commit_coverage"][0], 0)
 
     def test_collect_cmd_timeout_kills_124(self):
         # 方向 1：_collect_cmd 超时 → kill + rc=124（约定超时标记，不无限

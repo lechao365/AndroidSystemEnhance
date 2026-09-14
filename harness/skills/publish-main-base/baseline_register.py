@@ -176,8 +176,11 @@ def carried_issue_ids(task, issues_dir=None):
     """
     if not task:
         return []
-    return [e["issue_id"] for e in read_index(issues_dir)
-            if e["status"] in ("open", "scheduled") and e["task"] == task]
+    # 按 issue_id 去重（20260912）：flake 跨批 round 递增同 id 在 index 多行，
+    # 携带清单只记一条，防 candidate evidence 里同 id 重复 N 遍
+    return list(dict.fromkeys(
+        e["issue_id"] for e in read_index(issues_dir)
+        if e["status"] in ("open", "scheduled") and e["task"] == task))
 
 
 def _real_known_issues_dir():
@@ -441,8 +444,12 @@ def main(argv=None):
         # 与 data/baselines/（promote 生成的证据快照目录，随晋升提交入库）
         # 与 data/known-issues/（保留目录——promote 归档不删文件，批内新登记
         # 问题随晋升提交入库；不排除则登记变更让树等价断言必红回滚）
+        # 与 data/verify-results/（验证收据目录——纯收据提交纳入 BH 回溯跳过
+        # 后，BH 之后的收据提交新增的收据文件不在 tag 树而 main squash 树含之，
+        # 不排除则树等价断言必红回滚；收据是验证证据非发布内容，排除安全）
         excludes = ("harness/config/baseline-status.yaml", "docs/",
-                    "data/baselines/", "data/known-issues/")
+                    "data/baselines/", "data/known-issues/",
+                    "data/verify-results/")
         diffs = [ln for ln in r.stdout.splitlines()
                  if ln and not any(ln == e or ln.startswith(e) for e in excludes)]
         if diffs:

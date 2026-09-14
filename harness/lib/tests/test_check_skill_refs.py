@@ -374,6 +374,36 @@ class TestCheckSkillRefs(unittest.TestCase):
                 self.tmp / "harness" / "skills" / "untracked" / "SKILL.md"),
             ["../base/gone.md"])
 
+    def test_git_ls_files_excludes_ignored(self):
+        # KI-20260912-003：未跟踪并入扫描面依赖 --exclude-standard 让
+        # .gitignore 生效；删掉该参数会让忽略产物重新进扫描面（守卫静默
+        # fail-open，且 CI 上非仓库资产引入噪声/悬空）。断言被忽略的未跟踪
+        # SKILL.md 不进文件面，同时对照未跟踪非忽略文件仍须进文件面。
+        ckr._GIT_LS_CACHE.clear()
+        ckr._INDEX_CACHE.clear()
+        self._git("init", "-q")
+        self._git("config", "user.email", "t@t")
+        self._git("config", "user.name", "t")
+        self._mk(".gitignore", "harness/skills/ignored/\n")
+        self._mk("harness/skills/base/SKILL.md", "ok\n")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        # 盘上有、未跟踪，但被 .gitignore 忽略 → 不应进文件面
+        self._mk("harness/skills/ignored/SKILL.md",
+                 "[miss](../base/gone.md)\n")
+        # 对照：未跟踪非忽略文件须进文件面（防误把整个 --others 关掉）
+        self._mk("harness/skills/untracked/SKILL.md", "ok\n")
+        ckr._GIT_LS_CACHE.clear()
+        rels = [p.as_posix() for p in ckr._git_ls_files()]
+        self.assertIn("harness/skills/base/SKILL.md", rels)
+        self.assertIn("harness/skills/untracked/SKILL.md", rels)
+        self.assertNotIn("harness/skills/ignored/SKILL.md", rels)
+        # 扫描面（iter_scan_targets）同样不得含被忽略文件
+        ckr._GIT_LS_CACHE.clear()
+        targets = ckr.iter_scan_targets(None)
+        trels = [t.relative_to(self.tmp).as_posix() for t in targets]
+        self.assertNotIn("harness/skills/ignored/SKILL.md", trels)
+
     def test_bare_filename_ref_untracked_target_valid(self):
         # 方向 4：裸文件名目标为未跟踪文件（未 git add）→ basename 索引并入
         # 未跟踪后唯一命中视为有效（此前索引只含跟踪文件，唯一性漏计未跟踪

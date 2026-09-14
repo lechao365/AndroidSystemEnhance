@@ -346,6 +346,30 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertIn("前置校验通过", r.stdout)
         self.assertIn(f"BH={self.head_vc}", r.stdout)
 
+    def test_check_skips_pure_receipt_commit(self):
+        # 方向 2（批次 e3f5f80d7b22）：纯收据提交（仅改 data/verify-results/）
+        # 纳入回溯跳过——classify 只认 构建(baseline)/文档( 标题，杂项(baseline)
+        # 纯收据提交按 content 处理曾致 BH 停在收据提交上、PARENT==VC 恒 false
+        # 误拒 --prepare（18f0f14 首发）。跳过后续 BH 回溯到最近内容提交 c2，
+        # 父(c1)==VC 放行
+        self._write_receipt(self.parent_vc, batch_id="000000000002")
+        self._git("add", "-A")
+        self._git("commit", "-m", "杂项(baseline): 收据登记")
+        r = self._run("--check-only")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("前置校验通过", r.stdout)
+
+    def test_check_pure_receipt_commit_with_code_red(self):
+        # 方向 2：纯收据提交夹带代码（非 data/verify-results/）→ 不纳入回溯
+        # 跳过，按 content 拦截 → 最近内容提交是收据提交，父 != VC 拒
+        self._write_receipt(self.parent_vc, batch_id="000000000002")
+        (self.root / "c.txt").write_text("3\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "杂项(baseline): 夹带代码")
+        r = self._run("--check-only")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("NEED_VERIFY", r.stderr)
+
     def test_rejects_mismatched_cdp_project_root(self):
         # 方向 4：CDP_PROJECT_ROOT 已设且不等于 git 顶层目录 → 收据查找前拒绝，
         # 防收据目录被环境变量改道（CDP_PROJECT_ROOT=root 时正常放行）
@@ -563,6 +587,16 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertEqual(set(carried_issue_ids("t1", self.root / "data" / "known-issues")),
                          {"KI-OPEN", "KI-SCHED"})
 
+    def test_carried_issue_ids_dedup_by_issue_id(self):
+        # 20260912：同一 issue_id 多个登记文件（flake 跨批 round 递增同 id）
+        # 携带清单只记一条——防 candidate evidence 同 id 重复 N 遍
+        for tag in ("x", "y", "z"):
+            cdp_issue.write_issue(self._mk_issue(task="t1", origin="pre-existing",
+                                                 blocking=False, issue_id="KI-DUP"),
+                                  tag)
+        from baseline_register import carried_issue_ids
+        self.assertEqual(carried_issue_ids("t1"), ["KI-DUP"])
+
     # ── 方向 5：promote 收紧与 ki_gate 证据链（bare 远端 e2e）────────────
     def _receipt_commit_c3(self, batch_id="000000000002", **kw):
         # 收据入库为 c3（内容提交，父=c2==VC），保证 promote/prepare 工作树干净
@@ -653,7 +687,10 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         r = self._promote()
         self.assertEqual(r.returncode, 1)
         self.assertIn("check_class=RECEIPT_FAIL", r.stderr)
-        self.assertIn("非 pass", r.stderr)
+        # 20260912：latest_board_receipt 跳过 result!=pass 的 board 收据——fail
+        # board 收据（cases 失败）不作晋升上板证据（fail-closed），缺失 pass
+        # board 收据时按「未被 board 收据覆盖」拒绝
+        self.assertIn("被最新 board 收据覆盖", r.stderr)
 
     def _candidate_yaml_pkg(self, package_result):
         """candidate 登记模板（可变 package_result，供方向 3 门禁两态用例）。"""

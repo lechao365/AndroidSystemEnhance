@@ -151,8 +151,12 @@ def closed_issue_ids(issues_dir=None):
 def closed_issue_details(issues_dir=None, include_archived=False):
     """终态条目明细列表（promote 归档入档用）：每项含 issue_id / resolved_in /
     title / archived_in。include_archived=False（缺省）时过滤已归档（archived_in
-    非空）条目——归档段只收录首次归档，防跨批重复归档同一条终态（方向 6）。"""
+    非空）条目——归档段只收录首次归档，防跨批重复归档同一条终态（方向 6）。
+    按 issue_id 去重（20260912）：同一 id 多个登记文件（flake 跨批 round 递增
+    同 id）只记一条，防 promoted 记录里同 id 重复 N 遍。
+    """
     d = issues_dir or data_known_issues_dir()
+    seen = set()
     details = []
     for p in issue_files(d):
         i = read_issue(p)
@@ -160,6 +164,9 @@ def closed_issue_details(issues_dir=None, include_archived=False):
             continue
         if not include_archived and i.archived_in:
             continue
+        if i.issue_id in seen:
+            continue
+        seen.add(i.issue_id)
         details.append({"issue_id": i.issue_id, "resolved_in": i.resolved_in,
                         "title": i.title, "archived_in": i.archived_in})
     return details

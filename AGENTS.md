@@ -16,6 +16,12 @@
 （IDLE-001~007：队列准入不自选战场 / 让路协议复用 ws_lock / flake 修复纪律 /
 预算与断点续跑）。
 
+## 本地直连开发
+在 apply 设备上直连用 LLM 开发（不走 cross-device-apply 批次流程）前，必须先加载
+[harness/rules/local-dev-dod.md](harness/rules/local-dev-dod.md)
+（LOCAL-DEV-001~003：manual 收据须覆盖本次全部非 meta 提交 / 逐项三态自报 /
+带 selfcheck 结果；缺收据即被 check_commit_coverage 判红与 git-works-push 拒推）。
+
 ## Harness 工作流命令
 
 | 命令 | 用途 |

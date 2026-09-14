@@ -200,6 +200,17 @@ class TestIssue(unittest.TestCase):
         self.assertEqual(sorted(d["issue_id"] for d in all_d),
                          ["KI-ARCHIVED", "KI-FRESH"])
 
+    def test_closed_issue_details_dedup_by_issue_id(self):
+        # 20260912：同一 issue_id 多个登记文件（flake 跨批 round 递增同 id）
+        # 明细只记一条——防 promoted 记录 known_issues_closed 同 id 重复 N 遍
+        cdp_issue.write_issue(_mk_issue("KI-DUP", status="fixed"), "x")
+        cdp_issue.write_issue(_mk_issue("KI-DUP", status="fixed"), "y")
+        cdp_issue.write_issue(_mk_issue("KI-DUP", status="fixed"), "z")
+        details = cdp_issue.closed_issue_details(self._dir)
+        ids = [d["issue_id"] for d in details]
+        self.assertEqual(ids.count("KI-DUP"), 1, ids)
+        self.assertEqual(len(details), 1)
+
     def test_set_archived_in_writes_header_and_keeps_first(self):
         # set_archived_in 回写头 archived_in；已归档不覆盖（首次归档可追溯）
         r = _mk_issue("KI-ARC2", status="fixed")

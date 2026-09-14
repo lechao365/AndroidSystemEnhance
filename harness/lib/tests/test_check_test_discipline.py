@@ -167,6 +167,20 @@ class TestDiscipline(unittest.TestCase):
                 out = ctd.scan(self.repo)
                 self.assertTrue(any(kind in o for o in out), out)
 
+    def test_ignored_untracked_excluded(self):
+        # KI-20260912-003：未跟踪文件并入扫描面依赖 --exclude-standard 让
+        # .gitignore 生效；被忽略的未跟踪测试文件（含违禁行）不得进扫描面，
+        # 否则删掉该参数即静默 fail-open（忽略产物重新触发/干扰守卫）。
+        gi = self.repo / ".gitignore"
+        gi.write_text("harness/log/\n")
+        ignored = self.repo / "harness" / "log" / "test_ignored.py"
+        ignored.parent.mkdir(parents=True, exist_ok=True)
+        ignored.write_text("import time\n\ndef test_f():\n    time."
+                           + "sleep" + "(2)\n")
+        out = ctd.scan(self.repo)
+        self.assertEqual(out, [])
+        self.assertFalse(any("test_ignored.py" in o for o in out), out)
+
     def test_deleted_test_file_flagged_without_exempt(self):
         # 方向 2 红灯：删除测试文件（此前只扫新增行完全不可见，删测试换绿
         # 静默通过 discipline_rc=0）→ 未登记豁免即判红
@@ -242,6 +256,38 @@ class TestDisciplineFailClosed(unittest.TestCase):
         self.assertIn("git", out[0])
         err = io.StringIO()
         with mock.patch.object(ctd, "_git_lines", return_value=None), \
+                contextlib.redirect_stderr(err):
+            rc = ctd.main(["--repo", str(self.repo)])
+        self.assertEqual(rc, 1)
+        self.assertIn("判红", err.getvalue())
+
+    def test_deleted_list_failure_reported_red(self):
+        # KI-20260912-004 红灯：deleted 列表 git 失败 fail-closed 判红。
+        # 调用顺序固定 tracked→deleted→untracked，第 2 次返 None 命中删除
+        # 分支；静默当"无删除"会放行"删测试换绿"，须哨兵违规判红。
+        with mock.patch.object(ctd, "_git_lines", side_effect=[[], None]):
+            out = ctd.scan(self.repo)
+        self.assertTrue(out)
+        self.assertTrue(any("删除列表失败" in o for o in out), out)
+        err = io.StringIO()
+        with mock.patch.object(ctd, "_git_lines", side_effect=[[], None]), \
+                contextlib.redirect_stderr(err):
+            rc = ctd.main(["--repo", str(self.repo)])
+        self.assertEqual(rc, 1)
+        self.assertIn("判红", err.getvalue())
+
+    def test_untracked_list_failure_reported_red(self):
+        # KI-20260912-004 红灯：untracked 列表 git 失败 fail-closed 判红。
+        # 调用顺序第 3 次返 None 命中未跟踪分支；静默当"无未跟踪"会放行
+        # 上板前未 git add 的违禁测试文件（假绿），须哨兵违规判红。
+        with mock.patch.object(ctd, "_git_lines",
+                               side_effect=[[], [], None]):
+            out = ctd.scan(self.repo)
+        self.assertTrue(out)
+        self.assertTrue(any("ls-files" in o or "未跟踪" in o for o in out), out)
+        err = io.StringIO()
+        with mock.patch.object(ctd, "_git_lines",
+                               side_effect=[[], [], None]), \
                 contextlib.redirect_stderr(err):
             rc = ctd.main(["--repo", str(self.repo)])
         self.assertEqual(rc, 1)

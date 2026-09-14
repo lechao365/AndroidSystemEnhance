@@ -14,6 +14,9 @@
 # harness 运行时产物（plan/verify/构建报告等，不入库）
 /harness/log/
 
+# 收据趋势锁文件（ws_report 并发写锁残留，误入库过，20260912 起忽略）
+/data/verify-results/trend.md.lock
+
 # Python 缓存（本地产物）
 __pycache__/
 *.pyc

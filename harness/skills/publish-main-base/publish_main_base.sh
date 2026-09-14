@@ -222,7 +222,26 @@ while :; do
       SKIP_DOC=$((SKIP_DOC+1)); DOC_SHA_LIST="$DOC_SHA_LIST $BH"
       if ! BH=$(git rev-parse "$BH^"); then echo "error: BH 回溯越界（$BH 无父提交）" >&2; exit 1; fi
       ;;
-    *) break ;;
+    content)
+      # 登记类纯收据提交纳入回溯跳过（方向 2，批次 e3f5f80d7b22）：收据随批
+      # 入库产生 杂项(baseline) 等登记类纯收据提交（如 18f0f14，标题含
+      # (baseline) 且仅改 data/verify-results/），其 verified_commit 语义等同
+      # meta（无内容改动）——classify 只认 构建(baseline)/文档( 标题，登记类
+      # 收据提交按 content 处理曾致 BH 停在收据提交上、PARENT==VC 判定恒 false
+      # 误拒 --prepare。仅跳过"标题带 (baseline) 的登记类 + 改动面全部在收据
+      # 目录"的提交（夹带代码仍按 content 拦截；普通 修复(test) 收据入库提交
+      # 不做内容跳过，防越过验证锚点误放行）
+      case "$MSG" in
+        *"(baseline)"*)
+          RECEIPT_ONLY=$(git show --name-only --format= "$BH" | grep -v '^$' | grep -v '^data/verify-results/' || true)
+          if [ -z "$RECEIPT_ONLY" ]; then
+            SKIP_META=$((SKIP_META+1))
+            if ! BH=$(git rev-parse "$BH^"); then echo "error: BH 回溯越界（$BH 无父提交）" >&2; exit 1; fi
+            continue
+          fi
+          ;;
+      esac
+      break ;;
   esac
 done
 # 文档提交须仅改动 docs/**（防「文档(」前缀夹带未验证代码随 squash 混入 main）

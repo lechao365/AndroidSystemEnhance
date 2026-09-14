@@ -894,6 +894,18 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual({e["issue_id"] for e in read_index(issues_dir)},
                          {"KI-CLOSE-1", "KI-CLOSE-2", "KI-OPEN-1"})
 
+    def test_carried_issue_ids_dedup_by_issue_id(self):
+        # 20260912：同一 issue_id 多个登记文件（flake 跨批 round 递增同 id）
+        # 携带清单只记一条——防 candidate evidence known_issues_carried 同 id 重复
+        from cdp_issue import Issue, write_issue
+        base = dict(schema_version=1, discovered_in="abc", severity="P2",
+                    task="t1", batch_id="18f27638d9f6", origin="pre-existing",
+                    blocking=False)
+        for tag in ("x", "y", "z"):
+            write_issue(Issue(issue_id="KI-DUP-CARRIED", title="问题",
+                              status="open", **base), tag)
+        self.assertEqual(br.carried_issue_ids("t1"), ["KI-DUP-CARRIED"])
+
     def test_promote_archives_when_evidence_not_dict(self):
         # evidence 非字典写不成清单 → 告警，但归档仍入基线文档，文件保留
         self._write_issue_files()

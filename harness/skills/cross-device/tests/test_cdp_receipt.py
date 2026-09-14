@@ -179,6 +179,8 @@ class TestReceipt(unittest.TestCase):
     def test_prune_dedupes_same_batch_keeps_newest(self):
         # 方向 4：同 batch_id 只留最新一份（重检重推的中间态不占配额）——
         # 3 份同批（1 pass + 2 fail 中间态）去重后仅存最新；被引用文件仍护
+        # 20260912 修订：按 (batch_id, result) 分组——fail 组去重留最新 fail，
+        # pass 与 fail 两份并存（fail 不得顶掉 pass）
         names = [f"2026010{i}-000000-111111111111.md" for i in (1, 2, 3)]
         for i, n in enumerate(names):
             p = self._dir / n
@@ -187,8 +189,9 @@ class TestReceipt(unittest.TestCase):
                 f"- result: {'pass' if i == 2 else 'fail'}\n\n## body\n",
                 encoding="utf-8")
         cdp_receipt.prune_details(self._dir)
-        left = [f.name for f in self._dir.glob("*111111111111*.md")]
-        self.assertEqual(left, [names[2]])
+        left = sorted(f.name for f in self._dir.glob("*111111111111*.md"))
+        self.assertEqual(left, sorted([names[1], names[2]]),
+                         "同批 fail 去重留最新 fail，且与 pass 两份并存")
 
     def test_prune_dedupe_spares_referred_old_version(self):
         # 同批去重时被 baseline-status 引用的旧版本按名保留（证据链优先）
@@ -284,6 +287,87 @@ class TestReceipt(unittest.TestCase):
                       "被引用收据必须保留（证据链保护）")
         self.assertEqual(len(details), keep + 1)  # 配额 + 1 受保护
 
+    def test_prune_keeps_coverage_receipt(self):
+        # 方向 3（批次 e3f5f80d7b22）：覆盖最近 baseline..HEAD 内非 meta 提交
+        # 的收据是 commit_coverage 判定的唯一覆盖凭据，被老化删掉即翻红自锁
+        # （124520 manual 收据独自兜住区间全部 7 个提交）——配额老化须保护
+        repo = Path(self._tmp.name) / "covrepo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"],
+                       check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"],
+                       check=True)
+        # 首提交 = 最近 promoted baseline source_commit
+        (repo / "base.txt").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                        "构建(baseline): 基线发布"], check=True)
+        base = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=True).stdout.strip()
+        # 非 meta 提交（fix.py）——须被收据 commit_scope 覆盖
+        (repo / "fix.py").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                        "修复(harness): 修复"], check=True)
+        cfg = repo / "harness" / "config"
+        cfg.mkdir(parents=True, exist_ok=True)
+        (cfg / "baseline-status.yaml").write_text(
+            "baselines:\n- baseline_id: BL-A\n  status: promoted\n"
+            f"  source_commit: {base}\n", encoding="utf-8")
+        os.environ["CDP_PROJECT_ROOT"] = str(repo)
+        self.addCleanup(lambda: os.environ.update(
+            {"CDP_PROJECT_ROOT": self._tmp.name}))
+        d = cdp_paths.data_verify_results_dir()
+        # 覆盖收据（scope 覆盖 fix.py）作为最旧份，随后新收据触发老化
+        with mock.patch.object(cdp_receipt, "_DETAIL_KEEP", 1):
+            r = _mk_receipt("cov0000000001", result="pass")
+            r.commit_scope = "add=1 mod=0 del=0 | fix.py"
+            cdp_receipt.write_receipt(r, "b")
+            cdp_receipt.write_receipt(_mk_receipt("new0000000001"), "b")
+        details = [f.name for f in d.glob("*.md") if f.name != "trend.md"]
+        self.assertEqual(len(details), 2, "配额 1 + 覆盖保护 1")
+        self.assertTrue(any("cov0000000001" in n for n in details),
+                        "覆盖 baseline..HEAD 的收据必须保留（覆盖证据保护）")
+
+    def test_prune_ages_uncovering_receipt(self):
+        # 方向 3 反向：commit_scope 不覆盖任何区间内非 meta 提交的收据
+        # 不触发覆盖保护，正常老化
+        repo = Path(self._tmp.name) / "covrepo2"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"],
+                       check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"],
+                       check=True)
+        (repo / "base.txt").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                        "构建(baseline): 基线发布"], check=True)
+        base = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=True).stdout.strip()
+        cfg = repo / "harness" / "config"
+        cfg.mkdir(parents=True, exist_ok=True)
+        (cfg / "baseline-status.yaml").write_text(
+            "baselines:\n- baseline_id: BL-A\n  status: promoted\n"
+            f"  source_commit: {base}\n", encoding="utf-8")
+        os.environ["CDP_PROJECT_ROOT"] = str(repo)
+        self.addCleanup(lambda: os.environ.update(
+            {"CDP_PROJECT_ROOT": self._tmp.name}))
+        d = cdp_paths.data_verify_results_dir()
+        with mock.patch.object(cdp_receipt, "_DETAIL_KEEP", 1):
+            r = _mk_receipt("cov0000000001", result="pass")
+            r.commit_scope = "add=1 mod=0 del=0 | nowhere.py"  # 不覆盖任何提交
+            cdp_receipt.write_receipt(r, "b")
+            cdp_receipt.write_receipt(_mk_receipt("new0000000001"), "b")
+        details = [f.name for f in d.glob("*.md") if f.name != "trend.md"]
+        self.assertEqual(len(details), 1)
+        self.assertTrue(any("new0000000001" in n for n in details))
+
     def test_prune_without_yaml_ages_normally(self):
         # 无 baseline-status.yaml：无引用，正常老化到配额
         keep = cdp_receipt._DETAIL_KEEP
@@ -322,8 +406,11 @@ class TestReceipt(unittest.TestCase):
         """同秒同 batch_id 写入两份：文件名唯一不覆盖；latest 取最新写入。
 
         （批次 261f10265269 方向 4 调整：write_receipt 仍防覆盖，但落盘
-        后的老化去重使同批只留最新一份——最新收据代表该批终态，中间态
-        不占配额；跨批 fail 归因由非 pass 护窗承担）
+         后的老化去重使同批只留最新一份——最新收据代表该批终态，中间态
+         不占配额；跨批 fail 归因由非 pass 护窗承担。
+         20260912 修订：同批去重按 (batch_id, result) 分组——fail 与 pass
+         两份并存（fail 不得顶掉 pass，否则最新 board 收据成 fail 反挡后续
+         发布），仅同 result 的重检中间态去重）
         """
         r1 = _mk_receipt(result="fail")
         p1 = cdp_receipt.write_receipt(r1, "第一次失败现场")
@@ -333,12 +420,29 @@ class TestReceipt(unittest.TestCase):
         self.assertTrue(p2.exists())
         left = sorted(f.name for f in self._dir.glob("*abc123def456*.md")
                       if f.name != "trend.md")
-        self.assertEqual(left, [p2.name], "同批去重后只留最新一份")
+        self.assertEqual(left, sorted([p1.name, p2.name]),
+                         "fail 与 pass 同批须两份并存（fail 不得顶掉 pass）")
+        self.assertEqual(cdp_receipt.read_receipt(p1)[0].result, "fail")
         self.assertEqual(cdp_receipt.read_receipt(p2)[0].result, "pass")
         latest, errs = cdp_receipt.read_latest_receipt(self._dir)
         self.assertEqual(errs, [])
         self.assertEqual(latest.batch_id, "abc123def456")
         self.assertEqual(latest.result, "pass", "latest 应取最新写入的收据")
+
+    def test_prune_keeps_board_pass_with_same_batch_fail(self):
+        # 20260912 方向 3：同批 board pass 收据与 promote 失败落盘的 fail
+        # 收据两份并存——fail 不得顶掉 pass，否则最新 board 收据成 fail 反挡
+        # 后续发布；latest_board_receipt 仍须命中 pass 收据
+        r1 = _mk_receipt(result="pass")          # board pass（先落盘）
+        p1 = cdp_receipt.write_receipt(r1, "上板通过")
+        r2 = _mk_receipt(result="fail")          # 同批 promote 失败 fail 收据
+        p2 = cdp_receipt.write_receipt(r2, "promote 被拒现场")
+        self.assertTrue(p1.exists(), "board pass 收据不得被同批 fail 顶掉")
+        self.assertTrue(p2.exists())
+        bp, br, errs = cdp_receipt.latest_board_receipt(self._dir)
+        self.assertEqual(errs, [])
+        self.assertEqual(bp.name, p1.name, "latest_board_receipt 应命中 pass 收据")
+        self.assertEqual(br.result, "pass")
 
     def test_append_trend_truncates_to_keep(self):
         """trend 超过 _TREND_KEEP 行时截断保留最新（原子写语义不变）。"""
