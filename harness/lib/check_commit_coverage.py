@@ -35,12 +35,27 @@ _NON_META_TYPE_RE = re.compile(r"^(新增|修复|重构|杂项)\(")
 _DOC_SUFFIXES = {".md", ".txt", ".rst"}
 _DOC_PREFIXES = ("docs/", "doc/")
 
-# 构建元文件豁免面（批次 b410b688d206 方向 1 收窄）：构建(baseline) 等
-# 发布/晋升提交仅当改动面限于 baseline-status.yaml（收据目录 data/verify-results/
-# 已由 commit_files 排除自引用）才豁免——此前 subject.startswith("构建(")
-# 无条件豁免，写 构建(任意词) 即可零收据挟带任意 harness 代码（实测连检查器
-# 自身都能换成恒绿桩）
-_BUILD_META_EXEMPT_PATHS = frozenset({"harness/config/baseline-status.yaml"})
+# 构建元文件豁免面（批次 b410b688d206 方向 1 收窄，e3f5f80d7b22 方向 1 补全）：
+# 构建(baseline) 发布/晋升提交本职 add baseline-status.yaml 与证据目录
+# （publish_main_base.sh 晋升提交一并 add data/baselines/ 与 data/known-issues/），
+# 豁免须改动面限于 baseline-status.yaml 与这两个证据目录——此前仅 baseline-
+# status.yaml 致晋升提交 files 子集判定恒假、promote 每次必红（18f0f14 首发）
+_BUILD_META_EXEMPT_PATHS = frozenset({
+    "harness/config/baseline-status.yaml",
+    "data/baselines/",
+    "data/known-issues/",
+})
+
+
+def _build_meta_exempt_file(path: str) -> bool:
+    """构建( 提交豁免面文件判定：baseline-status.yaml 精确 + 证据目录前缀。
+
+    目录项（结尾 /）按前缀匹配其下文件（与 commit_scope 目录匹配同语义）。
+    """
+    if path in _BUILD_META_EXEMPT_PATHS:
+        return True
+    return any(path.startswith(p) for p in _BUILD_META_EXEMPT_PATHS
+               if p.endswith("/"))
 
 # 程序读取的 md 面（批次 b410b688d206 方向 1 收窄）：harness/rules/ 是判据、
 # data/known-issues/ 是 known-issue 数据，被程序读取的 md 改动即改判据/关
@@ -135,7 +150,7 @@ def _commit_is_meta_exempt(sha: str, cwd: Path) -> bool:
         files = commit_files(sha, cwd)
         if files is None:
             return False
-        return files <= _BUILD_META_EXEMPT_PATHS
+        return all(_build_meta_exempt_file(f) for f in files)
     files = commit_files(sha, cwd)
     if files is None:
         return False
@@ -388,6 +403,44 @@ def range_uncovered_fully_covered(base12: str, head12: str, scope_str: str,
         if not _covered_by_scope(files, scope_paths):
             return False
     return in_range_gap
+
+
+def scope_covers_baseline_head(scope_str: str, root: Path) -> bool:
+    """scope 单行是否覆盖最近 baseline..HEAD 内任一非 meta 提交（方向 3）。
+
+    供 cdp_receipt.prune_details 第三类保护：收据是 commit_coverage 判定的
+    唯一覆盖凭据，覆盖最近 promoted baseline..HEAD 区间提交的收据一旦被
+    prune 老化删掉，依赖它的提交即翻红自锁（124520 manual 收据独自兜住
+    区间全部 7 个提交的实例）。scope 非法/无法界定起点/枚举失败均返 False
+    （保守不触发保护）。
+    """
+    base = recent_promoted_baseline_commit(root)
+    if not base:
+        return False
+    here = Path(__file__).resolve().parent
+    cdp_lib = here.parent / "skills" / "cross-device" / "lib" / "python"
+    if str(cdp_lib) not in sys.path:
+        sys.path.insert(0, str(cdp_lib))
+    from commit_scope import parse_scope  # noqa: E402
+
+    _counts, scope_paths = parse_scope(scope_str)
+    if not scope_paths:
+        return False
+    r = _git(["rev-list", "--no-merges", f"{base}..HEAD"], root)
+    if r is None or r.returncode != 0:
+        return False
+    for sha in (r.stdout or "").splitlines():
+        sha = sha.strip()
+        if not sha:
+            continue
+        if _commit_is_meta_exempt(sha, root):
+            continue
+        files = commit_files(sha, root)
+        if files is None:
+            continue
+        if files and _covered_by_scope(files, scope_paths):
+            return True
+    return False
 
 
 def fix_cmd(root: Path, head: str = "HEAD") -> str:

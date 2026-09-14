@@ -128,6 +128,25 @@ class TestUncoveredScan(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0][0][:12], shas[1])
 
+    def test_build_meta_evidence_dirs_exempt(self):
+        # 方向 1（批次 e3f5f80d7b22）：晋升提交本职 add baseline-status.yaml 与
+        # data/baselines/、data/known-issues/ 证据目录（publish_main_base.sh
+        # 541）——改动面限于这三处仍豁免；仅 baseline-status.yaml 曾致 files
+        # 子集判定恒假、promote 每次必红
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+        ])
+        _mk_baseline(self.repo, shas[0])
+        # 晋升提交：baseline-status.yaml（保留基线内容）+ 两个证据目录
+        for rel in ("data/baselines/BL-X.md", "data/known-issues/ki-001.md"):
+            p = self.repo / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-q", "-m",
+                        "构建(baseline): 晋升 promoted"], check=True)
+        self.assertEqual(ccc.uncovered_commits(self.repo), [])
+
     def test_docs_prefix_code_not_doc_red(self):
         # 方向 1：docs/ 前缀不再不看扩展名——docs/ 下代码文件按非文档判红
         shas = _mk_git(self.repo, commits=[

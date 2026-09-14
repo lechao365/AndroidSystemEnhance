@@ -346,6 +346,30 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertIn("前置校验通过", r.stdout)
         self.assertIn(f"BH={self.head_vc}", r.stdout)
 
+    def test_check_skips_pure_receipt_commit(self):
+        # 方向 2（批次 e3f5f80d7b22）：纯收据提交（仅改 data/verify-results/）
+        # 纳入回溯跳过——classify 只认 构建(baseline)/文档( 标题，杂项(baseline)
+        # 纯收据提交按 content 处理曾致 BH 停在收据提交上、PARENT==VC 恒 false
+        # 误拒 --prepare（18f0f14 首发）。跳过后续 BH 回溯到最近内容提交 c2，
+        # 父(c1)==VC 放行
+        self._write_receipt(self.parent_vc, batch_id="000000000002")
+        self._git("add", "-A")
+        self._git("commit", "-m", "杂项(baseline): 收据登记")
+        r = self._run("--check-only")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("前置校验通过", r.stdout)
+
+    def test_check_pure_receipt_commit_with_code_red(self):
+        # 方向 2：纯收据提交夹带代码（非 data/verify-results/）→ 不纳入回溯
+        # 跳过，按 content 拦截 → 最近内容提交是收据提交，父 != VC 拒
+        self._write_receipt(self.parent_vc, batch_id="000000000002")
+        (self.root / "c.txt").write_text("3\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-m", "杂项(baseline): 夹带代码")
+        r = self._run("--check-only")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("NEED_VERIFY", r.stderr)
+
     def test_rejects_mismatched_cdp_project_root(self):
         # 方向 4：CDP_PROJECT_ROOT 已设且不等于 git 顶层目录 → 收据查找前拒绝，
         # 防收据目录被环境变量改道（CDP_PROJECT_ROOT=root 时正常放行）

@@ -287,6 +287,87 @@ class TestReceipt(unittest.TestCase):
                       "被引用收据必须保留（证据链保护）")
         self.assertEqual(len(details), keep + 1)  # 配额 + 1 受保护
 
+    def test_prune_keeps_coverage_receipt(self):
+        # 方向 3（批次 e3f5f80d7b22）：覆盖最近 baseline..HEAD 内非 meta 提交
+        # 的收据是 commit_coverage 判定的唯一覆盖凭据，被老化删掉即翻红自锁
+        # （124520 manual 收据独自兜住区间全部 7 个提交）——配额老化须保护
+        repo = Path(self._tmp.name) / "covrepo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"],
+                       check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"],
+                       check=True)
+        # 首提交 = 最近 promoted baseline source_commit
+        (repo / "base.txt").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                        "构建(baseline): 基线发布"], check=True)
+        base = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=True).stdout.strip()
+        # 非 meta 提交（fix.py）——须被收据 commit_scope 覆盖
+        (repo / "fix.py").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                        "修复(harness): 修复"], check=True)
+        cfg = repo / "harness" / "config"
+        cfg.mkdir(parents=True, exist_ok=True)
+        (cfg / "baseline-status.yaml").write_text(
+            "baselines:\n- baseline_id: BL-A\n  status: promoted\n"
+            f"  source_commit: {base}\n", encoding="utf-8")
+        os.environ["CDP_PROJECT_ROOT"] = str(repo)
+        self.addCleanup(lambda: os.environ.update(
+            {"CDP_PROJECT_ROOT": self._tmp.name}))
+        d = cdp_paths.data_verify_results_dir()
+        # 覆盖收据（scope 覆盖 fix.py）作为最旧份，随后新收据触发老化
+        with mock.patch.object(cdp_receipt, "_DETAIL_KEEP", 1):
+            r = _mk_receipt("cov0000000001", result="pass")
+            r.commit_scope = "add=1 mod=0 del=0 | fix.py"
+            cdp_receipt.write_receipt(r, "b")
+            cdp_receipt.write_receipt(_mk_receipt("new0000000001"), "b")
+        details = [f.name for f in d.glob("*.md") if f.name != "trend.md"]
+        self.assertEqual(len(details), 2, "配额 1 + 覆盖保护 1")
+        self.assertTrue(any("cov0000000001" in n for n in details),
+                        "覆盖 baseline..HEAD 的收据必须保留（覆盖证据保护）")
+
+    def test_prune_ages_uncovering_receipt(self):
+        # 方向 3 反向：commit_scope 不覆盖任何区间内非 meta 提交的收据
+        # 不触发覆盖保护，正常老化
+        repo = Path(self._tmp.name) / "covrepo2"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"],
+                       check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"],
+                       check=True)
+        (repo / "base.txt").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                        "构建(baseline): 基线发布"], check=True)
+        base = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=True).stdout.strip()
+        cfg = repo / "harness" / "config"
+        cfg.mkdir(parents=True, exist_ok=True)
+        (cfg / "baseline-status.yaml").write_text(
+            "baselines:\n- baseline_id: BL-A\n  status: promoted\n"
+            f"  source_commit: {base}\n", encoding="utf-8")
+        os.environ["CDP_PROJECT_ROOT"] = str(repo)
+        self.addCleanup(lambda: os.environ.update(
+            {"CDP_PROJECT_ROOT": self._tmp.name}))
+        d = cdp_paths.data_verify_results_dir()
+        with mock.patch.object(cdp_receipt, "_DETAIL_KEEP", 1):
+            r = _mk_receipt("cov0000000001", result="pass")
+            r.commit_scope = "add=1 mod=0 del=0 | nowhere.py"  # 不覆盖任何提交
+            cdp_receipt.write_receipt(r, "b")
+            cdp_receipt.write_receipt(_mk_receipt("new0000000001"), "b")
+        details = [f.name for f in d.glob("*.md") if f.name != "trend.md"]
+        self.assertEqual(len(details), 1)
+        self.assertTrue(any("new0000000001" in n for n in details))
+
     def test_prune_without_yaml_ages_normally(self):
         # 无 baseline-status.yaml：无引用，正常老化到配额
         keep = cdp_receipt._DETAIL_KEEP
