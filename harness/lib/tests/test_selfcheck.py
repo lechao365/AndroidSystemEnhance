@@ -32,6 +32,8 @@ _FAKE_TOOLS = {
                      ".sh 均以 100755 入库\n", ""),
     "known_issues": (0, "OK: baseline-status.yaml 引用的 KI 编号均有对应"
                         "记录文件\n", ""),
+    "commit_coverage": (0, "OK: 自最近 promoted baseline 起非 meta 提交均被"
+                          "收据 commit_scope 覆盖\n", ""),
 }
 
 
@@ -71,7 +73,7 @@ def _patched_parallel():
                            return_value={"refs": "p", "cfg": "p"}), \
             mock.patch.object(selfcheck, "_collect_tools",
                               return_value=(_fake_tools(), 1.0, 2.0, 0.1, 0.1,
-                                            0.1, 0.1)), \
+                                            0.1, 0.1, 0.1)), \
             mock.patch.object(selfcheck, "_spawn_cmd",
                               return_value="p"), \
             mock.patch.object(selfcheck, "_collect_cmd",
@@ -117,7 +119,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1, 0.1)):
             with redirect_stdout(buf):
                 self.assertEqual(selfcheck.main(), 0)
         out = buf.getvalue()
@@ -205,7 +207,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1, 0.1)):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -226,7 +228,7 @@ class TestSelfcheck(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_tools",
-                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1)):
+                                  return_value=(tools, 1.0, 2.0, 0.1, 0.1, 0.1, 0.1, 0.1)):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -334,7 +336,7 @@ class TestParallelTools(unittest.TestCase):
     def test_all_mode_tool_timeout_returns_124(self):
         # 治理工具挂起超时 → kill + rc=124（不无限阻塞自检）
         proc = mock.Mock()
-        # refs 超时路径：communicate×2（首超时 + kill 后回收）；其余三进程正常
+        # refs 超时路径：communicate×2（首超时 + kill 后回收）；其余进程正常
         proc.communicate.side_effect = [
             selfcheck.subprocess.TimeoutExpired("cmd", 120), ("", ""),
             ("OK: config 检查通过，无违规。\nconfig_rc=0\ncontract_rc=0\n", ""),
@@ -342,6 +344,8 @@ class TestParallelTools(unittest.TestCase):
             ("OK: 热路径检查器无全树 rglob/os.walk\n", ""),
             ("OK: git 路径输出点均已带 -c core.quotepath=false\n", ""),
             ("OK: baseline-status.yaml 引用的 KI 编号均有对应记录文件\n", ""),
+            ("OK: 自最近 promoted baseline 起非 meta 提交均被收据 commit_scope "
+             "覆盖\n", ""),
         ]
         with mock.patch.object(selfcheck.subprocess, "Popen",
                                return_value=proc):
@@ -353,8 +357,9 @@ class TestParallelTools(unittest.TestCase):
 
     def test_collect_tools_returns_split_durs(self):
         # 方向 2：_collect_tools 返回 (tools, refs_dur, cfg_dur, dis_dur,
-        # scan_dur, quotepath_dur)，durs 拆开各检查器各自自报（合并 tools
-        # 无法定位慢点归因）；收口顺序 refs 先、cfg 后，用 side_effect 逐个注入
+        # scan_dur, quotepath_dur, known_issues_dur, commit_coverage_dur)，
+        # durs 拆开各检查器各自自报（合并 tools 无法定位慢点归因）；收口顺序
+        # refs 先、cfg 后，用 side_effect 逐个注入
         out = ("[VIOLATION] x\n==== config: 共 1 处违规（判红）====\n"
                "OK: contract 检查通过，无违规。\nconfig_rc=1\ncontract_rc=0\n")
         refs_res = (1, "==== 共 3 处悬空引用 ====\n", "", 0.5)
@@ -365,21 +370,26 @@ class TestParallelTools(unittest.TestCase):
                   "", 0.4)
         ki_res = (0, "OK: baseline-status.yaml 引用的 KI 编号均有对应记录文件\n",
                   "", 0.6)
+        cc_res = (0, "OK: 自最近 promoted baseline 起非 meta 提交均被收据"
+                     " commit_scope 覆盖\n", "", 0.7)
         with mock.patch.object(selfcheck, "_collect_cmd",
                                side_effect=[refs_res, cfg_res,
                                             dis_res, scan_res, qp_res,
-                                            ki_res]):
-            (tools, refs_dur, cfg_dur, dis_dur, scan_dur, qp_dur, ki_dur) = \
+                                            ki_res, cc_res]):
+            (tools, refs_dur, cfg_dur, dis_dur, scan_dur, qp_dur, ki_dur,
+             cc_dur) = \
                 selfcheck._collect_tools({"refs": "p", "cfg": "p",
                                           "discipline": "p", "scan": "p",
                                           "quotepath": "p",
-                                          "known_issues": "p"})
+                                          "known_issues": "p",
+                                          "commit_coverage": "p"})
         self.assertEqual(refs_dur, 0.5)
         self.assertEqual(cfg_dur, 2.5)
         self.assertEqual(dis_dur, 0.2)
         self.assertEqual(scan_dur, 0.3)
         self.assertEqual(qp_dur, 0.4)
         self.assertEqual(ki_dur, 0.6)
+        self.assertEqual(cc_dur, 0.7)
         self.assertEqual(tools["refs"][0], 1)
         self.assertEqual(tools["cfg"][0], 1)
         self.assertEqual(tools["ctr"][0], 0)
@@ -387,6 +397,7 @@ class TestParallelTools(unittest.TestCase):
         self.assertEqual(tools["scan"][0], 0)
         self.assertEqual(tools["quotepath"][0], 0)
         self.assertEqual(tools["known_issues"][0], 0)
+        self.assertEqual(tools["commit_coverage"][0], 0)
 
     def test_collect_cmd_timeout_kills_124(self):
         # 方向 1：_collect_cmd 超时 → kill + rc=124（约定超时标记，不无限

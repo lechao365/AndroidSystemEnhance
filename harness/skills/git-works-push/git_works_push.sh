@@ -130,6 +130,19 @@ check_commit_scope() {
     fi
     if [ -n "$(printf '%s\n' "$status_out" | grep -E '^[AMD]+[[:space:]]+code/')" ]; then
       err "error: RECEIPT_MISSING 无收据 commit_scope 且提交面含 code/ 业务源码（发布内容与验证内容绑定被旁路），请先经 /workspace-verify 产收据后再推送；紧急人工场景可设 LGW_ALLOW_NO_RECEIPT=1"
+      # 补齐命令（批次 133b55812a81 方向 3）：本地直连开发提交须被某份收据
+      # commit_scope 覆盖，缺收据即拒推——直接打印 ws_report --manual 补齐
+      # 命令（从 git 区间生成 manual 收据并回填 commit_scope），不给补齐
+      # 工具而拦路；base 取最近 promoted baseline source_commit（与检查器同源）
+      BASE12=$(PYTHONPATH="$CDP_LIB:harness/lib" python3 -c \
+        "import sys; sys.path.insert(0, 'harness/lib'); \
+import check_commit_coverage as c; print(c.recent_promoted_baseline_commit('.'))" \
+        2>/dev/null || true)
+      if [ -n "$BASE12" ]; then
+        err "补齐命令：python3 harness/skills/workspace-verify/ws_report.py --manual ${BASE12}..HEAD --result skip --build skip --board skip --summary '<本地直连开发摘要>' --selfcheck '<pytest 摘要与各 *_rc>' --body <逐项自报文件>"
+      else
+        err "补齐命令：python3 harness/skills/workspace-verify/ws_report.py --manual <baseline>..HEAD --result skip --build skip --board skip --summary '<摘要>' --selfcheck '<pytest 摘要与各 *_rc>' --body <逐项自报文件>"
+      fi
       exit 1
     fi
     echo "warn: 无收据 commit_scope（未走 ws_report 或旧收据），跳过提交面比对" >&2

@@ -39,13 +39,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "l
 sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent / "lib"))
 from cdp_parse import (SOFT_ERRORS, batch_id_from_text, parse_batch,  # noqa: E402
                        validate_batch)
-from cdp_paths import log_apply_dir  # noqa: E402
+from cdp_paths import log_apply_dir, project_root  # noqa: E402
 from cdp_receipt import Receipt, append_trend, write_receipt  # noqa: E402
 from cdp_timing import _base_seg_name  # noqa: E402
 from commit_scope import format_scope, porcelain_to_name_status  # noqa: E402
 from content_tree import content_tree  # noqa: E402
 from paths import env_path  # noqa: E402
 from selfcheck import REQUIRED_RC_KEYS  # noqa: E402 方向 3：必查键单点定义
+# 方向 3（批次 133b55812a81）：manual 收据区间回填复用 check_commit_coverage 的
+# meta 提交判定与 git 区间改动收集（单点定义，ws_report 与检查器同源不漂移）
+from check_commit_coverage import (range_non_meta_name_status,  # noqa: E402
+                                   recent_promoted_baseline_commit)
 
 
 _HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -529,6 +533,27 @@ def _acceptance_device_dirty(path):
     return ""
 
 
+def _split_manual_range(arg: str):
+    """解析 --manual 区间 <base>..<head>，缺省补全与最近 baseline 同源。
+
+    返回 (base_ref, head_ref) 均为 git 引用/12hex 描述；base 缺省 =
+    recent_promoted_baseline_commit（与 check_commit_coverage 起点单点同源），
+    head 缺省 = HEAD。返回空串引用时由 _resolve_target 判定非法拒写。
+    """
+    base_ref, head_ref = "", "HEAD"
+    if arg:
+        if ".." not in arg:
+            base_ref = arg.strip()
+        else:
+            left, _, right = arg.partition("..")
+            base_ref = left.strip()
+            if right.strip():
+                head_ref = right.strip()
+    if not base_ref:
+        base_ref = recent_promoted_baseline_commit(project_root()) or ""
+    return base_ref, head_ref
+
+
 def _resolve_target(target: str):
     """把 --target 解析为 12hex commit，返回 (resolved, err)。
 
@@ -693,6 +718,14 @@ def main(argv=None):
                          "正文追加 forensics_dir 与 truncated/skipped 计数轻量摘要；"
                          "缺失/非法仅 warn 不阻断）")
     ap.add_argument("--body", help="正文文件路径（CDP 原文/失败现场），经脱敏写入")
+    ap.add_argument("--manual", nargs="?", const="", default=None,
+                    help="本地直连开发 manual 收据（check_commit_coverage 补齐命令）："
+                         "从 git 区间生成收据骨架并回填 commit_scope。参数为 "
+                         "<base>..<head> 区间（缺省 base=最近 promoted baseline，"
+                         "head=HEAD）；区间内非 meta 提交（type∈新增/修复/重构/杂项）"
+                         "改动面回填 commit_scope，meta（构建/文档）豁免。"
+                         "须配合 --result/--build/--board/--summary/--selfcheck/"
+                         "--body 使用（local-dev-dod 交付物）")
     args = ap.parse_args(argv)
 
     if args.metrics:
@@ -706,11 +739,54 @@ def main(argv=None):
             print(f"error: --metrics 须为合法 JSON 对象: {e}", file=sys.stderr)
             return 2
 
-    if not args.batch_file and not args.target:
-        print("error: 模式 A（--batch-file）与模式 B（--target）必选其一", file=sys.stderr)
+    if not args.batch_file and not args.target and args.manual is None:
+        print("error: 模式 A（--batch-file）、模式 B（--target）、"
+              "模式 M（--manual）必选其一", file=sys.stderr)
         return 2
 
-    if args.batch_file:
+    # 模式 M（批次 133b55812a81 方向 2）：本地直连开发 manual 收据——
+    # 从 git 区间生成收据骨架并回填 commit_scope（区间内非 meta 提交改动面）。
+    # 区间参数 <base>..<head>：base 缺省 = 最近 promoted baseline source_commit
+    # （与 check_commit_coverage 起点同源），head 缺省 = HEAD。manual 收据由
+    # check_commit_coverage 判红时打印补齐命令唤起，覆盖"自最近 baseline 起
+    # 非 meta 提交须被某份收据覆盖"的缺口。
+    manual_scope = ""
+    if args.manual is not None:
+        if not args.body:
+            print("error: 模式 M 必须传 --body（逐项三态自报，local-dev-dod 交付物）",
+                  file=sys.stderr)
+            return 2
+        if not Path(args.body).is_file():
+            print(f"error: --body 文件不存在: {args.body}", file=sys.stderr)
+            return 2
+        if not args.selfcheck.strip():
+            print("error: 模式 M 必须传 --selfcheck（自检摘要，local-dev-dod 交付物）",
+                  file=sys.stderr)
+            return 2
+        base_ref, head_ref = _split_manual_range(args.manual)
+        base12, b_err = _resolve_target(base_ref)
+        head12, h_err = _resolve_target(head_ref)
+        if b_err or h_err:
+            print(f"error: 区间解析失败（{b_err or h_err}）", file=sys.stderr)
+            return 2
+        if not base12:
+            print("error: --manual 区间 base 缺失（无 promoted baseline 且未"
+                  "显式传 base）——无法界定覆盖起点，拒绝写收据", file=sys.stderr)
+            return 2
+        batch_id = f"manual-{time.strftime('%y%m%d%H%M')}"
+        batch_base = base12
+        verified = head12
+        verify_mode = "board" if args.board != "skip" else "none"
+        # 回填 commit_scope：区间内非 meta 提交改动面（meta 豁免）；git 失败
+        # fail-closed 拒写（收据须承诺覆盖本次全部非 meta 提交，无法证明即拒）
+        lines = range_non_meta_name_status(base12, head12, project_root())
+        if lines is None:
+            print("error: --manual 区间提交枚举失败（git rev-list/diff-tree 无法"
+                  "执行），无法回填 commit_scope，拒绝写收据", file=sys.stderr)
+            return 2
+        manual_scope = format_scope(lines)
+
+    elif args.batch_file:
         if not args.body:
             print("error: 模式 A 必须传 --body（CDP 原文+失败现场）", file=sys.stderr)
             return 2
@@ -880,6 +956,12 @@ def main(argv=None):
                       file=sys.stderr)
                 return 2
         bad = {k: v for k, v in found.items() if v != 0}
+        if args.manual is not None:
+            # 模式 M（批次 133b55812a81 方向 2/3）：commit_coverage_rc 豁免判红
+            # ——该收据正是 check_commit_coverage 判红的补齐动作，落盘后 rc 由
+            # 1 转 0（自证补齐）；其余 rc 仍全绿才可写。豁免范围仅限该键，
+            # 缺键检查仍走 REQUIRED_RC_KEYS（自检摘要不可缺 commit_coverage_rc）
+            bad.pop("commit_coverage_rc", None)
         if bad:
             detail = " ".join(f"{k}={v}" for k, v in sorted(bad.items()))
             print(f"error: --selfcheck 存在非零退出码（{detail}），"
@@ -964,13 +1046,19 @@ def main(argv=None):
     verified_tree, commit_scope = "", ""
     try:
         verified_tree = content_tree()
-        status_out = subprocess.run(
-            ["git", "-c", "core.quotepath=false", "status", "--porcelain"],
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace", check=True)
-        commit_scope = format_scope([
-            porcelain_to_name_status(l)
-            for l in status_out.stdout.splitlines() if l.strip()])
+        if args.manual is not None:
+            # 模式 M：commit_scope 回填为 git 区间非 meta 提交改动面（不在工作
+            # 树——manual 收据补的是已提交历史，工作树 porcelain 为空会漏报
+            # 实际改动面；check_commit_coverage 判定即以区间改动面为覆盖判据）
+            commit_scope = manual_scope
+        else:
+            status_out = subprocess.run(
+                ["git", "-c", "core.quotepath=false", "status", "--porcelain"],
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace", check=True)
+            commit_scope = format_scope([
+                porcelain_to_name_status(l)
+                for l in status_out.stdout.splitlines() if l.strip()])
     except (subprocess.CalledProcessError, OSError, RuntimeError) as e:
         print(f"warn: verified_tree/commit_scope 计算失败（置空不阻断）: {e}",
               file=sys.stderr)
