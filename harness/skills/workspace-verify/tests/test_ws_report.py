@@ -1264,6 +1264,47 @@ class TestWsReport(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("拒绝写收据", err.getvalue())
 
+    def test_mode_m_rc1_with_real_gap_exempted(self):
+        # 方向 3（批次 e503284f97b9）：manual 收据的 commit_coverage_rc 豁免
+        # 须"仅确覆盖缺口才免"——区间内确有未覆盖提交（uncovered_commits 命中
+        # 本收据在补的缺口）时 rc=1 仍豁免，收据落盘后 rc 自转 0
+        repo, base, head = self._mk_manual_git()
+        os.environ["CDP_PROJECT_ROOT"] = repo
+        self.addCleanup(lambda: os.environ.update(
+            {"CDP_PROJECT_ROOT": self._tmp.name}))
+        body = self._write("## 自报\n- 完成：修复 harness 逻辑，验证单测绿\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--manual", f"{base}..{head}",
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "直连开发",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 quotepath_rc=0 known_issues_rc=0 commit_coverage_rc=1 | 120 passed, 2 skipped in 5.0s",
+                                 "--body", body])
+        self.assertEqual(rc, 0, buf.getvalue())
+        details = [f for f in (Path(repo) / "data" / "verify-results")
+                   .glob("*.md") if f.name != "trend.md"]
+        self.assertEqual(len(details), 1)
+
+    def test_mode_m_rc1_without_gap_rejected(self):
+        # 方向 3（批次 e503284f97b9）：无区间内缺口却报 commit_coverage_rc=1
+        # 属静音判红（加 --manual 即带过判红）——不豁免，拒写收据。
+        # 区间内提交已全部被有效收据覆盖（无缺口），rc=1 即矛盾/伪造
+        repo, base, head = self._mk_manual_git(
+            commits=("构建(baseline): 基线",))
+        os.environ["CDP_PROJECT_ROOT"] = repo
+        self.addCleanup(lambda: os.environ.update(
+            {"CDP_PROJECT_ROOT": self._tmp.name}))
+        body = self._write("## 自报\n- 完成：修复 harness 逻辑，验证单测绿\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--manual", f"{base}..{head}",
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "直连开发",
+                                 "--selfcheck", "pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 quotepath_rc=0 known_issues_rc=0 commit_coverage_rc=1 | 120 passed, 2 skipped in 5.0s",
+                                 "--body", body])
+        self.assertEqual(rc, 2)
+        self.assertIn("存在非零退出码", err.getvalue())
+
     def test_pass_without_acceptance_rejected(self):
         # result=pass 而无 --acceptance-file → 返 2 拒写（堵零验收证据假绿）
         batch = self._write(VALID_S, ".cdp")

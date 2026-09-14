@@ -48,8 +48,12 @@ from paths import env_path  # noqa: E402
 from selfcheck import REQUIRED_RC_KEYS  # noqa: E402 方向 3：必查键单点定义
 # 方向 3（批次 133b55812a81）：manual 收据区间回填复用 check_commit_coverage 的
 # meta 提交判定与 git 区间改动收集（单点定义，ws_report 与检查器同源不漂移）
+# 方向 3（批次 e503284f97b9）：manual 收据的 commit_coverage_rc 豁免须"仅确
+# 覆盖缺口才免"——uncovered_commits 用于验证缺口真实存在，杜绝加 --manual
+# 即静音判红的 fail-open（此前无条件 pop）
 from check_commit_coverage import (range_non_meta_name_status,  # noqa: E402
-                                   recent_promoted_baseline_commit)
+                                   recent_promoted_baseline_commit,
+                                   uncovered_commits)
 
 
 _HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -533,6 +537,31 @@ def _acceptance_device_dirty(path):
     return ""
 
 
+def _manual_gap_exists(base12: str, head12: str) -> bool:
+    """manual 收据区间内是否存在真实覆盖缺口（方向 3，批次 e503284f97b9）。
+
+    check_commit_coverage.uncovered_commits 给出自最近 promoted baseline 起
+    全库判红清单；若其中任一 sha 落在 <base12>..<head12> 区间内，即缺口真实
+    存在（本收据正是补齐动作，豁免 commit_coverage_rc 判红合理）；否则
+    rc=1 却无区间内缺口属静音判红，不得豁免。区间无法枚举/执行失败按
+    fail-closed 保守视为无缺口（不豁免）。
+    """
+    try:
+        uncov = uncovered_commits(project_root())
+    except Exception:
+        return False
+    if not uncov:
+        return False
+    r = subprocess.run(["git", "-c", "core.quotepath=false", "rev-list",
+                        "--no-merges", f"{base12}..{head12}"],
+                       cwd=project_root(), capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=30)
+    if r.returncode != 0:
+        return False
+    in_range = {ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()}
+    return any(sha in in_range for sha, _ in uncov)
+
+
 def _split_manual_range(arg: str):
     """解析 --manual 区间 <base>..<head>，缺省补全与最近 baseline 同源。
 
@@ -956,12 +985,16 @@ def main(argv=None):
                       file=sys.stderr)
                 return 2
         bad = {k: v for k, v in found.items() if v != 0}
-        if args.manual is not None:
-            # 模式 M（批次 133b55812a81 方向 2/3）：commit_coverage_rc 豁免判红
-            # ——该收据正是 check_commit_coverage 判红的补齐动作，落盘后 rc 由
-            # 1 转 0（自证补齐）；其余 rc 仍全绿才可写。豁免范围仅限该键，
-            # 缺键检查仍走 REQUIRED_RC_KEYS（自检摘要不可缺 commit_coverage_rc）
-            bad.pop("commit_coverage_rc", None)
+        if args.manual is not None and "commit_coverage_rc" in bad:
+            # 方向 3（批次 e503284f97b9）：manual 收据的 commit_coverage_rc
+            # 豁免改为"仅确覆盖缺口才免"——此前加 --manual 即无条件 pop 该
+            # rc，静音判红（check_commit_coverage 判红被收据自证带过）。只有
+            # 该收据区间内确实存在未覆盖提交（uncovered_commits 命中）才豁免
+            # （收据正是补齐动作，落盘后 rc 自转 0）；无区间内缺口却报
+            # rc=1 属矛盾/伪造，不豁免走下方拒写。
+            if bad.get("commit_coverage_rc") and _manual_gap_exists(
+                    base12, head12):
+                bad.pop("commit_coverage_rc", None)
         if bad:
             detail = " ".join(f"{k}={v}" for k, v in sorted(bad.items()))
             print(f"error: --selfcheck 存在非零退出码（{detail}），"

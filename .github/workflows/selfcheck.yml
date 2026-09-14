@@ -26,7 +26,12 @@ jobs:
     # （89 次 run 全 failure 且零 job 起来）。改 step 级 env 用 $RUNNER_TEMP。
     steps:
       # actions/checkout v4.2.2（SHA 固定；禁浮动 tag）
+      # fetch-depth: 0（批次 e503284f97b9 方向 1）：check_commit_coverage 用
+      # rev-list baseline..HEAD 判覆盖，浅克隆（默认 depth=1）缺历史致 rev-list
+      # 恒 exit 128 → commit_coverage_rc 恒 1 → CI 恒红自锁；全量检出放行覆盖判定
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
 
       - name: 安装测试依赖（无 secrets；runner 自带 Python）
         run: python3 -m pip install --quiet pyyaml pytest pytest-xdist ruff
