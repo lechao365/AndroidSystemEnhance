@@ -210,17 +210,17 @@ class TestSyncModifyIntegration(unittest.TestCase):
                              "--message-file", self._msg_file(),
                              "--task", "lcview-refactor", "--approved-by", "tester")
         self.assertEqual(r.returncode, 0, r.stderr)
-        # dev 重建 + source_commit 回填（方向 2，批次 6a3a0969d477）：
-        # dev = main squash 提交 + 1 个 source_commit 回填提交（随 dev 入库推送）
+        # dev 重建 + source_commit 回填并入 main（方向 2，批次 5846f4ebd472）：
+        # 回填提交在 push main 前并入 main，dev==main；main 树 yaml source_commit
+        # = main 侧 squash sha（回填提交的父，main 链严格祖先；main 与 dev 均不
+        # 判红，上批只写 dev 致 main 恒红）
         main_sha = self._origin(["rev-parse", "main"]).stdout.strip()
         dev_sha = self._origin(["rev-parse", "dev"]).stdout.strip()
         self.assertEqual(self._git_out(["rev-parse", "HEAD"]), dev_sha)
-        self.assertEqual(self._git_out(["rev-parse", "HEAD^"]), main_sha)
-        self.assertIn("source_commit 回填",
-                      self._git_out(["log", "-1", "--format=%s", "HEAD"]))
-        # 回填后 yaml source_commit = main 侧 squash sha（12hex，HEAD 祖先）
-        yaml_dev = self._git_out(["show", "HEAD:harness/config/baseline-status.yaml"])
-        self.assertIn(f"source_commit: {main_sha[:12]}", yaml_dev)
+        self.assertEqual(main_sha, dev_sha)
+        squash_sha = self._origin(["rev-parse", "main^"]).stdout.strip()
+        yaml_main = self._origin(["show", "main:harness/config/baseline-status.yaml"]).stdout
+        self.assertIn(f"source_commit: {squash_sha[:12]}", yaml_main)
         # main 内容：文档 + 收据 + promoted 登记
         self._origin(["show", "main:docs/design.md"], check=True)
         self._origin(["show", f"main:{RECEIPT_REL}"], check=True)

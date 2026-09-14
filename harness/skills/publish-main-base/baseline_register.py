@@ -880,6 +880,20 @@ def main(argv=None):
         if not re.fullmatch(r"[0-9a-f]{12}", sc):
             print(f"error: source_commit={sc!r} 非 12hex，拒绝回填", file=sys.stderr)
             return 1
+        # 方向 1（批次 5846f4ebd472）：须 HEAD 严格祖先且不等于 HEAD——merge-base
+        # --is-ancestor HEAD HEAD 返 0（自身即祖先），source_commit==HEAD 时区间
+        # 恒空全放行（--source-commit HEAD 即官方入口）；收紧后回填只收 main 侧
+        # squash sha（promote 重建 dev 后其为 dev HEAD 严格祖先）
+        r = subprocess.run(["git", "rev-parse", "HEAD"],
+                           capture_output=True, text=True, encoding="utf-8")
+        if r.returncode != 0:
+            print("error: 无法解析 HEAD，拒绝回填", file=sys.stderr)
+            return 1
+        head_sha = (r.stdout or "").strip()
+        if sc == head_sha:
+            print(f"error: source_commit={sc} 等于 HEAD 自身（非严格祖先），"
+                  "拒绝回填（须为 HEAD 严格祖先）", file=sys.stderr)
+            return 1
         r = subprocess.run(["git", "merge-base", "--is-ancestor", sc, "HEAD"],
                            capture_output=True, text=True, encoding="utf-8")
         if r.returncode != 0:

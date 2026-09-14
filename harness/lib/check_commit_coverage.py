@@ -109,12 +109,23 @@ def _subject(sha: str, cwd: Path) -> str:
     return (r.stdout or "").strip() if r and r.returncode == 0 else ""
 
 
-def _is_ancestor_of_head(sha: str, cwd: Path) -> bool:
-    """sha 是否 HEAD 祖先（git merge-base --is-ancestor；失败即 False fail-closed）。
+def _is_strict_ancestor_of_head(sha: str, cwd: Path) -> bool:
+    """sha 是否 HEAD 严格祖先（sha != HEAD 且 git merge-base --is-ancestor）。
 
-    方向 3（批次 6a3a0969d477）：promote 重建 dev 后 dev 侧 BH 悬空（仅 verified
-    tag 可达），无 tag 即 rev-list 失败判红；回填 main 侧 squash sha 后为祖先。
+    方向 1（批次 5846f4ebd472）：merge-base --is-ancestor HEAD HEAD 返 0——等于
+    自身也被判为祖先，source_commit==HEAD 时区间恒空全放行（backfill-source-
+    commit --source-commit HEAD 即官方入口）。收紧为严格祖先且不等于 HEAD，
+    回填只收 main 侧 squash sha（promote 重建 dev 后其为 dev HEAD 严格祖先）。
+    失败/HEAD 解析失败即 False（fail-closed）。
     """
+    head = _git(["rev-parse", "HEAD"], cwd)
+    if head is None or head.returncode != 0:
+        return False
+    head_sha = (head.stdout or "").strip()
+    # baseline-status.yaml 存 12hex，HEAD 为 40hex——统一按 12 位前缀比较
+    head12 = head_sha[:12] if len(head_sha) >= 12 else head_sha
+    if not head12 or sha == head12:
+        return False
     r = _git(["merge-base", "--is-ancestor", sha, "HEAD"], cwd)
     return r is not None and r.returncode == 0
 
@@ -352,17 +363,19 @@ def uncovered_commits(root: Path) -> list[tuple[str, str]]:
         return [("<no-baseline>",
                  "baseline-status.yaml 缺失/无 promoted 记录/解析失败，无法"
                  "界定覆盖起点——须登记 baseline 或人工核查（fail-closed）")]
-    # 方向 3（批次 6a3a0969d477）：source_commit 合法性校验——12hex 格式且
-    # 须为 HEAD 祖先（promote 重建 dev 后 dev 侧 BH 不再是祖先，悬空起点会让
-    # rev-list 区间失控含汇总提交/失败判红；回填 main 侧 squash sha 后区间
-    # 天然为空）。任一不满足即判红（fail-closed，无法可靠界定覆盖起点）。
+    # 方向 3 + 方向 1（批次 6a3a0969d477 / 5846f4ebd472）：source_commit 合法性
+    # 校验——12hex 格式且须为 HEAD 严格祖先（promote 重建 dev 后 dev 侧 BH 不再
+    # 是祖先，悬空起点会让 rev-list 区间失控含汇总提交/失败判红；回填 main 侧
+    # squash sha 后区间天然为空）。等于 HEAD 自身也被拒（merge-base --is-ancestor
+    # HEAD HEAD 返 0 会区间恒空全放行）。任一不满足即判红（fail-closed）。
     if not re.fullmatch(r"[0-9a-f]{12}", base):
         return [("<invalid-source-commit>",
                  f"source_commit={base!r} 非 12hex，无法界定覆盖起点（fail-closed）")]
-    if not _is_ancestor_of_head(base, root):
+    if not _is_strict_ancestor_of_head(base, root):
         return [("<source-commit-not-ancestor>",
-                 f"source_commit={base} 非 HEAD 祖先（promote 重建 dev 后悬空，"
-                 "须回填 main 侧 squash sha），无法界定覆盖起点（fail-closed）")]
+                 f"source_commit={base} 非 HEAD 严格祖先（悬空/等于 HEAD/拼错，"
+                 "promote 重建 dev 后须回填 main 侧 squash sha），无法界定"
+                 "覆盖起点（fail-closed）")]
     r = _git(["rev-list", "--no-merges", f"{base}..HEAD"], root)
     if r is None or r.returncode != 0:
         return [("<git-rev-list-failed>",

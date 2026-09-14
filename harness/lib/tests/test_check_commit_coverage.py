@@ -179,17 +179,37 @@ class TestUncoveredScan(unittest.TestCase):
     def test_source_commit_not_12hex_red(self):
         # 方向 3（批次 6a3a0969d477）：source_commit 非 12hex 判红（fail-closed
         # 无法界定覆盖起点）
-        shas = _mk_git(self.repo, commits=[
+        _mk_git(self.repo, commits=[
             ("构建(baseline): 基线发布", "base.txt"),
         ])
         cfg = self.repo / "harness" / "config" / "baseline-status.yaml"
         cfg.parent.mkdir(parents=True, exist_ok=True)
         cfg.write_text(
             "baselines:\n- baseline_id: BL-X\n  status: promoted\n"
-            f"  source_commit: {shas[0][:5]}\n", encoding="utf-8")
+            f"  source_commit: {'z' * 12}\n", encoding="utf-8")
         out = ccc.uncovered_commits(self.repo)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0][0], "<invalid-source-commit>")
+
+    def test_source_commit_equals_head_red(self):
+        # 方向 1（批次 5846f4ebd472）：source_commit == HEAD 自身即判红——merge-base
+        # --is-ancestor HEAD HEAD 返 0（自身即祖先），区间恒空全放行（backfill
+        # --source-commit HEAD 即官方入口）；收紧为严格祖先
+        _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+        ])
+        head12 = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=True).stdout.strip()
+        cfg = self.repo / "harness" / "config" / "baseline-status.yaml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(
+            "baselines:\n- baseline_id: BL-X\n  status: promoted\n"
+            f"  source_commit: {head12}\n", encoding="utf-8")
+        out = ccc.uncovered_commits(self.repo)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][0], "<source-commit-not-ancestor>")
 
     def test_source_commit_not_ancestor_red(self):
         # 方向 3（批次 6a3a0969d477）：source_commit 非 HEAD 祖先判红——promote
@@ -437,15 +457,17 @@ class TestUncoveredScan(unittest.TestCase):
 
     def test_rev_list_failure_red(self):
         # git rev-list 失败 fail-closed：无法证实覆盖即判红，不静默放行。
-        # 方向 3 校验在前：source_commit 须为真实 HEAD 祖先（merge-base 真跑），
-        # 只 mock rev-list 失败，才能命中 rev-list 判红分支
+        # 方向 1/3 校验在前：source_commit 须为真实 HEAD 严格祖先（rev-parse +
+        # merge-base 真跑），只 mock rev-list 失败，才能命中 rev-list 判红分支
         shas = _mk_git(self.repo, commits=[
             ("构建(baseline): 基线发布", "base.txt"),
+            ("修复(harness): 某修复", "fix.py"),
         ])
         _mk_baseline(self.repo, shas[0])
         real_git = ccc._git
         def fake_git(args, cwd):
-            if args[:2] == ["merge-base", "--is-ancestor"]:
+            if args[:2] in (["merge-base", "--is-ancestor"],
+                            ["rev-parse", "HEAD"]):
                 return real_git(args, cwd)
             return None
         with mock.patch.object(ccc, "_git", side_effect=fake_git):

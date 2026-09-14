@@ -1210,12 +1210,16 @@ class TestBackfillSourceCommit(unittest.TestCase):
              "source_commit": "aabbccddeeff"})
         br.save(data)
 
-    def _run_backfill(self, sid, sc, merge_rc=0):
+    def _run_backfill(self, sid, sc, merge_rc=0, head="aabbccddeeff"):
         buf = io.StringIO()
         err = io.StringIO()
         with redirect_stdout(buf), redirect_stderr(err):
-            with mock.patch("baseline_register.subprocess.run") as mrun:
-                mrun.return_value = mock.Mock(returncode=merge_rc)
+            def fake_run(cmd, *a, **kw):
+                if cmd[:2] == ["git", "rev-parse"]:
+                    return mock.Mock(returncode=0, stdout=head)
+                return mock.Mock(returncode=merge_rc)
+            with mock.patch("baseline_register.subprocess.run",
+                            side_effect=fake_run):
                 rc = br.main(["backfill-source-commit",
                               "--baseline-id", sid,
                               "--source-commit", sc])
@@ -1226,6 +1230,17 @@ class TestBackfillSourceCommit(unittest.TestCase):
         rc, out = self._run_backfill("BL-01", "abc", merge_rc=0)
         self.assertEqual(rc, 1)
         self.assertIn("非 12hex", out)
+        self.assertEqual(br.load()["baselines"][0]["source_commit"],
+                         "aabbccddeeff")
+
+    def test_backfill_rejects_equals_head(self):
+        # 方向 1（批次 5846f4ebd472）：source_commit==HEAD 自身即拒——merge-base
+        # --is-ancestor HEAD HEAD 返 0，回填 HEAD 使区间恒空全放行（官方后门）
+        self._mk_baseline()
+        rc, out = self._run_backfill("BL-01", "feedbeefcafe",
+                                     merge_rc=0, head="feedbeefcafe")
+        self.assertEqual(rc, 1)
+        self.assertIn("等于 HEAD", out)
         self.assertEqual(br.load()["baselines"][0]["source_commit"],
                          "aabbccddeeff")
 
