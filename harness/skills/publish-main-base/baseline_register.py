@@ -8,6 +8,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -363,6 +364,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="baseline candidate/promoted 登记")
     ap.add_argument("action",
                     choices=["add-candidate", "promote", "revert-candidate",
+                             "backfill-source-commit",
                              "check-issues", "check-approval", "verify-tree"])
     ap.add_argument("--baseline-id")
     ap.add_argument("--source-commit")
@@ -859,6 +861,38 @@ def main(argv=None):
                 b.pop("approved_at", None)
                 save(data)
                 print(f"reverted-candidate: {args.baseline_id}")
+                return 0
+        print(f"error: 未找到 baseline {args.baseline_id}")
+        return 1
+
+    if args.action == "backfill-source-commit":
+        # 方向 2（批次 6a3a0969d477）：promote 重建 dev 后回填 source_commit
+        # 为 main 侧 squash sha——登记时记的 dev 侧 BH 在 reset --hard main 后
+        # 不再是 dev HEAD 祖先，coverage 区间必含汇总提交判红（上批 BL-20260914-01
+        # 首发）。回填后区间天然为空，起点之后夹带仍判红。顺带解悬空：悬空
+        # source_commit（仅 verified tag 可达）无 tag 即 rev-list 失败判红。
+        # 方向 3 同源：source_commit 须 12hex 且为 HEAD 祖先，否则拒写。
+        if not args.baseline_id or not args.source_commit:
+            print("error: backfill-source-commit 必须传 --baseline-id 与 --source-commit",
+                  file=sys.stderr)
+            return 1
+        sc = (args.source_commit or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{12}", sc):
+            print(f"error: source_commit={sc!r} 非 12hex，拒绝回填", file=sys.stderr)
+            return 1
+        r = subprocess.run(["git", "merge-base", "--is-ancestor", sc, "HEAD"],
+                           capture_output=True, text=True, encoding="utf-8")
+        if r.returncode != 0:
+            print(f"error: source_commit={sc} 非 HEAD 祖先（悬空或拼错），拒绝回填",
+                  file=sys.stderr)
+            return 1
+        for b in baselines:
+            if b.get("baseline_id") == args.baseline_id:
+                old = b.get("source_commit") or ""
+                b["source_commit"] = sc
+                save(data)
+                print(f"backfilled-source-commit: {args.baseline_id} "
+                      f"{old} -> {sc}")
                 return 0
         print(f"error: 未找到 baseline {args.baseline_id}")
         return 1

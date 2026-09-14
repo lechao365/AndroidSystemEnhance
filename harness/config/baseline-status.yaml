@@ -463,8 +463,10 @@ baselines:
 - baseline_id: BL-20260914-01
   status: promoted
   source_branch: dev
-  source_commit: c1df806bd31a
+  source_commit: 0a41444cb264
   sync_manifest: data/verify-results/20260912-181227-b69c438c75cd.md
+  verified_commit: c1df806bd31a
+  verified_tree: 5c65b029f405879be9073d0639d6a0543f7ca94e
   build_result: SKIP
   package_result: PASS
   board_verify: PASS
@@ -474,6 +476,9 @@ baselines:
     package_result: PASS
     board_verify: PASS
     sync_manifest: data/verify-results/20260912-181227-b69c438c75cd.md
+    verified_commit: c1df806bd31a
+    verified_tree: 5c65b029f405879be9073d0639d6a0543f7ca94e
+    evidence_source: 三项证据（build/package/board）继承自 20260912-181227 旧收据（BL-20260912-03 sync_manifest）；本批 harness-only 无上板覆盖（no-code-change 豁免）
     ki_gate: pass
     evidence_scope: no-code-change
     known_issues_carried: KI-20260912-005,KI-20260912-002,KI-20260912-001,KI-20260912-006,KI-20260912-003,KI-20260912-004

@@ -109,6 +109,16 @@ def _subject(sha: str, cwd: Path) -> str:
     return (r.stdout or "").strip() if r and r.returncode == 0 else ""
 
 
+def _is_ancestor_of_head(sha: str, cwd: Path) -> bool:
+    """sha 是否 HEAD 祖先（git merge-base --is-ancestor；失败即 False fail-closed）。
+
+    方向 3（批次 6a3a0969d477）：promote 重建 dev 后 dev 侧 BH 悬空（仅 verified
+    tag 可达），无 tag 即 rev-list 失败判红；回填 main 侧 squash sha 后为祖先。
+    """
+    r = _git(["merge-base", "--is-ancestor", sha, "HEAD"], cwd)
+    return r is not None and r.returncode == 0
+
+
 def is_meta_subject(subject: str) -> bool:
     """提交标题是否 meta（type=构建/文档）→ 收据覆盖候选豁免。"""
     return bool(_META_TYPE_RE.match(subject or ""))
@@ -147,14 +157,12 @@ def _commit_is_meta_exempt(sha: str, cwd: Path) -> bool:
     if not is_meta_subject(subject):
         return False
     if subject.startswith("构建("):
-        # 发布汇总提交（标题「构建(baseline): 发布」，promote squash 全量）直接豁免：
-        # 其内容已过 verify-tree 树等价断言（push main 前 verified tag 树 ≡ main 树），
-        # 且改动面覆盖全仓（收据/known-issues/代码/文档），任何单份收据无法覆盖——
-        # 不豁免则每次 promote 重建 dev 后 commit_coverage 必红（发布提交判红，本批
-        # BL-20260914-01 首发）。其余 构建( 元提交仍须改动面限于构建元文件（防
-        # 「构建(baseline): 发布」之外标题挟带代码逃过收据覆盖）
-        if subject.startswith("构建(baseline): 发布"):
-            return True
+        # 注意：不设「构建(baseline): 发布」标题前缀豁免——纯标题免检是回归
+        # （批次 6a3a0969d477 方向 1 撤回 9e148fa）：实测「构建(baseline): 发布
+        # 后门」标题挟带 code/ 与改写检查器自身均 rc=0，三批收窄回到起点。
+        # 发布汇总提交由 promote 侧把 source_commit 回填为 main 侧 squash sha
+        # 解决（重建 dev 后区间天然为空，起点之后夹带仍判红），而非标题豁免。
+        # 其余 构建( 元提交仍须改动面限于构建元文件（防挟带代码逃过收据覆盖）
         files = commit_files(sha, cwd)
         if files is None:
             return False
@@ -344,6 +352,17 @@ def uncovered_commits(root: Path) -> list[tuple[str, str]]:
         return [("<no-baseline>",
                  "baseline-status.yaml 缺失/无 promoted 记录/解析失败，无法"
                  "界定覆盖起点——须登记 baseline 或人工核查（fail-closed）")]
+    # 方向 3（批次 6a3a0969d477）：source_commit 合法性校验——12hex 格式且
+    # 须为 HEAD 祖先（promote 重建 dev 后 dev 侧 BH 不再是祖先，悬空起点会让
+    # rev-list 区间失控含汇总提交/失败判红；回填 main 侧 squash sha 后区间
+    # 天然为空）。任一不满足即判红（fail-closed，无法可靠界定覆盖起点）。
+    if not re.fullmatch(r"[0-9a-f]{12}", base):
+        return [("<invalid-source-commit>",
+                 f"source_commit={base!r} 非 12hex，无法界定覆盖起点（fail-closed）")]
+    if not _is_ancestor_of_head(base, root):
+        return [("<source-commit-not-ancestor>",
+                 f"source_commit={base} 非 HEAD 祖先（promote 重建 dev 后悬空，"
+                 "须回填 main 侧 squash sha），无法界定覆盖起点（fail-closed）")]
     r = _git(["rev-list", "--no-merges", f"{base}..HEAD"], root)
     if r is None or r.returncode != 0:
         return [("<git-rev-list-failed>",

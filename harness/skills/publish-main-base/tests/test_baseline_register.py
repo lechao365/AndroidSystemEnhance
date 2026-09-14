@@ -1181,5 +1181,70 @@ class TestApprovalTokenNoStub(unittest.TestCase):
         self.assertEqual(rc, 0)
 
 
+class TestBackfillSourceCommit(unittest.TestCase):
+    """backfill-source-commit：promote 重建 dev 后回填 main 侧 squash sha。
+
+    方向 2（批次 6a3a0969d477）：登记时记的 dev 侧 BH 在 reset --hard main 后
+    不再是 dev HEAD 祖先，coverage 区间必含汇总提交判红；回填后区间天然为空。
+    方向 3 同源：source_commit 须 12hex 且为 HEAD 祖先，否则拒写。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._root = Path(self._tmp.name)
+        os.environ["CDP_PROJECT_ROOT"] = str(self._root)
+        self._config = self._root / "baseline-status.yaml"
+        self._config.write_text(_initial_config(), encoding="utf-8")
+        br.CONFIG = self._config
+
+    def tearDown(self):
+        br.CONFIG = Path(br.__file__).resolve().parents[2] / "config" / "baseline-status.yaml"
+        os.environ.pop("CDP_PROJECT_ROOT", None)
+        self._tmp.cleanup()
+
+    def _mk_baseline(self, sid="BL-01"):
+        """直接写入一条 promoted 记录（避免依赖 add-candidate 门禁）。"""
+        data = br.load()
+        data.setdefault("baselines", []).append(
+            {"baseline_id": sid, "status": "promoted",
+             "source_commit": "aabbccddeeff"})
+        br.save(data)
+
+    def _run_backfill(self, sid, sc, merge_rc=0):
+        buf = io.StringIO()
+        err = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(err):
+            with mock.patch("baseline_register.subprocess.run") as mrun:
+                mrun.return_value = mock.Mock(returncode=merge_rc)
+                rc = br.main(["backfill-source-commit",
+                              "--baseline-id", sid,
+                              "--source-commit", sc])
+        return rc, buf.getvalue() + err.getvalue()
+
+    def test_backfill_rejects_non_12hex(self):
+        self._mk_baseline()
+        rc, out = self._run_backfill("BL-01", "abc", merge_rc=0)
+        self.assertEqual(rc, 1)
+        self.assertIn("非 12hex", out)
+        self.assertEqual(br.load()["baselines"][0]["source_commit"],
+                         "aabbccddeeff")
+
+    def test_backfill_rejects_non_ancestor(self):
+        self._mk_baseline()
+        rc, out = self._run_backfill("BL-01", "0a41444cb264", merge_rc=1)
+        self.assertEqual(rc, 1)
+        self.assertIn("非 HEAD 祖先", out)
+        self.assertEqual(br.load()["baselines"][0]["source_commit"],
+                         "aabbccddeeff")
+
+    def test_backfill_ok(self):
+        self._mk_baseline()
+        rc, out = self._run_backfill("BL-01", "0a41444cb264", merge_rc=0)
+        self.assertEqual(rc, 0)
+        self.assertIn("backfilled-source-commit", out)
+        self.assertEqual(br.load()["baselines"][0]["source_commit"],
+                         "0a41444cb264")
+
+
 if __name__ == "__main__":
     unittest.main()

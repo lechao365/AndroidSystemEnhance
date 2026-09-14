@@ -597,5 +597,19 @@ git checkout dev && git reset --hard main || {
   echo "error: dev 重建失败。main 已含基线，请人工完成：git checkout dev && git reset --hard main && git push --force-with-lease origin dev（勿重跑 promote）" >&2; exit 2; }
 git push --force-with-lease -u origin dev || { echo "error: dev 重建推送失败，请人工处理" >&2; exit 2; }
 
+# 方向 2（批次 6a3a0969d477）：回填 source_commit = main 侧 squash sha。登记时
+# 记的 dev 侧 BH 在 reset --hard main 后不再是 dev HEAD 祖先，commit_coverage
+# 区间必含汇总提交判红（BL-20260914-01 首发）；回填后区间天然为空，起点之后
+# 夹带仍判红。顺带解悬空（悬空 source_commit 仅 verified tag 可达，无 tag 即
+# rev-list 失败判红）。backfill 侧校验 12hex + HEAD 祖先，随 dev 提交入库推送。
+SQUASH_SHA=$(git rev-parse --short=12 main)
+python3 harness/skills/publish-main-base/baseline_register.py backfill-source-commit \
+  --baseline-id "$BID" --source-commit "$SQUASH_SHA" \
+  || { echo "error: source_commit 回填失败（12hex/HEAD 祖先校验未过）" >&2; exit 1; }
+git add harness/config/baseline-status.yaml || { echo "error: add baseline-status.yaml 失败" >&2; exit 1; }
+git commit -m "构建(baseline): ${BID} source_commit 回填 main 侧 squash sha（coverage 区间对齐）" \
+  || { echo "error: source_commit 回填提交失败" >&2; exit 1; }
+git push origin dev || { echo "error: source_commit 回填推送失败，请人工处理" >&2; exit 2; }
+
 echo "promote 完成；提示：本批次文档同步应在 promote 前以 /sync-code-to-doc --base origin/main 完成，promote 后工作区已 clean（git diff HEAD 无变动，勿再硬同步）"
 exit 0

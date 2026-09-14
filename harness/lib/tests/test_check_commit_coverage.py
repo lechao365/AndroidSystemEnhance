@@ -147,11 +147,11 @@ class TestUncoveredScan(unittest.TestCase):
                         "构建(baseline): 晋升 promoted"], check=True)
         self.assertEqual(ccc.uncovered_commits(self.repo), [])
 
-    def test_release_squash_commit_exempt(self):
-        # 发布汇总提交豁免（本批 BL-20260914-01）：promote squash 全量提交标题
-        # 「构建(baseline): 发布」——内容已过 verify-tree 树等价断言，且改动面
-        # 覆盖全仓（代码+收据+known-issues）任何单份收据无法覆盖；不豁免则每次
-        # promote 重建 dev 后 commit_coverage 必红
+    def test_release_squash_commit_not_exempt_red(self):
+        # 方向 1（批次 6a3a0969d477 撤回 9e148fa）：标题「构建(baseline): 发布」
+        # 前缀豁免是纯标题免检回归——实测挟带 code/ 与改写检查器自身均 rc=0，
+        # 三批收窄回到起点。发布汇总提交不得按标题豁免：改动面含代码即判红
+        #（正解是 promote 侧回填 source_commit 使区间为空，非标题豁免）
         shas = _mk_git(self.repo, commits=[
             ("构建(baseline): 基线发布", "base.txt"),
             ("修复(harness): 某修复", "harness/lib/checker.py"),
@@ -168,7 +168,62 @@ class TestUncoveredScan(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), "commit", "-q", "-m",
                         "构建(baseline): 发布 BL-TEST-01 基线（解锁并发出 main 基线）"],
                        check=True)
-        self.assertEqual(ccc.uncovered_commits(self.repo), [])
+        out = ccc.uncovered_commits(self.repo)
+        self.assertEqual(len(out), 1)
+        head12 = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=True).stdout.strip()
+        self.assertEqual(out[0][0][:12], head12)
+
+    def test_source_commit_not_12hex_red(self):
+        # 方向 3（批次 6a3a0969d477）：source_commit 非 12hex 判红（fail-closed
+        # 无法界定覆盖起点）
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+        ])
+        cfg = self.repo / "harness" / "config" / "baseline-status.yaml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(
+            "baselines:\n- baseline_id: BL-X\n  status: promoted\n"
+            f"  source_commit: {shas[0][:5]}\n", encoding="utf-8")
+        out = ccc.uncovered_commits(self.repo)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][0], "<invalid-source-commit>")
+
+    def test_source_commit_not_ancestor_red(self):
+        # 方向 3（批次 6a3a0969d477）：source_commit 非 HEAD 祖先判红——promote
+        # 重建 dev 后 dev 侧 BH 悬空（仅 verified tag 可达），须回填 main 侧
+        # squash sha，否则区间失控必红
+        _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+            ("修复(harness): 某修复", "harness/lib/checker.py"),
+        ])
+        # source_commit 指向 first（非 HEAD 祖先）；构造第二个仓？——直接用
+        # 悬空 sha（HEAD 的父），模拟重建后悬空：base=首提交，HEAD=尾提交
+        shas = [subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "--short=12", "HEAD~1"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=True).stdout.strip()]
+        shas.append(subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=True).stdout.strip())
+        cfg = self.repo / "harness" / "config" / "baseline-status.yaml"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        # source_commit 用 HEAD 的 tree sha（12hex 合法对象但非提交祖先，
+        # merge-base --is-ancestor 非提交即失败）——模拟 promote 重建 dev 后
+        # 悬空起点（仅 verified tag 可达，无 tag 即 rev-list 失败判红）
+        tree12 = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "--short=12", "HEAD^{tree}"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=True).stdout.strip()
+        cfg.write_text(
+            "baselines:\n- baseline_id: BL-X\n  status: promoted\n"
+            f"  source_commit: {tree12}\n", encoding="utf-8")
+        out = ccc.uncovered_commits(self.repo)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][0], "<source-commit-not-ancestor>")
 
     def test_docs_prefix_code_not_doc_red(self):
         # 方向 1：docs/ 前缀不再不看扩展名——docs/ 下代码文件按非文档判红
@@ -381,9 +436,19 @@ class TestUncoveredScan(unittest.TestCase):
         self.assertIn("<no-baseline>", out[0][0])
 
     def test_rev_list_failure_red(self):
-        # git rev-list 失败 fail-closed：无法证实覆盖即判红，不静默放行
-        _mk_baseline(self.repo, "aabbccddeeff")
-        with mock.patch.object(ccc, "_git", return_value=None):
+        # git rev-list 失败 fail-closed：无法证实覆盖即判红，不静默放行。
+        # 方向 3 校验在前：source_commit 须为真实 HEAD 祖先（merge-base 真跑），
+        # 只 mock rev-list 失败，才能命中 rev-list 判红分支
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+        ])
+        _mk_baseline(self.repo, shas[0])
+        real_git = ccc._git
+        def fake_git(args, cwd):
+            if args[:2] == ["merge-base", "--is-ancestor"]:
+                return real_git(args, cwd)
+            return None
+        with mock.patch.object(ccc, "_git", side_effect=fake_git):
             out = ccc.uncovered_commits(self.repo)
         self.assertEqual(len(out), 1)
         self.assertIn("rev-list", out[0][0])
