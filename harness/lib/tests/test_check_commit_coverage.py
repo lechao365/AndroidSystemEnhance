@@ -147,6 +147,29 @@ class TestUncoveredScan(unittest.TestCase):
                         "构建(baseline): 晋升 promoted"], check=True)
         self.assertEqual(ccc.uncovered_commits(self.repo), [])
 
+    def test_release_squash_commit_exempt(self):
+        # 发布汇总提交豁免（本批 BL-20260914-01）：promote squash 全量提交标题
+        # 「构建(baseline): 发布」——内容已过 verify-tree 树等价断言，且改动面
+        # 覆盖全仓（代码+收据+known-issues）任何单份收据无法覆盖；不豁免则每次
+        # promote 重建 dev 后 commit_coverage 必红
+        shas = _mk_git(self.repo, commits=[
+            ("构建(baseline): 基线发布", "base.txt"),
+            ("修复(harness): 某修复", "harness/lib/checker.py"),
+        ])
+        _mk_baseline(self.repo, shas[0])
+        _mk_receipt(self.repo, "add=1 mod=0 del=0 | harness/lib/checker.py")
+        # 发布提交：squash 汇总——改动面含代码与收据等全仓内容
+        for rel in ("harness/lib/checker.py", "data/known-issues/ki-x.md",
+                    "docs/design.md", "harness/lib/new.py"):
+            p = self.repo / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("y\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-q", "-m",
+                        "构建(baseline): 发布 BL-TEST-01 基线（解锁并发出 main 基线）"],
+                       check=True)
+        self.assertEqual(ccc.uncovered_commits(self.repo), [])
+
     def test_docs_prefix_code_not_doc_red(self):
         # 方向 1：docs/ 前缀不再不看扩展名——docs/ 下代码文件按非文档判红
         shas = _mk_git(self.repo, commits=[

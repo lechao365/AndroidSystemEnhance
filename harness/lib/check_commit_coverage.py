@@ -147,6 +147,14 @@ def _commit_is_meta_exempt(sha: str, cwd: Path) -> bool:
     if not is_meta_subject(subject):
         return False
     if subject.startswith("构建("):
+        # 发布汇总提交（标题「构建(baseline): 发布」，promote squash 全量）直接豁免：
+        # 其内容已过 verify-tree 树等价断言（push main 前 verified tag 树 ≡ main 树），
+        # 且改动面覆盖全仓（收据/known-issues/代码/文档），任何单份收据无法覆盖——
+        # 不豁免则每次 promote 重建 dev 后 commit_coverage 必红（发布提交判红，本批
+        # BL-20260914-01 首发）。其余 构建( 元提交仍须改动面限于构建元文件（防
+        # 「构建(baseline): 发布」之外标题挟带代码逃过收据覆盖）
+        if subject.startswith("构建(baseline): 发布"):
+            return True
         files = commit_files(sha, cwd)
         if files is None:
             return False
