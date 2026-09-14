@@ -444,8 +444,12 @@ def main(argv=None):
         # 与 data/baselines/（promote 生成的证据快照目录，随晋升提交入库）
         # 与 data/known-issues/（保留目录——promote 归档不删文件，批内新登记
         # 问题随晋升提交入库；不排除则登记变更让树等价断言必红回滚）
+        # 与 data/verify-results/（验证收据目录——纯收据提交纳入 BH 回溯跳过
+        # 后，BH 之后的收据提交新增的收据文件不在 tag 树而 main squash 树含之，
+        # 不排除则树等价断言必红回滚；收据是验证证据非发布内容，排除安全）
         excludes = ("harness/config/baseline-status.yaml", "docs/",
-                    "data/baselines/", "data/known-issues/")
+                    "data/baselines/", "data/known-issues/",
+                    "data/verify-results/")
         diffs = [ln for ln in r.stdout.splitlines()
                  if ln and not any(ln == e or ln.startswith(e) for e in excludes)]
         if diffs:
