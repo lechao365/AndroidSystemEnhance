@@ -8,7 +8,7 @@
 - blocking_reason: 
 - status: fixed
 - task: checker-hardening
-- resolved_in: 
+- resolved_in: 13ffd93
 - archived_in: 
 - kind: 
 
