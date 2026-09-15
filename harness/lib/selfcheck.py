@@ -897,7 +897,7 @@ def _main_body(mode):
     manifest_last = last_stdout_line(manifest_out)
     if manifest_last:
         parts.append(manifest_last)
-    # 测试改动纪律（方向 1，IDLE-006 机械化）：discipline_rc 透出——测试改动
+    # 测试改动纪律（禁止修法机械化）：discipline_rc 透出——测试改动
     # 新增 xfail/skip/sleep 重试即判红，交 ws_report 全 *_rc 判红拒写
     parts.append(f"discipline_rc={dis_rc}")
     dis_last = last_stdout_line(dis_out)

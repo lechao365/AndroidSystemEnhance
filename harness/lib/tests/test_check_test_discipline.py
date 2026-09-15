@@ -46,7 +46,7 @@ class TestDiscipline(unittest.TestCase):
         self.assertEqual(ctd.scan(self.repo), [])
 
     def test_new_xfail_reported(self):
-        # 新增 @pytest.mark.xfail → 违规（IDLE-006：禁 xfail 掩盖）
+        # 新增 xfail 装饰 → 违规（禁 xfail 掩盖）
         out = self._edit(
             "import pytest\n\ndef test_ok():\n    pass\n\n"
             "@pytest.mark.xfail\ndef test_f():\n    pass\n")

@@ -8,3 +8,22 @@
 # 新增掩盖），恢复即整文件新增行被扫禁戒误判；按方向 1 不得改写原样，
 # 故整文件豁免纪律扫描。
 harness/skills/publish-main-base/tests/test_publish_integration.py
+
+# 2026-09-15（批次 cf7cfa02d6dd）：收缩 harness 面积——删坏死覆盖率模块与
+# 让路死机制，逐项删除后全仓去引用。
+#   - test_ws_coverage.py：ws_coverage 覆盖率模块整体删除（P1-A 一期即未启用，
+#     插桩摆设无采集链），测试随模块同删；
+#   - test_ws_lock.py：删让路协议 1 用例（request_yield/yield_requested/
+#     clear_yield 符号整体移除，无替换）；
+#   - test_ws_report.py：删 coverage 自动填充 1 用例（ws_report --coverage-file
+#     入参摘除，收据 coverage 字段废弃恒空）；
+#   - test_ws_verify_chain.py：删 coverage 步 2 用例 + 取锁让路 1 用例 +
+#     coverage 链步 1 用例共 4 用例（coverage 步与让路协议同删）；
+#   - selfcheck.py：仅改注释（IDLE-006 引用→禁止修法机械化），纯注释改动；
+#   - cdp_receipt.py：仅改注释（coverage 字段废弃说明），纯注释改动。
+harness/skills/workspace-verify/tests/test_ws_coverage.py
+harness/skills/workspace-verify/tests/test_ws_lock.py
+harness/skills/workspace-verify/tests/test_ws_report.py
+harness/skills/workspace-verify/tests/test_ws_verify_chain.py
+harness/lib/selfcheck.py
+harness/skills/cross-device/lib/python/cdp_receipt.py

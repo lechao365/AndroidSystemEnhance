@@ -373,8 +373,7 @@ def _build_report_argv(chain_args, derive):
     for key, flag in (("push_file", "--push-file"),
                       ("unit_test_file", "--unit-test-file"),
                       ("acc_file", "--acceptance-file"),
-                      ("timings_file", "--timings-file"),
-                      ("coverage_file", "--coverage-file")):
+                      ("timings_file", "--timings-file")):
         if chain_args.get(key):
             cmd += [flag, chain_args[key]]
     # board 收据强制自检证据（ws_report 方向 4 门禁；rc 全 0 与否由其扫描判定）
@@ -395,13 +394,13 @@ def _derive_report_args(steps, overall):
       不可信，不得机械降级 skip 掩盖）
     - board：全过=pass；push/unit_test/acceptance 失败=fail（设备已被动过）；
       sync/connect 阶段失败=skip（未触及设备态）
-    - coverage 步（P1-A 只记录不门禁）不进入 board/链停判定：其失败不得
-      抢先成为 failed 使 board 判 skip 掩盖其后真实的上板失败（方向 4）。
+    - package（方向 3 打包证据，只记录不门禁）：其失败不得抢先成为 failed
+      使 board 判 skip 掩盖其后真实的上板失败（方向 4）。
     """
-    # 排除 coverage（只记录不门禁）与 package（方向 3 打包证据，只记录不
-    # 门禁）：其失败不得抢先成为 failed 使 board 判 skip 掩盖其后真实的上板
-    # 失败（方向 4 同款——package 失败如 sudo 不可用是环境问题，非上板归因）
-    real_failed = next((s for s in steps if s["name"] not in ("coverage", "package")
+    # 排除 package（方向 3 打包证据，只记录不门禁）：其失败不得抢先成为
+    # failed 使 board 判 skip 掩盖其后真实的上板失败（方向 4 同款——package
+    # 失败如 sudo 不可用是环境问题，非上板归因）
+    real_failed = next((s for s in steps if s["name"] != "package"
                         and (s.get("canceled") or s["rc"] is None
                              or s["rc"] != 0)), None)
     result = "pass" if overall == "pass" else "fail"
@@ -466,7 +465,7 @@ def _join_selfcheck_preflight(thread, result):
 
 def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
               case=None, wait_ready=False, log_since=None, build=None,
-              timeouts=None, use_locks=True, coverage=False):
+              timeouts=None, use_locks=True):
     """顺序执行全链，返回 (rc, result_dict)。失败即停，余步记入 skipped。
 
     batch_file：模式 A 批次文件（acceptance 验收源 + report 收据源）；
@@ -530,16 +529,8 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
             return _run_chain_locked(run_id, batch_id, product, out,
                                      result_file, batch_file, build,
                                      timeout_map, chain_args,
-                                     selfcheck_thread, selfcheck_result,
-                                     coverage=coverage)
+                                     selfcheck_thread, selfcheck_result)
     except ws_lock.LockHeld as exc:
-        # 方向 1（闲时加固让路协议）：正式任务取锁失败即置让路标志，持锁的
-        # idle-hardening 会话在原子步骤边界检查到后收敛让路（不抢占验证中的
-        # 正式任务；标志为提示性，写失败静默）
-        try:
-            ws_lock.request_yield()
-        except Exception:
-            pass
         print(f"error: {exc}", file=sys.stderr)
         return 3, {"run_id": run_id, "batch_id": batch_id, "overall": "fail",
                    "exit_rc": 3, "canceled": False, "steps": [],
@@ -652,8 +643,7 @@ def _mark_step(name, batch_id, dur_s=None, zero=False):
 
 def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
                       build, timeout_map, chain_args,
-                      selfcheck_thread=None, selfcheck_result=None,
-                      coverage=False):
+                      selfcheck_thread=None, selfcheck_result=None):
     """锁内编排主体：逐步执行 + 运行态落盘（仅编排器写）。
 
     失败停链语义（A1 修订）：某步失败/取消后，其余验证步记 skipped，
@@ -717,27 +707,10 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
         canceled_any = canceled_any or canceled
         # 方向 3：package 是证据补充（打包失败只记步，ws_package 已如实落盘
         # evidence，report 内嵌真实 script_rc），不阻断链、不改 overall——
-        # 与 coverage 同语义（只记录不门禁），避免打包不可用拖垮上板验证。
+        # 只记录不门禁，避免打包不可用拖垮上板验证。
         if name != "package" and (canceled or rc is None or rc != 0):
             overall = "fail"
             fail_stop = True  # 不 break：report 步仍执行落 fail 收据（A1）
-        # P1-A：单测成功后可选 coverage 步（只记录不门禁；失败仅记步不进链判红）
-        if coverage and name == "unit_test" and overall == "pass" \
-                and not fail_stop:
-            t0m, t0 = time.monotonic(), time.time()
-            cov_argv = [sys.executable,
-                        str(_SCRIPT_DIR / "ws_coverage.py"),
-                        "--product", product]
-            if out:
-                cov_argv += ["--out", out]
-            cov_file = str(_CROSS_DEVICE_LOG / f"coverage-{batch_id or run_id}.json")
-            cov_argv += ["--result-file", cov_file]
-            cov_rc, cov_canceled = _run_step(cov_argv, timeout_map["unit_test"])
-            steps.append({"name": "coverage", "rc": cov_rc, "start": t0,
-                          "end": time.time(),
-                          "dur_s": round(time.monotonic() - t0m, 3),
-                          "canceled": cov_canceled})
-            chain_args["coverage_file"] = cov_file
     _chain_mark("verify_end", batch_id)
     ended_at = time.time()
     exit_rc = 0 if overall == "pass" else 1
@@ -774,8 +747,6 @@ def main(argv=None):
     ap.add_argument("--quick", action="store_true",
                     help="快检模式：sync + 内核 host 单测 + 自检，不落收据"
                          "（AI 编辑纯逻辑后的廉价反馈，不占真机）")
-    ap.add_argument("--coverage", action="store_true",
-                    help="单测后采集覆盖率（ws_coverage；只记录不门禁）")
     ap.add_argument("--build-dry-run", action="store_true",
                     help="build 步秒级干跑：source envsetup+lunch 验证环境可用、"
                          "_load_build_targets 非空、_aosp_root 存在、BLD-004/005"
@@ -791,8 +762,7 @@ def main(argv=None):
     rc, result = run_chain(args.product, args.out, args.result_file,
                            batch_file=args.batch_file, case=args.case,
                            wait_ready=args.wait_ready,
-                           log_since=args.log_since, build=args.build,
-                           coverage=args.coverage)
+                           log_since=args.log_since, build=args.build)
     print(json.dumps(result, ensure_ascii=False))
     return rc
 

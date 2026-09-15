@@ -466,20 +466,6 @@ class TestChain(unittest.TestCase):
         ctor.assert_not_called()
         self.assertEqual(list(self.runs.glob("*.json")), [])
 
-    def test_lock_held_requests_yield(self):
-        # 方向 1（闲时加固让路协议）：正式任务取锁失败即置让路标志，持锁的
-        # idle-hardening 会话在原子步骤边界检查到后收敛让路（不抢占验证中的
-        # 正式任务）
-        with mock.patch.object(wc.ws_lock, "verify_locks",
-                               side_effect=wc.ws_lock.LockHeld("占用")), \
-                mock.patch.object(wc.ws_lock, "request_yield") as req_yield, \
-                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
-                mock.patch.object(wc, "_run_selfcheck",
-                                  return_value=_SELFCHECK_OK):
-            rc, result = wc.run_chain(batch_file=str(self.batch))
-        self.assertEqual(rc, 3)
-        req_yield.assert_called_once()
-
     def test_no_batch_skips_acceptance_and_report(self):
         # 无验收源/无收据源（裸三步用法兼容）：acceptance/report 记 skipped
         rc, result, _ = self._run(batch_file=None)
@@ -574,26 +560,6 @@ class TestDeriveReportArgs(unittest.TestCase):
             self._steps(("sync", 0), ("connect", 0), ("push", 1)), "fail")
         self.assertEqual((d["result"], d["build"], d["board"]),
                          ("fail", "fail", "fail"))
-
-    def test_coverage_fail_then_acceptance_fail_board_fail(self):
-        # 方向 4：coverage 步（只记录不门禁）失败不得抢先成为 failed，使
-        # board 判 skip 掩盖其后真实上板失败（acceptance 在板上跑失败 → fail）
-        d = wc._derive_report_args(
-            self._steps(("sync", 0), ("push", 0), ("unit_test", 0),
-                        ("coverage", 1), ("acceptance", 1)), "fail")
-        self.assertEqual((d["result"], d["build"], d["board"]),
-                         ("fail", "pass", "fail"))
-        self.assertIn("acceptance", d["summary"], "链停归因须落到真实失败步")
-
-    def test_coverage_fail_alone_does_not_change_overall(self):
-        # 方向 4：coverage 失败不改 overall（只记录不门禁），board 仍全过
-        #（无真实上板失败，coverage 失败仅是记录）
-        d = wc._derive_report_args(
-            self._steps(("sync", 0), ("push", 0), ("unit_test", 0),
-                        ("coverage", 1), ("acceptance", 0)), "pass")
-        self.assertEqual((d["result"], d["build"], d["board"]),
-                         ("pass", "pass", "pass"))
-        self.assertIn("全链通过", d["summary"])
 
     def test_push_not_executed_build_skip(self):
         # wsv-13：push 未执行（sync 失败停链，步骤不在 steps）→ build=skip
@@ -708,20 +674,6 @@ class TestQuickMode(unittest.TestCase):
                                   return_value=_SELFCHECK_OK):
             rc, _ = wc.run_quick(use_locks=False)
         self.assertEqual(rc, 1)
-
-    def test_coverage_step_runs_after_unit_test(self):
-        ctor, proc = _fake_popen(0)
-        with mock.patch.object(wc.subprocess, "Popen", ctor), \
-                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
-                mock.patch.object(wc, "_run_selfcheck",
-                                  return_value=_SELFCHECK_OK):
-            rc, result = wc.run_chain(batch_file=str(self.batch),
-                                      coverage=True, use_locks=False)
-        names = _script_names(ctor.call_args_list)
-        self.assertIn("ws_coverage.py", names)
-        self.assertGreater(
-            [i for i, n in enumerate(names) if n == "ws_coverage.py"][0],
-            [i for i, n in enumerate(names) if n == "ws_upload_tests.py"][0])
 
 
 class TestBuildDryRun(unittest.TestCase):

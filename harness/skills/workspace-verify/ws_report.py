@@ -729,9 +729,6 @@ def main(argv=None):
     ap.add_argument("--flake-count", default="",
                     help="本批 selfcheck 登记的 flake 数（缺省从 --selfcheck "
                          "文本解析；供 metrics 聚合 flake 率）")
-    ap.add_argument("--coverage-file", default="",
-                    help="ws_coverage 覆盖率产物 JSON 路径（写入收据 coverage "
-                         "字段；只记录不门禁，缺失仅 warn 不阻断）")
     ap.add_argument("--metrics", default="",
                     help="三指标结构化 JSON 对象（写入收据 metrics 字段与 trend 行尾）")
     ap.add_argument("--timings-file", default="",
@@ -1042,36 +1039,6 @@ def main(argv=None):
                                                args.selfcheck)))
                             if args.selfcheck.strip() else "0")
 
-    # P1-A：覆盖率证据（ws_coverage 自描述 JSON；只记录不门禁，读取失败仅 warn）
-    coverage = ""
-    if args.coverage_file:
-        try:
-            cdata = json.loads(Path(args.coverage_file).read_text(
-                encoding="utf-8"))
-            if isinstance(cdata, dict):
-                coverage = json.dumps(cdata, ensure_ascii=False,
-                                      separators=(",", ":"))
-        except (OSError, ValueError, json.JSONDecodeError) as e:
-            print(f"warn: --coverage-file 读取失败（不入收据）: {e}",
-                  file=sys.stderr)
-    else:
-        # 方向 20260912：收据 coverage 恒空字段补齐——无 ws_coverage JSON 时
-        # 用验收 cases 算发布全量组覆盖摘要填充（与 add-candidate cases_coverage
-        # 同源同口径），board pass 收据 coverage 不再恒空；失败仅 warn 不阻断
-        try:
-            data = yaml.safe_load(
-                Path(_CASES_PATH).read_text(encoding="utf-8")) or {}
-            all_ids = list((data.get("cases") or {}).keys())
-            got = {c.strip() for c in (args.case or "").split(",") if c.strip()}
-            missing = [c for c in all_ids if c not in got]
-            result = "missing" if not got else ("partial" if missing else "full")
-            coverage = json.dumps(
-                {"cases": result, "run_count": len(got),
-                 "missing": missing}, ensure_ascii=False, separators=(",", ":"))
-        except (OSError, ValueError, yaml.YAMLError) as e:
-            print(f"warn: coverage 自动填充失败（留空不阻断）: {e}",
-                  file=sys.stderr)
-
     # 发布内容与验证内容绑定（批次 261f10265269 方向 1）：verified_tree 为
     # 落盘时刻排除统一集合后的内容树（git 树对象 id，可复算）；commit_scope
     # 为该时刻 porcelain 清单加摘要。均排除收据目录（自引用豁免）；git 不可
@@ -1124,7 +1091,6 @@ def main(argv=None):
                 timings=args.timings, cases=args.case,
                 selfcheck=args.selfcheck,
                 flake_count=args.flake_count,
-                coverage=coverage,
                 package=args.package,
                 verified_tree=verified_tree, commit_scope=commit_scope,
                 device_dirty=device_dirty)

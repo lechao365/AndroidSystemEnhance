@@ -10,12 +10,6 @@
 ## 缺陷归属判定
 缺陷归属判定（当批修或登记 known-issues）前，必须先加载 [harness/rules/known-issues.md](harness/rules/known-issues.md)（KIR-001~007 有序判据与准入场景表）。
 
-## 闲时加固
-执行闲时加固（修复 idle-eligible 队列、让路协议、预算内修复）前，必须先加载
-[harness/rules/idle-hardening.md](harness/rules/idle-hardening.md)
-（IDLE-001~007：队列准入不自选战场 / 让路协议复用 ws_lock / flake 修复纪律 /
-预算与断点续跑）。
-
 ## 本地直连开发
 在 apply 设备上直连用 LLM 开发（不走 cross-device-apply 批次流程）前，必须先加载
 [harness/rules/local-dev-dod.md](harness/rules/local-dev-dod.md)

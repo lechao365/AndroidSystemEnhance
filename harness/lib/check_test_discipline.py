@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # ============================================================
-# check_test_discipline.py — 测试改动纪律机械守卫（IDLE-006 配套）
-# 设计目的：idle-hardening 的禁止修法（sleep 重试 / xfail / 弱化断言）此前
-#   只写在文档里，无机械守卫——修复时以"掩盖而非修复"方式改测试会静默
-#   混入批次。本检查器扫**测试改动中新增的行**（git diff HEAD 的 + 行），
-#   命中禁令即 rc=1，由 selfcheck 以 discipline_rc 透出、ws_report/CI 判红。
+# check_test_discipline.py — 测试改动纪律机械守卫
+# 设计目的：禁止修法（sleep 重试 / xfail / 弱化断言）此前只写在文档里，无
+# 机械守卫——修复时以"掩盖而非修复"方式改测试会静默混入批次。本检查器扫
+# **测试改动中新增的行**（git diff HEAD 的 + 行），命中禁令即 rc=1，由
+# selfcheck 以 discipline_rc 透出、ws_report/CI 判红。
 # 扫描对象：改动文件中的测试文件（路径含 /tests/ 或 test 前缀/后缀）。
 # 判定语义：只扫新增行（改动引入的），存量合规历史不动；sleep 命中可能为
 #   设备等待等合理用途，报告提示人工复核（机械守卫只拦不判死，评审放行）。
@@ -20,7 +20,7 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
 
-# 禁令模式 → 违规类别（方向 1：idle-hardening 禁止修法机械化）。
+# 禁令模式 → 违规类别（禁止修法机械化）。
 # sleep 分支（lib-15）：在原 time.sleep / 非标识符前导裸调两分支基础上
 # 补 行首裸 sleep( 与 asyncio.sleep( ——此前漏 asyncio.sleep 与行首裸调，
 # sleep 重试可换皮绕过守卫
@@ -223,7 +223,7 @@ def main(argv=None) -> int:
         return 0
     findings = scan(repo, rev=args.rev)
     if findings:
-        print("==== 测试改动中新增禁戒（xfail/skip/sleep 重试，IDLE-006 "
+        print("==== 测试改动中新增禁戒（xfail/skip/sleep 重试，禁止修法 "
               "机械守卫）——须改除后再提交 ====")
         for f in findings:
             print(f"  {f}")

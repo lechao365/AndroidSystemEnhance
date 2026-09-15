@@ -70,8 +70,8 @@ _FIELDS = [
     # P0-C：本批 selfcheck 登记的 flake 数（ws_report 从 selfcheck 文本解析；
     # 旧收据无此行 → 默认空，metrics 聚合容错）
     ("flake_count", ""),
-    # P1-A：覆盖率采集证据（ws_coverage 自描述 JSON 单行；只记录不门禁，
-    # status 三态 ok/partial/unavailable）。旧收据无此行 → 默认空，兼容。
+    # coverage 字段已废弃（P1-A 覆盖率模块 ws_coverage 删除后恒空；字段保留
+    # 兼容旧收据，read_receipt 按默认空解析）
     ("coverage", ""),
 ]
 
