@@ -149,14 +149,20 @@ def _run_step(argv, timeout, cwd=None, log_path=None):
                     sys.stdout.buffer.write(raw)
                     sys.stdout.buffer.flush()
                     logf.write(raw)
+                    logf.flush()  # 方向 3：每行写后落盘，防退出强杀丢日志
         except Exception:
             pass  # 非真实管道（测试桩）：tee 静默降级，不污染 stderr
 
-    threading.Thread(target=_tee, daemon=True).start()
+    tee_thread = threading.Thread(target=_tee, daemon=True)
+    tee_thread.start()
     try:
-        return proc.wait(timeout=timeout), False
+        rc, canceled = proc.wait(timeout=timeout), False
     except subprocess.TimeoutExpired:
-        return _killpg_bounded(proc)
+        rc, canceled = _killpg_bounded(proc)
+    # 方向 3：留线程句柄 + proc.wait 返回后有界 join，等 tee 线程收尾
+    # （日志写完再返回，防 daemon 线程被解释器退出强杀致日志为空）
+    tee_thread.join(timeout=5)
+    return rc, canceled
 
 
 def _killpg_bounded(proc):

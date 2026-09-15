@@ -29,6 +29,15 @@ YAML_MIN = (
 
 YAML_NO_PUSH = "modules:\n  lcview:\n    targets: [x]\n"
 
+YAML_BIN_ONLY = (
+    "modules:\n"
+    "  lcview:\n"
+    "    push:\n"
+    "      - module: m1\n"
+    "        dst:\n"
+    "          - /vendor/bin/app1\n"
+)
+
 CTX_OK = "u:object_r:vendor_file:s0"
 
 
@@ -473,6 +482,96 @@ class TestMainOrchestration(unittest.TestCase):
         # 参数错误（SystemExit），杜绝用参数绕过生效门禁
         with self.assertRaises(SystemExit):
             wp.main(["--no-reboot"])
+
+    # ── 方向 1：非 reboot 场景 bin 模块经 setprop ctl.restart 重启 init 服务 ──
+    def _run_bin_only(self, fake_adb):
+        """纯 bin push（无生效类产物，不触发 reboot）+ 注入 adb_run 行为。"""
+        self.cfg.write_text(YAML_BIN_ONLY, encoding="utf-8")
+        make_out(self.out, "/vendor/bin/app1")
+        with mock.patch.object(wp.ac, "ensure_connected", return_value="ep"), \
+                mock.patch.object(wp, "ensure_root_remount",
+                                  return_value=(True, "")), \
+                mock.patch.object(wp, "_sleep"), \
+                mock.patch.object(wp, "_mark_stage",
+                                  side_effect=lambda n, dur_s=None: None), \
+                mock.patch.object(wp, "adb_run", side_effect=fake_adb):
+            return wp.main(["--out", self.out, "--cases", str(self.cfg),
+                            "--result-file", str(self.result)])
+
+    def _bin_fake(self, svc_out="running", pidof_seq=None, initial_equal=False):
+        pidof_calls = {"n": 0}
+        pushed = {"v": False}
+
+        def fake(ep, args, timeout=600):
+            if args[0] == "push":
+                pushed["v"] = True
+                return ("", 0)
+            if args[0] == "shell":
+                cmd = args[1]
+                if cmd.startswith("sha256sum"):
+                    if initial_equal or pushed["v"]:
+                        return (hashlib.sha256(b"A" * 100).hexdigest() + "  x", 0)
+                    return ("0" * 64 + "  x", 0)
+                if cmd.startswith("stat"):
+                    return ("100", 0)
+                if cmd.startswith("ls"):
+                    return (f"{CTX_OK} /x", 0)
+                if cmd.startswith("getprop init.svc.app1"):
+                    return (svc_out, 0)
+                if cmd.startswith("pidof app1"):
+                    pidof_calls["n"] += 1
+                    if pidof_seq is None:
+                        return ("123", 0)
+                    return (pidof_seq[min(pidof_calls["n"], len(pidof_seq)) - 1], 0)
+            return ("", 0)
+
+        return fake
+
+    def test_bin_restart_records_pid_change(self):
+        # 方向 1：bin 模块推送成功且无生效类产物（未 reboot）→ setprop
+        # ctl.restart 重启对应 init 服务，重启前后 pid 写入产物；pid 变化 ok
+        rc = self._run_bin_only(self._bin_fake(pidof_seq=["123", "456"]))
+        self.assertEqual(rc, 0)
+        data = json.loads(self.result.read_text(encoding="utf-8"))
+        self.assertIsNone(data["reboot"])
+        self.assertEqual(len(data["service_restarts"]), 1)
+        sr = data["service_restarts"][0]
+        self.assertEqual((sr["module"], sr["service"]), ("m1", "app1"))
+        self.assertEqual((sr["before_pid"], sr["after_pid"]), ("123", "456"))
+        self.assertTrue(sr["ok"])
+
+    def test_bin_restart_no_service_skipped(self):
+        # 方向 1：bin 产物无对应 init 服务（getprop init.svc 空，如纯工具
+        # lciod_probe）→ 跳过不判红，service_restarts 记 ok=None
+        rc = self._run_bin_only(self._bin_fake(svc_out=""))
+        self.assertEqual(rc, 0)
+        data = json.loads(self.result.read_text(encoding="utf-8"))
+        self.assertIsNone(data["reboot"])
+        sr = data["service_restarts"][0]
+        self.assertIsNone(sr["ok"])
+        self.assertEqual(data["overall"], "pass")
+
+    def test_bin_restart_records_pid_change_idempotent(self):
+        # 方向 1 意图核心：幂等跳过（产物与设备全等，pushed=False）也要重启
+        # 服务——旧进程可能仍在跑旧代码，此前跳过不重启致验收报绿
+        rc = self._run_bin_only(
+            self._bin_fake(pidof_seq=["123", "456"], initial_equal=True))
+        self.assertEqual(rc, 0)
+        data = json.loads(self.result.read_text(encoding="utf-8"))
+        self.assertTrue(all(it["pushed"] is False for it in data["items"]))
+        sr = data["service_restarts"][0]
+        self.assertEqual((sr["before_pid"], sr["after_pid"]), ("123", "456"))
+        self.assertTrue(sr["ok"])
+        self.assertEqual(data["overall"], "pass")
+
+    def test_bin_restart_pid_unchanged_is_red(self):
+        # 方向 1：服务存在但重启后 pid 未变化（新进程未生效）→ 判红 rc 1
+        rc = self._run_bin_only(self._bin_fake(pidof_seq=["123", "123"]))
+        self.assertEqual(rc, 1)
+        data = json.loads(self.result.read_text(encoding="utf-8"))
+        sr = data["service_restarts"][0]
+        self.assertFalse(sr["ok"])
+        self.assertEqual(data["overall"], "fail")
 
 
 class TestAdbBinOverride(unittest.TestCase):

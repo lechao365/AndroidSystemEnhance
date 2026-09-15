@@ -221,6 +221,12 @@ modules:
     targets:
       - lechao_lcview
       - vendor.lechao.lcview-config
+      # 方向 2（2026-09-15）：libjsoncpp/vendor_file_contexts/precompiled_sepolicy
+      # 此前只在 push 段，build 步不编译 → 推的是 out 下旧产物；补入 targets
+      # 让 build 步一并编译，上板推送的是本轮新产物
+      - libjsoncpp
+      - vendor_file_contexts
+      - precompiled_sepolicy
     # 测试 target（AGENTS.md 强制两个 test target，tests/Android.bp 定义）
     test_targets:
       - lechao_lcview_unit_test

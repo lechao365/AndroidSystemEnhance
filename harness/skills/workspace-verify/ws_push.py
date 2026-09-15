@@ -217,6 +217,37 @@ def needs_reboot(dst):
     return "/selinux/" in dst or "/vintf/" in dst or dst.endswith(".rc")
 
 
+def _service_for_bin(dst):
+    """bin 目录产物 → 对应 init 服务名（rc service 名 = 二进制 basename 约定，
+    本仓 lechao_lcview/lechao_lciod/lechao_lciod_hal 均符；非 bin 产物返 None）。"""
+    if "/bin/" not in dst:
+        return None
+    return Path(dst).name
+
+
+def restart_service(ep, service):
+    """setprop ctl.restart <service> 重启 init 服务，返回 (ok, before, after, note)。
+
+    方向 1：非 reboot 生效类产物推送后旧进程仍在跑，验收会报绿；ctl.restart
+    让新进程生效。服务不存在（init.svc.<svc> prop 为空，如纯工具二进制
+    lciod_probe）→ ok=None 表示跳过不判红；pid 重启前后各取一次作"新进程
+    生效"证据，after 为空或未变化判红。
+    """
+    out, _ = adb_run(ep, ["shell", f"getprop init.svc.{service}"], timeout=30)
+    if not out.strip():
+        return None, None, None, "无对应 init 服务（纯工具/非服务产物），跳过"
+    out, _ = adb_run(ep, ["shell", f"pidof {service}"], timeout=30)
+    before = out.strip() or None
+    adb_run(ep, ["shell", f"setprop ctl.restart {service}"], timeout=30)
+    _sleep(3)  # init 拉起窗口
+    out, _ = adb_run(ep, ["shell", f"pidof {service}"], timeout=30)
+    after = out.strip() or None
+    ok = bool(after) and after != before
+    note = ("ok" if ok else
+            f"重启后 pid 未变化/为空（before={before} after={after}）")
+    return ok, before, after, note
+
+
 def reboot_and_wait(ep, boot_timeout=240):
     """强制重启并等待启动完成（方向 4 生效门禁）。
 
@@ -346,7 +377,7 @@ def main(argv=None):
     ok_root, detail = ensure_root_remount(ep)
     if not ok_root:
         print(f"ERROR: {detail}")
-        _write_result(args.result_file, ep, [], None, "fail")
+        _write_result(args.result_file, ep, [], None, [], "fail")
         return 1
 
     all_ok = True
@@ -415,15 +446,38 @@ def main(argv=None):
         print(f"  生效门禁: 强制重启 {'通过' if ok_boot else '判红'}——{detail}")
         all_ok = all_ok and ok_boot
 
+    # 方向 1：未触发 reboot 时，对推送成功的 bin 模块重启对应 init 服务——
+    # 含幂等跳过项（产物与设备全等未推，但旧进程可能仍在跑旧代码，验收会
+    # 报绿）；ctl.restart 让新进程生效，重启前后 pid 写入产物作证据。
+    service_restarts = []
+    if not reboot_info:
+        for r in results:
+            if not r["push_ok"]:
+                continue
+            service = _service_for_bin(r["dst"])
+            if not service:
+                continue
+            ok, before, after, note = restart_service(ep, service)
+            service_restarts.append({
+                "module": r["module"], "dst": r["dst"], "service": service,
+                "before_pid": before, "after_pid": after,
+                "ok": ok, "detail": note})
+            tag = "SKIP" if ok is None else ("OK" if ok else "FAIL")
+            print(f"  [{tag}] {r['module']}: restart {service} pid "
+                  f"{before} → {after}: {note}")
+            if ok is False:
+                all_ok = False
+
     _write_result(args.result_file, ep, results, reboot_info,
-                  "pass" if all_ok else "fail")
+                  service_restarts, "pass" if all_ok else "fail")
     print(f"\n推送{'全部通过' if all_ok else '存在失败'}：{len(items)} 项")
     return 0 if all_ok else 1
 
 
-def _write_result(path, ep, results, reboot_info, overall):
+def _write_result(path, ep, results, reboot_info, service_restarts, overall):
     """落自描述推送产物（方向 3）：run_id + endpoint + 逐项源/目标路径 +
-    三项校验值 + 生效门禁段，原子写。path 为空跳过。"""
+    三项校验值 + 生效门禁段 + 服务重启段（方向 1 pid 前后证据），原子写。
+    path 为空跳过。"""
     if not path:
         return
     _atomic_write_json(path, {
@@ -431,6 +485,7 @@ def _write_result(path, ep, results, reboot_info, overall):
         "endpoint": ep,
         "items": results,
         "reboot": reboot_info,
+        "service_restarts": service_restarts,
         "overall": overall,
     })
 
