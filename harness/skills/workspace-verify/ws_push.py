@@ -239,9 +239,17 @@ def restart_service(ep, service):
     out, _ = adb_run(ep, ["shell", f"pidof {service}"], timeout=30)
     before = out.strip() or None
     adb_run(ep, ["shell", f"setprop ctl.restart {service}"], timeout=30)
-    _sleep(3)  # init 拉起窗口
-    out, _ = adb_run(ep, ["shell", f"pidof {service}"], timeout=30)
-    after = out.strip() or None
+    # 方向 3：固定 _sleep(3) 在 init 拉起慢时取到旧/空 pid 误判红；改有界
+    # 轮询 pidof 最多 15 次（每次间隔 _sleep(1)，约 15s 上限），取到新 pid
+    #（非空且 != before）即返回——用次数而非墙钟 deadline，避免单测 patch
+    # _sleep 后墙钟循环忙转 15s
+    after = before
+    for _ in range(15):
+        out, _ = adb_run(ep, ["shell", f"pidof {service}"], timeout=30)
+        after = out.strip() or None
+        if after and after != before:
+            break
+        _sleep(1)
     ok = bool(after) and after != before
     note = ("ok" if ok else
             f"重启后 pid 未变化/为空（before={before} after={after}）")

@@ -23,6 +23,7 @@ import argparse
 import json
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -597,6 +598,12 @@ def _run_forensics(ep, since_epoch, items, first_error):
         return None
 
 
+class _SigTermRequested(BaseException):
+    """SIGTERM 中断请求（方向 2）：链路超时 killpg 向本进程组发 SIGTERM 时
+    抛出，先执行既有 teardown（恢复 USB authorized 等副作用）再走中断收尾
+    落盘退出，防 teardown 被跳过把设备留在脏态。"""
+
+
 def run_case_lifecycle(acceptance_text, lifecycle, adb_exec, adb_logcat,
                        ep=None, ensure_boot=False, on_item=None, host_env=None,
                        since_epoch=0):
@@ -626,10 +633,27 @@ def run_case_lifecycle(acceptance_text, lifecycle, adb_exec, adb_logcat,
             return "fail", items, meta
     timeout_s = lifecycle.get("timeout_s")
     deadline = time.monotonic() + int(timeout_s) if timeout_s else None
-    overall, items = run_acceptance(acceptance_text, adb_exec, adb_logcat,
-                                    ensure_boot=ensure_boot, on_item=on_item,
-                                    host_env=host_env, deadline=deadline,
-                                    endpoint=ep)
+    try:
+        overall, items = run_acceptance(acceptance_text, adb_exec, adb_logcat,
+                                        ensure_boot=ensure_boot, on_item=on_item,
+                                        host_env=host_env, deadline=deadline,
+                                        endpoint=ep)
+    except _SigTermRequested:
+        # 方向 2：判据执行中收 SIGTERM（链路超时 killpg）——teardown 先执行
+        #（恢复 USB authorized 等副作用，防坏设备），取证留现场，再 re-raise
+        # 走外层中断收尾落盘；teardown 自身异常不阻断 re-raise（标 dirty 保守）
+        try:
+            dirty, tdetail = _restore_state(
+                setup_cmds, lifecycle.get("teardown") or [], snapshot, host_env)
+        except Exception as e:
+            dirty, tdetail = True, f"teardown 执行异常: {e!r}"
+        meta["device_dirty"] = dirty
+        meta["teardown_detail"] = (f"判据未完成即收 SIGTERM，teardown 已执行: "
+                                   f"{tdetail}")
+        # 判据异常中断时 items 未赋值，取证用空列表（现场以中断项标记落收据）
+        meta["forensics_dir"] = _run_forensics(ep, since_epoch, [],
+                                               "SIGTERM 中断")
+        raise
     meta["timed_out"] = any(i.get("tag") == "__timeout__" for i in items)
     first_error = next((f"{i['tag']}: {i['detail']}" for i in items
                         if i["status"] == "fail"), "")
@@ -936,6 +960,14 @@ def main(argv=None):
               f"（按设备时钟/时区换算）")
         _mark_stage("verify_acceptance_since_convert", batch_id)
 
+    # 方向 2：SIGTERM（链路超时 killpg 组信号）→ 抛 _SigTermRequested，经
+    # run_case_lifecycle 先执行既有 teardown（恢复 USB authorized 等副作用）
+    # 再走外层中断收尾落盘退出，防 teardown 被跳过把设备留在脏态
+    def _on_sigterm(signum, frame):
+        raise _SigTermRequested()
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
     # logcat 缓存：key=(pid, device_since)——同批多标签（如 liveness 的 log:
     # + 5 条同 pid logfield）只拉一次 5000 行，避免各拉一遍拖慢验收段；
     # force=True 绕过缓存重取（logfield 5 段轮询语义须实时，走缓存永远
@@ -1041,6 +1073,11 @@ def main(argv=None):
             forensics_dir = None
             for label, val, acc_c in case_vals:
                 ran_labels.append(label)
+                # 方向 1：logcat 缓存 key=(pid, since) 不含 case 标识，多 case
+                # 逐 case 跑时跨 case 复用旧快照（批 5 收据实证相邻两 case 取回
+                # 字节数相同且耗时 0.0s，判据读旧日志）——每 case 起始清缓存，
+                # 防上一 case 的日志污染本 case 判据（同 pid 同 since 撞 key）
+                _logcat_cache.clear()
                 done = len(items)
                 try:
                     if isinstance(val, dict):

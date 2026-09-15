@@ -573,6 +573,18 @@ class TestMainOrchestration(unittest.TestCase):
         self.assertFalse(sr["ok"])
         self.assertEqual(data["overall"], "fail")
 
+    def test_bin_restart_slow_start_polls_until_new_pid(self):
+        # 方向 3：服务拉起慢（固定 _sleep(3) 后仍取到旧 pid 会误判红）——
+        # 改有界轮询 pidof 最多 15 次，旧 pid 持续数轮后出现新 pid 即 ok
+        rc = self._run_bin_only(self._bin_fake(
+            pidof_seq=["123", "123", "123", "456"]))
+        self.assertEqual(rc, 0)
+        data = json.loads(self.result.read_text(encoding="utf-8"))
+        sr = data["service_restarts"][0]
+        self.assertEqual((sr["before_pid"], sr["after_pid"]), ("123", "456"))
+        self.assertTrue(sr["ok"])
+        self.assertEqual(data["overall"], "pass")
+
 
 class TestAdbBinOverride(unittest.TestCase):
     """wsv-05：adb_run 二进制经 ac.adb_bin()——LC_VERIFY_ADB_BIN 覆盖生效
