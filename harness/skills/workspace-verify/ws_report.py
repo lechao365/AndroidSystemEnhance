@@ -959,6 +959,11 @@ def main(argv=None):
     #   - 缺 REQUIRED_RC_KEYS 任一键即返 2（rc 不可见则自检不可信）
     #   - 任一 rc 非零即返 2（pytest 崩溃/悬空引用/配置违规均带 rc，文本可能无 failed/skipped）
     # failed 文本匹配与 skipped 计数保留作冗余（rc 全 0 后的补充防线）
+    # 方向 2（批次意图二）：board 模式 result=fail 的收据放行 rc 全零与文本
+    # 防线——fail 收据是失败现场记录（设备验证失败/自检失败都是失败证据），
+    # 强制自检全绿会把该落盘的 fail 收据拒之门外（须重跑到自检绿才能记失败，
+    # 违背失败记录本意）；skip 与 board+pass 仍要求 rc 全零（证据须可信）。
+    board_fail_relax = verify_mode == "board" and args.result == "fail"
     if (args.result == "skip" or verify_mode == "board") \
             and not args.selfcheck.strip():
         print("error: result=skip 或 board 模式必须传 --selfcheck（自检摘要：pytest "
@@ -966,7 +971,7 @@ def main(argv=None):
               "上板批自检 rc 须入收据（方向 4），否则零验证通道敞开",
               file=sys.stderr)
         return 2
-    if args.selfcheck.strip():
+    if args.selfcheck.strip() and not board_fail_relax:
         # 全 rc 键扫描（方向 4）：config_rc/contract_rc 接入后任意 *_rc 非
         # 零即拒写——固定两键白名单会让新增 rc 的判红静默失效
         found = {}

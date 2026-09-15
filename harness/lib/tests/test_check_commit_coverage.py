@@ -279,9 +279,10 @@ class TestUncoveredScan(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0][0][:12], shas[1])
 
-    def test_untracked_handwritten_receipt_red(self):
-        # fail-open 修复：收据 glob 扫未跟踪 md——手写一份未跟踪收据即免检
-        # 是漏洞。未跟踪收据不作覆盖证据，判红
+    def test_untracked_receipt_now_evidence(self):
+        # 方向一（批次意图一）：收据口径统一为工作区 .md——未跟踪手写收据
+        # 现在就是合法证据（ws_report 新写收据在 commit 前即未跟踪，此前
+        # 判红自锁：同一收据既是补齐动作又因未跟踪被自己拒）
         shas = _mk_git(self.repo, commits=[
             ("构建(baseline): 基线发布", "base.txt"),
             ("修复(harness): 修复", "fix.py"),
@@ -292,10 +293,8 @@ class TestUncoveredScan(unittest.TestCase):
         (d / "20260912-000000-handwritten.md").write_text(
             "- schema_version: 1\n- batch_id: hw\n- result: skip\n"
             "- commit_scope: add=1 mod=0 del=0 | fix.py\n", encoding="utf-8")
-        out = ccc.uncovered_commits(self.repo)
-        self.assertEqual(len(out), 2)  # 未跟踪收据错误 + fix.py 未被有效覆盖
-        self.assertIn("<receipt-invalid>", out[0][0])
-        self.assertIn("未跟踪", out[0][1])
+        self.assertEqual(ccc.uncovered_commits(self.repo), [],
+                         "未跟踪收据可作覆盖证据，fix.py 已被覆盖")
 
     def test_fail_receipt_not_evidence_red(self):
         # fail-open 修复：不滤 result=fail 收据——失败收据不能证明覆盖，
@@ -344,8 +343,10 @@ class TestUncoveredScan(unittest.TestCase):
         self.assertIn("<receipt-invalid>", out[0][0])
         self.assertIn("result 非法", out[0][1])
 
-    def test_workspace_modified_receipt_not_evidence(self):
-        # 方向 2：收据内容从 git show HEAD 读——工作区未提交修改不改判定
+    def test_workspace_modified_receipt_is_evidence(self):
+        # 方向一：收据从工作区 glob 读——工作区未提交修改直接改判定（收据
+        # 落盘即证据，与 commit_scope.latest_scope 同口径；此前 git show HEAD
+        # 只认已提交内容，新写收据未提交即不可见）
         shas = _mk_git(self.repo, commits=[
             ("构建(baseline): 基线发布", "base.txt"),
             ("修复(harness): 修复", "fix.py"),
@@ -357,15 +358,14 @@ class TestUncoveredScan(unittest.TestCase):
         f.write_text("- schema_version: 1\n- batch_id: ok\n- result: skip\n"
                      "- commit_scope: add=1 mod=0 del=0 | fix.py\n",
                      encoding="utf-8")
-        subprocess.run(["git", "-C", str(self.repo), "add", "--", f.as_posix()],
-                       check=True)
-        subprocess.run(["git", "-C", str(self.repo), "commit", "-q", "-m",
-                        "构建(baseline): 收据登记"], check=True)
+        # 未提交收据即可覆盖（无需 git add/commit）
         self.assertEqual(ccc.uncovered_commits(self.repo), [])
-        # 工作区把 scope 改成空/伪造 → HEAD 不变仍按 HEAD 判定，覆盖不失效
+        # 工作区把 scope 改成空 → 覆盖失效，fix.py 判红（工作区内容即判定）
         f.write_text("- schema_version: 1\n- batch_id: ok\n- result: skip\n"
                      "- commit_scope: add=0 mod=0 del=0 |\n", encoding="utf-8")
-        self.assertEqual(ccc.uncovered_commits(self.repo), [])
+        out = ccc.uncovered_commits(self.repo)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][0][:12], shas[1])
 
     def test_broken_receipt_parse_red(self):
         # fail-open 修复：收据解析失败丢错误——坏收据静默丢弃等于免检。

@@ -1159,6 +1159,49 @@ class TestWsReport(unittest.TestCase):
         self.assertIn("- verify_mode: board", content)
         self.assertIn("- cases: lcview-liveness", content)
 
+    def test_mode_b_board_fail_relaxes_rc_requirement(self):
+        # 方向 2（批次意图二）：board 模式 result=fail 的收据放行 rc 全零与
+        # 文本防线——fail 收据是失败现场记录，自检非零/带红是失败证据而非
+        # 拒写理由（此前强制自检全绿会把该落盘的 fail 收据拒之门外，自锁）
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--target", "1a2b3c4d5e6f",
+                                 "--result", "fail", "--build", "fail",
+                                 "--board", "fail", "--summary", "上板失败",
+                                 "--selfcheck", "pytest_rc=1 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 quotepath_rc=0 known_issues_rc=0 commit_coverage_rc=0 | 1 failed, 119 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        self.assertEqual(len(details), 1)
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- verify_mode: board", content)
+        self.assertIn("- result: fail", content)
+
+    def test_mode_b_board_fail_still_requires_selfcheck_text(self):
+        # 方向 2 边界：board+fail 放宽 rc 但不放宽「必须传 --selfcheck」——
+        # fail 收据仍需自检文本作失败现场证据（堵零验证通道）
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--target", "1a2b3c4d5e6f",
+                                 "--result", "fail", "--build", "fail",
+                                 "--board", "fail", "--summary", "上板失败"])
+        self.assertEqual(rc, 2)
+        self.assertIn("必须传 --selfcheck", err.getvalue())
+
+    def test_mode_b_board_pass_still_requires_rc_all_zero(self):
+        # 方向 2 反向：board+pass 仍要求 rc 全零（证据须可信，仅 fail 放行）
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--target", "1a2b3c4d5e6f",
+                                 "--result", "pass", "--build", "pass",
+                                 "--board", "pass", "--summary", "上板通过",
+                                 "--case", "lcview-liveness",
+                                 "--selfcheck", "pytest_rc=1 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 quotepath_rc=0 known_issues_rc=0 commit_coverage_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--acceptance-file", self._write_acc(),
+                                 "--unit-test-file", self._write_ut(),
+                                 "--push-file", self._write_push()])
+        self.assertEqual(rc, 2)
+        self.assertIn("非零退出码", err.getvalue())
+
     def _mk_manual_git(self, commits=("构建(baseline): 基线", "修复(harness): 修复")):
         """模式 M 测试：真 git 仓 + baseline-status.yaml + 非 meta 提交。
 

@@ -429,9 +429,11 @@ def _coverage_protected_names(verify_dir: Path) -> set:
     check_commit_coverage 以收据 commit_scope 为唯一覆盖凭据；覆盖当前证据
     区间（最近 promoted baseline..HEAD）的收据被 prune 老化删掉，依赖它的
     提交即翻红自锁（124520 manual 收据独自兜住区间全部 7 个提交的实例，
-    按日频老化约 5 天后进删除窗口）。判定复用 check_commit_coverage.
-    scope_covers_baseline_head（单点定义不漂移）；无法界定起点/枚举失败
-    返回空集（不启用本保护）。
+    按日频老化约 5 天后进删除窗口）。判定复用 check_commit_coverage（单点
+    定义不漂移）；无法界定起点/枚举失败返回空集（不启用本保护）。
+    方向 4（批次意图四）：一次 git 取全区间提交文件集后内存比对——此前逐
+    收据调 scope_covers_baseline_head，N 份收据即 N 次全区间 rev-list，老化
+    git 调用量随收据数线性放大。
     """
     root = project_root()
     # 复用真实仓 check_commit_coverage（cdp_receipt 所在仓资产，不随
@@ -441,8 +443,10 @@ def _coverage_protected_names(verify_dir: Path) -> set:
     if str(lib) not in sys.path:
         sys.path.insert(0, str(lib))
     import check_commit_coverage as ccc  # noqa: E402
+    from commit_scope import parse_scope  # noqa: E402
 
-    if not ccc.recent_promoted_baseline_commit(root):
+    commit_sets = ccc.baseline_head_commit_file_sets(root)
+    if not commit_sets:
         return set()
     protected = set()
     for f in _detail_files(verify_dir):
@@ -455,7 +459,11 @@ def _coverage_protected_names(verify_dir: Path) -> set:
         scope = (r.commit_scope or "").strip()
         if not scope:
             continue
-        if ccc.scope_covers_baseline_head(scope, root):
+        _counts, scope_paths = parse_scope(scope)
+        if not scope_paths:
+            continue
+        if any(ccc._covered_by_scope(files, scope_paths)
+               for files in commit_sets):
             protected.add(f.name)
     return protected
 
@@ -485,6 +493,11 @@ def prune_details(verify_dir=None):
     by_batch = {}
     for f in files:
         by_batch.setdefault(_receipt_batch_id(f), []).append(f)
+    # 方向五（批次意图五）：去重前先算覆盖保护名单并跳过被保护者——覆盖
+    # baseline..HEAD 的收据一旦被去重顶掉（同 batch 只留最新）同样会翻红
+    # 自锁，须与配额老化同受覆盖保护（名单复用方向四优化：一次 git 取全
+    # 区间后内存比对，不随收据数放大）
+    dedup_guarded = _coverage_protected_names(d) if files else set()
     dedup_removed = 0
     for fs in by_batch.values():
         by_result = {}
@@ -494,7 +507,8 @@ def prune_details(verify_dir=None):
             by_result.setdefault(key, []).append(f)
         for group in by_result.values():
             for old in group[:-1]:
-                if old.name in referred or _receipt_batch_id(old) is None:
+                if old.name in referred or old.name in dedup_guarded \
+                        or _receipt_batch_id(old) is None:
                     continue
                 old.unlink()
                 dedup_removed += 1
