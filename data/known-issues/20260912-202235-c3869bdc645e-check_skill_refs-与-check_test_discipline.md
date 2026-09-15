@@ -6,7 +6,7 @@
 - severity: P1
 - blocking: False
 - blocking_reason: 
-- status: open
+- status: fixed
 - task: checker-hardening
 - resolved_in: 
 - archived_in: 

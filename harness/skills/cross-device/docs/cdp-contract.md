@@ -23,6 +23,7 @@
 | 引号禁令 | 批次正文禁用单双引号字符（' 与 "，emit 角色校验，违规 exit 19）——apply 侧传输层会展开吞字致批次结构损坏；改用中文标点（「」、——）或去引号 |
 | batch_id | 规范化文本（剥 BOM/strip/去空行/LF，逐行删净行内空白）sha256 前 12 位 |
 | 验收语法 | `-sv` 验收必须为 `case:<id>[,<id>...]`（id 限小写字母数字与连字符，多个用逗号分隔，逐个查 verify-cases.yaml cases 段，任一未知判死）或 `manual:<自由文本>`（**仅 manual 模式保留自由文本**）；用例 id 在 verify-cases.yaml 集中维护，批次内不再书写 svc/log/prop/file 等验收表达式。**用例两级策略（B6）**：`-sv` 常态回归批验收 case 默认取快速回归组（lcview-liveness, lcview-pipeline, lcview-trigger, lciod-liveness, lciod-trigger）；publish-main-base 前的全量验收批取全部 case；批次方向涉及特定 case 的专项修复按需追加——选择依据见 verify-cases.yaml 顶部注释 |
+| 方向编号 | 多方向时以「1 xxx 2 yyy 3 zzz」连续编号；**编号前须为行首或句号或分号、编号后须带空白**（`(?:^|[。；])\s*(\d+)\s`，ws_report 方向数解析与 CDP-DOD-003 逐方向自报条数门禁据此计数，分号格式批次曾被解析为 0 绕过门禁） |
 
 ## 退出码
 

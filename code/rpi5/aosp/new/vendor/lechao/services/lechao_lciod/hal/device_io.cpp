@@ -71,12 +71,15 @@ int open_device(const char *path, int max_retries, int delay_ms) {
         fd = open(path, O_RDONLY);
         if (fd >= 0)
             return fd;
-        LC_LOGD("open: attempt " << (i + 1) << "/" << max_retries << " failed: " << strerror(errno));
+        int saved = errno;  // strerror 可能改 errno，先存再打日志
+        LC_LOGD("open: attempt " << (i + 1) << "/" << max_retries << " failed: " << strerror(saved));
         if (i + 1 < max_retries && delay_ms > 0)
             usleep(delay_ms * 1000);
     }
+    int saved = errno;
     LC_LOGE("Cannot open " << path << " after " << max_retries
-               << " retries: " << strerror(errno));
+               << " retries: " << strerror(saved));
+    errno = saved;  // 还原 errno（strerror 可能改），return 后上层取到正确错误码
     return fd;
 }
 
@@ -98,7 +101,11 @@ void close_device(int fd) {
 int get_stats(int fd, struct vendor_lechao_usbd_stats *stats) {
     memset(stats, 0, sizeof(*stats));
     int ret = ioctl(fd, VENDOR_LECHAO_USBD_IOC_GET_STATS, stats);
-    if (ret < 0) LC_LOGE("get_stats: ioctl failed: " << strerror(errno));
+    if (ret < 0) {
+        int saved = errno;  // strerror 可能改 errno，先存并 return 前还原
+        LC_LOGE("get_stats: ioctl failed: " << strerror(saved));
+        errno = saved;
+    }
     return ret;
 }
 
@@ -108,7 +115,11 @@ int get_stats(int fd, struct vendor_lechao_usbd_stats *stats) {
  */
 int reset_state(int fd) {
     int ret = ioctl(fd, VENDOR_LECHAO_USBD_IOC_RESET_STATE);
-    if (ret < 0) LC_LOGE("reset_state: ioctl failed: " << strerror(errno));
+    if (ret < 0) {
+        int saved = errno;  // strerror 可能改 errno，先存并 return 前还原
+        LC_LOGE("reset_state: ioctl failed: " << strerror(saved));
+        errno = saved;
+    }
     return ret;
 }
 
@@ -118,7 +129,11 @@ int reset_state(int fd) {
  */
 int get_config(int fd, struct vendor_lechao_usbd_config *config) {
     int ret = ioctl(fd, VENDOR_LECHAO_USBD_IOC_GET_CONFIG, config);
-    if (ret < 0) LC_LOGE("get_config: ioctl failed: " << strerror(errno));
+    if (ret < 0) {
+        int saved = errno;  // strerror 可能改 errno，先存并 return 前还原
+        LC_LOGE("get_config: ioctl failed: " << strerror(saved));
+        errno = saved;
+    }
     return ret;
 }
 
@@ -128,7 +143,11 @@ int get_config(int fd, struct vendor_lechao_usbd_config *config) {
  */
 int set_config(int fd, const struct vendor_lechao_usbd_config *config) {
     int ret = ioctl(fd, VENDOR_LECHAO_USBD_IOC_SET_CONFIG, (void *)config);
-    if (ret < 0) LC_LOGE("set_config: ioctl failed: " << strerror(errno));
+    if (ret < 0) {
+        int saved = errno;  // strerror 可能改 errno，先存并 return 前还原
+        LC_LOGE("set_config: ioctl failed: " << strerror(saved));
+        errno = saved;
+    }
     return ret;
 }
 

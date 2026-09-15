@@ -149,8 +149,9 @@ ndk::ScopedAStatus IoHalImpl::getStats(int32_t in_deviceMinor, IoStats* _aidl_re
 
     struct vendor_lechao_usbd_stats raw;
     int ret = ::get_stats(fd, &raw);
+    int saved = errno;  // close(fd) 可能改 errno，先存再关
     close(fd);
-    if (ret < 0) { int saved = errno; LC_LOGE("getStats: ioctl GET_STATS failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
+    if (ret < 0) { LC_LOGE("getStats: ioctl GET_STATS failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
 
     /* --- 字段映射: raw → _aidl_return --- */
     _aidl_return->vid = raw.vid;
@@ -193,8 +194,9 @@ ndk::ScopedAStatus IoHalImpl::resetState(int32_t in_deviceMinor) {
     if (fd < 0) { int saved = errno; LC_LOGE("resetState: open device failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
 
     int ret = ::reset_state(fd);
+    int saved = errno;  // close(fd) 可能改 errno，先存再关
     close(fd);
-    if (ret < 0) { int saved = errno; LC_LOGE("resetState: ioctl RESET_STATE failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
+    if (ret < 0) { LC_LOGE("resetState: ioctl RESET_STATE failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
     return ndk::ScopedAStatus::ok();
 }
 
@@ -211,8 +213,9 @@ ndk::ScopedAStatus IoHalImpl::getConfig(int32_t in_deviceMinor, IoConfig* _aidl_
 
     struct vendor_lechao_usbd_config raw;
     int cfg_ret = ::get_config(fd, &raw);
+    int saved = errno;  // close(fd) 可能改 errno，先存再关
     close(fd);
-    if (cfg_ret != 0) { int saved = errno; LC_LOGE("getConfig: ioctl GET_CONFIG failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
+    if (cfg_ret != 0) { LC_LOGE("getConfig: ioctl GET_CONFIG failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
 
     _aidl_return->enabled = raw.enabled;
     _aidl_return->flags = raw.flags;
@@ -235,8 +238,9 @@ ndk::ScopedAStatus IoHalImpl::setConfig(int32_t in_deviceMinor, const IoConfig& 
     raw.enabled = in_config.enabled;
     raw.flags = in_config.flags;
     int set_ret = ::set_config(fd, &raw);
+    int saved = errno;  // close(fd) 可能改 errno，先存再关
     close(fd);
-    if (set_ret != 0) { int saved = errno; LC_LOGE("setConfig: ioctl SET_CONFIG failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
+    if (set_ret != 0) { LC_LOGE("setConfig: ioctl SET_CONFIG failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
 
     *_aidl_return = true;
     return ndk::ScopedAStatus::ok();

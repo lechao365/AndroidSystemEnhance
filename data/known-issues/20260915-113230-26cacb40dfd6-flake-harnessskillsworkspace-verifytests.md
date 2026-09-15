@@ -6,7 +6,7 @@
 - severity: P2
 - blocking: False
 - blocking_reason: 
-- status: open
+- status: wontfix
 - task: auto-flake
 - resolved_in: 
 - archived_in: 
