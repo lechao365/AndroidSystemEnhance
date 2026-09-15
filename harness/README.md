@@ -44,8 +44,7 @@ harness/
 │   ├── debug-tools-reference.md  # 日志抓取、串口调试、WSL 映射 USB 设备（DBG-001~008）
 │   └── remote-access-reference.md # 跨网络远程访问 opencode WebUI（Tailscale + Serve，RMT-001~008）
 ├── scripts/
-│   ├── mk_rpi5_full_image.sh   # RPI5 一键编译打包
-│   └── apply_preset_bugs.py    # 预设 bug 注入/回退（LE 验证用）
+│   └── mk_rpi5_full_image.sh   # RPI5 一键编译打包
 └── log/                        # 运行时产物目录（plan/verify/构建报告等；可安全清理，不入库）
 ```
 

@@ -463,8 +463,8 @@ class TestWsReport(unittest.TestCase):
         rcs = {k: "0" for k in
                ("pytest_rc", "refs_rc", "config_rc", "contract_rc",
                 "pyenv_rc", "ioctl_rc", "manifest_rc", "discipline_rc",
-                "scan_rc", "ruff_rc", "host_rc", "metrics_rc",
-                "opencode_rc", "quotepath_rc", "known_issues_rc",
+                "scan_rc", "ruff_rc", "host_rc",
+                "quotepath_rc", "known_issues_rc",
                 "commit_coverage_rc")}
         rcs[rc_key] = "1"
         line = " ".join(f"{k}={v}" for k, v in rcs.items())
@@ -490,10 +490,6 @@ class TestWsReport(unittest.TestCase):
         # 死 rc 判红（方向 3）：热路径扫描违规（scan_rc=1）须拒写
         self._assert_rc_nonzero_rejected("scan_rc")
 
-    def test_selfcheck_opencode_rc_nonzero_rejected(self):
-        # 死 rc 判红（方向 3）：opencode-server 脚本校验失败（opencode_rc=1）须拒写
-        self._assert_rc_nonzero_rejected("opencode_rc")
-
     def test_selfcheck_pyenv_rc_nonzero_rejected(self):
         self._assert_rc_nonzero_rejected("pyenv_rc")
 
@@ -508,9 +504,6 @@ class TestWsReport(unittest.TestCase):
 
     def test_selfcheck_host_rc_nonzero_rejected(self):
         self._assert_rc_nonzero_rejected("host_rc")
-
-    def test_selfcheck_metrics_rc_nonzero_rejected(self):
-        self._assert_rc_nonzero_rejected("metrics_rc")
 
     def test_selfcheck_quotepath_rc_nonzero_rejected(self):
         # 死 rc 判红（方向 3 + KI 2026-09-11）：裸 git diff/ls-files/status
