@@ -163,7 +163,15 @@ def _collect_cmd(proc, name, timeout=_TOOL_TIMEOUT_S):
         rc = proc.returncode
     except subprocess.TimeoutExpired:
         proc.kill()
-        out, err = proc.communicate()
+        try:
+            # 第二次 communicate 补 timeout（本批方向 4）：kill 后管道排空
+            # 若无限等待会悬挂拖垮自检主流程，须有上界
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # kill 后管道仍不排空：放弃等待（防悬挂）
+            print(f"warn: 治理工具 {name} kill 后仍悬挂，放弃等待",
+                  file=sys.stderr)
+            out, err = "", ""
         print(f"warn: 治理工具超时（>{timeout}s，rc=124）: {name}",
               file=sys.stderr)
         rc, err = 124, f"timeout after {timeout}s"

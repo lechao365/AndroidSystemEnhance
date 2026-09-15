@@ -119,33 +119,61 @@ def _ensure_timings_started(batch_id):
     return path
 
 
-def _run_step(argv, timeout, cwd=None):
+def _run_step(argv, timeout, cwd=None, log_path=None):
     """独立进程组执行一步；返回 (rc, canceled)。
 
     start_new_session 使子进程自成进程组：超时可 killpg 整组回收
     （子脚本再 spawn 的 adb/make 孙进程一并终止，不留孤儿占用设备）。
     cwd：build 步编译须在 AOSP 工作区根执行（envsetup 相对路径依赖），
     其余步默认进程继承调用方 cwd（None）。
-    stdout/stderr 不 capture：直通终端，rc 真实。
+    stdout/stderr 不 capture：直通终端，rc 真实。build 步传 log_path 时
+    输出经 tee 同时落盘 harness/log（失败现场留痕，本批方向 3）。
     """
-    proc = subprocess.Popen(argv, start_new_session=True, cwd=cwd)
+    if log_path is None:
+        proc = subprocess.Popen(argv, start_new_session=True, cwd=cwd)
+        try:
+            return proc.wait(timeout=timeout), False
+        except subprocess.TimeoutExpired:
+            return _killpg_bounded(proc)
+    # tee 分支：合并 stdout/stderr 经管道读转发到终端与日志（daemon 线程
+    # 阻塞读管道，主线程 wait 维护超时/teardown 语义与无 tee 分支一致）
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen(argv, start_new_session=True, cwd=cwd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT)
+
+    def _tee():
+        try:
+            with log_path.open("wb") as logf:
+                for raw in iter(proc.stdout.readline, b""):
+                    sys.stdout.buffer.write(raw)
+                    sys.stdout.buffer.flush()
+                    logf.write(raw)
+        except Exception:
+            pass  # 非真实管道（测试桩）：tee 静默降级，不污染 stderr
+
+    threading.Thread(target=_tee, daemon=True).start()
     try:
         return proc.wait(timeout=timeout), False
     except subprocess.TimeoutExpired:
-        # 有界 teardown：TERM → 宽限 → KILL，两段都有上界，不无限等
-        for sig, grace in ((signal.SIGTERM, _TERM_GRACE_S),
-                           (signal.SIGKILL, _KILL_WAIT_S)):
-            try:
-                os.killpg(proc.pid, sig)
-            except (ProcessLookupError, PermissionError):
-                pass  # 进程组已退出/无权限：直接进入下一段等待
-            try:
-                proc.wait(timeout=grace)
-                return None, True  # 已终止：无真实 rc，记 canceled
-            except subprocess.TimeoutExpired:
-                continue
-        proc.wait()  # KILL 后必退（防御兜底，不预期到达）
-        return None, True
+        return _killpg_bounded(proc)
+
+
+def _killpg_bounded(proc):
+    """有界 teardown：TERM → 宽限 → KILL，两段都有上界，不无限等。"""
+    for sig, grace in ((signal.SIGTERM, _TERM_GRACE_S),
+                       (signal.SIGKILL, _KILL_WAIT_S)):
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass  # 进程组已退出/无权限：直接进入下一段等待
+        try:
+            proc.wait(timeout=grace)
+            return None, True  # 已终止：无真实 rc，记 canceled
+        except subprocess.TimeoutExpired:
+            continue
+    proc.wait()  # KILL 后必退（防御兜底，不预期到达）
+    return None, True
 
 
 # product → AOSP lunch 目标映射（BLD-004：lunch 前必须先 source envsetup）
@@ -158,10 +186,16 @@ def _load_build_targets(cases_path):
     build 链步编译目标与部署/测试映射同源（verify-cases.yaml 单一事实源），
     不再由执行者手敲目标列表；文件缺失/解析失败返空（调用方拒跑 build）。
     """
+    import yaml
     try:
-        import yaml
         data = yaml.safe_load(Path(cases_path).read_text(encoding="utf-8")) or {}
     except OSError:
+        return []
+    except yaml.YAMLError as e:
+        # 方向 5：解析失败不再静默返空（此前坏 YAML 静默当"无目标"拒跑
+        # build 且无现场，warn 留痕）
+        print(f"warn: verify-cases.yaml 解析失败（{e}），编译目标返空",
+              file=sys.stderr)
         return []
     mods = data.get("modules") or {}
     seen, out = set(), []
@@ -388,10 +422,11 @@ def _derive_report_args(steps, overall):
     """收据参数派生：result/build/board/summary 全部由真实 rc 机械推导。
 
     - result：overall（pass/fail）
-    - build：push 未执行（前序已停，编译产物状态不可知）=skip；push 执行
-      且 rc=0（产物在位）=pass；push 已执行且未成功（rc!=0 或 canceled
-      的 rc=None，含编译产物缺失）=fail（push 已跑到产物环节失败，编译段
-      不可信，不得机械降级 skip 掩盖）
+    - build：build 步未执行（链未到 build 或前序已停，编译产物状态不可知）
+      =skip；build 步真实 rc=0=pass；build 步已执行且失败（rc!=0 或
+      canceled 的 rc=None）=fail（编译失败由真实 build 步 rc 推导，不再由
+      push 步 rc 反推——build 失败时 fail_stop 令 push 未执行，旧逻辑把
+      编译失败静默记成 skip 失真）
     - board：全过=pass；push/unit_test/acceptance 失败=fail（设备已被动过）；
       sync/connect 阶段失败=skip（未触及设备态）
     - package（方向 3 打包证据，只记录不门禁）：其失败不得抢先成为 failed
@@ -405,11 +440,13 @@ def _derive_report_args(steps, overall):
                              or s["rc"] != 0)), None)
     result = "pass" if overall == "pass" else "fail"
     # 步骤是否执行以 steps 在场为准（skipped 步骤不进 steps；_step_rc 对
-    # "未执行"与"canceled 的 rc=None"同为 None，不可用于区分执行与否）
-    push_step = next((s for s in steps if s["name"] == "push"), None)
-    if push_step is None:
+    # "未执行"与"canceled 的 rc=None"同为 None，不可用于区分执行与否）；
+    # build 由真实 build 步 rc 推导（编译失败时 fail_stop 令 push 未执行，
+    # 旧逻辑 push 缺席即 skip 把编译失败记成 skip 失真，本批修）
+    build_step = next((s for s in steps if s["name"] == "build"), None)
+    if build_step is None:
         build = "skip"
-    elif push_step["rc"] == 0:
+    elif build_step["rc"] == 0:
         build = "pass"
     else:
         build = "fail"
@@ -681,6 +718,7 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
             skipped.append(name)
             skip_reasons[name] = "链已停（前序步骤失败，收据仍落盘）"
             continue
+        step_log = None
         if name == "report":
             derive = _derive_report_args(steps, overall)
             if build:  # 显式传参优先（AI 对 build 段的判定不可替代时使用）
@@ -695,8 +733,13 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
             argv = _build_argv(name, product, out, chain_args)
             # 方向 1：build 步须在 AOSP 工作区根执行（envsetup 相对路径依赖）
             step_cwd = _aosp_root() if name == "build" else None
+            # 方向 3：build 步输出经 tee 落 harness/log/verify-chain 留失败现场
+            if name == "build":
+                step_log = (_SCRIPT_DIR.parents[1] / "log" / "verify-chain"
+                            / f"build-{run_id}.log")
         t0m, t0 = time.monotonic(), time.time()
-        rc, canceled = _run_step(argv, timeout_map[name], cwd=step_cwd)
+        rc, canceled = _run_step(argv, timeout_map[name], cwd=step_cwd,
+                                 log_path=step_log)
         steps.append({"name": name, "rc": rc, "start": t0,
                       "end": time.time(),
                       "dur_s": round(time.monotonic() - t0m, 3),

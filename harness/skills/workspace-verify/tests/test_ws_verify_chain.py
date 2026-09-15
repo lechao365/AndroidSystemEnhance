@@ -513,8 +513,8 @@ class TestDeriveReportArgs(unittest.TestCase):
 
     def test_all_pass(self):
         d = wc._derive_report_args(
-            self._steps(("sync", 0), ("push", 0), ("acceptance", 0),
-                        ("report", 0)), "pass")
+            self._steps(("sync", 0), ("build", 0), ("push", 0),
+                        ("acceptance", 0), ("report", 0)), "pass")
         self.assertEqual(d["result"], "pass")
         self.assertEqual(d["build"], "pass")
         self.assertEqual(d["board"], "pass")
@@ -522,7 +522,8 @@ class TestDeriveReportArgs(unittest.TestCase):
 
     def test_unit_test_fail_board_fail(self):
         d = wc._derive_report_args(
-            self._steps(("sync", 0), ("push", 0), ("unit_test", 1)), "fail")
+            self._steps(("sync", 0), ("build", 0), ("push", 0),
+                        ("unit_test", 1)), "fail")
         self.assertEqual((d["result"], d["build"], d["board"]),
                          ("fail", "pass", "fail"))
         self.assertIn("链停于 unit_test", d["summary"])
@@ -553,24 +554,24 @@ class TestDeriveReportArgs(unittest.TestCase):
         rep = next(" ".join(c) for c in calls if "ws_report.py" in c[1])
         self.assertIn("--build fail", rep)
 
-    def test_push_executed_fail_build_fail(self):
-        # wsv-13：push 已执行且 rc!=0（含编译产物缺失）→ build=fail
-        #（不得机械降级 skip 掩盖编译段失败）
+    def test_build_failed_build_fail(self):
+        # build 步真实失败（rc!=0，fail_stop 令 push 未执行）→ build=fail
+        #（编译失败由真实 build 步 rc 推导，不再被 push 未执行的 skip 掩盖）
         d = wc._derive_report_args(
-            self._steps(("sync", 0), ("connect", 0), ("push", 1)), "fail")
+            self._steps(("sync", 0), ("build", 1)), "fail")
         self.assertEqual((d["result"], d["build"], d["board"]),
-                         ("fail", "fail", "fail"))
+                         ("fail", "fail", "skip"))
 
-    def test_push_not_executed_build_skip(self):
-        # wsv-13：push 未执行（sync 失败停链，步骤不在 steps）→ build=skip
+    def test_build_not_executed_build_skip(self):
+        # build 步未执行（sync 失败停链，步骤不在 steps）→ build=skip
         d = wc._derive_report_args(self._steps(("sync", 1)), "fail")
         self.assertEqual((d["result"], d["build"], d["board"]),
                          ("fail", "skip", "skip"))
 
-    def test_push_canceled_build_fail(self):
-        # wsv-13：push 超时取消（步骤已执行、rc=None）→ build=fail
+    def test_build_canceled_build_fail(self):
+        # build 步超时取消（步骤已执行、rc=None）→ build=fail
         d = wc._derive_report_args(
-            [{"name": "push", "rc": None, "canceled": True}], "fail")
+            [{"name": "build", "rc": None, "canceled": True}], "fail")
         self.assertEqual(d["build"], "fail")
 
 
