@@ -145,12 +145,12 @@ ndk::ScopedAStatus IoHalImpl::getStats(int32_t in_deviceMinor, IoStats* _aidl_re
 
     /* 临时打开 fd，避免占用 readEvent 的持久 fd */
     int fd = ::open_device(entry->path.c_str());
-    if (fd < 0) { LC_LOGE("getStats: open device failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
+    if (fd < 0) { int saved = errno; LC_LOGE("getStats: open device failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
 
     struct vendor_lechao_usbd_stats raw;
     int ret = ::get_stats(fd, &raw);
     close(fd);
-    if (ret < 0) { LC_LOGE("getStats: ioctl GET_STATS failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
+    if (ret < 0) { int saved = errno; LC_LOGE("getStats: ioctl GET_STATS failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
 
     /* --- 字段映射: raw → _aidl_return --- */
     _aidl_return->vid = raw.vid;
@@ -190,11 +190,11 @@ ndk::ScopedAStatus IoHalImpl::resetState(int32_t in_deviceMinor) {
     if (!entry) { LC_LOGW("resetState: device not found for minor"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
 
     int fd = ::open_device(entry->path.c_str());
-    if (fd < 0) { LC_LOGE("resetState: open device failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
+    if (fd < 0) { int saved = errno; LC_LOGE("resetState: open device failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
 
     int ret = ::reset_state(fd);
     close(fd);
-    if (ret < 0) { LC_LOGE("resetState: ioctl RESET_STATE failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
+    if (ret < 0) { int saved = errno; LC_LOGE("resetState: ioctl RESET_STATE failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
     return ndk::ScopedAStatus::ok();
 }
 
@@ -207,12 +207,12 @@ ndk::ScopedAStatus IoHalImpl::getConfig(int32_t in_deviceMinor, IoConfig* _aidl_
     if (!entry) { LC_LOGW("getConfig: device not found"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
 
     int fd = ::open_device(entry->path.c_str());
-    if (fd < 0) { LC_LOGE("getConfig: open failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
+    if (fd < 0) { int saved = errno; LC_LOGE("getConfig: open failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
 
     struct vendor_lechao_usbd_config raw;
     int cfg_ret = ::get_config(fd, &raw);
     close(fd);
-    if (cfg_ret != 0) { LC_LOGE("getConfig: ioctl GET_CONFIG failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
+    if (cfg_ret != 0) { int saved = errno; LC_LOGE("getConfig: ioctl GET_CONFIG failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
 
     _aidl_return->enabled = raw.enabled;
     _aidl_return->flags = raw.flags;
@@ -229,14 +229,14 @@ ndk::ScopedAStatus IoHalImpl::setConfig(int32_t in_deviceMinor, const IoConfig& 
     if (!entry) { LC_LOGW("setConfig: device not found"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
 
     int fd = ::open_device(entry->path.c_str());
-    if (fd < 0) { LC_LOGE("setConfig: open failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
+    if (fd < 0) { int saved = errno; LC_LOGE("setConfig: open failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
 
     struct vendor_lechao_usbd_config raw;
     raw.enabled = in_config.enabled;
     raw.flags = in_config.flags;
     int set_ret = ::set_config(fd, &raw);
     close(fd);
-    if (set_ret != 0) { LC_LOGE("setConfig: ioctl SET_CONFIG failed: " << strerror(errno)); return ndk::ScopedAStatus::fromServiceSpecificError(-errno); }
+    if (set_ret != 0) { int saved = errno; LC_LOGE("setConfig: ioctl SET_CONFIG failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
 
     *_aidl_return = true;
     return ndk::ScopedAStatus::ok();
@@ -288,13 +288,14 @@ ndk::ScopedAStatus IoHalImpl::readEvent(int32_t in_deviceMinor, int32_t in_timeo
             _aidl_return->valid = false;
             return ndk::ScopedAStatus::ok();
         }
-        LC_LOGE("readEvent: read_event failed: " << strerror(errno));
-        if (errno == ENODEV || errno == EIO) {
-            LC_LOGW("readEvent: device removed (errno=" << errno << ")");
+        int saved = errno;
+        LC_LOGE("readEvent: read_event failed: " << strerror(saved));
+        if (saved == ENODEV || saved == EIO) {
+            LC_LOGW("readEvent: device removed (errno=" << saved << ")");
             ::close_device(entry->fd);
             entry->fd = -1;
         }
-        return ndk::ScopedAStatus::fromServiceSpecificError(-errno);
+        return ndk::ScopedAStatus::fromServiceSpecificError(-saved);
     }
 
     /* 字段映射: raw → _aidl_return */

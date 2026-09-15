@@ -2547,6 +2547,15 @@ class TestDirectionParsing(unittest.TestCase):
         self.assertEqual(ws_report._direction_count("补充说明无编号"), 0)
         self.assertEqual(ws_report._direction_count(""), 0)
 
+    def test_count_semicolon_separated_with_embedded_numbers(self):
+        # 分号分隔方向 + 内容内嵌数字（9 处/15s/84 行/331 行）：取 1 起最长
+        # 连续前缀，内嵌数字不在 1..k 链上即断链截断，不干扰计数
+        self.assertEqual(ws_report._direction_count(
+            "条 1 至 3 改 code；1 DeviceReader n==0 分支；2 hal_service 9 处；"
+            "3 device_io 短读置 EIO；4 AGENTS.md 84 行"), 4)
+        self.assertEqual(ws_report._direction_count(
+            "1 xxx；2 yyy 9 处 strerror；3 zzz 15s"), 3)
+
     def test_report_count_counts_direction_prefix_lines(self):
         body = ("## 逐方向自报\n"
                 "- 方向1: 改动 A\n"

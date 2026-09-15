@@ -44,6 +44,8 @@ import uuid
 from contextlib import nullcontext
 from pathlib import Path
 
+import yaml
+
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _SYNC = _SCRIPT_DIR.parent / "sync-code-to-workspace" / "sync_code_to_workspace.py"
 # 复用仓内共享库：cdp_parse（batch_id 解析，与 ws_report 同路径注入方式）
@@ -310,14 +312,29 @@ def _build_argv(name, product, out, chain_args):
         # INC-001 禁 make clean/clobber（m 即增量，不触发）。cwd 由编排器
         # 在 _run_chain_locked 注入 AOSP 根（见 build 分支）。
         lunch = _LUNCH_TARGETS.get(product, f"{product}-userdebug")
-        targets = _load_build_targets(
-            str(_SCRIPT_DIR.parents[1] / "config" / "verify-cases.yaml"))
+        cases_path = str(_SCRIPT_DIR.parents[1] / "config" / "verify-cases.yaml")
+        targets = _load_build_targets(cases_path)
         bad = _build_validate(targets, lunch)
         if bad:
             raise ValueError(bad)
+        # test_targets 编译前删除 out 测试二进制强制 Soong 重建：多 test_target
+        # 共享模块级 test_src 目录时（lciod 的 daemon/hal 源码分离），Soong 增量
+        # 判定"源未变跳过重编"会与 ws_upload_tests 的 fresh 守卫（test_src
+        # 全目录最新 mtime 比较）冲突——本批只改 hal，unit_test 未重编却被判
+        # 陈旧误伤。强制重编让测试二进制恒新，同时杜绝旧测试二进制报绿
+        try:
+            _cfg = yaml.safe_load(Path(cases_path).read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            _cfg = {}
+        test_targets = [t for _m in (_cfg.get("modules") or {}).values()
+                        for t in (_m.get("test_targets") or [])]
+        rm_cmds = " && ".join(
+            f"rm -f out/target/product/{product}/data/nativetest64/{t}/{t} "
+            f"out/target/product/{product}/testcases/{t}/arm64/{t}"
+            for t in test_targets) if test_targets else "true"
         cmd = (f"source build/envsetup.sh && lunch {lunch} && "
                f"export USE_CCACHE=1 CCACHE_EXEC=$(which ccache) "
-               f"CCACHE_DIR=out/ccache && "
+               f"CCACHE_DIR=out/ccache && {rm_cmds} && "
                f"m {' '.join(targets)} -j$(nproc)")
         return ["bash", "-c", cmd]
     if name == "connect":        # 连接 fail-fast：设备不可达时不浪费推送/单测轮次

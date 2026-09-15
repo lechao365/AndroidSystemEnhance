@@ -208,6 +208,10 @@ int read_event(int fd, struct vendor_lechao_usbd_event *event, int timeout_ms) {
     }
     if (n < 0)
         saved_errno = errno;
+    else if (n == 0 || n < (ssize_t)sizeof(tmp))
+        // read 返回 0（EOF，设备关闭）或短读（记录不完整）属异常，置 EIO；
+        // 原实现落 EAGAIN 会把设备关闭伪装成"暂无事件"（上层白名单内判绿）
+        saved_errno = EIO;
 
     if (count > 1)
         LC_LOGW("read_event: drained " << count << " events from kernel, "

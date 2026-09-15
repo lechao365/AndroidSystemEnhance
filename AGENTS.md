@@ -81,7 +81,7 @@ lcview / lciod 模块改动后必须通过单元测试编译验证 **且设备�
   modules 段读 test_targets，nativetest push 到设备运行 gtest 并汇总）。
   仅编译不执行不达标——C++ 单测长期只编译不执行是 nextSeqFor 真 bug 未被发现的
   根因（2026-08-28 本批起强制设备真跑）。
-测试源码见 `~/workspace/aosp/vendor/lechao/services/lechao_lcview/tests/` 与 `~/workspace/aosp/vendor/lechao/services/lechao_lciod/tests/`。
+测试源码见 `code/rpi5/aosp/new/vendor/lechao/services/lechao_lcview/tests/` 与 `code/rpi5/aosp/new/vendor/lechao/services/lechao_lciod/tests/`。
 
 ## Baseline 使用指引
 `/sync-code-to-workspace` 的恢复真相源为 code 仓 dev/main HEAD（`SRC-004` 已放宽，不再强制 promoted baseline；`--auto` 日常同步不受限）。仅当**选择以某个 promoted baseline 为参考**核对证据时，先查 [harness/config/baseline-status.yaml](harness/config/baseline-status.yaml)：

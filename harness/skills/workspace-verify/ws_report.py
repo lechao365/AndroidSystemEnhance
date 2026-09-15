@@ -614,12 +614,12 @@ def _sanitize(text: str) -> str:
 
 
 def _direction_count(direction):
-    """批次方向条目数：方向文本形如"1 xxx。2 yyy。3 zzz"，条目以句号/
-    行尾分隔、编号 1..N 连续递增。只认从 1 起的最长连续编号前缀（方向
-    内容内偶发的"。N "不干扰——它不会是前缀 1..k 的延续且必被 1 起断链
-    截断）。"""
+    """批次方向条目数：方向文本形如"1 xxx 2 yyy 3 zzz"，编号前须为行首/
+    句号/分号、编号后须空白（空格/句号/分号分隔均识别）。只认从 1 起的最长
+    连续编号前缀（内容内偶发的数字如"9 处""15s""84 行"前无分隔符、不进入
+    编号集，不干扰计数）。"""
     nums = {int(m.group(1)) for m in
-            re.finditer(r"(?:^|。)\s*(\d+)\s", direction or "")}
+            re.finditer(r"(?:^|[。；])\s*(\d+)\s", direction or "")}
     n = 0
     while (n + 1) in nums:
         n += 1
