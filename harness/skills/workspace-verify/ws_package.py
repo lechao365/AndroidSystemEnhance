@@ -99,6 +99,11 @@ def run_package(mode=0, evidence_file=None, timeout=900, aosp_ws=None,
                 "script": str(_SCRIPT), "images": [], "images_ok": False,
                 "packaged_img": None, "script_rc": None, "ran": False,
                 "sudo_bld007": False, "sudo_n": False, "error": ""}
+    if mode == 0:
+        # mode 0 仅打包已有镜像，PASS 语义边界：不表示刷机包与本轮增量推送同构
+        evidence["mode0_caveat"] = ("package_result=PASS 仅表示 out 三镜像齐备且"
+                                    "打包脚本 rc 为 0，不表示刷机包与本轮增量推送"
+                                    "同构（build 只编 verify-cases 列的 Soong 模块）")
 
     def _finish(rc):
         evidence["started_at"] = started_at
