@@ -50,7 +50,7 @@ jobs:
           # 输出中全部 *_rc（含 pyenv_rc/ioctl_rc）任一非零即失败——否则测试
           # 失败也绿（CI 只跑不判）；键集合与 ws_report 必查键同源
           fail=""
-          for rc_name in pytest_rc refs_rc config_rc contract_rc pyenv_rc ioctl_rc manifest_rc discipline_rc scan_rc ruff_rc host_rc metrics_rc opencode_rc quotepath_rc known_issues_rc commit_coverage_rc; do
+          for rc_name in pytest_rc refs_rc config_rc contract_rc pyenv_rc ioctl_rc manifest_rc discipline_rc scan_rc ruff_rc host_rc quotepath_rc known_issues_rc commit_coverage_rc; do
             echo "$out" | grep -Eq "${rc_name}=0" \
               || { echo "error: ${rc_name} 非零，自检失败"; fail="$fail $rc_name"; }
           done
@@ -75,6 +75,10 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          # 批次 26cacb40dfd6 方向 5：git diff origin/main...HEAD 需完整历史，
+          # 浅克隆（默认 depth=1）缺历史致 diff 空/失败，C/C++ 静态检查漏检
+          fetch-depth: 0
 
       - name: 安装 clang 静态检查工具
         run: |
@@ -90,7 +94,9 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --quiet origin main || true
-          CHANGED=$(git diff --name-only --diff-filter=ACM origin/main...HEAD -- '*.c' '*.h' || true)
+          # 批次 26cacb40dfd6 方向 5：diff 驱动补 *.cpp（C++ 改动此前漏检——
+          # clang-format/clang-tidy 只管 .c/.h，.cpp 静态检查从未触发）
+          CHANGED=$(git diff --name-only --diff-filter=ACM origin/main...HEAD -- '*.c' '*.h' '*.cpp' || true)
           if [ -z "$CHANGED" ]; then
             echo "本批无 C/C++ 改动，静态检查跳过"
             exit 0

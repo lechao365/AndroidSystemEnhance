@@ -328,7 +328,7 @@ android::status_t LechaoLcview::getBatch(Batch* out) {
 
 以下任一条件命中时，AI 必须在改动前加载本规则：
 
-1. **路径触发**：改动业务仓 workspace 下任何 `.c/.cpp/.h/.hpp` 源码（涉及 lcview/lciod 组件）。
+1. **路径触发**：改动业务仓 code 下任何 `.c/.cpp/.h/.hpp` 源码（涉及 lcview/lciod 组件，`code/` 是唯一改动源头，`~/workspace/` 仅编译缓存镜像）。
 2. **符号触发**：改动涉及 `lcview_ring_*`、`lcview_builder_*`、`SchemaParser`、`FileWriter`、`readerLoop`、`workLoop`、`getBatch`、`copy_from_user/copy_to_user`。
 3. **协议触发**：改动涉及内核 ↔ 用户态、HAL ↔ Daemon 的二进制协议格式（record 头、schema 字段、JSON line）。
 4. **配置触发**：改动涉及 JSON 配置解析（schema.json 等）或二进制记录解析。

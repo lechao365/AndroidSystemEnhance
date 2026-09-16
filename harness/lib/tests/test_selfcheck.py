@@ -572,14 +572,11 @@ class TestCheckPythonEnv(unittest.TestCase):
         manifest_res = (0, "[OK] 一致\n", "", 0.1)
         ruff_res = (0, "All checks passed!\n", "", 0.1)
         host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
-        opencode_res = (0, "[INFO] 所有校验通过\n", "", 0.1)
-        metrics_res = (0, "metrics_rc=0\n", "", 0.1)
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_cmd",
                                   side_effect=[ioctl_res, ruff_res,
-                                               host_res, opencode_res,
-                                               manifest_res, metrics_res]):
+                                               host_res, manifest_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -609,14 +606,11 @@ class TestCheckPythonEnv(unittest.TestCase):
         manifest_res = (1, "[ERROR] manifest 未登记 1 个 code/rpi5 文件\n", "", 0.1)
         ruff_res = (0, "All checks passed!\n", "", 0.1)
         host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
-        opencode_res = (0, "[INFO] 所有校验通过\n", "", 0.1)
-        metrics_res = (0, "metrics_rc=0\n", "", 0.1)
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_cmd",
                                   side_effect=[ioctl_res, ruff_res,
-                                               host_res, opencode_res,
-                                               manifest_res, metrics_res]):
+                                               host_res, manifest_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -631,14 +625,11 @@ class TestCheckPythonEnv(unittest.TestCase):
         manifest_res = (0, "[OK] 一致\n", "", 0.1)
         ruff_res = (0, "All checks passed!\n", "", 0.1)
         host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
-        opencode_res = (0, "[INFO] 所有校验通过\n", "", 0.1)
-        metrics_res = (0, "metrics_rc=0\n", "", 0.1)
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_cmd",
                                   side_effect=[ioctl_res, ruff_res,
-                                               host_res, opencode_res,
-                                               manifest_res, metrics_res]):
+                                               host_res, manifest_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
@@ -654,57 +645,16 @@ class TestCheckPythonEnv(unittest.TestCase):
         manifest_res = (0, "[OK] 一致\n", "", 0.1)
         ruff_res = (0, "All checks passed!\n", "", 0.1)
         host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
-        opencode_res = (0, "[INFO] 所有校验通过\n", "", 0.1)
-        metrics_res = (0, "metrics_rc=0\n", "", 0.1)
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_cmd",
                                   side_effect=[ioctl_res, ruff_res,
-                                               host_res, opencode_res,
-                                               manifest_res, metrics_res]):
+                                               host_res, manifest_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
         out = buf.getvalue()
         self.assertIn("host_rc=0", out)
         self.assertIn("内核 host 单测全部通过", out)
-
-    def test_main_includes_opencode_segment(self):
-        # 方向 6：selfcheck 接入 validate_opencode_server → 输出含 opencode_rc=0
-        # 与结论行（opencode 走并行段，由 _patched_parallel 桩返成功）
-        fake = _fake_run([
-            _FakeProc(0, "531 passed in 27.9s\n"),
-        ])
-        buf = io.StringIO()
-        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake):
-            with redirect_stdout(buf):
-                selfcheck.main()
-        out = buf.getvalue()
-        self.assertIn("opencode_rc=0", out)
-        self.assertIn("一致", out)
-
-    def test_opencode_nonzero_passed_through(self):
-        # 方向 6：opencode-server 脚本破坏（|| true 吞错/EnvironmentFile 硬编码）
-        # → opencode_rc=1 非零透出（交 ws_report 全 *_rc 判红拒写）
-        fake = _fake_run([
-            _FakeProc(0, "531 passed in 27.9s\n"),
-        ])
-        ioctl_res = (0, "[OK] 一致\n", "", 0.1)
-        manifest_res = (0, "[OK] 一致\n", "", 0.1)
-        ruff_res = (0, "All checks passed!\n", "", 0.1)
-        host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
-        opencode_res = (1, "[ERROR] 校验失败: EnvironmentFile 硬编码 %h\n", "", 0.1)
-        metrics_res = (0, "metrics_rc=0\n", "", 0.1)
-        buf = io.StringIO()
-        with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
-                mock.patch.object(selfcheck, "_collect_cmd",
-                                  side_effect=[ioctl_res, ruff_res,
-                                               host_res, opencode_res,
-                                               manifest_res, metrics_res]):
-            with redirect_stdout(buf):
-                selfcheck.main()
-        out = buf.getvalue()
-        self.assertIn("opencode_rc=1", out)
-        self.assertIn("EnvironmentFile 硬编码", out)
 
     def test_main_includes_checker_durations(self):
         # 方向 2 + 6：逐检查器耗时入输出行（durs: py/refs/cfg/pyenv/ioctl/
@@ -751,11 +701,11 @@ class TestCheckPythonEnv(unittest.TestCase):
             with redirect_stdout(buf):
                 selfcheck.main()
         # 顺序固定：refs/cfg 并行段启动 → ioctl Popen → ruff Popen →
-        # host Popen → metrics Popen → opencode Popen → pytest（重叠开始；
-        # gen_manifest 延后至 host 收口后单独跑——host 编译产物与 manifest
-        # 扫描并发竞态 KIR-002 修复，见 selfcheck.py）
-        self.assertEqual(calls[:7], ["tools", "spawn", "spawn", "spawn",
-                                     "spawn", "spawn", "pytest"])
+        # host Popen → pytest（重叠开始；gen_manifest 延后至 host 收口后
+        # 单独跑——host 编译产物与 manifest 扫描并发竞态 KIR-002 修复，
+        # 见 selfcheck.py）
+        self.assertEqual(calls[:5], ["tools", "spawn", "spawn", "spawn",
+                                     "pytest"])
 
 
 class TestFlakeRerun(unittest.TestCase):

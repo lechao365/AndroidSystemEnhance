@@ -30,24 +30,32 @@ class TestCheckCi(unittest.TestCase):
             self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 0)
 
     def test_failure_conclusion_blocks(self):
-        # 判红：conclusion=failure 阻断（fail-closed）
+        # 判红：conclusion=failure/timed_out 阻断（fail-closed）
         with _resp("200", '{"workflow_runs":[{"id":1,"conclusion":"success"},'
                            '{"id":2,"conclusion":"failure"}]}'):
             self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 1)
-        # cancelled / timed_out 同为失败结论
-        for c in ("cancelled", "timed_out"):
+        for c in ("failure", "timed_out"):
             with _resp("200", '{"workflow_runs":[{"conclusion":"%s"}]}' % c):
                 self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 1)
+        # 方向 3：cancelled（用户手动取消）不再算失败——放行
+        with _resp("200", '{"workflow_runs":[{"conclusion":"cancelled"}]}'):
+            self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 0)
 
-    def test_prev_head_failure_blocks(self):
-        # 方向 2：上一个已推送提交（prev-head）CI 失败 → 阻断（主判据——
-        # 待推送新 HEAD 无 run 记录时须以已推送提交 CI 状态为准）
-        # 第一次调用 prev-head 返回 failure，第二次（HEAD）未触达
+    def test_prev_head_failure_warns_not_blocks(self):
+        # 方向 2/3：上一个已推送提交（prev-head）CI 失败 → 降级告警不阻断
+        # （历史失败不锁死修复推送）；HEAD 自身失败仍阻断（fail-closed）
         def _curl(url):
             if "head_sha=b" in url:
                 return "200", '{"workflow_runs":[{"conclusion":"failure"}]}'
             return "200", '{"workflow_runs":[]}'
         with mock.patch.object(cci, "_curl", side_effect=_curl):
+            self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 0)
+
+        def _curl_head_fail(url):
+            if "head_sha=a" in url:
+                return "200", '{"workflow_runs":[{"conclusion":"failure"}]}'
+            return "200", '{"workflow_runs":[]}'
+        with mock.patch.object(cci, "_curl", side_effect=_curl_head_fail):
             self.assertEqual(cci.check_ci("a" * 40, "b" * 40, "o/r"), 1)
 
     def test_new_head_no_runs_passes(self):

@@ -465,6 +465,8 @@ baselines:
   source_branch: dev
   source_commit: 0a41444cb264
   sync_manifest: data/verify-results/20260912-181227-b69c438c75cd.md
+  verified_commit: c1df806bd31a
+  verified_tree: 5c65b029f405879be9073d0639d6a0543f7ca94e
   build_result: SKIP
   package_result: PASS
   board_verify: PASS
@@ -474,6 +476,10 @@ baselines:
     package_result: PASS
     board_verify: PASS
     sync_manifest: data/verify-results/20260912-181227-b69c438c75cd.md
+    verified_commit: c1df806bd31a
+    verified_tree: 5c65b029f405879be9073d0639d6a0543f7ca94e
+    evidence_source: 三项证据（build/package/board）继承自 20260912-181227 旧收据（BL-20260912-03
+      sync_manifest）；本批 harness-only 无上板覆盖（no-code-change 豁免）
     ki_gate: pass
     evidence_scope: no-code-change
     known_issues_carried: KI-20260912-005,KI-20260912-002,KI-20260912-001,KI-20260912-006,KI-20260912-003,KI-20260912-004
@@ -506,3 +512,61 @@ baselines:
       archived_in: ''
   approved_by: lechao
   approved_at: '2026-09-14T16:51:59+08:00'
+- baseline_id: BL-20260916-01
+  status: promoted
+  source_branch: dev
+  source_commit: 727a9547a1f3
+  sync_manifest: data/verify-results/20260916-120712-562ca49ba916.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260916-120712-562ca49ba916.md
+    ki_gate: pass
+    evidence_scope: lciod-liveness,lciod-pipeline,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+    known_issues_carried: ''
+    package_evidence: data/verify-results/20260916-120712-562ca49ba916.md
+    package_rc: 0
+    cases_coverage:
+      result: full
+      missing: []
+      run_count: 11
+    known_issues_closed:
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+    - issue_id: KI-20260912-005
+      resolved_in: 13ffd93
+      title: _HOST_TIMEOUT_S 650 低于内部最坏 720s，外层抢先 kill 丢内层归因
+      archived_in: ''
+    - issue_id: KI-20260912-002
+      resolved_in: 13ffd93
+      title: _stage_module_copy 只复制 tests 子目录时 8 用例仍全绿（全 mock subprocess.run，无断言副本含父目录源文件）
+      archived_in: ''
+    - issue_id: KI-20260912-001
+      resolved_in: 13ffd93
+      title: check_host_tests 副本路径无锁无 pid 后缀，并发抛 FileExistsError 且产物被别路删掉仍返回 rc=0
+      archived_in: ''
+    - issue_id: KI-20260912-006
+      resolved_in: 13ffd93
+      title: check_host_tests 复制失败无 host_rc 归因行且 stdout 空
+      archived_in: ''
+    - issue_id: KI-20260912-003
+      resolved_in: 13ffd93
+      title: check_skill_refs 与 check_test_discipline 去掉 --exclude-standard 各自零检出
+      archived_in: ''
+    - issue_id: KI-20260912-004
+      resolved_in: 13ffd93
+      title: check_test_discipline 两条 fail-closed 分支零守护，可无声退化 fail-open
+      archived_in: ''
+    - issue_id: KI-FLAKE-26cacb40dfd6-c1860c
+      resolved_in: 13ffd93
+      title: '[flake] harness/skills/workspace-verify/tests/test_ws_verify_chain.py::TestChain::test_chain_ensures_timings_wired_to_report'
+      archived_in: ''
+  approved_by: lechao
+  approved_at: '2026-09-16T14:34:30+08:00'

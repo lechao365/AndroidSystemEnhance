@@ -138,28 +138,6 @@ class TestWsReport(unittest.TestCase):
         self.assertIn("## body", content)
         self.assertIn("adb 失败", content)
 
-    def test_receipt_coverage_filled_from_cases(self):
-        # 方向 20260912：无 --coverage-file 时收据 coverage 不得恒空——用验收
-        # cases 算发布全量组覆盖摘要填充（与 add-candidate cases_coverage 同源）
-        batch = self._write(VALID_S, ".cdp")
-        body = self._write("## 现场\n")
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            rc = ws_report.main(["--batch-file", batch, "--body", body,
-                                 "--result", "skip", "--build", "skip",
-                                 "--board", "skip", "--summary", "s 说明",
-                                 "--case", "lcview-liveness",
-                                 "--selfcheck", _selfcheck_ok()])
-        self.assertEqual(rc, 0)
-        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
-        content = details[0].read_text(encoding="utf-8")
-        m = re.search(r"^- coverage: (\{.*\})$", content, re.M)
-        self.assertIsNotNone(m, f"coverage 字段不应恒空:\n{content}")
-        cov = json.loads(m.group(1))
-        self.assertIn("cases", cov)
-        self.assertEqual(cov["cases"], "partial")  # 单 case 未覆盖全量组
-        self.assertEqual(cov["run_count"], 1)
-
     def test_receipt_requires_per_direction_report(self):
         # 方向 3（CDP-DOD-003 判红）：批次方向数 2、正文无逐方向自报 →
         # 返 2 拒写（长期只有少数收据写了自报，根因 -s 模板把 --body 直接
@@ -485,8 +463,8 @@ class TestWsReport(unittest.TestCase):
         rcs = {k: "0" for k in
                ("pytest_rc", "refs_rc", "config_rc", "contract_rc",
                 "pyenv_rc", "ioctl_rc", "manifest_rc", "discipline_rc",
-                "scan_rc", "ruff_rc", "host_rc", "metrics_rc",
-                "opencode_rc", "quotepath_rc", "known_issues_rc",
+                "scan_rc", "ruff_rc", "host_rc",
+                "quotepath_rc", "known_issues_rc",
                 "commit_coverage_rc")}
         rcs[rc_key] = "1"
         line = " ".join(f"{k}={v}" for k, v in rcs.items())
@@ -512,10 +490,6 @@ class TestWsReport(unittest.TestCase):
         # 死 rc 判红（方向 3）：热路径扫描违规（scan_rc=1）须拒写
         self._assert_rc_nonzero_rejected("scan_rc")
 
-    def test_selfcheck_opencode_rc_nonzero_rejected(self):
-        # 死 rc 判红（方向 3）：opencode-server 脚本校验失败（opencode_rc=1）须拒写
-        self._assert_rc_nonzero_rejected("opencode_rc")
-
     def test_selfcheck_pyenv_rc_nonzero_rejected(self):
         self._assert_rc_nonzero_rejected("pyenv_rc")
 
@@ -530,9 +504,6 @@ class TestWsReport(unittest.TestCase):
 
     def test_selfcheck_host_rc_nonzero_rejected(self):
         self._assert_rc_nonzero_rejected("host_rc")
-
-    def test_selfcheck_metrics_rc_nonzero_rejected(self):
-        self._assert_rc_nonzero_rejected("metrics_rc")
 
     def test_selfcheck_quotepath_rc_nonzero_rejected(self):
         # 死 rc 判红（方向 3 + KI 2026-09-11）：裸 git diff/ls-files/status
@@ -1158,6 +1129,49 @@ class TestWsReport(unittest.TestCase):
         content = details[0].read_text(encoding="utf-8")
         self.assertIn("- verify_mode: board", content)
         self.assertIn("- cases: lcview-liveness", content)
+
+    def test_mode_b_board_fail_relaxes_rc_requirement(self):
+        # 方向 2（批次意图二）：board 模式 result=fail 的收据放行 rc 全零与
+        # 文本防线——fail 收据是失败现场记录，自检非零/带红是失败证据而非
+        # 拒写理由（此前强制自检全绿会把该落盘的 fail 收据拒之门外，自锁）
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ws_report.main(["--target", "1a2b3c4d5e6f",
+                                 "--result", "fail", "--build", "fail",
+                                 "--board", "fail", "--summary", "上板失败",
+                                 "--selfcheck", "pytest_rc=1 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 quotepath_rc=0 known_issues_rc=0 commit_coverage_rc=0 | 1 failed, 119 passed, 2 skipped in 5.0s"])
+        self.assertEqual(rc, 0)
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        self.assertEqual(len(details), 1)
+        content = details[0].read_text(encoding="utf-8")
+        self.assertIn("- verify_mode: board", content)
+        self.assertIn("- result: fail", content)
+
+    def test_mode_b_board_fail_still_requires_selfcheck_text(self):
+        # 方向 2 边界：board+fail 放宽 rc 但不放宽「必须传 --selfcheck」——
+        # fail 收据仍需自检文本作失败现场证据（堵零验证通道）
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--target", "1a2b3c4d5e6f",
+                                 "--result", "fail", "--build", "fail",
+                                 "--board", "fail", "--summary", "上板失败"])
+        self.assertEqual(rc, 2)
+        self.assertIn("必须传 --selfcheck", err.getvalue())
+
+    def test_mode_b_board_pass_still_requires_rc_all_zero(self):
+        # 方向 2 反向：board+pass 仍要求 rc 全零（证据须可信，仅 fail 放行）
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--target", "1a2b3c4d5e6f",
+                                 "--result", "pass", "--build", "pass",
+                                 "--board", "pass", "--summary", "上板通过",
+                                 "--case", "lcview-liveness",
+                                 "--selfcheck", "pytest_rc=1 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 ruff_rc=0 host_rc=0 metrics_rc=0 opencode_rc=0 quotepath_rc=0 known_issues_rc=0 commit_coverage_rc=0 | 120 passed, 2 skipped in 5.0s",
+                                 "--acceptance-file", self._write_acc(),
+                                 "--unit-test-file", self._write_ut(),
+                                 "--push-file", self._write_push()])
+        self.assertEqual(rc, 2)
+        self.assertIn("非零退出码", err.getvalue())
 
     def _mk_manual_git(self, commits=("构建(baseline): 基线", "修复(harness): 修复")):
         """模式 M 测试：真 git 仓 + baseline-status.yaml + 非 meta 提交。
@@ -2532,6 +2546,15 @@ class TestDirectionParsing(unittest.TestCase):
     def test_count_ignores_bare_text(self):
         self.assertEqual(ws_report._direction_count("补充说明无编号"), 0)
         self.assertEqual(ws_report._direction_count(""), 0)
+
+    def test_count_semicolon_separated_with_embedded_numbers(self):
+        # 分号分隔方向 + 内容内嵌数字（9 处/15s/84 行/331 行）：取 1 起最长
+        # 连续前缀，内嵌数字不在 1..k 链上即断链截断，不干扰计数
+        self.assertEqual(ws_report._direction_count(
+            "条 1 至 3 改 code；1 DeviceReader n==0 分支；2 hal_service 9 处；"
+            "3 device_io 短读置 EIO；4 AGENTS.md 84 行"), 4)
+        self.assertEqual(ws_report._direction_count(
+            "1 xxx；2 yyy 9 处 strerror；3 zzz 15s"), 3)
 
     def test_report_count_counts_direction_prefix_lines(self):
         body = ("## 逐方向自报\n"

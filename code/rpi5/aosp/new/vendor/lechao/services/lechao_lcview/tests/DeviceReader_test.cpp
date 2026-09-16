@@ -64,6 +64,19 @@ TEST_F(EpollDeviceReaderTest, PartialRead_ReturnsWrittenBytes) {
     EXPECT_EQ(memcmp(buf, data, 3), 0);
 }
 
+TEST_F(EpollDeviceReaderTest, ReadEof_ReturnsEnodev) {
+    // 方向 1：read 返 0（EOF，内核 shutdown）→ -1 + errno=ENODEV（不再
+    // 与 timeout 同返 0 伪装"本次无数据"，上层按设备不可用收尾）
+    ASSERT_TRUE(mReader->open());
+    ::close(mPipe[1]);  // 写端关闭 → 读端 read 返 0（EOF）
+    mPipe[1] = -1;
+    uint8_t buf[64];
+    errno = 0;
+    ssize_t n = mReader->waitAndRead(buf, 0, sizeof(buf), 500);
+    EXPECT_EQ(n, -1);
+    EXPECT_EQ(errno, ENODEV);
+}
+
 TEST_F(EpollDeviceReaderTest, ReadFromClosedFd_ReturnsEBADF) {
     // 错误码：close 后读取 → -1 + errno=EBADF（致命，透传 errno）
     ASSERT_TRUE(mReader->open());

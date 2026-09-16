@@ -614,12 +614,12 @@ def _sanitize(text: str) -> str:
 
 
 def _direction_count(direction):
-    """批次方向条目数：方向文本形如"1 xxx。2 yyy。3 zzz"，条目以句号/
-    行尾分隔、编号 1..N 连续递增。只认从 1 起的最长连续编号前缀（方向
-    内容内偶发的"。N "不干扰——它不会是前缀 1..k 的延续且必被 1 起断链
-    截断）。"""
+    """批次方向条目数：方向文本形如"1 xxx 2 yyy 3 zzz"，编号前须为行首/
+    句号/分号、编号后须空白（空格/句号/分号分隔均识别）。只认从 1 起的最长
+    连续编号前缀（内容内偶发的数字如"9 处""15s""84 行"前无分隔符、不进入
+    编号集，不干扰计数）。"""
     nums = {int(m.group(1)) for m in
-            re.finditer(r"(?:^|。)\s*(\d+)\s", direction or "")}
+            re.finditer(r"(?:^|[。；])\s*(\d+)\s", direction or "")}
     n = 0
     while (n + 1) in nums:
         n += 1
@@ -729,9 +729,6 @@ def main(argv=None):
     ap.add_argument("--flake-count", default="",
                     help="本批 selfcheck 登记的 flake 数（缺省从 --selfcheck "
                          "文本解析；供 metrics 聚合 flake 率）")
-    ap.add_argument("--coverage-file", default="",
-                    help="ws_coverage 覆盖率产物 JSON 路径（写入收据 coverage "
-                         "字段；只记录不门禁，缺失仅 warn 不阻断）")
     ap.add_argument("--metrics", default="",
                     help="三指标结构化 JSON 对象（写入收据 metrics 字段与 trend 行尾）")
     ap.add_argument("--timings-file", default="",
@@ -959,6 +956,11 @@ def main(argv=None):
     #   - 缺 REQUIRED_RC_KEYS 任一键即返 2（rc 不可见则自检不可信）
     #   - 任一 rc 非零即返 2（pytest 崩溃/悬空引用/配置违规均带 rc，文本可能无 failed/skipped）
     # failed 文本匹配与 skipped 计数保留作冗余（rc 全 0 后的补充防线）
+    # 方向 2（批次意图二）：board 模式 result=fail 的收据放行 rc 全零与文本
+    # 防线——fail 收据是失败现场记录（设备验证失败/自检失败都是失败证据），
+    # 强制自检全绿会把该落盘的 fail 收据拒之门外（须重跑到自检绿才能记失败，
+    # 违背失败记录本意）；skip 与 board+pass 仍要求 rc 全零（证据须可信）。
+    board_fail_relax = verify_mode == "board" and args.result == "fail"
     if (args.result == "skip" or verify_mode == "board") \
             and not args.selfcheck.strip():
         print("error: result=skip 或 board 模式必须传 --selfcheck（自检摘要：pytest "
@@ -966,7 +968,7 @@ def main(argv=None):
               "上板批自检 rc 须入收据（方向 4），否则零验证通道敞开",
               file=sys.stderr)
         return 2
-    if args.selfcheck.strip():
+    if args.selfcheck.strip() and not board_fail_relax:
         # 全 rc 键扫描（方向 4）：config_rc/contract_rc 接入后任意 *_rc 非
         # 零即拒写——固定两键白名单会让新增 rc 的判红静默失效
         found = {}
@@ -1037,36 +1039,6 @@ def main(argv=None):
                                                args.selfcheck)))
                             if args.selfcheck.strip() else "0")
 
-    # P1-A：覆盖率证据（ws_coverage 自描述 JSON；只记录不门禁，读取失败仅 warn）
-    coverage = ""
-    if args.coverage_file:
-        try:
-            cdata = json.loads(Path(args.coverage_file).read_text(
-                encoding="utf-8"))
-            if isinstance(cdata, dict):
-                coverage = json.dumps(cdata, ensure_ascii=False,
-                                      separators=(",", ":"))
-        except (OSError, ValueError, json.JSONDecodeError) as e:
-            print(f"warn: --coverage-file 读取失败（不入收据）: {e}",
-                  file=sys.stderr)
-    else:
-        # 方向 20260912：收据 coverage 恒空字段补齐——无 ws_coverage JSON 时
-        # 用验收 cases 算发布全量组覆盖摘要填充（与 add-candidate cases_coverage
-        # 同源同口径），board pass 收据 coverage 不再恒空；失败仅 warn 不阻断
-        try:
-            data = yaml.safe_load(
-                Path(_CASES_PATH).read_text(encoding="utf-8")) or {}
-            all_ids = list((data.get("cases") or {}).keys())
-            got = {c.strip() for c in (args.case or "").split(",") if c.strip()}
-            missing = [c for c in all_ids if c not in got]
-            result = "missing" if not got else ("partial" if missing else "full")
-            coverage = json.dumps(
-                {"cases": result, "run_count": len(got),
-                 "missing": missing}, ensure_ascii=False, separators=(",", ":"))
-        except (OSError, ValueError, yaml.YAMLError) as e:
-            print(f"warn: coverage 自动填充失败（留空不阻断）: {e}",
-                  file=sys.stderr)
-
     # 发布内容与验证内容绑定（批次 261f10265269 方向 1）：verified_tree 为
     # 落盘时刻排除统一集合后的内容树（git 树对象 id，可复算）；commit_scope
     # 为该时刻 porcelain 清单加摘要。均排除收据目录（自引用豁免）；git 不可
@@ -1119,7 +1091,6 @@ def main(argv=None):
                 timings=args.timings, cases=args.case,
                 selfcheck=args.selfcheck,
                 flake_count=args.flake_count,
-                coverage=coverage,
                 package=args.package,
                 verified_tree=verified_tree, commit_scope=commit_scope,
                 device_dirty=device_dirty)

@@ -966,6 +966,57 @@ class TestMultiCaseLifecycle(unittest.TestCase):
         self.assertIn("device_dirty", data["teardown_detail"])
         self.assertIn("[lcview-transfer]", data["teardown_detail"])
 
+    def test_multi_case_logcat_cache_cleared_between_cases(self):
+        # 方向 1：logcat 缓存 key=(pid, since) 不含 case 标识，多 case 逐
+        # case 跑时跨 case 复用旧快照（批 5 收据实证两 case 取回字节数相同
+        # 且耗时 0.0s，判据读旧日志）——每 case 起始清 _logcat_cache，同
+        # pid 两 case 各重新拉取，防上一 case 日志污染本 case 判据
+        d = tempfile.mkdtemp()
+        batch = self._batch(d, "lcview-trigger,lcview-transfer")
+        out_json = Path(d) / "acc.json"
+        pulls = {"n": 0}
+
+        def fake_lifecycle(acc, lifecycle, adb_exec, adb_logcat, ep=None,
+                           ensure_boot=False, on_item=None, host_env=None,
+                           since_epoch=0):
+            adb_logcat(pid="123")  # 两 case 以同 pid 各拉一次
+            return ("pass", [{"tag": "t", "status": "pass", "detail": "ok"}],
+                    {"device_dirty": False, "timed_out": False,
+                     "teardown_detail": "已恢复到初值", "forensics_dir": None})
+
+        def fake_run(cmd, **kw):
+            if cmd[:2] == ["adb", "logcat"]:
+                pulls["n"] += 1
+            return mock.Mock(stdout="logbytes", stderr="", returncode=0)
+
+        with mock.patch.object(wa, "ac") as m_ac:
+            m_ac.ensure_connected.side_effect = ["ep", "ep"]
+            m_ac.clock_sync.return_value = (True, "")
+            m_ac.build_exec_cmd.side_effect = lambda c, endpoint=None: ["adb", "shell", c]
+            m_ac.parse_exec_output.return_value = ("1", 0)
+            m_ac.build_logcat_cmd.return_value = ["adb", "logcat", "-d"]
+            m_sub = mock.Mock()
+            m_sub.TimeoutExpired = subprocess.TimeoutExpired
+            m_sub.side_effect = fake_run
+            buf = io.StringIO()
+            with mock.patch.object(wa.subprocess, "run", m_sub), \
+                    mock.patch.object(wa, "run_case_lifecycle",
+                                      side_effect=fake_lifecycle), \
+                    mock.patch.object(wa, "run_acceptance",
+                                      return_value=("pass", [])), \
+                    mock.patch.object(wa, "_device_serial",
+                                      return_value=("SN1", "getprop ro.serialno")), \
+                    mock.patch.object(wa, "_mark_stage"), \
+                    mock.patch.object(wa, "_write_cases"), \
+                    mock.patch.object(wa, "_backfill_zero_marks"):
+                with contextlib.redirect_stdout(buf):
+                    rc = wa.main(["run", "--batch-file", str(batch),
+                                  "--result-file", str(out_json)])
+        self.assertEqual(rc, 0)
+        # 两 case 同 pid 各重新拉取（缓存每 case 起始清空）= 2 次；若跨
+        # case 复用旧快照则只拉 1 次
+        self.assertEqual(pulls["n"], 2)
+
     def test_multi_case_all_crash_still_writes_result(self):
         # 方向 3：多处 case 全崩溃仍最终落盘（逐 case 记 fail/dirty 不中断，
         # 无异常上抛；收据完整含两崩溃项）
@@ -2277,6 +2328,28 @@ class TestRunCaseLifecycle(unittest.TestCase):
                 lambda c: ("running", 0), lambda **k: "", ep="ep")
         self.assertEqual(overall, "pass")
         self.assertEqual(events, ["teardown"])
+
+    def test_sigterm_runs_teardown_then_reraises(self):
+        # 方向 2：判据执行中收 SIGTERM（链路超时 killpg 组信号）→ 既有
+        # teardown 仍执行（恢复 USB authorized 等副作用，防坏设备）再
+        # re-raise，走外层中断收尾落盘（result-file 仍落，退出码非 0）
+        events = []
+        with mock.patch.object(wa, "_run_host_cmd", return_value=("1", 0)), \
+                mock.patch.object(wa, "run_acceptance",
+                                  side_effect=wa._SigTermRequested()), \
+                mock.patch.object(wa, "_run_forensics",
+                                  side_effect=lambda *a, **k:
+                                      events.append("forensics") or "/f"), \
+                mock.patch.object(wa, "_restore_state",
+                                  side_effect=lambda *a, **k:
+                                      events.append("teardown") or (False, "ok")):
+            with self.assertRaises(wa._SigTermRequested):
+                wa.run_case_lifecycle(
+                    "svc:a", self._lc(setup=['adb shell "cat x"'],
+                                      teardown=['adb shell "echo 0 > x"']),
+                    lambda c: ("", 0), lambda **k: "", ep="ep")
+        # 顺序：先 teardown（恢复副作用）再取证，随后 re-raise 冒泡
+        self.assertEqual(events, ["teardown", "forensics"])
 
 
 class TestLoadLifecycle(unittest.TestCase):

@@ -67,16 +67,22 @@ int open_device(const char *path, int max_retries, int delay_ms) {
     if (max_retries <= 0) max_retries = OPEN_RETRY_MAX_DEFAULT;
     if (delay_ms  <= 0) delay_ms  = OPEN_RETRY_DELAY_MS_DEFAULT;
     int fd = -1;
+    int last_errno = 0;
     for (int i = 0; i < max_retries; i++) {
         fd = open(path, O_RDONLY);
         if (fd >= 0)
             return fd;
-        LC_LOGD("open: attempt " << (i + 1) << "/" << max_retries << " failed: " << strerror(errno));
+        /* LCD-021：每次失败先把 errno 承接进 last_errno——LC_LOGD 展开会调
+         * debugVerbose()/strerror/流操作，污染 errno；循环外据 last_errno
+         * 打日志并还原，勿读被污染的当前 errno */
+        last_errno = errno;
+        LC_LOGD("open: attempt " << (i + 1) << "/" << max_retries << " failed: " << strerror(last_errno));
         if (i + 1 < max_retries && delay_ms > 0)
             usleep(delay_ms * 1000);
     }
     LC_LOGE("Cannot open " << path << " after " << max_retries
-               << " retries: " << strerror(errno));
+               << " retries: " << strerror(last_errno));
+    errno = last_errno;  // 还原 errno（strerror 可能改），return 后上层取到正确错误码
     return fd;
 }
 
@@ -98,7 +104,11 @@ void close_device(int fd) {
 int get_stats(int fd, struct vendor_lechao_usbd_stats *stats) {
     memset(stats, 0, sizeof(*stats));
     int ret = ioctl(fd, VENDOR_LECHAO_USBD_IOC_GET_STATS, stats);
-    if (ret < 0) LC_LOGE("get_stats: ioctl failed: " << strerror(errno));
+    if (ret < 0) {
+        int saved = errno;  // strerror 可能改 errno，先存并 return 前还原
+        LC_LOGE("get_stats: ioctl failed: " << strerror(saved));
+        errno = saved;
+    }
     return ret;
 }
 
@@ -108,7 +118,11 @@ int get_stats(int fd, struct vendor_lechao_usbd_stats *stats) {
  */
 int reset_state(int fd) {
     int ret = ioctl(fd, VENDOR_LECHAO_USBD_IOC_RESET_STATE);
-    if (ret < 0) LC_LOGE("reset_state: ioctl failed: " << strerror(errno));
+    if (ret < 0) {
+        int saved = errno;  // strerror 可能改 errno，先存并 return 前还原
+        LC_LOGE("reset_state: ioctl failed: " << strerror(saved));
+        errno = saved;
+    }
     return ret;
 }
 
@@ -118,7 +132,11 @@ int reset_state(int fd) {
  */
 int get_config(int fd, struct vendor_lechao_usbd_config *config) {
     int ret = ioctl(fd, VENDOR_LECHAO_USBD_IOC_GET_CONFIG, config);
-    if (ret < 0) LC_LOGE("get_config: ioctl failed: " << strerror(errno));
+    if (ret < 0) {
+        int saved = errno;  // strerror 可能改 errno，先存并 return 前还原
+        LC_LOGE("get_config: ioctl failed: " << strerror(saved));
+        errno = saved;
+    }
     return ret;
 }
 
@@ -128,7 +146,11 @@ int get_config(int fd, struct vendor_lechao_usbd_config *config) {
  */
 int set_config(int fd, const struct vendor_lechao_usbd_config *config) {
     int ret = ioctl(fd, VENDOR_LECHAO_USBD_IOC_SET_CONFIG, (void *)config);
-    if (ret < 0) LC_LOGE("set_config: ioctl failed: " << strerror(errno));
+    if (ret < 0) {
+        int saved = errno;  // strerror 可能改 errno，先存并 return 前还原
+        LC_LOGE("set_config: ioctl failed: " << strerror(saved));
+        errno = saved;
+    }
     return ret;
 }
 
@@ -183,7 +205,12 @@ int read_event(int fd, struct vendor_lechao_usbd_event *event, int timeout_ms) {
         }
     } while (ret < 0 && errno == EINTR);
     if (ret < 0) {
-        LC_LOGW("read_event: poll failed: " << strerror(errno));
+        /* LCD-021：poll 失败先存 saved 再打日志还原——LC_LOGW 无条件展开，
+         * strerror/流操作必执行，污染 errno；调用方 readEvent 靠 errno 区分
+         * 暂无事件（ETIMEDOUT/EAGAIN）与真故障，据 ENODEV/EIO 决定关 fd */
+        int saved = errno;
+        LC_LOGW("read_event: poll failed: " << strerror(saved));
+        errno = saved;
         return -1;
     }
     if (ret == 0) {
@@ -208,6 +235,10 @@ int read_event(int fd, struct vendor_lechao_usbd_event *event, int timeout_ms) {
     }
     if (n < 0)
         saved_errno = errno;
+    else if (n == 0 || n < (ssize_t)sizeof(tmp))
+        // read 返回 0（EOF，设备关闭）或短读（记录不完整）属异常，置 EIO；
+        // 原实现落 EAGAIN 会把设备关闭伪装成"暂无事件"（上层白名单内判绿）
+        saved_errno = EIO;
 
     if (count > 1)
         LC_LOGW("read_event: drained " << count << " events from kernel, "

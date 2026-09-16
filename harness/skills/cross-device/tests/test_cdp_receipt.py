@@ -206,6 +206,105 @@ class TestReceipt(unittest.TestCase):
         self.assertTrue(old.exists())
         self.assertTrue(new.exists())
 
+    def test_prune_dedupe_spares_coverage_receipt(self):
+        # 方向五（批次意图五）：去重前先算覆盖保护名单并跳过被保护者——
+        # 同 batch 去重只留最新时，覆盖 baseline..HEAD 的旧版收据须保留
+        # （否则同批重检会顶掉唯一覆盖凭据，commit_coverage 翻红自锁）
+        repo = Path(self._tmp.name) / "covrepo3"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"],
+                       check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"],
+                       check=True)
+        (repo / "base.txt").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                        "构建(baseline): 基线发布"], check=True)
+        base = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=True).stdout.strip()
+        (repo / "fix.py").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                        "修复(harness): 修复"], check=True)
+        cfg = repo / "harness" / "config"
+        cfg.mkdir(parents=True, exist_ok=True)
+        (cfg / "baseline-status.yaml").write_text(
+            "baselines:\n- baseline_id: BL-A\n  status: promoted\n"
+            f"  source_commit: {base}\n", encoding="utf-8")
+        os.environ["CDP_PROJECT_ROOT"] = str(repo)
+        self.addCleanup(lambda: os.environ.update(
+            {"CDP_PROJECT_ROOT": self._tmp.name}))
+        d = cdp_paths.data_verify_results_dir()
+        old = _mk_receipt("dedup00000001", result="pass")
+        old.commit_scope = "add=1 mod=0 del=0 | fix.py"
+        p_old = cdp_receipt.write_receipt(old, "第一次")
+        new = _mk_receipt("dedup00000001", result="pass")
+        new.commit_scope = "add=0 mod=0 del=0 |"
+        p_new = cdp_receipt.write_receipt(new, "第二次")
+        cdp_receipt.prune_details(d)
+        self.assertTrue(p_old.exists(),
+                        "覆盖 baseline..HEAD 的旧版收据须被去重保护")
+        self.assertTrue(p_new.exists())
+
+    def test_coverage_protected_single_range_fetch(self):
+        # 方向 4（批次意图四）：覆盖保护一次 git 取全区间提交文件集后内存
+        # 比对——N 份收据只跑 1 次区间枚举（此前逐收据调 scope_covers_...
+        # 触发 N 次 rev-list 的 git 风暴）
+        repo = Path(self._tmp.name) / "covrepo4"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"],
+                       check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"],
+                       check=True)
+        (repo / "base.txt").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                        "构建(baseline): 基线发布"], check=True)
+        base = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", check=True).stdout.strip()
+        (repo / "fix.py").write_text("x\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                        "修复(harness): 修复"], check=True)
+        cfg = repo / "harness" / "config"
+        cfg.mkdir(parents=True, exist_ok=True)
+        (cfg / "baseline-status.yaml").write_text(
+            "baselines:\n- baseline_id: BL-A\n  status: promoted\n"
+            f"  source_commit: {base}\n", encoding="utf-8")
+        os.environ["CDP_PROJECT_ROOT"] = str(repo)
+        self.addCleanup(lambda: os.environ.update(
+            {"CDP_PROJECT_ROOT": self._tmp.name}))
+        d = cdp_paths.data_verify_results_dir()
+        cov = _mk_receipt("cov0000000001", result="pass")
+        cov.commit_scope = "add=1 mod=0 del=0 | fix.py"
+        cdp_receipt.write_receipt(cov, "b")
+        for i in range(3):
+            r = _mk_receipt(f"oth{i:012d}", result="pass")
+            r.commit_scope = "add=1 mod=0 del=0 | elsewhere.py"
+            cdp_receipt.write_receipt(r, "b")
+        here = Path(__file__).resolve().parent
+        sys.path.insert(0, str(here.parents[2] / "lib"))
+        import check_commit_coverage as ccc_mod  # noqa: E402
+        calls = {"n": 0}
+        real = ccc_mod.baseline_head_commit_file_sets
+
+        def counting(root):
+            calls["n"] += 1
+            return real(root)
+        with mock.patch.object(ccc_mod, "baseline_head_commit_file_sets",
+                               side_effect=counting):
+            names = cdp_receipt._coverage_protected_names(d)
+        self.assertEqual(calls["n"], 1,
+                         "一次 git 取全区间，不得逐收据重复枚举")
+        self.assertTrue(any("cov0000000001" in n for n in names),
+                        "覆盖 baseline..HEAD 的收据须在保护名单")
+
     def test_prune_dedupe_skips_unparseable(self):
         # batch_id 解析失败的文件保守跳过（不删）
         p = self._dir / "20260101-000000-broken0000000.md"

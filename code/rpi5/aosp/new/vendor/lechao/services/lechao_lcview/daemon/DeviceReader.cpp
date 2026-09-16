@@ -133,10 +133,13 @@ ssize_t EpollDeviceReader::waitAndRead(uint8_t* buf, size_t offset,
     if (n < 0 && isRecoverableReadErrno(errno))
         return 0;  // 可恢复（EINTR/EAGAIN/EMSGSIZE），视作本次无数据
     // n == 0：EOF（内核 shutdown 后期望用户态退出，模块卸载场景；
-    // LCV-17：与正常 timeout 同返 0 会伪装正常，计数暴露供心跳判红）
+    // LCV-17：与正常 timeout 同返 0 会伪装正常——置 ENODEV 返回 -1，
+    // 上层按设备不可用收尾，不再被当作"本次无数据"）
     if (n == 0) {
         mEofCount++;
         LOG(ERROR) << "EpollDeviceReader: read returned EOF (kernel shutdown?)";
+        errno = ENODEV;
+        return -1;
     }
     // n > 0：读到数据；n < 0：致命错误，透传 errno
     return n;

@@ -6,10 +6,10 @@
 - severity: P1
 - blocking: False
 - blocking_reason: 
-- status: open
+- status: fixed
 - task: checker-hardening
-- resolved_in: 
-- archived_in: 
+- resolved_in: 13ffd93
+- archived_in: BL-20260916-01
 - kind: 
 
 ## body

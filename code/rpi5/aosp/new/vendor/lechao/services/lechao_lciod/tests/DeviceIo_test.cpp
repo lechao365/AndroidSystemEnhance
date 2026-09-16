@@ -106,20 +106,22 @@ TEST_F(DeviceIoTest, ReadEvent_ClosedFd_PollNval_ReturnsEIO) {
     EXPECT_EQ(errno, EIO);
 }
 
-TEST_F(DeviceIoTest, ReadEvent_WriteEndClosed_ReturnsError) {
+TEST_F(DeviceIoTest, ReadEvent_WriteEndClosed_ReturnsEIO) {
     // 写端全关 → 读端 EOF：Linux 下 poll 报 POLLHUP（无 POLLIN → EIO），
-    // 个别内核报 POLLIN|POLLHUP → read 返 0（EOF）→ EAGAIN。两者皆失败态
+    // 个别内核报 POLLIN|POLLHUP → read 返 0（EOF）→ EIO。方向 3：EOF 置
+    // EIO（设备关闭态），不再伪装 EAGAIN"暂无事件"
     ::close(mPipe[1]);
     mPipe[1] = -1;
 
     vendor_lechao_usbd_event out{};
     errno = 0;
     EXPECT_EQ(read_event(mPipe[0], &out, 200), -1);
-    EXPECT_TRUE(errno == EIO || errno == EAGAIN) << "errno=" << errno;
+    EXPECT_EQ(errno, EIO);
 }
 
-TEST_F(DeviceIoTest, ReadEvent_PartialEvent_ReturnsEAGAIN) {
-    // 部分事件（不足一个 struct）→ read 短读退出排空循环 → count=0 → EAGAIN
+TEST_F(DeviceIoTest, ReadEvent_PartialEvent_ReturnsEIO) {
+    // 部分事件（不足一个 struct）→ read 短读退出排空循环 → count=0 →
+    // EIO（方向 3：短读置 EIO，不再伪装 EAGAIN"暂无事件"）
     char half[sizeof(vendor_lechao_usbd_event) / 2];
     memset(half, 0xAB, sizeof(half));
     ASSERT_EQ(::write(mPipe[1], half, sizeof(half)), (ssize_t)sizeof(half));
@@ -127,7 +129,7 @@ TEST_F(DeviceIoTest, ReadEvent_PartialEvent_ReturnsEAGAIN) {
     vendor_lechao_usbd_event out{};
     errno = 0;
     EXPECT_EQ(read_event(mPipe[0], &out, 200), -1);
-    EXPECT_EQ(errno, EAGAIN);
+    EXPECT_EQ(errno, EIO);
 }
 
 /* --- 方向 6：EINTR 重试按剩余扣减（不重新起算） --- */

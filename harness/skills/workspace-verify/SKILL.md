@@ -181,7 +181,8 @@ stages:
    [--timings-file harness/log/cross-device/timings-<batch_id>.json] \
    --selfcheck "<自检摘要（全部 *_rc 键，见 harness/lib/selfcheck.py 的
    REQUIRED_RC_KEYS：pytest/refs/config/contract/pyenv/ioctl/manifest/
-   discipline/scan/ruff/host/metrics/opencode——任一缺失 ws_report 拒写）>"
+   discipline/scan/ruff/host/quotepath/known_issues/commit_coverage——
+   任一缺失 ws_report 拒写）>"
    （--batch-file/--target 为模式 A 参数；--body 必传：CDP 原文 + 各阶段明细 +
    失败现场摘录，自动脱敏；PASS 必传 --acceptance-file（步骤 5 自描述验收产物）
    与 --unit-test-file（步骤 4b 自描述单测产物）与 --push-file（步骤 4 自描述
@@ -232,6 +233,12 @@ package_result=PASS，须在**会话外普通终端**人工执行打包：
    单点动作，与打包执行位置无关，同 batch 同 run_id 可追溯）。
 3. baseline_register 从收据 package 字段取证据 → script_rc=0 记 PASS → promote
    硬门禁放行。
+
+> **语义边界（2026-09-16 明确）**：`package_result=PASS` 仅表示 out 三镜像
+> （boot/system/vendor）齐备且打包脚本 rc 为 0，**不表示刷机包与本轮增量推送
+> 同构**——build 只编 verify-cases 列的 Soong 模块（增量），刷机包复用的是
+> out 既有镜像，可能不含本轮最新改动。发布/上板判定以增量推送验收为准，
+> 打包证据只作为镜像齐备性的独立门禁。
 ## 退出码
 - 0 验证完成（含 fail 收据落盘）；1 设备不可达或验收 fail；2 参数错误或验收 ai
 
@@ -313,6 +320,16 @@ package_result=PASS，须在**会话外普通终端**人工执行打包：
 - **验证闭环**：L2 触发后重跑 L1 fresh/ts 全过（最新写入秒级、ts 偏差 <30s），
   且 usb_probe 的 vid/pid/vendor/product 与设备描述精确匹配——全链路（内核 hook → ring → HAL →
   daemon 解析 → JSONL）正确。
+
+### 收据 commit_scope 落盘冻结（2026-09-16 定）
+
+`ws_report` 落盘收据时，`commit_scope` 取自**落盘时刻** `git status --porcelain`
+的文件清单加摘要（排除 `data/verify-results/` 自引用豁免，见
+[harness/lib/commit_scope.py](../../lib/commit_scope.py)）——收据一经落盘
+即证据，`commit_scope` 随之冻结。**落盘后再改任何非 meta 文件**（业务源码/
+harness 工具改动），`git-works-push` 提交面与 scope 比对不一致即拒推
+（发布内容与验证内容绑定）。故 harness-only 改动须先 push 或另写 manual 收据
+覆盖，禁止在收据落盘后夹带未声明改动。
 
 ### 收据老化（设计语义，2026-08-27 明确，配额 2026-09-01 扩至 50/200）
 

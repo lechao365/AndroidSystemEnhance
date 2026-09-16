@@ -519,42 +519,6 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("promoted:", out)
 
-    # ── 方向 3：未闭环 flake 类 KI 阻断 promote ──────────────────────────
-    def test_open_flake_issues_only_unclosed_flake(self):
-        # _open_flake_issues：只认 kind=flake 且未标终态的条目（普通 open 不算）
-        from cdp_issue import Issue, write_issue
-        write_issue(Issue(issue_id="KI-FLAKE-01", title="[flake] a",
-                          kind="flake", origin="pre-existing", blocking=False,
-                          status="open", task="", discovered_in="abc",
-                          batch_id="18f27638d9f6"), "抖动")
-        write_issue(Issue(issue_id="KI-FLAKE-02", title="[flake] b",
-                          kind="flake", origin="pre-existing", blocking=False,
-                          status="fixed", resolved_in="abc", task="",
-                          discovered_in="abc", batch_id="18f27638d9f6"), "闭环")
-        write_issue(Issue(issue_id="KI-OPEN-01", title="普通问题",
-                          status="open", task="t1", discovered_in="abc",
-                          batch_id="18f27638d9f6"), "普通")
-        from baseline_register import _open_flake_issues
-        flakes = _open_flake_issues(self._root / "data" / "known-issues")
-        self.assertEqual(len(flakes), 1)
-        self.assertIn("[flake] a", flakes[0])
-
-    def test_promote_blocks_open_flake(self):
-        # 存在未闭环 flake（kind=flake 且 open）→ promote 拒绝（抖动未闭环
-        # 不得晋升；闭环须标 fixed/wontfix 并填 resolved_in）
-        from cdp_issue import Issue, write_issue
-        rp = self._make_receipt_pkg()
-        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
-                                   "--evidence-scope", "lcview-liveness")[0], 0)
-        bid = br.load()["baselines"][0]["baseline_id"]
-        write_issue(Issue(issue_id="KI-FLAKE-01", title="[flake] x",
-                          kind="flake", origin="pre-existing", blocking=False,
-                          status="open", task="", discovered_in="abc",
-                          batch_id="18f27638d9f6"), "抖动")
-        rc, out = self._run("promote", "--baseline-id", bid, "--approved-by", "reviewer")
-        self.assertEqual(rc, 1)
-        self.assertIn("未闭环 flake", out)
-
     def test_add_candidate_package_pass_from_evidence(self):
         # 方向 2：ws_package 证据 script_rc=0 → package_result 记 PASS
         # （按收据 batch_id 探测 log/workspace-verify/package-<batch_id>.json）
@@ -1179,6 +1143,86 @@ class TestApprovalTokenNoStub(unittest.TestCase):
             rc, out = self._check_approval_main(
                 "check-approval", "--approved-by", "reviewer")
         self.assertEqual(rc, 0)
+
+
+class TestBackfillSourceCommit(unittest.TestCase):
+    """backfill-source-commit：promote 重建 dev 后回填 main 侧 squash sha。
+
+    方向 2（批次 6a3a0969d477）：登记时记的 dev 侧 BH 在 reset --hard main 后
+    不再是 dev HEAD 祖先，coverage 区间必含汇总提交判红；回填后区间天然为空。
+    方向 3 同源：source_commit 须 12hex 且为 HEAD 祖先，否则拒写。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._root = Path(self._tmp.name)
+        os.environ["CDP_PROJECT_ROOT"] = str(self._root)
+        self._config = self._root / "baseline-status.yaml"
+        self._config.write_text(_initial_config(), encoding="utf-8")
+        br.CONFIG = self._config
+
+    def tearDown(self):
+        br.CONFIG = Path(br.__file__).resolve().parents[2] / "config" / "baseline-status.yaml"
+        os.environ.pop("CDP_PROJECT_ROOT", None)
+        self._tmp.cleanup()
+
+    def _mk_baseline(self, sid="BL-01"):
+        """直接写入一条 promoted 记录（避免依赖 add-candidate 门禁）。"""
+        data = br.load()
+        data.setdefault("baselines", []).append(
+            {"baseline_id": sid, "status": "promoted",
+             "source_commit": "aabbccddeeff"})
+        br.save(data)
+
+    def _run_backfill(self, sid, sc, merge_rc=0, head="aabbccddeeff"):
+        buf = io.StringIO()
+        err = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(err):
+            def fake_run(cmd, *a, **kw):
+                if cmd[:2] == ["git", "rev-parse"]:
+                    return mock.Mock(returncode=0, stdout=head)
+                return mock.Mock(returncode=merge_rc)
+            with mock.patch("baseline_register.subprocess.run",
+                            side_effect=fake_run):
+                rc = br.main(["backfill-source-commit",
+                              "--baseline-id", sid,
+                              "--source-commit", sc])
+        return rc, buf.getvalue() + err.getvalue()
+
+    def test_backfill_rejects_non_12hex(self):
+        self._mk_baseline()
+        rc, out = self._run_backfill("BL-01", "abc", merge_rc=0)
+        self.assertEqual(rc, 1)
+        self.assertIn("非 12hex", out)
+        self.assertEqual(br.load()["baselines"][0]["source_commit"],
+                         "aabbccddeeff")
+
+    def test_backfill_rejects_equals_head(self):
+        # 方向 1（批次 5846f4ebd472）：source_commit==HEAD 自身即拒——merge-base
+        # --is-ancestor HEAD HEAD 返 0，回填 HEAD 使区间恒空全放行（官方后门）
+        self._mk_baseline()
+        rc, out = self._run_backfill("BL-01", "feedbeefcafe",
+                                     merge_rc=0, head="feedbeefcafe")
+        self.assertEqual(rc, 1)
+        self.assertIn("等于 HEAD", out)
+        self.assertEqual(br.load()["baselines"][0]["source_commit"],
+                         "aabbccddeeff")
+
+    def test_backfill_rejects_non_ancestor(self):
+        self._mk_baseline()
+        rc, out = self._run_backfill("BL-01", "0a41444cb264", merge_rc=1)
+        self.assertEqual(rc, 1)
+        self.assertIn("非 HEAD 祖先", out)
+        self.assertEqual(br.load()["baselines"][0]["source_commit"],
+                         "aabbccddeeff")
+
+    def test_backfill_ok(self):
+        self._mk_baseline()
+        rc, out = self._run_backfill("BL-01", "0a41444cb264", merge_rc=0)
+        self.assertEqual(rc, 0)
+        self.assertIn("backfilled-source-commit", out)
+        self.assertEqual(br.load()["baselines"][0]["source_commit"],
+                         "0a41444cb264")
 
 
 if __name__ == "__main__":

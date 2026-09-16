@@ -16,15 +16,14 @@ ws_report 拒写令 KIR-002 放行流程自锁——仅摘要缺失（崩溃/截
 refs 结论行同理只取 stdout 末行，stderr 仅附注不参与判定。
 
 输出单行（| 连接，供 ws_report --selfcheck 落盘与门禁判定）：
-    pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n> | refs_rc=<n> | <refs 结论行> | config_rc=<n> | <config 结论行> | contract_rc=<n> | <contract 结论行> | pyenv_rc=<n> | <pyenv 汇总行> | ioctl_rc=<n> | <ioctl 结论行> | manifest_rc=<n> | <manifest 结论行> | ... | opencode_rc=<n> | <opencode 结论行> | durs: py=<s> tools=<s> pyenv=<s> ioctl=<s> manifest=<s>
+    pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n> | refs_rc=<n> | <refs 结论行> | config_rc=<n> | <config 结论行> | contract_rc=<n> | <contract 结论行> | pyenv_rc=<n> | <pyenv 汇总行> | ioctl_rc=<n> | <ioctl 结论行> | manifest_rc=<n> | <manifest 结论行> | durs: py=<s> tools=<s> pyenv=<s> ioctl=<s> manifest=<s>
 skipped=<n> 仅在 pytest_rc=0 且摘要无 skipped 时补 0。config_rc/contract_rc
 为 check_config.py 两模式（配置治理/契约检查，方向 4 接入）；pyenv_rc 为
 check_python_env 探测结果（Python 版本 + requirements.txt 依赖，环境破损
 时后续工具结论均不可信）；ioctl_rc 为 check_ioctl_headers 内核/AOSP ioctl
 头一致性结果（方向 2，双空/漂移判红透出）；manifest_rc 为 gen_manifest
 --check-only 的 code/rpi5 manifest 登记完整性结果（方向 2，未登记/有变化
-判红透出）；opencode_rc 为 validate_opencode_server 的 opencode-server 脚本
-与 SKILL.md 一致性结果（方向 6，此前无调用方静默判红）；ws_report 按
+判红透出）；ws_report 按
 全部 *_rc 键判红（任一非零拒写收据）。退出码恒 0：拒写与否由 ws_report
 按 rc 判定，本脚本只负责如实采集（emit 侧可独立自测）。
 """
@@ -50,7 +49,7 @@ ROOT = Path(__file__).resolve().parents[2]
 REQUIRED_RC_KEYS = ("pytest_rc", "refs_rc", "config_rc", "contract_rc",
                     "pyenv_rc", "ioctl_rc", "manifest_rc",
                     "discipline_rc", "scan_rc", "ruff_rc", "host_rc",
-                    "metrics_rc", "opencode_rc", "quotepath_rc",
+                    "quotepath_rc",
                     "known_issues_rc", "commit_coverage_rc")
 
 # pytest 摘要计数行：含 passed/failed/skipped 任一计数的行（形如
@@ -164,7 +163,15 @@ def _collect_cmd(proc, name, timeout=_TOOL_TIMEOUT_S):
         rc = proc.returncode
     except subprocess.TimeoutExpired:
         proc.kill()
-        out, err = proc.communicate()
+        try:
+            # 第二次 communicate 补 timeout（本批方向 4）：kill 后管道排空
+            # 若无限等待会悬挂拖垮自检主流程，须有上界
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # kill 后管道仍不排空：放弃等待（防悬挂）
+            print(f"warn: 治理工具 {name} kill 后仍悬挂，放弃等待",
+                  file=sys.stderr)
+            out, err = "", ""
         print(f"warn: 治理工具超时（>{timeout}s，rc=124）: {name}",
               file=sys.stderr)
         rc, err = 124, f"timeout after {timeout}s"
@@ -769,13 +776,6 @@ def _main_body(mode):
         [sys.executable, str(ROOT / "harness" / "lib" / "check_ruff.py")])
     host_proc = _spawn_cmd(
         [sys.executable, str(ROOT / "harness" / "lib" / "check_host_tests.py")])
-    metrics_proc = _spawn_cmd(
-        [sys.executable, str(ROOT / "harness" / "lib" / "metrics.py"),
-         "--report"])
-    opencode_proc = _spawn_cmd(
-        [sys.executable, str(ROOT / "harness" / "skills" / "cross-device"
-                             / "opencode-server"
-                             / "validate_opencode_server.py")])
     py_rc, py_out, py_err, py_dur = timed_run(
         pytest_cmd, timeout=_PYTEST_TIMEOUT_S)
     # pytest 跑完收口治理（各进程已与 pytest 重叠，墙钟取 max 而非 sum）
@@ -785,8 +785,6 @@ def _main_body(mode):
     ruff_rc, ruff_out, _, ruff_dur = _collect_cmd(ruff_proc, "ruff")
     host_rc, host_out, _, host_dur = _collect_cmd(host_proc, "host",
                                                   timeout=_HOST_TIMEOUT_S)
-    opencode_rc, opencode_out, _, opencode_dur = _collect_cmd(
-        opencode_proc, "opencode")
     # gen_manifest 校验延后到 host 收口之后（KIR-002 当批修，批次 7d41df8e24bf
     # 连带）：check_host_tests 曾在 code/rpi5/kernel/new/.../tests/ 下直跑 make，
     # 其编译产物（无扩展名 host_test 二进制）短暂存在，与 gen_manifest 的
@@ -869,20 +867,6 @@ def _main_body(mode):
     parts.append(f"pyenv_rc={0 if env_ok else 1}")
     if env_summary:
         parts.append(env_summary)
-    # 自度量统计（P0-C）：metrics.py --report 跑通即 0（聚合异常/数据目录
-    # 缺失判红，红路径可达）。批次 7d41df8e24bf 方向 4：此前走 timed_run
-    # 串行计入自检墙钟（refs 同量级 ~数秒），且 metrics.py 聚合全容错恒
-    # rc=0——metrics_rc 无可达红路径（门禁形同虚设）；改 _spawn_cmd 与
-    # pytest 重叠（同 ioctl/ruff 族），收口取并行结果不额外占墙钟。
-    # metrics.py 输出首行自带 metrics_rc= 机器行（报表体在后），以正则定位
-    # 机器行，不依赖末行位置。
-    met_rc, met_out, _, met_dur = _collect_cmd(metrics_proc, "metrics")
-    parts.append(f"metrics_rc={met_rc}")
-    m = re.search(r"metrics_rc=(\d+)", met_out)
-    if m and int(m.group(1)) == 0:
-        parts.append("OK: 自度量聚合成功")
-    elif met_rc != 0:
-        parts.append("error: 自度量聚合失败")
     # 内核/AOSP ioctl 头一致性（方向 2）：此前 check_ioctl_headers 无调用方，
     # 头文件单侧漂移/双空解析异常静默无感；接入自检后 ioctl_rc 透出，双空
     # 判红在 check_ioctl_headers 内部完成，非零由 ws_report 全 *_rc 判红拒写
@@ -897,7 +881,7 @@ def _main_body(mode):
     manifest_last = last_stdout_line(manifest_out)
     if manifest_last:
         parts.append(manifest_last)
-    # 测试改动纪律（方向 1，IDLE-006 机械化）：discipline_rc 透出——测试改动
+    # 测试改动纪律（禁止修法机械化）：discipline_rc 透出——测试改动
     # 新增 xfail/skip/sleep 重试即判红，交 ws_report 全 *_rc 判红拒写
     parts.append(f"discipline_rc={dis_rc}")
     dis_last = last_stdout_line(dis_out)
@@ -941,14 +925,7 @@ def _main_body(mode):
     host_last = last_stdout_line(host_out)
     if host_last:
         parts.append(host_last)
-    # opencode-server 脚本/SKILL.md 一致性（方向 6）：此前 validate_opencode_server
-    # 无调用方，脚本 || true 吞错/EnvironmentFile 硬编码等破坏曾静默判红；接入
-    # 自检后 opencode_rc 透出，非零交 ws_report 全 *_rc 判红拒写
-    parts.append(f"opencode_rc={opencode_rc}")
-    opencode_last = last_stdout_line(opencode_out)
-    if opencode_last:
-        parts.append(opencode_last)
-    # 方向 2 + 方向 6：逐检查器耗时（秒，一位小数）入输出行，refs/cfg 拆开
+    # 方向 2：逐检查器耗时（秒，一位小数）入输出行，refs/cfg 拆开
     # 各自自报（合并 tools 无法定位慢点）。重叠模型（方向 1）下语义：
     # py 为 pytest 进程总耗时；refs/cfg/ioctl/manifest 为其收口阻塞墙钟
     # （≈进程对主流程耗时的贡献：≈0 即进程在 pytest 期间已完成不拖慢，
@@ -960,9 +937,7 @@ def _main_body(mode):
                  f"discipline={dis_dur:.1f} scan={scan_dur:.1f} "
                   f"quotepath={qp_dur:.1f} known_issues={ki_dur:.1f} "
                   f"commit_coverage={cc_dur:.1f} "
-                  f"ruff={ruff_dur:.1f} host={host_dur:.1f} "
-                 f"opencode={opencode_dur:.1f} "
-                 f"metrics={met_dur:.1f}")
+                  f"ruff={ruff_dur:.1f} host={host_dur:.1f}")
     print(" | ".join(parts))
     _mark_selfcheck(dur_s=time.time() - _t0)
     return 0

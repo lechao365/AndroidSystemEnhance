@@ -109,6 +109,27 @@ def _subject(sha: str, cwd: Path) -> str:
     return (r.stdout or "").strip() if r and r.returncode == 0 else ""
 
 
+def _is_strict_ancestor_of_head(sha: str, cwd: Path) -> bool:
+    """sha 是否 HEAD 严格祖先（sha != HEAD 且 git merge-base --is-ancestor）。
+
+    方向 1（批次 5846f4ebd472）：merge-base --is-ancestor HEAD HEAD 返 0——等于
+    自身也被判为祖先，source_commit==HEAD 时区间恒空全放行（backfill-source-
+    commit --source-commit HEAD 即官方入口）。收紧为严格祖先且不等于 HEAD，
+    回填只收 main 侧 squash sha（promote 重建 dev 后其为 dev HEAD 严格祖先）。
+    失败/HEAD 解析失败即 False（fail-closed）。
+    """
+    head = _git(["rev-parse", "HEAD"], cwd)
+    if head is None or head.returncode != 0:
+        return False
+    head_sha = (head.stdout or "").strip()
+    # baseline-status.yaml 存 12hex，HEAD 为 40hex——统一按 12 位前缀比较
+    head12 = head_sha[:12] if len(head_sha) >= 12 else head_sha
+    if not head12 or sha == head12:
+        return False
+    r = _git(["merge-base", "--is-ancestor", sha, "HEAD"], cwd)
+    return r is not None and r.returncode == 0
+
+
 def is_meta_subject(subject: str) -> bool:
     """提交标题是否 meta（type=构建/文档）→ 收据覆盖候选豁免。"""
     return bool(_META_TYPE_RE.match(subject or ""))
@@ -147,6 +168,12 @@ def _commit_is_meta_exempt(sha: str, cwd: Path) -> bool:
     if not is_meta_subject(subject):
         return False
     if subject.startswith("构建("):
+        # 注意：不设「构建(baseline): 发布」标题前缀豁免——纯标题免检是回归
+        # （批次 6a3a0969d477 方向 1 撤回 9e148fa）：实测「构建(baseline): 发布
+        # 后门」标题挟带 code/ 与改写检查器自身均 rc=0，三批收窄回到起点。
+        # 发布汇总提交由 promote 侧把 source_commit 回填为 main 侧 squash sha
+        # 解决（重建 dev 后区间天然为空，起点之后夹带仍判红），而非标题豁免。
+        # 其余 构建( 元提交仍须改动面限于构建元文件（防挟带代码逃过收据覆盖）
         files = commit_files(sha, cwd)
         if files is None:
             return False
@@ -233,12 +260,14 @@ def _receipt_scopes(root: Path) -> tuple[list[set[str]], list[str]]:
 
     返回 (scopes, errors)：
     - scopes：可作覆盖证据的收据路径集（commit_scope 有效、result != fail）；
-    - errors：跳过收据的原因（未跟踪 / 解析失败 / result=fail / 无 scope），
+    - errors：跳过收据的原因（工作区读取失败 / 解析失败 / result=fail / 无 scope），
       供调用方判红——收据是覆盖判定唯一证据源，坏收据静默丢弃等于手写一份
       垃圾收据即免检（fail-open）。
 
     fail-open 修复（批次 e503284f97b9 方向 2）：
-      1. 只扫 git 跟踪的收据（git ls-files），未跟踪手写 .md 不算证据；
+      1. 收据证据口径统一为工作区 .md glob（批次意图一，与 commit_scope.
+         latest_scope 同源）——未跟踪/未提交的新写收据即合法证据（此前只认
+         git ls-tree HEAD 已提交收据且未跟踪即判红，新写收据写完即自锁）；
       2. 解析失败/无 scope 记录错误而非静默 continue；
       3. result=fail 收据不作覆盖证据（失败收据不能证明覆盖）。
     """
@@ -254,37 +283,18 @@ def _receipt_scopes(root: Path) -> tuple[list[set[str]], list[str]]:
     d = root / "data" / "verify-results"
     if not d.is_dir():
         return scopes, errors
-    # 证据只认 HEAD 中已提交的收据（git ls-tree HEAD，内容经 git show 读）：
-    # 此前 ls-files 查索引（git add 不 commit 即授予覆盖）与 read_text 读工作区
-    # （只改工作区内容即改判定）都不是 HEAD——两处一起收窄为 git show HEAD
-    # 读（批次 b410b688d206 方向 2），未提交/仅索引/工作区改动的收据不作证据。
-    r = _git(["ls-tree", "-r", "--name-only", "HEAD", "--", _VERIFY_PREFIX],
-             root)
-    if r is None or r.returncode != 0:
-        # git ls-tree 失败 fail-closed：无法证实 HEAD 收据面即判红，不静默放行
-        errors.append("<ls-tree-failed>: git ls-tree HEAD 枚举收据失败，"
-                      "无法证实覆盖证据")
-        return scopes, errors
-    # 工作区未跟踪收据补充判红（不在 HEAD 但存在的手写收据须显式提示，
-    # 审计链要求坏证据可见——手写未跟踪收据仍不作证据，且不静默无视）
-    r_untracked = _git(["ls-files", "--others", "--exclude-standard", "--",
-                        _VERIFY_PREFIX], root)
-    if r_untracked is not None and r_untracked.returncode == 0:
-        for ln in (r_untracked.stdout or "").splitlines():
-            rel = ln.strip()
-            if rel and rel.endswith(".md") and not rel.endswith("/trend.md"):
-                errors.append(f"{rel}: 未跟踪（手写收据不作覆盖证据）")
-    for rel in sorted(ln.strip() for ln in (r.stdout or "").splitlines()
-                      if ln.strip()):
-        if not rel.startswith(_VERIFY_PREFIX + "/"):
+    # 收据证据口径统一为工作区 .md（批次意图一，与 commit_scope.latest_scope
+    # 的 d.glob("*.md") 同源）：ws_report 新写收据在 commit 前就是未跟踪文件，
+    # 此前 git ls-tree HEAD 只认已提交收据 + 未跟踪判红——同一份收据既是补齐
+    # 动作又因未跟踪被自己拒，写完即自锁。改为 glob 工作区 *.md 直接读，未
+    # 跟踪即合法证据（收据必与代码同批 commit，push 侧已绑定提交面与 scope）。
+    for rel in sorted(p.name for p in d.glob("*.md")
+                      if p.name != "trend.md"):
+        try:
+            txt = (d / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            errors.append(f"{rel}: 工作区读取失败（{e}）")
             continue
-        if not rel.endswith(".md") or rel.endswith("/trend.md"):
-            continue
-        g = _git(["show", f"HEAD:{rel}"], root)
-        if g is None or g.returncode != 0:
-            errors.append(f"{rel}: 从 HEAD 读取失败（git show）")
-            continue
-        txt = g.stdout or ""
         # 非收据文件（不含收据头 key-value，如测试夹具/文档）跳过不判红——
         # 只有形如收据的 md 才是覆盖证据候选；手写伪造收据若模仿头仍会被
         # 后续解析/result 白名单判定拦截（方向 2）
@@ -327,7 +337,7 @@ def uncovered_commits(root: Path) -> list[tuple[str, str]]:
       - 无/坏 baseline-status.yaml：无法界定覆盖起点（fail-open 修复，
         批次 e503284f97b9 方向 2——此前全放行且打印 OK）；
       - git rev-list 自 baseline 起枚举失败：无法证实覆盖；
-      - 收据不可用（未跟踪/解析失败/result=fail/无 scope）：覆盖证据损坏，
+      - 收据不可用（读取失败/解析失败/result=fail/无 scope）：覆盖证据损坏，
         手写垃圾收据不再免检；
       - 非 meta 提交改动未被任何可用收据 scope 覆盖。
     """
@@ -336,6 +346,19 @@ def uncovered_commits(root: Path) -> list[tuple[str, str]]:
         return [("<no-baseline>",
                  "baseline-status.yaml 缺失/无 promoted 记录/解析失败，无法"
                  "界定覆盖起点——须登记 baseline 或人工核查（fail-closed）")]
+    # 方向 3 + 方向 1（批次 6a3a0969d477 / 5846f4ebd472）：source_commit 合法性
+    # 校验——12hex 格式且须为 HEAD 严格祖先（promote 重建 dev 后 dev 侧 BH 不再
+    # 是祖先，悬空起点会让 rev-list 区间失控含汇总提交/失败判红；回填 main 侧
+    # squash sha 后区间天然为空）。等于 HEAD 自身也被拒（merge-base --is-ancestor
+    # HEAD HEAD 返 0 会区间恒空全放行）。任一不满足即判红（fail-closed）。
+    if not re.fullmatch(r"[0-9a-f]{12}", base):
+        return [("<invalid-source-commit>",
+                 f"source_commit={base!r} 非 12hex，无法界定覆盖起点（fail-closed）")]
+    if not _is_strict_ancestor_of_head(base, root):
+        return [("<source-commit-not-ancestor>",
+                 f"source_commit={base} 非 HEAD 严格祖先（悬空/等于 HEAD/拼错，"
+                 "promote 重建 dev 后须回填 main 侧 squash sha），无法界定"
+                 "覆盖起点（fail-closed）")]
     r = _git(["rev-list", "--no-merges", f"{base}..HEAD"], root)
     if r is None or r.returncode != 0:
         return [("<git-rev-list-failed>",
@@ -441,6 +464,36 @@ def scope_covers_baseline_head(scope_str: str, root: Path) -> bool:
         if files and _covered_by_scope(files, scope_paths):
             return True
     return False
+
+
+def baseline_head_commit_file_sets(root: Path) -> list[set[str]] | None:
+    """最近 promoted baseline..HEAD 区间非 meta 提交的文件集列表（方向 4）。
+
+    一次 git 取全区间（rev-list + 逐提交 diff-tree）——供 cdp_receipt 覆盖
+    保护做内存比对，替代逐收据调 scope_covers_baseline_head（N 份收据即 N
+    次全区间 rev-list 的 git 风暴，老化时 git 调用量随收据数线性放大）。
+    无法界定起点/枚举失败返回 None（调用方保守不启用保护，与
+    scope_covers_baseline_head 同语义）；区间无非 meta 提交返回空列表。
+    """
+    base = recent_promoted_baseline_commit(root)
+    if not base:
+        return None
+    r = _git(["rev-list", "--no-merges", f"{base}..HEAD"], root)
+    if r is None or r.returncode != 0:
+        return None
+    sets: list[set[str]] = []
+    for sha in (r.stdout or "").splitlines():
+        sha = sha.strip()
+        if not sha:
+            continue
+        if _commit_is_meta_exempt(sha, root):
+            continue
+        files = commit_files(sha, root)
+        if files is None:
+            continue
+        if files:
+            sets.append(files)
+    return sets
 
 
 def fix_cmd(root: Path, head: str = "HEAD") -> str:

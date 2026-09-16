@@ -233,7 +233,7 @@ while :; do
       # 不做内容跳过，防越过验证锚点误放行）
       case "$MSG" in
         *"(baseline)"*)
-          RECEIPT_ONLY=$(git show --name-only --format= "$BH" | grep -v '^$' | grep -v '^data/verify-results/' || true)
+          RECEIPT_ONLY=$(git -c core.quotepath=false show --name-only --format= "$BH" | grep -v '^$' | grep -v '^data/verify-results/' || true)
           if [ -z "$RECEIPT_ONLY" ]; then
             SKIP_META=$((SKIP_META+1))
             if ! BH=$(git rev-parse "$BH^"); then echo "error: BH 回溯越界（$BH 无父提交）" >&2; exit 1; fi
@@ -246,7 +246,7 @@ while :; do
 done
 # 文档提交须仅改动 docs/**（防「文档(」前缀夹带未验证代码随 squash 混入 main）
 for D in $DOC_SHA_LIST; do
-  BAD=$(git show --name-only --format= "$D" | grep -v '^docs/' | grep -v '^$' || true)
+  BAD=$(git -c core.quotepath=false show --name-only --format= "$D" | grep -v '^docs/' | grep -v '^$' || true)
   if [ -n "$BAD" ]; then
     check_class DOC_VIOLATION
     echo "error: 文档提交 $D 含非 docs/ 改动（$(echo "$BAD" | tr '\n' ' ')），拒绝（防未验证代码夹带）" >&2
@@ -334,8 +334,8 @@ PYEOF
   # evidence-scope 可选：缺省交 baseline_register add-candidate 从 board 收据 cases
   # 推导（人工传值仅可为收据实测范围子集，防过度声称）
   git fetch origin || { echo "error: fetch 失败" >&2; exit 1; }
-  CNT=$(git rev-list --count main..dev)
-  [ "$CNT" -gt 0 ] || { echo "dev 无领先 main 的提交（exit 4）"; exit 4; }
+  CNT=$(git rev-list --count origin/main..dev)
+  [ "$CNT" -gt 0 ] || { echo "dev 无领先 origin/main 的提交（exit 4）"; exit 4; }
   # source_commit 取回溯后的最近内容提交 BH（非 HEAD，避免重复 prepare 时误记登记元提交）
   # 带病项自动携带：从 read_index 取 status 属 open/scheduled 且 task 匹配的条目 id
   #（逗号分隔写入 evidence.known_issues_carried；未显式 --task 时按门禁推断任务匹配，
@@ -585,6 +585,32 @@ git merge --squash dev || { rollback_promote; echo "error: merge --squash 失败
 # 一致性检查在 commit 前：暂存区须与 dev tree 一致（此时 main 尚无 commit，rollback 可干净撤销）
 git -c core.quotepath=false diff --cached --quiet dev || { rollback_promote; echo "error: squash 暂存与 dev 内容不一致" >&2; exit 1; }
 git commit -F "$MSG_FILE" || { rollback_promote; echo "error: squash commit 失败" >&2; exit 1; }
+
+# 方向 2（批次 5846f4ebd472）：squash 写入 main 前落 main 侧 sha——回填提交并入
+# main（push main 前完成），main 树 yaml source_commit=main 侧 squash sha，main 与
+# 重建后的 dev 均不再判红（上批回填在 push main 后只写 dev，main 树恒为旧 dev
+# sha 恒红，等于把 9e148fa 的自锁从 dev 搬到 main）。步骤：squash 提交后建空占位
+# 提交使 squash 成 HEAD 严格祖先（backfill 拒 source_commit==HEAD），backfill
+# 回填 main 侧 squash sha，amend 占位提交注入 yaml；方向 3：回填幂等（yaml 无
+# 变更）时 diff --cached --quiet 守卫跳过提交，防 nothing to commit 返 1 且
+# main 已 push 无恢复步骤的僵局。
+git commit --allow-empty -q -m "构建(baseline): ${BID} source_commit 回填占位" \
+  || { rollback_promote; echo "error: 回填占位提交失败" >&2; exit 1; }
+SQUASH_SHA=$(git rev-parse --short=12 HEAD^)
+python3 harness/skills/publish-main-base/baseline_register.py backfill-source-commit \
+  --baseline-id "$BID" --source-commit "$SQUASH_SHA" \
+  || { rollback_promote; echo "error: source_commit 回填失败（12hex/严格祖先校验未过）" >&2; exit 1; }
+git add harness/config/baseline-status.yaml || {
+  rollback_promote; git reset -q; echo "error: add baseline-status.yaml 失败，已回滚并清暂存" >&2; exit 1; }
+if git -c core.quotepath=false diff --cached --quiet; then
+  echo "warn: baseline-status.yaml 无变更（source_commit 已回填），跳过回填提交"
+  git reset -q
+else
+  git commit --amend -q -m "构建(baseline): ${BID} source_commit 回填 main 侧 squash sha（coverage 区间对齐）" \
+    || { rollback_promote; git reset -q
+      echo "error: source_commit 回填提交失败，已回滚并清暂存" >&2; exit 1; }
+fi
+
 # 树等价断言：tag verified/$BID 与 main 树（排除登记 yaml 与 docs）必须无差异，
 # 防未验证内容借 meta/doc 提交夹带进 main；失败走 rollback（含删 tag）退 1
 python3 harness/skills/publish-main-base/baseline_register.py verify-tree --baseline-id "$BID" \

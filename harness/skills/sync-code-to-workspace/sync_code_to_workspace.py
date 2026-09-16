@@ -416,6 +416,7 @@ def _scan_aosp_modified(out: str) -> tuple[int, int]:
             continue
         proj_ws = Path(_aosp_ws()) / proj
         if not (proj_ws / ".git").is_dir():
+            log_warn(f"aosp:{proj}: workspace 缺 .git，跳过 diff 扫描")
             continue
         base = _find_upstream_base(cwd=proj_ws)
         if not base:
@@ -508,6 +509,7 @@ def _extra_aosp_worker(proj: str) -> tuple[list[str], int]:
     try:
         proj_ws = Path(_aosp_ws()) / proj
         if not (proj_ws / ".git").is_dir():
+            log_warn(f"aosp:{proj}: workspace 缺 .git，跳过 extra 扫描")
             return rows, 0
         # 不以 git status --porcelain 空输出早退（sync-03）：有 upstream 的
         # 项目，已提交未归档改动（HEAD 领先 upstream 且工作树干净）须由下方

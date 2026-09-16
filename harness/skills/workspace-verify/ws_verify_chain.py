@@ -44,6 +44,8 @@ import uuid
 from contextlib import nullcontext
 from pathlib import Path
 
+import yaml
+
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _SYNC = _SCRIPT_DIR.parent / "sync-code-to-workspace" / "sync_code_to_workspace.py"
 # 复用仓内共享库：cdp_parse（batch_id 解析，与 ws_report 同路径注入方式）
@@ -119,33 +121,67 @@ def _ensure_timings_started(batch_id):
     return path
 
 
-def _run_step(argv, timeout, cwd=None):
+def _run_step(argv, timeout, cwd=None, log_path=None):
     """独立进程组执行一步；返回 (rc, canceled)。
 
     start_new_session 使子进程自成进程组：超时可 killpg 整组回收
     （子脚本再 spawn 的 adb/make 孙进程一并终止，不留孤儿占用设备）。
     cwd：build 步编译须在 AOSP 工作区根执行（envsetup 相对路径依赖），
     其余步默认进程继承调用方 cwd（None）。
-    stdout/stderr 不 capture：直通终端，rc 真实。
+    stdout/stderr 不 capture：直通终端，rc 真实。build 步传 log_path 时
+    输出经 tee 同时落盘 harness/log（失败现场留痕，本批方向 3）。
     """
-    proc = subprocess.Popen(argv, start_new_session=True, cwd=cwd)
+    if log_path is None:
+        proc = subprocess.Popen(argv, start_new_session=True, cwd=cwd)
+        try:
+            return proc.wait(timeout=timeout), False
+        except subprocess.TimeoutExpired:
+            return _killpg_bounded(proc)
+    # tee 分支：合并 stdout/stderr 经管道读转发到终端与日志（daemon 线程
+    # 阻塞读管道，主线程 wait 维护超时/teardown 语义与无 tee 分支一致）
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen(argv, start_new_session=True, cwd=cwd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT)
+
+    def _tee():
+        try:
+            with log_path.open("wb") as logf:
+                for raw in iter(proc.stdout.readline, b""):
+                    sys.stdout.buffer.write(raw)
+                    sys.stdout.buffer.flush()
+                    logf.write(raw)
+                    logf.flush()  # 方向 3：每行写后落盘，防退出强杀丢日志
+        except Exception:
+            pass  # 非真实管道（测试桩）：tee 静默降级，不污染 stderr
+
+    tee_thread = threading.Thread(target=_tee, daemon=True)
+    tee_thread.start()
     try:
-        return proc.wait(timeout=timeout), False
+        rc, canceled = proc.wait(timeout=timeout), False
     except subprocess.TimeoutExpired:
-        # 有界 teardown：TERM → 宽限 → KILL，两段都有上界，不无限等
-        for sig, grace in ((signal.SIGTERM, _TERM_GRACE_S),
-                           (signal.SIGKILL, _KILL_WAIT_S)):
-            try:
-                os.killpg(proc.pid, sig)
-            except (ProcessLookupError, PermissionError):
-                pass  # 进程组已退出/无权限：直接进入下一段等待
-            try:
-                proc.wait(timeout=grace)
-                return None, True  # 已终止：无真实 rc，记 canceled
-            except subprocess.TimeoutExpired:
-                continue
-        proc.wait()  # KILL 后必退（防御兜底，不预期到达）
-        return None, True
+        rc, canceled = _killpg_bounded(proc)
+    # 方向 3：留线程句柄 + proc.wait 返回后有界 join，等 tee 线程收尾
+    # （日志写完再返回，防 daemon 线程被解释器退出强杀致日志为空）
+    tee_thread.join(timeout=5)
+    return rc, canceled
+
+
+def _killpg_bounded(proc):
+    """有界 teardown：TERM → 宽限 → KILL，两段都有上界，不无限等。"""
+    for sig, grace in ((signal.SIGTERM, _TERM_GRACE_S),
+                       (signal.SIGKILL, _KILL_WAIT_S)):
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass  # 进程组已退出/无权限：直接进入下一段等待
+        try:
+            proc.wait(timeout=grace)
+            return None, True  # 已终止：无真实 rc，记 canceled
+        except subprocess.TimeoutExpired:
+            continue
+    proc.wait()  # KILL 后必退（防御兜底，不预期到达）
+    return None, True
 
 
 # product → AOSP lunch 目标映射（BLD-004：lunch 前必须先 source envsetup）
@@ -158,10 +194,16 @@ def _load_build_targets(cases_path):
     build 链步编译目标与部署/测试映射同源（verify-cases.yaml 单一事实源），
     不再由执行者手敲目标列表；文件缺失/解析失败返空（调用方拒跑 build）。
     """
+    import yaml
     try:
-        import yaml
         data = yaml.safe_load(Path(cases_path).read_text(encoding="utf-8")) or {}
     except OSError:
+        return []
+    except yaml.YAMLError as e:
+        # 方向 5：解析失败不再静默返空（此前坏 YAML 静默当"无目标"拒跑
+        # build 且无现场，warn 留痕）
+        print(f"warn: verify-cases.yaml 解析失败（{e}），编译目标返空",
+              file=sys.stderr)
         return []
     mods = data.get("modules") or {}
     seen, out = set(), []
@@ -270,14 +312,29 @@ def _build_argv(name, product, out, chain_args):
         # INC-001 禁 make clean/clobber（m 即增量，不触发）。cwd 由编排器
         # 在 _run_chain_locked 注入 AOSP 根（见 build 分支）。
         lunch = _LUNCH_TARGETS.get(product, f"{product}-userdebug")
-        targets = _load_build_targets(
-            str(_SCRIPT_DIR.parents[1] / "config" / "verify-cases.yaml"))
+        cases_path = str(_SCRIPT_DIR.parents[1] / "config" / "verify-cases.yaml")
+        targets = _load_build_targets(cases_path)
         bad = _build_validate(targets, lunch)
         if bad:
             raise ValueError(bad)
+        # test_targets 编译前删除 out 测试二进制强制 Soong 重建：多 test_target
+        # 共享模块级 test_src 目录时（lciod 的 daemon/hal 源码分离），Soong 增量
+        # 判定"源未变跳过重编"会与 ws_upload_tests 的 fresh 守卫（test_src
+        # 全目录最新 mtime 比较）冲突——本批只改 hal，unit_test 未重编却被判
+        # 陈旧误伤。强制重编让测试二进制恒新，同时杜绝旧测试二进制报绿
+        try:
+            _cfg = yaml.safe_load(Path(cases_path).read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            _cfg = {}
+        test_targets = [t for _m in (_cfg.get("modules") or {}).values()
+                        for t in (_m.get("test_targets") or [])]
+        rm_cmds = " && ".join(
+            f"rm -f out/target/product/{product}/data/nativetest64/{t}/{t} "
+            f"out/target/product/{product}/testcases/{t}/arm64/{t}"
+            for t in test_targets) if test_targets else "true"
         cmd = (f"source build/envsetup.sh && lunch {lunch} && "
                f"export USE_CCACHE=1 CCACHE_EXEC=$(which ccache) "
-               f"CCACHE_DIR=out/ccache && "
+               f"CCACHE_DIR=out/ccache && {rm_cmds} && "
                f"m {' '.join(targets)} -j$(nproc)")
         return ["bash", "-c", cmd]
     if name == "connect":        # 连接 fail-fast：设备不可达时不浪费推送/单测轮次
@@ -373,8 +430,7 @@ def _build_report_argv(chain_args, derive):
     for key, flag in (("push_file", "--push-file"),
                       ("unit_test_file", "--unit-test-file"),
                       ("acc_file", "--acceptance-file"),
-                      ("timings_file", "--timings-file"),
-                      ("coverage_file", "--coverage-file")):
+                      ("timings_file", "--timings-file")):
         if chain_args.get(key):
             cmd += [flag, chain_args[key]]
     # board 收据强制自检证据（ws_report 方向 4 门禁；rc 全 0 与否由其扫描判定）
@@ -389,28 +445,31 @@ def _derive_report_args(steps, overall):
     """收据参数派生：result/build/board/summary 全部由真实 rc 机械推导。
 
     - result：overall（pass/fail）
-    - build：push 未执行（前序已停，编译产物状态不可知）=skip；push 执行
-      且 rc=0（产物在位）=pass；push 已执行且未成功（rc!=0 或 canceled
-      的 rc=None，含编译产物缺失）=fail（push 已跑到产物环节失败，编译段
-      不可信，不得机械降级 skip 掩盖）
+    - build：build 步未执行（链未到 build 或前序已停，编译产物状态不可知）
+      =skip；build 步真实 rc=0=pass；build 步已执行且失败（rc!=0 或
+      canceled 的 rc=None）=fail（编译失败由真实 build 步 rc 推导，不再由
+      push 步 rc 反推——build 失败时 fail_stop 令 push 未执行，旧逻辑把
+      编译失败静默记成 skip 失真）
     - board：全过=pass；push/unit_test/acceptance 失败=fail（设备已被动过）；
       sync/connect 阶段失败=skip（未触及设备态）
-    - coverage 步（P1-A 只记录不门禁）不进入 board/链停判定：其失败不得
-      抢先成为 failed 使 board 判 skip 掩盖其后真实的上板失败（方向 4）。
+    - package（方向 3 打包证据，只记录不门禁）：其失败不得抢先成为 failed
+      使 board 判 skip 掩盖其后真实的上板失败（方向 4）。
     """
-    # 排除 coverage（只记录不门禁）与 package（方向 3 打包证据，只记录不
-    # 门禁）：其失败不得抢先成为 failed 使 board 判 skip 掩盖其后真实的上板
-    # 失败（方向 4 同款——package 失败如 sudo 不可用是环境问题，非上板归因）
-    real_failed = next((s for s in steps if s["name"] not in ("coverage", "package")
+    # 排除 package（方向 3 打包证据，只记录不门禁）：其失败不得抢先成为
+    # failed 使 board 判 skip 掩盖其后真实的上板失败（方向 4 同款——package
+    # 失败如 sudo 不可用是环境问题，非上板归因）
+    real_failed = next((s for s in steps if s["name"] != "package"
                         and (s.get("canceled") or s["rc"] is None
                              or s["rc"] != 0)), None)
     result = "pass" if overall == "pass" else "fail"
     # 步骤是否执行以 steps 在场为准（skipped 步骤不进 steps；_step_rc 对
-    # "未执行"与"canceled 的 rc=None"同为 None，不可用于区分执行与否）
-    push_step = next((s for s in steps if s["name"] == "push"), None)
-    if push_step is None:
+    # "未执行"与"canceled 的 rc=None"同为 None，不可用于区分执行与否）；
+    # build 由真实 build 步 rc 推导（编译失败时 fail_stop 令 push 未执行，
+    # 旧逻辑 push 缺席即 skip 把编译失败记成 skip 失真，本批修）
+    build_step = next((s for s in steps if s["name"] == "build"), None)
+    if build_step is None:
         build = "skip"
-    elif push_step["rc"] == 0:
+    elif build_step["rc"] == 0:
         build = "pass"
     else:
         build = "fail"
@@ -466,7 +525,7 @@ def _join_selfcheck_preflight(thread, result):
 
 def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
               case=None, wait_ready=False, log_since=None, build=None,
-              timeouts=None, use_locks=True, coverage=False):
+              timeouts=None, use_locks=True):
     """顺序执行全链，返回 (rc, result_dict)。失败即停，余步记入 skipped。
 
     batch_file：模式 A 批次文件（acceptance 验收源 + report 收据源）；
@@ -530,16 +589,8 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
             return _run_chain_locked(run_id, batch_id, product, out,
                                      result_file, batch_file, build,
                                      timeout_map, chain_args,
-                                     selfcheck_thread, selfcheck_result,
-                                     coverage=coverage)
+                                     selfcheck_thread, selfcheck_result)
     except ws_lock.LockHeld as exc:
-        # 方向 1（闲时加固让路协议）：正式任务取锁失败即置让路标志，持锁的
-        # idle-hardening 会话在原子步骤边界检查到后收敛让路（不抢占验证中的
-        # 正式任务；标志为提示性，写失败静默）
-        try:
-            ws_lock.request_yield()
-        except Exception:
-            pass
         print(f"error: {exc}", file=sys.stderr)
         return 3, {"run_id": run_id, "batch_id": batch_id, "overall": "fail",
                    "exit_rc": 3, "canceled": False, "steps": [],
@@ -652,8 +703,7 @@ def _mark_step(name, batch_id, dur_s=None, zero=False):
 
 def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
                       build, timeout_map, chain_args,
-                      selfcheck_thread=None, selfcheck_result=None,
-                      coverage=False):
+                      selfcheck_thread=None, selfcheck_result=None):
     """锁内编排主体：逐步执行 + 运行态落盘（仅编排器写）。
 
     失败停链语义（A1 修订）：某步失败/取消后，其余验证步记 skipped，
@@ -691,6 +741,7 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
             skipped.append(name)
             skip_reasons[name] = "链已停（前序步骤失败，收据仍落盘）"
             continue
+        step_log = None
         if name == "report":
             derive = _derive_report_args(steps, overall)
             if build:  # 显式传参优先（AI 对 build 段的判定不可替代时使用）
@@ -705,8 +756,13 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
             argv = _build_argv(name, product, out, chain_args)
             # 方向 1：build 步须在 AOSP 工作区根执行（envsetup 相对路径依赖）
             step_cwd = _aosp_root() if name == "build" else None
+            # 方向 3：build 步输出经 tee 落 harness/log/verify-chain 留失败现场
+            if name == "build":
+                step_log = (_SCRIPT_DIR.parents[1] / "log" / "verify-chain"
+                            / f"build-{run_id}.log")
         t0m, t0 = time.monotonic(), time.time()
-        rc, canceled = _run_step(argv, timeout_map[name], cwd=step_cwd)
+        rc, canceled = _run_step(argv, timeout_map[name], cwd=step_cwd,
+                                 log_path=step_log)
         steps.append({"name": name, "rc": rc, "start": t0,
                       "end": time.time(),
                       "dur_s": round(time.monotonic() - t0m, 3),
@@ -717,27 +773,10 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
         canceled_any = canceled_any or canceled
         # 方向 3：package 是证据补充（打包失败只记步，ws_package 已如实落盘
         # evidence，report 内嵌真实 script_rc），不阻断链、不改 overall——
-        # 与 coverage 同语义（只记录不门禁），避免打包不可用拖垮上板验证。
+        # 只记录不门禁，避免打包不可用拖垮上板验证。
         if name != "package" and (canceled or rc is None or rc != 0):
             overall = "fail"
             fail_stop = True  # 不 break：report 步仍执行落 fail 收据（A1）
-        # P1-A：单测成功后可选 coverage 步（只记录不门禁；失败仅记步不进链判红）
-        if coverage and name == "unit_test" and overall == "pass" \
-                and not fail_stop:
-            t0m, t0 = time.monotonic(), time.time()
-            cov_argv = [sys.executable,
-                        str(_SCRIPT_DIR / "ws_coverage.py"),
-                        "--product", product]
-            if out:
-                cov_argv += ["--out", out]
-            cov_file = str(_CROSS_DEVICE_LOG / f"coverage-{batch_id or run_id}.json")
-            cov_argv += ["--result-file", cov_file]
-            cov_rc, cov_canceled = _run_step(cov_argv, timeout_map["unit_test"])
-            steps.append({"name": "coverage", "rc": cov_rc, "start": t0,
-                          "end": time.time(),
-                          "dur_s": round(time.monotonic() - t0m, 3),
-                          "canceled": cov_canceled})
-            chain_args["coverage_file"] = cov_file
     _chain_mark("verify_end", batch_id)
     ended_at = time.time()
     exit_rc = 0 if overall == "pass" else 1
@@ -774,8 +813,6 @@ def main(argv=None):
     ap.add_argument("--quick", action="store_true",
                     help="快检模式：sync + 内核 host 单测 + 自检，不落收据"
                          "（AI 编辑纯逻辑后的廉价反馈，不占真机）")
-    ap.add_argument("--coverage", action="store_true",
-                    help="单测后采集覆盖率（ws_coverage；只记录不门禁）")
     ap.add_argument("--build-dry-run", action="store_true",
                     help="build 步秒级干跑：source envsetup+lunch 验证环境可用、"
                          "_load_build_targets 非空、_aosp_root 存在、BLD-004/005"
@@ -791,8 +828,7 @@ def main(argv=None):
     rc, result = run_chain(args.product, args.out, args.result_file,
                            batch_file=args.batch_file, case=args.case,
                            wait_ready=args.wait_ready,
-                           log_since=args.log_since, build=args.build,
-                           coverage=args.coverage)
+                           log_since=args.log_since, build=args.build)
     print(json.dumps(result, ensure_ascii=False))
     return rc
 

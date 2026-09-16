@@ -98,9 +98,8 @@ emit 侧（远端）经 tailnet 从浏览器/手机访问，衔接 `/cross-devic
 
 ## 增量验证（Incremental verification）
 
-- 校验器：`harness/skills/cross-device/opencode-server/validate_opencode_server.py`
-- 运行：`python3 harness/skills/cross-device/opencode-server/validate_opencode_server.py`
-- 本 skill 不直接修改代码文件（纯运维：systemd unit + tailscale serve），其验证内嵌在脚本与校验器中
+本 skill 不直接修改代码文件（纯运维：systemd unit + tailscale serve），脚本
+输出汇总即验证依据（`--status-only` 可复核 service/监听/serve 状态）。
 
 ## 相关规则（Related policy IDs）
 

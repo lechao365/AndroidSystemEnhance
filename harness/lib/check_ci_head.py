@@ -26,8 +26,10 @@ import subprocess
 import sys
 
 # 判定为「CI 失败」的 conclusion 集（其余结论一律放行，包括 neutral/
-# skipped/started/pending/null 等未定性状态）
-_BAD_CONCLUSIONS = {"failure", "cancelled", "timed_out"}
+# skipped/started/pending/null 等未定性状态）。方向 3（批次意图三）：移除
+# cancelled——用户手动取消的 run 非 CI 失败（常见于重跑队列排空/手动停），
+# 按失败阻断会让 CI 一旦出现过 cancelled 就永久锁死推送。
+_BAD_CONCLUSIONS = {"failure", "timed_out"}
 
 # 免费额度限流（HTTP 429/403 限流头），公共仓免认证 60 次/小时
 _API_LIMIT_CODES = ("403", "429")
@@ -62,8 +64,14 @@ def _curl(url: str):
     return code, body
 
 
-def _check_sha_runs(sha: str, slug: str, label: str):
-    """查单个 sha 的 actions runs；返回 rc（0 放行，1 阻断）。"""
+def _check_sha_runs(sha: str, slug: str, label: str,
+                    block_on_fail: bool = True):
+    """查单个 sha 的 actions runs；返回 rc（0 放行，1 阻断）。
+
+    block_on_fail=False（方向 3，上一个已推送提交）：失败结论降为告警不
+    阻断——已推送提交的 CI 失败是历史事实，推送修复提交必须被允许（否则
+    CI 一旦红，push 前门禁永远锁死、修复永远推不上去）。
+    """
     if not sha:
         return 0
     url = (f"https://api.github.com/repos/{slug}/actions/runs"
@@ -99,19 +107,28 @@ def _check_sha_runs(sha: str, slug: str, label: str):
     bad = sorted({r.get("conclusion") for r in runs
                   if r.get("conclusion") in _BAD_CONCLUSIONS})
     if bad:
-        print(f"error: CI run 存在失败结论 {bad}（{label}，共 {len(runs)}"
-              f" run）——阻断推送，修复 CI 或登记放弃后重试", file=sys.stderr)
-        return 1
+        if block_on_fail:
+            print(f"error: CI run 存在失败结论 {bad}（{label}，共 {len(runs)}"
+                  f" run）——阻断推送，修复 CI 或登记放弃后重试", file=sys.stderr)
+            return 1
+        print(f"warn: CI run 存在失败结论 {bad}（{label}，共 {len(runs)} run）"
+              f"——上一已推送提交的历史失败降级告警，不阻断本推送（方向 3）",
+              file=sys.stderr)
+        return 0
     ids = [r.get("id") for r in runs[:3]]
     print(f"OK: CI run {ids}（{label}，{len(runs)} run）结论全部非失败")
     return 0
 
 
 def check_ci(head_sha: str, prev_head_sha: str, repo_slug: str):
-    """核对 HEAD 与上一个已推送提交的 actions runs；返回 rc（0/1）。"""
-    rc = _check_sha_runs(prev_head_sha, repo_slug, "上一个已推送提交")
-    if rc != 0:
-        return rc
+    """核对 HEAD 与上一个已推送提交的 actions runs；返回 rc（0/1）。
+
+    方向 3：上一已推送提交的失败结论降为告警（历史失败不锁死修复推送），
+    仅待推送 HEAD 的真实失败结论阻断。不可改成只查将推 HEAD——新 HEAD 尚未
+    推送时 GitHub 无其 run 恒过，等于 CI 门禁形同虚设；prev 仍须核对留痕。
+    """
+    _check_sha_runs(prev_head_sha, repo_slug, "上一个已推送提交",
+                    block_on_fail=False)
     return _check_sha_runs(head_sha, repo_slug, "待推送 HEAD")
 
 

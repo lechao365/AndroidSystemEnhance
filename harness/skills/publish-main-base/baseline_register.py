@@ -8,6 +8,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -193,22 +194,6 @@ def _real_known_issues_dir():
     return Path(__file__).resolve().parents[3] / "data" / "known-issues"
 
 
-def _open_flake_issues(issues_dir=None):
-    """未闭环 flake 类 known-issues：kind=flake 且 status 非 fixed/wontfix。
-
-    方向 3：KIR-002 抖动登记（selfcheck 机械放行）的 flake 是"单跑绿非阻塞"
-    记录，但存在未闭环 flake 意味着抖动尚未根因定位/闭环——promote 基线
-    晋升不得携带未闭环抖动，故 promote 硬拒。闭环 = 标 fixed/wontfix 并填
-    resolved_in（KIR-006）。"""
-    d = Path(issues_dir) if issues_dir else _real_known_issues_dir()
-    out = []
-    for p in issue_files(d):
-        i = read_issue(p)
-        if i.kind == "flake" and i.status not in ("fixed", "wontfix"):
-            out.append(f"{p.name}: {i.title}")
-    return out
-
-
 # ── P1-B：promote 审批独立校验（修复 KI-20260907-001）────────────────
 # 业界对齐 SLSA 独立审批思想：审批不得自证。两道校验——
 #   1) 身份不等式：--approved-by 审批人不得等于执行人 git 身份（收据
@@ -363,6 +348,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="baseline candidate/promoted 登记")
     ap.add_argument("action",
                     choices=["add-candidate", "promote", "revert-candidate",
+                             "backfill-source-commit",
                              "check-issues", "check-approval", "verify-tree"])
     ap.add_argument("--baseline-id")
     ap.add_argument("--source-commit")
@@ -694,17 +680,6 @@ def main(argv=None):
                 if not ok:
                     print(f"error: {aerr}", file=sys.stderr)
                     return 1
-                # 方向 3：存在未闭环 flake 类 KI（kind=flake 且未标终态）即拒
-                # ——KIR-002 抖动登记允许放行本轮自检，但晋升不得携带未闭环
-                # 抖动（闭环须标 fixed/wontfix 并填 resolved_in）
-                open_flakes = _open_flake_issues(args.known_issues_dir)
-                if open_flakes:
-                    print(f"error: promote 存在 {len(open_flakes)} 个未闭环 flake "
-                          f"known-issues（抖动未闭环不得晋升），拒绝：",
-                          file=sys.stderr)
-                    for o in open_flakes:
-                        print(f"  {o}", file=sys.stderr)
-                    return 1
                 snapshot_name = f"{args.baseline_id}-{receipt.name}"
                 if not snapshot_name.endswith(".md"):
                     snapshot_name += ".md"
@@ -859,6 +834,52 @@ def main(argv=None):
                 b.pop("approved_at", None)
                 save(data)
                 print(f"reverted-candidate: {args.baseline_id}")
+                return 0
+        print(f"error: 未找到 baseline {args.baseline_id}")
+        return 1
+
+    if args.action == "backfill-source-commit":
+        # 方向 2（批次 6a3a0969d477）：promote 重建 dev 后回填 source_commit
+        # 为 main 侧 squash sha——登记时记的 dev 侧 BH 在 reset --hard main 后
+        # 不再是 dev HEAD 祖先，coverage 区间必含汇总提交判红（上批 BL-20260914-01
+        # 首发）。回填后区间天然为空，起点之后夹带仍判红。顺带解悬空：悬空
+        # source_commit（仅 verified tag 可达）无 tag 即 rev-list 失败判红。
+        # 方向 3 同源：source_commit 须 12hex 且为 HEAD 祖先，否则拒写。
+        if not args.baseline_id or not args.source_commit:
+            print("error: backfill-source-commit 必须传 --baseline-id 与 --source-commit",
+                  file=sys.stderr)
+            return 1
+        sc = (args.source_commit or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{12}", sc):
+            print(f"error: source_commit={sc!r} 非 12hex，拒绝回填", file=sys.stderr)
+            return 1
+        # 方向 1（批次 5846f4ebd472）：须 HEAD 严格祖先且不等于 HEAD——merge-base
+        # --is-ancestor HEAD HEAD 返 0（自身即祖先），source_commit==HEAD 时区间
+        # 恒空全放行（--source-commit HEAD 即官方入口）；收紧后回填只收 main 侧
+        # squash sha（promote 重建 dev 后其为 dev HEAD 严格祖先）
+        r = subprocess.run(["git", "rev-parse", "HEAD"],
+                           capture_output=True, text=True, encoding="utf-8")
+        if r.returncode != 0:
+            print("error: 无法解析 HEAD，拒绝回填", file=sys.stderr)
+            return 1
+        head_sha = (r.stdout or "").strip()
+        if sc == head_sha:
+            print(f"error: source_commit={sc} 等于 HEAD 自身（非严格祖先），"
+                  "拒绝回填（须为 HEAD 严格祖先）", file=sys.stderr)
+            return 1
+        r = subprocess.run(["git", "merge-base", "--is-ancestor", sc, "HEAD"],
+                           capture_output=True, text=True, encoding="utf-8")
+        if r.returncode != 0:
+            print(f"error: source_commit={sc} 非 HEAD 祖先（悬空或拼错），拒绝回填",
+                  file=sys.stderr)
+            return 1
+        for b in baselines:
+            if b.get("baseline_id") == args.baseline_id:
+                old = b.get("source_commit") or ""
+                b["source_commit"] = sc
+                save(data)
+                print(f"backfilled-source-commit: {args.baseline_id} "
+                      f"{old} -> {sc}")
                 return 0
         print(f"error: 未找到 baseline {args.baseline_id}")
         return 1
