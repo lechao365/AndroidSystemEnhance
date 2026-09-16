@@ -402,11 +402,13 @@ def _compute_numstat(stat_path: str, display_path: str, base_status: str,
     多行 numstat（pathspec 多命中异常）时取与目标路径匹配的行，防御取错。
     """
     if base == "HEAD":
-        numstat = _git(["diff", "HEAD", "--numstat", "--", stat_path]).strip()
+        raw = _git(["diff", "HEAD", "--numstat", "--", stat_path])
     else:
-        numstat = _git(
+        raw = _git(
             ["--no-pager", "diff", base + "...HEAD", "--numstat", "--", stat_path]
-        ).strip()
+        )
+    # git 故障（_git 返 None）时按 0 计，勿裸 strip 抛异常（方向 4）
+    numstat = raw.strip() if raw is not None else ""
 
     numstat_line = ""
     if numstat:

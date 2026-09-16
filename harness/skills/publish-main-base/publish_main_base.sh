@@ -233,7 +233,7 @@ while :; do
       # 不做内容跳过，防越过验证锚点误放行）
       case "$MSG" in
         *"(baseline)"*)
-          RECEIPT_ONLY=$(git show --name-only --format= "$BH" | grep -v '^$' | grep -v '^data/verify-results/' || true)
+          RECEIPT_ONLY=$(git -c core.quotepath=false show --name-only --format= "$BH" | grep -v '^$' | grep -v '^data/verify-results/' || true)
           if [ -z "$RECEIPT_ONLY" ]; then
             SKIP_META=$((SKIP_META+1))
             if ! BH=$(git rev-parse "$BH^"); then echo "error: BH 回溯越界（$BH 无父提交）" >&2; exit 1; fi
@@ -246,7 +246,7 @@ while :; do
 done
 # 文档提交须仅改动 docs/**（防「文档(」前缀夹带未验证代码随 squash 混入 main）
 for D in $DOC_SHA_LIST; do
-  BAD=$(git show --name-only --format= "$D" | grep -v '^docs/' | grep -v '^$' || true)
+  BAD=$(git -c core.quotepath=false show --name-only --format= "$D" | grep -v '^docs/' | grep -v '^$' || true)
   if [ -n "$BAD" ]; then
     check_class DOC_VIOLATION
     echo "error: 文档提交 $D 含非 docs/ 改动（$(echo "$BAD" | tr '\n' ' ')），拒绝（防未验证代码夹带）" >&2
@@ -334,8 +334,8 @@ PYEOF
   # evidence-scope 可选：缺省交 baseline_register add-candidate 从 board 收据 cases
   # 推导（人工传值仅可为收据实测范围子集，防过度声称）
   git fetch origin || { echo "error: fetch 失败" >&2; exit 1; }
-  CNT=$(git rev-list --count main..dev)
-  [ "$CNT" -gt 0 ] || { echo "dev 无领先 main 的提交（exit 4）"; exit 4; }
+  CNT=$(git rev-list --count origin/main..dev)
+  [ "$CNT" -gt 0 ] || { echo "dev 无领先 origin/main 的提交（exit 4）"; exit 4; }
   # source_commit 取回溯后的最近内容提交 BH（非 HEAD，避免重复 prepare 时误记登记元提交）
   # 带病项自动携带：从 read_index 取 status 属 open/scheduled 且 task 匹配的条目 id
   #（逗号分隔写入 evidence.known_issues_carried；未显式 --task 时按门禁推断任务匹配，
