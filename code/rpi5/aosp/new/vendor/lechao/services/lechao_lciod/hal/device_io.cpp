@@ -67,19 +67,22 @@ int open_device(const char *path, int max_retries, int delay_ms) {
     if (max_retries <= 0) max_retries = OPEN_RETRY_MAX_DEFAULT;
     if (delay_ms  <= 0) delay_ms  = OPEN_RETRY_DELAY_MS_DEFAULT;
     int fd = -1;
+    int last_errno = 0;
     for (int i = 0; i < max_retries; i++) {
         fd = open(path, O_RDONLY);
         if (fd >= 0)
             return fd;
-        int saved = errno;  // strerror 可能改 errno，先存再打日志
-        LC_LOGD("open: attempt " << (i + 1) << "/" << max_retries << " failed: " << strerror(saved));
+        /* LCD-021：每次失败先把 errno 承接进 last_errno——LC_LOGD 展开会调
+         * debugVerbose()/strerror/流操作，污染 errno；循环外据 last_errno
+         * 打日志并还原，勿读被污染的当前 errno */
+        last_errno = errno;
+        LC_LOGD("open: attempt " << (i + 1) << "/" << max_retries << " failed: " << strerror(last_errno));
         if (i + 1 < max_retries && delay_ms > 0)
             usleep(delay_ms * 1000);
     }
-    int saved = errno;
     LC_LOGE("Cannot open " << path << " after " << max_retries
-               << " retries: " << strerror(saved));
-    errno = saved;  // 还原 errno（strerror 可能改），return 后上层取到正确错误码
+               << " retries: " << strerror(last_errno));
+    errno = last_errno;  // 还原 errno（strerror 可能改），return 后上层取到正确错误码
     return fd;
 }
 
@@ -202,7 +205,12 @@ int read_event(int fd, struct vendor_lechao_usbd_event *event, int timeout_ms) {
         }
     } while (ret < 0 && errno == EINTR);
     if (ret < 0) {
-        LC_LOGW("read_event: poll failed: " << strerror(errno));
+        /* LCD-021：poll 失败先存 saved 再打日志还原——LC_LOGW 无条件展开，
+         * strerror/流操作必执行，污染 errno；调用方 readEvent 靠 errno 区分
+         * 暂无事件（ETIMEDOUT/EAGAIN）与真故障，据 ENODEV/EIO 决定关 fd */
+        int saved = errno;
+        LC_LOGW("read_event: poll failed: " << strerror(saved));
+        errno = saved;
         return -1;
     }
     if (ret == 0) {
