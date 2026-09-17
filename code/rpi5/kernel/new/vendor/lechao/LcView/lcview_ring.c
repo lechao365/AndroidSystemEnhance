@@ -231,15 +231,23 @@ static void ring_evict_one(struct lcview_ring *ring)
 int lcview_ring_write(struct lcview_ring *ring,
                       const uint8_t *data, uint32_t len)
 {
-    uint32_t total = LCVIEW_LEN_PREFIX_SIZE + len;
+    uint32_t total;
     uint32_t avail;
     unsigned long flags;
 
-    if (total > ring->size) {
-        pr_err(PREFIX "record too large: %u > ring_size %u\n",
-               total, ring->size);
+    /*
+     * 修回绕（方向 1）：先判 len 大于 ring->size - 4 拒 -EMSGSIZE。
+     * 若先算 total = 4 + len，len 接近 UINT32_MAX 时 total 溢出回绕成
+     * 小值，绕过 total > ring->size 检查后进入写路径，memcpy 越界。
+     * 改先判 len 本身（len ≤ ring->size - 4 时 total 必不溢出）。
+     */
+    if (len > ring->size - LCVIEW_LEN_PREFIX_SIZE) {
+        pr_err(PREFIX "record too large: len=%u > ring_size-%u=%u\n",
+               len, LCVIEW_LEN_PREFIX_SIZE,
+               ring->size - LCVIEW_LEN_PREFIX_SIZE);
         return -EMSGSIZE;
     }
+    total = LCVIEW_LEN_PREFIX_SIZE + len;
 
     spin_lock_irqsave(&ring->lock, flags);
 
@@ -406,13 +414,15 @@ int lcview_ring_read(struct lcview_ring *ring,
         /*
          * 校验记录长度：
          * - 最小合法值: LCVIEW_LEN_PREFIX_SIZE (4) + 记录头 (16) = 20
+         *   方向 5：下限由 4 改 20（前缀+记录头）。[4,20) 的记录连
+         *   记录头都放不下，判损坏跳过——防伪造/损坏前缀导致的撕裂。
          * - 最大合法值: min(LCVIEW_BUILDER_MAX_SIZE, ring->size)
          *
          * 如果记录损坏，使用保守的默认大小跳过这条记录。
          * 跳过策略：推进到前缀 + 记录头大小的位置，尝试从下一条继续。
          * 这样可以最大程度地从数据损坏中恢复，而不是永久阻塞 reader。
          */
-        if (record_len < LCVIEW_LEN_PREFIX_SIZE ||
+        if (record_len < LCVIEW_LEN_PREFIX_SIZE + sizeof(struct lcview_record_hdr) ||
             record_len > LCVIEW_BUILDER_MAX_SIZE ||
             record_len > ring->size) {
             pr_warn_ratelimited(PREFIX "corrupted record at pos=%u, len=%u, skipping\n",

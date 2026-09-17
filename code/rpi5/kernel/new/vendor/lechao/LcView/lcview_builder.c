@@ -309,9 +309,15 @@ int lcview_builder_add_binary(struct lcview_builder *b,
  *
  * 调用场景：构建过程中遇到不可恢复的错误，或构建器不再需要。
  * 释放 builder 内存，记录取消事件（用于调试日志流完整性问题）。
+ *
+ * 方向 4：空指针容忍直接返回——调用方可能在 builder 创建失败
+ * （lcview_builder_start 返回 NULL）后无分支判断直接 cancel，
+ * 对 NULL 解引用会内核崩溃，此处防御性兜底。
  */
 void lcview_builder_cancel(struct lcview_builder *b)
 {
+    if (!b)
+        return;
     pr_debug(PREFIX "cancelled event_id=%u level=%u fields=%u\n",
              b->event_id, b->level, b->field_count);
     lcview_builder_free(b);

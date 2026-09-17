@@ -73,16 +73,19 @@ static void lcview_trace_probe(int device_index, u16 vid, u16 pid,
                                const char *vendor, const char *product)
 {
     struct lcview_builder *b;
+    int rc;
 
     b = lcview_builder_start(LCVIEW_EVENT_USB_PROBE, LCVIEW_LEVEL_INFO);
     if (!b)
         return;
-    lcview_builder_add_int(b, (int64_t)device_index);
-    lcview_builder_add_int(b, (int64_t)vid);
-    lcview_builder_add_int(b, (int64_t)pid);
-    lcview_builder_add_str(b, vendor);
-    lcview_builder_add_str(b, product);
-    if (lcview_builder_commit(b, &lcview_ring))
+    rc  = lcview_builder_add_int(b, (int64_t)device_index);
+    rc |= lcview_builder_add_int(b, (int64_t)vid);
+    rc |= lcview_builder_add_int(b, (int64_t)pid);
+    rc |= lcview_builder_add_str(b, vendor);
+    rc |= lcview_builder_add_str(b, product);
+    /* KRN-016：add 失败聚合处理——任一字段缺失都会使用户态
+     * 按 schema 解析错位，整体丢弃事件而非发射残缺记录。*/
+    if (rc || lcview_builder_commit(b, &lcview_ring))
         lcview_builder_cancel(b);
 }
 
@@ -95,12 +98,15 @@ static void lcview_trace_probe(int device_index, u16 vid, u16 pid,
 static void lcview_trace_disconnect(int device_index)
 {
     struct lcview_builder *b;
+    int rc;
 
     b = lcview_builder_start(LCVIEW_EVENT_USB_DISCONNECT, LCVIEW_LEVEL_INFO);
     if (!b)
         return;
-    lcview_builder_add_int(b, (int64_t)device_index);
-    if (lcview_builder_commit(b, &lcview_ring))
+    rc = lcview_builder_add_int(b, (int64_t)device_index);
+    /* KRN-016：add 失败聚合处理——任一字段缺失都会使用户态
+     * 按 schema 解析错位，整体丢弃事件而非发射残缺记录。*/
+    if (rc || lcview_builder_commit(b, &lcview_ring))
         lcview_builder_cancel(b);
 }
 

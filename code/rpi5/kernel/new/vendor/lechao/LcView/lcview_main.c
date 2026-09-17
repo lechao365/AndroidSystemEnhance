@@ -28,6 +28,7 @@
 #include <linux/device.h>
 #include <linux/poll.h>
 #include <linux/uaccess.h>
+#include <linux/capability.h>
 #include "lcview_internal.h"
 #include "lcview_ioctl.h"
 #include "lcview_ring_logic.h"
@@ -97,8 +98,12 @@ static atomic_t device_opened = ATOMIC_INIT(0);
  * 当前最低日志等级
  * 低于此级别的事件会被 lcview_builder_start 过滤掉，不分配也不写入
  * 默认 LCVIEW_LEVEL_DEBUG = 0（不过滤）
+ *
+ * 方向 2：min_level 改 atomic_t，读写原子化消竞争——SET_LEVEL ioctl
+ * 写与 builder_start 读可跨 CPU 并发，普通 uint8_t 读写存在撕裂/缓存
+ * 不一致竞争，atomic_set/atomic_read 保证原子且编译期内存屏障。
  */
-static uint8_t min_level = LCVIEW_LEVEL_DEBUG;
+static atomic_t min_level = ATOMIC_INIT(LCVIEW_LEVEL_DEBUG);
 
 /* 模块参数：环形缓冲区大小（KB），默认 256KB，最大 4096KB */
 static uint32_t ring_size_kb = LCVIEW_RING_DEFAULT_KB;
@@ -254,8 +259,16 @@ static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
     /*
      * 设置最低日志级别
      * 级别值校验：必须在 LCVIEW_LEVEL_DEBUG(0) ~ LCVIEW_LEVEL_ERROR(3) 范围内
+     *
+     * 方向 3：SET_LEVEL 加 capable(CAP_SYS_ADMIN) 校验——日志级别过滤
+     * 影响全部消费者读取内容（低级别事件被丢弃），须仅限管理员设置，
+     * 非特权进程调用返回 -EPERM。
      */
     case LCVIEW_SET_LEVEL:
+        if (!capable(CAP_SYS_ADMIN)) {
+            pr_warn(PREFIX "SET_LEVEL denied: need CAP_SYS_ADMIN\n");
+            return -EPERM;
+        }
         if (copy_from_user(&level, (void __user *)arg, sizeof(level))) {
             pr_err(PREFIX "SET_LEVEL invalid\n");
             return -EFAULT;
@@ -264,7 +277,7 @@ static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
             pr_err(PREFIX "SET_LEVEL invalid\n");
             return -EINVAL;
         }
-        min_level = level;
+        atomic_set(&min_level, level);
         break;
 
     /*
@@ -315,7 +328,7 @@ static const struct file_operations lcview_fops = {
  */
 struct lcview_builder *lcview_builder_start(uint16_t event_id, uint8_t level)
 {
-    if (level < min_level)
+    if (level < (uint8_t)atomic_read(&min_level))
         return NULL;
     return lcview_builder_new(event_id, level);
 }

@@ -192,6 +192,83 @@ static void test_ring_read_callsite_corrupt_garbage(void)
     CHECK(ring.read_pos == (0 + 20) % sizeof(ringbuf));
 }
 
+/*
+ * 调用点判红（方向 7/方向 1）：ring_write 巨 len 拒写。
+ * len 接近 UINT32_MAX 时，若先算 total = 4 + len 会溢出回绕成小值，
+ * 绕过 total > ring->size 检查进入写路径越界。修复后先判
+ * len > ring->size - 4 直接拒 -EMSGSIZE。
+ */
+static void test_ring_write_callsite_huge_len(void)
+{
+    uint8_t ringbuf[8192];
+    uint8_t readbuf[4096];
+    struct lcview_ring ring;
+
+    memset(ringbuf, 0, sizeof(ringbuf));
+    memset(readbuf, 0, sizeof(readbuf));
+
+    ring.buf = ringbuf;
+    ring.read_buf = readbuf;
+    ring.size = sizeof(ringbuf);
+    ring.write_pos = 0;
+    ring.read_pos = 0;
+    ring.shutdown = false;
+    atomic_set(&ring.overrun_cnt, 0);
+    atomic_set(&ring.total_records, 0);
+    spin_lock_init(&ring.lock);
+
+    /* 巨 len：total = 4 + 0xFFFFFFFC 溢出回绕为 0，修复前绕过检查越界写 */
+    int rc = lcview_ring_write(&ring, ringbuf, 0xFFFFFFFC);
+    CHECK(rc == -EMSGSIZE);
+}
+
+/*
+ * 调用点判红（方向 7/方向 4）：空指针 cancel 不崩。
+ * 修复前 lcview_builder_cancel(NULL) 对 NULL 解引用 b->event_id 崩溃；
+ * 修复后空指针容忍直接返回。
+ */
+static void test_builder_cancel_callsite_null(void)
+{
+    lcview_builder_cancel(NULL);
+    CHECK(1);  /* 未崩溃即通过 */
+}
+
+/*
+ * 调用点判红（方向 7/方向 5）：短前缀记录判损坏跳过。
+ * 记录长度下限由 4 改为 20（前缀+记录头），[4,20) 前缀判损坏跳过。
+ * 构造 record_len=10 的坏记录，read 判损坏且 read_pos 前移
+ * ring_corrupt_skip_len(10, size, 20) = 10（10 在 [前缀, size] 可信）。
+ * 修复前下限 4：10 ≥ 4 判合法，正常读给用户 n=10（非跳过）。
+ */
+static void test_ring_read_callsite_short_prefix(void)
+{
+    uint8_t ringbuf[8192];
+    uint8_t readbuf[4096];
+    uint8_t user[4096];
+    struct lcview_ring ring;
+
+    memset(ringbuf, 0, sizeof(ringbuf));
+    memset(readbuf, 0, sizeof(readbuf));
+    memset(user, 0, sizeof(user));
+
+    /* 短前缀 10：< 20（前缀+头）判损坏，但 ≥ 4 且在环内可信 */
+    put_u32(ringbuf, 10);
+
+    ring.buf = ringbuf;
+    ring.read_buf = readbuf;
+    ring.size = sizeof(ringbuf);
+    ring.write_pos = 10;   /* 假想损坏记录占 10B */
+    ring.read_pos = 0;
+    ring.shutdown = true;
+    atomic_set(&ring.overrun_cnt, 0);
+    atomic_set(&ring.total_records, 0);
+
+    int n = lcview_ring_read(&ring, user, sizeof(user));
+    CHECK(n == 0);
+    /* 判损坏跳过，前移 ring_corrupt_skip_len(10,...) = 10 */
+    CHECK(ring.read_pos == (0 + 10) % sizeof(ringbuf));
+}
+
 int main(void)
 {
     test_add_str_callsite_overflow();
@@ -199,6 +276,9 @@ int main(void)
     test_add_str_callsite_boundary();
     test_ring_read_callsite_corrupt_skip();
     test_ring_read_callsite_corrupt_garbage();
+    test_ring_write_callsite_huge_len();
+    test_builder_cancel_callsite_null();
+    test_ring_read_callsite_short_prefix();
     if (g_fails) {
         printf("FAIL: %d/%d checks failed\n", g_fails, g_checks);
         return 1;
