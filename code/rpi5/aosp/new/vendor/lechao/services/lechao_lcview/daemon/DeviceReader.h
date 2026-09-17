@@ -38,7 +38,8 @@ public:
     // 等待并读取一次数据：
     //   返回 >0 = 本次读到的字节数（写入 buf[offset..offset+n)）
     //   返回  0 = timeoutMs 内无可读数据（含 EINTR/EAGAIN 可恢复情形）
-    //   返回 -1 = 致命错误（fd 失效/epoll 损坏，errno 携带现场）
+    //   返回 -1 = 致命错误（fd 失效/epoll 未注册 → errno=EBADF；
+    //             offset >= cap 调用方参数错误 → errno=EINVAL）
     virtual ssize_t waitAndRead(uint8_t* buf, size_t offset, size_t cap,
                                 int timeoutMs) = 0;
 

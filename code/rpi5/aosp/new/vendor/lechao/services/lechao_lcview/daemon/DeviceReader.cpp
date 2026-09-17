@@ -113,8 +113,14 @@ bool EpollDeviceReader::open()
 ssize_t EpollDeviceReader::waitAndRead(uint8_t* buf, size_t offset,
                                         size_t cap, int timeoutMs)
 {
-    if (mFd < 0 || mEpfd < 0 || offset >= cap) {
+    // 参数防御拆分（方向 1）：fd 未打开/未注册是设备状态错误 → EBADF；
+    // offset >= cap 是调用方参数错误 → EINVAL（与设备状态解耦，语义明确）
+    if (mFd < 0 || mEpfd < 0) {
         errno = EBADF;
+        return -1;
+    }
+    if (offset >= cap) {
+        errno = EINVAL;
         return -1;
     }
 

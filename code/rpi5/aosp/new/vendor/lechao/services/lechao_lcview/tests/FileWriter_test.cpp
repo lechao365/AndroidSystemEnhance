@@ -1602,6 +1602,38 @@ TEST(FileWriterWriteInvalidTest, TruncateToLastNewline_RemovesPartialLine) {
     EXPECT_EQ(readFile(inv), complete);
 }
 
+TEST(FileWriterWriteInvalidTest, LargeFile_MultiNewline_TruncatesOnlyTrailingPartial) {
+    // 方向 1 回归（>64KB）：truncateToLastNewline 旧实现从文件头分块向前找
+    // 换行，前 64KB 块内任一换行即被误当"最后一个换行"，>64KB 多行文件
+    // 的完整行会被整段误截；改为从文件尾向前找后，仅尾部半行被截断，
+    // 前面所有完整行（含换行）全部保留。
+    TempDir dir;
+    const std::string inv = dir.path() + "/invalid_records.log";
+    // 1000 行 × 80B（79 个 'x' + '\n'）= 80000B > 64KB（truncateToLastNewline
+    // 的 kChunk 单块上限），保证首个读块内就有换行——旧实现必误截的触发条件
+    const std::string line(79, 'x');
+    std::string complete;
+    complete.reserve(1000 * 80);
+    for (int i = 0; i < 1000; i++)
+        complete += line + "\n";
+    ASSERT_GT(complete.size(), 64u * 1024u);
+    const std::string partial = "{\"tail\":1}";  // 尾部残留半行（无换行）
+    {
+        std::ofstream f(inv, std::ios::app);
+        f << complete << partial;
+    }
+
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+    // 构造时 openInvalidStream 截断半行：只去尾部半行，完整行全保留，
+    // mInvalidSize 恢复为完整内容字节数（非 0，非被误截的前 64KB 内位置）
+    EXPECT_EQ(writer.mInvalidSize, complete.size());
+    EXPECT_EQ(readFile(inv), complete);
+    // 截断后再次调用幂等：文件以换行结尾不再截断，返回值 = 完整字节数
+    EXPECT_EQ(writer.truncateToLastNewline(inv), complete.size());
+}
+
 // ============================================================
 // 方向 5：fsyncActiveFiles（心跳同锚刷活跃文件）+ 轮转前刷旧文件
 // ============================================================

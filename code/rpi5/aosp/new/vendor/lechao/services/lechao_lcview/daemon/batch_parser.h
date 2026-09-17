@@ -53,13 +53,13 @@ bool loadSchemaWithRetry(SchemaParser& schema, const std::string& path,
 bool shouldFlushBatch(size_t buffered, bool timedOut, bool ageExpired,
                       size_t bufferCapacity);
 
-// 预防性 flush 判定（丢数据收口 方向 1）：缓冲剩余空间不足以容纳内核
-// 单次读最小单位（minRead）时，须先强制 flush 清空缓冲——否则
-// waitAndRead 以 cap-offset 调内核 read，内核因剩余容量过小返回
-// -EINVAL，主循环退出交 init 重启形成退出环（数据持续丢失）。
-// 参数：buffered 当前缓冲字节数，bufferCapacity 缓冲上限，
-//   minRead 内核单次读最小容量。buffered>=bufferCapacity（满/越界）同样
-//   须 flush（剩余为 0）。
+// 预防性 flush 判定（丢数据收口 方向 1）：缓冲剩余空间不足以容纳单条记录
+// 上限（minRead = LCVIEW_MAX_RECORD_SIZE，真相源内核 LCVIEW_BUILDER_MAX_SIZE）
+// 时，须先强制 flush 清空缓冲——否则 waitAndRead 以 cap-offset 调内核 read，
+// 首条记录放不下剩余缓冲返回 -EMSGSIZE（KRN-001），缓冲不足反复空转。
+// 契约收敛（方向 1）：内核 read 无 4096 读下限，EMSGSIZE 由"剩余空间恒 >=
+// 单条记录上限"的预防性 flush 提前闭合。buffered>=bufferCapacity（满/越界）
+// 同样须 flush（剩余为 0）。
 bool shouldPreventiveFlush(size_t buffered, size_t bufferCapacity,
                            size_t minRead);
 

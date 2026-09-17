@@ -88,13 +88,14 @@ TEST_F(EpollDeviceReaderTest, ReadFromClosedFd_ReturnsEBADF) {
     EXPECT_EQ(errno, EBADF);
 }
 
-TEST_F(EpollDeviceReaderTest, InvalidOffsetCap_ReturnsEBADF) {
-    // 错误码：offset >= cap → -1 + errno=EBADF（参数防御）
+TEST_F(EpollDeviceReaderTest, InvalidOffsetCap_ReturnsEINVAL) {
+    // 方向 1：offset >= cap 是调用方参数错误 → -1 + errno=EINVAL
+    // （与 fd 未打开的设备状态错误 EBADF 解耦，不再混判）
     ASSERT_TRUE(mReader->open());
     uint8_t buf[64];
     errno = 0;
     EXPECT_EQ(mReader->waitAndRead(buf, 64, 64, 50), -1);
-    EXPECT_EQ(errno, EBADF);
+    EXPECT_EQ(errno, EINVAL);
 }
 
 TEST_F(EpollDeviceReaderTest, OverrunIoctlUnsupported_ReturnsZero) {

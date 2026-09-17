@@ -493,27 +493,32 @@ size_t FileWriter::truncateToLastNewline(const std::string& path)
     }
     const off_t size = st.st_size;
     off_t lastNl = -1;
-    // 分块读查找最后一个换行：日志单文件 <=50MB，心跳外低频调用（open/
-    // 轮转/重启），全文件读一次可接受；不追求 mmap 的复杂度
+    // 分块从文件尾向前找最后一个换行：日志单文件 <=50MB，心跳外低频调用
+    // （open/轮转/重启），全文件读一次可接受；不追求 mmap 的复杂度。
+    // 从尾向前的第一块内从块尾往前扫，找到的第一个换行即文件最后一个换行
+    // （若文件以换行结尾则 lastNl=size-1，keep==size 不截断）；块内无换行
+    // 则继续读更靠前的块直至文件头。
+    // 旧实现从文件头分块向前找：>64KB 多行文件在前 64KB 块内即命中换行并
+    // 被误当"最后一个换行"，其后所有完整行被整段截断（方向 1 截断回归，
+    // 对应 FileWriter_test 的 >64KB 用例）
     constexpr size_t kChunk = 64 * 1024;
     std::vector<char> buf(kChunk);
-    off_t pos = 0;
-    while (pos < size) {
-        size_t want = static_cast<size_t>(
-            std::min<off_t>(kChunk, size - pos));
-        ssize_t n = pread(fd, buf.data(), want, pos);
+    off_t pos = size;
+    while (pos > 0) {
+        off_t start = pos - std::min<off_t>(kChunk, pos);
+        size_t want = static_cast<size_t>(pos - start);
+        ssize_t n = pread(fd, buf.data(), want, start);
         if (n <= 0)
             break;
         for (ssize_t i = n - 1; i >= 0; i--) {
             if (buf[i] == '\n') {
-                lastNl = pos + i;
+                lastNl = start + i;
                 break;
             }
         }
-        pos += n;
-        // 从后往前找：一旦在块内找到换行，它就是文件最后一个换行
         if (lastNl != -1)
             break;
+        pos = start;
     }
     off_t keep = (lastNl >= 0) ? lastNl + 1 : 0;
     if (keep != size) {

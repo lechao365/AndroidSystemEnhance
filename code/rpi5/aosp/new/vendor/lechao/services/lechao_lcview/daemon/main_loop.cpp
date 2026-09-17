@@ -20,6 +20,7 @@
 
 #include "batch_parser.h"
 #include "lechao_log.h"
+#include "../include/lcview_events.h"
 #include <log/log.h>
 #include <csignal>
 #include <cerrno>
@@ -195,8 +196,16 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
     long long invalidRecords = 0;
     static constexpr size_t kBufSize = 64 * 1024;
     static constexpr int kEpollTimeoutMs = 1000;
-    // 内核单次读最小容量：内核 read 要求 cap-offset >= 4096，否则 -EINVAL
-    static constexpr size_t kMinReadSize = 4096;
+    // 预防性 flush 阈值 = 单条记录上限（LCVIEW_MAX_RECORD_SIZE，真相源内核
+    // LCVIEW_BUILDER_MAX_SIZE）：内核 read 无 4096 读下限（lcview_ring_read
+    // 仅按记录长度上限校验，不要求 cap-offset 固定值）；EMSGSIZE（首条记录
+    // 放不下剩余缓冲，KRN-001）由"剩余空间恒 >= 单条记录上限"的预防性 flush
+    // 提前闭合，读路径不再因缓冲不足返 EMSGSIZE
+    static constexpr size_t kMinReadSize = LCVIEW_MAX_RECORD_SIZE;
+    // 契约收敛硬约束：kMinReadSize 不得小于单条记录上限——否则预防性 flush
+    // 后剩余空间仍可能放不下一条最大记录，EMSGSIZE 漏网（与读端闭合条件矛盾）
+    static_assert(kMinReadSize >= LCVIEW_MAX_RECORD_SIZE,
+                  "kMinReadSize 须不小于单条记录上限 LCVIEW_MAX_RECORD_SIZE");
     uint8_t buf[kBufSize];
     size_t offset = 0;
     auto dataArrivedAt = std::chrono::steady_clock::time_point::max();

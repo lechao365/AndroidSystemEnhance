@@ -250,8 +250,9 @@ TEST(DaemonLoopHelperTest, Flush_TimeoutOrAge_TriggersFlush) {
 // ============================================================
 
 TEST(DaemonLoopHelperTest, PreventiveFlush_RemainingBelowMinRead_TriggersFlush) {
-    // 方向 1：缓冲剩余空间 < 内核最小读单位（4096）须先 flush——否则
-    // 内核 read 因 cap-offset 过小返 -EINVAL，主循环退出交 init 重启成环
+    // 方向 1：缓冲剩余空间 < 单条记录上限（minRead=4096）须先 flush——否则
+    // 首条记录放不下剩余缓冲返 -EMSGSIZE（KRN-001），缓冲不足反复空转
+    // （契约收敛：内核 read 无 4096 读下限，靠记录上限与 flush 闭合）
     const size_t cap = 64 * 1024;
     const size_t minRead = 4096;
     // 剩余恰好 4096：不 flush（边界闭合，>= minRead 合法）
