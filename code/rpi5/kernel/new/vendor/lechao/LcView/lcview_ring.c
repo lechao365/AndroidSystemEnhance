@@ -43,6 +43,10 @@ extern int lcview_debug;
 
 #define PREFIX KERNEL_LCVIEW_TAG ": ring: "
 
+/* 读取实现，由 lcview_ring_read 包装调用（见下） */
+static int lcview_ring_read_internal(struct lcview_ring *ring,
+                                     uint8_t __user *buf, uint32_t len);
+
 /*
  * ring_avail_write — 计算环形缓冲区中可写入的空闲空间
  *
@@ -131,8 +135,10 @@ int lcview_ring_init(struct lcview_ring *ring, uint32_t size_kb)
     ring->shutdown = false;
     atomic_set(&ring->overrun_cnt, 0);
     atomic_set(&ring->total_records, 0);
+    atomic_set(&ring->readers, 0);
     spin_lock_init(&ring->lock);
     init_waitqueue_head(&ring->waitq);
+    init_waitqueue_head(&ring->exit_wait);
 
     pr_info(PREFIX "initialized ring=%uKB read_buf=%uB\n",
             size / 1024, LCVIEW_BUILDER_MAX_SIZE);
@@ -144,12 +150,16 @@ int lcview_ring_init(struct lcview_ring *ring, uint32_t size_kb)
  * lcview_ring_destroy — 销毁环形缓冲区
  *
  * 设置 shutdown 标志后唤醒等待中的 reader，使其感知关闭事件并退出。
- * 然后释放两个 vmalloc 缓冲区。
+ * 然后经 wait_event(exit_wait) 等所有在途 read 调用（readers 计数）归零，
+ * 最后才释放两个 vmalloc 缓冲区。
  *
- * 为什么先设 shutdown 再释放内存？
- * 因为 reader 可能在等待队列中睡眠，wake_up_interruptible 之后 reader
- * 会检查 shutdown 标志并退出临界区，然后我们才能安全释放内存。
- * 如果不先设 shutdown，reader 可能刚被唤醒就去读已被释放的 buf。
+ * 为什么先设 shutdown 再等 readers 归零再释放内存？
+ * 因为 reader 可能在等待队列中睡眠，或在锁外 copy_to_user / 锁内
+ * memcpy 的任意点访问 buf / read_buf。wake_up_interruptible 之后 reader
+ * 会检查 shutdown 标志并退出，但"唤醒"与"真正退出"之间存在窗口——
+ * 若不等 readers 归零就 vfree，正在 copy_to_user 的 reader 会读已释放的
+ * read_buf（UAF）。readers 归零是"已无任何 reader 引用 buf"的可靠信号，
+ * 只有归零后才能安全释放内存。
  */
 void lcview_ring_destroy(struct lcview_ring *ring)
 {
@@ -159,6 +169,9 @@ void lcview_ring_destroy(struct lcview_ring *ring)
     ring->shutdown = true;
     spin_unlock_irqrestore(&ring->lock, flags);
     wake_up_interruptible(&ring->waitq);
+
+    /* 等所有在途 read 调用退出（readers 归零）再释放，杜绝 UAF */
+    wait_event(ring->exit_wait, atomic_read(&ring->readers) == 0);
 
     vfree(ring->read_buf);
     ring->read_buf = NULL;
@@ -326,7 +339,52 @@ int lcview_ring_write(struct lcview_ring *ring,
 }
 
 /*
- * lcview_ring_read — 从环形缓冲区读取事件记录到用户缓冲区
+ * lcview_ring_read — 从环形缓冲区读取事件记录到用户缓冲区（UAF 安全包装）
+ *
+ * 生命周期契约（防 UAF）：
+ *   1. 入口 atomic_inc(&ring->readers)，标记一个在途读调用。
+ *   2. 持锁检查 shutdown：已销毁（shutdown=true）时直接返回 0（EOF），
+ *      不触碰 buf / read_buf——避免 destroy 置位后新读仍去访问内存。
+ *   3. 调内部实现 lcview_ring_read_internal 执行真正的读取。
+ *   4. 出口 atomic_dec_and_test(&ring->readers)，归零时 wake_up(exit_wait)，
+ *      唤醒可能正 wait_event(exit_wait) 睡眠的 lcview_ring_destroy。
+ *
+ * destroy 经 wait_event(exit_wait, readers == 0) 等所有在途 read 退出后
+ * 才 vfree buf / read_buf，杜绝"reader 还在 copy_to_user 内存已被释放"的 UAF。
+ */
+int lcview_ring_read(struct lcview_ring *ring,
+                     uint8_t __user *buf, uint32_t len)
+{
+    int ret;
+    unsigned long flags;
+
+    atomic_inc(&ring->readers);
+
+    /* 入口查 shutdown：销毁后新读直接 EOF，不进内部函数触碰已释放内存 */
+    spin_lock_irqsave(&ring->lock, flags);
+    if (ring->shutdown) {
+        spin_unlock_irqrestore(&ring->lock, flags);
+        ret = 0;
+        goto out;
+    }
+    spin_unlock_irqrestore(&ring->lock, flags);
+
+    ret = lcview_ring_read_internal(ring, buf, len);
+
+out:
+    /* 读调用退出：归零唤醒 destroy（readers==0 是"可安全释放内存"的信号） */
+    if (atomic_dec_and_test(&ring->readers))
+        wake_up(&ring->exit_wait);
+    return ret;
+}
+
+/*
+ * lcview_ring_read_internal — 环形缓冲区读取实现（不含入口 shutdown 检查）
+ *
+ * 由 lcview_ring_read 包装调用，调用者已 inc readers 且确认非 shutdown。
+ * 本函数内仍须在循环中检查 shutdown：读期间 destroy 可能置位，须尽快
+ * 退出（方向 3：shutdown 即 break，已拷贝数据照常返回），配合包装出口
+ * 的 readers 归零让 destroy 得以安全释放内存。
  *
  * 读取策略：
  *   1. 在循环中尽可能多地读取记录，直到填满用户缓冲区 (len) 或数据读完
@@ -345,11 +403,11 @@ int lcview_ring_write(struct lcview_ring *ring,
  * 用户态通常一次性提供大缓冲区（如 64KB 或更大），批量读取多条记录
  * 可以减少系统调用次数，提高吞吐量。
  *
- * 为什么 shutdown + empty 时返回 0 而非负值？
+ * 为什么 shutdown 后返回 0 而非负值？
  * 返回 0 表示 EOF，用户态 reader 应关闭设备并退出。
  */
-int lcview_ring_read(struct lcview_ring *ring,
-                     uint8_t __user *buf, uint32_t len)
+static int lcview_ring_read_internal(struct lcview_ring *ring,
+                                     uint8_t __user *buf, uint32_t len)
 {
     uint32_t copied_total = 0;
     int ret;
@@ -379,24 +437,25 @@ int lcview_ring_read(struct lcview_ring *ring,
         }
 
         /*
+         * 方向 3：shutdown 即 break，已拷贝数据照常返回。
+         * 读期间 destroy 可能置位 shutdown——立刻停止交付剩余记录，
+         * 让包装出口的 readers 归零尽快解除 destroy 的 wait_event，
+         * 缩短销毁窗口。已拷贝的字节数随 break 后的 return 照常交付
+         * （copied_total==0 时返回 0 即 EOF）。原"shutdown+empty 才返回"
+         * 会继续消费 shutdown 后残留的记录，拖延销毁且无必要。
+         */
+        if (ring->shutdown) {
+            spin_unlock_irqrestore(&ring->lock, flags);
+            break;
+        }
+
+        /*
          * 已经读取到部分数据后，如果此时 ring 为空，则直接返回已读数据，
          * 避免为了填满整个用户缓冲区而无限阻塞。
          */
         if (copied_total > 0 && ring->write_pos == ring->read_pos) {
             spin_unlock_irqrestore(&ring->lock, flags);
             break;
-        }
-
-        /*
-         * 如果 shutdown 且缓冲区已空，终止读取。
-         * 如果已经拷贝了一些数据给用户态，先返回已拷贝的字节数；
-         * 否则返回 0 表示 EOF。
-         */
-        if (ring->shutdown && ring->write_pos == ring->read_pos) {
-            spin_unlock_irqrestore(&ring->lock, flags);
-            if (copied_total > 0)
-                return (int)copied_total;
-            return 0;
         }
 
         rpos = ring->read_pos;

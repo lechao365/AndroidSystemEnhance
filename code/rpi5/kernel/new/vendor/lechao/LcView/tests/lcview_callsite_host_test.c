@@ -7,6 +7,12 @@
  * lcview_builder_add_binary / lcview_ring_read 判损坏跳过），使调用点改坏
  * （漏扣 4B 前缀 / 判损坏跳过只前移前缀+头）在 host 层判红，不再"改坏照绿"。
  *
+ * UAF 修复判红（方向 2/3/7）：read 改为 readers 计数 + shutdown 入口检查的
+ * 包装，destroy 经 wait_event(exit_wait) 等 readers 归零再 vfree。本文件
+ * 构造 ring 均补 readers/exit_wait 两字段初始化；既有"判损坏跳过"用例改走
+ * 内部读路径（shutdown=false + 后跟合法记录），并新增 destroy 后 read 返 0、
+ * shutdown 含数据停交付、正常/EMSGSIZE 后 readers 归零四类判红。
+ *
  * 编译运行：make test（Makefile 已链入调用点文件 + -D__KERNEL__ + shim 头）。
  * 退出码 0 全过。
  */
@@ -138,23 +144,31 @@ static void test_ring_read_callsite_corrupt_skip(void)
     memset(readbuf, 0, sizeof(readbuf));
     memset(user, 0, sizeof(user));
 
-    /* 一条损坏记录：长度前缀 4100（> MAX 判损坏，但 ≤ ring->size 可信） */
+    /* 一条损坏记录：长度前缀 4100（> MAX 判损坏，但 ≤ ring->size 可信），
+     * 后跟一条合法记录 20B（前缀 4 + 记录头 16），跳过损坏后正常读完
+     * 返回（copied_total>0 且 ring 空 → break，避免空环阻塞等待）。 */
     put_u32(ringbuf, 4100);
+    put_u32(ringbuf + 4100, 20);
 
     ring.buf = ringbuf;
     ring.read_buf = readbuf;
     ring.size = sizeof(ringbuf);
-    ring.write_pos = 4100;   /* 假想写者已写入 4100B 损坏记录 */
+    ring.write_pos = 4100 + 20;  /* 损坏记录 4100B + 合法记录 20B */
     ring.read_pos = 0;
-    ring.shutdown = true;    /* 判损坏跳过排空后返回 EOF（0），不阻塞等待 */
+    ring.shutdown = false;  /* UAF 修复新语义：shutdown=true 时 read 入口直返
+                             * 0，须走内部读路径才能判红跳过前移量 */
     atomic_set(&ring.overrun_cnt, 0);
     atomic_set(&ring.total_records, 0);
+    atomic_set(&ring.readers, 0);
+    init_waitqueue_head(&ring.exit_wait);
 
-    /* read 判损坏后按 record_len=4100 前移 read_pos（% size） */
+    /* read 判损坏后按 record_len=4100 前移 read_pos（% size），再读合法记录 */
     int n = lcview_ring_read(&ring, user, sizeof(user));
-    /* 4100 > 4096（用户缓冲），首条判损坏跳过，ring 已排空 → 返回 0（EOF） */
-    CHECK(n == 0);
-    CHECK(ring.read_pos == (0 + 4100) % sizeof(ringbuf)); /* 4100，修复前为 20 */
+    /* 跳过 4100B 损坏记录 + 读到 20B 合法记录，返回 20（修复前只跳 20 撕裂流） */
+    CHECK(n == 20);
+    CHECK(ring.read_pos == (0 + 4100 + 20) % sizeof(ringbuf)); /* 4120 */
+    /* 读调用退出后 readers 归零（destroy 可安全释放内存） */
+    CHECK(atomic_read(&ring.readers) == 0);
 }
 
 /*
@@ -172,24 +186,27 @@ static void test_ring_read_callsite_corrupt_garbage(void)
     memset(readbuf, 0, sizeof(readbuf));
     memset(user, 0, sizeof(user));
 
-    /* 垃圾前缀 9000 > ring->size=8192 → 不可信，回落保守默认 20
-     * write_pos=20 表示该记录实际仅占 20B（前缀4+头16），read 跳过
-     * 后 read_pos 追上 write_pos，shutdown 下返回 EOF（0）。 */
+    /* 垃圾前缀 9000 > ring->size=8192 → 不可信，回落保守默认 20；
+     * 后跟合法记录 20B（前缀4+头16），跳过 20 后读合法记录正常返回。 */
     put_u32(ringbuf, 9000);
+    put_u32(ringbuf + 20, 20);
 
     ring.buf = ringbuf;
     ring.read_buf = readbuf;
     ring.size = sizeof(ringbuf);
-    ring.write_pos = 20;
+    ring.write_pos = 40;
     ring.read_pos = 0;
-    ring.shutdown = true;
+    ring.shutdown = false;
     atomic_set(&ring.overrun_cnt, 0);
     atomic_set(&ring.total_records, 0);
+    atomic_set(&ring.readers, 0);
+    init_waitqueue_head(&ring.exit_wait);
 
     int n = lcview_ring_read(&ring, user, sizeof(user));
-    CHECK(n == 0);
-    /* 默认跳过量 = 前缀 4 + 记录头 16 = 20 */
-    CHECK(ring.read_pos == (0 + 20) % sizeof(ringbuf));
+    CHECK(n == 20);
+    /* 默认跳过量 = 前缀 4 + 记录头 16 = 20，再读 20B 合法记录 → 40 */
+    CHECK(ring.read_pos == (0 + 20 + 20) % sizeof(ringbuf));
+    CHECK(atomic_read(&ring.readers) == 0);
 }
 
 /*
@@ -215,6 +232,8 @@ static void test_ring_write_callsite_huge_len(void)
     ring.shutdown = false;
     atomic_set(&ring.overrun_cnt, 0);
     atomic_set(&ring.total_records, 0);
+    atomic_set(&ring.readers, 0);
+    init_waitqueue_head(&ring.exit_wait);
     spin_lock_init(&ring.lock);
 
     /* 巨 len：total = 4 + 0xFFFFFFFC 溢出回绕为 0，修复前绕过检查越界写 */
@@ -251,22 +270,116 @@ static void test_ring_read_callsite_short_prefix(void)
     memset(readbuf, 0, sizeof(readbuf));
     memset(user, 0, sizeof(user));
 
-    /* 短前缀 10：< 20（前缀+头）判损坏，但 ≥ 4 且在环内可信 */
+    /* 短前缀 10：< 20（前缀+头）判损坏，但 ≥ 4 且在环内可信；
+     * 后跟合法记录 20B，跳过 10 后读合法记录正常返回。 */
     put_u32(ringbuf, 10);
+    put_u32(ringbuf + 10, 20);
 
     ring.buf = ringbuf;
     ring.read_buf = readbuf;
     ring.size = sizeof(ringbuf);
-    ring.write_pos = 10;   /* 假想损坏记录占 10B */
+    ring.write_pos = 30;   /* 损坏记录 10B + 合法记录 20B */
     ring.read_pos = 0;
-    ring.shutdown = true;
+    ring.shutdown = false;
     atomic_set(&ring.overrun_cnt, 0);
     atomic_set(&ring.total_records, 0);
+    atomic_set(&ring.readers, 0);
+    init_waitqueue_head(&ring.exit_wait);
 
     int n = lcview_ring_read(&ring, user, sizeof(user));
+    CHECK(n == 20);
+    /* 判损坏跳过 ring_corrupt_skip_len(10,...) = 10，再读 20B → 30 */
+    CHECK(ring.read_pos == (0 + 10 + 20) % sizeof(ringbuf));
+    CHECK(atomic_read(&ring.readers) == 0);
+}
+
+/*
+ * 方向 7（UAF 修复判红）：destroy 后 read 直返 0（EOF）。
+ * 修复前 destroy 直接 vfree，reader 可能读已释放内存（UAF）；修复后
+ * lcview_ring_read 入口 inc readers + 持锁查 shutdown，销毁后新读返回 0，
+ * 且入口/出口的 readers 计数在 destroy 的 wait_event 保护下归零。
+ * 用 lcview_ring_init 构造（vmalloc shim=malloc），destroy 的 vfree 安全。
+ */
+static void test_ring_destroy_read_zero(void)
+{
+    struct lcview_ring ring;
+    uint8_t user[256];
+
+    CHECK(lcview_ring_init(&ring, 1) == 0);
+    /* destroy：置 shutdown → wait_event(exit_wait, readers==0)（未读，归零）→ vfree */
+    lcview_ring_destroy(&ring);
+    /* 销毁后新 read 入口查 shutdown 直返 0，不触碰已释放的 buf/read_buf */
+    int n = lcview_ring_read(&ring, user, sizeof(user));
     CHECK(n == 0);
-    /* 判损坏跳过，前移 ring_corrupt_skip_len(10,...) = 10 */
-    CHECK(ring.read_pos == (0 + 10) % sizeof(ringbuf));
+    CHECK(atomic_read(&ring.readers) == 0);
+}
+
+/*
+ * 方向 7（UAF 修复判红）：shutdown 含数据停交付。
+ * ring 中已有可读记录（68B），但 shutdown 置位后 read 入口立即停交付
+ * 返回 0，不消费剩余记录——配合 destroy 的 wait_event 尽快收敛。
+ */
+static void test_ring_shutdown_stops_delivery(void)
+{
+    struct lcview_ring ring;
+    uint8_t user[256];
+    uint8_t payload[64];
+
+    CHECK(lcview_ring_init(&ring, 1) == 0);
+    memset(payload, 0x11, sizeof(payload));
+    CHECK(lcview_ring_write(&ring, payload, sizeof(payload)) == 0);
+
+    /* ring 含 68B 记录，但 shutdown 置位后 read 停交付（入口返 0） */
+    ring.shutdown = true;
+    int n = lcview_ring_read(&ring, user, sizeof(user));
+    CHECK(n == 0);
+    CHECK(atomic_read(&ring.readers) == 0);
+
+    ring.shutdown = false;
+    lcview_ring_destroy(&ring);
+}
+
+/*
+ * 方向 7（UAF 修复判红）：正常 read 返回后 readers 归零。
+ * read 包装出口 atomic_dec_and_test 归零，destroy 的 wait_event 据此
+ * 判定"可安全释放内存"；归零失败即 destroy 提前 vfree 的 UAF 风险。
+ */
+static void test_ring_read_readers_zero(void)
+{
+    struct lcview_ring ring;
+    uint8_t user[256];
+    uint8_t payload[64];
+
+    CHECK(lcview_ring_init(&ring, 1) == 0);
+    memset(payload, 0x22, sizeof(payload));
+    CHECK(lcview_ring_write(&ring, payload, sizeof(payload)) == 0);
+
+    int n = lcview_ring_read(&ring, user, sizeof(user));
+    CHECK(n == 68);   /* 4B 前缀 + 64B 数据 */
+    CHECK(atomic_read(&ring.readers) == 0);   /* 正常路径出口归零 */
+    lcview_ring_destroy(&ring);
+}
+
+/*
+ * 方向 7（UAF 修复判红）：EMSGSIZE 错误路径后 readers 也归零。
+ * 首条记录（4+100=104B）放不进 64B 用户缓冲 → -EMSGSIZE（KRN-001），
+ * 该错误从内部函数提前 return，readers 须由包装出口归零，否则 destroy
+ * wait_event 永等、销毁死锁。
+ */
+static void test_ring_read_emsgsize_readers_zero(void)
+{
+    struct lcview_ring ring;
+    uint8_t user[64];
+    uint8_t payload[100];
+
+    CHECK(lcview_ring_init(&ring, 1) == 0);
+    memset(payload, 0x33, sizeof(payload));
+    CHECK(lcview_ring_write(&ring, payload, sizeof(payload)) == 0);
+
+    int n = lcview_ring_read(&ring, user, sizeof(user));
+    CHECK(n == -EMSGSIZE);
+    CHECK(atomic_read(&ring.readers) == 0);   /* 错误路径出口归零 */
+    lcview_ring_destroy(&ring);
 }
 
 int main(void)
@@ -279,6 +392,10 @@ int main(void)
     test_ring_write_callsite_huge_len();
     test_builder_cancel_callsite_null();
     test_ring_read_callsite_short_prefix();
+    test_ring_destroy_read_zero();
+    test_ring_shutdown_stops_delivery();
+    test_ring_read_readers_zero();
+    test_ring_read_emsgsize_readers_zero();
     if (g_fails) {
         printf("FAIL: %d/%d checks failed\n", g_fails, g_checks);
         return 1;

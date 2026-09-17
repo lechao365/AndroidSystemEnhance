@@ -6,3 +6,4 @@ typedef struct { int unused; } wait_queue_entry_t;
 #define wake_up_interruptible(w) do {} while (0)
 #define wake_up(w) do {} while (0)
 #define wait_event_interruptible(w, c) ({ int __r = 0; (void)(c); __r; })
+#define wait_event(w, c) do { (void)(w); (void)(c); } while (0)

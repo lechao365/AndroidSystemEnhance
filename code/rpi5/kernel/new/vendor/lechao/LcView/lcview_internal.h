@@ -58,6 +58,12 @@
  *
  * 空间不足时写者自动驱逐最旧记录 (ring_evict_one)，保证最新事件不丢失。
  * 适用于"最新 N 条"日志场景，而非可靠传输。
+ *
+ * 生命周期防护（防 UAF）：lcview_ring_read 入口 atomic_inc(readers)，
+ * 出口 atomic_dec_and_test 归零时 wake_up(exit_wait)；lcview_ring_destroy
+ * 置 shutdown 后经 wait_event(exit_wait) 等 readers 归零，才 vfree buf/
+ * read_buf。写者路径由 spin_lock 与 shutdown 检查互斥闭环（销毁前持锁
+ * 置 shutdown，后续写者查 shutdown 拒绝），无需计数。
  */
 struct lcview_ring {
     uint8_t      *buf;         /* 环形缓冲区内存（vmalloc 分配） */
@@ -70,6 +76,8 @@ struct lcview_ring {
     spinlock_t    lock;        /* 保护 write_pos/read_pos 的自旋锁 */
     wait_queue_head_t waitq;   /* 读取等待队列，写完后 wake_up 唤醒 reader */
     bool          shutdown;    /* destroy 标记，通知等待中的 reader 退出 */
+    atomic_t      readers;     /* 在途读调用计数，destroy 等其归零再释放内存（防 UAF） */
+    wait_queue_head_t exit_wait; /* 读调用归零等待队列，destroy 睡眠等所有 reader 退出 */
 };
 
 /* 全局环形缓冲区实例，在 lcview_main.c 中定义 */

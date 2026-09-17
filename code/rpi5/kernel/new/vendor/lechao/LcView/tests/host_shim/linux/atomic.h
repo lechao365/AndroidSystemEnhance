@@ -8,3 +8,4 @@ static inline int atomic_read(const atomic_t *v) { return v->counter; }
 static inline void atomic_inc(atomic_t *v) { v->counter++; }
 static inline void atomic_dec(atomic_t *v) { v->counter--; }
 static inline int atomic_xchg(atomic_t *v, int i) { int o = v->counter; v->counter = i; return o; }
+static inline int atomic_dec_and_test(atomic_t *v) { return --v->counter == 0; }
