@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -37,9 +38,12 @@ BatchParseResult parseBatch(SchemaParser& schema, FileWriter& writer,
                             const uint8_t* data, size_t len);
 
 // schema 加载重试（vendor 分区可能晚于 daemon 就绪）：
-// 最多 maxRetries 次、每次间隔 interval，eventCount>0 即成功
+// 最多 maxRetries 次、每次间隔 interval，eventCount>0 即成功。
+// running 为可中断开关（生产传全局 gRunning）：重试期间收到停止信号
+// （SIGTERM 置 gRunning=false）立即退出，不再等满 maxRetries×interval
+// （原实现最长 15s 无法及时响应 init stop，方向 4）
 bool loadSchemaWithRetry(SchemaParser& schema, const std::string& path,
-                         int maxRetries,
+                         const std::atomic<bool>& running, int maxRetries,
                          std::chrono::milliseconds interval =
                              std::chrono::milliseconds(500));
 

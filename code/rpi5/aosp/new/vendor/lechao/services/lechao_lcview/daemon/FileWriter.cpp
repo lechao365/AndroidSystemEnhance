@@ -143,8 +143,13 @@ int FileWriter::nextSeqFor(const EventSchema& schema, const std::string& date)
                          + "_" + date + "_p";
     int maxSeq = -1;
     DIR* dir = opendir(mCfg.logDir.c_str());
-    if (!dir)
+    if (!dir) {
+        // 方向 5：opendir 失败须可见——静默 return 0 会让 seq 归 0 续接，
+        // daemon 重启/跨天后重复写 _p0 追加旧文件（轮转约束失效）且无信号
+        ALOGE("FileWriter: nextSeqFor: opendir(%s) failed: %s (seq not continued, "
+              "may rewrite _p0)", mCfg.logDir.c_str(), strerror(errno));
         return 0;
+    }
     struct dirent* entry;
     while ((entry = readdir(dir)) != nullptr) {
         std::string name(entry->d_name);
@@ -868,16 +873,20 @@ void FileWriter::checkRotation()
                 fs.stream.close();
             }
 
-            // 同一天内 seq 递增，跨天重置
-            if (fs.currentDate == today)
-                fs.seq++;
-            else
-                fs.seq = 0;
-
             // 用 stub schema 生成新文件名（只需 id 和 name）
             EventSchema stubSchema;
             stubSchema.id = fs.eventId;
             stubSchema.name = fs.eventName;
+
+            // 同一天内 seq 递增；跨天走 nextSeqFor 续接（扫描目标日期目录
+            // 已有最大 seq+1）——时钟回拨/跨天后重复写 _p0 追加旧文件的 P0
+            // 修复：旧逻辑跨天硬置 seq=0，系统时间回拨（currentDate 超前）
+            // 触发轮转时会重复写回拨目标日期已有的 _p0 文件（CXX-002 重启
+            // 后 seq 续接语义同源，只是触发点从 openFile 挪到 checkRotation）
+            if (fs.currentDate == today)
+                fs.seq++;
+            else
+                fs.seq = nextSeqFor(stubSchema, today);
 
             fs.currentDate = today;
             fs.currentFilename = makeFilename(stubSchema, today, fs.seq);
@@ -894,6 +903,12 @@ void FileWriter::checkRotation()
                 struct stat st;
                 if (stat(fs.currentFilename.c_str(), &st) == 0)
                     fs.currentSize = static_cast<size_t>(st.st_size);
+                else
+                    // 方向 5：轮转 stat 失败须可见——静默保持 0 会让该文件
+                    // 轮转约束失效（可超限近一倍且无信号，与 openFile 同语义）
+                    ALOGE("FileWriter: checkRotation: stat %s failed: %s "
+                          "(rotation constraint degraded)",
+                          fs.currentFilename.c_str(), strerror(errno));
             }
         }
     }

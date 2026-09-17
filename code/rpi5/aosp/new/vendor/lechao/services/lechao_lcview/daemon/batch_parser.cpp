@@ -99,13 +99,23 @@ BatchParseResult vendor::lechao::lcview::parseBatch(
 }
 
 bool vendor::lechao::lcview::loadSchemaWithRetry(
-    SchemaParser& schema, const std::string& path, int maxRetries,
+    SchemaParser& schema, const std::string& path,
+    const std::atomic<bool>& running, int maxRetries,
     std::chrono::milliseconds interval)
 {
-    int schemaRetry = 0;
-    while (!schema.loadFromFile(path) && schemaRetry < maxRetries) {
-        ALOGW("lechao_lcview: schema not ready, retrying... (%d/%d)",
-              ++schemaRetry, maxRetries);
+    // 方向 4：可中断 + 尝试次数语义。
+    //   running：循环条件显式查 running，schema 重试期间收到停止信号
+    //   （gRunning=false）立即退出，不再等满 maxRetries×interval——
+    //   否则 init stop 被最长 15s 的重试窗口卡住（无法及时响应）。
+    //   日志从"第 N 次重试 (N/30)"改为"第 N 次尝试失败（attempt N/30）"：
+    //   attempt 即本轮已尝试加载的次数，语义与 maxRetries（尝试上限）
+    //   同尺度，弱 LLM/排查时直接可读，不再混淆"重试次数 vs 尝试次数"。
+    int attempt = 0;
+    while (!schema.loadFromFile(path) && running.load() &&
+           attempt < maxRetries) {
+        attempt++;
+        ALOGW("lechao_lcview: schema load attempt %d/%d failed, retrying",
+              attempt, maxRetries);
         std::this_thread::sleep_for(interval);
     }
     return schema.eventCount() > 0;

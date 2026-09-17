@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <memory>
@@ -200,21 +201,38 @@ TEST_F(DaemonLoopTest, MixedBatch_ValidAndInvalidCounts) {
 
 TEST(DaemonLoopHelperTest, SchemaLoadRetry_EventualSuccess) {
     // schema 路径不存在 → 重试失败；maxRetries=0 直接失败
+    // 方向 4 适配：新增 running 参数（测试传本地 atomic，生产传 gRunning）
+    std::atomic<bool> running{true};
     SchemaParser sp;
-    EXPECT_FALSE(loadSchemaWithRetry(sp, "/nonexistent/lcview_events.json", 0,
+    EXPECT_FALSE(loadSchemaWithRetry(sp, "/nonexistent/lcview_events.json",
+                                     running, 0,
                                      std::chrono::milliseconds(1)));
 }
 
 TEST(DaemonLoopHelperTest, SchemaLoadRetry_SuccessOnFirstTry) {
     // 真实配置（上板路径 /vendor/etc/lcview_events.json）一次加载成功
+    std::atomic<bool> running{true};
     SchemaParser sp;
     if (access("/vendor/etc/lcview_events.json", R_OK) == 0) {
-        EXPECT_TRUE(loadSchemaWithRetry(sp, "/vendor/etc/lcview_events.json", 0,
+        EXPECT_TRUE(loadSchemaWithRetry(sp, "/vendor/etc/lcview_events.json",
+                                        running, 0,
                                         std::chrono::milliseconds(1)));
         EXPECT_EQ(sp.eventCount(), 10u);
     } else {
         GTEST_SKIP() << "真配置不存在（host 环境）";
     }
+}
+
+TEST(DaemonLoopHelperTest, SchemaLoadRetry_InterruptibleByRunning) {
+    // 方向 4：running=false 时重试循环立即中断——schema 加载重试期间收到
+    // SIGTERM（gRunning 置 false）不再等满 maxRetries×interval。
+    // maxRetries 大 + interval 长：若 running 不生效会等满（测试卡死超时），
+    // 快速返回即证明中断生效
+    std::atomic<bool> running{false};
+    SchemaParser sp;
+    EXPECT_FALSE(loadSchemaWithRetry(sp, "/nonexistent/lcview_events.json",
+                                     running, 1000,
+                                     std::chrono::milliseconds(100)));
 }
 
 // ============================================================

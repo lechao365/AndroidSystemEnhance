@@ -49,7 +49,7 @@ int main(int argc, char* argv[])
     //   因为 schema 文件所在的 vendor 分区可能在启动早期尚未挂载完成。
     //   替代旧版本直接 FATAL 退出的策略，提高启动可靠性。
     //   （重试逻辑抽入 batch_parser 可测函数）
-    const bool schemaOk = loadSchemaWithRetry(schema, schemaPath, 30);
+    const bool schemaOk = loadSchemaWithRetry(schema, schemaPath, gRunning, 30);
     if (!schemaOk) {
         ALOGE("lechao_lcview: failed to load schema from %s", schemaPath.c_str());
         return 1;

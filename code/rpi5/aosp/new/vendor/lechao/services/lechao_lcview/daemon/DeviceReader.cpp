@@ -44,9 +44,12 @@ namespace lcview {
 bool isRecoverableReadErrno(int e)
 {
     // EINTR：信号打断瞬时噪声；EAGAIN：非阻塞无数据；
-    // EMSGSIZE：内核 read 首条记录放不下用户缓冲（KRN-001 返 -EMSGSIZE，
-    // 提示缓冲不足，可恢复——下次换大缓冲或分拆再读）。
-    // 刻意不加 EINVAL：真参数错误吞掉会让 daemon 对坏参数静默成环。
+    // EMSGSIZE：内核 read 首条记录放不下剩余读缓冲（KRN-001）。该路径
+    // 已由读端契约闭合：用户态 kMinReadSize 恒不小于单条记录上限
+    // LCVIEW_MAX_RECORD_SIZE，预防性 flush 保证剩余空间恒 >= 单条记录
+    // 上限，正常路径不再触发——保留可恢复判定仅作防御兜底（真触发也
+    // 不应致命退出）。刻意不加 EINVAL：真参数错误吞掉会让 daemon 对
+    // 坏参数静默成环。
     return e == EINTR || e == EAGAIN || e == EMSGSIZE;
 }
 

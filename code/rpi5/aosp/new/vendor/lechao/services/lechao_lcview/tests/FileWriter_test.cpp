@@ -701,7 +701,10 @@ TEST(FileWriterRotationTest, NoRotationNeeded_KeepsSeq) {
 // 轮转边界（方向 2）：跨天轮转重置 seq + 恢复已有轮转文件大小
 // ============================================================
 
-TEST(FileWriterRotationTest, DateChange_RotatesWithSeqReset) {
+TEST(FileWriterRotationTest, DateChange_ContinuesSeqFromDirectory) {
+    // 方向 3 适配：跨天不再硬重置 seq=0，改走 nextSeqFor 扫描目标日期目录
+    // 续接——openFile 已创建当日 _p0，跨天轮转后续接 seq=1（写 _p1），
+    // 避免重复写 _p0 追加旧文件（轮转文件名混乱）
     TempDir dir;
     FileWriterConfig cfg;
     cfg.logDir = dir.path();
@@ -709,18 +712,49 @@ TEST(FileWriterRotationTest, DateChange_RotatesWithSeqReset) {
     FileWriter writer(cfg);
     auto schema = makeSchema(4, "e", {FieldType::INT64});
 
-    writer.openFile(4, schema);
-    writer.mFiles[4].seq = 3;  // 同日内已轮转到 seq=3
+    writer.openFile(4, schema);          // 创建 _<today>_p0.jsonl，seq=0
+    writer.mFiles[4].seq = 3;            // 模拟同日内已轮转到 seq=3
     writer.mFiles[4].currentDate = "20000101";  // 伪造旧日期
     writer.mFiles[4].currentSize = 10;
 
     writer.checkRotation();
 
-    // 跨天：seq 重置为 0（非同日内递增）
-    EXPECT_EQ(writer.mFiles[4].seq, 0);
+    // 跨天：nextSeqFor(today) 扫描到目录已有 _p0 → 续接 seq=1
+    EXPECT_EQ(writer.mFiles[4].seq, 1);
     EXPECT_EQ(writer.mFiles[4].currentDate, writer.makeDateStr());
+    EXPECT_NE(writer.mFiles[4].currentFilename.find("_p1.jsonl"),
+              std::string::npos);
     // 新文件被追加打开：大小从 0 恢复
     EXPECT_EQ(writer.mFiles[4].currentSize, 0u);
+}
+
+TEST(FileWriterRotationTest, ClockRollback_ContinuesSeqFromExistingFiles) {
+    // 方向 3 时钟回拨 P0：系统时间从未来回拨（currentDate 超前于今天），
+    // checkRotation 检测日期变更触发轮转——旧逻辑跨天硬置 seq=0 会重复写
+    // 回拨目标日期（今天）已有的 _p0 文件追加旧内容；修复后跨天走
+    // nextSeqFor 扫描目标日期目录续接，不再重复写 _p0
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxFileSizeMb = 50;
+    FileWriter writer(cfg);
+    auto schema = makeSchema(4, "e", {FieldType::INT64});
+
+    writer.openFile(4, schema);          // 创建 _<today>_p0.jsonl，seq=0
+    writer.mFiles[4].seq = 0;
+    writer.mFiles[4].currentDate = "20991231";  // 伪造超前日期（时钟回拨现场）
+    writer.mFiles[4].currentSize = 10;
+    // 回拨目标日期（今天）已有轮转文件：_p0/_p1
+    std::string date = writer.makeDateStr();
+    prewriteFile(dir.path() + "/4_e_" + date + "_p0.jsonl", 10);
+    prewriteFile(dir.path() + "/4_e_" + date + "_p1.jsonl", 20);
+
+    writer.checkRotation();
+
+    // 跨天续接：seq 从目录扫描得 2（非 0 重复写 _p0），打开新文件 _p2
+    EXPECT_EQ(writer.mFiles[4].seq, 2);
+    EXPECT_NE(writer.mFiles[4].currentFilename.find("_p2.jsonl"),
+              std::string::npos);
 }
 
 TEST(FileWriterRotationTest, SizeBoundary_NoRotationAtExactLimit) {
