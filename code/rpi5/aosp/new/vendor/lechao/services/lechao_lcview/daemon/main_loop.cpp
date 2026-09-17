@@ -100,9 +100,14 @@ static void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
     uint32_t ov = reader.getOverrun();
     overrunAccum += ov;
     const FileWriter::DropCounters& dc = writer.dropCounters();
+    // 方向 3：dropped 求和纳入 dropRotate/dropInvRotate/dropRollback——
+    // 轮转/回滚失败也属丢记录（或半行残留风险），须进心跳求和与分项
     uint64_t dropped = static_cast<uint64_t>(dc.openFailed)
         + dc.formatEmpty + dc.formatOob + dc.reopenFailed
-        + dc.retryFailed + dc.invalidNotOpen + dc.invalidWriteFailed;
+        + dc.retryFailed + dc.invalidNotOpen + dc.invalidWriteFailed
+        + dc.dropRotate + dc.dropInvRotate + dc.dropRollback;
+    // 方向 5：心跳 30s 同锚刷活跃文件落盘（fdatasync），缩小断电丢失窗口
+    writer.fsyncActiveFiles();
     const FileWriter::WriteTimings& wt = writer.writeTimings();
     uint64_t avgFormatUs = wt.formatCount ? wt.formatTotalUs / wt.formatCount : 0;
     uint64_t avgWriteUs = wt.writeCount ? wt.writeTotalUs / wt.writeCount : 0;
@@ -112,7 +117,8 @@ static void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
           "invalid_records=%lld, ioctl_err=%llu, eof=%llu, "
           "drop_open=%llu drop_format=%llu drop_oob=%llu "
           "drop_reopen=%llu drop_retry=%llu drop_invalid=%llu "
-          "drop_invalidwrite=%llu, "
+          "drop_invalidwrite=%llu "
+          "drop_rotate=%llu drop_invrotate=%llu drop_rollback=%llu, "
           "avg_format_us=%llu avg_write_us=%llu",
           static_cast<unsigned long long>(loopCount),
           static_cast<long long>(overrunAccum),
@@ -128,6 +134,9 @@ static void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
           static_cast<unsigned long long>(dc.retryFailed),
           static_cast<unsigned long long>(dc.invalidNotOpen),
           static_cast<unsigned long long>(dc.invalidWriteFailed),
+          static_cast<unsigned long long>(dc.dropRotate),
+          static_cast<unsigned long long>(dc.dropInvRotate),
+          static_cast<unsigned long long>(dc.dropRollback),
           static_cast<unsigned long long>(avgFormatUs),
           static_cast<unsigned long long>(avgWriteUs));
 }

@@ -37,6 +37,12 @@ struct FileWriterConfig {
     size_t maxFileSizeMb = 50;
     size_t maxTotalSizeMb = 500;
     size_t retentionScanEveryWrites = 256;
+    // 保留策略时间兜底（方向 1）：即使写入计数未达阈值，距上次实际扫描
+    // 满 retentionScanMaxIntervalSec 秒也强制执行一次 enforceRetention——
+    // 防止"长静默期 + 少量写入永不触发扫描"的陈旧超限数据滞留。
+    // 0 表示关闭时间兜底（单测显式调用 enforceRetention 断言扫描行为的
+    // 场景可与 retentionScanEveryWrites=0 同用）
+    size_t retentionScanMaxIntervalSec = 300;
     size_t maxInvalidFileSizeMb = 10;
 };
 
@@ -76,9 +82,18 @@ public:
         uint64_t retryFailed = 0;    // 恢复后重试二次写失败
         uint64_t invalidNotOpen = 0; // invalid 事件流未打开
         uint64_t invalidWriteFailed = 0; // invalid 写失败恢复后仍失败（reopen/retry）
+        uint64_t dropRotate = 0;     // checkRotation 轮转后重开新文件失败（方向 3）
+        uint64_t dropInvRotate = 0;  // invalid 轮转失败（rename/reopen 任一失败，方向 3）
+        uint64_t dropRollback = 0;   // 写失败恢复回退截断失败（rollbackFileTo，方向 3）
     };
     // 返回当前累计的 DROP 计数（心跳输出用）
     const DropCounters& dropCounters() const { return mDrops; }
+
+    // 刷活跃文件落盘（方向 5）：心跳 30s 同锚调用，对全部已打开的事件
+    // 文件与 invalid 流按路径 fdatasync（flush 只到内核页缓存，崩溃/断电
+    // 丢数据；fdatasync 才真正落盘）。轮转前对旧文件单独 fsync 见
+    // checkRotation 内部实现
+    void fsyncActiveFiles();
 
     // 写路径耗时统计（方向 3：drain 被攒包策略钉死，对写路径成本不敏感，
     // 心跳输出平均微秒/条作为微优化可判定指标）
@@ -126,9 +141,23 @@ private:
     // 轮转名 → 重开新文件。rename 失败时尽力重开原文件继续追加
     // （不丢数据），成败由调用方按流状态判定
     void rotateInvalid();
+    // 打开 invalid 流（追加模式，不覆盖已有内容）：writeInvalid 流未开
+    // 先重开（方向 2）、构造函数、rotateInvalid 重开共用；重开后恢复
+    // mInvalidSize（fstat），失败仅 ALOGE，由调用方按流状态判定
+    void openInvalidStream();
     // 扫描日志目录：invalid_records_{date}_p<seq>.log 已存在的最大
     // 轮转序号 +1（重启/多次轮转后 seq 续接，与 nextSeqFor 同模式）
     int nextInvalidSeqFor(const std::string& date);
+    // 按路径 fdatasync（方向 5）：open + fdatasync + close，尽力而为，
+    // 失败 ALOGE（心跳周期短，静默不刷即丢数据，须可见）
+    static void fsyncFileByPath(const std::string& path);
+    // 打开文件后修复残留半行（方向 4）：末字节非换行说明上次异常退出
+    // 留下半行，截断至最后一个换行，避免半行与后续行粘连成非法 JSONL。
+    // 返回修复后文件字节数（供恢复 currentSize/mInvalidSize）
+    static size_t truncateToLastNewline(const std::string& path);
+    // 回退文件到指定偏移（写失败恢复前截断残留半行）。原静态自由函数
+    // 改为成员方法：失败时累计 dropRollback（方向 3，回滚失败也须可见）
+    void rollbackFileTo(const std::string& path, size_t offset);
 
     // 日志目录扫描结果：路径 + mtime + size（enforceRetention 淘汰用）
     struct LogFile {
@@ -163,4 +192,9 @@ private:
     // 距上次 enforceRetention 实际扫描的写入次数（方向 4 降频）；
     // 构造时初始化为满阈值（LCV-13：启动首扫清理历史超限数据）
     size_t mWritesSinceRetention = 0;
+    // 距上次 enforceRetention 实际扫描的时刻（方向 1 时间兜底）：
+    // 写入计数未达阈值但距上次扫描满 retentionScanMaxIntervalSec 秒时
+    // 也强制执行，防长静默期陈旧超限数据滞留；构造时置 now 避免启动
+    // 首扫（计数满触发）与时间兜底叠加干扰
+    std::chrono::steady_clock::time_point mLastRetentionScanAt;
 };

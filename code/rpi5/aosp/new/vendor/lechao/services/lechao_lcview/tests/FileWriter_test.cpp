@@ -45,11 +45,19 @@ private:
     std::string name_;
 };
 
+// 预写文件：size-1 个 'x' + 结尾换行——总字节数仍为 size。
+// 方向 4（truncateToLastNewline）后末字节须为换行：JSONL 日志每行以 \n
+// 结尾，无换行结尾的文件会被当作"上次异常退出的残留半行"截断至最后换行
+// （纯 x 无换行内容会被整个截为 0，破坏 size 恢复断言）——预写内容以
+// 换行结尾既保留 size 恢复验证意图，又符合方向 4 语义
 void prewriteFile(const std::string& path, size_t size) {
     FILE* f = fopen(path.c_str(), "w");
     ASSERT_NE(f, nullptr);
-    std::vector<char> buf(size, 'x');
-    ASSERT_EQ(fwrite(buf.data(), 1, size, f), size);
+    if (size > 0) {
+        std::vector<char> buf(size - 1, 'x');
+        ASSERT_EQ(fwrite(buf.data(), 1, size - 1, f), size - 1);
+        fputc('\n', f);
+    }
     fclose(f);
 }
 
@@ -757,21 +765,23 @@ TEST(FileWriterRotationTest, RotatedFileRestoresExistingSize) {
     FileWriter writer(cfg);
     auto schema = makeSchema(4, "e", {FieldType::INT64});
 
-    // 首开（目录空 → seq=0 创建 _p0），再预写轮转目标 _p1（seq 0→1）
+    // 首开（目录空 → seq=0 创建 _p0），再预写轮转目标 _p1（seq 0→1）。
+    // 方向 4：预写内容以换行结尾（无换行会被截为 0），断言 currentSize
+    // 恢复为完整行字节数
     writer.openFile(4, schema);
     std::string rotated = dir.path() + "/4_e_"
                           + writer.makeDateStr() + "_p1.jsonl";
     {
         std::ofstream f(rotated, std::ios::app);
-        f << "x";
+        f << "x\n";
     }
     writer.mFiles[4].currentSize = 2 * 1024 * 1024;  // 触发轮转
 
     writer.checkRotation();
 
-    // 轮转到已存在的 p1 文件：currentSize 恢复为 1（CXX-002 持久层恢复）
+    // 轮转到已存在的 p1 文件：currentSize 恢复为 2（CXX-002 持久层恢复）
     EXPECT_EQ(writer.mFiles[4].seq, 1);
-    EXPECT_EQ(writer.mFiles[4].currentSize, 1u);
+    EXPECT_EQ(writer.mFiles[4].currentSize, 2u);
 }
 
 // ============================================================
@@ -937,18 +947,38 @@ TEST(FileWriterDropCountTest, WriteRecord_BadData_CountsFormatEmpty) {
     SUCCEED();
 }
 
-TEST(FileWriterDropCountTest, InvalidNotOpen_Counts) {
-    // writeInvalid 时 invalid 流未打开 → invalidNotOpen +1
+TEST(FileWriterDropCountTest, InvalidNotOpen_ReopenFails_Counts) {
+    // 方向 2：writeInvalid 时 invalid 流未打开 → 先尝试重开（openInvalidStream）；
+    // 仅重开也失败（目录不可写）才计 invalidNotOpen +1（不再未开即弃）
     TempDir dir;
     FileWriterConfig cfg;
     cfg.logDir = dir.path();
     FileWriter writer(cfg);
-    writer.mInvalidStream.close();  // 模拟 invalid 流打开失败/已关闭
+    writer.mInvalidStream.close();  // 模拟 invalid 流已关闭
+    // 指向不可写的目录：重开（open 追加）失败 → invalidNotOpen 计数
+    writer.mInvalidFilename = "/nonexistent_dir/invalid_records.log";
 
     uint8_t data[4] = {0x01, 0x02, 0x03, 0x04};
     writer.writeInvalid(data, sizeof(data), "broken");
     EXPECT_EQ(writer.dropCounters().invalidNotOpen, 1);
     SUCCEED();
+}
+
+TEST(FileWriterDropCountTest, InvalidStreamClosed_ReopenSucceeds_Writes) {
+    // 方向 2：invalid 流未打开但重开成功 → 正常写入，不计数 invalidNotOpen
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+    writer.mInvalidStream.close();  // 流关闭但路径可写
+
+    uint8_t data[4] = {0x01, 0x02, 0x03, 0x04};
+    writer.writeInvalid(data, sizeof(data), "reopened");
+
+    EXPECT_EQ(writer.dropCounters().invalidNotOpen, 0);
+    std::string content = readFile(dir.path() + "/invalid_records.log");
+    EXPECT_NE(content.find("reopened"), std::string::npos);
+    EXPECT_TRUE(writer.mInvalidStream.is_open());
 }
 
 // ============================================================
@@ -1388,3 +1418,228 @@ TEST(FileWriterWriteLineFlushTest, FlushFail_RecoverySucceeds) {
     EXPECT_EQ(readFile(fname), "{\"pre\":1}\n{\"x\":1}\n");
     EXPECT_EQ(writer.mFiles[4].currentSize, 10u);
 }
+
+// ============================================================
+// 方向 1：writeInvalid 成功推进写入计数 + enforceRetention 300s 时间兜底
+// ============================================================
+
+TEST(FileWriterRetentionTest, WriteInvalid_AdvancesWritesCounter) {
+    // 方向 1：writeInvalid 成功也推进 mWritesSinceRetention——纯 invalid
+    // 写入时保留策略计数不冻结，超限数据可被容量扫描淘汰
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+    // 构造时计数器置满（LCV-13 首扫）；复位后验证 writeInvalid 推进
+    writer.mWritesSinceRetention = 0;
+
+    uint8_t data[2] = {0xDE, 0xAD};
+    writer.writeInvalid(data, 2, "advance");
+
+    EXPECT_GT(writer.mWritesSinceRetention, 0u);
+}
+
+TEST(FileWriterRetentionTest, TimeFallback_TriggersScan_AfterInterval) {
+    // 方向 1 时间兜底：写入计数未达阈值但距上次扫描满 300s → 仍执行扫描。
+    // 通过私有成员访问把 lastRetentionScanAt 拨回 301s 前模拟超时；
+    // 验证满容量下最旧文件被淘汰（时间兜底生效，计数未达阈值不拦截）
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxTotalSizeMb = 1;
+    cfg.retentionScanEveryWrites = 100000;  // 写入计数远超当前，只靠时间兜底
+    cfg.retentionScanMaxIntervalSec = 300;
+    FileWriter writer(cfg);
+    std::string date = writer.makeDateStr();
+    std::string f1 = dir.path() + "/1_a_" + date + "_p0.jsonl";
+    prewriteFile(f1, 700 * 1024);
+    std::string f2 = dir.path() + "/2_b_" + date + "_p0.jsonl";
+    prewriteFile(f2, 500 * 1024);
+    // 设 mtime 确保淘汰确定性：f1 最旧 → 先删 f1
+    struct utimbuf tb;
+    tb.actime = 1000; tb.modtime = 1000; utime(f1.c_str(), &tb);
+    tb.actime = 2000; tb.modtime = 2000; utime(f2.c_str(), &tb);
+    // 计数清零 + 距上次扫描拨回 301s（时间兜底触发条件）
+    writer.mWritesSinceRetention = 0;
+    writer.mLastRetentionScanAt =
+        std::chrono::steady_clock::now() - std::chrono::seconds(301);
+
+    writer.enforceRetention();
+
+    // 总 1.2MB > 1MB：时间兜底触发扫描，最旧 f1 被删，剩余 f2 500K 达标
+    EXPECT_NE(access(f1.c_str(), F_OK), 0);
+    EXPECT_EQ(access(f2.c_str(), F_OK), 0);
+}
+
+TEST(FileWriterRetentionTest, TimeFallback_NotDue_Skips) {
+    // 时间兜底未到期（距上次扫描仅 10s）+ 写入计数未达阈值 → 跳过扫描
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxTotalSizeMb = 1;
+    cfg.retentionScanEveryWrites = 100000;
+    cfg.retentionScanMaxIntervalSec = 300;
+    FileWriter writer(cfg);
+    std::string date = writer.makeDateStr();
+    std::string f1 = dir.path() + "/1_a_" + date + "_p0.jsonl";
+    prewriteFile(f1, 700 * 1024);
+    std::string f2 = dir.path() + "/2_b_" + date + "_p0.jsonl";
+    prewriteFile(f2, 500 * 1024);
+    writer.mWritesSinceRetention = 0;
+    writer.mLastRetentionScanAt =
+        std::chrono::steady_clock::now() - std::chrono::seconds(10);
+
+    writer.enforceRetention();
+
+    // 未到期未达阈值：扫描被跳过，超限文件保留（总 1.2MB > 1MB）
+    EXPECT_EQ(access(f1.c_str(), F_OK), 0);
+    EXPECT_EQ(access(f2.c_str(), F_OK), 0);
+}
+
+// ============================================================
+// 方向 3：DropCounters 新增 dropRotate / dropInvRotate / dropRollback
+// ============================================================
+
+TEST(FileWriterDropCountTest, CheckRotation_OpenNewFileFail_Drops) {
+    // 方向 3：checkRotation 轮转后重开新文件失败 → dropRotate +1
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxFileSizeMb = 1;
+    FileWriter writer(cfg);
+    auto schema = makeSchema(4, "e", {FieldType::INT64});
+    writer.openFile(4, schema);
+    writer.mFiles[4].currentSize = 2 * 1024 * 1024;  // 触发轮转
+    // 轮转新文件路径不可创建：把目录改只读，seq 递增后 open 失败
+    chmod(dir.path().c_str(), 0500);
+
+    writer.checkRotation();
+
+    chmod(dir.path().c_str(), 0755);
+    EXPECT_EQ(writer.dropCounters().dropRotate, 1);
+    SUCCEED();
+}
+
+TEST(FileWriterDropCountTest, RotateInvalid_RenameFail_Drops) {
+    // 方向 3：rotateInvalid rename 失败 → dropInvRotate +1
+    TempDir dir;
+    prewriteFile(dir.path() + "/invalid_records.log", 1024 * 1024);
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxInvalidFileSizeMb = 1;
+    FileWriter writer(cfg);
+    chmod(dir.path().c_str(), 0500);  // 只读：rename 无法创建轮转目标
+
+    writer.rotateInvalid();
+
+    chmod(dir.path().c_str(), 0755);
+    EXPECT_EQ(writer.dropCounters().dropInvRotate, 1);
+    SUCCEED();
+}
+
+TEST(FileWriterDropCountTest, RollbackFail_Counts) {
+    // 方向 3：写失败恢复回退截断失败 → dropRollback +1
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+
+    // rollback 目标路径不存在（open 失败）→ dropRollback 累计
+    writer.rollbackFileTo(dir.path() + "/nonexistent.jsonl", 0);
+    EXPECT_EQ(writer.dropCounters().dropRollback, 1);
+}
+
+// ============================================================
+// 方向 4：openFile 末字节非换行截断至最后换行（invalid 同规则）
+// ============================================================
+
+TEST(FileWriterOpenFileTest, ExistingTrailingPartialLine_Truncated) {
+    // 方向 4：openFile 打开已存在文件，末字节非换行（上次异常退出残留
+    // 半行）→ 截断至最后一个换行，currentSize 恢复为完整行边界
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+    auto schema = makeSchema(4, "test_event", {FieldType::INT64});
+
+    std::string date = writer.makeDateStr();
+    std::string p0 = dir.path() + "/4_test_event_" + date + "_p0.jsonl";
+    // 完整行 + 残留半行（无换行结尾）
+    const std::string complete = "{\"a\":1}\n";
+    const std::string partial = "{\"b\":2}";
+    {
+        std::ofstream f(p0, std::ios::app);
+        f << complete << partial;
+    }
+    writer.mFiles[4].stream.close();
+    writer.mFiles[4].currentFilename = p0;
+
+    writer.openFile(4, schema);
+
+    auto it = writer.mFiles.find(4);
+    ASSERT_NE(it, writer.mFiles.end());
+    // currentSize 恢复为完整行字节数（半行被截断）
+    EXPECT_EQ(it->second.currentSize, complete.size());
+    // 磁盘内容也只含完整行，无半行残留
+    EXPECT_EQ(readFile(p0), complete);
+}
+
+TEST(FileWriterWriteInvalidTest, TruncateToLastNewline_RemovesPartialLine) {
+    // 方向 4：invalid 文件同规则——半行截断，mInvalidSize 只计完整行
+    TempDir dir;
+    const std::string inv = dir.path() + "/invalid_records.log";
+    const std::string complete = "{\"reason\":\"a\"}\n";
+    const std::string partial = "{\"reason\":\"b\"}";
+    {
+        std::ofstream f(inv, std::ios::app);
+        f << complete << partial;
+    }
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+    // 构造时 openInvalidStream 已截断半行并恢复大小
+    EXPECT_EQ(writer.mInvalidSize, complete.size());
+    EXPECT_EQ(readFile(inv), complete);
+}
+
+// ============================================================
+// 方向 5：fsyncActiveFiles（心跳同锚刷活跃文件）+ 轮转前刷旧文件
+// ============================================================
+
+TEST(FileWriterFsyncTest, FsyncActiveFiles_OpenedFiles_NoCrash) {
+    // 方向 5：心跳同锚调用 fsyncActiveFiles——对已打开事件文件与 invalid
+    // 流按路径 fdatasync，正常场景不崩溃、不改变文件内容
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+    auto schema = makeSchema(4, "e", {FieldType::INT64});
+    auto hdr = makeHdr(4, 1);
+    auto fields = buildFields({FieldType::INT64});
+
+    writer.writeRecord(schema, &hdr, fields.data(), fields.size());
+
+    writer.fsyncActiveFiles();  // 心跳同锚：无异常即通过
+
+    std::string content = readFile(writer.mFiles[4].currentFilename);
+    EXPECT_FALSE(content.empty());
+}
+
+TEST(FileWriterRotationTest, Rotate_FsyncsOldFileBeforeClose) {
+    // 方向 5：轮转前对旧文件 fdatasync（fsyncFileByPath）——通过调用
+    // checkRotation 触发轮转，验证不崩溃且轮转正常推进
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxFileSizeMb = 1;
+    FileWriter writer(cfg);
+    auto schema = makeSchema(4, "e", {FieldType::INT64});
+    writer.openFile(4, schema);
+    writer.mFiles[4].currentSize = 2 * 1024 * 1024;
+
+    writer.checkRotation();
+
+    EXPECT_EQ(writer.mFiles[4].seq, 1);
+    SUCCEED();
+}
+

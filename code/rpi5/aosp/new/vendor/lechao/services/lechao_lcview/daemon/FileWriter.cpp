@@ -74,6 +74,9 @@ FileWriter::FileWriter(const FileWriterConfig& cfg) : mCfg(cfg)
     // LCV-13：计数器置满——启动后首次 enforceRetention 即全量扫描，
     // 清理上次运行遗留的超限数据（否则静默期内永不清理）
     mWritesSinceRetention = cfg.retentionScanEveryWrites;
+    // 方向 1：时间兜底起点置 now——启动首扫由计数满触发（LCV-13），
+    // 时间兜底从首次扫描时刻重新起算（构造点置 now 防双重触发）
+    mLastRetentionScanAt = std::chrono::steady_clock::now();
     // LCV-15：目录创建失败必须可见（仅靠后续 openFailed 间接可见时，
     // 首条心跳前无直接信号）；权限 0750 与 rc 文件策略一致
     if (!mkdirRecursive(mCfg.logDir, 0750))
@@ -83,18 +86,10 @@ FileWriter::FileWriter(const FileWriterConfig& cfg) : mCfg(cfg)
     if (!mkdirRecursive(uploadedDir, 0750))
         ALOGE("FileWriter: cannot create uploaded dir %s", uploadedDir.c_str());
 
-    // 追加模式打开 invalid_records.log，不覆盖已有内容
+    // 追加模式打开 invalid_records.log，不覆盖已有内容；统一走
+    // openInvalidStream（方向 4 半行修复 + CXX-002 大小恢复一体）
     mInvalidFilename = mCfg.logDir + "/invalid_records.log";
-    mInvalidStream.open(mInvalidFilename, std::ios::app);
-    if (!mInvalidStream.is_open())
-        ALOGE("FileWriter: cannot open %s", mInvalidFilename.c_str());
-    else {
-        // CXX-002：daemon 重启后从持久层恢复 invalid 文件已写字节——
-        // 归零会使轮转阈值判定失效（可超限近一倍，LCV-01 修复的前提）
-        struct stat st;
-        if (stat(mInvalidFilename.c_str(), &st) == 0)
-            mInvalidSize = static_cast<size_t>(st.st_size);
-    }
+    openInvalidStream();
 }
 
 // 析构函数：关闭所有打开的文件流
@@ -205,9 +200,15 @@ void FileWriter::openFile(uint16_t eventId, const EventSchema& schema)
         return;
     }
 
+    // 方向 4：打开后先修复上次异常退出的残留半行（末字节非换行截断至
+    // 最后换行），再恢复大小——否则半行与后续行粘连成非法 JSONL。
+    // 半行修复优先于 stat 恢复：修复后字节数才反映真实完整行边界
+    truncateToLastNewline(fs.currentFilename);
+
     // 追加模式下文件可能已有内容：stat 恢复 currentSize，兑现轮转约束。
     // LCV-11：stat 失败必须可见（静默保持 0 会让该文件轮转约束失效，
-    // 可超限近一倍且无任何信号）
+    // 可超限近一倍且无任何信号）。方向 4：半行已截断，stat 结果反映
+    // 截断后字节数
     struct stat st;
     if (stat(fs.currentFilename.c_str(), &st) == 0)
         fs.currentSize = static_cast<size_t>(st.st_size);
@@ -435,16 +436,131 @@ void FileWriter::recordWriteTiming(std::chrono::steady_clock::time_point start)
 // 回退文件到指定偏移：flush 失败后首写可能部分落盘，重试前须截断掉残留的
 // 半行，否则磁盘留"半行+整行"坏行（app 重开并重写整行只追加不清残留）。
 // 仅尽力而为——文件不可打开/非普通文件（如 /dev/full）时静默忽略，成败由
-// 后续重写决定（CXX-004 故障可恢复：不留坏行）
-static void rollbackFileTo(const std::string& path, size_t offset)
+// 后续重写决定（CXX-004 故障可恢复：不留坏行）。
+// 方向 3：截断失败累计 dropRollback（回滚失败也进心跳 dropped 求和，
+// 不能只 ALOGE 静默——回滚失败 = 半行残留风险，须可见）
+void FileWriter::rollbackFileTo(const std::string& path, size_t offset)
 {
     int fd = open(path.c_str(), O_WRONLY | O_CLOEXEC);
-    if (fd < 0)
+    if (fd < 0) {
+        mDrops.dropRollback++;
+        ALOGE("FileWriter: rollback open %s failed: %s",
+              path.c_str(), strerror(errno));
         return;
-    if (ftruncate(fd, static_cast<off_t>(offset)) != 0)
+    }
+    if (ftruncate(fd, static_cast<off_t>(offset)) != 0) {
+        mDrops.dropRollback++;
         ALOGE("FileWriter: rollback truncate %s to %zu failed: %s",
               path.c_str(), offset, strerror(errno));
+    }
     close(fd);
+}
+
+// 按路径 fdatasync（方向 5）：open + fdatasync + close。
+// ofstream flush 只把用户态缓冲刷到内核页缓存，断电/崩溃时页缓存丢失；
+// fdatasync 才把文件数据真正落盘。心跳 30s 同锚调用 + 轮转前刷旧文件，
+// 缩小断电数据丢失窗口。尽力而为，失败 ALOGE 可见（不阻断写路径）。
+void FileWriter::fsyncFileByPath(const std::string& path)
+{
+    int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        ALOGE("FileWriter: fsync open %s failed: %s",
+              path.c_str(), strerror(errno));
+        return;
+    }
+    if (fdatasync(fd) != 0)
+        ALOGE("FileWriter: fdatasync %s failed: %s",
+              path.c_str(), strerror(errno));
+    close(fd);
+}
+
+// 打开文件后修复残留半行（方向 4）：异常退出（kill -9/断电）可能留下
+// 末尾无换行的半行 JSON，与后续追加的行粘连成非法 JSONL（一次粘连污染
+// 一条记录）。打开/轮转/重启恢复时调用：末字节非换行则截断至最后一个
+// 换行，只保留完整行。返回修复后文件字节数。
+// 实现：读文件内容找最后一个 '\n'，存在则截断到其后 1 字节（保留换行
+// 符本身），不存在（纯半行/空文件）则截断为 0。文件不可开/非普通文件
+// 返回 0（无法修复，保持现状由调用方按 size=0 处理）。
+size_t FileWriter::truncateToLastNewline(const std::string& path)
+{
+    int fd = open(path.c_str(), O_RDWR | O_CLOEXEC);
+    if (fd < 0)
+        return 0;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        close(fd);
+        return 0;
+    }
+    const off_t size = st.st_size;
+    off_t lastNl = -1;
+    // 分块读查找最后一个换行：日志单文件 <=50MB，心跳外低频调用（open/
+    // 轮转/重启），全文件读一次可接受；不追求 mmap 的复杂度
+    constexpr size_t kChunk = 64 * 1024;
+    std::vector<char> buf(kChunk);
+    off_t pos = 0;
+    while (pos < size) {
+        size_t want = static_cast<size_t>(
+            std::min<off_t>(kChunk, size - pos));
+        ssize_t n = pread(fd, buf.data(), want, pos);
+        if (n <= 0)
+            break;
+        for (ssize_t i = n - 1; i >= 0; i--) {
+            if (buf[i] == '\n') {
+                lastNl = pos + i;
+                break;
+            }
+        }
+        pos += n;
+        // 从后往前找：一旦在块内找到换行，它就是文件最后一个换行
+        if (lastNl != -1)
+            break;
+    }
+    off_t keep = (lastNl >= 0) ? lastNl + 1 : 0;
+    if (keep != size) {
+        if (ftruncate(fd, keep) != 0)
+            ALOGE("FileWriter: truncateToLastNewline %s to %lld failed: %s",
+                  path.c_str(), static_cast<long long>(keep), strerror(errno));
+        // 截断后定位到末尾，保证后续追加写正确（ofstream 以 append 打开，
+        // 对同一文件新 open 时 O_APPEND 已定位；此处 fd 仅用于截断+stat）
+    }
+    close(fd);
+    return static_cast<size_t>(keep);
+}
+
+// 打开 invalid 流（追加模式，不覆盖已有内容）：writeInvalid 流未开先重开
+// （方向 2）、构造函数、rotateInvalid 重开共用。打开后先修复残留半行
+// （方向 4，末字节非换行截断至最后换行），再 fstat 恢复 mInvalidSize
+// （CXX-002 从持久层恢复）。失败仅 ALOGE，由调用方按流状态判定（写路径
+// 走 invalidNotOpen 计数可见）。
+void FileWriter::openInvalidStream()
+{
+    mInvalidStream.open(mInvalidFilename, std::ios::app);
+    if (!mInvalidStream.is_open()) {
+        ALOGE("FileWriter: openInvalidStream: cannot open %s",
+              mInvalidFilename.c_str());
+        return;
+    }
+    truncateToLastNewline(mInvalidFilename);
+    struct stat st;
+    if (stat(mInvalidFilename.c_str(), &st) == 0)
+        mInvalidSize = static_cast<size_t>(st.st_size);
+    else
+        ALOGE("FileWriter: openInvalidStream: stat %s failed: %s",
+              mInvalidFilename.c_str(), strerror(errno));
+}
+
+// 刷活跃文件落盘（方向 5）：心跳 30s 同锚调用。遍历全部已打开的事件
+// 文件 + invalid 流，按路径 fdatasync。flush 已由写路径保证，此处补
+// 内核页缓存→磁盘的持久化，缩小断电丢失窗口。文件打开失败的跳过
+// （is_open 判定），避免对已关闭流 fsync 报错刷屏
+void FileWriter::fsyncActiveFiles()
+{
+    for (auto& [id, fs] : mFiles) {
+        if (fs.stream.is_open())
+            fsyncFileByPath(fs.currentFilename);
+    }
+    if (mInvalidStream.is_open())
+        fsyncFileByPath(mInvalidFilename);
 }
 
 // 写盘 + flush + 失败恢复（拆分自 writeRecord，行为不变）。
@@ -553,24 +669,36 @@ void FileWriter::writeRecord(const EventSchema& schema,
 // enforceRetention 可正常淘汰（evictOldFiles 仅跳过当前 mInvalidFilename，
 // 轮转文件名不同天然参与淘汰）。rename 失败（目录只读等）时重开原文件
 // 继续追加保底不丢数据，累计大小保留待下轮重试（方向 3：仅 rename 成功
-// 才归零，失败从持久层恢复——归零会致无界增长且回滚抹诊断）
+// 才归零，失败从持久层恢复——归零会致无界增长且回滚抹诊断）。
+// 方向 2：rename 成功 reopen 失败时也归零——旧内容已轮转走，重开失败仅
+// 影响后续写入（走 invalidNotOpen 计数），与"未轮转"语义不同，归零正确
+// 反映"当前 invalid_records.log 为空"。
+// 方向 3：rename/reopen 任一失败累计 dropInvRotate（轮转失败也进心跳
+// dropped 求和，只 ALOGE 会静默丢诊断）
 void FileWriter::rotateInvalid()
 {
     mInvalidStream.flush();
     mInvalidStream.close();
+    // 方向 5：轮转前刷旧文件落盘（fdatasync），防断电丢轮转边界数据
+    fsyncFileByPath(mInvalidFilename);
     const std::string date = makeDateStr();
     const std::string rotated = mCfg.logDir + "/invalid_records_" + date
                                 + "_p" + std::to_string(nextInvalidSeqFor(date))
                                 + ".log";
     const bool renamed = (rename(mInvalidFilename.c_str(), rotated.c_str()) == 0);
-    if (!renamed)
+    if (!renamed) {
+        mDrops.dropInvRotate++;
         ALOGE("FileWriter: rotateInvalid: rename to %s failed: %s",
               rotated.c_str(), strerror(errno));
+    }
     mInvalidStream.open(mInvalidFilename, std::ios::app);
     if (!mInvalidStream.is_open()) {
+        mDrops.dropInvRotate++;
         // 重开失败：后续 writeInvalid 走 invalidNotOpen 分支计数可见
         ALOGE("FileWriter: rotateInvalid: reopen %s failed",
               mInvalidFilename.c_str());
+        if (renamed)
+            mInvalidSize = 0;  // 方向 2：rename 成功（旧内容已走），reopen 失败也归零
         return;
     }
     if (renamed) {
@@ -626,10 +754,18 @@ int FileWriter::nextInvalidSeqFor(const std::string& date)
 void FileWriter::writeInvalid(const uint8_t* data, size_t len,
                                const std::string& reason)
 {
+    // 方向 2：流未开先重开（追加模式 + fstat 恢复 mInvalidSize），重开成功
+    // 继续写入——仅重开失败才计 invalidNotOpen。原实现未开即弃（坏数据风暴
+    // 后流异常关闭、恢复路径已 reopen 时，未开直接丢弃会静默丢诊断）
     if (!mInvalidStream.is_open()) {
-        ALOGE("FileWriter: writeInvalid: stream not open, DROPPING reason=%s", reason.c_str());
-        mDrops.invalidNotOpen++;
-        return;
+        openInvalidStream();
+        if (!mInvalidStream.is_open()) {
+            ALOGE("FileWriter: writeInvalid: stream not open, DROPPING reason=%s",
+                  reason.c_str());
+            mDrops.invalidNotOpen++;
+            return;
+        }
+        ALOGI("FileWriter: writeInvalid: reopened invalid stream");
     }
     // 超过单文件轮转阈值：先轮转再写（写前检查，单文件最多超一个 payload）
     if (mInvalidSize >= mCfg.maxInvalidFileSizeMb * 1024 * 1024)
@@ -693,6 +829,10 @@ void FileWriter::writeInvalid(const uint8_t* data, size_t len,
     }
     // 写成功（含恢复重试成功）才累计，失败路径保持写前偏移供 rollback
     mInvalidSize += payload.size();
+    // 方向 1：writeInvalid 成功也推进写入计数——invalid 坏数据风暴也须
+    // 触发容量扫描（原只有 writeRecord 推进，纯 invalid 写入时保留策略
+    // 永不扫描，超限数据滞留）；enforceRetention 另有 300s 时间兜底
+    mWritesSinceRetention++;
 }
 
 // 文件轮转检查：
@@ -717,9 +857,11 @@ void FileWriter::checkRotation()
 
         if (needRotate) {
             ALOGI("FileWriter: rotating: %s (size=%zu, date=%s)", fs.currentFilename.c_str(), fs.currentSize, fs.currentDate.c_str());
-            // 关闭当前文件
-            if (fs.stream.is_open())
+            // 方向 5：轮转前刷旧文件落盘（fdatasync），防断电丢轮转边界数据
+            if (fs.stream.is_open()) {
+                fsyncFileByPath(fs.currentFilename);
                 fs.stream.close();
+            }
 
             // 同一天内 seq 递增，跨天重置
             if (fs.currentDate == today)
@@ -736,9 +878,13 @@ void FileWriter::checkRotation()
             fs.currentFilename = makeFilename(stubSchema, today, fs.seq);
             fs.currentSize = 0;
             fs.stream.open(fs.currentFilename, std::ios::app);
-            if (!fs.stream.is_open())
+            if (!fs.stream.is_open()) {
+                mDrops.dropRotate++;
                 ALOGE("FileWriter: cannot open %s", fs.currentFilename.c_str());
-            else {
+            } else {
+                // 方向 4：轮转新开文件同样修复残留半行（目标 seq 文件若
+                // 已存在且上次异常退出留有半行，须截断再统计）
+                truncateToLastNewline(fs.currentFilename);
                 // 追加模式打开旧轮转文件时同样恢复大小（与 openFile 一致）
                 struct stat st;
                 if (stat(fs.currentFilename.c_str(), &st) == 0)
@@ -841,12 +987,20 @@ void FileWriter::enforceRetention()
     // retentionScanEveryWrites == 0 表示关闭降频（每次调用都扫描，
     // 单测显式调用 enforceRetention 断言扫描行为的场景使用）。
     // LCV-13：构造时把计数器初始化为满阈值——启动后首次调用即执行
-    // 全量扫描，清理上次运行遗留的超限数据（静默期内永不清理的空洞）
+    // 全量扫描，清理上次运行遗留的超限数据（静默期内永不清理的空洞）。
+    // 方向 1 时间兜底：写入计数未达阈值但距上次实际扫描满
+    // retentionScanMaxIntervalSec 秒（缺省 300s）也强制执行——纯 invalid
+    // 写入 / 长静默期少量写入时计数阈值永不达，陈旧超限数据滞留；
+    // 时间兜底与计数是"或"关系，任一满足即扫描
+    const bool timeDue = mCfg.retentionScanMaxIntervalSec > 0 &&
+        (std::chrono::steady_clock::now() - mLastRetentionScanAt) >=
+            std::chrono::seconds(mCfg.retentionScanMaxIntervalSec);
     if (mCfg.retentionScanEveryWrites > 0 &&
-        mWritesSinceRetention < mCfg.retentionScanEveryWrites) {
+        mWritesSinceRetention < mCfg.retentionScanEveryWrites && !timeDue) {
         return;
     }
     mWritesSinceRetention = 0;
+    mLastRetentionScanAt = std::chrono::steady_clock::now();
 
     // 扫描 → 淘汰 两段（行为不变）
     std::vector<LogFile> files = scanLogFiles();
