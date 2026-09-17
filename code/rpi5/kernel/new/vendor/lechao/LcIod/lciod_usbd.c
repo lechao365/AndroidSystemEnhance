@@ -249,7 +249,7 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
     /* 非阻塞快速路径：ring 空 + 未 shutdown 时立即返回 -EAGAIN */
     if (file->f_flags & O_NONBLOCK) {
         spin_lock_irqsave(&dev->event_lock, flags);
-        bool empty = (dev->event_head == dev->event_tail);
+        bool empty = (READ_ONCE(dev->event_head) == READ_ONCE(dev->event_tail));
         bool shutdown = READ_ONCE(dev->event_shutdown);
         spin_unlock_irqrestore(&dev->event_lock, flags);
         /*
@@ -267,12 +267,13 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
 
     for (;;) {
         ret = wait_event_interruptible(dev->event_wq,
-                dev->event_head != dev->event_tail || READ_ONCE(dev->event_shutdown));
+                READ_ONCE(dev->event_head) != READ_ONCE(dev->event_tail) ||
+                READ_ONCE(dev->event_shutdown));
         if (ret)
             return ret;
 
         spin_lock_irqsave(&dev->event_lock, flags);
-        if (dev->event_head != dev->event_tail) {
+        if (READ_ONCE(dev->event_head) != READ_ONCE(dev->event_tail)) {
             ev = dev->event_buf[dev->event_tail];
             consumed_pos = dev->event_tail;
             dev->event_tail = (dev->event_tail + 1) % VENDOR_LECHAO_USBD_EVENT_BUF_SIZE;
@@ -332,7 +333,7 @@ static __poll_t vendor_lechao_usbd_poll(struct file *file, poll_table *wait)
 
     poll_wait(file, &dev->event_wq, wait);
 
-    if (dev->event_head != dev->event_tail)
+    if (READ_ONCE(dev->event_head) != READ_ONCE(dev->event_tail))
         mask |= EPOLLIN | EPOLLRDNORM;
     if (READ_ONCE(dev->event_shutdown))
         mask |= EPOLLHUP;
@@ -996,3 +997,4 @@ module_exit(vendor_lechao_usbd_monitor_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Lechao");
 MODULE_DESCRIPTION("USB Storage Rate Monitor for Lechao Vendor");
+MODULE_VERSION("1.0");

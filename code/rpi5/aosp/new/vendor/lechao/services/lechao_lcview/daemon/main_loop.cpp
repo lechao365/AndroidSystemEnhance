@@ -85,7 +85,7 @@ static ssize_t readOnce(DeviceReader& reader, uint8_t* buf, size_t bufSize,
 }
 
 // 心跳段（每 30 loop）：直读内核 overrun/total_records，
-// dropped 取 FileWriter DROP 合计（七条丢记录路径汇总，
+// dropped 取 FileWriter DROP 合计（10 条丢记录路径汇总，
 // 含 invalid 写失败恢复不成 invalidWriteFailed），
 // readErr 为读错误计数——HAL 停用后三字段由 daemon 补齐，
 // 供 liveness 判据（logfield overrun/dropped/readErr=0）继续成立；

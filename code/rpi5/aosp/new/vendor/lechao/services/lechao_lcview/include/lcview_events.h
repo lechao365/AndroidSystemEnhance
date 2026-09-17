@@ -91,7 +91,8 @@
  *   level       — 日志级别
  *   field_count — 字段数量（与 schema 中的字段数匹配）
  *   reserved    — 保留字段，对齐用
- *   timestamp_ns— 单调时钟纳秒时间戳，用于排序和延迟分析
+ *   timestamp_ns— CLOCK_REALTIME 时钟纳秒时间戳（非单调，受 NTP 调整），
+ *   用于跨设备日志时间对齐和延迟分析
  *
  * lcview_field_hdr：每个字段前 1 字节类型标识，
  *   后接类型相关的值（定长 4/8 字节，或 2 字节长度前缀+变长）。

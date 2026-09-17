@@ -439,3 +439,10 @@ static void __exit lcview_exit(void)
 
 module_init(lcview_init);
 module_exit(lcview_exit);
+
+/* GPL 合规声明：本驱动基于 GPL-2.0 内核模块接口实现，
+ * 显式声明 GPL 使 GPL-only 符号（spin_lock_irqsave 等）可正常链接 */
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Lechao");
+MODULE_DESCRIPTION("LcView structured event logging kernel driver");
+MODULE_VERSION("1.0");
