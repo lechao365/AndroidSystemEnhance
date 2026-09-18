@@ -127,41 +127,44 @@ static void test_memcpy_in(void)
 static void test_evict(void)
 {
     uint8_t buf[16];
+    uint8_t big[32];
     uint32_t read_pos, out_len;
     int rc;
 
-    /* 正常驱逐（不跨尾部）：read_pos += len */
-    memset(buf, 0, sizeof(buf));
-    put_u32(buf, 8);
+    /* 正常驱逐（不跨尾部）：read_pos += len。
+     * 方向 3 后下界 = default_record_len(20)，正常记录须 >= 20 且
+     * size > 20（buf[16] 装不下合法记录），故用 big[32]。 */
+    memset(big, 0, sizeof(big));
+    put_u32(big, 20);                    /* 合法最小记录 20B */
     read_pos = 0;
     out_len = 99;
-    rc = ring_evict_one_core(buf, 16, &read_pos, 8, 20, &out_len);
+    rc = ring_evict_one_core(big, 32, &read_pos, 8, 20, &out_len);
     CHECK(rc == 1);
-    CHECK(read_pos == 8);
-    CHECK(out_len == 8);
+    CHECK(read_pos == 20);
+    CHECK(out_len == 20);
 
     /* 正常驱逐 + read_pos 环绕 % size */
-    memset(buf, 0, sizeof(buf));
-    put_u32(buf + 10, 12);                 /* 记录长度 12，前缀在 pos=10 */
-    read_pos = 10;                         /* write=0 环内有 6 字节数据 */
+    memset(big, 0, sizeof(big));
+    put_u32(big + 10, 24);                 /* 记录长度 24，前缀在 pos=10 */
+    read_pos = 10;                         /* write=0 环内有 10+24=34>32 数据（环绕） */
     out_len = 0;
-    rc = ring_evict_one_core(buf, 16, &read_pos, 0, 20, &out_len);
+    rc = ring_evict_one_core(big, 32, &read_pos, 0, 20, &out_len);
     CHECK(rc == 1);
-    CHECK(read_pos == (10 + 12) % 16);     /* 6 */
-    CHECK(out_len == 12);
+    CHECK(read_pos == (10 + 24) % 32);     /* 2 */
+    CHECK(out_len == 24);
 
-    /* 长度前缀跨尾部读取：pos=14，4 字节 = buf[14..15]+buf[0..1] */
-    memset(buf, 0, sizeof(buf));
-    buf[14] = 0x0A;
-    buf[15] = 0x00;
-    buf[0] = 0x00;
-    buf[1] = 0x00;                         /* old_len = 10 */
-    read_pos = 14;
+    /* 长度前缀跨尾部读取：pos=30，4 字节 = big[30..31]+big[0..1] */
+    memset(big, 0, sizeof(big));
+    big[30] = 0x14;
+    big[31] = 0x00;
+    big[0] = 0x00;
+    big[1] = 0x00;                         /* old_len = 20 */
+    read_pos = 30;
     out_len = 0;
-    rc = ring_evict_one_core(buf, 16, &read_pos, 8, 20, &out_len);
+    rc = ring_evict_one_core(big, 32, &read_pos, 8, 20, &out_len);
     CHECK(rc == 1);
-    CHECK(read_pos == (14 + 10) % 16);     /* 8 */
-    CHECK(out_len == 10);
+    CHECK(read_pos == (30 + 20) % 32);     /* 18 */
+    CHECK(out_len == 20);
 
     /* 损坏：长度 0 → 保守跳过 default_record_len */
     memset(buf, 0, sizeof(buf));         /* 前缀全 0 → old_len == 0 */
@@ -201,6 +204,36 @@ static void test_evict(void)
     CHECK(rc == 0);
     CHECK(read_pos == 5);
     CHECK(out_len == 0);
+
+    /* 方向 3/6 判红：损坏下界 [1, default_record_len)——old_len 小于
+     * default_record_len（20）判损坏回落保守跳过，与读路径下界一致；
+     * 修复前下界仅 0，长度 1..19 会按 old_len 正常推进撕裂后续流。 */
+    {
+        uint32_t len;
+        for (len = 1; len < 20; len++) {
+            memset(buf, 0, sizeof(buf));
+            put_u32(buf, len);
+            read_pos = 0;
+            out_len = 0;
+            rc = ring_evict_one_core(buf, 16, &read_pos, 8, 20, &out_len);
+            CHECK(rc == 2);
+            CHECK(read_pos == 20 % 16);   /* 4 */
+            CHECK(out_len == len);
+        }
+    }
+    /* 边界 old_len == default_record_len：合法最小记录，正常推进
+     * （size 须 > 20，故用 64B 缓冲） */
+    {
+        uint8_t big[64];
+        memset(big, 0, sizeof(big));
+        put_u32(big, 20);
+        read_pos = 0;
+        out_len = 0;
+        rc = ring_evict_one_core(big, 64, &read_pos, 8, 20, &out_len);
+        CHECK(rc == 1);
+        CHECK(read_pos == 20);
+        CHECK(out_len == 20);
+    }
 }
 
 /* ring_read_fit_check：KRN-001 假 EOF 收口语义 */

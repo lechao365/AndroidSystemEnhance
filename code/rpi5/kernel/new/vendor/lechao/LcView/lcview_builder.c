@@ -63,8 +63,14 @@ static inline struct lcview_builder *builder_pool_get(void)
 
 static inline void builder_pool_put(struct lcview_builder *b)
 {
-    /* 槽已占用则释放新来的对象（池容量恒为 1） */
-    if (xchg(&builder_pool_slot, b))
+    /*
+     * 仅槽空时存入；槽已占用则直接释放新来的对象（池容量恒为 1）。
+     * 用 cmpxchg 先判后存，杜绝 xchg 先存再 free 的槽悬垂 UAF：
+     * 并发 get 可能在 xchg 存入 b 后立刻取走 b，随后 xchg 分支又
+     * kfree(b)（释放已被取走、正在使用的对象）。cmpxchg 失败即 b
+     * 从未入槽，任何并发 get 都不可能取到它，释放安全。
+     */
+    if (cmpxchg(&builder_pool_slot, NULL, b) != NULL)
         kfree(b);
 }
 

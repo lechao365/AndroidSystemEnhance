@@ -80,9 +80,12 @@ int ring_evict_one_core(uint8_t *buf, uint32_t size, uint32_t *read_pos,
         *out_len = old_len;
 
     /* 防御损坏记录：长度异常时用保守默认长度跳过。
+     * 方向 3：下界由 0 改 default_record_len——[1, default_record_len)
+     * 的记录连记录头都放不下，判损坏回落默认，与读路径下界一致
+     * （防伪造/损坏前缀按短长度推进撕裂后续流）。
      * 方向 4：上界由 > 改 >=——old_len == size 时按 old_len 推进
      * (rpos + size) % size == rpos 零推进死循环，判损坏用默认跳过。 */
-    if (old_len == 0 || old_len >= size) {
+    if (old_len < default_record_len || old_len >= size) {
         *read_pos = (rpos + default_record_len) % size;
         return 2;
     }

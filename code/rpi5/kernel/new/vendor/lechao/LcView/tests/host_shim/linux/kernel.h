@@ -54,3 +54,16 @@ static inline void *xchg(void *ptr, void *val)
     return (void *)__atomic_exchange_n((uintptr_t *)ptr, (uintptr_t)val,
                                        __ATOMIC_SEQ_CST);
 }
+
+// cmpxchg：builder 空闲池用，host 侧原子比较交换——仅当 *ptr == old 时
+// 写入 new_，返回旧值（成功时 == old）。与内核 cmpxchg 语义一致：
+// builder_pool_put 以 cmpxchg(slot, NULL, b) 实现"仅槽空才存入"，
+// 并发 get 在交换窗口内取走 b 后此处不可能再释放已取走的对象。
+static inline void *cmpxchg(void *ptr, void *old, void *new_)
+{
+    void *cur = old;
+    __atomic_compare_exchange_n((uintptr_t *)ptr, (uintptr_t *)&cur,
+                                (uintptr_t)new_, 0,
+                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return cur;
+}

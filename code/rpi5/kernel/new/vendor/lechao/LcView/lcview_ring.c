@@ -487,19 +487,20 @@ static int lcview_ring_read_internal(struct lcview_ring *ring,
          * - 最小合法值: LCVIEW_LEN_PREFIX_SIZE (4) + 记录头 (16) = 20
          *   方向 5：下限由 4 改 20（前缀+记录头）。[4,20) 的记录连
          *   记录头都放不下，判损坏跳过——防伪造/损坏前缀导致的撕裂。
-         * - 最大合法值: min(LCVIEW_BUILDER_MAX_SIZE, ring->size)
-         *   方向 4：上界由 > 改 >=——record_len == ring->size 时按
-         *   record_len 前移会 (rpos + size) % size == rpos 零推进死循环；
-         *   record_len == LCVIEW_BUILDER_MAX_SIZE 时记录恰好占满上限，
-         *   写侧可达真实记录最大 4092（16 头 + 4 前缀 + 4076 数据），
-         *   等长上界判损坏消除零推进且不误伤合法记录。
+         * - 上界（两档，语义不同）：
+         *   · record_len > LCVIEW_BUILDER_MAX_SIZE 判损坏：写侧可达的
+         *     最大记录总长恰为 4096（4 前缀 + 16 头 + 4076 数据），
+         *     方向 2 恢复严格大于——满长 4096 记录合法交付，>= 会
+         *     误伤满长记录判损坏跳过（丢记录）。
+         *   · record_len >= ring->size 判损坏：等长时按 record_len
+         *     前移会 (rpos + size) % size == rpos 零推进死循环，保留 >=。
          *
          * 如果记录损坏，使用保守的默认大小跳过这条记录。
          * 跳过策略：推进到前缀 + 记录头大小的位置，尝试从下一条继续。
          * 这样可以最大程度地从数据损坏中恢复，而不是永久阻塞 reader。
          */
         if (record_len < LCVIEW_LEN_PREFIX_SIZE + sizeof(struct lcview_record_hdr) ||
-            record_len >= LCVIEW_BUILDER_MAX_SIZE ||
+            record_len > LCVIEW_BUILDER_MAX_SIZE ||
             record_len >= ring->size) {
             pr_warn_ratelimited(PREFIX "corrupted record at pos=%u, len=%u, skipping\n",
                                 rpos, record_len);

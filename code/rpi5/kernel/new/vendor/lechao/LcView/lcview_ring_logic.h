@@ -56,9 +56,11 @@ void ring_memcpy_in_core(uint8_t *buf, uint32_t size, uint32_t pos,
  * ring_evict_one_core — 驱逐（跳过）一条最旧记录，推进 read_pos
  *
  * 从 read_pos 读取 4 字节长度前缀（处理跨尾部换行），推进
- * read_pos = (read_pos + old_len) % size。防御损坏记录（old_len 为 0 或
- * >= size）时用 default_record_len 保守跳过，避免推进过多致永久错乱
- * （方向 4：等长 old_len == size 会零推进死循环，一并判损坏）。
+ * read_pos = (read_pos + old_len) % size。防御损坏记录（old_len <
+ * default_record_len 或 >= size）时用 default_record_len 保守跳过，
+ * 避免推进过多致永久错乱（方向 3：下界 [1, default_record_len) 与
+ * 读路径一致判损坏防撕裂；方向 4：等长 old_len == size 会零推进
+ * 死循环，一并判损坏）。
  *
  * @buf/@{size}       环形缓冲区内存与大小
  * @read_pos          入/出：驱逐后推进到的读指针

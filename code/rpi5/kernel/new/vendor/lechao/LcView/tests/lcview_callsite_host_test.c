@@ -166,6 +166,7 @@ static void test_ring_read_callsite_corrupt_skip(void)
     atomic_set(&ring.total_records, 0);
     atomic_set(&ring.readers, 0);
     init_waitqueue_head(&ring.exit_wait);
+    mutex_init(&ring.read_mutex);
 
     /* read 判损坏后按 record_len=4100 前移 read_pos（% size），再读合法记录 */
     int n = lcview_ring_read(&ring, user, sizeof(user));
@@ -206,6 +207,7 @@ static void test_ring_read_callsite_corrupt_garbage(void)
     atomic_set(&ring.total_records, 0);
     atomic_set(&ring.readers, 0);
     init_waitqueue_head(&ring.exit_wait);
+    mutex_init(&ring.read_mutex);
 
     int n = lcview_ring_read(&ring, user, sizeof(user));
     CHECK(n == 20);
@@ -239,6 +241,7 @@ static void test_ring_write_callsite_huge_len(void)
     atomic_set(&ring.total_records, 0);
     atomic_set(&ring.readers, 0);
     init_waitqueue_head(&ring.exit_wait);
+    mutex_init(&ring.read_mutex);
     spin_lock_init(&ring.lock);
 
     /* 巨 len：total = 4 + 0xFFFFFFFC 溢出回绕为 0，修复前绕过检查越界写 */
@@ -291,6 +294,7 @@ static void test_ring_read_callsite_short_prefix(void)
     atomic_set(&ring.total_records, 0);
     atomic_set(&ring.readers, 0);
     init_waitqueue_head(&ring.exit_wait);
+    mutex_init(&ring.read_mutex);
 
     int n = lcview_ring_read(&ring, user, sizeof(user));
     CHECK(n == 20);
@@ -332,6 +336,7 @@ static void test_ring_read_callsite_equal_size(void)
     atomic_set(&ring.total_records, 0);
     atomic_set(&ring.readers, 0);
     init_waitqueue_head(&ring.exit_wait);
+    mutex_init(&ring.read_mutex);
 
     int n = lcview_ring_read(&ring, user, sizeof(user));
     CHECK(n == 20);
@@ -429,6 +434,115 @@ static void test_ring_read_emsgsize_readers_zero(void)
     lcview_ring_destroy(&ring);
 }
 
+/*
+ * 方向 1 判红（池 cmpxchg 修复）：连续 put 后 get 不返已释放对象，
+ * 复用先入槽者。
+ *
+ * 场景：b1 先入槽（先入槽者），b2 再 put 时槽已满被释放（池容量 1）。
+ * 修复前 xchg 先存再 free：put(b2) 把 b2 存入槽覆盖 b1 并 kfree(b2)——
+ * 槽中留下已释放的 b2，get 返回已释放对象（UAF）；修复后 cmpxchg
+ * 仅槽空才存入，b2 从未入槽即 kfree，槽保持 b1（先入槽者，存活），
+ * get 复用 b1。断言 b3 == b1（复用先入槽者）且 != b2（未返已释放）。
+ */
+static void test_pool_put_get_reuse_first(void)
+{
+    struct lcview_builder *b1, *b2, *b3;
+
+    b1 = lcview_builder_new(LCVIEW_EVENT_USB_CONNECT, LCVIEW_LEVEL_INFO);
+    b2 = lcview_builder_new(LCVIEW_EVENT_USB_CONNECT, LCVIEW_LEVEL_INFO);
+    CHECK(b1 != NULL && b2 != NULL);
+    if (!b1 || !b2)
+        return;
+    CHECK(b1 != b2);   /* 池空：两次 new 均走 kmalloc，指针不同 */
+
+    /* 连续 put：b1 入槽（先入槽者），b2 再入槽被释放（池容量 1） */
+    lcview_builder_free(b1);
+    lcview_builder_free(b2);
+
+    /* get 复用先入槽者 b1（存活），而非已释放的 b2 */
+    b3 = lcview_builder_new(LCVIEW_EVENT_USB_CONNECT, LCVIEW_LEVEL_INFO);
+    CHECK(b3 == b1);   /* 复用先入槽者（xchg 版本返回已释放的 b2，判红） */
+    CHECK(b3 != b2);   /* 未返已释放对象 */
+    if (b3) {
+        /* b1 内存存活可用：add_str 写入成功证明未被释放 */
+        int rc = lcview_builder_add_str(b3, "reuse-ok");
+        CHECK(rc == 0);
+        lcview_builder_free(b3);
+    }
+}
+
+/*
+ * 方向 2 判红（满长 4096 交付）：恰好 4096B 的满长记录（4B 前缀 +
+ * 4092B 数据）写入后正常读出交付。
+ * 修复前读侧 record_len >= LCVIEW_BUILDER_MAX_SIZE 判损坏，满长记录
+ * 被跳过（误伤丢记录）；恢复严格大于后 record_len == 4096 合法，
+ * 完整交付且不误伤。
+ */
+static void test_ring_read_callsite_max_record_delivery(void)
+{
+    struct lcview_ring ring;
+    uint8_t user[8192];
+    uint8_t payload[4092];
+
+    CHECK(lcview_ring_init(&ring, 8) == 0);   /* 8KB 环，能容纳满长记录 */
+    memset(payload, 0x44, sizeof(payload));
+    CHECK(lcview_ring_write(&ring, payload, sizeof(payload)) == 0);
+
+    int n = lcview_ring_read(&ring, user, sizeof(user));
+    CHECK(n == 4096);                         /* 满长完整交付（修复前判损坏跳过返 0） */
+    CHECK(memcmp(user + 4, payload, sizeof(payload)) == 0);
+    CHECK(ring.read_pos == 4096 % ring.size);
+    CHECK(atomic_read(&ring.readers) == 0);
+    CHECK(ring.read_mutex.locked == 0);       /* 读后锁平衡 */
+    lcview_ring_destroy(&ring);
+}
+
+/*
+ * 方向 7 判红（读后锁平衡）：host_shim mutex 带锁态断言后，read 任何出口
+ * 漏 unlock 都会判红。覆盖正常交付、EMSGSIZE 错误、shutdown 停交付、
+ * destroy 后 EOF 四类出口，断言返回后 read_mutex 回到解锁态（locked == 0）。
+ */
+static void test_ring_read_lock_balanced(void)
+{
+    struct lcview_ring ring;
+    uint8_t user[256];
+    uint8_t small[64];
+    uint8_t payload[64];
+
+    CHECK(lcview_ring_init(&ring, 1) == 0);
+
+    /* 正常出口：read 返回后锁平衡 */
+    memset(payload, 0x55, sizeof(payload));
+    CHECK(lcview_ring_write(&ring, payload, sizeof(payload)) == 0);
+    int n = lcview_ring_read(&ring, user, sizeof(user));
+    CHECK(n == 68);                           /* 4B 前缀 + 64B 数据 */
+    CHECK(ring.read_mutex.locked == 0);
+    CHECK(atomic_read(&ring.readers) == 0);
+
+    /* EMSGSIZE 出口：首条放不下小缓冲，错误路径返回后锁平衡 */
+    memset(payload, 0x66, sizeof(payload));
+    CHECK(lcview_ring_write(&ring, payload, sizeof(payload)) == 0);
+    n = lcview_ring_read(&ring, small, sizeof(small));
+    CHECK(n == -EMSGSIZE);
+    CHECK(ring.read_mutex.locked == 0);
+    CHECK(atomic_read(&ring.readers) == 0);
+
+    /* shutdown 出口：入口查 shutdown 直返 0，锁平衡 */
+    ring.shutdown = true;
+    n = lcview_ring_read(&ring, user, sizeof(user));
+    CHECK(n == 0);
+    CHECK(ring.read_mutex.locked == 0);
+    CHECK(atomic_read(&ring.readers) == 0);
+    ring.shutdown = false;
+
+    /* destroy 后 EOF 出口：销毁后 read 直返 0，锁平衡 */
+    lcview_ring_destroy(&ring);
+    n = lcview_ring_read(&ring, user, sizeof(user));
+    CHECK(n == 0);
+    CHECK(ring.read_mutex.locked == 0);
+    CHECK(atomic_read(&ring.readers) == 0);
+}
+
 int main(void)
 {
     test_add_str_callsite_overflow();
@@ -444,6 +558,9 @@ int main(void)
     test_ring_shutdown_stops_delivery();
     test_ring_read_readers_zero();
     test_ring_read_emsgsize_readers_zero();
+    test_pool_put_get_reuse_first();
+    test_ring_read_callsite_max_record_delivery();
+    test_ring_read_lock_balanced();
     if (g_fails) {
         printf("FAIL: %d/%d checks failed\n", g_fails, g_checks);
         return 1;
