@@ -92,13 +92,6 @@ struct vendor_lechao_usbd_device {
 void vendor_lechao_usbd_do_reset(struct vendor_lechao_usbd_device *rate_dev);
 
 /*
- * vendor_lechao_usbd_stats_init / _exit — 统计子模块初始化/清理
- * 当前为空实现，预留未来扩展（如 procfs/debugfs 注册）。
- */
-int vendor_lechao_usbd_stats_init(void);
-void vendor_lechao_usbd_stats_exit(void);
-
-/*
  * vendor_lechao_usbd_handle_event — notifier 回调入口
  * @nb:  通知块（通过 container_of 获取 rate_dev）
  * @event: 事件类型（见 usb_stor_notifier_event 枚举）

@@ -17,27 +17,12 @@
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
 
+// ioctl 命令号 / struct lcview_stats 统一取自用户态镜像头
+// （真相源为内核 lcview_ioctl.h + lcview_internal.h，禁单侧改，见
+// lcview_ioctl.h 头注释；原本地副本宏/结构定义已收敛到镜像头）
+#include "../include/lcview_ioctl.h"
+
 using namespace vendor::lechao::lcview;
-
-// ioctl 命令号：用户态本地副本，与内核
-// code/rpi5/kernel/new/vendor/lechao/LcView/lcview_ioctl.h 的宏保持一致。
-// 两侧未走共享头（vendor include 与内核 include 目录隔离），命令号漂移
-// 会导致 ioctl 失败/错配——改动任一侧须同步核对另一侧（ioctl 失败已由
-// mIoctlErr 计数进心跳可见，LCV-16）
-#define LCVIEW_IOC_MAGIC  'V'
-#define LCVIEW_GET_OVERRUN _IOR(LCVIEW_IOC_MAGIC, 2, uint32_t)
-
-// 内核 ring 统计结构（与内核 lcview_internal.h 的 struct lcview_stats 一致）
-struct lcview_stats {
-    uint32_t total_records;
-    uint32_t overrun_cnt;
-    uint32_t ring_usage_bytes;
-    uint32_t ring_size_bytes;
-};
-// GET_STATS 承载 getTotalRecords（心跳守恒校验数据源）与启动诊断快照；
-// total_records/overrun_cnt 为内核驱动自初始化起的累计计数（只读不清零，
-// 与 GET_OVERRUN 的"读取即清零"语义不同，两者互补支撑守恒）
-#define LCVIEW_GET_STATS _IOR(LCVIEW_IOC_MAGIC, 3, struct lcview_stats)
 
 EpollDeviceReader::EpollDeviceReader(int fd) : mFd(fd)
 {

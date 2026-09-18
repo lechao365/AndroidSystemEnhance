@@ -351,6 +351,11 @@ EXPORT_SYMBOL(lcview_builder_add_float);
 EXPORT_SYMBOL(lcview_builder_add_binary);
 EXPORT_SYMBOL(lcview_builder_commit);
 EXPORT_SYMBOL(lcview_builder_cancel);
+/* lcview_builder_free 与 lcview_builder_start 配对导出（方向 2）：
+ * 跨模块调用者经 builder_start 分配后必须能归还构建器（空闲池归还/释放），
+ * 未导出时外部模块链接报"undefined symbol"，构建器泄漏——start/free 同
+ * 生命周期必须同侧可链接 */
+EXPORT_SYMBOL(lcview_builder_free);
 
 /*
  * lcview_init — 模块初始化入口 (module_init)

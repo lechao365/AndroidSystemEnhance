@@ -1372,6 +1372,32 @@ TEST(FileWriterConfigTest, NonZeroMaxTotalSize_Preserved) {
     EXPECT_EQ(writer.mCfg.maxTotalSizeMb, 1u);
 }
 
+TEST(FileWriterConfigTest, ZeroMaxFileSize_ClampedToSafeDefault) {
+    // 方向 4（批次 8 补齐）：maxFileSizeMb=0 属非法配置（单文件上限为 0
+    // 时 checkRotation 每轮都触发无限轮转），构造期告警并钳制到结构体
+    // 缺省 50MB；钳制只作用于成员副本，不改写调用方 cfg 本体
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxFileSizeMb = 0;
+    FileWriter writer(cfg);
+    EXPECT_EQ(writer.mCfg.maxFileSizeMb, 50u);
+    EXPECT_EQ(cfg.maxFileSizeMb, 0u);
+}
+
+TEST(FileWriterConfigTest, ZeroMaxInvalidFileSize_ClampedToSafeDefault) {
+    // 方向 4（批次 8 补齐）：maxInvalidFileSizeMb=0 属非法配置（invalid
+    // 轮转阈值为 0 时每条 invalid 写入都触发轮转），构造期告警并钳制到
+    // 结构体缺省 10MB；钳制只作用于成员副本，不改写调用方 cfg 本体
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxInvalidFileSizeMb = 0;
+    FileWriter writer(cfg);
+    EXPECT_EQ(writer.mCfg.maxInvalidFileSizeMb, 10u);
+    EXPECT_EQ(cfg.maxInvalidFileSizeMb, 0u);
+}
+
 // ============================================================
 // writeLineFlush 直测（方向 3）：拆分后的写盘+恢复路径直接验证
 // ============================================================

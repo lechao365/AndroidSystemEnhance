@@ -263,6 +263,8 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lcview/include/Android.bp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/include/lcview_events.h
       source: aosp/vendor/lechao/services/lechao_lcview/include/lcview_events.h
+    - patch: aosp/new/vendor/lechao/services/lechao_lcview/include/lcview_ioctl.h
+      source: aosp/vendor/lechao/services/lechao_lcview/include/lcview_ioctl.h
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/tests/Android.bp
       source: aosp/vendor/lechao/services/lechao_lcview/tests/Android.bp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/tests/DaemonLoop_test.cpp

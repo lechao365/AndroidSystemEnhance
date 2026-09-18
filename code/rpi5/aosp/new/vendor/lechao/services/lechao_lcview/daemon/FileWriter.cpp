@@ -80,6 +80,23 @@ FileWriter::FileWriter(const FileWriterConfig& cfg) : mCfg(cfg)
               "500MB");
         mCfg.maxTotalSizeMb = 500;
     }
+    // 方向 4（补齐批次 7 未覆盖项）：maxFileSizeMb=0 属非法配置（单文件
+    // 上限为 0 时 checkRotation 每轮都把 currentSize>=0 判真而无限轮转，
+    // 每写一条就新建文件），告警并钳制到安全默认（结构体缺省 50MB）
+    if (mCfg.maxFileSizeMb == 0) {
+        ALOGE("FileWriter: maxFileSizeMb=0 invalid, clamping to safe default "
+              "50MB");
+        mCfg.maxFileSizeMb = 50;
+    }
+    // 方向 4（补齐批次 7 未覆盖项）：maxInvalidFileSizeMb=0 属非法配置
+    // （invalid 轮转阈值为 0 时每条 invalid 写入都触发 rotateInvalid，
+    // 坏数据风暴下无界轮转文件刷盘），告警并钳制到安全默认（结构体
+    // 缺省 10MB）
+    if (mCfg.maxInvalidFileSizeMb == 0) {
+        ALOGE("FileWriter: maxInvalidFileSizeMb=0 invalid, clamping to safe "
+              "default 10MB");
+        mCfg.maxInvalidFileSizeMb = 10;
+    }
     // LCV-13：计数器置满——启动后首次 enforceRetention 即全量扫描，
     // 清理上次运行遗留的超限数据（否则静默期内永不清理）
     mWritesSinceRetention = cfg.retentionScanEveryWrites;

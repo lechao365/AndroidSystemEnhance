@@ -730,12 +730,3 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
 
     return NOTIFY_OK;
 }
-
-int vendor_lechao_usbd_stats_init(void)
-{
-    return 0;
-}
-
-void vendor_lechao_usbd_stats_exit(void)
-{
-}
