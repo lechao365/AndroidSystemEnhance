@@ -71,6 +71,15 @@ static bool mkdirRecursive(const std::string& path, mode_t mode)
 // uploaded 目录为将来"已上传标记"预留，当前未使用
 FileWriter::FileWriter(const FileWriterConfig& cfg) : mCfg(cfg)
 {
+    // 方向 4：容量阈值下限校验——maxTotalSizeMb=0 属非法配置（总容量上限
+    // 为 0 时每次淘汰扫描都会尝试删除全部文件，容量管理失效且会误删有效
+    // 日志），告警并钳制到安全默认（结构体缺省 500MB），防配置错误静默
+    // 生效；仅在构造期钳制到成员副本，不改写调用方传入的 cfg 本体
+    if (mCfg.maxTotalSizeMb == 0) {
+        ALOGE("FileWriter: maxTotalSizeMb=0 invalid, clamping to safe default "
+              "500MB");
+        mCfg.maxTotalSizeMb = 500;
+    }
     // LCV-13：计数器置满——启动后首次 enforceRetention 即全量扫描，
     // 清理上次运行遗留的超限数据（否则静默期内永不清理）
     mWritesSinceRetention = cfg.retentionScanEveryWrites;
@@ -110,7 +119,14 @@ std::string FileWriter::makeDateStr()
 {
     time_t now = time(nullptr);
     struct tm tm_buf;
-    localtime_r(&now, &tm_buf);
+    // 方向 6：localtime_r 返回 nullptr 即失败（无效 time_t / 时区数据缺失），
+    // 静默使用未初始化 tm_buf 是 UB（CXX-001 输入防御）——失败告警并回退
+    // 固定纪元日期，防文件命名与跨天轮转判定基于脏数据
+    if (localtime_r(&now, &tm_buf) == nullptr) {
+        ALOGE("FileWriter: makeDateStr: localtime_r failed: %s, fallback to "
+              "epoch", strerror(errno));
+        return "19700101";
+    }
     char buf[16];
     strftime(buf, sizeof(buf), "%Y%m%d", &tm_buf);
     return std::string(buf);
@@ -925,35 +941,54 @@ std::vector<FileWriter::LogFile> FileWriter::scanLogFiles()
         ALOGE("FileWriter: enforceRetention: opendir(%s) failed: %s", mCfg.logDir.c_str(), strerror(errno));
         return files;
     }
-
-    // 遍历日志目录，收集所有 .jsonl 和 .log 文件。
-    // LCV-10：精确后缀匹配（原子串包含会把 foo.jsonl.bak / x.log.old
-    // 等文件误入淘汰候选——目录虽由 daemon 自管，人工排障放置的
-    // 中间文件不应被静默删除）
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        std::string name(entry->d_name);
-        const std::string kJsonl = ".jsonl", kLog = ".log";
-        bool isJsonl = name.size() >= kJsonl.size() &&
-            name.compare(name.size() - kJsonl.size(), kJsonl.size(), kJsonl) == 0;
-        bool isLog = name.size() >= kLog.size() &&
-            name.compare(name.size() - kLog.size(), kLog.size(), kLog) == 0;
-        if (!isJsonl && !isLog)
-            continue;
-
-        std::string fullPath = mCfg.logDir + "/" + name;
-        struct stat st;
-        if (stat(fullPath.c_str(), &st) == 0)
-            files.push_back({fullPath, st.st_mtime,
-                             static_cast<std::int64_t>(st.st_size)});
-    }
     closedir(dir);
+
+    // 方向 1：扫描范围扩展为「日志根目录 + uploaded 子目录」——uploaded
+    // 下是"已上传远程存储"的标记文件（目录当前仅预留，上传器二期实现），
+    // 也须纳入容量统计并参与 LRU 淘汰，否则上传过的历史文件永不回收。
+    // 二期约束：上传器上线后须保证 uploaded 文件名的可重入（已上传即
+    // 淘汰、不重复传输），且本扫描的 mtime 淘汰语义对上传标记文件同样
+    // 适用；uploaded 内文件默认全部参与淘汰，与业务日志同容量池。
+    // uploaded 子目录不存在/不可读时静默跳过（构造函数会创建，外部删除
+    // 属预期场景，不刷 ALOGE）
+    auto collectDir = [&files](const std::string& dirPath) {
+        DIR* sub = opendir(dirPath.c_str());
+        if (!sub)
+            return;
+        // 遍历目录，收集所有 .jsonl 和 .log 文件。
+        // LCV-10：精确后缀匹配（原子串包含会把 foo.jsonl.bak / x.log.old
+        // 等文件误入淘汰候选——目录虽由 daemon 自管，人工排障放置的
+        // 中间文件不应被静默删除）
+        struct dirent* entry;
+        while ((entry = readdir(sub)) != nullptr) {
+            std::string name(entry->d_name);
+            const std::string kJsonl = ".jsonl", kLog = ".log";
+            bool isJsonl = name.size() >= kJsonl.size() &&
+                name.compare(name.size() - kJsonl.size(), kJsonl.size(), kJsonl) == 0;
+            bool isLog = name.size() >= kLog.size() &&
+                name.compare(name.size() - kLog.size(), kLog.size(), kLog) == 0;
+            if (!isJsonl && !isLog)
+                continue;
+
+            std::string fullPath = dirPath + "/" + name;
+            struct stat st;
+            if (stat(fullPath.c_str(), &st) == 0)
+                files.push_back({fullPath, st.st_mtime,
+                                 static_cast<std::int64_t>(st.st_size)});
+        }
+        closedir(sub);
+    };
+
+    collectDir(mCfg.logDir);
+    collectDir(mCfg.logDir + "/uploaded");
     return files;
 }
 
 // 淘汰段：按 mtime 升序（最旧优先）删除文件直至总大小 <= maxTotalSizeMb；
 // 跳过当前正在写入/被 invalid 流持有的文件（拆分自 enforceRetention，
 // 行为不变）
+// 跳过打开文件告警的 ratelimit 周期（方向 2）：每累计 64 次跳过才打 1 条
+static constexpr unsigned kEvictSkipWarnEvery = 64;
 void FileWriter::evictOldFiles(std::vector<LogFile>& files)
 {
     size_t maxBytes = mCfg.maxTotalSizeMb * 1024 * 1024;
@@ -971,6 +1006,13 @@ void FileWriter::evictOldFiles(std::vector<LogFile>& files)
 
     // 从最旧文件开始删除，直到总大小 <= maxBytes
     // 跳过当前正在写入的文件，避免删除后 writeRecord 写入失败
+    // NOTE（方向 2 脆弱点）："是否打开"的判定基于字符串路径相等比较
+    // （fs.currentFilename == f.path / f.path == mInvalidFilename）。
+    // 路径两侧拼法不同源：openFile 拼 mCfg.logDir + "/" + name，而
+    // scanLogFiles 拼 dirPath + "/" + name（uploaded 子目录为
+    // mCfg.logDir + "/uploaded" + "/" + name）。任一侧格式漂移（尾斜杠/
+    // 符号链接/相对路径/大小写）即比较失败，打开中的文件可能被误删——
+    // 当前一致性靠两侧同用 mCfg.logDir 前缀拼装保证，改动任一侧须同步。
     for (const auto& f : files) {
         if (totalSize <= maxBytes) break;
         bool isOpen = false;
@@ -984,8 +1026,16 @@ void FileWriter::evictOldFiles(std::vector<LogFile>& files)
         // 已删除 inode，空间泄漏直至进程退出（CXX-002 资源生命周期）
         if (f.path == mInvalidFilename)
             isOpen = true;
-        if (isOpen)
+        if (isOpen) {
+            // 方向 2：跳过打开文件加 ratelimited 告警——持续超限时每轮
+            // 扫描都在跳过同一批打开文件，静默会让"淘汰未达上限"无信号；
+            // ratelimit 防逐文件/逐轮刷屏（每 kEvictSkipWarnEvery 次跳过
+            // 才打一条，成员计数保证多实例/多轮测试互不串扰）
+            if (++mEvictSkipWarnCount % kEvictSkipWarnEvery == 1)
+                ALOGW("FileWriter: evictOldFiles: skipping open file %s "
+                      "(capacity limit may not be reached)", f.path.c_str());
             continue;
+        }
         if (unlink(f.path.c_str()) == 0) {
             totalSize -= static_cast<size_t>(f.size);
             ALOGI("FileWriter: deleted old log %s", f.path.c_str());

@@ -197,4 +197,8 @@ private:
     // 也强制执行，防长静默期陈旧超限数据滞留；构造时置 now 避免启动
     // 首扫（计数满触发）与时间兜底叠加干扰
     std::chrono::steady_clock::time_point mLastRetentionScanAt;
+    // evictOldFiles 跳过打开文件告警的 ratelimit 计数（方向 2）：
+    // 每累计 kEvictSkipWarnEvery 次跳过才打 1 条 ALOGW，防超限场景
+    // 每轮扫描刷屏（成员变量而非 static，避免多实例/测试间串扰）
+    unsigned mEvictSkipWarnCount = 0;
 };

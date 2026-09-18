@@ -1345,6 +1345,34 @@ TEST(FileWriterEvictTest, SkipsOpenFileAndInvalidLog) {
 }
 
 // ============================================================
+// 容量阈值下限校验（方向 4）：maxTotalSizeMb=0 告警并钳制安全默认
+// ============================================================
+
+TEST(FileWriterConfigTest, ZeroMaxTotalSize_ClampedToSafeDefault) {
+    // 构造时钳制：0 属非法配置（总容量上限为 0 时每次淘汰扫描都会尝试
+    // 删除全部文件，容量管理失效且会误删有效日志），告警并钳制到结构体
+    // 缺省 500MB
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxTotalSizeMb = 0;
+    FileWriter writer(cfg);
+    EXPECT_EQ(writer.mCfg.maxTotalSizeMb, 500u);
+    // 钳制只作用于成员副本，不改写调用方传入的 cfg 本体
+    EXPECT_EQ(cfg.maxTotalSizeMb, 0u);
+}
+
+TEST(FileWriterConfigTest, NonZeroMaxTotalSize_Preserved) {
+    // 非零合法值原样保留（小容量测试配置等不受钳制影响）
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxTotalSizeMb = 1;
+    FileWriter writer(cfg);
+    EXPECT_EQ(writer.mCfg.maxTotalSizeMb, 1u);
+}
+
+// ============================================================
 // writeLineFlush 直测（方向 3）：拆分后的写盘+恢复路径直接验证
 // ============================================================
 

@@ -168,3 +168,36 @@ TEST_F(MainLoopTest, ReaderBatchThenFatal_WriterGetsBatch) {
     // writer 收到该批次：落盘文件真实存在
     EXPECT_TRUE(logFileExists("usb_transport_start"));
 }
+
+// ============================================================
+// 守恒告警判定（方向 3）：dev = totalΔ - (overrunΔ + jsonlΔ + invalidΔ)
+// ============================================================
+
+TEST(MainLoopConservationTest, ZeroDeviation_NoAlarm) {
+    // 完全守恒：产生全落盘，dev=0
+    EXPECT_FALSE(shouldAlarmConservation(100, 0, 100, 0, kConserveTolerance));
+    // overrun/invalid 计入后守恒成立
+    EXPECT_FALSE(shouldAlarmConservation(100, 10, 80, 10, kConserveTolerance));
+}
+
+TEST(MainLoopConservationTest, InFlightWithinTolerance_NoAlarm) {
+    // 在途积压未超容差：不告警（容差边界 dev == tol 严格大于才告警）
+    EXPECT_FALSE(shouldAlarmConservation(1000, 0, 900, 0, kConserveTolerance));
+    EXPECT_FALSE(shouldAlarmConservation(1000 + kConserveTolerance, 0, 1000,
+                                         0, kConserveTolerance));
+    // 负向同理：落盘略超产生但在容差内
+    EXPECT_FALSE(shouldAlarmConservation(1000, 0, 1000 + kConserveTolerance,
+                                         0, kConserveTolerance));
+}
+
+TEST(MainLoopConservationTest, PositiveDeviationBeyondTolerance_Alarms) {
+    // 产生未落盘超容差：丢记录/在途积压异常告警
+    EXPECT_TRUE(shouldAlarmConservation(1000 + kConserveTolerance + 1, 0, 1000,
+                                        0, kConserveTolerance));
+}
+
+TEST(MainLoopConservationTest, NegativeDeviationBeyondTolerance_Alarms) {
+    // 落盘超过产生超容差：重复落盘/计数漂移告警
+    EXPECT_TRUE(shouldAlarmConservation(1000, 0, 1000 + kConserveTolerance + 1,
+                                        0, kConserveTolerance));
+}
