@@ -802,8 +802,11 @@ static struct notifier_block vendor_lechao_usbd_vendor_nb = {
  *
  * 为什么遍历 USB 接口而非直接匹配 us_data：
  *   usb_for_each_dev 遍历的是 struct usb_device，需要通过
- *   USB 接口的驱动名匹配 "usb-storage"，再通过 dev_get_drvdata
- *   获取 Scsi_Host，最后转为 us_data。这是一条间接但完整路径。
+ *   USB 接口的驱动名匹配 "usb-storage"。usb-storage 在 probe 时经
+ *   usb_set_intfdata(intf, us) 把接口私有数据设为 us_data*，因此
+ *   dev_get_drvdata(&intf->dev) 返回的就是 struct us_data*，
+ *   无需再经 Scsi_Host 中转（方向 2：删除 scsi_host_get/host_to_us
+ *   误用——drvdata 不是 Scsi_Host，强制转换既类型错又无谓持引用）。
  *
  * 为什么 check us->notifier.head：
  *   确保 us_data 的 notifier 链已经初始化，防止在关键路径上
@@ -818,8 +821,6 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
         return 0;
 
     for (i = 0; i < udev->actconfig->desc.bNumInterfaces; i++) {
-        void *drvdata;
-        struct Scsi_Host *shost;
         struct us_data *us;
         struct vendor_lechao_usbd_device *pos;
         struct vendor_lechao_usbd_device *new_dev = NULL;
@@ -832,16 +833,11 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
         if (strcmp(intf->dev.driver->name, "usb-storage") != 0)
             continue;
 
-        drvdata = dev_get_drvdata(&intf->dev);
-        shost = drvdata ? scsi_host_get(drvdata) : NULL;
-        if (!shost)
+        /* usb-storage 的 intfdata 即 us_data（probe 时 usb_set_intfdata），
+         * 直接取用，删 scsi_host_get 与 host_to_us 的类型误用（方向 2）。 */
+        us = dev_get_drvdata(&intf->dev);
+        if (!us || !us->notifier.head)
             continue;
-
-        us = host_to_us(shost);
-        if (!us || !us->notifier.head) {
-            scsi_host_put(shost);
-            continue;
-        }
 
         mutex_lock(&vendor_lechao_usbd_mutex);
         list_for_each_entry(pos, &vendor_lechao_usbd_devices, list) {
@@ -852,15 +848,12 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
         }
         mutex_unlock(&vendor_lechao_usbd_mutex);
 
-        if (found) {
-            scsi_host_put(shost);
+        if (found)
             continue;
-        }
 
         new_dev = vendor_lechao_usbd_device_alloc(us);
         if (IS_ERR(new_dev)) {
             pr_warn(PREFIX "failed to alloc device: %ld\n", PTR_ERR(new_dev));
-            scsi_host_put(shost);
             continue;
         }
 
@@ -877,8 +870,6 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
             kref_put(&new_dev->kref, vendor_lechao_usbd_device_release);
         }
         mutex_unlock(&vendor_lechao_usbd_mutex);
-
-        scsi_host_put(shost);
     }
     return 0;
 }

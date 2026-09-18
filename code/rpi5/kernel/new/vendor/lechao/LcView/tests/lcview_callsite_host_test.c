@@ -60,9 +60,12 @@ static void test_add_str_callsite_overflow(void)
      * 剩余 LCVIEW_BUILDER_MAX_SIZE - 23 = 4073 字节可写变长数据。
      * 再加 1 字节 data 即需 data_offset+4+3+4074 > 4096 → -ENOSPC。
      * 修复前漏扣 4B 前缀：data_offset+3+4074=4100 > 4096 本也应超——
-     * 该用例在 4096 边界上方区分，边界处判红见下面 data_offset 精确用例。 */
-    char blob[4074];
-    memset(blob, 'x', sizeof(blob));
+     * 该用例在 4096 边界上方区分，边界处判红见下面 data_offset 精确用例。
+     * 缓冲须补 NUL 结尾：add_str 走 compute_str_len → strlen，未终止的
+     * 栈缓冲导致 strlen 越界读（UB），长度不可预期用例失效。 */
+    char blob[4075];
+    memset(blob, 'x', 4074);
+    blob[4074] = '\0';   /* strlen = 4074 → 4+3+4074 = 4097 > 4096 → -ENOSPC */
     int rc = lcview_builder_add_str(b, blob);
     CHECK(rc == -ENOSPC);
 
@@ -103,15 +106,17 @@ static void test_add_str_callsite_boundary(void)
     if (!b)
         return;
 
-    char blob[4077];
-    memset(blob, 'y', sizeof(blob));
+    char blob[4078];
+    memset(blob, 'y', 4077);
+    blob[4077] = '\0';   /* strlen = 4077（补 NUL 防 strlen 越界 UB） */
     /* data_offset=16：4(前缀)+3(type/len)+4077 = 4100 > 4096 → -ENOSPC */
     int rc = lcview_builder_add_str(b, blob);
     CHECK(rc == -ENOSPC);
 
     /* 4073B 恰好：4+3+4073 = 4080 ≤ 4096 → 装得下 */
-    char small[4073];
-    memset(small, 'z', sizeof(small));
+    char small[4074];
+    memset(small, 'z', 4073);
+    small[4073] = '\0';  /* strlen = 4073（补 NUL 防 strlen 越界 UB） */
     struct lcview_builder *b2 = lcview_builder_new(LCVIEW_EVENT_USB_RATE_DEGRADED,
                                                    LCVIEW_LEVEL_INFO);
     CHECK(b2 != NULL);
@@ -254,10 +259,11 @@ static void test_builder_cancel_callsite_null(void)
 
 /*
  * 调用点判红（方向 7/方向 5）：短前缀记录判损坏跳过。
- * 记录长度下限由 4 改为 20（前缀+记录头），[4,20) 前缀判损坏跳过。
- * 构造 record_len=10 的坏记录，read 判损坏且 read_pos 前移
- * ring_corrupt_skip_len(10, size, 20) = 10（10 在 [前缀, size] 可信）。
- * 修复前下限 4：10 ≥ 4 判合法，正常读给用户 n=10（非跳过）。
+ * 记录长度下限由 4 改为 default_skip 20（前缀+记录头），[4,20)
+ * 前缀判损坏且长度不可信——ring_corrupt_skip_len(10, size, 20) = 20。
+ * 修复前下限 4：10 ≥ 4 判合法，正常读给用户 n=10（非跳过）；
+ * 且修复前 skip 下界也是 4，跳过 10 会落进记录体中间撕裂后续流。
+ * 合法记录放在 pos 20，read 跳过默认 20 后读到。
  */
 static void test_ring_read_callsite_short_prefix(void)
 {
@@ -270,15 +276,15 @@ static void test_ring_read_callsite_short_prefix(void)
     memset(readbuf, 0, sizeof(readbuf));
     memset(user, 0, sizeof(user));
 
-    /* 短前缀 10：< 20（前缀+头）判损坏，但 ≥ 4 且在环内可信；
-     * 后跟合法记录 20B，跳过 10 后读合法记录正常返回。 */
+    /* 短前缀 10：< 20（前缀+头）判损坏且不可信；
+     * 后跟合法记录 20B（pos 20），跳过默认 20 后读合法记录正常返回。 */
     put_u32(ringbuf, 10);
-    put_u32(ringbuf + 10, 20);
+    put_u32(ringbuf + 20, 20);
 
     ring.buf = ringbuf;
     ring.read_buf = readbuf;
     ring.size = sizeof(ringbuf);
-    ring.write_pos = 30;   /* 损坏记录 10B + 合法记录 20B */
+    ring.write_pos = 40;   /* 损坏前缀 4B + 跳过空洞 16B + 合法记录 20B */
     ring.read_pos = 0;
     ring.shutdown = false;
     atomic_set(&ring.overrun_cnt, 0);
@@ -288,8 +294,49 @@ static void test_ring_read_callsite_short_prefix(void)
 
     int n = lcview_ring_read(&ring, user, sizeof(user));
     CHECK(n == 20);
-    /* 判损坏跳过 ring_corrupt_skip_len(10,...) = 10，再读 20B → 30 */
-    CHECK(ring.read_pos == (0 + 10 + 20) % sizeof(ringbuf));
+    /* 判损坏跳过 ring_corrupt_skip_len(10,...) = default 20，再读 20B → 40 */
+    CHECK(ring.read_pos == (0 + 20 + 20) % sizeof(ringbuf));
+    CHECK(atomic_read(&ring.readers) == 0);
+}
+
+/*
+ * 调用点判红（方向 7/方向 4）：等长记录 record_len == ring->size 判损坏。
+ * 修复前上界为 >：等长记录不判损坏，读到后 (rpos + size) % size == rpos
+ * 零推进，写指针环绕重合时 read 死循环或重复交付。修复后
+ * record_len >= ring->size 判损坏，corrupt_skip_len 判不可信回落默认
+ * default_skip 前移，跳过损坏后正常读到后续合法记录。
+ */
+static void test_ring_read_callsite_equal_size(void)
+{
+    uint8_t ringbuf[64];
+    uint8_t readbuf[4096];
+    uint8_t user[4096];
+    struct lcview_ring ring;
+
+    memset(ringbuf, 0, sizeof(ringbuf));
+    memset(readbuf, 0, sizeof(readbuf));
+    memset(user, 0, sizeof(user));
+
+    /* 等长前缀 64 == ring->size=64 → 判损坏（零推进消除）；
+     * 后跟合法记录 20B（pos 20），跳过默认 20 后读到。 */
+    put_u32(ringbuf, 64);
+    put_u32(ringbuf + 20, 20);
+
+    ring.buf = ringbuf;
+    ring.read_buf = readbuf;
+    ring.size = sizeof(ringbuf);
+    ring.write_pos = 40;
+    ring.read_pos = 0;
+    ring.shutdown = false;
+    atomic_set(&ring.overrun_cnt, 0);
+    atomic_set(&ring.total_records, 0);
+    atomic_set(&ring.readers, 0);
+    init_waitqueue_head(&ring.exit_wait);
+
+    int n = lcview_ring_read(&ring, user, sizeof(user));
+    CHECK(n == 20);
+    /* 等长判损坏 → ring_corrupt_skip_len(64,64,20) = 20，再读 20B → 40 */
+    CHECK(ring.read_pos == (0 + 20 + 20) % sizeof(ringbuf));
     CHECK(atomic_read(&ring.readers) == 0);
 }
 
@@ -392,6 +439,7 @@ int main(void)
     test_ring_write_callsite_huge_len();
     test_builder_cancel_callsite_null();
     test_ring_read_callsite_short_prefix();
+    test_ring_read_callsite_equal_size();
     test_ring_destroy_read_zero();
     test_ring_shutdown_stops_delivery();
     test_ring_read_readers_zero();

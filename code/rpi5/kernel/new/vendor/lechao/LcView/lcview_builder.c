@@ -385,8 +385,9 @@ int lcview_builder_commit(struct lcview_builder *b, struct lcview_ring *ring)
         b->committed = true;
         lcview_builder_free(b);
     } else {
-        pr_warn(PREFIX "commit failed event_id=%u err=%d\n",
-                b->event_id, ret);
+        /* KRN-014：commit 失败在环满/I/O 洪水时可每条命令触发，限频防日志风暴 */
+        pr_warn_ratelimited(PREFIX "commit failed event_id=%u err=%d\n",
+                            b->event_id, ret);
     }
 
     return ret;

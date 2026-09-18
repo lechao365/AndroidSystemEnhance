@@ -70,6 +70,8 @@ kernel:
       source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/errno.h
     - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/kernel.h
       source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/kernel.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/mutex.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/mutex.h
     - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/slab.h
       source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/slab.h
     - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/spinlock.h

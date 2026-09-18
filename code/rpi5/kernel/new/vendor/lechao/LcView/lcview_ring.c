@@ -137,6 +137,7 @@ int lcview_ring_init(struct lcview_ring *ring, uint32_t size_kb)
     atomic_set(&ring->total_records, 0);
     atomic_set(&ring->readers, 0);
     spin_lock_init(&ring->lock);
+    mutex_init(&ring->read_mutex);
     init_waitqueue_head(&ring->waitq);
     init_waitqueue_head(&ring->exit_wait);
 
@@ -339,15 +340,24 @@ int lcview_ring_write(struct lcview_ring *ring,
 }
 
 /*
- * lcview_ring_read — 从环形缓冲区读取事件记录到用户缓冲区（UAF 安全包装）
+ * lcview_ring_read — 从环形缓冲区读取事件记录到用户缓冲区（串行化 + UAF 安全包装）
  *
- * 生命周期契约（防 UAF）：
- *   1. 入口 atomic_inc(&ring->readers)，标记一个在途读调用。
- *   2. 持锁检查 shutdown：已销毁（shutdown=true）时直接返回 0（EOF），
- *      不触碰 buf / read_buf——避免 destroy 置位后新读仍去访问内存。
- *   3. 调内部实现 lcview_ring_read_internal 执行真正的读取。
- *   4. 出口 atomic_dec_and_test(&ring->readers)，归零时 wake_up(exit_wait)，
- *      唤醒可能正 wait_event(exit_wait) 睡眠的 lcview_ring_destroy。
+ * 并发与生命周期契约（方向 3：read 串行化）：
+ *   1. 入口 atomic_inc(&ring->readers)，标记一个在途读调用——先于
+ *      mutex_lock：排队等 read_mutex 的 reader 同样计入在途读，destroy
+ *      的 wait_event(exit_wait, readers==0) 会等其拿到锁后查 shutdown
+ *      直返归零，杜绝"等待者越过归零判定后访问已释放内存"的 UAF。
+ *   2. mutex_lock(&ring->read_mutex) 串行化 read 调用：read 路径会睡眠
+ *      （wait_event_interruptible / copy_to_user）不能持 spinlock，并发
+ *      读者若仅靠 spin_lock 互斥会在锁外 copy_to_user 阶段交错推进
+ *      read_pos，撕裂记录流。mutex 保证同一时刻只有一个 read 在途推进
+ *      读指针与使用 read_buf。
+ *   3. 持 spin_lock 检查 shutdown：已销毁（shutdown=true）时直接返回
+ *      0（EOF），不触碰 buf / read_buf。
+ *   4. 调内部实现 lcview_ring_read_internal 执行真正的读取。
+ *   5. 出口 mutex_unlock 释放串行化锁；atomic_dec_and_test(&ring->readers)
+ *      归零时 wake_up(exit_wait)，唤醒可能正 wait_event(exit_wait) 睡眠的
+ *      lcview_ring_destroy。
  *
  * destroy 经 wait_event(exit_wait, readers == 0) 等所有在途 read 退出后
  * 才 vfree buf / read_buf，杜绝"reader 还在 copy_to_user 内存已被释放"的 UAF。
@@ -359,6 +369,7 @@ int lcview_ring_read(struct lcview_ring *ring,
     unsigned long flags;
 
     atomic_inc(&ring->readers);
+    mutex_lock(&ring->read_mutex);
 
     /* 入口查 shutdown：销毁后新读直接 EOF，不进内部函数触碰已释放内存 */
     spin_lock_irqsave(&ring->lock, flags);
@@ -372,6 +383,7 @@ int lcview_ring_read(struct lcview_ring *ring,
     ret = lcview_ring_read_internal(ring, buf, len);
 
 out:
+    mutex_unlock(&ring->read_mutex);
     /* 读调用退出：归零唤醒 destroy（readers==0 是"可安全释放内存"的信号） */
     if (atomic_dec_and_test(&ring->readers))
         wake_up(&ring->exit_wait);
@@ -476,24 +488,30 @@ static int lcview_ring_read_internal(struct lcview_ring *ring,
          *   方向 5：下限由 4 改 20（前缀+记录头）。[4,20) 的记录连
          *   记录头都放不下，判损坏跳过——防伪造/损坏前缀导致的撕裂。
          * - 最大合法值: min(LCVIEW_BUILDER_MAX_SIZE, ring->size)
+         *   方向 4：上界由 > 改 >=——record_len == ring->size 时按
+         *   record_len 前移会 (rpos + size) % size == rpos 零推进死循环；
+         *   record_len == LCVIEW_BUILDER_MAX_SIZE 时记录恰好占满上限，
+         *   写侧可达真实记录最大 4092（16 头 + 4 前缀 + 4076 数据），
+         *   等长上界判损坏消除零推进且不误伤合法记录。
          *
          * 如果记录损坏，使用保守的默认大小跳过这条记录。
          * 跳过策略：推进到前缀 + 记录头大小的位置，尝试从下一条继续。
          * 这样可以最大程度地从数据损坏中恢复，而不是永久阻塞 reader。
          */
         if (record_len < LCVIEW_LEN_PREFIX_SIZE + sizeof(struct lcview_record_hdr) ||
-            record_len > LCVIEW_BUILDER_MAX_SIZE ||
-            record_len > ring->size) {
+            record_len >= LCVIEW_BUILDER_MAX_SIZE ||
+            record_len >= ring->size) {
             pr_warn_ratelimited(PREFIX "corrupted record at pos=%u, len=%u, skipping\n",
                                 rpos, record_len);
             /*
              * 损坏记录跳过量须按 record_len（写侧写入的长度前缀）前移：
              * 记录在环中实际占用 record_len 字节，只前移前缀+头（20B）
              * 会让 read_pos 落进记录体中间，把后续记录当损坏撕裂整个流。
-             * record_len 在环内可信（[前缀, ring->size]）时按 record_len
-             * 前移；不可信（<前缀 或 > ring->size，垃圾前缀）才用保守
-             * 默认跳过量（前缀 + 记录头），防止跳过头。判定内聚于 logic
-             * 层 ring_corrupt_skip_len 供单测判红。
+             * record_len 可信（[default_skip, ring->size)）时按 record_len
+             * 前移；不可信（<default_skip 或 >= ring->size，伪造/垃圾
+             * 前缀，方向 4/5）才用保守默认跳过量（前缀 + 记录头），
+             * 防止跳过头。判定内聚于 logic 层 ring_corrupt_skip_len 供
+             * 单测判红。
              */
             ring->read_pos = (rpos + ring_corrupt_skip_len(
                 record_len, ring->size,

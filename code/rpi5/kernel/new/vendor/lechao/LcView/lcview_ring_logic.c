@@ -79,8 +79,10 @@ int ring_evict_one_core(uint8_t *buf, uint32_t size, uint32_t *read_pos,
     if (out_len)
         *out_len = old_len;
 
-    /* 防御损坏记录：长度异常时用保守默认长度跳过 */
-    if (old_len == 0 || old_len > size) {
+    /* 防御损坏记录：长度异常时用保守默认长度跳过。
+     * 方向 4：上界由 > 改 >=——old_len == size 时按 old_len 推进
+     * (rpos + size) % size == rpos 零推进死循环，判损坏用默认跳过。 */
+    if (old_len == 0 || old_len >= size) {
         *read_pos = (rpos + default_record_len) % size;
         return 2;
     }
@@ -140,7 +142,12 @@ int builder_str_field_fits(uint32_t data_offset, uint32_t data_len,
 uint32_t ring_corrupt_skip_len(uint32_t record_len, uint32_t ring_size,
                                uint32_t default_skip)
 {
-    if (record_len < LCVIEW_RING_LEN_PREFIX || record_len > ring_size)
+    /* 方向 5：下界由前缀 4 改 default_skip 20——[4,20) 的记录连记录头
+     * 都放不下，伪造长度不可信，一律回落保守默认。
+     * 方向 4：上界由 > 改 >=——record_len == ring_size 时按 record_len
+     * 前移会 (rpos + ring_size) % ring_size == rpos 零推进死循环，
+     * 判不可信回落默认。可信区间收缩为 [default_skip, ring_size)。 */
+    if (record_len < default_skip || record_len >= ring_size)
         return default_skip;
     return record_len;
 }

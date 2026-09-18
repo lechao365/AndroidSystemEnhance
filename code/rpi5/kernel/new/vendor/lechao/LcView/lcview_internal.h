@@ -21,6 +21,7 @@
 
 #include <linux/kernel.h>
 #include <linux/spinlock.h>
+#include <linux/mutex.h>
 #include <linux/wait.h>
 #include <linux/atomic.h>
 #include "lcview_events.h"
@@ -52,9 +53,12 @@
  *
  * 并发模型：写者（lcview_ring_write）可能在多个上下文并发调用
  * （USB 中断回调、lciod notifier 等），靠 spin_lock_irqsave 互斥；
- * 读者（lcview_ring_read）因设备单打开限制为单消费者。
- * 读者同样持锁读取记录头到 read_buf，随后解锁执行 copy_to_user
- * 以减少持锁时间。
+ * 读者（lcview_ring_read）因设备单打开限制为单消费者，但多个打开
+ * 实例经单打开 cmpxchg 限制前仍可能并发调用 read——read 会睡眠
+ * （wait_event_interruptible / copy_to_user）不能持 spinlock，故
+ * 用 read_mutex 串行化 read 调用，保护 read_pos 与 read_buf 不被
+ * 并发读者竞争撕裂。读者锁内拷贝记录头到 read_buf，随后解锁执行
+ * copy_to_user 以减少持锁时间。
  *
  * 空间不足时写者自动驱逐最旧记录 (ring_evict_one)，保证最新事件不丢失。
  * 适用于"最新 N 条"日志场景，而非可靠传输。
@@ -62,7 +66,10 @@
  * 生命周期防护（防 UAF）：lcview_ring_read 入口 atomic_inc(readers)，
  * 出口 atomic_dec_and_test 归零时 wake_up(exit_wait)；lcview_ring_destroy
  * 置 shutdown 后经 wait_event(exit_wait) 等 readers 归零，才 vfree buf/
- * read_buf。写者路径由 spin_lock 与 shutdown 检查互斥闭环（销毁前持锁
+ * read_buf。readers 计数在 mutex_lock 之前 inc——等待 read_mutex 的
+ * reader 同样计入在途读，destroy 的 wait_event 会等其拿到锁后因
+ * shutdown 直返归零，杜绝"持锁等待者越过归零判定后访问已释放内存"。
+ * 写者路径由 spin_lock 与 shutdown 检查互斥闭环（销毁前持锁
  * 置 shutdown，后续写者查 shutdown 拒绝），无需计数。
  */
 struct lcview_ring {
@@ -74,6 +81,7 @@ struct lcview_ring {
     atomic_t      overrun_cnt; /* 溢出逐出累计计数（边读边清） */
     atomic_t      total_records; /* 累计写入记录数（仅统计，不清零） */
     spinlock_t    lock;        /* 保护 write_pos/read_pos 的自旋锁 */
+    struct mutex  read_mutex;  /* 串行化 read 调用（方向 3）：并发读者防 read_pos 撕裂 */
     wait_queue_head_t waitq;   /* 读取等待队列，写完后 wake_up 唤醒 reader */
     bool          shutdown;    /* destroy 标记，通知等待中的 reader 退出 */
     atomic_t      readers;     /* 在途读调用计数，destroy 等其归零再释放内存（防 UAF） */

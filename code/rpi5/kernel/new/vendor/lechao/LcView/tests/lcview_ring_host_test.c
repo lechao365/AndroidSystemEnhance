@@ -182,6 +182,18 @@ static void test_evict(void)
     CHECK(read_pos == 20 % 16);          /* 4 */
     CHECK(out_len == 0xFFFF);
 
+    /* 方向 4/7：损坏等长 old_len == size → 保守跳过（零推进消除）。
+     * 修复前上界 >：16 > 16 不判损坏，按 old_len 推进 (0+16)%16 == 0
+     * 零推进死循环。 */
+    memset(buf, 0, sizeof(buf));
+    put_u32(buf, 16);                    /* old_len == 16 == size */
+    read_pos = 0;
+    out_len = 0;
+    rc = ring_evict_one_core(buf, 16, &read_pos, 8, 20, &out_len);
+    CHECK(rc == 2);
+    CHECK(read_pos == 20 % 16);          /* 4 */
+    CHECK(out_len == 16);
+
     /* 空环：read_pos == write_pos → 不驱逐、不推进 */
     read_pos = 5;
     out_len = 77;
@@ -256,11 +268,13 @@ static void test_builder_str_fits(void)
 
 /* ring_corrupt_skip_len：损坏记录跳过前移量判红（方向 2 判红）
  * 记录在环中实占 record_len 字节，只前移前缀+头（20B）会撕裂后续流；
- * 但垃圾前缀（<4 或 > ring->size）须回落保守默认，防止跳过头。 */
+ * 但垃圾前缀须回落保守默认，防止跳过头。可信区间 [default_skip, ring_size)。
+ * 方向 5：下界由前缀 4 改 default_skip 20，[4,20) 不再信任伪造长度；
+ * 方向 4/7：上界 >= ring_size，等长零推进消除。 */
 static void test_corrupt_skip(void)
 {
     const uint32_t def = 20; /* 前缀 4 + 记录头 16 */
-    /* 可信前缀（含超 MAX 但 ≤ ring->size，如 4100）→ 按 record_len 前移 */
+    /* 可信前缀（含超 MAX 但 < ring->size，如 4100）→ 按 record_len 前移 */
     CHECK(ring_corrupt_skip_len(4100, 8192, def) == 4100);
     CHECK(ring_corrupt_skip_len(4096, 8192, def) == 4096);
     CHECK(ring_corrupt_skip_len(20, 8192, def) == 20);
@@ -268,6 +282,11 @@ static void test_corrupt_skip(void)
     CHECK(ring_corrupt_skip_len(0, 8192, def) == def);
     CHECK(ring_corrupt_skip_len(3, 8192, def) == def);
     CHECK(ring_corrupt_skip_len(9000, 8192, def) == def);
+    /* 方向 5/7：下界 [4,20) 不可信，回落默认 */
+    CHECK(ring_corrupt_skip_len(4, 8192, def) == def);
+    CHECK(ring_corrupt_skip_len(19, 8192, def) == def);
+    /* 方向 4/7：等长 record_len == ring_size → 不可信（零推进消除） */
+    CHECK(ring_corrupt_skip_len(8192, 8192, def) == def);
 }
 
 int main(void)
