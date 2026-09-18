@@ -80,6 +80,10 @@ struct lcview_ring {
     uint32_t      read_pos;    /* 读指针（读时持锁修改，指向下条读取位置） */
     atomic_t      overrun_cnt; /* 溢出逐出累计计数（边读边清） */
     atomic_t      total_records; /* 累计写入记录数（仅统计，不清零） */
+    atomic_t      dropped_cnt; /* ENOSPC 丢弃累计计数（方向 7：驱逐预算超限丢弃，
+                                * 与 total_records 同步递增——该记录同样被内核收到，
+                                * 守恒左式 totalΔ = overrunΔ + droppedΔ + jsonlΔ + invalidΔ
+                                * 由此闭合，避免丢弃时守恒负向误报） */
     spinlock_t    lock;        /* 保护 write_pos/read_pos 的自旋锁 */
     struct mutex  read_mutex;  /* 串行化 read 调用（方向 3）：并发读者防 read_pos 撕裂 */
     wait_queue_head_t waitq;   /* 读取等待队列，写完后 wake_up 唤醒 reader */
@@ -119,8 +123,9 @@ struct lcview_builder {
  * 通过 LCVIEW_GET_STATS ioctl 返回给用户态
  */
 struct lcview_stats {
-    uint32_t total_records;    /* 累计写入记录总数 */
+    uint32_t total_records;    /* 累计写入记录总数（含 ENOSPC 丢弃，见 lcview_ring_write） */
     uint32_t overrun_cnt;      /* 溢出逐出记录数 */
+    uint32_t dropped_cnt;      /* ENOSPC 丢弃累计（方向 7：驱逐预算超限丢弃，只读不清零） */
     uint32_t ring_usage_bytes; /* 当前已使用字节数 */
     uint32_t ring_size_bytes;  /* 环形缓冲区总大小 */
 };

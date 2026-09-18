@@ -135,6 +135,7 @@ int lcview_ring_init(struct lcview_ring *ring, uint32_t size_kb)
     ring->shutdown = false;
     atomic_set(&ring->overrun_cnt, 0);
     atomic_set(&ring->total_records, 0);
+    atomic_set(&ring->dropped_cnt, 0);
     atomic_set(&ring->readers, 0);
     spin_lock_init(&ring->lock);
     mutex_init(&ring->read_mutex);
@@ -294,8 +295,10 @@ int lcview_ring_write(struct lcview_ring *ring,
      * KRN-008：单次 write 驱逐预算。极端场景（256KB 环 + 全 20B 小记录）
      * 需要驱逐 ~13000 条腾空间，持锁 ~1.3ms，阻塞同锁读者与并发写者。
      * 预算 256 条（≈26µs 持锁上限）：256×20B=5KB 覆盖常规腾空间需求；
-     * 超限返回 -ENOSPC 丢弃本次写入——该场景本就是 overrun（计数继续
-     * 递增），牺牲单条写入换取读写路径的低延迟。
+     * 超限返回 -ENOSPC 丢弃本次写入——该场景本就是 overrun（驱逐仍在
+     * 预算内进行，overrun 计数继续递增），方向 7 起丢弃的记录计入
+     * dropped_cnt 并同步递增 total_records（守恒左式闭合），牺牲单条
+     * 写入换取读写路径的低延迟。
      */
     {
         uint32_t evicted = 0;
@@ -317,6 +320,14 @@ int lcview_ring_write(struct lcview_ring *ring,
             /* KRN-014：满环在 I/O 洪水时可每条命令触发，限频防止日志风暴 */
             pr_err_ratelimited(PREFIX "ring full, write failed (total=%u avail=%u evicted=%u)\n",
                                total, avail, evicted);
+            /*
+             * 方向 7：ENOSPC 丢弃同样计入 total_records（该记录已被内核收到，
+             * 属"产生但被丢弃"）并递增 dropped_cnt——否则守恒左式 totalΔ 不含
+             * 该条而右式含 droppedΔ，dev 恒为负向误报。total_records 语义由
+             * "成功写入数"扩展为"内核处理的记录总数（成功 + 预算超限丢弃）"。
+             */
+            atomic_inc(&ring->total_records);
+            atomic_inc(&ring->dropped_cnt);
             return -ENOSPC;
         }
     }
@@ -616,6 +627,7 @@ void lcview_ring_get_stats(struct lcview_ring *ring, struct lcview_stats *stats)
 {
     stats->total_records = atomic_read(&ring->total_records);
     stats->overrun_cnt = atomic_read(&ring->overrun_cnt);
+    stats->dropped_cnt = atomic_read(&ring->dropped_cnt);
     stats->ring_size_bytes = ring->size;
     stats->ring_usage_bytes = lcview_ring_avail_bytes(ring);
 }

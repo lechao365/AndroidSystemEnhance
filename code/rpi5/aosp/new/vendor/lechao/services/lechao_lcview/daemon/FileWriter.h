@@ -89,6 +89,17 @@ public:
     // 返回当前累计的 DROP 计数（心跳输出用）
     const DropCounters& dropCounters() const { return mDrops; }
 
+    // 落盘计数（方向 5）：writeRecord/writeInvalid 真正成功落盘（含恢复
+    // 重试成功）的记录数，供守恒右式替代解析成功数——解析成功计数在
+    // writeRecord 内部 DROP（openFile 失败 / formatEmpty 等）时仍 +1，
+    // 守恒右式用它会高估落盘，dev 恒向负偏（落盘超产生误报）。落盘计数
+    // 只在 flush 成功后累计，与磁盘真实一致
+    struct PersistCounters {
+        uint64_t valid = 0;    // 合法记录成功落盘数
+        uint64_t invalid = 0;  // 非法记录成功落盘数（invalid_records.log）
+    };
+    const PersistCounters& persistCounters() const { return mPersist; }
+
     // 刷活跃文件落盘（方向 5）：心跳 30s 同锚调用，对全部已打开的事件
     // 文件与 invalid 流按路径 fdatasync（flush 只到内核页缓存，崩溃/断电
     // 丢数据；fdatasync 才真正落盘）。轮转前对旧文件单独 fsync 见
@@ -155,9 +166,12 @@ private:
     // 留下半行，截断至最后一个换行，避免半行与后续行粘连成非法 JSONL。
     // 返回修复后文件字节数（供恢复 currentSize/mInvalidSize）
     static size_t truncateToLastNewline(const std::string& path);
-    // 回退文件到指定偏移（写失败恢复前截断残留半行）。原静态自由函数
-    // 改为成员方法：失败时累计 dropRollback（方向 3，回滚失败也须可见）
-    void rollbackFileTo(const std::string& path, size_t offset);
+    // 回退文件到指定偏移（写失败恢复前截断残留半行）。返回回退后文件
+    // 真实大小（fstat），供调用方校准 currentSize/mInvalidSize——内存计数
+    // 与磁盘实际不一致会导致后续追加/轮转判定基于失真值而误截（方向 2）。
+    // 失败返回 SIZE_MAX（调用方保持原计数）并累计 dropRollback（方向 3，
+    // 回滚失败也须可见，进心跳 dropped 求和）
+    size_t rollbackFileTo(const std::string& path, size_t offset);
 
     // 日志目录扫描结果：路径 + mtime + size（enforceRetention 淘汰用）
     struct LogFile {
@@ -187,6 +201,8 @@ private:
     // 方向 4：DROP 计数点收敛到 writeRecord 的 formatEmpty；formatOob
     // 保留供心跳格式兼容，当前无自增路径（同一次丢弃只计 1 次不虚高）
     DropCounters mDrops;
+    // 落盘计数（方向 5：守恒右式数据源，见 PersistCounters）
+    PersistCounters mPersist;
     // 写路径耗时统计（方向 3，见 WriteTimings）
     WriteTimings mTimings;
     // 距上次 enforceRetention 实际扫描的写入次数（方向 4 降频）；

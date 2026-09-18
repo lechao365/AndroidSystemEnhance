@@ -235,6 +235,17 @@ TEST(DaemonLoopHelperTest, SchemaLoadRetry_InterruptibleByRunning) {
                                      std::chrono::milliseconds(100)));
 }
 
+TEST(DaemonLoopHelperTest, SchemaExitCode_StoppedReturnsZero) {
+    // 方向 4：未运行（关停中断 running=false）返回 0——init stop 在 schema
+    // 重试窗口内被 SIGTERM 打断时优雅退出，不判崩溃重启
+    EXPECT_EQ(schemaLoadExitCode(false, false), 0);
+    // 加载成功返回 0（正常继续）
+    EXPECT_EQ(schemaLoadExitCode(true, true), 0);
+    EXPECT_EQ(schemaLoadExitCode(true, false), 0);
+    // 真失败（running 仍 true）返回 1，交 init 重启重试
+    EXPECT_EQ(schemaLoadExitCode(false, true), 1);
+}
+
 // ============================================================
 // flush 触发语义（原 hal_test LcViewReaderLoopTest 分支 4/5 有效逻辑
 // 并入 daemon）：空批不 flush（避免写放大）；满缓冲 flush；

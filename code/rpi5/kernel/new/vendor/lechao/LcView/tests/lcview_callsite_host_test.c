@@ -543,6 +543,53 @@ static void test_ring_read_lock_balanced(void)
     CHECK(atomic_read(&ring.readers) == 0);
 }
 
+/*
+ * 方向 7 判红（ENOSPC 丢弃计数）：驱逐预算超限时返回 -ENOSPC，且该丢弃
+ * 记录同步递增 total_records 与新增 dropped_cnt——守恒左式
+ * totalΔ = overrunΔ + droppedΔ + jsonlΔ + invalidΔ 由此闭合（丢弃不使
+ * dev 恒负向误报）。
+ * 构造：8KB 环持续写 20B 小记录（环满后每次驱逐 1 条腾空间，全成功），
+ * 再写 8000B 大记录需驱逐 >LCVIEW_EVICT_MAX_RECORDS(256) 条 → -ENOSPC。
+ * 被驱逐旧记录计 overrun，丢弃这条计 dropped，守恒自洽
+ * （total = overrun + dropped + 环内在途）。
+ */
+static void test_ring_write_enospc_counts_dropped(void)
+{
+    struct lcview_ring ring;
+    uint8_t small[16];   /* 16B 数据 + 4B 前缀 = 20B/条 */
+    uint8_t big[8000];
+
+    CHECK(lcview_ring_init(&ring, 8) == 0);   /* 8KB 环 */
+
+    /* 填满环：写 1000 条 20B 小记录（环满后每条驱逐 1 条腾空间，全成功） */
+    memset(small, 0x77, sizeof(small));
+    int written = 0;
+    for (int i = 0; i < 1000; i++) {
+        if (lcview_ring_write(&ring, small, sizeof(small)) != 0)
+            break;
+        written++;
+    }
+    CHECK(written == 1000);
+
+    /* 8000B 大记录需驱逐 >256 条（256×20B=5120B < 8000B+4B）→ 预算超限 → -ENOSPC。
+     * 8000 ≤ ring->size-4(8188)，不被 EMSGSIZE 前置拒绝 */
+    memset(big, 0x88, sizeof(big));
+    int rc = lcview_ring_write(&ring, big, sizeof(big));
+    CHECK(rc == -ENOSPC);
+
+    /* 方向 7：ENOSPC 丢弃同步计入 total_records 与 dropped_cnt */
+    CHECK(atomic_read(&ring.total_records) == written + 1);
+    CHECK(atomic_read(&ring.dropped_cnt) == 1);
+    /* 被驱逐旧记录计 overrun（右式 overrun 项），overrun > 0 可见 */
+    CHECK(atomic_read(&ring.overrun_cnt) > 0);
+    /* 守恒自洽：total（成功+丢弃）>= overrun（驱逐）+ dropped（丢弃）——
+     * 剩余在途（环中未读 409-256 条）补足等式 */
+    CHECK(atomic_read(&ring.total_records) >=
+          atomic_read(&ring.overrun_cnt) + atomic_read(&ring.dropped_cnt));
+
+    lcview_ring_destroy(&ring);
+}
+
 int main(void)
 {
     test_add_str_callsite_overflow();
@@ -561,6 +608,7 @@ int main(void)
     test_pool_put_get_reuse_first();
     test_ring_read_callsite_max_record_delivery();
     test_ring_read_lock_balanced();
+    test_ring_write_enospc_counts_dropped();
     if (g_fails) {
         printf("FAIL: %d/%d checks failed\n", g_fails, g_checks);
         return 1;

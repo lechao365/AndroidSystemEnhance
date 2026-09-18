@@ -221,7 +221,14 @@ void FileWriter::openFile(uint16_t eventId, const EventSchema& schema)
             it->second.stream.close();
         seq = it->second.seq;
     } else {
-        seq = nextSeqFor(schema, date);
+        // 方向 1：重启（mFiles 空）打开最高 seq 现有文件并修复残留半行，
+        // 而不是新建更高 seq 文件——上次异常退出留在最高 seq 文件的半行
+        // 须截断（下方 truncateToLastNewline），否则与后续追加行粘连成
+        // 非法 JSONL；同时避免生成空 _p{max+1}。nextSeqFor 返回 max+1：
+        // >0 即有现有文件（最高 seq = next-1，继续追加）；==0 无文件
+        // （新建 _p0，追加模式打开同名已有文件同样不丢数据）
+        const int next = nextSeqFor(schema, date);
+        seq = (next > 0) ? (next - 1) : 0;
     }
 
     FileState fs;
@@ -473,18 +480,17 @@ void FileWriter::recordWriteTiming(std::chrono::steady_clock::time_point start)
 
 // 回退文件到指定偏移：flush 失败后首写可能部分落盘，重试前须截断掉残留的
 // 半行，否则磁盘留"半行+整行"坏行（app 重开并重写整行只追加不清残留）。
-// 仅尽力而为——文件不可打开/非普通文件（如 /dev/full）时静默忽略，成败由
-// 后续重写决定（CXX-004 故障可恢复：不留坏行）。
-// 方向 3：截断失败累计 dropRollback（回滚失败也进心跳 dropped 求和，
+// 返回回退后文件真实大小（fstat）供调用方校准内存计数（方向 2）；失败
+// 返回 SIZE_MAX 并计 dropRollback（方向 3：回滚失败也进心跳 dropped 求和，
 // 不能只 ALOGE 静默——回滚失败 = 半行残留风险，须可见）
-void FileWriter::rollbackFileTo(const std::string& path, size_t offset)
+size_t FileWriter::rollbackFileTo(const std::string& path, size_t offset)
 {
     int fd = open(path.c_str(), O_WRONLY | O_CLOEXEC);
     if (fd < 0) {
         mDrops.dropRollback++;
         ALOGE("FileWriter: rollback open %s failed: %s",
               path.c_str(), strerror(errno));
-        return;
+        return SIZE_MAX;
     }
     if (ftruncate(fd, static_cast<off_t>(offset)) != 0) {
         mDrops.dropRollback++;
@@ -492,6 +498,14 @@ void FileWriter::rollbackFileTo(const std::string& path, size_t offset)
               path.c_str(), offset, strerror(errno));
     }
     close(fd);
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) {
+        mDrops.dropRollback++;
+        ALOGE("FileWriter: rollback stat %s failed: %s",
+              path.c_str(), strerror(errno));
+        return SIZE_MAX;
+    }
+    return static_cast<size_t>(st.st_size);
 }
 
 // 按路径 fdatasync（方向 5）：open + fdatasync + close。
@@ -629,7 +643,12 @@ bool FileWriter::writeLineFlush(FileState& fs, const std::string& line)
          * 恢复路径：清错误状态 → 回退首写残留 → 重开流 → 重试一次 */
         fs.stream.clear();
         fs.stream.close();
-        rollbackFileTo(fs.currentFilename, writeBase);
+        // 方向 2：以回退后真实文件大小校准 currentSize（截断后磁盘实际
+        // 字节数 = writeBase，重开后续写/轮转判定不基于失真的内存计数；
+        // 回退失败返回 SIZE_MAX 时保持原计数）
+        const size_t rolled = rollbackFileTo(fs.currentFilename, writeBase);
+        if (rolled != SIZE_MAX)
+            fs.currentSize = rolled;
         fs.stream.open(fs.currentFilename, std::ios::app);
         if (!fs.stream.is_open()) {
             ALOGE("FileWriter: recovery reopen failed for event %u, DROPPING",
@@ -647,8 +666,11 @@ bool FileWriter::writeLineFlush(FileState& fs, const std::string& line)
             fs.stream.clear();
             // CXX-004 坏行归零延续：重试同样可能部分落盘，须回退到写前
             // 偏移截断残留半行——否则残留与下一条记录粘成非法 JSON
-            // （下一条从 currentSize=writeBase 续写，不清残留即粘连）
-            rollbackFileTo(fs.currentFilename, writeBase);
+            // （下一条从 currentSize=writeBase 续写，不清残留即粘连）。
+            // 方向 2：同时校准 currentSize 为回退后真实大小
+            const size_t rolledRetry = rollbackFileTo(fs.currentFilename, writeBase);
+            if (rolledRetry != SIZE_MAX)
+                fs.currentSize = rolledRetry;
             recordWriteTiming(tWriteStart);
             return false;
         }
@@ -701,6 +723,10 @@ void FileWriter::writeRecord(const EventSchema& schema,
     if (!writeLineFlush(it->second, line))
         return;
 
+    // 方向 5：真正落盘成功才累计（守恒右式数据源）——writeLineFlush
+    // 返回 true 即 flush 成功、磁盘已有完整行
+    mPersist.valid++;
+
     // 方向 4：写入计数累计，供 enforceRetention 按写入阈值降频扫描
     mWritesSinceRetention++;
 
@@ -725,14 +751,24 @@ void FileWriter::rotateInvalid()
     // 方向 5：轮转前刷旧文件落盘（fdatasync），防断电丢轮转边界数据
     fsyncFileByPath(mInvalidFilename);
     const std::string date = makeDateStr();
-    const std::string rotated = mCfg.logDir + "/invalid_records_" + date
-                                + "_p" + std::to_string(nextInvalidSeqFor(date))
-                                + ".log";
-    const bool renamed = (rename(mInvalidFilename.c_str(), rotated.c_str()) == 0);
-    if (!renamed) {
+    // 方向 3：seq 不可用（nextInvalidSeqFor 返回 -1，opendir 失败）时跳过
+    // rename——无法确定目标序号，贸然 rename 成 _p{-1} 或覆盖已有轮转文件
+    // 会造成诊断数据错位/覆盖；仅重开原文件继续追加，保底不丢数据
+    const int nextSeq = nextInvalidSeqFor(date);
+    bool renamed = false;
+    std::string rotated;
+    if (nextSeq >= 0) {
+        rotated = mCfg.logDir + "/invalid_records_" + date
+                  + "_p" + std::to_string(nextSeq) + ".log";
+        renamed = (rename(mInvalidFilename.c_str(), rotated.c_str()) == 0);
+        if (!renamed) {
+            mDrops.dropInvRotate++;
+            ALOGE("FileWriter: rotateInvalid: rename to %s failed: %s",
+                  rotated.c_str(), strerror(errno));
+        }
+    } else {
         mDrops.dropInvRotate++;
-        ALOGE("FileWriter: rotateInvalid: rename to %s failed: %s",
-              rotated.c_str(), strerror(errno));
+        ALOGE("FileWriter: rotateInvalid: nextInvalidSeqFor failed, skipping rename");
     }
     mInvalidStream.open(mInvalidFilename, std::ios::app);
     if (!mInvalidStream.is_open()) {
@@ -767,8 +803,13 @@ int FileWriter::nextInvalidSeqFor(const std::string& date)
     const std::string suffix = ".log";
     int maxSeq = -1;
     DIR* dir = opendir(mCfg.logDir.c_str());
-    if (!dir)
-        return 0;
+    if (!dir) {
+        // 方向 3：opendir 失败返回 -1（区别于无匹配的 0）——调用方
+        // rotateInvalid 据此跳过 rename，防止以未知序号覆盖已有轮转文件
+        ALOGE("FileWriter: nextInvalidSeqFor: opendir(%s) failed: %s",
+              mCfg.logDir.c_str(), strerror(errno));
+        return -1;
+    }
     struct dirent* entry;
     while ((entry = readdir(dir)) != nullptr) {
         std::string name(entry->d_name);
@@ -849,7 +890,11 @@ void FileWriter::writeInvalid(const uint8_t* data, size_t len,
         ALOGE("FileWriter: writeInvalid: write failed, attempting recovery");
         mInvalidStream.clear();
         mInvalidStream.close();
-        rollbackFileTo(mInvalidFilename, mInvalidSize);
+        // 方向 2：以回退后真实大小校准 mInvalidSize（防内存计数失真导致
+        // 后续轮转阈值判定错误 / 再 rollback 时误截已有诊断）
+        const size_t rolledInv = rollbackFileTo(mInvalidFilename, mInvalidSize);
+        if (rolledInv != SIZE_MAX)
+            mInvalidSize = rolledInv;
         mInvalidStream.open(mInvalidFilename, std::ios::app);
         if (!mInvalidStream.is_open()) {
             ALOGE("FileWriter: writeInvalid: recovery reopen failed, DROPPING reason=%s",
@@ -864,14 +909,20 @@ void FileWriter::writeInvalid(const uint8_t* data, size_t len,
                   reason.c_str());
             mDrops.invalidWriteFailed++;
             mInvalidStream.clear();
-            // 重试同样可能部分落盘：回退到写前偏移截断残留半行（LCV-07）
-            rollbackFileTo(mInvalidFilename, mInvalidSize);
+            // 重试同样可能部分落盘：回退到写前偏移截断残留半行（LCV-07）。
+            // 方向 2：同时校准 mInvalidSize 为回退后真实大小
+            const size_t rolledInvRetry =
+                rollbackFileTo(mInvalidFilename, mInvalidSize);
+            if (rolledInvRetry != SIZE_MAX)
+                mInvalidSize = rolledInvRetry;
             return;
         }
         ALOGI("FileWriter: writeInvalid: recovered invalid stream");
     }
     // 写成功（含恢复重试成功）才累计，失败路径保持写前偏移供 rollback
     mInvalidSize += payload.size();
+    // 方向 5：invalid 真正落盘成功才累计（守恒右式 invalid 项数据源）
+    mPersist.invalid++;
     // 方向 1：writeInvalid 成功也推进写入计数——invalid 坏数据风暴也须
     // 触发容量扫描（原只有 writeRecord 推进，纯 invalid 写入时保留策略
     // 永不扫描，超限数据滞留）；enforceRetention 另有 300s 时间兜底

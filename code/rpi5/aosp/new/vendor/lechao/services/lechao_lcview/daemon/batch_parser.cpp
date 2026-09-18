@@ -121,6 +121,16 @@ bool vendor::lechao::lcview::loadSchemaWithRetry(
     return schema.eventCount() > 0;
 }
 
+int vendor::lechao::lcview::schemaLoadExitCode(bool schemaOk, bool running)
+{
+    // 方向 4：未运行（关停中断，running=false）返回 0——schema 重试窗口
+    // 被 SIGTERM 打断时优雅退出，init 不再判崩溃重启；真失败返回 1 交
+    // init 重启重试
+    if (schemaOk)
+        return 0;
+    return running ? 1 : 0;
+}
+
 bool vendor::lechao::lcview::shouldFlushBatch(
     size_t buffered, bool timedOut, bool ageExpired, size_t bufferCapacity)
 {

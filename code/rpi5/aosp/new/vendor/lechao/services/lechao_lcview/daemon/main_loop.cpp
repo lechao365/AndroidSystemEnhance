@@ -84,15 +84,16 @@ static ssize_t readOnce(DeviceReader& reader, uint8_t* buf, size_t bufSize,
     return n;
 }
 
-// 守恒告警判定（方向 3）：dev = totalΔ - (overrunΔ + jsonlΔ + invalidΔ)，
-// |dev| 超容差即判告警（正值：产生未落盘在途积压/丢记录；负值：落盘
-// 超过产生，重复落盘/计数漂移）。纯函数，供 emitHeartbeat 与单测共用。
+// 守恒告警判定（方向 3/7）：dev = totalΔ - (overrunΔ + droppedΔ + jsonlΔ +
+// invalidΔ)，|dev| 超容差即判告警（正值：产生未落盘在途积压/丢记录；负值：
+// 落盘超过产生，重复落盘/计数漂移）。纯函数，供 emitHeartbeat 与单测共用。
 bool shouldAlarmConservation(uint64_t totalDelta, uint64_t overrunDelta,
-                             uint64_t jsonlDelta, uint64_t invalidDelta,
-                             int64_t tolerance)
+                             uint64_t droppedDelta, uint64_t jsonlDelta,
+                             uint64_t invalidDelta, int64_t tolerance)
 {
     const int64_t dev = static_cast<int64_t>(totalDelta)
-        - static_cast<int64_t>(overrunDelta + jsonlDelta + invalidDelta);
+        - static_cast<int64_t>(overrunDelta + droppedDelta
+                               + jsonlDelta + invalidDelta);
     return dev > tolerance || dev < -tolerance;
 }
 
@@ -108,7 +109,8 @@ bool shouldAlarmConservation(uint64_t totalDelta, uint64_t overrunDelta,
 static void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
                           FileWriter& writer, int64_t& overrunAccum,
                           uint64_t readErr,
-                          long long jsonlRecords, long long invalidRecords)
+                          long long jsonlRecords, long long invalidRecords,
+                          ConserveBaseline& conserve)
 {
     uint32_t ov = reader.getOverrun();
     overrunAccum += ov;
@@ -119,49 +121,66 @@ static void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
         + dc.formatEmpty + dc.formatOob + dc.reopenFailed
         + dc.retryFailed + dc.invalidNotOpen + dc.invalidWriteFailed
         + dc.dropRotate + dc.dropInvRotate + dc.dropRollback;
-    // 方向 3（本批）：守恒校验——内核 total_records 累计产生应等于
-    // overrun + jsonl + invalid 之和（每条记录要么被驱逐 overrun、要么
-    // 合法落盘 jsonl、要么非法落盘 invalid），偏差即"在途积压"（内核
-    // ring 未读 + 用户态 64KB 攒包缓冲未落盘），超容差即守恒破坏（丢
-    // 记录/重复落盘/计数漂移），ALOGE 供 liveness 判红定位。
-    // 重启适配：daemon 重启后内核 total_records 不归零（驱动累计）而
-    // overrun/jsonl/invalid 进程内归零，绝对比较必误报——首心跳建立
-    // 基线，次心跳起按增量比较（Δtotal ≈ Δoverrun + Δjsonl + Δinvalid）
+    // 守恒校验（方向 3/5/6/7）：内核 total_records 累计产生应等于
+    // overrun（驱逐）+ dropped（ENOSPC 丢弃）+ jsonl（合法落盘）+
+    // invalid（非法落盘）之和，偏差即"在途积压"（内核 ring 未读 + 用户态
+    // 64KB 攒包缓冲未落盘），超容差即守恒破坏（丢记录/重复落盘/计数漂移）。
+    // 右式去向改用真实计数：jsonl/invalid 取 FileWriter 落盘计数（方向 5，
+    // 解析成功数在 DROP 时仍 +1 会高估落盘致负向误报），dropped 取内核
+    // dropped_cnt（方向 7，ENOSPC 丢弃与 total_records 同步递增）。
+    // 重启适配 + 防回绕 + ioctl 失败跳过（方向 6）：基线移 runMainLoop
+    // 局部（ConserveBaseline）并按心跳推进——daemon 重启后内核累计不归零
+    // 而进程内计数归零，须增量比较；相邻心跳窗口比较使 uint32 total 永不
+    // 回绕；任一 ioctl 失败（查询返 0 伪装真实 0）时跳过守恒且不推进数值
+    // 基线，防失败值失真误报。
     const uint32_t total = reader.getTotalRecords();
-    static bool conservationInit = false;
-    static uint32_t conservationBaseTotal = 0;
-    static int64_t conservationBaseOverrun = 0;
-    static long long conservationBaseJsonl = 0;
-    static long long conservationBaseInvalid = 0;
-    if (!conservationInit) {
-        conservationInit = true;
-        conservationBaseTotal = total;
-        conservationBaseOverrun = overrunAccum;
-        conservationBaseJsonl = jsonlRecords;
-        conservationBaseInvalid = invalidRecords;
+    const uint32_t kernDropped = reader.getDropped();
+    const uint32_t ringSize = reader.getRingSizeBytes();
+    const uint64_t ioctlErr = reader.ioctlErr();
+    const FileWriter::PersistCounters& pc = writer.persistCounters();
+    if (ioctlErr != conserve.ioctlErr) {
+        // 方向 6：本轮 ioctl 失败，跳过守恒校验并仅推进 ioctlErr 基线；
+        // 数值基线保持上次成功值（防失败返 0 失真）
+        conserve.ioctlErr = ioctlErr;
+    } else if (!conserve.initialized) {
+        // 首心跳（ioctl 成功）：建立基线，次心跳起按增量比较
+        conserve.initialized = true;
+        conserve.total = total;
+        conserve.overrun = overrunAccum;
+        conserve.dropped = kernDropped;
+        conserve.persistedValid = pc.valid;
+        conserve.persistedInvalid = pc.invalid;
     } else {
         const uint64_t totalDelta = static_cast<uint64_t>(
-            total - conservationBaseTotal);
+            total - conserve.total);
         const uint64_t overrunDelta = static_cast<uint64_t>(
-            overrunAccum - conservationBaseOverrun);
-        const uint64_t jsonlDelta = static_cast<uint64_t>(
-            jsonlRecords - conservationBaseJsonl);
-        const uint64_t invalidDelta = static_cast<uint64_t>(
-            invalidRecords - conservationBaseInvalid);
-        if (shouldAlarmConservation(totalDelta, overrunDelta, jsonlDelta,
-                                    invalidDelta, kConserveTolerance)) {
+            overrunAccum - conserve.overrun);
+        const uint64_t droppedDelta = kernDropped - conserve.dropped;
+        const uint64_t jsonlDelta = pc.valid - conserve.persistedValid;
+        const uint64_t invalidDelta = pc.invalid - conserve.persistedInvalid;
+        const int64_t tolerance = computeConserveTolerance(ringSize);
+        if (shouldAlarmConservation(totalDelta, overrunDelta, droppedDelta,
+                                    jsonlDelta, invalidDelta, tolerance)) {
             const int64_t dev = static_cast<int64_t>(totalDelta)
-                - static_cast<int64_t>(overrunDelta + jsonlDelta + invalidDelta);
+                - static_cast<int64_t>(overrunDelta + droppedDelta
+                                       + jsonlDelta + invalidDelta);
             ALOGE("lechao_lcview: CONSERVATION BROKEN: dev=%lld (tol=%lld), "
-                  "total_delta=%llu overrun_delta=%llu jsonl_delta=%llu "
-                  "invalid_delta=%llu",
+                  "total_delta=%llu overrun_delta=%llu dropped_delta=%llu "
+                  "jsonl_delta=%llu invalid_delta=%llu",
                   static_cast<long long>(dev),
-                  static_cast<long long>(kConserveTolerance),
+                  static_cast<long long>(tolerance),
                   static_cast<unsigned long long>(totalDelta),
                   static_cast<unsigned long long>(overrunDelta),
+                  static_cast<unsigned long long>(droppedDelta),
                   static_cast<unsigned long long>(jsonlDelta),
                   static_cast<unsigned long long>(invalidDelta));
         }
+        // 方向 6：每心跳推进数值基线（防 uint32 total_records 回绕）
+        conserve.total = total;
+        conserve.overrun = overrunAccum;
+        conserve.dropped = kernDropped;
+        conserve.persistedValid = pc.valid;
+        conserve.persistedInvalid = pc.invalid;
     }
     // 方向 5：心跳 30s 同锚刷活跃文件落盘（fdatasync），缩小断电丢失窗口
     writer.fsyncActiveFiles();
@@ -250,6 +269,10 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
     long long jsonlRecords = 0;
     // parseBatch 丢弃累计（invalid 计数，方向 1：心跳可见性）
     long long invalidRecords = 0;
+    // 守恒基线（方向 6）：runMainLoop 局部，经引用传入 emitHeartbeat——
+    // 替代 emitHeartbeat 内 static 局部（多实例/多测试串扰 + 无法按心跳
+    // 推进防 uint32 回绕）
+    ConserveBaseline conserve;
     static constexpr size_t kBufSize = 64 * 1024;
     static constexpr int kEpollTimeoutMs = 1000;
     // 预防性 flush 阈值 = 单条记录上限（LCVIEW_MAX_RECORD_SIZE，真相源内核
@@ -296,7 +319,7 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
         auto now = std::chrono::steady_clock::now();
         if (now - lastBeatAt >= std::chrono::seconds(30)) {
             emitHeartbeat(loopCount, reader, writer, overrunAccum, readErr,
-                          jsonlRecords, invalidRecords);
+                          jsonlRecords, invalidRecords, conserve);
             lastBeatAt = now;
         }
 

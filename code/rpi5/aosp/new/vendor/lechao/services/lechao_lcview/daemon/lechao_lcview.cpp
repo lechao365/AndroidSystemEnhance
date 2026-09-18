@@ -52,7 +52,9 @@ int main(int argc, char* argv[])
     const bool schemaOk = loadSchemaWithRetry(schema, schemaPath, gRunning, 30);
     if (!schemaOk) {
         ALOGE("lechao_lcview: failed to load schema from %s", schemaPath.c_str());
-        return 1;
+        // 方向 4：退出码抽纯函数——未运行（关停中断，gRunning=false）
+        // 返回 0 优雅退出，init 不判崩溃；真失败返回 1 交 init 重启重试
+        return schemaLoadExitCode(schemaOk, gRunning);
     }
     ALOGI("lechao_lcview: loaded %zu event schemas", schema.eventCount());
 

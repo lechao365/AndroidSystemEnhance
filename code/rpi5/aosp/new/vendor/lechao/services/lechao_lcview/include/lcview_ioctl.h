@@ -46,6 +46,7 @@
 struct lcview_stats {
     uint32_t total_records;
     uint32_t overrun_cnt;
+    uint32_t dropped_cnt;
     uint32_t ring_usage_bytes;
     uint32_t ring_size_bytes;
 };
@@ -63,7 +64,7 @@ struct lcview_stats {
 #define LCVIEW_SET_LEVEL        _IOW(LCVIEW_IOC_MAGIC, 4, uint8_t)
 
 /* struct 尺寸守卫：与内核镜像（lcview_internal.h）漂移即编译期报错 */
-static_assert(sizeof(struct lcview_stats) == 16,
-              "lcview_stats must be 16 bytes (kernel mirror drift)");
+static_assert(sizeof(struct lcview_stats) == 20,
+              "lcview_stats must be 20 bytes (kernel mirror drift)");
 
 #endif /* LCVIEW_IOCTL_H */

@@ -53,6 +53,17 @@ public:
     // overrun 覆盖的记录）；与 getOverrun 互补支撑守恒校验（失败返回 0）
     virtual uint32_t getTotalRecords() = 0;
 
+    // 查询内核 ring buffer ENOSPC 丢弃累计（方向 7：驱逐预算超限丢弃，
+    // 与 getTotalRecords 同源 GET_STATS；失败返回 0）。守恒左式
+    // totalΔ = overrunΔ + droppedΔ + jsonlΔ + invalidΔ 由它闭合——丢弃
+    // 的记录同样计入 total_records，右式吸收 dropped 后不误报负偏差。
+    virtual uint32_t getDropped() { return 0; }
+
+    // 查询内核 ring buffer 总大小（方向 6：守恒容差按环推导，避免固定
+    // 容差在 ring 配置变化时失配；失败返回 0，ioctlErr 计数区分）。非
+    // 纯虚默认 0：不强制旧 mock 实现，容差退化由 ioctl 失败跳过兜底。
+    virtual uint32_t getRingSizeBytes() { return 0; }
+
     // LCV-16/17：诊断计数（心跳可见性，失败返 0 与真实 0 可区分）。
     // 提上抽象接口：emitHeartbeat 经抽象 DeviceReader 注入（main_loop
     // 可测边界）即可读取，不再依赖具体 EpollDeviceReader。
@@ -78,6 +89,8 @@ public:
                         int timeoutMs) override;
     uint32_t getOverrun() override;
     uint32_t getTotalRecords() override;
+    uint32_t getDropped() override;
+    uint32_t getRingSizeBytes() override;
     void close() override;
 
     // LCV-16/17：诊断计数（心跳可见性，失败返 0 与真实 0 可区分）

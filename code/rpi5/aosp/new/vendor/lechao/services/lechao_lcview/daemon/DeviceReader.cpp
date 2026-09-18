@@ -168,6 +168,30 @@ uint32_t EpollDeviceReader::getTotalRecords()
     return 0;
 }
 
+uint32_t EpollDeviceReader::getDropped()
+{
+    // 查询内核 ENOSPC 丢弃累计（方向 7），与 getTotalRecords 同源
+    // GET_STATS；失败容错返 0 并计 ioctlErr（心跳 ioctl 失败跳过守恒）
+    struct lcview_stats stats = {};
+    if (mFd >= 0 && ioctl(mFd, LCVIEW_GET_STATS, &stats) == 0)
+        return stats.dropped_cnt;
+    mIoctlErr++;
+    LC_LOGE("ioctl GET_STATS failed: errno=" << errno);
+    return 0;
+}
+
+uint32_t EpollDeviceReader::getRingSizeBytes()
+{
+    // 查询内核 ring 总大小（方向 6：守恒容差按环推导的数据源）；
+    // 失败容错返 0 并计 ioctlErr（ioctl 失败时守恒整体跳过）
+    struct lcview_stats stats = {};
+    if (mFd >= 0 && ioctl(mFd, LCVIEW_GET_STATS, &stats) == 0)
+        return stats.ring_size_bytes;
+    mIoctlErr++;
+    LC_LOGE("ioctl GET_STATS failed: errno=" << errno);
+    return 0;
+}
+
 void EpollDeviceReader::close()
 {
     // 幂等：析构与显式调用都可能触发

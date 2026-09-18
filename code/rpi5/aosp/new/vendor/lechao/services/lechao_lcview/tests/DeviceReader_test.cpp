@@ -110,6 +110,20 @@ TEST_F(EpollDeviceReaderTest, TotalRecordsIoctlUnsupported_ReturnsZero) {
     EXPECT_EQ(mReader->getTotalRecords(), 0u);
 }
 
+TEST_F(EpollDeviceReaderTest, DroppedIoctlUnsupported_ReturnsZero) {
+    // 方向 7：ioctl 失败（pipe 不支持 GET_STATS）→ 返 0（getDropped 容错
+    // 语义，与 getTotalRecords 同源同容错）
+    ASSERT_TRUE(mReader->open());
+    EXPECT_EQ(mReader->getDropped(), 0u);
+}
+
+TEST_F(EpollDeviceReaderTest, RingSizeIoctlUnsupported_ReturnsZero) {
+    // 方向 6：ioctl 失败（pipe 不支持 GET_STATS）→ 返 0（getRingSizeBytes
+    // 容错语义；容差退化为最小档，由 ioctl 失败跳过守恒兜底）
+    ASSERT_TRUE(mReader->open());
+    EXPECT_EQ(mReader->getRingSizeBytes(), 0u);
+}
+
 TEST_F(EpollDeviceReaderTest, CloseIdempotent) {
     // close 幂等：显式 close 与析构都可能触发
     ASSERT_TRUE(mReader->open());

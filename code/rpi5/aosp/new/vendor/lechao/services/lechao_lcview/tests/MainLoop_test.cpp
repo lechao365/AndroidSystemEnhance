@@ -170,34 +170,64 @@ TEST_F(MainLoopTest, ReaderBatchThenFatal_WriterGetsBatch) {
 }
 
 // ============================================================
-// 守恒告警判定（方向 3）：dev = totalΔ - (overrunΔ + jsonlΔ + invalidΔ)
+// 守恒告警判定（方向 3/7）：dev = totalΔ - (overrunΔ + droppedΔ +
+// jsonlΔ + invalidΔ)；容差按环推导（方向 6）
 // ============================================================
+
+namespace {
+// 默认 ring 256KB 推导容差：(262144+65536)/20 = 16384（与原固定容差一致）
+constexpr int64_t kDefaultTol = computeConserveTolerance(256 * 1024);
+}  // namespace
 
 TEST(MainLoopConservationTest, ZeroDeviation_NoAlarm) {
     // 完全守恒：产生全落盘，dev=0
-    EXPECT_FALSE(shouldAlarmConservation(100, 0, 100, 0, kConserveTolerance));
+    EXPECT_FALSE(shouldAlarmConservation(100, 0, 0, 100, 0, kDefaultTol));
     // overrun/invalid 计入后守恒成立
-    EXPECT_FALSE(shouldAlarmConservation(100, 10, 80, 10, kConserveTolerance));
+    EXPECT_FALSE(shouldAlarmConservation(100, 10, 0, 80, 10, kDefaultTol));
+}
+
+TEST(MainLoopConservationTest, DroppedIsAbsorbedByLeftSide) {
+    // 方向 7：ENOSPC 丢弃计入守恒右式（droppedDelta）后被吸收——
+    // 产生 100、丢弃 100（未落盘）dev=0，不误报负偏差
+    EXPECT_FALSE(shouldAlarmConservation(100, 0, 100, 0, 0, kDefaultTol));
+    // 混合去向：驱逐 10 + 丢弃 5 + 合法落盘 80 + 非法落盘 5 = 100
+    EXPECT_FALSE(shouldAlarmConservation(100, 10, 5, 80, 5, kDefaultTol));
+    // 丢弃超过产生（计数漂移/重复丢弃）→ 负偏差超容差告警
+    EXPECT_TRUE(shouldAlarmConservation(100, 0, 100 + kDefaultTol + 1, 0, 0,
+                                        kDefaultTol));
 }
 
 TEST(MainLoopConservationTest, InFlightWithinTolerance_NoAlarm) {
     // 在途积压未超容差：不告警（容差边界 dev == tol 严格大于才告警）
-    EXPECT_FALSE(shouldAlarmConservation(1000, 0, 900, 0, kConserveTolerance));
-    EXPECT_FALSE(shouldAlarmConservation(1000 + kConserveTolerance, 0, 1000,
-                                         0, kConserveTolerance));
+    EXPECT_FALSE(shouldAlarmConservation(1000, 0, 0, 900, 0, kDefaultTol));
+    EXPECT_FALSE(shouldAlarmConservation(1000 + kDefaultTol, 0, 0, 1000, 0,
+                                         kDefaultTol));
     // 负向同理：落盘略超产生但在容差内
-    EXPECT_FALSE(shouldAlarmConservation(1000, 0, 1000 + kConserveTolerance,
-                                         0, kConserveTolerance));
+    EXPECT_FALSE(shouldAlarmConservation(1000, 0, 0, 1000 + kDefaultTol, 0,
+                                         kDefaultTol));
 }
 
 TEST(MainLoopConservationTest, PositiveDeviationBeyondTolerance_Alarms) {
     // 产生未落盘超容差：丢记录/在途积压异常告警
-    EXPECT_TRUE(shouldAlarmConservation(1000 + kConserveTolerance + 1, 0, 1000,
-                                        0, kConserveTolerance));
+    EXPECT_TRUE(shouldAlarmConservation(1000 + kDefaultTol + 1, 0, 0, 1000, 0,
+                                        kDefaultTol));
 }
 
 TEST(MainLoopConservationTest, NegativeDeviationBeyondTolerance_Alarms) {
     // 落盘超过产生超容差：重复落盘/计数漂移告警
-    EXPECT_TRUE(shouldAlarmConservation(1000, 0, 1000 + kConserveTolerance + 1,
-                                        0, kConserveTolerance));
+    EXPECT_TRUE(shouldAlarmConservation(1000, 0, 0, 1000 + kDefaultTol + 1, 0,
+                                        kDefaultTol));
+}
+
+TEST(MainLoopConservationTest, ToleranceDerivedFromRingSize) {
+    // 方向 6：默认 ring 256KB → (262144+65536)/20 = 16384（与原固定容差一致）
+    EXPECT_EQ(computeConserveTolerance(256 * 1024), 16384);
+    // 更大 ring → 更大容差（容忍更大在途积压）
+    EXPECT_GT(computeConserveTolerance(4096 * 1024),
+              computeConserveTolerance(256 * 1024));
+    // 更小 ring → 更小容差（更灵敏）
+    EXPECT_LT(computeConserveTolerance(64 * 1024),
+              computeConserveTolerance(256 * 1024));
+    // ring 为 0（ioctl 失败兜底值）→ 仅用户缓冲档位
+    EXPECT_EQ(computeConserveTolerance(0), 65536 / 20);
 }

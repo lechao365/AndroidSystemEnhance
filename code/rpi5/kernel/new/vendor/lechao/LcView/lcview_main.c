@@ -72,9 +72,9 @@ static ssize_t lcview_stats_show(struct device *dev,
     struct lcview_stats st;
     lcview_ring_get_stats(&lcview_ring, &st);
     return scnprintf(buf, PAGE_SIZE,
-                     "total_records=%u overrun=%u ring_usage_bytes=%u "
-                     "ring_size_bytes=%u\n",
-                     st.total_records, st.overrun_cnt,
+                     "total_records=%u overrun=%u dropped=%u "
+                     "ring_usage_bytes=%u ring_size_bytes=%u\n",
+                     st.total_records, st.overrun_cnt, st.dropped_cnt,
                      st.ring_usage_bytes, st.ring_size_bytes);
 }
 static DEVICE_ATTR_RO(lcview_stats);

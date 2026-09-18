@@ -47,6 +47,13 @@ bool loadSchemaWithRetry(SchemaParser& schema, const std::string& path,
                          std::chrono::milliseconds interval =
                              std::chrono::milliseconds(500));
 
+// schema 加载失败时的 main 退出码（方向 4，纯函数）：
+// 加载成功 → 0（正常继续）；因关停中断（running=false，重试窗口被
+// SIGTERM 打断）→ 0（优雅退出，init 不判崩溃）；真失败（running 仍
+// true，schema 文件确不可用）→ 1（交 init 重启重试）。原实现失败一律
+// return 1——init stop 时 gRunning 已置 false 仍返 1，init 视作崩溃重启
+int schemaLoadExitCode(bool schemaOk, bool running);
+
 // flush 触发判定（hal_test readerLoop 的满/超时/滞留窗语义并入 daemon）：
 //   缓冲非空 且（缓冲满 || epoll 超时 || 500ms 滞留窗到期）即应 flush 攒包。
 // 参数：buffered 当前缓冲字节数，timedOut 本轮 epoll 超时（无新数据），
