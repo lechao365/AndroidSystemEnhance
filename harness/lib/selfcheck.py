@@ -50,7 +50,8 @@ REQUIRED_RC_KEYS = ("pytest_rc", "refs_rc", "config_rc", "contract_rc",
                     "pyenv_rc", "ioctl_rc", "manifest_rc",
                     "discipline_rc", "scan_rc", "ruff_rc", "host_rc",
                     "quotepath_rc",
-                    "known_issues_rc", "commit_coverage_rc")
+                    "known_issues_rc", "commit_coverage_rc",
+                    "lcview_events_rc")
 
 # pytest 摘要计数行：含 passed/failed/skipped 任一计数的行（形如
 # "531 passed in 27.9s"、"121 passed, 3 skipped in 6.0s"、"1 failed, ..."）
@@ -772,6 +773,11 @@ def _main_body(mode):
     tools_procs = _spawn_tools()
     ioctl_proc = _spawn_cmd(
         [sys.executable, str(ROOT / "harness" / "lib" / "check_ioctl_headers.py")])
+    # lcview 事件 schema 与内核发射点契约（方向 5）：id 与字段类型序双侧
+    # 一致性 gate，读 code/ 源码与 pytest 并行重叠跑（同 ioctl 族）
+    events_proc = _spawn_cmd(
+        [sys.executable, str(ROOT / "harness" / "lib"
+                             / "check_lcview_events.py")])
     ruff_proc = _spawn_cmd(
         [sys.executable, str(ROOT / "harness" / "lib" / "check_ruff.py")])
     host_proc = _spawn_cmd(
@@ -782,6 +788,7 @@ def _main_body(mode):
     (tools, refs_dur, cfg_dur, dis_dur, scan_dur, qp_dur, ki_dur, cc_dur) = \
         _collect_tools(tools_procs)
     ioctl_rc, ioctl_out, _, ioctl_dur = _collect_cmd(ioctl_proc, "ioctl")
+    events_rc, events_out, _, events_dur = _collect_cmd(events_proc, "events")
     ruff_rc, ruff_out, _, ruff_dur = _collect_cmd(ruff_proc, "ruff")
     host_rc, host_out, _, host_dur = _collect_cmd(host_proc, "host",
                                                   timeout=_HOST_TIMEOUT_S)
@@ -874,6 +881,12 @@ def _main_body(mode):
     ioctl_last = last_stdout_line(ioctl_out)
     if ioctl_last:
         parts.append(ioctl_last)
+    # lcview 事件 schema 与内核发射点契约（方向 5）：id 与字段类型序双侧
+    # 漂移即判红，lcview_events_rc 透出交 ws_report 全 *_rc 判红拒写
+    parts.append(f"lcview_events_rc={events_rc}")
+    events_last = last_stdout_line(events_out)
+    if events_last:
+        parts.append(events_last)
     # manifest 登记完整性（方向 2）：gen_manifest --check-only 未登记文件或有
     # 变化均判红（--check-only 有变化返非零），manifest_rc 透出交 ws_report
     # 全 *_rc 判红拒写（此前 --check-only 无调用方，manifest 漂移静默无感）
@@ -933,7 +946,8 @@ def _main_body(mode):
     # 前缀 *_dur 不匹配 ws_report 的 *_rc 判红正则，不干扰 rc 判定
     parts.append(f"durs: py={py_dur:.1f} refs={refs_dur:.1f} "
                  f"cfg={cfg_dur:.1f} pyenv={env_dur:.1f} "
-                 f"ioctl={ioctl_dur:.1f} manifest={manifest_dur:.1f} "
+                 f"ioctl={ioctl_dur:.1f} events={events_dur:.1f} "
+                 f"manifest={manifest_dur:.1f} "
                  f"discipline={dis_dur:.1f} scan={scan_dur:.1f} "
                   f"quotepath={qp_dur:.1f} known_issues={ki_dur:.1f} "
                   f"commit_coverage={cc_dur:.1f} "

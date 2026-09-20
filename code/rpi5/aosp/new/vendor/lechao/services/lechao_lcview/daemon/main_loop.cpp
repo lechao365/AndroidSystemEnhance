@@ -281,10 +281,18 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
     // 放不下剩余缓冲，KRN-001）由"剩余空间恒 >= 单条记录上限"的预防性 flush
     // 提前闭合，读路径不再因缓冲不足返 EMSGSIZE
     static constexpr size_t kMinReadSize = LCVIEW_MAX_RECORD_SIZE;
-    // 契约收敛硬约束：kMinReadSize 不得小于单条记录上限——否则预防性 flush
-    // 后剩余空间仍可能放不下一条最大记录，EMSGSIZE 漏网（与读端闭合条件矛盾）
-    static_assert(kMinReadSize >= LCVIEW_MAX_RECORD_SIZE,
-                  "kMinReadSize 须不小于单条记录上限 LCVIEW_MAX_RECORD_SIZE");
+    // 契约收敛硬约束（方向 4）：缓冲总大小必须能容纳至少一条最大记录——
+    // 否则预防性 flush 后剩余空间不可能容纳单条记录上限，EMSGSIZE 必漏网
+    // （原断言 kMinReadSize >= LCVIEW_MAX_RECORD_SIZE 中 kMinReadSize 定义
+    // 即为 LCVIEW_MAX_RECORD_SIZE，恒真无防护价值，改为对 kBufSize 的真实
+    // 门禁）
+    static_assert(kBufSize >= LCVIEW_MAX_RECORD_SIZE,
+                  "kBufSize 须不小于单条记录上限 LCVIEW_MAX_RECORD_SIZE");
+    // 契约门禁（方向 4）：用户态单条上限必须与内核真相源 LCVIEW_BUILDER_MAX_SIZE
+    // 相等——两侧仅一处修改而缓冲预算未同步即漂移，缓冲"够大"的断言会被绕过
+    static_assert(LCVIEW_BUILDER_MAX_SIZE == LCVIEW_MAX_RECORD_SIZE,
+                  "LCVIEW_BUILDER_MAX_SIZE（内核真相源）须与 "
+                  "LCVIEW_MAX_RECORD_SIZE 相等");
     uint8_t buf[kBufSize];
     size_t offset = 0;
     auto dataArrivedAt = std::chrono::steady_clock::time_point::max();

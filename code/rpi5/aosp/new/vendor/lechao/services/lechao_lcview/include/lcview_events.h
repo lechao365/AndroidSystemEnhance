@@ -84,6 +84,12 @@
  * EMSGSIZE：缓冲剩余空间恒 >= 本值，首条记录必放得下。 */
 #define LCVIEW_MAX_RECORD_SIZE 4096
 
+/* 内核 builder 预分配缓冲上限镜像（真相源内核 lcview_internal.h）。用户态
+ * 契约宏 LCVIEW_MAX_RECORD_SIZE 必须与内核真相源 LCVIEW_BUILDER_MAX_SIZE
+ * 相等——main_loop.cpp 以 static_assert 门禁钉死，防两侧仅一处修改后
+ * 缓冲预算（kBufSize）仍够大却与内核单条上限漂移的静默错配。 */
+#define LCVIEW_BUILDER_MAX_SIZE 4096
+
 /* --- 记录头结构（16B 固定头 + 变长字段区） --- */
 /* lcview_record_hdr：16 字节固定长度头部，所有事件共用。
  *   magic       — 魔数，用于快速校验

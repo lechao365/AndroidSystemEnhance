@@ -17,9 +17,10 @@
  * 使用：daemon/DeviceReader 经该头获取 ioctl 定义，不再本地重复拷贝。
  */
 
-#ifndef LCVIEW_IOCTL_H
-#define LCVIEW_IOCTL_H
+#ifndef LCVIEW_DAEMON_IOCTL_H
+#define LCVIEW_DAEMON_IOCTL_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include <sys/ioctl.h>
 
@@ -63,8 +64,21 @@ struct lcview_stats {
  */
 #define LCVIEW_SET_LEVEL        _IOW(LCVIEW_IOC_MAGIC, 4, uint8_t)
 
-/* struct 尺寸守卫：与内核镜像（lcview_internal.h）漂移即编译期报错 */
+/* struct 尺寸守卫：与内核镜像（lcview_internal.h）漂移即编译期报错
+ * 逐字段 offsetof 断言（方向 3）：不仅守总尺寸，还逐字段校验偏移与内核
+ * lcview_internal.h 的 struct lcview_stats 一致——仅 sizeof 相等挡不住
+ * 字段顺序/类型互换（同 20B 不同布局），offsetof 逐字段钉死对齐。 */
+static_assert(offsetof(struct lcview_stats, total_records) == 0,
+              "lcview_stats.total_records offset drift");
+static_assert(offsetof(struct lcview_stats, overrun_cnt) == 4,
+              "lcview_stats.overrun_cnt offset drift");
+static_assert(offsetof(struct lcview_stats, dropped_cnt) == 8,
+              "lcview_stats.dropped_cnt offset drift");
+static_assert(offsetof(struct lcview_stats, ring_usage_bytes) == 12,
+              "lcview_stats.ring_usage_bytes offset drift");
+static_assert(offsetof(struct lcview_stats, ring_size_bytes) == 16,
+              "lcview_stats.ring_size_bytes offset drift");
 static_assert(sizeof(struct lcview_stats) == 20,
               "lcview_stats must be 20 bytes (kernel mirror drift)");
 
-#endif /* LCVIEW_IOCTL_H */
+#endif /* LCVIEW_DAEMON_IOCTL_H */

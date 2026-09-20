@@ -286,11 +286,11 @@ aosp:
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/tools/usbreset.c
       source: aosp/vendor/lechao/services/lechao_lcview/tools/usbreset.c
 others:
+  - patch: others/usb-verify/.gitignore
+    source: null
   - patch: others/usb-verify/Makefile
     source: null
   - patch: others/usb-verify/README.md
-    source: null
-  - patch: others/usb-verify/fault-verify
     source: null
   - patch: others/usb-verify/include/fv_ioctl_compat.h
     source: null

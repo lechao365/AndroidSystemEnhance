@@ -706,9 +706,9 @@ class TestBaselineExplicit(unittest.TestCase):
             self.assertTrue(lc._baseline_explicit(None))
 
 
-def _sysfs(total=0, overrun=0, ring=0):
-    return (f"total_records={total} overrun={overrun} ring_usage_bytes={ring} "
-            f"ring_size_bytes=262144")
+def _sysfs(total=0, overrun=0, dropped=0, ring=0):
+    return (f"total_records={total} overrun={overrun} dropped={dropped} "
+            f"ring_usage_bytes={ring} ring_size_bytes=262144")
 
 
 def _wc(lines):
@@ -718,8 +718,10 @@ def _wc(lines):
 class TestModeConserve(unittest.TestCase):
     # conserve v4：两段式采样（静止确认段 2 拍 + 负载采样段 2 拍，共 3 拍）。
     # 静止确认段增量归零 → 起点无积压；负载段比较内核产生增量
-    # （Δtotal-Δoverrun）vs 磁盘 JSONL 落盘增量，负向（落盘>产生）在
+    # （Δtotal-Δoverrun-Δdropped）vs 磁盘 JSONL 落盘增量，负向（落盘>产生）在
     # 起点无积压时为真异常判红，仅追赶期（起点有积压）放行。
+    # dropped（ENOSPC 丢弃）计入 total_records 却未落盘，须从左式减除，
+    # 否则 ENOSPC 被误当在途积压判红（方向 1）。
     def _run(self, sysfs_seq, wc_seq, **kw):
         fake = FakeAdb(sysfs_seq=sysfs_seq, wc_seq=wc_seq,
                        dd_rc=kw.get("dd_rc", 0))
@@ -766,6 +768,18 @@ class TestModeConserve(unittest.TestCase):
             self._run([(_sysfs(total=100), 0), (_sysfs(total=100), 0),
                        (_sysfs(total=110), 0)],
                       [(_wc(90), 0), (_wc(90), 0), (_wc(120), 0)]), 1)
+
+    def test_conserve_enospc_dropped_not_inflight(self):
+        # ENOSPC 丢弃（dropped 增量）计入 total_records 却未落盘：左式
+        # produced 须减 Δdropped——否则被误当在途积压判红（方向 1）
+        # 构造：total 100→132（Δ32），dropped 0→16（Δ16，ENOSPC 丢弃），
+        # landed 90→105（Δ15）→ 真实 produced = 32-16 = 16，in_flight=1 OK；
+        # 若不减 dropped 则 produced=32、in_flight=17 > 16 误判红
+        self.assertEqual(
+            self._run([(_sysfs(total=100, dropped=0), 0),
+                       (_sysfs(total=100, dropped=0), 0),
+                       (_sysfs(total=132, dropped=16), 0)],
+                      [(_wc(90), 0), (_wc(90), 0), (_wc(105), 0)]), 0)
 
     def test_conserve_negative_release_with_backlog_ok(self):
         # 静止确认段有增量（起点有积压，追赶期）→ 负载窗口落盘 40 > 产生 5

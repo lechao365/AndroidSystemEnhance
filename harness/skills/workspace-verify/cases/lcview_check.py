@@ -20,6 +20,9 @@
 #   conserve   — 守恒判据：窗口内内核产生 ≈ 磁盘 JSONL 落盘（两拍直读采样，
 #                在途差值 = 产生增量 - 落盘增量，不超界且不为负——防丢记录/
 #                重复落盘回归，替代人工核算；磁盘行数不受 daemon 重启影响）
+#                产生增量 = Δtotal - Δoverrun - Δdropped（dropped 为 ENOSPC
+#                丢弃，计入 total_records 却未落盘，左式减去除其干扰——
+#                否则 ENOSPC 被误当在途积压判红）
 #   perf       — 性能采集（脚本化统一负载）：dd 读块设备 --load-mb MB（默认 64，
 #                与性能基线负载一致）→ 三指标：事件吞吐（内核 total_records 直读
 #                增量 / dd 实测耗时）、平均落盘延迟（jsonl 达标 drain 时间 /
@@ -480,7 +483,9 @@ def mode_conserve(tmp, args):
     - 静止确认段：两拍直读（间隔 --conserve-sample-s）增量归零即确认窗口
       起点无积压（外部负载已排干）；增量非零则起点有积压（追赶期）
     - 负载采样段：--conserve-load-mb 触发 dd 读块设备自造负载后两拍采样，
-      produced = Δtotal - Δoverrun（内核产生增量，去被驱逐）
+      produced = Δtotal - Δoverrun - Δdropped（内核产生增量，去被驱逐与
+      ENOSPC 丢弃——dropped 计入 total_records 却未落盘，不减去会被误当
+      在途积压，消 ENOSPC 误判红）
       landed   = ΔJSONL 行数（wc -l，磁盘持久计数）
       in_flight = produced - landed
     - produced == 0：负载窗口无事件产生 → 判红（防假绿，与 valid_json/
@@ -514,7 +519,8 @@ def mode_conserve(tmp, args):
         return 1
     # 静止确认段：前段两拍增量归零 → 窗口起点无积压（外部负载已排干）；
     # 增量非零 → 起点有积压（追赶期），负向判红须放行（landed 含补落盘）
-    rest_produced = (s2[0] - s1[0]) - (s2[1] - s1[1])
+    rest_produced = ((s2[0] - s1[0]) - (s2[1] - s1[1])
+                     - (s2[2] - s1[2]))
     rest_landed = l2 - l1
     at_rest = rest_produced == 0 and rest_landed == 0
     print(f"静止确认: 前段增量 产生={rest_produced} 落盘={rest_landed} "
@@ -541,7 +547,8 @@ def mode_conserve(tmp, args):
     if l3 is None:
         print("ERROR: 无法直读 JSONL 行数（wc -l 失败）")
         return 1
-    produced = (s3[0] - s2[0]) - (s3[1] - s2[1])
+    produced = ((s3[0] - s2[0]) - (s3[1] - s2[1])
+                - (s3[2] - s2[2]))
     landed = l3 - l2
     in_flight = produced - landed
     print(f"负载窗口 {interval}s: 内核产生增量={produced}，落盘增量={landed}，"
@@ -572,22 +579,25 @@ def mode_conserve(tmp, args):
 
 
 def kernel_stats():
-    """直读内核三计数 (total_records, overrun, ring_usage_bytes)；失败返回 None。
+    """直读内核四计数 (total_records, overrun, dropped, ring_usage_bytes)；失败返回 None。
 
     与 kernel_total 同源（STATS_SYSFS 只读导出，单次 cat 全量解析，减少
-    adb 往返）：conserve 窗口采样需 total 与 overrun 配对，perf 只取 total。
+    adb 往返）：conserve 窗口采样需 total/overrun/dropped 配对（方向 1：
+    dropped 为 ENOSPC 丢弃，计入 total_records 却未落盘，左式须减去除其
+    干扰），perf 只取 total。
     """
     out, rc = adb(["shell", f"cat {STATS_SYSFS}"])
     if rc == -1:
         return None
     vals = {}
     for line in out.splitlines():
-        for key in ("total_records", "overrun", "ring_usage_bytes"):
+        for key in ("total_records", "overrun", "dropped", "ring_usage_bytes"):
             m = re.search(key + r"=(\d+)", line)
             if m and key not in vals:
                 vals[key] = int(m.group(1))
-    if len(vals) == 3:
-        return (vals["total_records"], vals["overrun"], vals["ring_usage_bytes"])
+    if len(vals) == 4:
+        return (vals["total_records"], vals["overrun"], vals["dropped"],
+                vals["ring_usage_bytes"])
     return None
 
 

@@ -569,13 +569,15 @@ class TestCheckPythonEnv(unittest.TestCase):
             _FakeProc(0, "531 passed in 27.9s\n"),
         ])
         ioctl_res = (1, "签名漂移: vendor_lechao_usbd_config\n", "", 0.1)
+        events_res = (0, "[OK] 一致: 10 事件\n", "", 0.1)
         manifest_res = (0, "[OK] 一致\n", "", 0.1)
         ruff_res = (0, "All checks passed!\n", "", 0.1)
         host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_cmd",
-                                  side_effect=[ioctl_res, ruff_res,
+                                  side_effect=[ioctl_res, events_res,
+                                               ruff_res,
                                                host_res, manifest_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
@@ -603,13 +605,15 @@ class TestCheckPythonEnv(unittest.TestCase):
             _FakeProc(0, "531 passed in 27.9s\n"),
         ])
         ioctl_res = (0, "[OK] 一致\n", "", 0.1)
+        events_res = (0, "[OK] 一致: 10 事件\n", "", 0.1)
         manifest_res = (1, "[ERROR] manifest 未登记 1 个 code/rpi5 文件\n", "", 0.1)
         ruff_res = (0, "All checks passed!\n", "", 0.1)
         host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_cmd",
-                                  side_effect=[ioctl_res, ruff_res,
+                                  side_effect=[ioctl_res, events_res,
+                                               ruff_res,
                                                host_res, manifest_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
@@ -622,13 +626,15 @@ class TestCheckPythonEnv(unittest.TestCase):
             _FakeProc(0, "531 passed in 27.9s\n"),
         ])
         ioctl_res = (0, "[OK] 一致\n", "", 0.1)
+        events_res = (0, "[OK] 一致: 10 事件\n", "", 0.1)
         manifest_res = (0, "[OK] 一致\n", "", 0.1)
         ruff_res = (0, "All checks passed!\n", "", 0.1)
         host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_cmd",
-                                  side_effect=[ioctl_res, ruff_res,
+                                  side_effect=[ioctl_res, events_res,
+                                               ruff_res,
                                                host_res, manifest_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
@@ -642,13 +648,15 @@ class TestCheckPythonEnv(unittest.TestCase):
             _FakeProc(0, "531 passed in 27.9s\n"),
         ])
         ioctl_res = (0, "[OK] 一致\n", "", 0.1)
+        events_res = (0, "[OK] 一致: 10 事件\n", "", 0.1)
         manifest_res = (0, "[OK] 一致\n", "", 0.1)
         ruff_res = (0, "All checks passed!\n", "", 0.1)
         host_res = (0, "OK: 内核 host 单测全部通过\n", "", 0.1)
         buf = io.StringIO()
         with mock.patch.object(selfcheck.subprocess, "run", side_effect=fake), \
                 mock.patch.object(selfcheck, "_collect_cmd",
-                                  side_effect=[ioctl_res, ruff_res,
+                                  side_effect=[ioctl_res, events_res,
+                                               ruff_res,
                                                host_res, manifest_res]):
             with redirect_stdout(buf):
                 selfcheck.main()
@@ -669,7 +677,8 @@ class TestCheckPythonEnv(unittest.TestCase):
                 selfcheck.main()
         out = buf.getvalue()
         m = re.search(r"durs: py=[0-9.]+ refs=[0-9.]+ cfg=[0-9.]+ "
-                      r"pyenv=[0-9.]+ ioctl=[0-9.]+ manifest=[0-9.]+", out)
+                      r"pyenv=[0-9.]+ ioctl=[0-9.]+ events=[0-9.]+ "
+                      r"manifest=[0-9.]+", out)
         self.assertIsNotNone(m, "自检输出须含逐检查器耗时 durs 段（refs/cfg 拆开）")
         # 耗时不会误成 *_rc 判红键（ws_report 正则 \w+_rc= 不匹配 *_dur=）
         self.assertNotRegex(out, r"\w+_dur=(\d+)")
@@ -700,12 +709,12 @@ class TestCheckPythonEnv(unittest.TestCase):
                                   side_effect=_run):
             with redirect_stdout(buf):
                 selfcheck.main()
-        # 顺序固定：refs/cfg 并行段启动 → ioctl Popen → ruff Popen →
-        # host Popen → pytest（重叠开始；gen_manifest 延后至 host 收口后
-        # 单独跑——host 编译产物与 manifest 扫描并发竞态 KIR-002 修复，
-        # 见 selfcheck.py）
-        self.assertEqual(calls[:5], ["tools", "spawn", "spawn", "spawn",
-                                     "pytest"])
+        # 顺序固定：refs/cfg 并行段启动 → ioctl Popen → events Popen →
+        # ruff Popen → host Popen → pytest（重叠开始；gen_manifest 延后至
+        # host 收口后单独跑——host 编译产物与 manifest 扫描并发竞态 KIR-002
+        # 修复，见 selfcheck.py）
+        self.assertEqual(calls[:6], ["tools", "spawn", "spawn", "spawn",
+                                     "spawn", "pytest"])
 
 
 class TestFlakeRerun(unittest.TestCase):

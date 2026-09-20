@@ -77,6 +77,58 @@ class TestCompare(unittest.TestCase):
         self.assertIn("嵌套", msg)
         self.assertIn("outer", msg)
 
+    def test_cmd_identical_returns_ok(self):
+        # 方向 2：ioctl 命令号 guard 一致 → mode=cmd 通过（LcView 双侧形态）
+        text = ("#define M  'V'\n"
+                "#define GET_A  _IOR(M, 1, uint32_t)\n"
+                "#define GET_S  _IOR(M, 3, struct foo)\n")
+        k = self._write(text)
+        a = self._write(text)
+        try:
+            rc, msg = compare(k, a, "cmd")
+        finally:
+            k.unlink()
+            a.unlink()
+        self.assertEqual(rc, 0)
+        self.assertIn("一致", msg)
+
+    def test_cmd_drift_returns_red(self):
+        # 方向 2：命令号漂移（序号/类型不同）判红——struct 签名一致也拦不住
+        # ioctl 错配，须单独比对命令号 guard
+        k = self._write("#define M 'V'\n#define GET_S _IOR(M, 3, struct foo)\n")
+        a = self._write("#define M 'V'\n#define GET_S _IOR(M, 4, struct foo)\n")
+        try:
+            rc, msg = compare(k, a, "cmd")
+        finally:
+            k.unlink()
+            a.unlink()
+        self.assertEqual(rc, 1)
+        self.assertIn("命令号漂移", msg)
+
+    def test_cmd_missing_on_one_side_red(self):
+        # 方向 2：命令号仅单侧存在判红（单侧增删命令即漂移）
+        k = self._write("#define M 'V'\n#define GET_A _IOR(M, 1, uint32_t)\n")
+        a = self._write("#define M 'V'\n")
+        try:
+            rc, msg = compare(k, a, "cmd")
+        finally:
+            k.unlink()
+            a.unlink()
+        self.assertEqual(rc, 1)
+        self.assertIn("仅", msg)
+
+    def test_cmd_both_empty_returns_red(self):
+        # 方向 2：mode=cmd 但两侧均无命令号 → 双空判红（不得静默放行）
+        k = self._write("/* only comment */\n")
+        a = self._write("#define X 1\n")
+        try:
+            rc, msg = compare(k, a, "cmd")
+        finally:
+            k.unlink()
+            a.unlink()
+        self.assertEqual(rc, 1)
+        self.assertIn("命令号双空", msg)
+
 
 if __name__ == "__main__":
     unittest.main()
