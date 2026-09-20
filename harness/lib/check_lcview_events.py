@@ -86,25 +86,28 @@ def parse_event_id_macros(text: str) -> dict[str, int]:
 def parse_emit_sequences(text: str) -> dict[str, list[str]]:
     """扫描内核发射点 → {事件宏名: 字段类型序}。
 
-    对每个 lcview_builder_start(LCVIEW_EVENT_X, ...) 调用，取其位置到下一
-    start（或文件尾）之间的 add_* 调用序，映射为 schema 字段类型。commit
-    前的 add 序列即该事件的字段序（cancel 属丢弃路径，不影响 schema 契约）。
+    对每个 lcview_builder_start(LCVIEW_EVENT_X, ...) 调用，取其位置到该事件
+    第一个 lcview_builder_commit（R-04 方向 3：段界按 _COMMIT_RE 截断）之间的
+    add_* 调用序，映射为 schema 字段类型。cancel 属丢弃路径，不入字段序。
+    零字段事件（start 后到 commit 前无 add_*）记录为空字段序 []——合法零字段
+    事件不得被跳过（否则 emit 缺该事件，compare 会误报"内核无发射点"）。
     """
     out = {}
     starts = list(_START_RE.finditer(text))
-    for i, sm in enumerate(starts):
+    for sm in starts:
         name = sm.group(1)
-        seg_end = starts[i + 1].start() if i + 1 < len(starts) else len(text)
+        seg_end = len(text)
+        for cm in _COMMIT_RE.finditer(text, sm.end()):
+            seg_end = cm.start()
+            break  # 首个 commit 即该事件字段段界（start 到 commit 之间）
         seg = text[sm.end():seg_end]
-        # 该事件发射点的 add 序列：取到 commit（字段追加在 commit 前）
         add_types = []
         for am in _ADD_RE.finditer(seg):
             api = am.group(1)
             if api not in _ADD_TYPE:
                 continue  # 非字段追加 API（如 add 失败路径无关）
             add_types.append(_ADD_TYPE[api])
-        if add_types:
-            out[name] = add_types
+        out[name] = add_types
     return out
 
 
@@ -144,7 +147,8 @@ def compare(repo: Path) -> tuple[int, str]:
         if macros[macro] != ev["id"]:
             problems.append(f"事件 {ev['name']}: schema id={ev['id']} != 内核宏 "
                             f"{macro}={macros[macro]}")
-        # 2) 字段类型序契约：schema 序 vs 内核发射点序
+        # 2) 字段类型序契约：schema 序 vs 内核发射点序（R-04 方向 3：
+        #    零字段事件 emit 记 []，emit.get(macro) 恒命中，不再误报"无发射点"）
         emit_fields = emit.get(macro)
         if emit_fields is None:
             problems.append(f"事件 {ev['name']}: 内核无 {macro} 发射点（或字段序为空）")
@@ -152,6 +156,16 @@ def compare(repo: Path) -> tuple[int, str]:
         if emit_fields != ev["fields"]:
             problems.append(f"事件 {ev['name']} 字段类型序漂移: "
                             f"schema={ev['fields']} 内核发射点={emit_fields}")
+    # 3) 反向契约（R-04 方向 3）：内核发射点宏 → schema 事件互查——内核新增
+    #    发射点宏而 schema 漏加（新事件无 schema 定义）即判红（用户态按 schema
+    #    解析时新事件无 id/字段定义，落盘即解析失败）。schema 事件名到宏的
+    #    映射是 name.upper() 前缀 LCVIEW_EVENT_，反向由宏后缀推导 schema name。
+    for macro in sorted(emit):
+        suffix = macro[len("LCVIEW_EVENT_"):]
+        schema_name = suffix.lower()
+        if schema_name not in name_to_macro:
+            problems.append(f"内核发射点 {macro} 无对应 schema 事件 "
+                            f"（schema 漏加 {schema_name}？）")
     if problems:
         return 1, "\n".join(problems)
     return 0, f"一致: {len(schema)} 事件 id 与字段类型序全部匹配"

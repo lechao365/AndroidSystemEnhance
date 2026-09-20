@@ -120,6 +120,8 @@ def _args(**kw):
     a.perf_timeout = kw.get("perf_timeout", 60)
     a.perf_sample_ms = kw.get("perf_sample_ms", 100)
     a.dd_timeout = kw.get("dd_timeout", 300)
+    a.perf_baseline = kw.get("perf_baseline", lc.PERF_BASELINE_DEFAULT)
+    a.perf_save_baseline = kw.get("perf_save_baseline", False)
     return a
 
 
@@ -1057,6 +1059,204 @@ class TestModePerf(unittest.TestCase):
         self.assertEqual(metrics["ring_water_pct"], 50.0)
         self.assertEqual(metrics["ring_usage_bytes"], 131072)
         self.assertEqual(metrics["overrun_delta"], 0)
+
+
+# ============================================================
+# R-04 方向 1：性能基线入库与回归判红（perf_regression_gate）
+# ============================================================
+
+class TestPerfRegressionGate(unittest.TestCase):
+    _BASE = {
+        "throughput_evs": 1000.0,
+        "drain_ms_per_event": 10.0,
+        "drain_p99_ms": 20.0,
+        "daemon_rss_kb": 5000,
+    }
+
+    def _tmp_base(self, base=None):
+        """写临时基线文件，返回路径。"""
+        path = Path(tempfile.gettempdir()) / "lcview_perf_gate_test.json"
+        with open(path, "w", encoding="utf-8") as fp:
+            json.dump(base or self._BASE, fp)
+        return str(path)
+
+    def _metrics(self, **over):
+        m = dict(self._BASE)
+        m.update(over)
+        return m
+
+    def test_gate_within_tolerance_ok(self):
+        # 吞吐/延迟/p99/RSS 均在 ±30% 容差内 → 门禁通过
+        path = self._tmp_base()
+        try:
+            rc = lc.perf_regression_gate(
+                self._metrics(throughput_evs=1200.0, drain_p99_ms=24.0),
+                path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 0)
+
+    def test_gate_throughput_drop_red(self):
+        # 吞吐腰斩（1000→500，-50% > -30%）→ 判红（性能劣化）
+        path = self._tmp_base()
+        try:
+            rc = lc.perf_regression_gate(
+                self._metrics(throughput_evs=500.0), path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 1)
+        out = sys.stdout
+        self.assertIsNotNone(out)
+
+    def test_gate_throughput_improve_not_red(self):
+        # 吞吐提升（1000→1500，+50%）→ 改善不判红（涨优方向）
+        path = self._tmp_base()
+        try:
+            rc = lc.perf_regression_gate(
+                self._metrics(throughput_evs=1500.0), path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 0)
+
+    def test_gate_latency_degrade_red(self):
+        # 延迟劣化（10→20ms，+100% > +30%）→ 判红（降优方向劣化）
+        path = self._tmp_base()
+        try:
+            rc = lc.perf_regression_gate(
+                self._metrics(drain_ms_per_event=20.0), path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 1)
+
+    def test_gate_latency_improve_not_red(self):
+        # 延迟改善（10→5ms，-50%）→ 改善不判红
+        path = self._tmp_base()
+        try:
+            rc = lc.perf_regression_gate(
+                self._metrics(drain_ms_per_event=5.0), path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 0)
+
+    def test_gate_rss_inflate_red(self):
+        # RSS 膨胀（5000→9000，+80% > +30%）→ 判红（内存劣化）
+        path = self._tmp_base()
+        try:
+            rc = lc.perf_regression_gate(
+                self._metrics(daemon_rss_kb=9000), path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 1)
+
+    def test_gate_p99_degrade_red(self):
+        # p99 劣化（20→30ms，+50% > +30%）→ 判红
+        path = self._tmp_base()
+        try:
+            rc = lc.perf_regression_gate(
+                self._metrics(drain_p99_ms=30.0), path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 1)
+
+    def test_gate_no_baseline_red(self):
+        # 基线文件不存在且未 save → 判红（防无基线空转假绿）
+        rc = lc.perf_regression_gate(
+            self._metrics(),
+            str(Path(tempfile.gettempdir()) / "lcview_perf_nonexist.json"))
+        self.assertEqual(rc, 1)
+
+    def test_gate_save_baseline_writes_file(self):
+        # save=True 写基线文件；再比对同值应通过（建档后自洽）
+        path = str(Path(tempfile.gettempdir()) / "lcview_perf_save_test.json")
+        try:
+            if os.path.exists(path):
+                os.unlink(path)
+            rc = lc.perf_regression_gate(self._metrics(), path, save=True)
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(path))
+            with open(path, encoding="utf-8") as fp:
+                saved = json.load(fp)
+            self.assertEqual(saved["throughput_evs"], 1000.0)
+            # 建档后同值比对通过（自洽）
+            rc2 = lc.perf_regression_gate(self._metrics(), path)
+            self.assertEqual(rc2, 0)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_gate_save_then_degrade_red(self):
+        # save 建档 → 构造超阈值吞吐劣化样本 → 判红（负例验证判红链路）
+        path = str(Path(tempfile.gettempdir()) / "lcview_perf_save_deg.json")
+        try:
+            if os.path.exists(path):
+                os.unlink(path)
+            rc = lc.perf_regression_gate(self._metrics(), path, save=True)
+            self.assertEqual(rc, 0)
+            rc2 = lc.perf_regression_gate(
+                self._metrics(throughput_evs=400.0), path)
+            self.assertEqual(rc2, 1)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_gate_mode_perf_gate_disabled_by_default(self):
+        # mode_perf 未显式传 perf 基线 → 门禁关闭（只报数，R-02/03 语义）
+        fake = FakeAdb(dd_rc=0,
+                       pidof_out="1234\n", pidof_rc=0,
+                       proc_out="VmHWM:\t    5516 kB\n", proc_rc=0,
+                       sysfs_out="total_records=1321 overrun=0 dropped=0 "
+                                 "ring_usage_bytes=131072 "
+                                 "ring_size_bytes=262144\n")
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(lc, "adb", fake):
+                with mock.patch.object(lc, "kernel_total",
+                                       side_effect=[100, 1321, 1321]):
+                    with mock.patch.object(lc, "jsonl_line_count",
+                                           side_effect=[90, 1311, 1311]):
+                        with mock.patch.object(lc.time, "sleep"):
+                            with mock.patch.object(lc.time, "monotonic",
+                                                   side_effect=[100.0, 101.0,
+                                                                101.0, 101.1]):
+                                with contextlib.redirect_stdout(out):
+                                    rc = lc.mode_perf(tmp, _args())
+        self.assertEqual(rc, 0)
+        self.assertIn("METRICS ", out.getvalue())
+
+    def test_gate_mode_perf_save_baseline_ok(self):
+        # mode_perf --perf-save-baseline → 建档 + rc=0（门禁启用且存档成功）
+        path = str(Path(tempfile.gettempdir()) / "lcview_perf_mode_save.json")
+        try:
+            if os.path.exists(path):
+                os.unlink(path)
+            fake = FakeAdb(dd_rc=0,
+                           pidof_out="1234\n", pidof_rc=0,
+                           proc_out="VmHWM:\t    5516 kB\n", proc_rc=0,
+                           sysfs_out="total_records=1321 overrun=0 dropped=0 "
+                                     "ring_usage_bytes=131072 "
+                                     "ring_size_bytes=262144\n")
+            out = io.StringIO()
+            with tempfile.TemporaryDirectory() as tmp:
+                with mock.patch.object(lc, "adb", fake):
+                    with mock.patch.object(lc, "kernel_total",
+                                           side_effect=[100, 1321, 1321]):
+                        with mock.patch.object(lc, "jsonl_line_count",
+                                               side_effect=[90, 1311, 1311]):
+                            with mock.patch.object(lc.time, "sleep"):
+                                with mock.patch.object(lc.time, "monotonic",
+                                                       side_effect=[100.0, 101.0,
+                                                                    101.0, 101.1]):
+                                    with contextlib.redirect_stdout(out):
+                                        rc = lc.mode_perf(
+                                            tmp,
+                                            _args(perf_baseline=path,
+                                                  perf_save_baseline=True))
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(path))
+            self.assertIn("性能基线已存档", out.getvalue())
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
 
 
 if __name__ == "__main__":

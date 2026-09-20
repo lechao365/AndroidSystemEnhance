@@ -62,7 +62,19 @@ def _default_baseline(env_name="LCVIEW_BASELINE_FILE"):
     return os.environ.get(env_name) or "/tmp/lcview_baseline.json"
 
 
+def _default_perf_baseline():
+    """性能基线文件路径（R-04 方向 1）：按轮次隔离的 env
+    LCVIEW_PERF_BASELINE_FILE（编排层注入），未设置回退固定默认。"""
+    return os.environ.get("LCVIEW_PERF_BASELINE_FILE") or "/tmp/lcview_perf_baseline.json"
+
+
 BASELINE_DEFAULT = _default_baseline()
+PERF_BASELINE_DEFAULT = _default_perf_baseline()
+
+# 性能回归容差（R-04 方向 1）：±30% 起步——吞吐/延迟/p99/RSS 与基线偏差超此
+# 阈值即判红（性能回归门禁）。30% 为起步档：覆盖板卡/负载抖动（dd 读块设备
+# 吞吐受 SD/eMMC 状态与系统负载影响），后续按实测收紧。
+PERF_TOLERANCE = 0.30
 
 
 def adb(args, timeout=60):
@@ -641,6 +653,13 @@ def _daemon_pid():
     return out.strip().split()[0]
 
 
+# 设备 USER_HZ（R-04 方向 4）：Linux/Android 用户态节拍常量 100 tick/s。
+# daemon 的 /proc/<pid>/stat utime/stime 为设备节拍计数的 tick，折算 CPU 占比
+# 须除以设备 USER_HZ；case 在 host 侧执行，host 的 sysconf("SC_CLK_TCK") 与
+# 设备可能不同（如 host 250），弃 host 值、用设备恒定常量 100 保证占比可信。
+_USER_HZ = 100
+
+
 def _daemon_cpu_ticks():
     """daemon 进程 utime+stime tick 快照（单拍）；失败返回 None。
 
@@ -692,10 +711,14 @@ def daemon_cpu_pct_between(ticks0, ticks1, wall_s):
     ——占比语义 = dd 窗口内 daemon 消耗的 CPU 时间占比，替代 dd 前单点采样
     （dd 前空闲态 CPU 不能代表负载窗口）。任一侧为 None 返回 None（缺项
     不判红，perf 只报数）。
+    R-04 方向 4：tick 折算用设备 USER_HZ 常量 100（Linux/Android 用户态节拍
+    恒定 100，弃 host 侧 sysconf("SC_CLK_TCK")——case 在 host 侧执行但统计
+    的是设备 daemon 的 tick，host 的 CLK_TCK 与设备不一致会导致占比失真
+    （如 host 250、设备 100 时低估 2.5 倍）。
     """
     if ticks0 is None or ticks1 is None or not wall_s or wall_s <= 0:
         return None
-    clk_tck = os.sysconf("SC_CLK_TCK")
+    clk_tck = _USER_HZ
     pct = (ticks1 - ticks0) / (wall_s * clk_tck) * 100.0
     return round(max(pct, 0.0), 1)
 
@@ -971,6 +994,105 @@ def mode_perf(tmp, args):
           f"（syscr 增量={syscr_delta}，syscw 增量={syscw_delta}），"
           f"事件分布={dist_delta or 'N/A'}（drain {drain_s:.3f}s）")
     print("METRICS " + json.dumps(metrics, ensure_ascii=False))
+
+    # R-04 方向 1：性能基线入库与回归判红。
+    # - 基线入库：--perf-save-baseline 时把本次 METRICS 关键指标写基线文件
+    #   （首次建档；后续比对以此为参考）。
+    # - 回归判红：显式传 --perf-baseline（≠默认）时对吞吐/延迟/p99/RSS 与基线
+    #   容差比对（±30%），超容差判红（性能回归门禁，防吞吐腰斩/延迟劣化静默
+    #   放行）。缺基线文件且未 save → 判红提示先建档（防无基线空转假绿）。
+    # - 未显式指定基线且未 save：只报数不设门禁（R-02/03 语义，独立跑 perf
+    #   不被门禁阻断；lcview-perf case 显式传基线启用门禁）。
+    perf_base = getattr(args, "perf_baseline", None) or PERF_BASELINE_DEFAULT
+    perf_save = bool(getattr(args, "perf_save_baseline", False))
+    gate_enabled = perf_save or perf_base != PERF_BASELINE_DEFAULT
+    if not gate_enabled:
+        return 0
+    return perf_regression_gate(metrics, perf_base, save=perf_save)
+
+
+# R-04 方向 1：性能回归门禁——当前 METRICS vs 基线文件容差比对。
+# 判红指标：throughput_evs（吞吐，涨优降劣）、drain_ms_per_event（平均落盘
+# 延迟，升劣降优）、drain_p99_ms（p99 延迟，升劣降优）、daemon_rss_kb（RSS，
+# 涨劣降优）。容差 PERF_TOLERANCE（±30%）。
+# 吞吐/延迟方向不同：吞吐是"越大越好"，延迟/RSS 是"越小越好"，容差判定
+# 时低吞吐、高延迟、高 RSS 判红（性能劣化），反向改善不判红。
+_PERF_GATE_METRICS = [
+    # (metrics 键, 判红方向: "min"=低于基线容差判红/涨优, "max"=高于基线容差判红/降优)
+    ("throughput_evs", "min"),
+    ("drain_ms_per_event", "max"),
+    ("drain_p99_ms", "max"),
+    ("daemon_rss_kb", "max"),
+]
+
+
+def perf_regression_gate(metrics, baseline_path, save=False):
+    """性能回归门禁（R-04 方向 1）：
+    save=True 时写当前 METRICS 关键指标为基线文件（首次建档/重置）；
+    save=False 且基线存在时容差比对判红（超 PERF_TOLERANCE 返回 1）；
+    save=False 且基线缺失时判红提示先建档（防无基线空转假绿）。
+    """
+    gate = {k: metrics.get(k) for k, _ in _PERF_GATE_METRICS}
+    if save:
+        baseline = dict(gate)
+        baseline["load_mb"] = metrics.get("load_mb")
+        baseline["created"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with open(baseline_path, "w", encoding="utf-8") as fp:
+                json.dump(baseline, fp, ensure_ascii=False, indent=2)
+        except OSError as e:
+            print(f"ERROR: 性能基线写盘失败 {baseline_path}: {e}")
+            return 1
+        print(f"性能基线已存档 {baseline_path}: " +
+              ", ".join(f"{k}={gate[k]}" for k, _ in _PERF_GATE_METRICS))
+        return 0
+    if not os.path.exists(baseline_path):
+        print(f"ERROR: 性能基线文件不存在 {baseline_path}（先跑 "
+              f"--perf-save-baseline 建档，或性能回归门禁无参考判绿）")
+        return 1
+    try:
+        with open(baseline_path, encoding="utf-8") as fp:
+            base = json.load(fp)
+    except (OSError, ValueError, json.JSONDecodeError) as e:
+        print(f"ERROR: 性能基线读取失败 {baseline_path}: {e}")
+        return 1
+    problems = []
+    for key, direction in _PERF_GATE_METRICS:
+        now = gate.get(key)
+        ref = base.get(key)
+        if now is None:
+            problems.append(f"{key}: 当前 METRICS 缺该指标（无法比对）")
+            continue
+        if ref is None:
+            problems.append(f"{key}: 基线缺该指标（基线不完整）")
+            continue
+        if isinstance(ref, str):
+            try:
+                ref = float(ref)
+            except ValueError:
+                problems.append(f"{key}: 基线值非数字 {ref!r}")
+                continue
+        now = float(now)
+        if ref <= 0:
+            problems.append(f"{key}: 基线值非法（<=0）: {ref}")
+            continue
+        deviation = abs(now - ref) / ref
+        # 劣化方向判定：direction=min（涨优）时 now 显著低于 ref 即劣化；
+        # direction=max（降优）时 now 显著高于 ref 即劣化
+        if direction == "min":
+            bad = now < ref * (1 - PERF_TOLERANCE)
+        else:
+            bad = now > ref * (1 + PERF_TOLERANCE)
+        if bad:
+            problems.append(
+                f"{key} 超容差判红: 当前={now} 基线={ref} "
+                f"(偏差 {deviation * 100:.1f}% > ±{PERF_TOLERANCE * 100:.0f}%，"
+                f"{'吞吐' if direction == 'min' else '延迟/RSS'}劣化)")
+    if problems:
+        print("ERROR: 性能回归门禁失败——" + "; ".join(problems))
+        return 1
+    print(f"性能回归门禁通过: 与基线 {baseline_path} 容差内一致"
+          f"（±{PERF_TOLERANCE * 100:.0f}%）")
     return 0
 
 
@@ -1032,6 +1154,11 @@ def main(argv=None):
                     help="perf 模式直读采样间隔（毫秒），默认 100（不受心跳周期绑架）")
     ap.add_argument("--dd-timeout", type=int, default=300,
                     help="perf 模式 dd 执行 adb 超时（秒）")
+    ap.add_argument("--perf-baseline", default=PERF_BASELINE_DEFAULT,
+                    help="perf 模式性能基线文件路径（R-04 方向 1，回归门禁参考）")
+    ap.add_argument("--perf-save-baseline", action="store_true",
+                    help="perf 模式把本次 METRICS 关键指标存档为性能基线"
+                         "（R-04 方向 1，首次建档/重置；不设时对已有基线做容差比对）")
     args = ap.parse_args(argv)
     # 记录 --baseline 是否显式传（ts 模式只在显式时做基线限定）
     args.baseline_explicit = _baseline_explicit(argv)

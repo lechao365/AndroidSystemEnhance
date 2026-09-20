@@ -19,16 +19,19 @@ cases:
   # cmd 判据 exit 0 即 pass：grep -q 命中新类型 && avc denied 无 lechao_lcview。
   lcview-sepolicy-label: 'cmd:"ls -Z /dev/vendor_lechao_lcview | grep -q lechao_lcview_device:s0 && ! logcat -d -t 5000 | grep -E \"avc: denied .*lechao_lcview\" | grep -q ." boot'
 
-  # 性能采集（脚本化统一负载，只报数不设门禁）：dd 读块设备 64MB（与性能基线
-  # 负载一致，消除 4MB 用例负载失真）→ 事件吞吐 / 平均落盘延迟 / daemon RSS，
-  # METRICS JSON 行供 ws_report --metrics 结构化存档（跨批可 diff）。
+  # 性能采集 + 回归门禁（R-04 方向 1：性能基线入库与回归判红）：dd 读块设备
+  # 64MB（与性能基线负载一致，消除 4MB 用例负载失真）→ 事件吞吐 / 平均落盘
+  # 延迟 / daemon RSS，METRICS JSON 行供 ws_report --metrics 结构化存档
+  # （跨批可 diff）。基线经 LCVIEW_PERF_BASELINE_FILE 指向轮次隔离路径：
+  # 首轮 --perf-save-baseline 建档（基准快照），后续轮次自动与基线 ±30%
+  # 容差比对判红（吞吐腰斩 / 延迟劣化 / p99 劣化 / RSS 膨胀超阈值即判红）。
   # 直读采样：内核 total_records 经 sysfs 只读节点
   # （/sys/class/lcview/vendor_lechao_lcview/lcview_stats，lcview_main.c 导出；
   #  设备节点有单打开限制 HAL 常驻，ioctl 直读返 EBUSY）+ JSONL 行数经 wc -l
   # 按 100ms 采样——不依赖心跳（心跳每 30 loop 约 28s 才更新，远粗于 2.5s 的
   # dd 负载窗，曾致 drain 恒为一个心跳周期、延迟随负载机械失真）。
   # dd 读负载有 IO 副作用，不并入 liveness，按需触发或随批次方向单独跑。
-  lcview-perf: 'hostcmd:"cases/lcview_check.sh --mode perf --load-mb 64"'
+  lcview-perf: 'hostcmd:"cases/lcview_check.sh --mode perf --load-mb 64 --perf-baseline ${LCVIEW_PERF_BASELINE_FILE:-/tmp/lcview_perf_baseline.json}"'
 
   # 重启恢复用例（补齐"无重启恢复用例"空洞）：kill daemon 进程 →
   # init 自动拉起 + 心跳恢复（kill 后出现新心跳行）；额外断言 dd 触发的

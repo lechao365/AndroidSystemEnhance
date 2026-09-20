@@ -39,6 +39,39 @@ HEADER_PAIRS = [
      "cmd"),
 ]
 
+# 跨侧契约常量宏比对（R-04 方向 2）：内核真相源头 vs AOSP 镜像头。
+# 四元组 (内核相对路径, 内核宏名, AOSP 相对路径, AOSP 宏名)——两侧同名
+# 常量值必须相等（如 LCVIEW_BUILDER_MAX_SIZE 决定单条记录硬上限，用户态
+# 缓冲预算与内核写入端同以此为契约，单侧改即缓冲预算/上限漂移的静默错配）。
+CONSTANT_PAIRS = [
+    ("rpi5/kernel/new/vendor/lechao/LcView/lcview_internal.h",
+     "LCVIEW_BUILDER_MAX_SIZE",
+     "rpi5/aosp/new/vendor/lechao/services/lechao_lcview/include/lcview_events.h",
+     "LCVIEW_BUILDER_MAX_SIZE"),
+]
+
+# struct 跨侧 offsetof 契约（R-04 方向 2）：内核 struct 布局真相源 vs AOSP
+# static_assert 镜像。元组 (内核头路径, 内核 struct 名, AOSP 头路径, AOSP struct 名)。
+# 脚本从内核 struct 字段序自动推导各字段 offsetof（按字段类型尺寸顺序布局），
+# 与 AOSP 侧 static_assert(offsetof(...) == N) 提取值比对——两侧不等判红。
+# 意图：offsetof 断言值不再靠 AOSP 侧手工硬编码（手工填错/漏同步不可见），
+# 由内核 struct 真相源自动推导后交叉验证。
+OFFSETOF_PAIRS = [
+    ("rpi5/kernel/new/vendor/lechao/LcView/lcview_internal.h", "lcview_stats",
+     "rpi5/aosp/new/vendor/lechao/services/lechao_lcview/include/lcview_ioctl.h",
+     "lcview_stats"),
+]
+
+# C 标量/内建类型字节数（offsetof 推导用；struct lcview_stats 全 uint32_t 4B，
+# 顺序布局天然无 padding 间隙。此处映射覆盖常见标量，未知类型按最宽 8B 保守
+# 判红防假绿——不推导则无法发现手工断言漂移）
+_CTYPE_SIZE = {
+    "u8": 1, "__u8": 1, "uint8_t": 1, "char": 1,
+    "u16": 2, "__u16": 2, "uint16_t": 2,
+    "u32": 4, "__u32": 4, "uint32_t": 4, "int": 4, "unsigned": 4,
+    "u64": 8, "__u64": 8, "uint64_t": 8, "long": 8,
+}
+
 # 提取 struct/enum 块：`struct NAME {` 或 `enum NAME {` 起步至配对 `};`
 # 约束（lib-09）：BLOCK_RE 的 [^}]* 不支持嵌套花括号（嵌套 struct/enum 块
 # 提取不到会静默漏检），extract_signatures 对块内出现嵌套 { 的情况判红
@@ -51,6 +84,18 @@ BLOCK_RE = re.compile(r"((?:struct|enum)\s+\w+\s*\{[^}]*\}\s*;)", re.S)
 # struct/enum 签名覆盖不到，须单独提取比对。
 IOCTL_CMD_RE = re.compile(
     r"#define\s+(\w+)\s+_(IO|IOR|IOW|IORW)\((.*?)\)\s*$", re.M)
+
+# 提取纯数值 #define 宏：`#define NAME  VALUE`（VALUE 为十进制/十六进制/八进制
+# 整数，或简单常量表达式如 (4096*2)）。供 CONSTANT_PAIRS 跨侧常量值比对。
+DEFINE_RE = re.compile(r"#define\s+(\w+)\s+(0[xX][0-9a-fA-F]+|\d+)")
+
+# 提取 AOSP 侧 offsetof 静态断言：`static_assert(offsetof(struct NAME, FIELD) == N, ...)`
+OFFSETOF_ASSERT_RE = re.compile(
+    r"offsetof\(\s*(?:struct\s+)?(\w+)\s*,\s*(\w+)\s*\)\s*==\s*(\d+)")
+
+# 从 BLOCK_RE 提取的 struct 字段行提取字段类型与名（去掉尾部数组后缀/初始化）：
+# "uint32_t total_records" → ("uint32_t", "total_records")
+_FIELD_RE = re.compile(r"^(\w+(?:\s*\*)?)\s+(\w+)(?:\[\d*\])?(?:\s*=\s*.*)?$")
 
 
 def extract_ioctl_cmds(text: str) -> dict[str, str]:
@@ -110,6 +155,62 @@ def extract_signatures(text: str) -> dict[str, list[str]]:
         sig = normalize_block(block)
         if sig:                                        # 空块（前向声明）不收
             out[name] = sig
+    return out
+
+
+def extract_define_values(text: str) -> dict[str, str]:
+    """提取纯数值 #define 宏值 → {宏名: 规范化值字符串}。
+
+    值规范化：去注释/空白后按数值字面量保留（0x10 == 16 视为不等？——
+    否，两侧写法不同但数值相同应判一致，故统一转十进制 int 后回退字符串）。
+    无法解析为整数的值（表达式/非数值）不收录（跨侧不比对，交人工）。
+    """
+    out = {}
+    for m in DEFINE_RE.finditer(text):
+        name, val = m.group(1), m.group(2).strip()
+        val = re.split(r"[/*\s]", val)[0]
+        try:
+            out[name] = str(int(val, 0))
+        except ValueError:
+            continue
+    return out
+
+
+def derive_offsetofs(sig_lines: list[str]) -> tuple[dict[str, int] | None, str]:
+    """从 struct 规范化字段行推导各字段 offsetof。
+
+    返回 (字段名→offset 映射, 描述)。按字段类型尺寸顺序累加（假设紧凑布局，
+    无 padding——struct lcview_stats 全 uint32_t 即此形态）。任一字段类型
+    未知时返回 (None, 描述)（fail-closed：无法推导即不参与比对，防假绿）。
+    """
+    offsets, cur = {}, 0
+    for line in sig_lines:
+        line = re.sub(r"/\*.*?\*/", "", line)
+        line = line.split("//")[0].strip().rstrip(";").strip()
+        if not line:
+            continue
+        m = _FIELD_RE.match(line)
+        if not m:
+            return None, f"无法解析字段行: {line!r}"
+        ftype, fname = m.group(1).strip(), m.group(2).strip()
+        ftype = re.sub(r"\b__u(\d+)\b", r"u\1", ftype)
+        ftype = re.sub(r"\b__s(\d+)\b", r"s\1", ftype)
+        size = _CTYPE_SIZE.get(ftype)
+        if size is None:
+            return None, f"未知字段类型 {ftype!r}（无法推导 offsetof）"
+        offsets[fname] = cur
+        cur += size
+    if not offsets:
+        return None, "struct 无字段（无法推导 offsetof）"
+    return offsets, f"{len(offsets)} 字段推导完成"
+
+
+def extract_offsetof_asserts(text: str) -> dict[str, dict[str, int]]:
+    """提取 AOSP 侧 static_assert 的 offsetof 值 → {struct名: {字段: 值}}。"""
+    out = {}
+    for m in OFFSETOF_ASSERT_RE.finditer(text):
+        sname, fname, val = m.group(1), m.group(2), int(m.group(3))
+        out.setdefault(sname, {})[fname] = val
     return out
 
 
@@ -212,6 +313,85 @@ def compare(k_path: Path, a_path: Path, mode: str = "struct") -> tuple[int, str]
     return 0, f"一致: {label}"
 
 
+def compare_constants(repo: Path) -> tuple[int, str]:
+    """跨侧契约常量值比对（R-04 方向 2）：内核真相源 vs AOSP 镜像同名宏
+    值必须相等，不等判红（如 LCVIEW_BUILDER_MAX_SIZE 单条硬上限漂移）。"""
+    problems = []
+    checked = 0
+    for k_rel, k_macro, a_rel, a_macro in CONSTANT_PAIRS:
+        k_path, a_path = repo / k_rel, repo / a_rel
+        if not k_path.is_file() or not a_path.is_file():
+            return 2, f"常量文件缺失: {k_rel if not k_path.is_file() else a_rel}"
+        kv = extract_define_values(k_path.read_text(encoding="utf-8",
+                                                    errors="replace"))
+        av = extract_define_values(a_path.read_text(encoding="utf-8",
+                                                    errors="replace"))
+        if k_macro not in kv:
+            problems.append(f"内核缺宏 {k_macro}（{k_rel}）")
+            continue
+        if a_macro not in av:
+            problems.append(f"AOSP 缺镜像宏 {a_macro}（{a_rel}）")
+            continue
+        checked += 1
+        if kv[k_macro] != av[a_macro]:
+            problems.append(f"跨侧常量漂移: {k_macro} 内核={kv[k_macro]} "
+                            f"AOSP({a_macro})={av[a_macro]}（{k_rel} vs {a_rel}）")
+    if problems:
+        return 1, "\n".join(problems)
+    if checked == 0 and CONSTANT_PAIRS:
+        return 1, "常量对全部未比对到（两侧宏缺失/解析异常）"
+    return 0, f"一致: {checked} 个跨侧常量值相等"
+
+
+def compare_offsetofs(repo: Path) -> tuple[int, str]:
+    """struct 跨侧 offsetof 契约（R-04 方向 2）：内核 struct 字段序自动推导
+    offsetof，与 AOSP static_assert 值比对，不等判红。
+
+    offsetof 值不再依赖 AOSP 侧手工硬编码可信——由内核真相源字段序推导
+    后交叉验证；任一侧推导失败即 fail-closed 判红交人工（防静默假绿）。
+    """
+    problems = []
+    checked = 0
+    for k_rel, k_struct, a_rel, a_struct in OFFSETOF_PAIRS:
+        k_path, a_path = repo / k_rel, repo / a_rel
+        if not k_path.is_file() or not a_path.is_file():
+            return 2, f"offsetof 文件缺失: {k_rel if not k_path.is_file() else a_rel}"
+        ktext = k_path.read_text(encoding="utf-8", errors="replace")
+        atext = a_path.read_text(encoding="utf-8", errors="replace")
+        ksig = extract_signatures(ktext).get(k_struct)
+        if ksig is None:
+            problems.append(f"内核无 struct {k_struct}（{k_rel}）")
+            continue
+        offsets, desc = derive_offsetofs(ksig)
+        if offsets is None:
+            problems.append(f"内核 {k_struct} offsetof 推导失败: {desc}")
+            continue
+        aassert = extract_offsetof_asserts(atext).get(a_struct, {})
+        if not aassert:
+            problems.append(f"AOSP 无 struct {a_struct} 的 offsetof static_assert "
+                            f"（{a_rel}）")
+            continue
+        for fname, off in offsets.items():
+            if fname not in aassert:
+                problems.append(f"内核 {k_struct}.{fname} offset={off} 但 AOSP "
+                                f"无对应 static_assert")
+                continue
+            checked += 1
+            if aassert[fname] != off:
+                problems.append(f"offsetof 漂移: {a_struct}.{fname} 内核推导={off} "
+                                f"AOSP 断言={aassert[fname]}（{k_rel} vs {a_rel}）")
+        # AOSP 侧多断言字段（内核 struct 无此字段）判红：断言内容超内核布局
+        extra = set(aassert) - set(offsets)
+        if extra:
+            problems.append(f"AOSP 多出内核 {k_struct} 无的 offsetof 断言字段: "
+                            f"{sorted(extra)}")
+    if problems:
+        return 1, "\n".join(problems)
+    if checked == 0 and OFFSETOF_PAIRS:
+        return 1, "offsetof 对全部未比对到（推导/断言缺失）"
+    return 0, f"一致: {checked} 个 offsetof 值自动推导与断言一致"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default=str(Path(__file__).resolve().parents[2] / "code"),
@@ -223,6 +403,15 @@ def main() -> int:
         rc, msg = compare(repo / k_rel, repo / a_rel, mode)
         tag = {0: "OK", 1: "漂移", 2: "缺失"}[rc]
         print(f"[{tag}] {k_rel} vs {a_rel} (mode={mode})\n  {msg}")
+        if rc != 0:
+            rc_total = max(rc_total, 1 if rc == 1 else 2)
+            fail_msgs.append(msg)
+    # R-04 方向 2：跨侧常量 + offsetof 契约（独立于 HEADER_PAIRS 的文件对）
+    for name, fn in (("跨侧常量", compare_constants),
+                     ("struct offsetof", compare_offsetofs)):
+        rc, msg = fn(repo)
+        tag = {0: "OK", 1: "漂移", 2: "缺失"}[rc]
+        print(f"[{tag}] {name}\n  {msg}")
         if rc != 0:
             rc_total = max(rc_total, 1 if rc == 1 else 2)
             fail_msgs.append(msg)
