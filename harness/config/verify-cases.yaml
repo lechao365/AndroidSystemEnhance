@@ -189,6 +189,29 @@ cases:
   lciod-liveness: 'svc:lechao_lciod_hal svc:lechao_lciod log:"monitor: minor=" boot'
 
 
+  # 性能采集（R-02 方向 2，脚本化统一负载，只报数不设门禁）：dd 读块设备
+  # 64MB（与 lcview-perf 同负载，对齐性能基线）驱动真实 USB 传输 →
+  # lciod_probe 前后差分算 per-IO ns（Δread_ns/Δread_cmds）、吞吐
+  # （Δread_bytes/dd 秒）、最近传输延迟（last_transport_latency_ns），
+  # METRICS JSON 行供 ws_report --metrics 结构化存档（跨批可 diff）。
+  # lciod 内核 GET_STATS 计数（read_bytes/read_cmds/read_ns）与 lcview
+  # 事件维度互补——直接观测 USBD 栈传输量，无落盘/攒包路径干扰。
+  # dd 读负载有 IO 副作用，不并入 liveness，按需触发或随批次方向单独跑。
+  lciod-perf: 'hostcmd:"cases/lciod_check.sh --mode perf --load-mb 64"'
+
+
+  # 重启恢复用例（补齐 lciod 侧"无重启恢复用例"空洞，R-02 方向 4）：kill
+  # HAL 进程 → init 自动拉起（rc 非 oneshot）+ daemon 经 IoHalClient 自动
+  # 重连（binder 死亡回调 → 指数退避，logcat 出现 hal_client: reconnected
+  # to HAL）。kill 有副作用（服务重启，init 自动恢复），单独用例不并入
+  # liveness。前置断言 HAL/daemon 进程均存活（无 kill 目标/无重连方即判红）。
+  # 仅登记 timeout_s（生命周期字段可单用，setup_snapshot/teardown 缺省
+  # 即无快照/无恢复——kill 由 init 自愈，无可登记持久态变更面）
+  lciod-recover-hal:
+    acceptance: 'hostcmd:"cases/lciod_recover.sh"'
+    timeout_s: 120
+
+
   # 事件覆盖登记（驱动级覆盖盘点，2026-08-27 修订）：
   # - 已覆盖（真实触发 + delta 断言）: 4(transfer-start,lcview-transfer) 5(transfer-end,lcview-transfer)
   #   8(probe,lcview-trigger) 9(disconnect,lcview-trigger)

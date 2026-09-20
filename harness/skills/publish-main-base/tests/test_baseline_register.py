@@ -456,7 +456,7 @@ class TestBaselineRegister(unittest.TestCase):
 
     # ── 方向 1/2（本批意图 1/2）：发布全量组覆盖核对（promote 门禁 + evidence 记录）──
     def _full_cases_without(self, drop):
-        """全量 11 case 中剔除指定 case（构造缺项收据用，同 BL-20260905-01 场景）。"""
+        """全量 case 中剔除指定 case（构造缺项收据用，同 BL-20260905-01 场景）。"""
         return ",".join(c for c in br.verify_case_ids() if c != drop)
 
     def test_add_candidate_records_cases_coverage(self):
@@ -470,7 +470,10 @@ class TestBaselineRegister(unittest.TestCase):
         cov = br.load()["baselines"][0]["evidence"]["cases_coverage"]
         self.assertEqual(cov["result"], "partial")
         self.assertEqual(cov["missing"], ["lcview-trigger"])
-        self.assertEqual(cov["run_count"], 10)
+        # 实跑 = 全量 - 1（缺 lcview-trigger）；不硬编码数字——verify-cases.yaml
+        # cases 段随批次增长（perf/recover 用例扩充），数字断言跨批漂移（2026-09-20
+        # 新增 lciod-perf/lciod-recover-hal 后 11→13 case 实测假红）
+        self.assertEqual(cov["run_count"], len(br.verify_case_ids()) - 1)
         # 全量 → full
         rp2 = self._make_receipt(cases=_FULL_CASES)
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp2,
@@ -494,7 +497,7 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("发布全量组门禁", out)
         self.assertIn("lcview-trigger", out)
-        self.assertIn("实跑 10", out)
+        self.assertIn(f"实跑 {len(br.verify_case_ids()) - 1}", out)
         self.assertEqual(br.load()["baselines"][0]["status"], "candidate")
 
     def test_promote_cases_gate_exempts_no_code_change(self):

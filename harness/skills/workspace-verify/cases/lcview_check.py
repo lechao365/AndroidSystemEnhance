@@ -579,25 +579,28 @@ def mode_conserve(tmp, args):
 
 
 def kernel_stats():
-    """直读内核四计数 (total_records, overrun, dropped, ring_usage_bytes)；失败返回 None。
+    """直读内核五计数 (total_records, overrun, dropped, ring_usage_bytes,
+    ring_size_bytes)；失败返回 None。
 
     与 kernel_total 同源（STATS_SYSFS 只读导出，单次 cat 全量解析，减少
     adb 往返）：conserve 窗口采样需 total/overrun/dropped 配对（方向 1：
     dropped 为 ENOSPC 丢弃，计入 total_records 却未落盘，左式须减去除其
-    干扰），perf 只取 total。
+    干扰），perf 扩展（R-02 方向 1）需 ring_size_bytes 算环水位
+    （ring_usage/ring_size）。
     """
     out, rc = adb(["shell", f"cat {STATS_SYSFS}"])
     if rc == -1:
         return None
     vals = {}
     for line in out.splitlines():
-        for key in ("total_records", "overrun", "dropped", "ring_usage_bytes"):
+        for key in ("total_records", "overrun", "dropped", "ring_usage_bytes",
+                    "ring_size_bytes"):
             m = re.search(key + r"=(\d+)", line)
             if m and key not in vals:
                 vals[key] = int(m.group(1))
-    if len(vals) == 4:
+    if len(vals) == 5:
         return (vals["total_records"], vals["overrun"], vals["dropped"],
-                vals["ring_usage_bytes"])
+                vals["ring_usage_bytes"], vals["ring_size_bytes"])
     return None
 
 
@@ -626,6 +629,71 @@ def daemon_rss_kb():
                 return int(parts[1])
     print("ERROR: /proc/<pid>/status 无 VmHWM 字段")
     return -1
+
+
+def _daemon_pid():
+    """daemon 进程 pid（首个）；失败返回 None。perf 扩展 CPU/syscall 采样共用。"""
+    out, rc = adb(["shell", "pidof lechao_lcview"])
+    if rc == -1:
+        return None  # adb 超时透传
+    if rc != 0 or not out.strip():
+        return None
+    return out.strip().split()[0]
+
+
+def daemon_cpu_pct(sample_s=1.0):
+    """daemon 进程 CPU 占用（%）：两次采样 utime+stime tick 差 / 墙钟。
+
+    /proc/<pid>/stat 第 14/15 字段（utime/stime，USER_HZ tick）——两次采样
+    tick 差折算 CPU 占用百分比（tick/墙钟/100 核心归一，多核时可能 >100，
+    单核比例展示语义明确）。失败返回 None（perf 只报数，缺项不判红）。
+    """
+    pid = _daemon_pid()
+    if not pid:
+        return None
+
+    def _ticks():
+        out, rc = adb(["shell", f"cat /proc/{pid}/stat"])
+        if rc != 0:
+            return None
+        try:
+            # /proc/<pid>/stat 前 3 段可能含进程名空格（comm 带括号含空格时
+            # 字段后移），从右取第 14/15（tick）字段定位到 comm 结束
+            comm_end = out.rfind(")")  # comm 以 ")" 结束，其后即字段 3
+            rest = out[comm_end + 1:].split()
+            utime = int(rest[11])  # 字段 14 → rest 下标 14-3=11
+            stime = int(rest[12])  # 字段 15
+            return utime + stime
+        except (ValueError, IndexError):
+            return None
+
+    t1 = _ticks()
+    if t1 is None:
+        return None
+    time.sleep(sample_s)
+    t2 = _ticks()
+    if t2 is None:
+        return None
+    clk_tck = os.sysconf("SC_CLK_TCK")  # 常见 100（USER_HZ）
+    pct = (t2 - t1) / (sample_s * clk_tck) * 100.0
+    return round(max(pct, 0.0), 1)
+
+
+def daemon_syscall():
+    """daemon 当前阻塞系统调用（/proc/<pid>/syscall 首字段，符号名）。
+
+    Linux 内核导出当前线程正在执行的系统调用（阻塞于 epoll_wait 等时可见），
+    用于 perf 画像 daemon 是否驻留等待；可能返回 "running"（非阻塞）或空。
+    失败返回 None（perf 只报数，缺项不判红）。
+    """
+    pid = _daemon_pid()
+    if not pid:
+        return None
+    out, rc = adb(["shell", f"cat /proc/{pid}/syscall 2>/dev/null"])
+    if rc != 0 or not out.strip():
+        return None
+    token = out.split()[0]
+    return token if token != "running" else "running"
 
 
 # 内核 total_records 直读节点：sysfs 只读导出（lcview_main.c lcview_stats_show）。
@@ -667,6 +735,28 @@ def jsonl_line_count():
     return total
 
 
+def event_id_distribution():
+    """JSONL 事件 id 分布（{id: count}，设备侧 grep -o 统计，不回传内容）。
+
+    perf 扩展（R-02 方向 1）：JSONL 行含 "id":<event_id> 字段（FileWriter
+    输出 {"ts":..,"id":..,"level":..,"f":[...]}），grep -o 抽取 id 值统计
+    分布，看 dd 负载触发的事件构成（transfer_start/end 等）。adb 超时或
+    无数据返回 None（perf 只报数，缺项不判红）。统计全体历史文件——分布
+    语义为"当前采集点的事件构成"，绝对值累加不影响占比结论。
+    """
+    out, rc = adb(["shell",
+                   f"grep -oE '\\\"id\\\":[0-9]+' {LOGS_DIR}/*.jsonl 2>/dev/null "
+                   "| sed 's/.*://' | sort | uniq -c"])
+    if rc == -1:
+        return None  # adb 超时透传
+    dist = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            dist[int(parts[1])] = int(parts[0])
+    return dist or None
+
+
 def mode_perf(tmp, args):
     """性能采集（固定负载，脚本化，只报数不设门禁）。
 
@@ -679,6 +769,10 @@ def mode_perf(tmp, args):
       不含任何人工 sleep，也不受心跳 28s 周期绑架（原心跳观测致延迟随负载
       翻倍而机械减半、drain 恒为一个心跳周期）
     - daemon RSS = /proc VmHWM 峰值（kB）
+    - R-02 方向 1 扩展（仍只报数不设门禁，METRICS 结构化存档）：
+      overrun 增量 / 环水位（ring_usage/ring_size）/ daemon CPU%（utime+stime
+      tick 采样）/ 当前 syscall（阻塞画像）/ 落盘延迟 p99（drain 采样点
+      第 99 百分位，替代"只看均值"掩蔽长尾）/ event id 分布（dd 负载事件构成）
     输出 human 可读行 + METRICS JSON 行（供上层结构化存档，跨批可 diff）。
     """
     load_mb = args.load_mb or 64
@@ -694,6 +788,14 @@ def mode_perf(tmp, args):
     if jsonl0 is None:
         print("ERROR: 无法直读 JSONL 行数（wc -l 失败）")
         return 1
+
+    # R-02 方向 1：dd 前快照 overrun / 环水位 / CPU / syscall / event 分布。
+    # 环水位取 dd 后采样（负载峰值视角），dd 前快照只留 overrun 做增量差分
+    pre = kernel_stats()
+    overrun0 = pre[1] if pre else 0
+    dist0 = event_id_distribution()
+    cpu_pct = daemon_cpu_pct()
+    syscall0 = daemon_syscall()
 
     # dd 计时（host 侧单调钟，不含任何人工 sleep）
     t0 = time.monotonic()
@@ -713,10 +815,13 @@ def mode_perf(tmp, args):
         return 1
 
     # drain 计时起点 = dd 完成时刻；直读按 100ms 采样——先等内核计数出现增量
-    # （dd 产生事件已计入），再等 jsonl 落盘达标（与心跳观测 28s 粒度解耦）
+    # （dd 产生事件已计入），再等 jsonl 落盘达标（与心跳观测 28s 粒度解耦）。
+    # drain 采样点数组（R-02 方向 1）：(累计 jsonl 增量, 距 drain 起点耗时) 供
+    # 落盘延迟 p99 计算——达标前逐拍记录，达标时刻的末点即全部事件落盘完成。
     drain_t0 = time.monotonic()
     total, jsonl = total0, jsonl0
     seen_total = False
+    drain_samples = []  # (jsonl_delta, elapsed_s) 供落盘延迟 p99（R-02 方向 1）
     while True:
         t = kernel_total()
         if t is not None:
@@ -724,16 +829,20 @@ def mode_perf(tmp, args):
         j = jsonl_line_count()
         if j is not None:
             jsonl = j
+        # 复用超时判定的 monotonic 调用记采样点（不新增调用点，与既有
+        # 单测 mock 的单调钟序列长度兼容）
+        elapsed = time.monotonic() - drain_t0
+        drain_samples.append((jsonl - jsonl0, elapsed))
         if total - total0 > 0:
             seen_total = True
         if seen_total and jsonl - jsonl0 >= total - total0:
             break  # 内核计数已反映 dd 事件且 jsonl 落盘达标
-        if time.monotonic() - drain_t0 > (args.perf_timeout or 60):
+        if elapsed > (args.perf_timeout or 60):
             print("ERROR: 内核计数未出现增量或 jsonl 落盘未达标（drain 超时，"
                   "daemon 消费停滞？）")
             return 1
         time.sleep(sample_s)
-    drain_s = time.monotonic() - drain_t0
+    drain_s = elapsed
 
     total_delta = total - total0
     jsonl_delta = jsonl - jsonl0
@@ -747,18 +856,63 @@ def mode_perf(tmp, args):
     if rss_kb < 0:
         return 1  # RSS 指标不全不能当完整基线（内部已打印原因）
 
+    # R-02 方向 1：落盘延迟 p99——drain 采样点按 jsonl 增量插值累计，
+    # 取第 99 百分位落盘耗时（长尾视角，替代只看均值掩蔽慢事件）。
+    # 样本末点恒为全部 jsonl_delta 落盘（达标跳出），p99 必有值。
+    latency_p99_ms = None
+    if drain_samples and jsonl_delta > 0:
+        cumulative = []
+        acc = 0
+        for jd, el in drain_samples:
+            acc = max(acc, jd)
+            cumulative.append((acc, el))
+        target = jsonl_delta * 0.99
+        for acc, el in cumulative:
+            if acc >= target:
+                latency_p99_ms = round(el * 1000, 3)
+                break
+
+    # R-02 方向 1：dd 后 overrun/环水位增量快照（与 dd 前快照差分）
+    post = kernel_stats()
+    overrun_delta = (post[1] - overrun0) if post else 0
+    ring_usage = post[3] if post else 0
+    ring_size = post[4] if post else 0
+    ring_water_pct = (ring_usage / ring_size * 100.0
+                      if ring_size else 0.0)
+    # event 分布增量：dd 前后各事件 id 计数差（新产生事件构成）
+    dist1 = event_id_distribution()
+    dist_delta = {}
+    if dist0 is not None and dist1 is not None:
+        for eid, cnt in dist1.items():
+            d = cnt - dist0.get(eid, 0)
+            if d > 0:
+                dist_delta[eid] = d
+    syscall1 = daemon_syscall()
+
     metrics = {
         "load_mb": load_mb,
         "dd_s": round(dd_s, 3),
         "throughput_evs": round(throughput, 1),
         "drain_ms_per_event": round(latency_ms, 3),
+        "drain_p99_ms": latency_p99_ms,
         "daemon_rss_kb": rss_kb,
+        "overrun_delta": overrun_delta,
+        "ring_water_pct": round(ring_water_pct, 2),
+        "ring_usage_bytes": ring_usage,
+        "ring_size_bytes": ring_size,
+        "daemon_cpu_pct": cpu_pct,
+        "daemon_syscall": syscall1 or syscall0,
+        "event_distribution": dist_delta or None,
         "total_delta": total_delta,
         "jsonl_delta": jsonl_delta,
     }
     print(f"性能采集（负载 {load_mb}MB，dd {dd_s:.3f}s）: "
           f"事件吞吐={throughput:.1f} events/s，平均落盘延迟={latency_ms:.3f} "
-          f"ms/event，daemon RSS={rss_kb} kB（drain {drain_s:.3f}s）")
+          f"ms/event，p99={latency_p99_ms} ms，daemon RSS={rss_kb} kB，"
+          f"overrun 增量={overrun_delta}，环水位={ring_water_pct:.2f}% "
+          f"（{ring_usage}/{ring_size}B），daemon CPU={cpu_pct}% "
+          f"（syscall={syscall1 or syscall0}），"
+          f"事件分布={dist_delta or 'N/A'}（drain {drain_s:.3f}s）")
     print("METRICS " + json.dumps(metrics, ensure_ascii=False))
     return 0
 

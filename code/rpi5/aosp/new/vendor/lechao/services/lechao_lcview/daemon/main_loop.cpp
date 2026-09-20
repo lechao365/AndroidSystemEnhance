@@ -97,6 +97,85 @@ bool shouldAlarmConservation(uint64_t totalDelta, uint64_t overrunDelta,
     return dev > tolerance || dev < -tolerance;
 }
 
+// 守恒基线单心跳推进与告警判定（R-02 方向 3，抽自 emitHeartbeat 内联逻辑）。
+// 语义见 main_loop.h ConserveBaseline::updateAndCheck 注释；实现把"ioctl
+// 失败跳过数值推进 / 首心跳建基线 / 后续心跳增量判定 + 推进"三态收口，
+// emitHeartbeat 不再内联守恒逻辑（可测边界），只消费 Result 打告警日志。
+ConserveBaseline::Result ConserveBaseline::updateAndCheck(const Sample& s)
+{
+    Result r;
+    if (s.ioctlErr != ioctlErr) {
+        // 方向 6：本轮 ioctl 失败，跳过守恒校验并仅推进 ioctlErr 基线；
+        // 数值基线保持上次成功值（防失败返 0 失真）
+        ioctlErr = s.ioctlErr;
+        return r;
+    }
+    if (!initialized) {
+        // 首心跳（ioctl 成功）：建立基线，次心跳起按增量比较
+        initialized = true;
+        total = s.total;
+        overrun = s.overrun;
+        dropped = s.dropped;
+        persistedValid = s.persistedValid;
+        persistedInvalid = s.persistedInvalid;
+        return r;
+    }
+    r.totalDelta = static_cast<uint64_t>(s.total - total);
+    r.overrunDelta = static_cast<uint64_t>(s.overrun - overrun);
+    r.droppedDelta = static_cast<uint64_t>(s.dropped - dropped);
+    r.jsonlDelta = static_cast<uint64_t>(s.persistedValid - persistedValid);
+    r.invalidDelta = static_cast<uint64_t>(s.persistedInvalid
+                                           - persistedInvalid);
+    r.tolerance = computeConserveTolerance(s.ringSizeBytes);
+    r.dev = static_cast<int64_t>(r.totalDelta)
+        - static_cast<int64_t>(r.overrunDelta + r.droppedDelta
+                               + r.jsonlDelta + r.invalidDelta);
+    r.broken = shouldAlarmConservation(
+        r.totalDelta, r.overrunDelta, r.droppedDelta, r.jsonlDelta,
+        r.invalidDelta, r.tolerance);
+    // 方向 6：每心跳推进数值基线（防 uint32 total_records 回绕）
+    total = s.total;
+    overrun = s.overrun;
+    dropped = s.dropped;
+    persistedValid = s.persistedValid;
+    persistedInvalid = s.persistedInvalid;
+    return r;
+}
+
+// 生产心跳 writer：格式化 HeartbeatFields 为 ALOGI 心跳行（原 emitHeartbeat
+// 内联 ALOGI 移此），供 runMainLoop 生产注入（liveness 判据 logfield 字段
+// 顺序与内容保持兼容，不得变更字段名）。
+void LogHeartbeatWriter::write(const HeartbeatFields& hb)
+{
+    ALOGI("lechao_lcview: heartbeat, loop=%llu, overrun=%lld, dropped=%llu, "
+          "readErr=%llu, total_records=%u, jsonl_records=%lld, "
+          "invalid_records=%lld, ioctl_err=%llu, eof=%llu, "
+          "drop_open=%llu drop_format=%llu drop_oob=%llu "
+          "drop_reopen=%llu drop_retry=%llu drop_invalid=%llu "
+          "drop_invalidwrite=%llu "
+          "drop_rotate=%llu drop_invrotate=%llu drop_rollback=%llu, "
+          "avg_format_us=%llu avg_write_us=%llu",
+          static_cast<unsigned long long>(hb.loop),
+          static_cast<long long>(hb.overrun),
+          static_cast<unsigned long long>(hb.dropped),
+          static_cast<unsigned long long>(hb.readErr),
+          hb.totalRecords, hb.jsonlRecords, hb.invalidRecords,
+          static_cast<unsigned long long>(hb.ioctlErr),
+          static_cast<unsigned long long>(hb.eofCount),
+          static_cast<unsigned long long>(hb.dropOpen),
+          static_cast<unsigned long long>(hb.dropFormat),
+          static_cast<unsigned long long>(hb.dropOob),
+          static_cast<unsigned long long>(hb.dropReopen),
+          static_cast<unsigned long long>(hb.dropRetry),
+          static_cast<unsigned long long>(hb.dropInvalid),
+          static_cast<unsigned long long>(hb.dropInvalidWrite),
+          static_cast<unsigned long long>(hb.dropRotate),
+          static_cast<unsigned long long>(hb.dropInvRotate),
+          static_cast<unsigned long long>(hb.dropRollback),
+          static_cast<unsigned long long>(hb.avgFormatUs),
+          static_cast<unsigned long long>(hb.avgWriteUs));
+}
+
 // 心跳段（每 30 loop）：直读内核 overrun/total_records，
 // dropped 取 FileWriter DROP 合计（10 条丢记录路径汇总，
 // 含 invalid 写失败恢复不成 invalidWriteFailed），
@@ -105,12 +184,14 @@ bool shouldAlarmConservation(uint64_t totalDelta, uint64_t overrunDelta,
 // invalidRecords 为 parseBatch 丢弃累计（wire 漂移/坏记录判红可见性：
 // 采集链路死了 jsonl 归零、三个零值字段仍全 0，须 invalid 累计兜底）；
 // 写路径指标（方向 3）：formatJsonLine 与 writeRecord 平均微秒/条，
-// 作微优化的可判定指标（drain 被攒包策略钉死，对写路径不敏感）
+// 作微优化的可判定指标（drain 被攒包策略钉死，对写路径不敏感）。
+// R-02 方向 3：输出端改 IHeartbeatWriter 接口注入（生产 LogHeartbeatWriter，
+// 单测记录型 writer），守恒判定收口到 conserve.updateAndCheck()。
 static void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
                           FileWriter& writer, int64_t& overrunAccum,
                           uint64_t readErr,
                           long long jsonlRecords, long long invalidRecords,
-                          ConserveBaseline& conserve)
+                          ConserveBaseline& conserve, IHeartbeatWriter& out)
 {
     uint32_t ov = reader.getOverrun();
     overrunAccum += ov;
@@ -132,89 +213,53 @@ static void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
     // 局部（ConserveBaseline）并按心跳推进——daemon 重启后内核累计不归零
     // 而进程内计数归零，须增量比较；相邻心跳窗口比较使 uint32 total 永不
     // 回绕；任一 ioctl 失败（查询返 0 伪装真实 0）时跳过守恒且不推进数值
-    // 基线，防失败值失真误报。
+    // 基线，防失败值失真。
     const uint32_t total = reader.getTotalRecords();
     const uint32_t kernDropped = reader.getDropped();
     const uint32_t ringSize = reader.getRingSizeBytes();
-    const uint64_t ioctlErr = reader.ioctlErr();
     const FileWriter::PersistCounters& pc = writer.persistCounters();
-    if (ioctlErr != conserve.ioctlErr) {
-        // 方向 6：本轮 ioctl 失败，跳过守恒校验并仅推进 ioctlErr 基线；
-        // 数值基线保持上次成功值（防失败返 0 失真）
-        conserve.ioctlErr = ioctlErr;
-    } else if (!conserve.initialized) {
-        // 首心跳（ioctl 成功）：建立基线，次心跳起按增量比较
-        conserve.initialized = true;
-        conserve.total = total;
-        conserve.overrun = overrunAccum;
-        conserve.dropped = kernDropped;
-        conserve.persistedValid = pc.valid;
-        conserve.persistedInvalid = pc.invalid;
-    } else {
-        const uint64_t totalDelta = static_cast<uint64_t>(
-            total - conserve.total);
-        const uint64_t overrunDelta = static_cast<uint64_t>(
-            overrunAccum - conserve.overrun);
-        const uint64_t droppedDelta = kernDropped - conserve.dropped;
-        const uint64_t jsonlDelta = pc.valid - conserve.persistedValid;
-        const uint64_t invalidDelta = pc.invalid - conserve.persistedInvalid;
-        const int64_t tolerance = computeConserveTolerance(ringSize);
-        if (shouldAlarmConservation(totalDelta, overrunDelta, droppedDelta,
-                                    jsonlDelta, invalidDelta, tolerance)) {
-            const int64_t dev = static_cast<int64_t>(totalDelta)
-                - static_cast<int64_t>(overrunDelta + droppedDelta
-                                       + jsonlDelta + invalidDelta);
-            ALOGE("lechao_lcview: CONSERVATION BROKEN: dev=%lld (tol=%lld), "
-                  "total_delta=%llu overrun_delta=%llu dropped_delta=%llu "
-                  "jsonl_delta=%llu invalid_delta=%llu",
-                  static_cast<long long>(dev),
-                  static_cast<long long>(tolerance),
-                  static_cast<unsigned long long>(totalDelta),
-                  static_cast<unsigned long long>(overrunDelta),
-                  static_cast<unsigned long long>(droppedDelta),
-                  static_cast<unsigned long long>(jsonlDelta),
-                  static_cast<unsigned long long>(invalidDelta));
-        }
-        // 方向 6：每心跳推进数值基线（防 uint32 total_records 回绕）
-        conserve.total = total;
-        conserve.overrun = overrunAccum;
-        conserve.dropped = kernDropped;
-        conserve.persistedValid = pc.valid;
-        conserve.persistedInvalid = pc.invalid;
+    // R-02 方向 3：守恒逻辑收口到 ConserveBaseline::updateAndCheck（纯函数，
+    // 单测可注入 Sample 覆盖三态 + 正负向告警）；Result.broken 即守恒破坏，
+    // 告警详情直接引用 Result 各项增量（不做外部反推，防推进后基线差失真）。
+    ConserveBaseline::Sample sample = {
+        total, overrunAccum, kernDropped, reader.ioctlErr(),
+        pc.valid, pc.invalid, ringSize,
+    };
+    const ConserveBaseline::Result cr = conserve.updateAndCheck(sample);
+    if (cr.broken) {
+        ALOGE("lechao_lcview: CONSERVATION BROKEN: dev=%lld (tol=%lld), "
+              "total_delta=%llu overrun_delta=%llu dropped_delta=%llu "
+              "jsonl_delta=%llu invalid_delta=%llu",
+              static_cast<long long>(cr.dev),
+              static_cast<long long>(cr.tolerance),
+              static_cast<unsigned long long>(cr.totalDelta),
+              static_cast<unsigned long long>(cr.overrunDelta),
+              static_cast<unsigned long long>(cr.droppedDelta),
+              static_cast<unsigned long long>(cr.jsonlDelta),
+              static_cast<unsigned long long>(cr.invalidDelta));
     }
     // 方向 5：心跳 30s 同锚刷活跃文件落盘（fdatasync），缩小断电丢失窗口
     writer.fsyncActiveFiles();
     const FileWriter::WriteTimings& wt = writer.writeTimings();
     uint64_t avgFormatUs = wt.formatCount ? wt.formatTotalUs / wt.formatCount : 0;
     uint64_t avgWriteUs = wt.writeCount ? wt.writeTotalUs / wt.writeCount : 0;
-    // LCV-16/17：ioctl 失败与 EOF 计数（失败返 0 与真实 0 在心跳可区分）
-    ALOGI("lechao_lcview: heartbeat, loop=%llu, overrun=%lld, dropped=%llu, "
-          "readErr=%llu, total_records=%u, jsonl_records=%lld, "
-          "invalid_records=%lld, ioctl_err=%llu, eof=%llu, "
-          "drop_open=%llu drop_format=%llu drop_oob=%llu "
-          "drop_reopen=%llu drop_retry=%llu drop_invalid=%llu "
-          "drop_invalidwrite=%llu "
-          "drop_rotate=%llu drop_invrotate=%llu drop_rollback=%llu, "
-          "avg_format_us=%llu avg_write_us=%llu",
-          static_cast<unsigned long long>(loopCount),
-          static_cast<long long>(overrunAccum),
-          static_cast<unsigned long long>(dropped),
-          static_cast<unsigned long long>(readErr),
-          total, jsonlRecords, invalidRecords,
-          static_cast<unsigned long long>(reader.ioctlErr()),
-          static_cast<unsigned long long>(reader.eofCount()),
-          static_cast<unsigned long long>(dc.openFailed),
-          static_cast<unsigned long long>(dc.formatEmpty),
-          static_cast<unsigned long long>(dc.formatOob),
-          static_cast<unsigned long long>(dc.reopenFailed),
-          static_cast<unsigned long long>(dc.retryFailed),
-          static_cast<unsigned long long>(dc.invalidNotOpen),
-          static_cast<unsigned long long>(dc.invalidWriteFailed),
-          static_cast<unsigned long long>(dc.dropRotate),
-          static_cast<unsigned long long>(dc.dropInvRotate),
-          static_cast<unsigned long long>(dc.dropRollback),
-          static_cast<unsigned long long>(avgFormatUs),
-          static_cast<unsigned long long>(avgWriteUs));
+    HeartbeatFields hb = {
+        loopCount, overrunAccum, dropped, readErr,
+        total, jsonlRecords, invalidRecords,
+        reader.ioctlErr(), reader.eofCount(),
+        static_cast<uint64_t>(dc.openFailed),
+        static_cast<uint64_t>(dc.formatEmpty),
+        static_cast<uint64_t>(dc.formatOob),
+        static_cast<uint64_t>(dc.reopenFailed),
+        static_cast<uint64_t>(dc.retryFailed),
+        static_cast<uint64_t>(dc.invalidNotOpen),
+        static_cast<uint64_t>(dc.invalidWriteFailed),
+        static_cast<uint64_t>(dc.dropRotate),
+        static_cast<uint64_t>(dc.dropInvRotate),
+        static_cast<uint64_t>(dc.dropRollback),
+        avgFormatUs, avgWriteUs,
+    };
+    out.write(hb);
 }
 
 // 落盘段：flush 条件判定 → 攒包解析写盘 → 轮转/容量管理
@@ -273,6 +318,9 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
     // 替代 emitHeartbeat 内 static 局部（多实例/多测试串扰 + 无法按心跳
     // 推进防 uint32 回绕）
     ConserveBaseline conserve;
+    // R-02 方向 3：心跳输出端注入生产 writer（ALOGI 落盘）——emitHeartbeat
+    // 只依赖 IHeartbeatWriter 接口，单测注入记录型 writer 可断言心跳内容
+    LogHeartbeatWriter heartbeatWriter;
     static constexpr size_t kBufSize = 64 * 1024;
     static constexpr int kEpollTimeoutMs = 1000;
     // 预防性 flush 阈值 = 单条记录上限（LCVIEW_MAX_RECORD_SIZE，真相源内核
@@ -327,7 +375,8 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
         auto now = std::chrono::steady_clock::now();
         if (now - lastBeatAt >= std::chrono::seconds(30)) {
             emitHeartbeat(loopCount, reader, writer, overrunAccum, readErr,
-                          jsonlRecords, invalidRecords, conserve);
+                          jsonlRecords, invalidRecords, conserve,
+                          heartbeatWriter);
             lastBeatAt = now;
         }
 

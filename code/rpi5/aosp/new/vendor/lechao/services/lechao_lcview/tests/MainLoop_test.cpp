@@ -231,3 +231,159 @@ TEST(MainLoopConservationTest, ToleranceDerivedFromRingSize) {
     // ring 为 0（ioctl 失败兜底值）→ 仅用户缓冲档位
     EXPECT_EQ(computeConserveTolerance(0), 65536 / 20);
 }
+
+// ============================================================
+// ConserveBaseline::updateAndCheck（R-02 方向 3）：守恒三态收口单测——
+// 首心跳建基线 / ioctl 失败跳过数值推进 / 后续心跳增量判定 + 推进。
+// 纯函数直测（不依赖 emitHeartbeat / ALOGI），覆盖正负向告警与防回绕推进。
+// ============================================================
+
+namespace {
+
+// 构造一轮采样（ioctl 正常，全计数可指定）
+ConserveBaseline::Sample makeSample(uint32_t total, int64_t overrun,
+                                    uint32_t dropped, uint64_t valid,
+                                    uint64_t invalid,
+                                    uint32_t ring = 256 * 1024,
+                                    uint64_t ioctlErr = 0) {
+    return ConserveBaseline::Sample{
+        total, overrun, dropped, ioctlErr, valid, invalid, ring,
+    };
+}
+
+}  // namespace
+
+TEST(MainLoopBaselineTest, FirstSample_InitializesNoAlarm) {
+    // 首心跳（initialized=false）：仅建基线，不告警
+    ConserveBaseline bl;
+    auto r = bl.updateAndCheck(makeSample(1000, 10, 0, 900, 0));
+    EXPECT_FALSE(r.broken);
+    EXPECT_TRUE(bl.initialized);
+    EXPECT_EQ(bl.total, 1000u);
+    // 次心跳推进后仍为上一轮值（防回绕推进）
+    auto r2 = bl.updateAndCheck(makeSample(2000, 20, 0, 1900, 0));
+    EXPECT_FALSE(r2.broken);
+    EXPECT_EQ(bl.total, 2000u);
+}
+
+TEST(MainLoopBaselineTest, IoctlError_SkipsNumericalAdvance) {
+    // ioctlErr 增量（任一查询失败）：跳过守恒校验与数值推进，仅推进 ioctlErr
+    ConserveBaseline bl;
+    bl.updateAndCheck(makeSample(1000, 10, 0, 900, 0));
+    auto r = bl.updateAndCheck(makeSample(1000, 10, 0, 900, 0,
+                                          256 * 1024, 5 /* ioctlErr 变化 */));
+    EXPECT_FALSE(r.broken);  // 失败值不作判定依据
+    EXPECT_EQ(bl.ioctlErr, 5u);
+    EXPECT_EQ(bl.total, 1000u);  // 数值基线保持上轮成功值
+    // ioctlErr 保持（无新失败，计数单调不回落）：数值推进恢复——本轮
+    // 产生 500 落盘 500，守恒成立且基线推进到 1500
+    auto r3 = bl.updateAndCheck(makeSample(1500, 15, 0, 1400, 0,
+                                           256 * 1024, 5));
+    EXPECT_FALSE(r3.broken);
+    EXPECT_EQ(r3.totalDelta, 500u);
+    EXPECT_EQ(bl.total, 1500u);
+}
+
+TEST(MainLoopBaselineTest, PositiveDeviation_AlarmsWithWindowDeltas) {
+    // 产生未落盘超容差：告警且 Result 携带窗口增量（日志直接引用）
+    ConserveBaseline bl;
+    bl.updateAndCheck(makeSample(1000, 10, 0, 900, 0));
+    // 本轮：产生 +2000，落盘 +1000（在途 1000 < tol 16384 不告警）
+    auto r_ok = bl.updateAndCheck(makeSample(3000, 10, 0, 1900, 0));
+    EXPECT_FALSE(r_ok.broken);
+    EXPECT_EQ(r_ok.totalDelta, 2000u);
+    EXPECT_EQ(r_ok.jsonlDelta, 1000u);
+    EXPECT_EQ(r_ok.dev, 1000);
+    // 本轮：产生 +18000，落盘 +1000 → dev 17000 > tol 告警
+    auto r_alarm = bl.updateAndCheck(makeSample(21000, 10, 0, 2900, 0));
+    EXPECT_TRUE(r_alarm.broken);
+    EXPECT_EQ(r_alarm.totalDelta, 18000u);
+    EXPECT_EQ(r_alarm.jsonlDelta, 1000u);
+    EXPECT_EQ(r_alarm.dev, 17000);
+    EXPECT_EQ(r_alarm.tolerance, kDefaultTol);
+}
+
+TEST(MainLoopBaselineTest, NegativeDeviation_Alarms) {
+    // 落盘超过产生超容差：重复落盘/计数漂移告警
+    ConserveBaseline bl;
+    bl.updateAndCheck(makeSample(1000, 10, 0, 900, 0));
+    // 本轮：产生 +1000，落盘 +18000 → dev -17000 < -tol 告警
+    auto r = bl.updateAndCheck(makeSample(2000, 10, 0, 18900, 0));
+    EXPECT_TRUE(r.broken);
+    EXPECT_EQ(r.dev, -17000);
+}
+
+TEST(MainLoopBaselineTest, DroppedAndInvalidAbsorbed) {
+    // 方向 7 + 方向 5：dropped（ENOSPC 丢弃）/invalid（非法落盘）计入右式
+    // 后被吸收——产生 100、丢弃 100（未落盘）dev=0 不告警
+    ConserveBaseline bl;
+    bl.updateAndCheck(makeSample(100, 0, 0, 100, 0));
+    auto r = bl.updateAndCheck(makeSample(200, 0, 100, 100, 0));
+    EXPECT_FALSE(r.broken);
+    EXPECT_EQ(r.droppedDelta, 100u);
+    EXPECT_EQ(r.dev, 0);
+    // invalid 同语义：产生 100、非法落盘 100 不告警
+    ConserveBaseline bl2;
+    bl2.updateAndCheck(makeSample(100, 0, 0, 100, 0));
+    auto r2 = bl2.updateAndCheck(makeSample(200, 0, 0, 100, 100));
+    EXPECT_FALSE(r2.broken);
+    EXPECT_EQ(r2.invalidDelta, 100u);
+    EXPECT_EQ(r2.dev, 0);
+}
+
+// ============================================================
+// IHeartbeatWriter（R-02 方向 3）：记录型 writer 断言心跳字段透传——
+// 心跳内容不再依赖 ALOGI 格式，接口层字段集即契约（单测直验字段值）。
+// ============================================================
+
+namespace {
+
+// 记录型 writer：捕获最近一次 HeartbeatFields，供断言
+class RecordingHeartbeatWriter : public IHeartbeatWriter {
+public:
+    void write(const HeartbeatFields& hb) override { last = hb; }
+    HeartbeatFields last;
+};
+
+}  // namespace
+
+TEST(MainLoopHeartbeatWriterTest, FieldsPassThrough) {
+    // 心跳字段集经接口透传（内容即契约）——字段缺失/错位在单测暴露，
+    // 不依赖 logcat 格式化（liveness 判据 logfield 的回归点在日志格式
+    // 测试 LogHeartbeatWriter 覆盖，此处断言字段语义）
+    RecordingHeartbeatWriter w;
+    // HeartbeatFields 字段顺序聚合初始化（C++17 无 designated initializer）
+    HeartbeatFields hb;
+    hb.loop = 42;
+    hb.overrun = 7;
+    hb.dropped = 3;
+    hb.readErr = 1;
+    hb.totalRecords = 1000;
+    hb.jsonlRecords = 900;
+    hb.invalidRecords = 5;
+    hb.ioctlErr = 0;
+    hb.eofCount = 2;
+    hb.dropOpen = 1;
+    hb.dropFormat = 2;
+    hb.dropOob = 3;
+    hb.dropReopen = 4;
+    hb.dropRetry = 5;
+    hb.dropInvalid = 6;
+    hb.dropInvalidWrite = 7;
+    hb.dropRotate = 8;
+    hb.dropInvRotate = 9;
+    hb.dropRollback = 10;
+    hb.avgFormatUs = 11;
+    hb.avgWriteUs = 12;
+    w.write(hb);
+    EXPECT_EQ(w.last.loop, 42u);
+    EXPECT_EQ(w.last.overrun, 7);
+    EXPECT_EQ(w.last.dropped, 3u);
+    EXPECT_EQ(w.last.readErr, 1u);
+    EXPECT_EQ(w.last.totalRecords, 1000u);
+    EXPECT_EQ(w.last.jsonlRecords, 900);
+    EXPECT_EQ(w.last.invalidRecords, 5);
+    EXPECT_EQ(w.last.dropRollback, 10u);
+    EXPECT_EQ(w.last.avgFormatUs, 11u);
+    EXPECT_EQ(w.last.avgWriteUs, 12u);
+}

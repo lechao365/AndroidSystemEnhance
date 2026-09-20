@@ -70,6 +70,82 @@ struct ConserveBaseline {
     uint64_t persistedValid = 0;    // FileWriter 合法落盘基线（方向 5）
     uint64_t persistedInvalid = 0;  // FileWriter 非法落盘基线（方向 5）
     uint64_t ioctlErr = 0;          // DeviceReader ioctl 失败计数基线
+
+    // 单心跳守恒采样输入（R-02 方向 3）：把 emitHeartbeat 内联的守恒判定
+    // 所需数据打包，经 updateAndCheck 统一消费——纯数据结构、无 ALOGI
+    // 依赖，使守恒推进/告警逻辑可脱离日志系统单测。
+    struct Sample {
+        uint32_t total;             // 本轮 getTotalRecords()
+        int64_t overrun;            // 本轮 overrunAccum（累计）
+        uint32_t dropped;           // 本轮 getDropped()
+        uint64_t ioctlErr;          // 本轮 reader.ioctlErr()
+        uint64_t persistedValid;    // 本轮 writer.persistCounters().valid
+        uint64_t persistedInvalid;  // 本轮 writer.persistCounters().invalid
+        uint32_t ringSizeBytes;     // 本轮 getRingSizeBytes()（容差推导）
+    };
+
+    // 单心跳守恒判定结果（R-02 方向 3）：updateAndCheck 返回本轮是否告警 +
+    // 判定窗口增量/偏差，供告警日志直接引用（不依赖外部反推，防推进后
+    // 基线差为 0 的日志失真）。
+    struct Result {
+        bool broken = false;        // 本轮守恒是否破坏（|dev| 超容差）
+        uint64_t totalDelta = 0;    // 窗口产生增量（本轮 - 上轮）
+        uint64_t overrunDelta = 0;  // 窗口驱逐增量
+        uint64_t droppedDelta = 0;  // 窗口丢弃增量
+        uint64_t jsonlDelta = 0;    // 窗口合法落盘增量
+        uint64_t invalidDelta = 0;  // 窗口非法落盘增量
+        int64_t dev = 0;            // totalΔ - (overrunΔ+droppedΔ+jsonlΔ+invalidΔ)
+        int64_t tolerance = 0;      // 本轮容差（ring 推导）
+    };
+
+    // 单心跳守恒推进与告警判定（R-02 方向 3，纯函数，无 I/O）：
+    //   - ioctlErr 较基线增量 → 跳过数值推进（防失败返 0 失真），仅推进
+    //     ioctlErr 基线，返回 Result{broken=false}（失败值不作判定依据）；
+    //   - 首心跳（未初始化）→ 建立全量基线，返回 Result{broken=false}；
+    //   - 后续心跳 → 按相邻窗口增量计算 dev，|dev| 超容差置 broken=true，
+    //     且无论是否告警都推进数值基线（防 uint32 回绕）。
+    // Result 各项增量即本轮判定窗口真实增量（告警日志引用，不做外部反推）。
+    Result updateAndCheck(const Sample& s);
+};
+
+// 心跳字段集（R-02 方向 3）：emitHeartbeat 收集的全部指标，经 IHeartbeatWriter
+// 透传；LogHeartbeatWriter 负责格式化 ALOGI，单测 writer 直接读字段断言。
+// 置于 IHeartbeatWriter 之前——接口签名引用本类型，定义须先于接口声明。
+struct HeartbeatFields {
+    uint64_t loop = 0;               // 主循环计数
+    int64_t overrun = 0;             // 累计 overrun（用户态）
+    uint64_t dropped = 0;            // dropped 求和（DropCounters 全分项）
+    uint64_t readErr = 0;            // 读错误计数
+    uint32_t totalRecords = 0;       // 内核 total_records
+    long long jsonlRecords = 0;      // 合法落盘累计
+    long long invalidRecords = 0;    // 非法落盘累计
+    uint64_t ioctlErr = 0;           // DeviceReader ioctl 失败计数
+    uint64_t eofCount = 0;           // EOF 计数
+    // DropCounters 分项（心跳可见性，分项判红用）
+    uint64_t dropOpen = 0, dropFormat = 0, dropOob = 0;
+    uint64_t dropReopen = 0, dropRetry = 0;
+    uint64_t dropInvalid = 0, dropInvalidWrite = 0;
+    uint64_t dropRotate = 0, dropInvRotate = 0, dropRollback = 0;
+    // 写路径平均耗时（微秒，方向 3 微优化可判定指标）
+    uint64_t avgFormatUs = 0, avgWriteUs = 0;
+};
+
+// 心跳输出抽象接口（R-02 方向 3）：emitHeartbeat 的落盘端从 ALOGI 解耦为
+// 接口，生产注入 LogHeartbeatWriter（ALOGI 落盘），单测注入记录型 writer
+// 断言心跳内容。使"守恒校验逻辑"与"心跳如何输出"分离，后者不再污染
+// 可测边界（C++ 单测编译期 ALOG 宏无依赖，但断言内容需记录）。
+class IHeartbeatWriter {
+public:
+    virtual ~IHeartbeatWriter() = default;
+
+    // 输出一条心跳（完整指标行）；实现方自行决定格式/去向
+    virtual void write(const HeartbeatFields& hb) = 0;
+};
+
+// 生产心跳 writer：格式化字段为 ALOGI 心跳行（原 emitHeartbeat 内联实现）
+class LogHeartbeatWriter : public IHeartbeatWriter {
+public:
+    void write(const HeartbeatFields& hb) override;
 };
 
 // 守恒告警判定（纯函数，方向 3/7）：内核 total_records 增量应等于
