@@ -135,7 +135,8 @@ class FakeAdb:
                  dd_rc=0, dd_out="", pidof_rc=0, pidof_out="",
                  proc_rc=0, proc_out="", stats_rc=0, stats_out="",
                  sysfs_rc=0, sysfs_out="", sysfs_seq=None,
-                 wc_rc=0, wc_out="", wc_seq=None):
+                 wc_rc=0, wc_out="", wc_seq=None,
+                 stat_seq=None, io_out="", io_rc=0, io_seq=None):
         self.files = dict(files or {})
         self.ls_rc = ls_rc
         self.pull_rc = pull_rc
@@ -159,6 +160,13 @@ class FakeAdb:
         self.wc_rc = wc_rc
         self.wc_out = wc_out
         self.wc_seq = list(wc_seq or [])
+        # R-03 方向 1：daemon stat（CPU tick）与 io（syscr/syscw）分离响应——
+        # stat 双拍（dd 前/后各一帧，stat_seq 依次弹出），io 支持双拍
+        # （io_seq 依次弹出，测计数差分；缺省回退 io_out 固定值）
+        self.stat_seq = list(stat_seq or [])
+        self.io_out = io_out
+        self.io_rc = io_rc
+        self.io_seq = list(io_seq or [])
         self.calls = []
 
     def __call__(self, args, timeout=60):
@@ -177,6 +185,14 @@ class FakeAdb:
                 return (self.dd_out, self.dd_rc)
             if cmd.startswith("pidof "):
                 return (self.pidof_out, self.pidof_rc)
+            if cmd.startswith("cat /proc/") and "/stat" in cmd:
+                if self.stat_seq:
+                    return (self.stat_seq.pop(0), self.proc_rc)
+                return (self.proc_out, self.proc_rc)
+            if cmd.startswith("cat /proc/") and "/io" in cmd:
+                if self.io_seq:
+                    return (self.io_seq.pop(0), self.io_rc)
+                return (self.io_out, self.io_rc)
             if cmd.startswith("cat /proc/"):
                 return (self.proc_out, self.proc_rc)
             if cmd.startswith("lcview_stats"):
@@ -948,6 +964,99 @@ class TestModePerf(unittest.TestCase):
         fake = FakeAdb(dd_rc=-1)
         rc = self._run(fake, totals=[100], jsonls=[90])
         self.assertEqual(rc, -1)
+
+    # ── R-03 方向 1：采样可信度回炉单测 ──────────────────────────
+    def test_perf_cpu_dd_window_diff(self):
+        # CPU 改 dd 窗口双拍差分：dd 前 tick=100，dd 后 tick=110（10 tick，
+        # USER_HZ=100，dd_s=1s）→ 10%（不在 dd 前单点快照取值）
+        fake = FakeAdb(dd_rc=0,
+                       pidof_out="1234\n", pidof_rc=0,
+                       proc_out="VmHWM:\t    5516 kB\n", proc_rc=0,
+                       stat_seq=["1234 (lechao_lcview) S 0 0 0 0 "
+                                 "0 0 0 0 0 0 0 100 100\n",
+                                 "1234 (lechao_lcview) S 0 0 0 0 "
+                                 "0 0 0 0 0 0 0 110 100\n"])
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(lc, "adb", fake):
+                with mock.patch.object(lc, "kernel_total",
+                                       side_effect=[100, 1321, 1321]):
+                    with mock.patch.object(lc, "jsonl_line_count",
+                                           side_effect=[90, 1311, 1311]):
+                        with mock.patch.object(lc.time, "sleep"):
+                            with mock.patch.object(lc.time, "monotonic",
+                                                   side_effect=[100.0, 101.0,
+                                                                101.0, 101.1]):
+                                with contextlib.redirect_stdout(out):
+                                    rc = lc.mode_perf(tmp, _args())
+        self.assertEqual(rc, 0)
+        line = [ln for ln in out.getvalue().splitlines()
+                if ln.startswith("METRICS ")]
+        metrics = json.loads(line[0][len("METRICS "):])
+        # utime 100→110 = 10 tick，USER_HZ 100，dd_s 1.0 → 10%
+        self.assertEqual(metrics["daemon_cpu_pct"], 10.0)
+
+    def test_perf_syscall_io_diff(self):
+        # syscall 改 /proc/<pid>/io 的 syscr/syscw 双拍计数差：dd 前
+        # syscr=1000/syscw=500，dd 后 syscr=1020/syscw=512 → 增量 20/12
+        fake = FakeAdb(dd_rc=0,
+                       pidof_out="1234\n", pidof_rc=0,
+                       proc_out="VmHWM:\t    5516 kB\n", proc_rc=0,
+                       io_seq=["rchar: 1000\nwchar: 200\nsyscr: 1000\n"
+                               "syscw: 500\nread_bytes: 0\nwrite_bytes: 0\n",
+                               "rchar: 1000\nwchar: 200\nsyscr: 1020\n"
+                               "syscw: 512\nread_bytes: 0\nwrite_bytes: 0\n"])
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(lc, "adb", fake):
+                with mock.patch.object(lc, "kernel_total",
+                                       side_effect=[100, 1321, 1321]):
+                    with mock.patch.object(lc, "jsonl_line_count",
+                                           side_effect=[90, 1311, 1311]):
+                        with mock.patch.object(lc.time, "sleep"):
+                            with mock.patch.object(lc.time, "monotonic",
+                                                   side_effect=[100.0, 101.0,
+                                                                101.0, 101.1]):
+                                with contextlib.redirect_stdout(out):
+                                    rc = lc.mode_perf(tmp, _args())
+        self.assertEqual(rc, 0)
+        line = [ln for ln in out.getvalue().splitlines()
+                if ln.startswith("METRICS ")]
+        metrics = json.loads(line[0][len("METRICS "):])
+        self.assertEqual(metrics["syscr_delta"], 20)
+        self.assertEqual(metrics["syscw_delta"], 12)
+
+    def test_perf_ring_water_immediate(self):
+        # 环水位改 dd 后立即采样（drain 前）：sysfs 首帧即 dd 后峰值
+        # （ring_usage_bytes=131072/ring_size_bytes=262144 → 50%），
+        # 不被 drain 耗时稀释——原 dd 后经 drain 才采样会取到回落低位
+        fake = FakeAdb(dd_rc=0,
+                       pidof_out="1234\n", pidof_rc=0,
+                       proc_out="VmHWM:\t    5516 kB\n", proc_rc=0,
+                       sysfs_out="total_records=1321 overrun=0 dropped=0 "
+                                 "ring_usage_bytes=131072 "
+                                 "ring_size_bytes=262144\n")
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(lc, "adb", fake):
+                with mock.patch.object(lc, "kernel_total",
+                                       side_effect=[100, 1321, 1321]):
+                    with mock.patch.object(lc, "jsonl_line_count",
+                                           side_effect=[90, 1311, 1311]):
+                        with mock.patch.object(lc.time, "sleep"):
+                            with mock.patch.object(lc.time, "monotonic",
+                                                   side_effect=[100.0, 101.0,
+                                                                101.0, 101.1]):
+                                with contextlib.redirect_stdout(out):
+                                    rc = lc.mode_perf(tmp, _args())
+        self.assertEqual(rc, 0)
+        line = [ln for ln in out.getvalue().splitlines()
+                if ln.startswith("METRICS ")]
+        metrics = json.loads(line[0][len("METRICS "):])
+        # 环水位 = 131072/262144 = 50%（dd 后立即采样帧）
+        self.assertEqual(metrics["ring_water_pct"], 50.0)
+        self.assertEqual(metrics["ring_usage_bytes"], 131072)
+        self.assertEqual(metrics["overrun_delta"], 0)
 
 
 if __name__ == "__main__":

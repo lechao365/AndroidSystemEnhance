@@ -115,6 +115,30 @@ private:
     size_t mServed = 0;
 };
 
+// 可控计数器值 reader（R-03 方向 3）：直调 emitHeartbeat 断言字段透传——
+// 各内核计数器可注入非零值，验证收集逻辑真实把这些值送入 HeartbeatFields
+// （原单测只构造 HeartbeatFields 直写，不覆盖收集路径）
+class ControlledDeviceReader : public DeviceReader {
+public:
+    ControlledDeviceReader() = default;
+    bool open() override { return true; }
+    ssize_t waitAndRead(uint8_t*, size_t, size_t, int) override { return -1; }
+    void close() override {}
+    uint32_t getOverrun() override { return overrun; }
+    uint32_t getTotalRecords() override { return totalRecords; }
+    uint32_t getDropped() override { return dropped; }
+    uint32_t getRingSizeBytes() override { return ringSize; }
+    uint64_t ioctlErr() const override { return ioctlErr_; }
+    uint64_t eofCount() const override { return eof; }
+
+    uint32_t overrun = 0;
+    uint32_t totalRecords = 0;
+    uint32_t dropped = 0;
+    uint32_t ringSize = 256 * 1024;
+    uint64_t ioctlErr_ = 0;
+    uint64_t eof = 0;
+};
+
 }  // namespace
 
 class MainLoopTest : public ::testing::Test {
@@ -348,42 +372,64 @@ public:
 }  // namespace
 
 TEST(MainLoopHeartbeatWriterTest, FieldsPassThrough) {
-    // 心跳字段集经接口透传（内容即契约）——字段缺失/错位在单测暴露，
-    // 不依赖 logcat 格式化（liveness 判据 logfield 的回归点在日志格式
-    // 测试 LogHeartbeatWriter 覆盖，此处断言字段语义）
+    // R-03 方向 3：直调生产函数 emitHeartbeat（去 static 后可测边界），注入
+    // ControlledDeviceReader + 真实 FileWriter + 记录型 writer，断言字段真实
+    // 透传——覆盖收集逻辑（reader 计数器值 + 入参 → HeartbeatFields），
+    // 原单测只构造 HeartbeatFields 直写，不覆盖收集路径，字段错位/漏取
+    // 在收集层被静默吞掉无法暴露。
+    std::string tmpl = "/data/local/tmp/lcview_hb_XXXXXX";
+    char* tmp = mkdtemp(tmpl.data());
+    ASSERT_NE(tmp, nullptr);
+    FileWriterConfig cfg;
+    cfg.logDir = tmp;
+    cfg.maxFileSizeMb = 50;
+    cfg.maxTotalSizeMb = 500;
+    FileWriter writer(cfg);
+
+    // 先真实写一条合法记录 → FileWriter 侧字段非零（jsonl 落盘 / avg 耗时 /
+    // dropped 求和的分项），验证这些字段经 emitHeartbeat 透传到 writer
+    SchemaParser sp = makeSchema();
+    auto rec = makeValidRecord();
+    const auto* hdr = reinterpret_cast<const lcview_record_hdr*>(rec.data());
+    const uint8_t* fields = rec.data() + sizeof(lcview_record_hdr);
+    const EventSchema* schema = sp.find(hdr->event_id);
+    ASSERT_NE(schema, nullptr);
+    writer.writeRecord(*schema, hdr, fields,
+                       rec.size() - sizeof(lcview_record_hdr));
+
+    // 可控 reader：内核计数器非零值注入
+    ControlledDeviceReader reader;
+    reader.overrun = 7;
+    reader.totalRecords = 1000;
+    reader.dropped = 3;
+    reader.ringSize = 512 * 1024;
+    reader.ioctlErr_ = 0;
+    reader.eof = 2;
+
+    int64_t overrunAccum = 0;
+    ConserveBaseline conserve;
     RecordingHeartbeatWriter w;
-    // HeartbeatFields 字段顺序聚合初始化（C++17 无 designated initializer）
-    HeartbeatFields hb;
-    hb.loop = 42;
-    hb.overrun = 7;
-    hb.dropped = 3;
-    hb.readErr = 1;
-    hb.totalRecords = 1000;
-    hb.jsonlRecords = 900;
-    hb.invalidRecords = 5;
-    hb.ioctlErr = 0;
-    hb.eofCount = 2;
-    hb.dropOpen = 1;
-    hb.dropFormat = 2;
-    hb.dropOob = 3;
-    hb.dropReopen = 4;
-    hb.dropRetry = 5;
-    hb.dropInvalid = 6;
-    hb.dropInvalidWrite = 7;
-    hb.dropRotate = 8;
-    hb.dropInvRotate = 9;
-    hb.dropRollback = 10;
-    hb.avgFormatUs = 11;
-    hb.avgWriteUs = 12;
-    w.write(hb);
+    // 首心跳：ioctl 正常 → 建基线（updateAndCheck 返回 false 不告警，字段
+    // 仍须完整透传）
+    emitHeartbeat(42, reader, writer, overrunAccum, 1, 900, 5, conserve, w);
+
     EXPECT_EQ(w.last.loop, 42u);
+    // overrunAccum 累计 reader.getOverrun()=7
     EXPECT_EQ(w.last.overrun, 7);
-    EXPECT_EQ(w.last.dropped, 3u);
+    // dropped 求和 = dropCounters 全分项（真实写入成功，全 0）
+    EXPECT_EQ(w.last.dropped, 0u);
     EXPECT_EQ(w.last.readErr, 1u);
     EXPECT_EQ(w.last.totalRecords, 1000u);
     EXPECT_EQ(w.last.jsonlRecords, 900);
     EXPECT_EQ(w.last.invalidRecords, 5);
-    EXPECT_EQ(w.last.dropRollback, 10u);
-    EXPECT_EQ(w.last.avgFormatUs, 11u);
-    EXPECT_EQ(w.last.avgWriteUs, 12u);
+    EXPECT_EQ(w.last.ioctlErr, 0u);
+    EXPECT_EQ(w.last.eofCount, 2u);
+    // FileWriter 真实写入后：persistCounters.valid=1 → jsonl 落盘计数
+    // （注：jsonlRecords 入参 900 是调用方累计，persistCounters 独立；
+    //  守恒基线首心跳只建基线不告警）
+    EXPECT_TRUE(conserve.initialized);
+    EXPECT_EQ(conserve.total, 1000u);
+
+    std::string cmd = "rm -rf " + std::string(tmp);
+    system(cmd.c_str());
 }

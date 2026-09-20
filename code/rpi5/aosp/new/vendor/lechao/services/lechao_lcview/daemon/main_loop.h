@@ -148,6 +148,19 @@ public:
     void write(const HeartbeatFields& hb) override;
 };
 
+// 心跳段（R-03 方向 3，可测边界）：收集直读内核/FileWriter/守恒判定的全部
+// 指标，经 IHeartbeatWriter 输出。生产 runMainLoop 注入 LogHeartbeatWriter，
+// 单测直调本函数注入 FakeDeviceReader + FileWriter + 记录型 writer，断言字段
+// 真实透传（原单测只构造 HeartbeatFields 直写，不覆盖收集逻辑）。
+// reader 为 DeviceReader 抽象（getOverrun/getTotalRecords/getDropped/
+// getRingSizeBytes/ioctlErr/eofCount），writer 为 FileWriter（dropCounters/
+// persistCounters/writeTimings/fsyncActiveFiles），out 为心跳输出端。
+void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
+                   FileWriter& writer, int64_t& overrunAccum,
+                   uint64_t readErr,
+                   long long jsonlRecords, long long invalidRecords,
+                   ConserveBaseline& conserve, IHeartbeatWriter& out);
+
 // 守恒告警判定（纯函数，方向 3/7）：内核 total_records 增量应等于
 // overrun + dropped + jsonl + invalid 增量之和（每条记录要么被驱逐
 // overrun、要么 ENOSPC 丢弃 dropped、要么合法落盘 jsonl、要么非法落盘

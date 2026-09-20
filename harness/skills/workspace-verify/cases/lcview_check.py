@@ -641,6 +641,31 @@ def _daemon_pid():
     return out.strip().split()[0]
 
 
+def _daemon_cpu_ticks():
+    """daemon 进程 utime+stime tick 快照（单拍）；失败返回 None。
+
+    /proc/<pid>/stat 第 14/15 字段（utime/stime，USER_HZ tick）。供 mode_perf
+    在 dd 窗口前后双拍差分算 CPU 占比（R-03 方向 1：CPU 取 dd 窗口真实负载
+    占比，替代 dd 前单点快照——dd 前的空闲 CPU 不能代表负载窗口）。
+    """
+    pid = _daemon_pid()
+    if not pid:
+        return None
+    out, rc = adb(["shell", f"cat /proc/{pid}/stat"])
+    if rc != 0:
+        return None
+    try:
+        # /proc/<pid>/stat 前 3 段可能含进程名空格（comm 带括号含空格时
+        # 字段后移），从右取第 14/15（tick）字段定位到 comm 结束
+        comm_end = out.rfind(")")  # comm 以 ")" 结束，其后即字段 3
+        rest = out[comm_end + 1:].split()
+        utime = int(rest[11])  # 字段 14 → rest 下标 14-3=11
+        stime = int(rest[12])  # 字段 15
+        return utime + stime
+    except (ValueError, IndexError):
+        return None
+
+
 def daemon_cpu_pct(sample_s=1.0):
     """daemon 进程 CPU 占用（%）：两次采样 utime+stime tick 差 / 墙钟。
 
@@ -648,30 +673,11 @@ def daemon_cpu_pct(sample_s=1.0):
     tick 差折算 CPU 占用百分比（tick/墙钟/100 核心归一，多核时可能 >100，
     单核比例展示语义明确）。失败返回 None（perf 只报数，缺项不判红）。
     """
-    pid = _daemon_pid()
-    if not pid:
-        return None
-
-    def _ticks():
-        out, rc = adb(["shell", f"cat /proc/{pid}/stat"])
-        if rc != 0:
-            return None
-        try:
-            # /proc/<pid>/stat 前 3 段可能含进程名空格（comm 带括号含空格时
-            # 字段后移），从右取第 14/15（tick）字段定位到 comm 结束
-            comm_end = out.rfind(")")  # comm 以 ")" 结束，其后即字段 3
-            rest = out[comm_end + 1:].split()
-            utime = int(rest[11])  # 字段 14 → rest 下标 14-3=11
-            stime = int(rest[12])  # 字段 15
-            return utime + stime
-        except (ValueError, IndexError):
-            return None
-
-    t1 = _ticks()
+    t1 = _daemon_cpu_ticks()
     if t1 is None:
         return None
     time.sleep(sample_s)
-    t2 = _ticks()
+    t2 = _daemon_cpu_ticks()
     if t2 is None:
         return None
     clk_tck = os.sysconf("SC_CLK_TCK")  # 常见 100（USER_HZ）
@@ -679,21 +685,50 @@ def daemon_cpu_pct(sample_s=1.0):
     return round(max(pct, 0.0), 1)
 
 
-def daemon_syscall():
-    """daemon 当前阻塞系统调用（/proc/<pid>/syscall 首字段，符号名）。
+def daemon_cpu_pct_between(ticks0, ticks1, wall_s):
+    """dd 窗口 CPU 占比（%）：两次 tick 快照差 / 窗口墙钟（R-03 方向 1）。
 
-    Linux 内核导出当前线程正在执行的系统调用（阻塞于 epoll_wait 等时可见），
-    用于 perf 画像 daemon 是否驻留等待；可能返回 "running"（非阻塞）或空。
-    失败返回 None（perf 只报数，缺项不判红）。
+    ticks0/ticks1 为 _daemon_cpu_ticks 的 dd 前/后快照，wall_s 为 dd 实测墙钟
+    ——占比语义 = dd 窗口内 daemon 消耗的 CPU 时间占比，替代 dd 前单点采样
+    （dd 前空闲态 CPU 不能代表负载窗口）。任一侧为 None 返回 None（缺项
+    不判红，perf 只报数）。
+    """
+    if ticks0 is None or ticks1 is None or not wall_s or wall_s <= 0:
+        return None
+    clk_tck = os.sysconf("SC_CLK_TCK")
+    pct = (ticks1 - ticks0) / (wall_s * clk_tck) * 100.0
+    return round(max(pct, 0.0), 1)
+
+
+def daemon_io_counts():
+    """daemon 进程系统调用计数快照（syscr/syscw，读/写 syscall 次数）；失败返回 None。
+
+    /proc/<pid>/io 的 syscr（read 类 syscall 次数）与 syscw（write 类 syscall
+    次数）——R-03 方向 1：syscall 改由此双拍计数差，替代 /proc/<pid>/syscall
+    的瞬时阻塞画像（单点值不可比、且经常是 epoll_wait 恒值，无信息量）。
+    返回 (syscr, syscw) 或 None（pidof 失败/adb 失败/解析失败）。
     """
     pid = _daemon_pid()
     if not pid:
         return None
-    out, rc = adb(["shell", f"cat /proc/{pid}/syscall 2>/dev/null"])
+    out, rc = adb(["shell", f"cat /proc/{pid}/io 2>/dev/null"])
     if rc != 0 or not out.strip():
         return None
-    token = out.split()[0]
-    return token if token != "running" else "running"
+    syscr = syscw = None
+    for line in out.splitlines():
+        if line.startswith("syscr:"):
+            try:
+                syscr = int(line.split()[1])
+            except (ValueError, IndexError):
+                pass
+        elif line.startswith("syscw:"):
+            try:
+                syscw = int(line.split()[1])
+            except (ValueError, IndexError):
+                pass
+    if syscr is None or syscw is None:
+        return None
+    return (syscr, syscw)
 
 
 # 内核 total_records 直读节点：sysfs 只读导出（lcview_main.c lcview_stats_show）。
@@ -770,9 +805,18 @@ def mode_perf(tmp, args):
       翻倍而机械减半、drain 恒为一个心跳周期）
     - daemon RSS = /proc VmHWM 峰值（kB）
     - R-02 方向 1 扩展（仍只报数不设门禁，METRICS 结构化存档）：
-      overrun 增量 / 环水位（ring_usage/ring_size）/ daemon CPU%（utime+stime
-      tick 采样）/ 当前 syscall（阻塞画像）/ 落盘延迟 p99（drain 采样点
-      第 99 百分位，替代"只看均值"掩蔽长尾）/ event id 分布（dd 负载事件构成）
+      overrun 增量 / 环水位 / daemon CPU / syscall 计数 / 落盘延迟 p99 /
+      event id 分布
+    - R-03 方向 1 回炉（可信度修正）：
+      * CPU 改 dd 窗口双拍差分——_daemon_cpu_ticks 在 dd 前后各取一帧
+        utime+stime，daemon_cpu_pct_between 按 dd 墙钟折算占比（dd 前
+        空闲态单点快照不代表性负载）；
+      * syscall 改 /proc/<pid>/io 的 syscr/syscw 双拍计数差（读/写系统
+        调用增量，dd 负载驱动）——替代 /proc/<pid>/syscall 瞬时阻塞画像
+        （单点值不可比、常为 epoll_wait 恒值）；
+      * 环水位改 dd 后立即采样（drain 循环前）——取负载峰值水位，不
+        被 drain 数十秒耗时稀释（原 dd 后经 drain 才采样，水位早已回落到
+        低位，指标失真）
     输出 human 可读行 + METRICS JSON 行（供上层结构化存档，跨批可 diff）。
     """
     load_mb = args.load_mb or 64
@@ -789,13 +833,15 @@ def mode_perf(tmp, args):
         print("ERROR: 无法直读 JSONL 行数（wc -l 失败）")
         return 1
 
-    # R-02 方向 1：dd 前快照 overrun / 环水位 / CPU / syscall / event 分布。
-    # 环水位取 dd 后采样（负载峰值视角），dd 前快照只留 overrun 做增量差分
+    # R-03 方向 1：dd 前快照 overrun / event 分布 / CPU ticks / io 计数——
+    # CPU 与 syscall 改 dd 窗口前后双拍差分（CPU 取 dd 窗口真实占比，syscall
+    # 取 syscr/syscw 计数增量，替代 dd 前单点快照的失真）；环水位改 dd 后
+    # 立即采样（drain 循环前，取负载峰值水位，不被 drain 耗时稀释）。
     pre = kernel_stats()
     overrun0 = pre[1] if pre else 0
     dist0 = event_id_distribution()
-    cpu_pct = daemon_cpu_pct()
-    syscall0 = daemon_syscall()
+    cpu_ticks0 = _daemon_cpu_ticks()
+    io_counts0 = daemon_io_counts()
 
     # dd 计时（host 侧单调钟，不含任何人工 sleep）
     t0 = time.monotonic()
@@ -813,6 +859,17 @@ def mode_perf(tmp, args):
         # 出数会得到 throughput=inf 的假基线，判红并提示负载未执行
         print("ERROR: dd 计时非正（dd_s<=0），负载未执行或计时异常，判红防假基线")
         return 1
+
+    # R-03 方向 1：dd 完成后立即采样环水位（负载峰值水位，drain 前）与
+    # CPU/io 双拍的后一帧（dd 窗口结束点）——环水位不再被 drain 耗时稀释
+    post_immediate = kernel_stats()
+    overrun_delta = (post_immediate[1] - overrun0) if post_immediate else 0
+    ring_usage = post_immediate[3] if post_immediate else 0
+    ring_size = post_immediate[4] if post_immediate else 0
+    ring_water_pct = (ring_usage / ring_size * 100.0
+                      if ring_size else 0.0)
+    cpu_ticks1 = _daemon_cpu_ticks()
+    io_counts1 = daemon_io_counts()
 
     # drain 计时起点 = dd 完成时刻；直读按 100ms 采样——先等内核计数出现增量
     # （dd 产生事件已计入），再等 jsonl 落盘达标（与心跳观测 28s 粒度解耦）。
@@ -872,14 +929,7 @@ def mode_perf(tmp, args):
                 latency_p99_ms = round(el * 1000, 3)
                 break
 
-    # R-02 方向 1：dd 后 overrun/环水位增量快照（与 dd 前快照差分）
-    post = kernel_stats()
-    overrun_delta = (post[1] - overrun0) if post else 0
-    ring_usage = post[3] if post else 0
-    ring_size = post[4] if post else 0
-    ring_water_pct = (ring_usage / ring_size * 100.0
-                      if ring_size else 0.0)
-    # event 分布增量：dd 前后各事件 id 计数差（新产生事件构成）
+    # R-03 方向 1：event 分布增量（dd 前后各事件 id 计数差，新产生事件构成）
     dist1 = event_id_distribution()
     dist_delta = {}
     if dist0 is not None and dist1 is not None:
@@ -887,7 +937,13 @@ def mode_perf(tmp, args):
             d = cnt - dist0.get(eid, 0)
             if d > 0:
                 dist_delta[eid] = d
-    syscall1 = daemon_syscall()
+    # R-03 方向 1：CPU 占比 = dd 窗口 tick 差分 / dd 墙钟；syscall = syscr/syscw
+    # 双拍计数差（读/写系统调用增量，dd 负载驱动），替代瞬时阻塞画像
+    cpu_pct = daemon_cpu_pct_between(cpu_ticks0, cpu_ticks1, dd_s)
+    syscr_delta = syscw_delta = None
+    if io_counts0 and io_counts1:
+        syscr_delta = max(io_counts1[0] - io_counts0[0], 0)
+        syscw_delta = max(io_counts1[1] - io_counts0[1], 0)
 
     metrics = {
         "load_mb": load_mb,
@@ -901,7 +957,8 @@ def mode_perf(tmp, args):
         "ring_usage_bytes": ring_usage,
         "ring_size_bytes": ring_size,
         "daemon_cpu_pct": cpu_pct,
-        "daemon_syscall": syscall1 or syscall0,
+        "syscr_delta": syscr_delta,
+        "syscw_delta": syscw_delta,
         "event_distribution": dist_delta or None,
         "total_delta": total_delta,
         "jsonl_delta": jsonl_delta,
@@ -911,7 +968,7 @@ def mode_perf(tmp, args):
           f"ms/event，p99={latency_p99_ms} ms，daemon RSS={rss_kb} kB，"
           f"overrun 增量={overrun_delta}，环水位={ring_water_pct:.2f}% "
           f"（{ring_usage}/{ring_size}B），daemon CPU={cpu_pct}% "
-          f"（syscall={syscall1 or syscall0}），"
+          f"（syscr 增量={syscr_delta}，syscw 增量={syscw_delta}），"
           f"事件分布={dist_delta or 'N/A'}（drain {drain_s:.3f}s）")
     print("METRICS " + json.dumps(metrics, ensure_ascii=False))
     return 0

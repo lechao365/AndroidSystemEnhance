@@ -187,11 +187,14 @@ void LogHeartbeatWriter::write(const HeartbeatFields& hb)
 // 作微优化的可判定指标（drain 被攒包策略钉死，对写路径不敏感）。
 // R-02 方向 3：输出端改 IHeartbeatWriter 接口注入（生产 LogHeartbeatWriter，
 // 单测记录型 writer），守恒判定收口到 conserve.updateAndCheck()。
-static void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
-                          FileWriter& writer, int64_t& overrunAccum,
-                          uint64_t readErr,
-                          long long jsonlRecords, long long invalidRecords,
-                          ConserveBaseline& conserve, IHeartbeatWriter& out)
+// R-03 方向 3：去 static 并入头声明（main_loop.h）——emitHeartbeat 成为
+// 可测边界，单测直调生产函数注入 FakeDeviceReader + FileWriter，断言字段
+// 真实透传到 writer（原单测只构造 HeartbeatFields 直写，不覆盖收集逻辑）。
+void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
+                   FileWriter& writer, int64_t& overrunAccum,
+                   uint64_t readErr,
+                   long long jsonlRecords, long long invalidRecords,
+                   ConserveBaseline& conserve, IHeartbeatWriter& out)
 {
     uint32_t ov = reader.getOverrun();
     overrunAccum += ov;
