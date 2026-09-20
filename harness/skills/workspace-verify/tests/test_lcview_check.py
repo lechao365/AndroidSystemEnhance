@@ -1158,12 +1158,26 @@ class TestPerfRegressionGate(unittest.TestCase):
             os.unlink(path)
         self.assertEqual(rc, 1)
 
-    def test_gate_no_baseline_red(self):
-        # 基线文件不存在且未 save → 判红（防无基线空转假绿）
-        rc = lc.perf_regression_gate(
-            self._metrics(),
-            str(Path(tempfile.gettempdir()) / "lcview_perf_nonexist.json"))
-        self.assertEqual(rc, 1)
+    def test_gate_no_baseline_first_run_auto_save_ok(self):
+        # R-05 方向 1：基线文件不存在且未 save → 首跑自动建档判绿（基准快照），
+        # 不判红（消"首跑必判红"死锁）；再次跑同值比对通过（自洽）
+        path = str(Path(tempfile.gettempdir()) / "lcview_perf_first_run.json")
+        try:
+            if os.path.exists(path):
+                os.unlink(path)
+            rc = lc.perf_regression_gate(self._metrics(), path)
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(path))
+            with open(path, encoding="utf-8") as fp:
+                saved = json.load(fp)
+            self.assertEqual(saved["throughput_evs"], 1000.0)
+            self.assertIn("created", saved)
+            # 第二次跑：基线已存在 → 容差比对通过（同值自洽）
+            rc2 = lc.perf_regression_gate(self._metrics(), path)
+            self.assertEqual(rc2, 0)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
 
     def test_gate_save_baseline_writes_file(self):
         # save=True 写基线文件；再比对同值应通过（建档后自洽）

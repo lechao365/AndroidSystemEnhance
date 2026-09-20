@@ -237,7 +237,7 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
     struct vendor_lechao_usbd_event ev;
     uint32_t consumed_pos;  /* 本次读取的事件槽位（读取前 tail），供回滚守卫 */
     unsigned long flags;
-    int ret;
+    int decision;
 
     LC_DBG("read: count=%zu\n", count);
 
@@ -246,45 +246,48 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
         return -EINVAL;
     }
 
-    /* 非阻塞快速路径：ring 空 + 未 shutdown 时立即返回 -EAGAIN */
-    if (file->f_flags & O_NONBLOCK) {
-        spin_lock_irqsave(&dev->event_lock, flags);
-        bool empty = (READ_ONCE(dev->event_head) == READ_ONCE(dev->event_tail));
+    /*
+     * R-05 方向 2：read 路径统一 poll 驱动 + 非阻塞 read 循环。
+     *
+     * 原实现把"O_NONBLOCK 快速路径采样"与"阻塞 for 循环消费"分成两段：
+     *   - 快速路径锁内采样 empty/shutdown 后解锁，decision==-1（非空）时
+     *     落入 for 循环；
+     *   - for 循环第一件事 wait_event_interruptible 等新事件，而 ring 里
+     *     的数据可能已在"采样 → wait"窗口内被并发读者消费（poll 报过
+     *     POLLIN 就绪、HAL 排空循环连续 read），wait 条件不满足即挂起等
+     *     新事件——但上层 poll 已判定就绪才来 read，read 却阻塞 → HAL
+     *     排空循环挂死（poll(0) 认为还有数据，read 卡住等永不来的新事件）。
+     *
+     * 修复：read 统一为非阻塞语义（不论 f_flags）——上层 poll() 负责等
+     * 就绪，read 只做"锁内取一条非空事件返回，空环按 decision 分流 EOF/
+     * EAGAIN"。消除采样与消费两段式竞态：单锁临界区内完成 empty 采样 +
+     * 事件消费，poll 就绪判定与 read 消费原子一致，HAL 排空循环读不到
+     * 就绪事件即 -EAGAIN 退出、由 poll 重新等，不会挂死。
+     *
+     * 语义变更：阻塞 fd 的 read 不再阻塞（原 wait_event 行为移除）。对
+     * 本驱动唯一消费者 HAL（read_event 恒先 poll 后 read 排空）无影响；
+     * 其它阻塞 read 调用方需自行 poll/select 等就绪——与字符设备
+     * "poll 就绪后 read 不阻塞"的惯用法一致。
+     */
+    spin_lock_irqsave(&dev->event_lock, flags);
+    if (READ_ONCE(dev->event_head) != READ_ONCE(dev->event_tail)) {
+        ev = dev->event_buf[dev->event_tail];
+        consumed_pos = dev->event_tail;
+        dev->event_tail = (dev->event_tail + 1) % VENDOR_LECHAO_USBD_EVENT_BUF_SIZE;
+        spin_unlock_irqrestore(&dev->event_lock, flags);
+    } else {
+        bool empty = true;
         bool shutdown = READ_ONCE(dev->event_shutdown);
         spin_unlock_irqrestore(&dev->event_lock, flags);
         /*
          * KRN-004：判定逻辑抽至 lciod_read_logic.c（host 单测覆盖
-         * 四象限语义）。返回 1→-EAGAIN（空环重试）、0→0（EOF）、
-         * -1→落到下面循环取事件（非空 drain，shutdown 不越过非空判定）。
+         * 四象限语义）。空环时分流：1→-EAGAIN（空环重试）、0→0（EOF）。
+         * 非空分支不会到此处（上方已消费）。
          */
-        int decision = lciod_nonblock_read_decision(empty, shutdown);
+        decision = lciod_nonblock_read_decision(empty, shutdown);
         if (decision == 1)
             return -EAGAIN;
-        if (decision == 0)
-            return 0;
-        /* decision == -1：ring 非空，落到下面的循环（首次 wait 不阻塞） */
-    }
-
-    for (;;) {
-        ret = wait_event_interruptible(dev->event_wq,
-                READ_ONCE(dev->event_head) != READ_ONCE(dev->event_tail) ||
-                READ_ONCE(dev->event_shutdown));
-        if (ret)
-            return ret;
-
-        spin_lock_irqsave(&dev->event_lock, flags);
-        if (READ_ONCE(dev->event_head) != READ_ONCE(dev->event_tail)) {
-            ev = dev->event_buf[dev->event_tail];
-            consumed_pos = dev->event_tail;
-            dev->event_tail = (dev->event_tail + 1) % VENDOR_LECHAO_USBD_EVENT_BUF_SIZE;
-            spin_unlock_irqrestore(&dev->event_lock, flags);
-            break;
-        }
-        if (READ_ONCE(dev->event_shutdown)) {
-            spin_unlock_irqrestore(&dev->event_lock, flags);
-            return 0;
-        }
-        spin_unlock_irqrestore(&dev->event_lock, flags);
+        return 0;
     }
 
     if (copy_to_user(buf, &ev, sizeof(ev))) {
@@ -363,6 +366,33 @@ static void vendor_lechao_usbd_apply_config_locked(
     rate_dev->enabled = !!rate_dev->config.enabled;
     rate_dev->stats.enabled = rate_dev->config.enabled;
     rate_dev->stats.flags = rate_dev->config.flags;
+
+    /*
+     * R-05 方向 3：disable 路径清理 transport_active（消 notifier 早退后
+     * END 残留）。
+     *
+     * 背景：transport_active 在 TRANSPORT_START 置位（lciod_usbd-stats.c
+     * handle_event）、TRANSPORT_END 消费后清零。当配置 enabled=false 时，
+     * handle_event 在锁外早退（`if (!rate_dev->enabled) return NOTIFY_DONE;`），
+     * 中间的传输不会收到 END —— transport_active 残留 true。
+     *
+     * 后果：disable 期间传输中断 → 重新 enable 后，若无新 START 先到，
+     * 残留的 transport_active 会把不配对的 END（或下一轮首个 END）误当
+     * 正常传输处理：错误累计延迟/字节、发射无 START 配对的 END trace，
+     * 污染统计与事件流（check_lcview_events 双向契约认为 END 必有 START）。
+     *
+     * 修复：enabled 由 1→0（disable）时重置传输状态机（transport_active/
+     * 起始时间/错误标志），与 vendor_lechao_usbd_do_reset 的 transport 段
+     * 一致——disable 语义即"停止追踪传输"，残留状态须随 disable 清空。
+     * 保持持锁（本函数调用方已持 rate_dev->lock）与 do_reset 同锁域。
+     */
+    if (!rate_dev->config.enabled) {
+        rate_dev->transport_active = false;
+        rate_dev->transport_start_time = ktime_set(0, 0);
+        rate_dev->last_transport_error = false;
+        rate_dev->last_transport_latency_ns = 0;
+        rate_dev->stats.last_transport_latency_ns = 0;
+    }
 }
 
 /*

@@ -1027,10 +1027,13 @@ _PERF_GATE_METRICS = [
 
 
 def perf_regression_gate(metrics, baseline_path, save=False):
-    """性能回归门禁（R-04 方向 1）：
+    """性能回归门禁（R-04 方向 1 / R-05 方向 1 回炉）：
     save=True 时写当前 METRICS 关键指标为基线文件（首次建档/重置）；
     save=False 且基线存在时容差比对判红（超 PERF_TOLERANCE 返回 1）；
-    save=False 且基线缺失时判红提示先建档（防无基线空转假绿）。
+    save=False 且基线缺失时以本次 METRICS 自动建档判绿——首跑建档，后续跑
+    才容差比对（R-05 方向 1：消除"首跑必判红"死锁——基线从未存在时无参考
+    可比，判红只逼用户手跑 save，且 lcview-perf 门禁用例每次跑都要求先建档
+    才能过，形成死锁）。
     """
     gate = {k: metrics.get(k) for k, _ in _PERF_GATE_METRICS}
     if save:
@@ -1047,9 +1050,21 @@ def perf_regression_gate(metrics, baseline_path, save=False):
               ", ".join(f"{k}={gate[k]}" for k, _ in _PERF_GATE_METRICS))
         return 0
     if not os.path.exists(baseline_path):
-        print(f"ERROR: 性能基线文件不存在 {baseline_path}（先跑 "
-              f"--perf-save-baseline 建档，或性能回归门禁无参考判绿）")
-        return 1
+        # R-05 方向 1：首跑自动建档判绿——基线缺失即本次为基线（基准快照），
+        # 不判红（无参考可比，判红即死锁；写盘失败才判红）
+        try:
+            baseline = dict(gate)
+            baseline["load_mb"] = metrics.get("load_mb")
+            baseline["created"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            with open(baseline_path, "w", encoding="utf-8") as fp:
+                json.dump(baseline, fp, ensure_ascii=False, indent=2)
+        except OSError as e:
+            print(f"ERROR: 性能基线首跑建档写盘失败 {baseline_path}: {e}")
+            return 1
+        print(f"性能基线首跑自动建档 {baseline_path}: " +
+              ", ".join(f"{k}={gate[k]}" for k, _ in _PERF_GATE_METRICS) +
+              "（本次为基准，后续跑容差比对）")
+        return 0
     try:
         with open(baseline_path, encoding="utf-8") as fp:
             base = json.load(fp)
