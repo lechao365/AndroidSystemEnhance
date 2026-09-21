@@ -363,7 +363,11 @@ static void vendor_lechao_usbd_apply_config_locked(
     rate_dev->config.enabled = !!cfg->enabled;
     memset(rate_dev->config.reserved, 0, sizeof(rate_dev->config.reserved));
     rate_dev->config.flags = cfg->flags;
-    rate_dev->enabled = !!rate_dev->config.enabled;
+    /*
+     * R-06 方向 1：enabled 写侧 WRITE_ONCE 与 handle_event 锁外 READ_ONCE 配对
+     * （无锁读侧依赖 disable 语义的可见性，持锁写亦须显式内存序标记）。
+     */
+    WRITE_ONCE(rate_dev->enabled, !!rate_dev->config.enabled);
     rate_dev->stats.enabled = rate_dev->config.enabled;
     rate_dev->stats.flags = rate_dev->config.flags;
 
@@ -411,6 +415,9 @@ static void vendor_lechao_usbd_fill_stats_locked(
     struct vendor_lechao_usbd_stats *stats)
 {
     memcpy(stats, &rate_dev->stats, sizeof(*stats));
+    /* R-06 方向 3：event_drop_count 从 atomic 计数读取（原子读，与 event_lock
+     * 域自增跨锁域），覆盖 memcpy 带入的陈旧 ABI 值。 */
+    stats->event_drop_count = atomic64_read(&rate_dev->event_drop_cnt);
     stats->last_transport_latency_ns = rate_dev->last_transport_latency_ns;
     stats->enabled = rate_dev->config.enabled;
     stats->flags = rate_dev->config.flags;
@@ -583,6 +590,7 @@ struct vendor_lechao_usbd_device *vendor_lechao_usbd_device_alloc(struct us_data
     rate_dev->stats.enabled = rate_dev->config.enabled;
     rate_dev->stats.flags = rate_dev->config.flags;
     rate_dev->stats.probe_count = 1;
+    atomic64_set(&rate_dev->event_drop_cnt, 0);
     rate_dev->transport_start_time = ktime_set(0, 0);
     rate_dev->transport_active = false;
     rate_dev->last_degrade_window_start = ktime_set(0, 0);
@@ -611,6 +619,25 @@ struct vendor_lechao_usbd_device *vendor_lechao_usbd_device_alloc(struct us_data
             rate_dev->stats.product[0] = '\0';
     }
 
+    /*
+     * R-06 方向 4：PROBE 入链前复查 us 存活。
+     *
+     * usb_string() 可睡眠，从 device_alloc 进入 usb_string 到返回这段窗口内
+     * 若发生物理拔出，USB core 会先把 usb_device->state 置为
+     * USB_STATE_NOTATTACHED（usb-storage 的 quiesce_and_remove_host 同样以此
+     * 判断设备已消失），随后 usb_stor_disconnect 的 release_everything 才释放
+     * us_data。若此时仍把 rate_dev 入链，add_to_list 之后对 us->notifier /
+     * us->pusb_dev 的访问将落在已释放的 us_data 上（UAF 滞留僵尸设备）。
+     * 因此 usb_string 完成后、返回前复查设备存活，发现已拔出则自释放并
+     * 返回 -ENODEV，调用方不得入链。
+     */
+    if (us->pusb_dev->state == USB_STATE_NOTATTACHED) {
+        pr_warn(PREFIX "device unplugged during probe alloc, aborting\n");
+        ida_free(&vendor_lechao_usbd_ida, minor);
+        kfree(rate_dev);
+        return ERR_PTR(-ENODEV);
+    }
+
     return rate_dev;
 }
 
@@ -630,11 +657,25 @@ struct vendor_lechao_usbd_device *vendor_lechao_usbd_device_alloc(struct us_data
  *   调用（如果 usb-storage 正在传输中），因此需要保证设备结构
  *   体已经初始化完成。
  */
-void vendor_lechao_usbd_device_add_to_list(struct vendor_lechao_usbd_device *rate_dev)
+/*
+ * R-06 方向 2：add_to_list 改返回错误码——notifier 注册 / cdev_add /
+ * device_create 任一失败都上报调用方（0 成功 / 负 errno），失败路径内部
+ * 回滚已做操作并 kref_put 释放 rate_dev（调用方不得再引用）。
+ */
+int vendor_lechao_usbd_device_add_to_list(struct vendor_lechao_usbd_device *rate_dev)
 {
     int ret;
 
-    atomic_notifier_chain_register(&rate_dev->us->notifier, &rate_dev->nb);
+    ret = atomic_notifier_chain_register(&rate_dev->us->notifier, &rate_dev->nb);
+    if (ret) {
+        /*
+         * 返回值检查：-EEXIST 表示 us_data 上已注册同名 notifier（重复 PROBE
+         * 或 us_data 异常复用），本设备未注册成功，无资源可回滚，直接上报。
+         */
+        pr_err(PREFIX "notifier_chain_register failed: %d\n", ret);
+        kref_put(&rate_dev->kref, vendor_lechao_usbd_device_release);
+        return ret;
+    }
 
     cdev_init(&rate_dev->cdev, &vendor_lechao_usbd_fops);
     rate_dev->cdev.owner = THIS_MODULE;
@@ -643,18 +684,19 @@ void vendor_lechao_usbd_device_add_to_list(struct vendor_lechao_usbd_device *rat
         pr_err(PREFIX "cdev_add failed: %d\n", ret);
         atomic_notifier_chain_unregister(&rate_dev->us->notifier, &rate_dev->nb);
         kref_put(&rate_dev->kref, vendor_lechao_usbd_device_release);
-        return;
+        return ret;
     }
 
     rate_dev->dev = device_create(vendor_lechao_usbd_class, NULL, 
                                    MKDEV(vendor_lechao_usbd_major, rate_dev->minor),
                                    rate_dev, VENDOR_LECHAO_USBD_NAME "%d", rate_dev->minor);
     if (IS_ERR(rate_dev->dev)) {
-        pr_err(PREFIX "device_create failed: %ld\n", PTR_ERR(rate_dev->dev));
+        ret = PTR_ERR(rate_dev->dev);
+        pr_err(PREFIX "device_create failed: %d\n", ret);
         cdev_del(&rate_dev->cdev);
         atomic_notifier_chain_unregister(&rate_dev->us->notifier, &rate_dev->nb);
         kref_put(&rate_dev->kref, vendor_lechao_usbd_device_release);
-        return;
+        return ret;
     }
 
     list_add_tail(&rate_dev->list, &vendor_lechao_usbd_devices);
@@ -666,6 +708,7 @@ void vendor_lechao_usbd_device_add_to_list(struct vendor_lechao_usbd_device *rat
     /* LcView: trace USB device PROBE (vid/pid/vendor/product) */
     lcview_trace_probe(rate_dev->minor, rate_dev->stats.vid, rate_dev->stats.pid,
                        rate_dev->stats.vendor, rate_dev->stats.product);
+    return 0;
 }
 
 /*
@@ -746,24 +789,36 @@ static int vendor_lechao_usbd_vendor_notifier(struct notifier_block *nb,
         if (found)
             break;
 
-        new_dev = vendor_lechao_usbd_device_alloc(us);
-        if (IS_ERR(new_dev)) {
-            pr_warn(PREFIX "failed to alloc device: %ld\n",
-                    PTR_ERR(new_dev));
-            break;
-        }
-
+        /*
+         * R-06 方向 4：alloc 与 add_to_list 全程持全局 mutex（alloc 内
+         * usb_string 可睡眠，进程上下文 OK）。disconnect 的 DISCONNECT
+         * notifier 同样经 blocking_notifier_call_chain 同步调用且在此
+         * mutex 上等待——若 PROBE 持锁期间设备拔出，DISCONNECT 阻塞在
+         * mutex 上，usb_stor_disconnect 主流程亦阻塞等待 notifier 返回，
+         * us_data 在 PROBE 释放锁前不会被 release_everything 释放，故
+         * 锁内访问 us 安全；device_alloc 内部已复查 us 存活（NOTATTACHED
+         * 即 -ENODEV），复查失败自释放，不存在"已分配未入链"滞留设备，
+         * DISCONNECT 侧链表状态始终一致。
+         */
         mutex_lock(&vendor_lechao_usbd_mutex);
+        found = false;
         list_for_each_entry(pos, &vendor_lechao_usbd_devices, list) {
             if (pos->us == us) {
                 found = true;
                 break;
             }
         }
-        if (!found)
-            vendor_lechao_usbd_device_add_to_list(new_dev);
-        else
-            kref_put(&new_dev->kref, vendor_lechao_usbd_device_release);
+        if (!found) {
+            new_dev = vendor_lechao_usbd_device_alloc(us);
+            if (IS_ERR(new_dev)) {
+                pr_warn(PREFIX "failed to alloc device: %ld\n",
+                        PTR_ERR(new_dev));
+            } else {
+                /* R-06 方向 2：add_to_list 失败已自释放 new_dev，仅记录告警 */
+                if (vendor_lechao_usbd_device_add_to_list(new_dev))
+                    pr_warn(PREFIX "failed to add device to list\n");
+            }
+        }
         mutex_unlock(&vendor_lechao_usbd_mutex);
         break;
     }
@@ -895,7 +950,9 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
             }
         }
         if (!found) {
-            vendor_lechao_usbd_device_add_to_list(new_dev);
+            /* R-06 方向 2：add_to_list 失败已自释放 new_dev，仅记录告警 */
+            if (vendor_lechao_usbd_device_add_to_list(new_dev))
+                pr_warn(PREFIX "failed to add device to list\n");
         } else {
             kref_put(&new_dev->kref, vendor_lechao_usbd_device_release);
         }

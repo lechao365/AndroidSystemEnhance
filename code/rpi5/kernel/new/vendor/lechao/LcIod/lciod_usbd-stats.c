@@ -413,8 +413,10 @@ static inline void vendor_lechao_usbd_event_push(
             VENDOR_LECHAO_USBD_EVENT_BUF_SIZE, &new_tail, &dropped);
         if (dropped) {
             pr_warn_ratelimited(PREFIX "event_push ring overflow, dropped old event\n");
-            /* 统计丢弃事件数，归 event_lock 保护域；fill_stats 在 dev->lock 下读取为原子读 */
-            dev->stats.event_drop_count++;
+            /* R-06 方向 3：丢弃计数改 atomic64_t 自增——写侧在 event_lock 域，
+             * 读侧（fill_stats）在 dev->lock 域，两个锁域无同步，普通 ++ 构成
+             * 形式化数据竞争；原子自增与原子读消除竞争，且不破坏 ABI 结构。 */
+            atomic64_inc(&dev->event_drop_cnt);
             dev->event_tail = new_tail;
         }
     }
@@ -459,6 +461,8 @@ void vendor_lechao_usbd_do_reset(struct vendor_lechao_usbd_device *rate_dev)
     rate_dev->stats.stall_count = 0;
     rate_dev->stats.corrupt_count = 0;
     rate_dev->stats.timeout_count = 0;
+    /* R-06 方向 3：atomic 清零（do_reset 持 dev->lock，与 event_lock 域自增跨锁域，须原子） */
+    atomic64_set(&rate_dev->event_drop_cnt, 0);
     rate_dev->stats.event_drop_count = 0;
     rate_dev->transport_start_time = ktime_set(0, 0);
     rate_dev->transport_active = false;
@@ -536,7 +540,14 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
     } trace = { 0 };
 
     rate_dev = container_of(nb, struct vendor_lechao_usbd_device, nb);
-    if (!rate_dev->enabled)
+    /*
+     * R-06 方向 1：enabled 锁外读取统一 READ_ONCE——写侧 apply_config_locked
+     * 在 dev->lock 下写（WRITE_ONCE 配对），本处 handle_event 顶部在取锁前
+     * 裸读，属无同步并发访问（KCSAN 可报 bool 数据竞争）。虽 bool 单字节撕裂
+     * 概率极低，但缺内存序保证且 disable 语义（enabled=false 早退）依赖读可见性，
+     * 统一 READ_ONCE 消除形式化竞争。
+     */
+    if (!READ_ONCE(rate_dev->enabled))
         return NOTIFY_DONE;
 
     trace.device_index = rate_dev->minor;
