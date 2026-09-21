@@ -67,6 +67,7 @@ struct ConserveBaseline {
     uint32_t total = 0;             // 内核 total_records 基线
     int64_t overrun = 0;            // 用户态 overrunAccum 基线
     uint64_t dropped = 0;           // 内核 dropped_cnt 基线（方向 7）
+    uint64_t writerDrop = 0;        // FileWriter DROP 累计基线（R-07 方向 3）
     uint64_t persistedValid = 0;    // FileWriter 合法落盘基线（方向 5）
     uint64_t persistedInvalid = 0;  // FileWriter 非法落盘基线（方向 5）
     uint64_t ioctlErr = 0;          // DeviceReader ioctl 失败计数基线
@@ -78,6 +79,7 @@ struct ConserveBaseline {
         uint32_t total;             // 本轮 getTotalRecords()
         int64_t overrun;            // 本轮 overrunAccum（累计）
         uint32_t dropped;           // 本轮 getDropped()
+        uint64_t writerDrop;        // 本轮 FileWriter DROP 合计（R-07 方向 3）
         uint64_t ioctlErr;          // 本轮 reader.ioctlErr()
         uint64_t persistedValid;    // 本轮 writer.persistCounters().valid
         uint64_t persistedInvalid;  // 本轮 writer.persistCounters().invalid
@@ -91,10 +93,11 @@ struct ConserveBaseline {
         bool broken = false;        // 本轮守恒是否破坏（|dev| 超容差）
         uint64_t totalDelta = 0;    // 窗口产生增量（本轮 - 上轮）
         uint64_t overrunDelta = 0;  // 窗口驱逐增量
-        uint64_t droppedDelta = 0;  // 窗口丢弃增量
+        uint64_t droppedDelta = 0;  // 窗口内核 ENOSPC 丢弃增量
+        uint64_t writerDropDelta = 0; // 窗口 FileWriter DROP 增量（R-07 方向 3）
         uint64_t jsonlDelta = 0;    // 窗口合法落盘增量
         uint64_t invalidDelta = 0;  // 窗口非法落盘增量
-        int64_t dev = 0;            // totalΔ - (overrunΔ+droppedΔ+jsonlΔ+invalidΔ)
+        int64_t dev = 0;            // totalΔ - (overrunΔ+droppedΔ+writerDropΔ+jsonlΔ+invalidΔ)
         int64_t tolerance = 0;      // 本轮容差（ring 推导）
     };
 
@@ -162,15 +165,20 @@ void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
                    ConserveBaseline& conserve, IHeartbeatWriter& out);
 
 // 守恒告警判定（纯函数，方向 3/7）：内核 total_records 增量应等于
-// overrun + dropped + jsonl + invalid 增量之和（每条记录要么被驱逐
-// overrun、要么 ENOSPC 丢弃 dropped、要么合法落盘 jsonl、要么非法落盘
-// invalid）。dev = totalΔ - (overrunΔ + droppedΔ + jsonlΔ + invalidΔ)：
+// overrun + dropped + writerDrop + jsonl + invalid 增量之和（每条记录要么
+// 被驱逐 overrun、要么 ENOSPC 丢弃 dropped、要么 FileWriter 落盘 DROP
+// writerDrop、要么合法落盘 jsonl、要么非法落盘 invalid）。
+// dev = totalΔ - (overrunΔ + droppedΔ + writerDropΔ + jsonlΔ + invalidΔ)：
 // 正值表示产生未落盘（在途积压/丢记录），负值表示落盘超过产生（重复
 // 落盘/计数漂移）；|dev| 超容差即判告警。抽成纯函数便于单测覆盖阈值与
-// 正负两向。
+// 正负两向。R-07 方向 3：右式并入 FileWriter DROP 增量——内核已计数
+// （total_records）但 FileWriter 写路径丢弃（openFailed/formatEmpty/...
+// /dropRollback）的记录，右式原四元组无法吸收，dev 恒向正偏（丢记录
+// 正向偏差被容差静默吞掉或误报 CONSERVATION BROKEN）；并入后右式闭合。
 bool shouldAlarmConservation(uint64_t totalDelta, uint64_t overrunDelta,
-                             uint64_t droppedDelta, uint64_t jsonlDelta,
-                             uint64_t invalidDelta, int64_t tolerance);
+                             uint64_t droppedDelta, uint64_t writerDropDelta,
+                             uint64_t jsonlDelta, uint64_t invalidDelta,
+                             int64_t tolerance);
 
 }  // namespace lcview
 }  // namespace lechao

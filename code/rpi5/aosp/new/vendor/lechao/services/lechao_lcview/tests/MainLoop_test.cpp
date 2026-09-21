@@ -205,42 +205,55 @@ constexpr int64_t kDefaultTol = computeConserveTolerance(256 * 1024);
 
 TEST(MainLoopConservationTest, ZeroDeviation_NoAlarm) {
     // 完全守恒：产生全落盘，dev=0
-    EXPECT_FALSE(shouldAlarmConservation(100, 0, 0, 100, 0, kDefaultTol));
+    EXPECT_FALSE(shouldAlarmConservation(100, 0, 0, 0, 100, 0, kDefaultTol));
     // overrun/invalid 计入后守恒成立
-    EXPECT_FALSE(shouldAlarmConservation(100, 10, 0, 80, 10, kDefaultTol));
+    EXPECT_FALSE(shouldAlarmConservation(100, 10, 0, 0, 80, 10, kDefaultTol));
 }
 
 TEST(MainLoopConservationTest, DroppedIsAbsorbedByLeftSide) {
     // 方向 7：ENOSPC 丢弃计入守恒右式（droppedDelta）后被吸收——
     // 产生 100、丢弃 100（未落盘）dev=0，不误报负偏差
-    EXPECT_FALSE(shouldAlarmConservation(100, 0, 100, 0, 0, kDefaultTol));
+    EXPECT_FALSE(shouldAlarmConservation(100, 0, 100, 0, 0, 0, kDefaultTol));
     // 混合去向：驱逐 10 + 丢弃 5 + 合法落盘 80 + 非法落盘 5 = 100
-    EXPECT_FALSE(shouldAlarmConservation(100, 10, 5, 80, 5, kDefaultTol));
+    EXPECT_FALSE(shouldAlarmConservation(100, 10, 5, 0, 80, 5, kDefaultTol));
     // 丢弃超过产生（计数漂移/重复丢弃）→ 负偏差超容差告警
-    EXPECT_TRUE(shouldAlarmConservation(100, 0, 100 + kDefaultTol + 1, 0, 0,
+    EXPECT_TRUE(shouldAlarmConservation(100, 0, 100 + kDefaultTol + 1, 0, 0, 0,
+                                        kDefaultTol));
+}
+
+TEST(MainLoopConservationTest, WriterDropAbsorbedByLeftSide) {
+    // R-07 方向 3：FileWriter DROP 增量（writerDropDelta）计入守恒右式后
+    // 被吸收——产生 100、写路径丢弃 100（openFailed/formatEmpty/...）
+    // 且未落盘 dev=0，消除丢记录正向偏差（原右式无该去向，dev=+100 被
+    // 容差静默吞掉或误报 CONSERVATION BROKEN）
+    EXPECT_FALSE(shouldAlarmConservation(100, 0, 0, 100, 0, 0, kDefaultTol));
+    // 混合：驱逐 10 + 内核丢弃 5 + 写路径丢弃 5 + 合法落盘 70 + 非法落盘 10
+    EXPECT_FALSE(shouldAlarmConservation(100, 10, 5, 5, 70, 10, kDefaultTol));
+    // 写路径丢弃超过产生（计数漂移/重复丢弃）→ 负偏差超容差告警
+    EXPECT_TRUE(shouldAlarmConservation(100, 0, 0, 100 + kDefaultTol + 1, 0, 0,
                                         kDefaultTol));
 }
 
 TEST(MainLoopConservationTest, InFlightWithinTolerance_NoAlarm) {
     // 在途积压未超容差：不告警（容差边界 dev == tol 严格大于才告警）
-    EXPECT_FALSE(shouldAlarmConservation(1000, 0, 0, 900, 0, kDefaultTol));
-    EXPECT_FALSE(shouldAlarmConservation(1000 + kDefaultTol, 0, 0, 1000, 0,
+    EXPECT_FALSE(shouldAlarmConservation(1000, 0, 0, 0, 900, 0, kDefaultTol));
+    EXPECT_FALSE(shouldAlarmConservation(1000 + kDefaultTol, 0, 0, 0, 1000, 0,
                                          kDefaultTol));
     // 负向同理：落盘略超产生但在容差内
-    EXPECT_FALSE(shouldAlarmConservation(1000, 0, 0, 1000 + kDefaultTol, 0,
+    EXPECT_FALSE(shouldAlarmConservation(1000, 0, 0, 0, 1000 + kDefaultTol, 0,
                                          kDefaultTol));
 }
 
 TEST(MainLoopConservationTest, PositiveDeviationBeyondTolerance_Alarms) {
     // 产生未落盘超容差：丢记录/在途积压异常告警
-    EXPECT_TRUE(shouldAlarmConservation(1000 + kDefaultTol + 1, 0, 0, 1000, 0,
-                                        kDefaultTol));
+    EXPECT_TRUE(shouldAlarmConservation(1000 + kDefaultTol + 1, 0, 0, 0, 1000,
+                                        0, kDefaultTol));
 }
 
 TEST(MainLoopConservationTest, NegativeDeviationBeyondTolerance_Alarms) {
     // 落盘超过产生超容差：重复落盘/计数漂移告警
-    EXPECT_TRUE(shouldAlarmConservation(1000, 0, 0, 1000 + kDefaultTol + 1, 0,
-                                        kDefaultTol));
+    EXPECT_TRUE(shouldAlarmConservation(1000, 0, 0, 0, 1000 + kDefaultTol + 1,
+                                        0, kDefaultTol));
 }
 
 TEST(MainLoopConservationTest, ToleranceDerivedFromRingSize) {
@@ -269,9 +282,10 @@ ConserveBaseline::Sample makeSample(uint32_t total, int64_t overrun,
                                     uint32_t dropped, uint64_t valid,
                                     uint64_t invalid,
                                     uint32_t ring = 256 * 1024,
-                                    uint64_t ioctlErr = 0) {
+                                    uint64_t ioctlErr = 0,
+                                    uint64_t writerDrop = 0) {
     return ConserveBaseline::Sample{
-        total, overrun, dropped, ioctlErr, valid, invalid, ring,
+        total, overrun, dropped, writerDrop, ioctlErr, valid, invalid, ring,
     };
 }
 
@@ -353,6 +367,48 @@ TEST(MainLoopBaselineTest, DroppedAndInvalidAbsorbed) {
     EXPECT_FALSE(r2.broken);
     EXPECT_EQ(r2.invalidDelta, 100u);
     EXPECT_EQ(r2.dev, 0);
+}
+
+TEST(MainLoopBaselineTest, WriterDropAbsorbedWithBaselineAdvance) {
+    // R-07 方向 3：FileWriter DROP 增量进守恒右式且随基线推进——首心跳
+    // 建基线（writerDrop=5），次心跳 writerDrop=105（+100），产生 +100
+    // 全被写路径丢弃（未落盘），dev=0 不告警
+    ConserveBaseline bl;
+    bl.updateAndCheck(makeSample(100, 0, 0, 100, 0, 256 * 1024, 0, 5));
+    auto r = bl.updateAndCheck(makeSample(200, 0, 0, 100, 0, 256 * 1024, 0,
+                                          105));
+    EXPECT_FALSE(r.broken);
+    EXPECT_EQ(r.writerDropDelta, 100u);
+    EXPECT_EQ(r.dev, 0);
+}
+
+TEST(MainLoopBaselineTest, KernelCountRollback_RebuildsBaseline) {
+    // R-07 方向 4：total 或 dropped 回退（当前采样 < 基线）即整体重建同锚，
+    // 不告警——模拟内核模块重载/重启后计数器清零（旧基线是重载前大值，
+    // 直接算增量会下溢成巨大值误报守恒破坏）
+    ConserveBaseline bl;
+    bl.updateAndCheck(makeSample(100000, 0, 5000, 90000, 0));
+    // 内核重载清零：total 100000→1000、dropped 5000→0，均回退
+    auto r = bl.updateAndCheck(makeSample(1000, 0, 0, 90000, 0));
+    EXPECT_FALSE(r.broken);          // 不得误报
+    EXPECT_EQ(r.totalDelta, 0u);     // 本窗口不判定增量
+    EXPECT_EQ(bl.total, 1000u);      // 基线重建到重载后值（同锚）
+    EXPECT_EQ(bl.dropped, 0u);
+    // 重建后下一心跳恢复正常增量判定（total 1000→2000）
+    auto r2 = bl.updateAndCheck(makeSample(2000, 0, 0, 90000, 0));
+    EXPECT_FALSE(r2.broken);
+    EXPECT_EQ(r2.totalDelta, 1000u);
+}
+
+TEST(MainLoopBaselineTest, DroppedRollback_RebuildsBaseline) {
+    // R-07 方向 4：仅 dropped 回退（total 正常）同样触发整体重建——内核
+    // 只清零 dropped 不清 total（异常现场），防 droppedΔ 下溢误报
+    ConserveBaseline bl;
+    bl.updateAndCheck(makeSample(1000, 0, 5000, 900, 0));
+    auto r = bl.updateAndCheck(makeSample(2000, 0, 0, 1800, 0));
+    EXPECT_FALSE(r.broken);
+    EXPECT_EQ(bl.total, 2000u);      // 同锚重建（total 也重取当前值）
+    EXPECT_EQ(bl.dropped, 0u);
 }
 
 // ============================================================

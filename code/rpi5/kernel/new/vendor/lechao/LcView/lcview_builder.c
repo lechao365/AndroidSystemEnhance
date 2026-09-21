@@ -56,6 +56,27 @@ extern int lcview_debug;
  */
 static struct lcview_builder *builder_pool_slot;
 
+/*
+ * R-07 方向 1：生产者丢弃累计计数（模块级静态，host 单测编本文件即自带）。
+ * 语义：记录尚未构造/构造失败即丢弃（builder kmalloc 失败 + level 过滤），
+ * 从未写入 ring、不计入 total_records——守恒左式不含它，sysfs 单独导出供
+ * 右式吸收。与 ring 结构解耦（不挂 struct lcview_ring）避免 host 单测链接
+ * 依赖全局 lcview_ring 实体（host 编 builder.c 不编 lcview_main.c）。
+ */
+static atomic_t producer_dropped_cnt = ATOMIC_INIT(0);
+
+/* 生产端丢弃计数 +1（builder kmalloc 失败与 level 过滤共用） */
+void lcview_builder_producer_dropped_inc(void)
+{
+    atomic_inc(&producer_dropped_cnt);
+}
+
+/* 读取生产端丢弃累计（sysfs 导出用；只读不清零，与 total_records 同语义） */
+uint32_t lcview_builder_producer_dropped_get(void)
+{
+    return (uint32_t)atomic_read(&producer_dropped_cnt);
+}
+
 static inline struct lcview_builder *builder_pool_get(void)
 {
     return xchg(&builder_pool_slot, NULL);
@@ -122,6 +143,10 @@ struct lcview_builder *lcview_builder_new(uint16_t event_id, uint8_t level)
     if (!b) {
         /* KRN-014：GFP_ATOMIC 失败在内存压力下可高频出现，限频防日志风暴 */
         pr_err_ratelimited(PREFIX "kmalloc failed for event_id=%u\n", event_id);
+        /* R-07 方向 1：builder kmalloc 失败计入 producer_dropped_cnt——
+         * 该记录从未构造/从未写入 ring，与环级 ENOSPC（dropped_cnt，计
+         * total_records）不同，守恒左式不含它，sysfs 单独导出供右式吸收 */
+        lcview_builder_producer_dropped_inc();
         return NULL;
     }
 

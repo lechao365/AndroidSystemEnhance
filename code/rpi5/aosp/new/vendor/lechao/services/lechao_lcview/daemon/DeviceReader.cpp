@@ -2,9 +2,10 @@
 // DeviceReader.cpp — EpollDeviceReader 生产实现
 // 所属模块：LcView 事件日志系统 — Daemon 层
 // 设计目的：封装 /dev/vendor_lechao_lcview 的打开、epoll(LT) 等待
-//   读取、overrun ioctl 查询与关闭。可恢复错误（EINTR/EAGAIN/EMSGSIZE）
-//   在本层消化为返回 0，致命错误透传 errno 返回 -1，
-//   使 daemon 主循环的错误处理保持极简。
+//   读取、overrun ioctl 查询与关闭。可恢复错误（EINTR/EAGAIN）在本层
+//   消化为返回 0；EMSGSIZE（R-07 方向 2）单独返回 -EMSGSIZE 信号（内核
+//   有数据但剩余缓冲放不下，须由上层 flush 闭环）；致命错误透传 errno
+//   返回 -1，使 daemon 主循环的错误处理保持极简。
 // ============================================================
 
 #include "DeviceReader.h"
@@ -34,14 +35,15 @@ namespace lcview {
 
 bool isRecoverableReadErrno(int e)
 {
-    // EINTR：信号打断瞬时噪声；EAGAIN：非阻塞无数据；
-    // EMSGSIZE：内核 read 首条记录放不下剩余读缓冲（KRN-001）。该路径
-    // 已由读端契约闭合：用户态 kMinReadSize 恒不小于单条记录上限
-    // LCVIEW_MAX_RECORD_SIZE，预防性 flush 保证剩余空间恒 >= 单条记录
-    // 上限，正常路径不再触发——保留可恢复判定仅作防御兜底（真触发也
-    // 不应致命退出）。刻意不加 EINVAL：真参数错误吞掉会让 daemon 对
-    // 坏参数静默成环。
-    return e == EINTR || e == EAGAIN || e == EMSGSIZE;
+    // EINTR：信号打断瞬时噪声；EAGAIN：非阻塞无数据。
+    // R-07 方向 2：EMSGSIZE 移出可恢复白名单——它语义是"内核有数据但
+    // 剩余缓冲放不下首条记录"，与"本次无数据"截然不同。原并入白名单后
+    // waitAndRead 返 0，主循环把本轮当无数据，offset 不动、不 flush、
+    // 不消费内核数据 → epoll LT 立即再报可读 → 无限忙旋转。现由
+    // waitAndRead 返回 -EMSGSIZE 专门信号，readOnce 限频日志 + msgTooBig
+    // 计数 + 退避，offset>0 时强制 flush 清空缓冲（读端契约闭环）。
+    // 刻意不加 EINVAL：真参数错误吞掉会让 daemon 对坏参数静默成环。
+    return e == EINTR || e == EAGAIN;
 }
 
 }  // namespace lcview
@@ -130,8 +132,15 @@ ssize_t EpollDeviceReader::waitAndRead(uint8_t* buf, size_t offset,
         return 0;  // 超时，无数据
 
     ssize_t n = ::read(mFd, buf + offset, cap - offset);
+    // R-07 方向 2：EMSGSIZE 单独信号化（返回 -EMSGSIZE），不再并入
+    // isRecoverableReadErrno 的"返回 0=本次无数据"——EMSGSIZE 语义是内核
+    // 有数据但剩余缓冲放不下首条记录，返 0 会让上层误判无数据 → 不 flush
+    // 不消费 → epoll LT 忙旋转。调用方（readOnce/runMainLoop）据此限频
+    // 日志 + msgTooBig 计数 + 强制 flush 清缓冲，闭环读端契约。
+    if (n < 0 && errno == EMSGSIZE)
+        return -EMSGSIZE;
     if (n < 0 && isRecoverableReadErrno(errno))
-        return 0;  // 可恢复（EINTR/EAGAIN/EMSGSIZE），视作本次无数据
+        return 0;  // 可恢复（EINTR/EAGAIN），视作本次无数据
     // n == 0：EOF（内核 shutdown 后期望用户态退出，模块卸载场景；
     // LCV-17：与正常 timeout 同返 0 会伪装正常——置 ENODEV 返回 -1，
     // 上层按设备不可用收尾，不再被当作"本次无数据"）

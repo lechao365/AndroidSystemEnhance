@@ -21,13 +21,13 @@ namespace vendor {
 namespace lechao {
 namespace lcview {
 
-// read 返回码"可恢复"白名单判定（EINTR/EAGAIN/EMSGSIZE）
+// read 返回码"可恢复"白名单判定（EINTR/EAGAIN）
 // 可恢复错误在 EpollDeviceReader 层消化为返回 0（本次无数据，继续循环）；
 // 其余 errno 透传致命错误。注意不含 EINVAL——那是真实参数错误，
 // 吞掉会让 daemon 对坏参数静默，故不得加入白名单。
-// EMSGSIZE 已由读端契约闭合（预防性 flush 保证剩余空间恒 >= 单条记录
-// 上限，正常路径不触发，见 batch_parser.h shouldPreventiveFlush），
-// 白名单保留仅作防御兜底。
+// R-07 方向 2：EMSGSIZE 移出白名单——由 waitAndRead 返回 -EMSGSIZE 专门
+// 信号（见 waitAndRead 文档），避免"内核有数据但缓冲放不下"被当作
+// "本次无数据"而忙轮询。
 bool isRecoverableReadErrno(int e);
 
 // 设备读取抽象接口（LcView::readerLoop 的唯一设备依赖）
@@ -41,6 +41,9 @@ public:
     // 等待并读取一次数据：
     //   返回 >0 = 本次读到的字节数（写入 buf[offset..offset+n)）
     //   返回  0 = timeoutMs 内无可读数据（含 EINTR/EAGAIN 可恢复情形）
+    //   返回 -EMSGSIZE = 内核 read 返回 EMSGSIZE（有数据但剩余缓冲放不下
+    //   首条记录，R-07 方向 2）——调用方须限频日志 + 计数 + 若 offset>0
+    //   强制 flush 清空缓冲后重试（消 epoll 忙轮询），不得视为致命错误
     //   返回 -1 = 致命错误（fd 失效/epoll 未注册 → errno=EBADF；
     //             offset >= cap 调用方参数错误 → errno=EINVAL）
     virtual ssize_t waitAndRead(uint8_t* buf, size_t offset, size_t cap,

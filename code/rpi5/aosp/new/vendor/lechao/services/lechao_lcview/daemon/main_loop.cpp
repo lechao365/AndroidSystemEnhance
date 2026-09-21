@@ -59,9 +59,25 @@ void installSignalHandlers() {
 static ssize_t readOnce(DeviceReader& reader, uint8_t* buf, size_t bufSize,
                         int timeoutMs, size_t& offset, uint64_t& readOk,
                         uint64_t& readEmpty, uint64_t& readErr,
+                        uint64_t& msgTooBig,
                         std::chrono::steady_clock::time_point& dataArrivedAt)
 {
     ssize_t n = reader.waitAndRead(buf, offset, bufSize, timeoutMs);
+    // R-07 方向 2：EMSGSIZE 专门信号（DeviceReader 返回 -EMSGSIZE）——
+    // 内核有数据但剩余缓冲放不下首条记录。非致命：限频日志 + msgTooBig
+    // 计数后透传，runMainLoop 据此强制 flush 清缓冲（offset>0 时）消忙轮询。
+    if (n == -EMSGSIZE) {
+        msgTooBig++;
+        // CXX-003：限频日志防高频刷屏（EMSGSIZE 若持续触发属异常现场）
+        static std::atomic<uint64_t> sMsgTooBigWarn;
+        uint64_t count = sMsgTooBigWarn.fetch_add(1);
+        if (count % 100 == 0 || msgTooBig == 1) {
+            ALOGW("lechao_lcview: read EMSGSIZE (kernel record too big for "
+                  "remaining buffer), msgTooBig=%llu offset=%zu",
+                  static_cast<unsigned long long>(msgTooBig), offset);
+        }
+        return n;
+    }
     if (n < 0) {
         // CXX-004: 致命读错误 4 步退出（日志 → 调用方 exit 交 init 重启），
         // 禁止静默 return 僵尸态（采集链路中断须可见）。
@@ -84,15 +100,16 @@ static ssize_t readOnce(DeviceReader& reader, uint8_t* buf, size_t bufSize,
     return n;
 }
 
-// 守恒告警判定（方向 3/7）：dev = totalΔ - (overrunΔ + droppedΔ + jsonlΔ +
-// invalidΔ)，|dev| 超容差即判告警（正值：产生未落盘在途积压/丢记录；负值：
-// 落盘超过产生，重复落盘/计数漂移）。纯函数，供 emitHeartbeat 与单测共用。
+// 守恒告警判定（方向 3/7）：dev = totalΔ - (overrunΔ + droppedΔ + writerDropΔ +
+// jsonlΔ + invalidΔ)，|dev| 超容差即判告警（正值：产生未落盘在途积压/丢记录；
+// 负值：落盘超过产生，重复落盘/计数漂移）。纯函数，供 emitHeartbeat 与单测共用。
 bool shouldAlarmConservation(uint64_t totalDelta, uint64_t overrunDelta,
-                             uint64_t droppedDelta, uint64_t jsonlDelta,
-                             uint64_t invalidDelta, int64_t tolerance)
+                             uint64_t droppedDelta, uint64_t writerDropDelta,
+                             uint64_t jsonlDelta, uint64_t invalidDelta,
+                             int64_t tolerance)
 {
     const int64_t dev = static_cast<int64_t>(totalDelta)
-        - static_cast<int64_t>(overrunDelta + droppedDelta
+        - static_cast<int64_t>(overrunDelta + droppedDelta + writerDropDelta
                                + jsonlDelta + invalidDelta);
     return dev > tolerance || dev < -tolerance;
 }
@@ -116,6 +133,20 @@ ConserveBaseline::Result ConserveBaseline::updateAndCheck(const Sample& s)
         total = s.total;
         overrun = s.overrun;
         dropped = s.dropped;
+        writerDrop = s.writerDrop;
+        persistedValid = s.persistedValid;
+        persistedInvalid = s.persistedInvalid;
+        return r;
+    }
+    // R-07 方向 4：total 或 dropped 回退（当前采样 < 基线）即整体重建同锚——
+    // 典型场景为内核模块重载/重启后计数器清零（uint32 回绕），此时旧基线是
+    // 重载前大值，直接算增量会下溢成巨大值误报守恒破坏。检测到任一内核
+    // 计数回退即放弃窗口增量判定，整体重建基线（同锚），防 uint64 回绕误报。
+    if (s.total < total || s.dropped < dropped) {
+        total = s.total;
+        overrun = s.overrun;
+        dropped = s.dropped;
+        writerDrop = s.writerDrop;
         persistedValid = s.persistedValid;
         persistedInvalid = s.persistedInvalid;
         return r;
@@ -123,20 +154,23 @@ ConserveBaseline::Result ConserveBaseline::updateAndCheck(const Sample& s)
     r.totalDelta = static_cast<uint64_t>(s.total - total);
     r.overrunDelta = static_cast<uint64_t>(s.overrun - overrun);
     r.droppedDelta = static_cast<uint64_t>(s.dropped - dropped);
+    r.writerDropDelta = static_cast<uint64_t>(s.writerDrop - writerDrop);
     r.jsonlDelta = static_cast<uint64_t>(s.persistedValid - persistedValid);
     r.invalidDelta = static_cast<uint64_t>(s.persistedInvalid
                                            - persistedInvalid);
     r.tolerance = computeConserveTolerance(s.ringSizeBytes);
     r.dev = static_cast<int64_t>(r.totalDelta)
         - static_cast<int64_t>(r.overrunDelta + r.droppedDelta
-                               + r.jsonlDelta + r.invalidDelta);
+                               + r.writerDropDelta + r.jsonlDelta
+                               + r.invalidDelta);
     r.broken = shouldAlarmConservation(
-        r.totalDelta, r.overrunDelta, r.droppedDelta, r.jsonlDelta,
-        r.invalidDelta, r.tolerance);
+        r.totalDelta, r.overrunDelta, r.droppedDelta, r.writerDropDelta,
+        r.jsonlDelta, r.invalidDelta, r.tolerance);
     // 方向 6：每心跳推进数值基线（防 uint32 total_records 回绕）
     total = s.total;
     overrun = s.overrun;
     dropped = s.dropped;
+    writerDrop = s.writerDrop;
     persistedValid = s.persistedValid;
     persistedInvalid = s.persistedInvalid;
     return r;
@@ -205,13 +239,6 @@ void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
         + dc.formatEmpty + dc.formatOob + dc.reopenFailed
         + dc.retryFailed + dc.invalidNotOpen + dc.invalidWriteFailed
         + dc.dropRotate + dc.dropInvRotate + dc.dropRollback;
-    // 守恒校验（方向 3/5/6/7）：内核 total_records 累计产生应等于
-    // overrun（驱逐）+ dropped（ENOSPC 丢弃）+ jsonl（合法落盘）+
-    // invalid（非法落盘）之和，偏差即"在途积压"（内核 ring 未读 + 用户态
-    // 64KB 攒包缓冲未落盘），超容差即守恒破坏（丢记录/重复落盘/计数漂移）。
-    // 右式去向改用真实计数：jsonl/invalid 取 FileWriter 落盘计数（方向 5，
-    // 解析成功数在 DROP 时仍 +1 会高估落盘致负向误报），dropped 取内核
-    // dropped_cnt（方向 7，ENOSPC 丢弃与 total_records 同步递增）。
     // 重启适配 + 防回绕 + ioctl 失败跳过（方向 6）：基线移 runMainLoop
     // 局部（ConserveBaseline）并按心跳推进——daemon 重启后内核累计不归零
     // 而进程内计数归零，须增量比较；相邻心跳窗口比较使 uint32 total 永不
@@ -225,19 +252,20 @@ void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
     // 单测可注入 Sample 覆盖三态 + 正负向告警）；Result.broken 即守恒破坏，
     // 告警详情直接引用 Result 各项增量（不做外部反推，防推进后基线差失真）。
     ConserveBaseline::Sample sample = {
-        total, overrunAccum, kernDropped, reader.ioctlErr(),
+        total, overrunAccum, kernDropped, dropped, reader.ioctlErr(),
         pc.valid, pc.invalid, ringSize,
     };
     const ConserveBaseline::Result cr = conserve.updateAndCheck(sample);
     if (cr.broken) {
         ALOGE("lechao_lcview: CONSERVATION BROKEN: dev=%lld (tol=%lld), "
               "total_delta=%llu overrun_delta=%llu dropped_delta=%llu "
-              "jsonl_delta=%llu invalid_delta=%llu",
+              "writer_drop_delta=%llu jsonl_delta=%llu invalid_delta=%llu",
               static_cast<long long>(cr.dev),
               static_cast<long long>(cr.tolerance),
               static_cast<unsigned long long>(cr.totalDelta),
               static_cast<unsigned long long>(cr.overrunDelta),
               static_cast<unsigned long long>(cr.droppedDelta),
+              static_cast<unsigned long long>(cr.writerDropDelta),
               static_cast<unsigned long long>(cr.jsonlDelta),
               static_cast<unsigned long long>(cr.invalidDelta));
     }
@@ -312,6 +340,8 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
     // epoll 立返 loop 计数快速膨胀，周级即溢出）
     uint64_t loopCount = 0;
     uint64_t readOk = 0, readEmpty = 0, readErr = 0, flushCount = 0;
+    // R-07 方向 2：EMSGSIZE（内核记录超缓冲）计数——忙轮询现场观测点
+    uint64_t msgTooBig = 0;
     int64_t overrunAccum = 0;
     // JSONL 落盘累计条数（守恒校验基准：内核 total_records ≈ overrun + 落盘条数）
     long long jsonlRecords = 0;
@@ -360,8 +390,25 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
         }
 
         ssize_t n = readOnce(reader, buf, kBufSize, kEpollTimeoutMs, offset,
-                             readOk, readEmpty, readErr, dataArrivedAt);
+                             readOk, readEmpty, readErr, msgTooBig,
+                             dataArrivedAt);
         loopCount++;
+
+        // R-07 方向 2：EMSGSIZE 处理（消 epoll 忙轮询）——内核有数据但
+        // 剩余缓冲放不下首条记录（读端契约防御兜底触发）。readOnce 已
+        // 限频日志 + msgTooBig 计数；此处若 offset>0 强制 flush 清空缓冲，
+        // 下次 read 剩余空间恢复 >= 单条记录上限 → 不再 EMSGSIZE → 忙轮询
+        // 消除。offset==0 时缓冲本已空，内核仍报 EMSGSIZE 属真超限（单条
+        // 记录 > 缓冲上限，LCVIEW_BUILDER_MAX_SIZE 契约约束），flush 无
+        // 意义，直接继续（下轮 epoll 仍可读则持续计数，现场可见）。
+        if (n == -EMSGSIZE) {
+            if (offset > 0) {
+                flushSegment(reader, schema, writer, buf, offset, dataArrivedAt,
+                             flushCount, jsonlRecords, invalidRecords, 0,
+                             kBufSize);
+            }
+            continue;
+        }
 
         if (n < 0) {
             // 方向 2：致命读错误退出前强制落盘缓冲残留，不丢已收数据

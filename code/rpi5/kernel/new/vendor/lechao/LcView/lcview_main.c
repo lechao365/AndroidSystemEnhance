@@ -71,10 +71,15 @@ static ssize_t lcview_stats_show(struct device *dev,
 {
     struct lcview_stats st;
     lcview_ring_get_stats(&lcview_ring, &st);
+    /* R-07 方向 1：producer_dropped 由 builder 模块级计数导出（不经
+     * struct lcview_stats，防 ABI 断言破坏）——与 total_records/dropped_cnt
+     * 区分，供守恒右式吸收生产端丢弃 */
     return scnprintf(buf, PAGE_SIZE,
                      "total_records=%u overrun=%u dropped=%u "
+                     "producer_dropped=%u "
                      "ring_usage_bytes=%u ring_size_bytes=%u\n",
                      st.total_records, st.overrun_cnt, st.dropped_cnt,
+                     lcview_builder_producer_dropped_get(),
                      st.ring_usage_bytes, st.ring_size_bytes);
 }
 static DEVICE_ATTR_RO(lcview_stats);
@@ -328,8 +333,13 @@ static const struct file_operations lcview_fops = {
  */
 struct lcview_builder *lcview_builder_start(uint16_t event_id, uint8_t level)
 {
-    if (level < (uint8_t)atomic_read(&min_level))
+    if (level < (uint8_t)atomic_read(&min_level)) {
+        /* R-07 方向 1：level 过滤丢弃计入 producer_dropped_cnt——被过滤
+         * 事件从未构造/从未写入 ring（不分配），守恒左式 total_records 不含
+         * 它，sysfs 单独导出供守恒右式吸收，防"产生未计数"正向漂移误判 */
+        lcview_builder_producer_dropped_inc();
         return NULL;
+    }
     return lcview_builder_new(event_id, level);
 }
 EXPORT_SYMBOL(lcview_builder_start);

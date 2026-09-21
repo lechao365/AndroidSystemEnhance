@@ -84,6 +84,12 @@ struct lcview_ring {
                                 * 与 total_records 同步递增——该记录同样被内核收到，
                                 * 守恒左式 totalΔ = overrunΔ + droppedΔ + jsonlΔ + invalidΔ
                                 * 由此闭合，避免丢弃时守恒负向误报） */
+    /* 说明：R-07 方向 1 的 producer_dropped_cnt 不再放本结构——builder kmalloc
+     * 失败点（lcview_builder.c）与 level 过滤点（lcview_main.c）计数，host 单测
+     * 编 builder.c 不编 lcview_main.c（无全局 lcview_ring 实体），若挂在 ring 结构
+     * 会致 host 链接 undefined reference。改为 lcview_builder.c 模块级静态计数 +
+     * getter/setter 导出（见 lcview_builder_producer_dropped_*），经 sysfs 导出
+     * 供守恒右式吸收，不动 struct lcview_stats 防 ABI 断言破坏。 */
     spinlock_t    lock;        /* 保护 write_pos/read_pos 的自旋锁 */
     struct mutex  read_mutex;  /* 串行化 read 调用（方向 3）：并发读者防 read_pos 撕裂 */
     wait_queue_head_t waitq;   /* 读取等待队列，写完后 wake_up 唤醒 reader */
@@ -207,5 +213,17 @@ int  lcview_builder_commit(struct lcview_builder *b, struct lcview_ring *ring);
 
 /* 取消构建并释放资源 */
 void lcview_builder_cancel(struct lcview_builder *b);
+
+/* ========== 生产者丢弃计数（R-07 方向 1） ========== */
+
+/*
+ * 生产端丢弃累计计数（builder kmalloc 失败 + level 过滤）。
+ * 与环级 dropped_cnt（ENOSPC，计 total_records）区分：producer_dropped
+ * 的记录从未写入 ring、不计入 total_records，守恒左式不含它，经 sysfs
+ * 导出供守恒右式吸收。模块级静态计数（lcview_builder.c），host 单测编
+ * 本文件即自带，不依赖全局 lcview_ring 实体。
+ */
+void lcview_builder_producer_dropped_inc(void);
+uint32_t lcview_builder_producer_dropped_get(void);
 
 #endif /* LCVIEW_INTERNAL_H */

@@ -132,12 +132,15 @@ TEST_F(EpollDeviceReaderTest, CloseIdempotent) {
     SUCCEED();
 }
 
-/* 方向 2：read errno 可恢复白名单（加 EMSGSIZE；不加 EINVAL） */
+/* 方向 2：read errno 可恢复白名单（R-07 方向 2 移除 EMSGSIZE；不加 EINVAL） */
 
-TEST(RecoverableErrnoTest, EmsgsizeIsRecoverable) {
-    // 内核 read 首条记录放不下返 -EMSGSIZE（KRN-001），可恢复——
-    // 缓冲不足属本次无数据，daemon 继续循环而非误判致命
-    EXPECT_TRUE(isRecoverableReadErrno(EMSGSIZE));
+TEST(RecoverableErrnoTest, EmsgsizeIsNotRecoverable) {
+    // R-07 方向 2：EMSGSIZE 移出可恢复白名单——它语义是"内核有数据但剩余
+    // 缓冲放不下首条记录"，与"本次无数据"（EINTR/EAGAIN）截然不同。
+    // 原并入白名单后 waitAndRead 返 0，上层不 flush 不消费 → epoll LT
+    // 忙旋转；现由 waitAndRead 返回 -EMSGSIZE 专门信号（见 waitAndRead
+    // 契约），限频日志 + msgTooBig 计数 + offset>0 强制 flush 清缓冲闭环。
+    EXPECT_FALSE(isRecoverableReadErrno(EMSGSIZE));
 }
 
 TEST(RecoverableErrnoTest, EagainAndEintrRecoverable) {
