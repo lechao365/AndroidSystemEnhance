@@ -27,7 +27,22 @@ namespace lcview {
 struct BatchParseResult {
     unsigned validCnt = 0;
     unsigned invalidCnt = 0;
+    // R-09 方向 4：invalid 按 reason 分类（区分坏长度/schema 漂移）
+    unsigned badLenCnt = 0;        // 坏长度/坏前缀类（wire 损坏/截断/错位）
+    unsigned schemaDriftCnt = 0;   // schema 漂移类（字段数/类型与 schema 不符）
+    unsigned miscInvalidCnt = 0;   // 其他 invalid（含 unknown event_id 边界）
 };
+
+// R-09 方向 4：reason 分类映射（纯函数）。SchemaParser validate/validateFields
+// 的动态 errMsg 与 parseBatch 的常量 reason 统一按前缀/子串归类：
+//   - 坏长度/坏前缀：bad length/record too small/trailing bytes/data too
+//     short for header/bad magic/EOF at field/data exceeds record/record
+//     length mismatch/unknown field type——数据在传输或缓冲环节损坏，与
+//     schema 无关；
+//   - schema 漂移：field count mismatch/type mismatch at field——schema
+//     文件过期或与内核打点版本不同步；
+//   - 其余（含 unknown event_id 边界、schema vanished 防御分支）归其他。
+int classifyInvalidReason(const std::string& reason);
 
 // 解析一个批次（4B 长度前缀 + 二进制记录序列），写盘并返回统计。
 // LCV-06：接口收为 data/len 指针对——调用方（主循环 flushSegment）

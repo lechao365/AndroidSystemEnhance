@@ -114,8 +114,71 @@ public:
         uint64_t formatTotalUs = 0; // formatJsonLine 累计耗时（微秒）
         uint64_t writeCount = 0;    // writeRecord 落盘次数（含恢复重试）
         uint64_t writeTotalUs = 0;  // writeRecord 累计耗时（微秒，不含 format）
+        // R-09 方向 2：累计 max（自 daemon 启动起，尾延迟上界可见）
+        uint64_t formatMaxUs = 0;   // formatJsonLine 单条最大耗时（微秒）
+        uint64_t writeMaxUs = 0;    // writeRecord 单条最大耗时（微秒）
     };
     const WriteTimings& writeTimings() const { return mTimings; }
+
+    // R-09 方向 2：延迟直方图分桶（尾延迟分布可见性）。耗时区间边界
+    // 固定数组，超过末桶并入末桶（饱和计数）。桶边界按典型写路径量级
+    // 设定：format 单条 ~几~几十微秒，write 单条 ~几十~几百微秒（含
+    // 恢复重试可到毫秒级）；用对数递增覆盖两个量级。
+    struct LatencyHistogram {
+        static constexpr size_t kBuckets = 6;
+        // 桶边界（微秒）：<1, <5, <20, <100, <500, >=500（饱和末桶）
+        static constexpr uint64_t kBoundsUs[kBuckets - 1] = {
+            1, 5, 20, 100, 500,
+        };
+        uint64_t formatBuckets[kBuckets] = {};  // formatJsonLine 耗时分布
+        uint64_t writeBuckets[kBuckets] = {};   // writeRecord 耗时分布
+
+        // 按耗时（微秒）累加到对应桶（越界钳制到末桶）
+        static size_t bucketFor(uint64_t us) {
+            for (size_t i = 0; i < kBuckets - 1; ++i)
+                if (us < kBoundsUs[i]) return i;
+            return kBuckets - 1;
+        }
+        void recordFormat(uint64_t us) { formatBuckets[bucketFor(us)]++; }
+        void recordWrite(uint64_t us) { writeBuckets[bucketFor(us)]++; }
+        void reset() {
+            for (size_t i = 0; i < kBuckets; ++i)
+                formatBuckets[i] = writeBuckets[i] = 0;
+        }
+    };
+
+    // 写路径延迟窗口快照（R-09 方向 2）：取并重置窗口内 max 与直方图，
+    // 供心跳按 30s 窗口输出。累计 max/计数无法从两次累计快照差还原
+    // 窗口 max，须由本方法在窗口边界重置（对齐 ConserveBaseline 模式）。
+    struct WindowLatency {
+        uint64_t formatMaxUs = 0;   // 窗口内 formatJsonLine 单条最大耗时
+        uint64_t writeMaxUs = 0;    // 窗口内 writeRecord 单条最大耗时
+        LatencyHistogram histogram; // 窗口内延迟直方图
+    };
+    // 返回并重置窗口延迟统计（emitHeartbeat 每心跳调用一次）
+    WindowLatency takeLatencyWindow();
+
+    // R-09 方向 3：event_id 分布统计（容量规划有据）。writeRecord 成功
+    // 落盘时按 schema.id 累计；心跳取并重置窗口分布。槽位上限 64（事件
+    // id 合法范围上界，越界忽略——validate 已保证 event_id 合法）。
+    struct EventDist {
+        static constexpr size_t kSlots = 64;
+        uint64_t counts[kSlots] = {};
+        void record(uint32_t eventId) {
+            if (eventId < kSlots) counts[eventId]++;
+        }
+        void reset() {
+            for (size_t i = 0; i < kSlots; ++i) counts[i] = 0;
+        }
+        // 取窗口 top event（出现次数最多者；全 0 返 (0,0)）
+        void top(uint32_t& id, uint64_t& cnt) const {
+            id = 0; cnt = 0;
+            for (size_t i = 0; i < kSlots; ++i)
+                if (counts[i] > cnt) { id = static_cast<uint32_t>(i); cnt = counts[i]; }
+        }
+    };
+    // 返回并重置窗口 event 分布（emitHeartbeat 每心跳调用）
+    EventDist takeEventDistWindow();
 
     // R-08 方向 2：批次级 flush 事务。
     // 批次 = parseBatch 一次调用处理的记录集合（flushSegment 攒出的 64KB
@@ -227,6 +290,10 @@ private:
     PersistCounters mPersist;
     // 写路径耗时统计（方向 3，见 WriteTimings）
     WriteTimings mTimings;
+    // R-09 方向 2：窗口延迟统计（takeLatencyWindow 取并重置）
+    WindowLatency mLatencyWindow;
+    // R-09 方向 3：窗口 event 分布（takeEventDistWindow 取并重置）
+    EventDist mEventDist;
     // 距上次 enforceRetention 实际扫描的写入次数（方向 4 降频）；
     // 构造时初始化为满阈值（LCV-13：启动首扫清理历史超限数据）
     size_t mWritesSinceRetention = 0;

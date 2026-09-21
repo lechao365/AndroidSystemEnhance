@@ -111,6 +111,30 @@ struct ConserveBaseline {
     Result updateAndCheck(const Sample& s);
 };
 
+// R-09 方向 1/3/4：心跳窗口统计载体。runMainLoop 按 30s 心跳窗口维护，
+// 每次心跳把窗口累计刷新到 HeartbeatFields 后清零（峰值/速率/分布/分类
+// 均按窗口口径输出，防累计均值掩盖短时波动）。
+struct WindowStats {
+    // 方向 1：窗口峰值字节（背压/读取快慢直观反映）
+    uint64_t peakReadBytes = 0;   // 窗口内单次 read 字节峰值
+    uint64_t windowReadBytes = 0; // 窗口内累计读字节（速率计算分子）
+    // 方向 3：窗口速率（容量规划有据）
+    uint64_t windowValidRecords = 0; // 窗口内合法落盘条数
+    uint64_t windowWrittenBytes = 0; // 窗口内落盘字节（event 文件 + invalid）
+    // 方向 4：invalid 按 reason 分类窗口累计（坏长度 vs schema 漂移）
+    long long invalidBadLen = 0;        // 窗口坏长度/坏前缀 invalid 累计
+    long long invalidSchemaDrift = 0;   // 窗口 schema 漂移 invalid 累计
+
+    void reset() {
+        peakReadBytes = 0;
+        windowReadBytes = 0;
+        windowValidRecords = 0;
+        windowWrittenBytes = 0;
+        invalidBadLen = 0;
+        invalidSchemaDrift = 0;
+    }
+};
+
 // 心跳字段集（R-02 方向 3）：emitHeartbeat 收集的全部指标，经 IHeartbeatWriter
 // 透传；LogHeartbeatWriter 负责格式化 ALOGI，单测 writer 直接读字段断言。
 // 置于 IHeartbeatWriter 之前——接口签名引用本类型，定义须先于接口声明。
@@ -131,6 +155,21 @@ struct HeartbeatFields {
     uint64_t dropRotate = 0, dropInvRotate = 0, dropRollback = 0;
     // 写路径平均耗时（微秒，方向 3 微优化可判定指标）
     uint64_t avgFormatUs = 0, avgWriteUs = 0;
+    // R-09 方向 1：环水位与窗口峰值字节（背压直接可见性）
+    uint32_t ringUsageBytes = 0;      // 内核 ring 当前已用字节（getRingUsageBytes）
+    uint32_t ringSizeBytes = 0;       // 内核 ring 总大小（getRingSizeBytes）
+    uint64_t windowPeakBytes = 0;     // 心跳窗口内单次读取字节峰值（读快慢直观反映）
+    // R-09 方向 2：写路径每窗口 max 耗时（微秒，尾延迟可见性）
+    uint64_t maxFormatUs = 0;         // 窗口内 formatJsonLine 单条最大耗时（微秒）
+    uint64_t maxWriteUs = 0;          // 窗口内 writeRecord 单条最大耗时（微秒）
+    // R-09 方向 3：心跳窗口速率与 event_id 分布（容量规划有据）
+    uint64_t recordsPerSec = 0;       // 窗口合法落盘速率（条/秒）
+    uint64_t bytesPerSec = 0;         // 窗口落盘字节速率（字节/秒）
+    uint32_t topEventId = 0;          // 窗口内出现次数最多的 event_id
+    uint64_t topEventCnt = 0;         // 窗口内 topEventId 出现次数
+    // R-09 方向 4：parseBatch invalid 按 reason 分类（区分坏长度/schema 漂移）
+    long long invalidBadLen = 0;      // 坏长度/坏前缀类 invalid 累计
+    long long invalidSchemaDrift = 0; // schema 漂移类 invalid 累计
 };
 
 // 心跳输出抽象接口（R-02 方向 3）：emitHeartbeat 的落盘端从 ALOGI 解耦为
@@ -162,7 +201,8 @@ void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
                    FileWriter& writer, int64_t& overrunAccum,
                    uint64_t readErr,
                    long long jsonlRecords, long long invalidRecords,
-                   ConserveBaseline& conserve, IHeartbeatWriter& out);
+                   ConserveBaseline& conserve, IHeartbeatWriter& out,
+                   const WindowStats& window);
 
 // 守恒告警判定（纯函数，方向 3/7）：内核 total_records 增量应等于
 // overrun + dropped + writerDrop + jsonl + invalid 增量之和（每条记录要么

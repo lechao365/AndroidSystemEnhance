@@ -512,13 +512,34 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
     return out;
 }
 
-// 写路径耗时累计（微秒；供心跳输出平均微秒/条）
+// 写路径耗时累计（微秒；供心跳输出平均微秒/条与窗口 max/直方图）
 void FileWriter::recordWriteTiming(std::chrono::steady_clock::time_point start)
 {
-    mTimings.writeCount++;
-    mTimings.writeTotalUs += static_cast<uint64_t>(
+    const uint64_t writeUs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - start).count());
+    mTimings.writeCount++;
+    mTimings.writeTotalUs += writeUs;
+    if (writeUs > mTimings.writeMaxUs) mTimings.writeMaxUs = writeUs;
+    if (writeUs > mLatencyWindow.writeMaxUs) mLatencyWindow.writeMaxUs = writeUs;
+    mLatencyWindow.histogram.recordWrite(writeUs);
+}
+
+// R-09 方向 2：取并重置窗口延迟统计（emitHeartbeat 每 30s 心跳调用）。
+// 返回窗口内 max 与直方图后清零窗口累计，供下个窗口独立统计。
+FileWriter::WindowLatency FileWriter::takeLatencyWindow()
+{
+    WindowLatency w = mLatencyWindow;
+    mLatencyWindow = WindowLatency{};
+    return w;
+}
+
+// R-09 方向 3：取并重置窗口 event 分布（emitHeartbeat 每心跳调用）。
+FileWriter::EventDist FileWriter::takeEventDistWindow()
+{
+    EventDist d = mEventDist;
+    mEventDist = EventDist{};
+    return d;
 }
 
 // 回退文件到指定偏移：flush 失败后首写可能部分落盘，重试前须截断掉残留的
@@ -748,14 +769,22 @@ void FileWriter::writeRecord(const EventSchema& schema,
     if (mBatchStarts.find(schema.id) == mBatchStarts.end())
         mBatchStarts[schema.id] = it->second.currentSize;
 
-    // 写路径耗时统计（方向 3）：formatJsonLine 与写盘分开累计，
-    // 心跳输出平均微秒/条，作为微优化可判定指标
+    // 写路径耗时统计（方向 3 + R-09 方向 2）：formatJsonLine 与写盘分开
+    // 累计，心跳输出平均微秒/条与窗口 max/直方图，作微优化与尾延迟
+    // 可判定指标（空串丢弃路径也计 format 耗时——格式化已发生）
     auto tFormatStart = std::chrono::steady_clock::now();
     std::string line = formatJsonLine(schema, hdr, fields, fieldsLen);
-    mTimings.formatCount++;
-    mTimings.formatTotalUs += static_cast<uint64_t>(
+    const uint64_t formatUs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - tFormatStart).count());
+    mTimings.formatCount++;
+    mTimings.formatTotalUs += formatUs;
+    if (formatUs > mTimings.formatMaxUs) mTimings.formatMaxUs = formatUs;
+    if (formatUs > mLatencyWindow.formatMaxUs) mLatencyWindow.formatMaxUs = formatUs;
+    mLatencyWindow.histogram.recordFormat(formatUs);
+    // R-09 方向 3：event_id 分布累计（含 format 失败——已尝试写该事件，
+    // 分布反映事件源活跃度；DROP 的 event 同样反映打点来源）
+    mEventDist.record(schema.id);
 
     if (line.empty()) {
         // 方向 4：DROP 计数点收敛到 writeRecord——空串是唯一丢弃分类，

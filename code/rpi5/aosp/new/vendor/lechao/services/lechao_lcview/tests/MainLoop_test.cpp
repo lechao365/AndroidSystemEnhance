@@ -465,9 +465,11 @@ TEST(MainLoopHeartbeatWriterTest, FieldsPassThrough) {
     int64_t overrunAccum = 0;
     ConserveBaseline conserve;
     RecordingHeartbeatWriter w;
+    WindowStats window;  // R-09：窗口统计（峰值/速率/分类）透传
     // 首心跳：ioctl 正常 → 建基线（updateAndCheck 返回 false 不告警，字段
     // 仍须完整透传）
-    emitHeartbeat(42, reader, writer, overrunAccum, 1, 900, 5, conserve, w);
+    emitHeartbeat(42, reader, writer, overrunAccum, 1, 900, 5, conserve, w,
+                  window);
 
     EXPECT_EQ(w.last.loop, 42u);
     // overrunAccum 累计 reader.getOverrun()=7

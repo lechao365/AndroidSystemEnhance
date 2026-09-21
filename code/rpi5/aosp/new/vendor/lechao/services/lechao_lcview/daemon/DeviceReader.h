@@ -67,6 +67,12 @@ public:
     // 纯虚默认 0：不强制旧 mock 实现，容差退化由 ioctl 失败跳过兜底。
     virtual uint32_t getRingSizeBytes() { return 0; }
 
+    // 查询内核 ring buffer 当前已用字节数（R-09 方向 1：心跳输出环水位
+    // ring_usage，背压直接可见——ring_usage 越接近 ring_size 越接近积压
+    // 溢出）。与 getRingSizeBytes 同源 GET_STATS；失败返回 0 并计
+    // ioctlErr（ioctl 失败时心跳水位归 0，由 ioctlErr 区分真 0 与失败）。
+    virtual uint32_t getRingUsageBytes() { return 0; }
+
     // LCV-16/17：诊断计数（心跳可见性，失败返 0 与真实 0 可区分）。
     // 提上抽象接口：emitHeartbeat 经抽象 DeviceReader 注入（main_loop
     // 可测边界）即可读取，不再依赖具体 EpollDeviceReader。
@@ -94,6 +100,7 @@ public:
     uint32_t getTotalRecords() override;
     uint32_t getDropped() override;
     uint32_t getRingSizeBytes() override;
+    uint32_t getRingUsageBytes() override;
     void close() override;
 
     // LCV-16/17：诊断计数（心跳可见性，失败返 0 与真实 0 可区分）

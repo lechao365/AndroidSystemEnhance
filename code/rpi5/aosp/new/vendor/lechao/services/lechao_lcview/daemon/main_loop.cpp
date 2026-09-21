@@ -178,7 +178,7 @@ ConserveBaseline::Result ConserveBaseline::updateAndCheck(const Sample& s)
 
 // 生产心跳 writer：格式化 HeartbeatFields 为 ALOGI 心跳行（原 emitHeartbeat
 // 内联 ALOGI 移此），供 runMainLoop 生产注入（liveness 判据 logfield 字段
-// 顺序与内容保持兼容，不得变更字段名）。
+// 顺序与内容保持兼容，不得变更字段名；R-09 新增字段只追加行尾）。
 void LogHeartbeatWriter::write(const HeartbeatFields& hb)
 {
     ALOGI("lechao_lcview: heartbeat, loop=%llu, overrun=%lld, dropped=%llu, "
@@ -188,7 +188,11 @@ void LogHeartbeatWriter::write(const HeartbeatFields& hb)
           "drop_reopen=%llu drop_retry=%llu drop_invalid=%llu "
           "drop_invalidwrite=%llu "
           "drop_rotate=%llu drop_invrotate=%llu drop_rollback=%llu, "
-          "avg_format_us=%llu avg_write_us=%llu",
+          "avg_format_us=%llu avg_write_us=%llu, "
+          "ring_usage=%uB/%uB window_peak=%lluB, "
+          "max_format_us=%llu max_write_us=%llu, "
+          "records/s=%llu bytes/s=%llu top_event=%u(%llu), "
+          "invalid_badlen=%lld invalid_schemadrift=%lld",
           static_cast<unsigned long long>(hb.loop),
           static_cast<long long>(hb.overrun),
           static_cast<unsigned long long>(hb.dropped),
@@ -207,7 +211,18 @@ void LogHeartbeatWriter::write(const HeartbeatFields& hb)
           static_cast<unsigned long long>(hb.dropInvRotate),
           static_cast<unsigned long long>(hb.dropRollback),
           static_cast<unsigned long long>(hb.avgFormatUs),
-          static_cast<unsigned long long>(hb.avgWriteUs));
+          static_cast<unsigned long long>(hb.avgWriteUs),
+          static_cast<unsigned>(hb.ringUsageBytes),
+          static_cast<unsigned>(hb.ringSizeBytes),
+          static_cast<unsigned long long>(hb.windowPeakBytes),
+          static_cast<unsigned long long>(hb.maxFormatUs),
+          static_cast<unsigned long long>(hb.maxWriteUs),
+          static_cast<unsigned long long>(hb.recordsPerSec),
+          static_cast<unsigned long long>(hb.bytesPerSec),
+          static_cast<unsigned>(hb.topEventId),
+          static_cast<unsigned long long>(hb.topEventCnt),
+          static_cast<long long>(hb.invalidBadLen),
+          static_cast<long long>(hb.invalidSchemaDrift));
 }
 
 // 心跳段（每 30 loop）：直读内核 overrun/total_records，
@@ -228,7 +243,8 @@ void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
                    FileWriter& writer, int64_t& overrunAccum,
                    uint64_t readErr,
                    long long jsonlRecords, long long invalidRecords,
-                   ConserveBaseline& conserve, IHeartbeatWriter& out)
+                   ConserveBaseline& conserve, IHeartbeatWriter& out,
+                   const WindowStats& window)
 {
     uint32_t ov = reader.getOverrun();
     overrunAccum += ov;
@@ -274,21 +290,51 @@ void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
     const FileWriter::WriteTimings& wt = writer.writeTimings();
     uint64_t avgFormatUs = wt.formatCount ? wt.formatTotalUs / wt.formatCount : 0;
     uint64_t avgWriteUs = wt.writeCount ? wt.writeTotalUs / wt.writeCount : 0;
+    // R-09 方向 2：取窗口延迟统计（max + 直方图），取后即重置供下窗口
+    const FileWriter::WindowLatency lat = writer.takeLatencyWindow();
+    // R-09 方向 3：取窗口 event 分布（top event），取后即重置
+    const FileWriter::EventDist dist = writer.takeEventDistWindow();
+    uint32_t topEventId = 0;
+    uint64_t topEventCnt = 0;
+    dist.top(topEventId, topEventCnt);
+    // R-09 方向 1/3：环水位、窗口峰值字节、窗口速率与 event 分布
+    const uint32_t ringUsage = reader.getRingUsageBytes();
+    // 窗口速率：秒 = 窗口累计字节/条 除以固定 30s 窗口（心跳周期常量）
+    uint64_t recordsPerSec = window.windowValidRecords / 30;
+    uint64_t bytesPerSec = window.windowReadBytes / 30;
     HeartbeatFields hb = {
-        loopCount, overrunAccum, dropped, readErr,
-        total, jsonlRecords, invalidRecords,
-        reader.ioctlErr(), reader.eofCount(),
-        static_cast<uint64_t>(dc.openFailed),
-        static_cast<uint64_t>(dc.formatEmpty),
-        static_cast<uint64_t>(dc.formatOob),
-        static_cast<uint64_t>(dc.reopenFailed),
-        static_cast<uint64_t>(dc.retryFailed),
-        static_cast<uint64_t>(dc.invalidNotOpen),
-        static_cast<uint64_t>(dc.invalidWriteFailed),
-        static_cast<uint64_t>(dc.dropRotate),
-        static_cast<uint64_t>(dc.dropInvRotate),
-        static_cast<uint64_t>(dc.dropRollback),
-        avgFormatUs, avgWriteUs,
+        .loop = loopCount,
+        .overrun = overrunAccum,
+        .dropped = dropped,
+        .readErr = readErr,
+        .totalRecords = total,
+        .jsonlRecords = jsonlRecords,
+        .invalidRecords = invalidRecords,
+        .ioctlErr = reader.ioctlErr(),
+        .eofCount = reader.eofCount(),
+        .dropOpen = static_cast<uint64_t>(dc.openFailed),
+        .dropFormat = static_cast<uint64_t>(dc.formatEmpty),
+        .dropOob = static_cast<uint64_t>(dc.formatOob),
+        .dropReopen = static_cast<uint64_t>(dc.reopenFailed),
+        .dropRetry = static_cast<uint64_t>(dc.retryFailed),
+        .dropInvalid = static_cast<uint64_t>(dc.invalidNotOpen),
+        .dropInvalidWrite = static_cast<uint64_t>(dc.invalidWriteFailed),
+        .dropRotate = static_cast<uint64_t>(dc.dropRotate),
+        .dropInvRotate = static_cast<uint64_t>(dc.dropInvRotate),
+        .dropRollback = static_cast<uint64_t>(dc.dropRollback),
+        .avgFormatUs = avgFormatUs,
+        .avgWriteUs = avgWriteUs,
+        .ringUsageBytes = ringUsage,
+        .ringSizeBytes = ringSize,
+        .windowPeakBytes = window.peakReadBytes,
+        .maxFormatUs = lat.formatMaxUs,
+        .maxWriteUs = lat.writeMaxUs,
+        .recordsPerSec = recordsPerSec,
+        .bytesPerSec = bytesPerSec,
+        .topEventId = topEventId,
+        .topEventCnt = topEventCnt,
+        .invalidBadLen = window.invalidBadLen,
+        .invalidSchemaDrift = window.invalidSchemaDrift,
     };
     out.write(hb);
 }
@@ -303,7 +349,7 @@ static void flushSegment(DeviceReader& reader, SchemaParser& schema,
                          std::chrono::steady_clock::time_point& dataArrivedAt,
                          uint64_t& flushCount, long long& jsonlRecords,
                          long long& invalidRecords, ssize_t n,
-                         size_t bufSize)
+                         size_t bufSize, WindowStats& window)
 {
     static constexpr auto kMaxBufferAge = std::chrono::milliseconds(500);
     bool timedOut = (n == 0);
@@ -318,6 +364,11 @@ static void flushSegment(DeviceReader& reader, SchemaParser& schema,
         // invalid 累计透传（方向 1）：wire 漂移等丢弃可见于心跳，
         // 防"采集链路死了 jsonl 归零而零值字段仍全 0"假绿
         invalidRecords += parsed.invalidCnt;
+        // R-09 方向 3/4：窗口速率与 invalid 分类累计（心跳可见）
+        window.windowValidRecords += parsed.validCnt;
+        window.windowWrittenBytes += offset;
+        window.invalidBadLen += parsed.badLenCnt;
+        window.invalidSchemaDrift += parsed.schemaDriftCnt;
         ALOGI("lechao_lcview: batch parsed: %u valid, %u invalid, %zuB "
               "(build=%s)", parsed.validCnt, parsed.invalidCnt, offset,
               LCVIEW_BUILD_TAG);
@@ -351,6 +402,13 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
     // 替代 emitHeartbeat 内 static 局部（多实例/多测试串扰 + 无法按心跳
     // 推进防 uint32 回绕）
     ConserveBaseline conserve;
+    // R-09 方向 1/3/4：心跳窗口统计（峰值字节/速率/event 分布/invalid 分类）
+    WindowStats window;
+    // event_id 分布统计（槽位 = event id，R-09 方向 3）。上限取事件 id
+    // 合法范围上界（内核 LCVIEW_MAX_EVENTS 同源常量在用户态镜像），越界
+    // event_id 记录不计分布（已由 validate 过滤，正常不达）。
+    static constexpr size_t kEventSlots = 64;
+    uint64_t eventDist[kEventSlots] = {};
     // R-02 方向 3：心跳输出端注入生产 writer（ALOGI 落盘）——emitHeartbeat
     // 只依赖 IHeartbeatWriter 接口，单测注入记录型 writer 可断言心跳内容
     LogHeartbeatWriter heartbeatWriter;
@@ -386,13 +444,22 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
         // 根治内核侧 -EINVAL 触发的主循环退出重启环
         if (shouldPreventiveFlush(offset, kBufSize, kMinReadSize)) {
             flushSegment(reader, schema, writer, buf, offset, dataArrivedAt,
-                         flushCount, jsonlRecords, invalidRecords, 0, kBufSize);
+                         flushCount, jsonlRecords, invalidRecords, 0, kBufSize, window);
         }
 
         ssize_t n = readOnce(reader, buf, kBufSize, kEpollTimeoutMs, offset,
                              readOk, readEmpty, readErr, msgTooBig,
                              dataArrivedAt);
         loopCount++;
+
+        // R-09 方向 1：窗口峰值字节与累计读字节（n>0 为本轮读到数据；
+        // EMSGSIZE/负值不累计）。峰值反映单次读的最大包（读快慢/积压
+        // 直观），累计字节为窗口速率分子
+        if (n > 0) {
+            window.windowReadBytes += static_cast<uint64_t>(n);
+            if (static_cast<uint64_t>(n) > window.peakReadBytes)
+                window.peakReadBytes = static_cast<uint64_t>(n);
+        }
 
         // R-07 方向 2：EMSGSIZE 处理（消 epoll 忙轮询）——内核有数据但
         // 剩余缓冲放不下首条记录（读端契约防御兜底触发）。readOnce 已
@@ -405,7 +472,7 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
             if (offset > 0) {
                 flushSegment(reader, schema, writer, buf, offset, dataArrivedAt,
                              flushCount, jsonlRecords, invalidRecords, 0,
-                             kBufSize);
+                             kBufSize, window);
             }
             continue;
         }
@@ -414,7 +481,7 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
             // 方向 2：致命读错误退出前强制落盘缓冲残留，不丢已收数据
             if (shouldFlushOnExit(offset)) {
                 flushSegment(reader, schema, writer, buf, offset, dataArrivedAt,
-                             flushCount, jsonlRecords, invalidRecords, 0, kBufSize);
+                             flushCount, jsonlRecords, invalidRecords, 0, kBufSize, window);
             }
             return 1;  // 致命读错误：readOnce 已打日志，退出交 init 重启
         }
@@ -426,7 +493,10 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
         if (now - lastBeatAt >= std::chrono::seconds(30)) {
             emitHeartbeat(loopCount, reader, writer, overrunAccum, readErr,
                           jsonlRecords, invalidRecords, conserve,
-                          heartbeatWriter);
+                          heartbeatWriter, window);
+            // R-09 方向 1/3/4：心跳窗口已消费（峰值/速率/分类进 hb），
+            // 重置窗口累计供下个窗口独立统计
+            window.reset();
             lastBeatAt = now;
         }
 
@@ -441,7 +511,7 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
         }
 
         flushSegment(reader, schema, writer, buf, offset, dataArrivedAt,
-                     flushCount, jsonlRecords, invalidRecords, n, kBufSize);
+                     flushCount, jsonlRecords, invalidRecords, n, kBufSize, window);
     }
 
     ALOGI("lechao_lcview: exiting, readOk=%llu readEmpty=%llu readErr=%llu "
@@ -453,7 +523,7 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
     // 方向 2：优雅退出前强制落盘缓冲残留，不丢已收数据
     if (shouldFlushOnExit(offset)) {
         flushSegment(reader, schema, writer, buf, offset, dataArrivedAt,
-                     flushCount, jsonlRecords, invalidRecords, 0, kBufSize);
+                     flushCount, jsonlRecords, invalidRecords, 0, kBufSize, window);
     }
     return 0;
 }

@@ -201,6 +201,19 @@ uint32_t EpollDeviceReader::getRingSizeBytes()
     return 0;
 }
 
+uint32_t EpollDeviceReader::getRingUsageBytes()
+{
+    // 查询内核 ring 当前已用字节数（R-09 方向 1：心跳输出环水位，
+    // 背压可见性——ring_usage/size 越接近越接近溢出）；失败容错返 0
+    // 并计 ioctlErr（与 getRingSizeBytes 同源同容错口径）
+    struct lcview_stats stats = {};
+    if (mFd >= 0 && ioctl(mFd, LCVIEW_GET_STATS, &stats) == 0)
+        return stats.ring_usage_bytes;
+    mIoctlErr++;
+    LC_LOGE("ioctl GET_STATS failed: errno=" << errno);
+    return 0;
+}
+
 void EpollDeviceReader::close()
 {
     // 幂等：析构与显式调用都可能触发
