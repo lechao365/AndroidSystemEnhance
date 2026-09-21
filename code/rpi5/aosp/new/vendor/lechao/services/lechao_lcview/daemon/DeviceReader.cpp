@@ -165,10 +165,35 @@ uint32_t EpollDeviceReader::getOverrun()
     return 0;
 }
 
+// R-10 方向 2：单次 GET_STATS ioctl 拉取全部统计字段缓存。成功置
+// mStatsValid=true（getter 全走缓存不再发 ioctl）；失败清缓存有效位
+// 并计 ioctlErr（getter 回退单次 ioctl 保容错，心跳 ioctl 失败仍跳过
+// 守恒）。缓存由 emitHeartbeat 心跳开头 refreshStats 一次性刷新，
+// 心跳内 getTotalRecords/getDropped/getRingSizeBytes/getRingUsageBytes
+// 从缓存分发，消每心跳四次 GET_STATS ioctl 放大。
+void EpollDeviceReader::refreshStats()
+{
+    mStatsValid = false;
+    struct lcview_stats stats = {};
+    if (mFd >= 0 && ioctl(mFd, LCVIEW_GET_STATS, &stats) == 0) {
+        // R-10 方向 2：逐字段缓存（标量成员，见 DeviceReader.h 注释）
+        mCachedTotal = stats.total_records;
+        mCachedDropped = stats.dropped_cnt;
+        mCachedRingSize = stats.ring_size_bytes;
+        mCachedRingUsage = stats.ring_usage_bytes;
+        mStatsValid = true;
+        return;
+    }
+    mIoctlErr++;
+    LC_LOGE("ioctl GET_STATS failed: errno=" << errno);
+}
+
 uint32_t EpollDeviceReader::getTotalRecords()
 {
-    // 查询内核累计记录总数（含被 overrun 覆盖的），供守恒校验；
-    // ioctl 失败容错返 0（与 getOverrun 语义一致，不静默抛错）
+    // 缓存有效时从缓存分发（R-10 方向 2，不再重复 ioctl）
+    if (mStatsValid)
+        return mCachedTotal;
+    // 缓存无效（未 refresh/refresh 失败）：回退单次 ioctl 保容错语义
     struct lcview_stats stats = {};
     if (mFd >= 0 && ioctl(mFd, LCVIEW_GET_STATS, &stats) == 0)
         return stats.total_records;
@@ -179,6 +204,9 @@ uint32_t EpollDeviceReader::getTotalRecords()
 
 uint32_t EpollDeviceReader::getDropped()
 {
+    // R-10 方向 2：缓存有效优先（与 getTotalRecords 同源同容错）
+    if (mStatsValid)
+        return mCachedDropped;
     // 查询内核 ENOSPC 丢弃累计（方向 7），与 getTotalRecords 同源
     // GET_STATS；失败容错返 0 并计 ioctlErr（心跳 ioctl 失败跳过守恒）
     struct lcview_stats stats = {};
@@ -191,6 +219,9 @@ uint32_t EpollDeviceReader::getDropped()
 
 uint32_t EpollDeviceReader::getRingSizeBytes()
 {
+    // R-10 方向 2：缓存有效优先（与 getRingUsageBytes 同源同容错）
+    if (mStatsValid)
+        return mCachedRingSize;
     // 查询内核 ring 总大小（方向 6：守恒容差按环推导的数据源）；
     // 失败容错返 0 并计 ioctlErr（ioctl 失败时守恒整体跳过）
     struct lcview_stats stats = {};
@@ -203,6 +234,9 @@ uint32_t EpollDeviceReader::getRingSizeBytes()
 
 uint32_t EpollDeviceReader::getRingUsageBytes()
 {
+    // R-10 方向 2：缓存有效优先（心跳 30s 一次 GET_STATS 后全走缓存）
+    if (mStatsValid)
+        return mCachedRingUsage;
     // 查询内核 ring 当前已用字节数（R-09 方向 1：心跳输出环水位，
     // 背压可见性——ring_usage/size 越接近越接近溢出）；失败容错返 0
     // 并计 ioctlErr（与 getRingSizeBytes 同源同容错口径）

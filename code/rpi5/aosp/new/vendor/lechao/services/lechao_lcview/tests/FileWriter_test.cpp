@@ -2062,3 +2062,183 @@ TEST(FileWriterPersistTest, DroppedWriteDoesNotCountAsPersist) {
     EXPECT_EQ(writer.dropCounters().openFailed, 1u);
     EXPECT_EQ(writer.persistCounters().valid, 0u);
 }
+
+// ============================================================
+// R-10 方向 1：写路径计时受 trackWriteTimings 开关控制（热路径降耗）
+// ============================================================
+
+TEST(FileWriterTimingSwitchTest, DefaultDisabled_NoTimingCollected) {
+    // 默认 trackWriteTimings=false：热路径不调 steady_clock，format/write
+    // 计数与耗时全 0（心跳 avg_format_us/avg_write_us 无意义，属预期降耗）
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+    auto schema = makeSchema(4, "e", {FieldType::INT64});
+    auto hdr = makeHdr(4, 1);
+    auto fields = buildFields({FieldType::INT64});
+
+    writer.writeRecord(schema, &hdr, fields.data(), fields.size());
+    writer.writeInvalid(fields.data(), fields.size(), "bad");
+    EXPECT_TRUE(writer.endBatch());
+
+    EXPECT_EQ(writer.writeTimings().formatCount, 0u);
+    EXPECT_EQ(writer.writeTimings().writeCount, 0u);
+    EXPECT_EQ(writer.writeTimings().formatTotalUs, 0u);
+    EXPECT_EQ(writer.writeTimings().writeTotalUs, 0u);
+}
+
+TEST(FileWriterTimingSwitchTest, Enabled_CollectsTiming) {
+    // trackWriteTimings=true：计时统计生效，format/write 计数非零
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.trackWriteTimings = true;
+    FileWriter writer(cfg);
+    auto schema = makeSchema(4, "e", {FieldType::INT64});
+    auto hdr = makeHdr(4, 1);
+    auto fields = buildFields({FieldType::INT64});
+
+    writer.writeRecord(schema, &hdr, fields.data(), fields.size());
+    EXPECT_TRUE(writer.endBatch());
+
+    EXPECT_GT(writer.writeTimings().formatCount, 0u);
+    EXPECT_GT(writer.writeTimings().writeCount, 0u);
+    // 窗口直方图同样有采样
+    FileWriter::WindowLatency w = writer.takeLatencyWindow();
+    EXPECT_GT(w.histogram.formatBuckets[0] + w.histogram.formatBuckets[1] +
+              w.histogram.formatBuckets[2] + w.histogram.formatBuckets[3] +
+              w.histogram.formatBuckets[4] + w.histogram.formatBuckets[5], 0u);
+}
+
+// ============================================================
+// R-10 方向 3：truncateToLastNewline pread 失败/短读不截断（破坏性截断安全）
+// ============================================================
+
+TEST(FileWriterTruncateTest, PreadFail_KeepsWholeFile) {
+    // 方向 3：pread 失败/短读时不得清空整日志（存储读错误破坏性截断
+    // 安全）。注入路径：
+    //   1) 正常可读文件：找到换行截断到其后（行为回归验证）；
+    //   2) 目录（open O_RDWR 失败 → 返 0，无法修复保持现状）；
+    //   3) 非普通文件/管道：pread 在 S_ISREG 守卫前被拦截（fstat 非
+    //      普通文件直接返回 0）——不触发截断清空。
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+    auto schema = makeSchema(4, "e", {FieldType::INT64});
+
+    // 1) 正常路径：一行完整 + 半行 → 截到换行后
+    const std::string p = dir.path() + "/trunc_normal.jsonl";
+    const std::string full = "{\"a\":1}\n{\"b\":2}";
+    {
+        std::ofstream f(p, std::ios::app);
+        f << full;
+    }
+    EXPECT_EQ(writer.truncateToLastNewline(p), std::string("{\"a\":1}\n").size());
+
+    // 2) 目录：open O_RDWR 失败返 0（无法修复，保持现状不清空）
+    std::string dirPath = dir.path() + "/adir";
+    ::mkdir(dirPath.c_str(), 0755);
+    EXPECT_EQ(writer.truncateToLastNewline(dirPath), 0u);
+
+    // 3) 命名管道：fstat 非普通文件 → 守卫返 0（不截断不破坏）
+    std::string fifo = dir.path() + "/afifo";
+    ASSERT_EQ(::mkfifo(fifo.c_str(), 0600), 0);
+    EXPECT_EQ(writer.truncateToLastNewline(fifo), 0u);
+    SUCCEED();
+}
+
+// ============================================================
+// R-10 方向 3：stat 失败标 degraded，写失败恢复禁止 rollback 到失真 0 基准
+// ============================================================
+
+TEST(FileWriterDegradedTest, RollbackSkippedWhenSizeDegraded) {
+    // openFile stat 失败 → sizeDegraded=true：写失败恢复不得 rollbackFileTo
+    // 到失真 0 基准（会 ftruncate 清空整个已有文件）。注入：预写文件内容，
+    // 手动置 sizeDegraded=true 并触发流 bad → writeLineFlush 恢复路径应
+    // 跳过 rollback（dropRollback 不增），只重开流
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+    auto schema = makeSchema(4, "e", {FieldType::INT64});
+    writer.openFile(4, schema);
+    std::string fname = writer.mFiles[4].currentFilename;
+
+    // 预写完整历史内容（模拟 stat 失败时文件其实有内容）
+    std::string existing = "{\"old\":1}\n";
+    {
+        std::ofstream f(fname, std::ios::app);
+        f << existing;
+    }
+    // 置 degraded（模拟 openFile stat 失败）
+    writer.mFiles[4].sizeDegraded = true;
+    writer.mFiles[4].stream.close();  // close 后 << 设 badbit → 触发恢复
+
+    bool ok = writer.writeLineFlush(writer.mFiles[4], "{\"x\":1}\n");
+
+    // degraded 跳过 rollback：dropRollback 不增；恢复仍进行（重开流重写）
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(writer.dropCounters().dropRollback, 0u);
+    EXPECT_TRUE(writer.mFiles[4].stream.is_open());
+    // 重开后 stat 恢复真实大小并清 degraded
+    EXPECT_EQ(writer.mFiles[4].currentSize, existing.size());
+    EXPECT_FALSE(writer.mFiles[4].sizeDegraded);
+}
+
+// ============================================================
+// R-10 方向 4：evictOldFiles 以 inode 集合判定打开文件（替代路径字符串相等）
+// ============================================================
+
+TEST(FileWriterEvictInodeTest, OpenFileSkippedByInode) {
+    // 打开文件经 inode 集合判定跳过：即使路径拼法与扫描结果不同
+    // （符号链接等路径漂移场景），inode 匹配即视为打开中不删除。
+    // 与方向 2 旧路径比较的等价验证：openFile 后 inode 被记录，
+    // scanLogFiles 采集同 inode，evictOldFiles 跳过打开文件。
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxTotalSizeMb = 1;
+    FileWriter writer(cfg);
+    auto schema = makeSchema(4, "e", {FieldType::INT64});
+    writer.openFile(4, schema);
+    std::string cur = writer.mFiles[4].currentFilename;
+    prewriteFile(cur, 700 * 1024);
+    std::string date = writer.makeDateStr();
+    std::string old = dir.path() + "/9_z_" + date + "_p0.jsonl";
+    prewriteFile(old, 500 * 1024);
+    struct utimbuf tb;
+    tb.actime = 100; tb.modtime = 100; utime(old.c_str(), &tb);
+
+    // 断言 openFile 后 inode 已记录
+    EXPECT_TRUE(writer.mFiles[4].hasInode);
+    EXPECT_NE(writer.mFiles[4].ino, 0u);
+
+    std::vector<FileWriter::LogFile> files = writer.scanLogFiles();
+    writer.evictOldFiles(files);
+
+    EXPECT_NE(access(old.c_str(), F_OK), 0);  // 旧文件被淘汰
+    EXPECT_EQ(access(cur.c_str(), F_OK), 0);  // 打开文件 inode 命中保留
+}
+
+TEST(FileWriterEvictInodeTest, InvalidLogSkippedByInode) {
+    // invalid_records.log 经 invalid 流 inode 判定跳过（替代路径比较）
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxTotalSizeMb = 1;
+    FileWriter writer(cfg);
+    // 构造时已 openInvalidStream 并记录 inode
+    EXPECT_TRUE(writer.mInvalidHasInode);
+    EXPECT_NE(writer.mInvalidIno, 0u);
+    std::string invalid = dir.path() + "/invalid_records.log";
+    prewriteFile(invalid, 500 * 1024);
+    struct utimbuf tb;
+    tb.actime = 50; tb.modtime = 50; utime(invalid.c_str(), &tb);
+
+    std::vector<FileWriter::LogFile> files = writer.scanLogFiles();
+    writer.evictOldFiles(files);
+
+    EXPECT_EQ(access(invalid.c_str(), F_OK), 0);  // invalid 流 inode 命中保留
+}

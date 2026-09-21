@@ -260,6 +260,11 @@ void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
     // 而进程内计数归零，须增量比较；相邻心跳窗口比较使 uint32 total 永不
     // 回绕；任一 ioctl 失败（查询返 0 伪装真实 0）时跳过守恒且不推进数值
     // 基线，防失败值失真。
+    // R-10 方向 2：心跳开头单次 GET_STATS（refreshStats 缓存），此后
+    // getTotalRecords/getDropped/getRingSizeBytes/getRingUsageBytes 全从
+    // 缓存分发——消每心跳四次 GET_STATS ioctl 放大（getOverrun 是独立
+    // GET_OVERRUN 读取即清零，不在此合并范围，仍单独调用）
+    reader.refreshStats();
     const uint32_t total = reader.getTotalRecords();
     const uint32_t kernDropped = reader.getDropped();
     const uint32_t ringSize = reader.getRingSizeBytes();

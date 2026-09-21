@@ -264,13 +264,26 @@ void FileWriter::openFile(uint16_t eventId, const EventSchema& schema)
     // 追加模式下文件可能已有内容：stat 恢复 currentSize，兑现轮转约束。
     // LCV-11：stat 失败必须可见（静默保持 0 会让该文件轮转约束失效，
     // 可超限近一倍且无任何信号）。方向 4：半行已截断，stat 结果反映
-    // 截断后字节数
+    // 截断后字节数。R-10 方向 3：stat 失败标 degraded（size 失真），
+    // 写失败恢复禁止 rollback 到失真 0 基准（会清空整日志）
     struct stat st;
-    if (stat(fs.currentFilename.c_str(), &st) == 0)
+    if (stat(fs.currentFilename.c_str(), &st) == 0) {
         fs.currentSize = static_cast<size_t>(st.st_size);
-    else
+        fs.sizeDegraded = false;
+        // R-10 方向 4：打开文件记录 inode（evictOldFiles 以 inode 集合
+        // 判定打开中文件，替代路径字符串相等比较）
+        fs.dev = st.st_dev;
+        fs.ino = st.st_ino;
+        fs.hasInode = true;
+    } else {
         ALOGE("FileWriter: openFile: stat %s failed: %s (rotation constraint degraded)",
               fs.currentFilename.c_str(), strerror(errno));
+        fs.sizeDegraded = true;
+        // R-10 方向 4：stat 失败无法取得 inode，清有效位——evictOldFiles
+        // 对该文件退化为"不视为打开中"（stat 失败的文件本身也在扫描中
+        // 失败进不来，双失效一致，不误删正在写文件）
+        fs.hasInode = false;
+    }
 
     LC_ALOGD("FileWriter: opened file: %s (restored size=%zu)",
              fs.currentFilename.c_str(), fs.currentSize);
@@ -513,8 +526,12 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
 }
 
 // 写路径耗时累计（微秒；供心跳输出平均微秒/条与窗口 max/直方图）
+// R-10 方向 1：计时开关 trackWriteTimings 关闭时直接返回——热路径默认
+// 不调 steady_clock::now()，仅开关打开时才统计（心跳耗时字段才有意义）
 void FileWriter::recordWriteTiming(std::chrono::steady_clock::time_point start)
 {
+    if (!mCfg.trackWriteTimings)
+        return;
     const uint64_t writeUs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - start).count());
@@ -609,6 +626,10 @@ size_t FileWriter::truncateToLastNewline(const std::string& path)
     }
     const off_t size = st.st_size;
     off_t lastNl = -1;
+    // R-10 方向 3：读取完整性标记——pread 失败或短读（n < want）时该块
+    // 内容不完整，无法确认块内/块后是否还有换行，禁止据此把 keep 判 0
+    // 清空整日志（原实现 n<=0 break 后 lastNl 仍 -1 → keep=0 破坏性截断）
+    bool readFailed = false;
     // 分块从文件尾向前找最后一个换行：日志单文件 <=50MB，心跳外低频调用
     // （open/轮转/重启），全文件读一次可接受；不追求 mmap 的复杂度。
     // 从尾向前的第一块内从块尾往前扫，找到的第一个换行即文件最后一个换行
@@ -624,8 +645,14 @@ size_t FileWriter::truncateToLastNewline(const std::string& path)
         off_t start = pos - std::min<off_t>(kChunk, pos);
         size_t want = static_cast<size_t>(pos - start);
         ssize_t n = pread(fd, buf.data(), want, start);
-        if (n <= 0)
+        if (n <= 0 || static_cast<size_t>(n) != want) {
+            // R-10 方向 3：pread 失败（n<=0）或短读（n<want）时块内容不
+            // 完整——若文件实际更大，换行可能在我们没读到的部分，把 keep
+            // 判 0 会清空整日志（存储读错误引发破坏性截断）。标记后停止
+            // 扫描，只截到已确认换行处
+            readFailed = true;
             break;
+        }
         for (ssize_t i = n - 1; i >= 0; i--) {
             if (buf[i] == '\n') {
                 lastNl = start + i;
@@ -636,7 +663,16 @@ size_t FileWriter::truncateToLastNewline(const std::string& path)
             break;
         pos = start;
     }
-    off_t keep = (lastNl >= 0) ? lastNl + 1 : 0;
+    // R-10 方向 3：只截到已确认换行处。读取失败/短读且未确认换行时保持
+    // 原大小（不截断），禁止 keep=0 清空整日志；正常读完整文件确认无换行
+    // （纯半行/空文件）才截为 0（原语义）
+    off_t keep;
+    if (lastNl >= 0)
+        keep = lastNl + 1;
+    else if (readFailed)
+        keep = size;
+    else
+        keep = 0;
     if (keep != size) {
         if (ftruncate(fd, keep) != 0)
             ALOGE("FileWriter: truncateToLastNewline %s to %lld failed: %s",
@@ -663,11 +699,22 @@ void FileWriter::openInvalidStream()
     }
     truncateToLastNewline(mInvalidFilename);
     struct stat st;
-    if (stat(mInvalidFilename.c_str(), &st) == 0)
+    if (stat(mInvalidFilename.c_str(), &st) == 0) {
         mInvalidSize = static_cast<size_t>(st.st_size);
-    else
+        mInvalidSizeDegraded = false;
+        // R-10 方向 4：invalid 流记录 inode（evictOldFiles 以 inode 集合
+        // 判定跳过，替代 f.path == mInvalidFilename 路径比较）
+        mInvalidDev = st.st_dev;
+        mInvalidIno = st.st_ino;
+        mInvalidHasInode = true;
+    } else {
         ALOGE("FileWriter: openInvalidStream: stat %s failed: %s",
               mInvalidFilename.c_str(), strerror(errno));
+        // R-10 方向 3：stat 失败标 degraded（size 失真），写失败恢复禁止
+        // rollback 到失真 0 基准（会清空 invalid_records.log 已有诊断）
+        mInvalidSizeDegraded = true;
+        mInvalidHasInode = false;
+    }
 }
 
 // 刷活跃文件落盘（方向 5）：心跳 30s 同锚调用。遍历全部已打开的事件
@@ -692,7 +739,12 @@ void FileWriter::fsyncActiveFiles()
 // （reopenFailed/retryFailed）与写耗时，调用方须直接返回
 bool FileWriter::writeLineFlush(FileState& fs, const std::string& line)
 {
-    auto tWriteStart = std::chrono::steady_clock::now();
+    // R-10 方向 1：写计时受 trackWriteTimings 开关控制——关闭时不调
+    // steady_clock::now()（热路径每记录两次 steady_clock 固定开销），
+    // recordWriteTiming 内部开关关时直接返回不累计
+    std::chrono::steady_clock::time_point tWriteStart;
+    if (mCfg.trackWriteTimings)
+        tWriteStart = std::chrono::steady_clock::now();
     // 写前记录偏移（fs.currentSize 为上次成功后落盘字节数，即本行写入起点）：
     // 首次 flush 部分落盘后失败时，重试前须先回退到该偏移再重写，否则磁盘
     // 留半行加整行的坏行（app 重开并重写整行只追加不清残留）
@@ -711,10 +763,16 @@ bool FileWriter::writeLineFlush(FileState& fs, const std::string& line)
         fs.stream.close();
         // 方向 2：以回退后真实文件大小校准 currentSize（截断后磁盘实际
         // 字节数 = writeBase，重开后续写/轮转判定不基于失真的内存计数；
-        // 回退失败返回 SIZE_MAX 时保持原计数）
-        const size_t rolled = rollbackFileTo(fs.currentFilename, writeBase);
-        if (rolled != SIZE_MAX)
-            fs.currentSize = rolled;
+        // 回退失败返回 SIZE_MAX 时保持原计数）。
+        // R-10 方向 3：stat 曾失败标 sizeDegraded（currentSize 失真为 0），
+        // rollbackFileTo 到失真 0 基准会 ftruncate 清空整个已有文件——
+        // 跳过回退直接重开（保留既有数据优先于清残留半行），重开成功后
+        // stat 恢复真实大小并清 degraded
+        if (!fs.sizeDegraded) {
+            const size_t rolled = rollbackFileTo(fs.currentFilename, writeBase);
+            if (rolled != SIZE_MAX)
+                fs.currentSize = rolled;
+        }
         fs.stream.open(fs.currentFilename, std::ios::app);
         if (!fs.stream.is_open()) {
             ALOGE("FileWriter: recovery reopen failed for event %u, DROPPING",
@@ -722,6 +780,15 @@ bool FileWriter::writeLineFlush(FileState& fs, const std::string& line)
             mDrops.reopenFailed++;
             recordWriteTiming(tWriteStart);
             return false;
+        }
+        // R-10 方向 3：重开后 stat 恢复真实大小并清 degraded（跳过回退时
+        // currentSize 仍为失真 0；恢复后轮转判定与后续 rollback 基准可靠）
+        if (fs.sizeDegraded) {
+            struct stat st;
+            if (stat(fs.currentFilename.c_str(), &st) == 0) {
+                fs.currentSize = static_cast<size_t>(st.st_size);
+                fs.sizeDegraded = false;
+            }
         }
         fs.stream << line;
         if (fs.stream.bad()) {
@@ -732,10 +799,14 @@ bool FileWriter::writeLineFlush(FileState& fs, const std::string& line)
             // CXX-004 坏行归零延续：重试同样可能部分落盘，须回退到写前
             // 偏移截断残留半行——否则残留与下一条记录粘成非法 JSON
             // （下一条从 currentSize=writeBase 续写，不清残留即粘连）。
-            // 方向 2：同时校准 currentSize 为回退后真实大小
-            const size_t rolledRetry = rollbackFileTo(fs.currentFilename, writeBase);
-            if (rolledRetry != SIZE_MAX)
-                fs.currentSize = rolledRetry;
+            // 方向 2：同时校准 currentSize 为回退后真实大小。
+            // R-10 方向 3：degraded（size 失真）时同样禁止回退到 0 基准，
+            // 保持原计数（磁盘残留由下条 openFile/stat 修复路径兜底）
+            if (!fs.sizeDegraded) {
+                const size_t rolledRetry = rollbackFileTo(fs.currentFilename, writeBase);
+                if (rolledRetry != SIZE_MAX)
+                    fs.currentSize = rolledRetry;
+            }
             recordWriteTiming(tWriteStart);
             return false;
         }
@@ -771,19 +842,27 @@ void FileWriter::writeRecord(const EventSchema& schema,
 
     // 写路径耗时统计（方向 3 + R-09 方向 2）：formatJsonLine 与写盘分开
     // 累计，心跳输出平均微秒/条与窗口 max/直方图，作微优化与尾延迟
-    // 可判定指标（空串丢弃路径也计 format 耗时——格式化已发生）
-    auto tFormatStart = std::chrono::steady_clock::now();
+    // 可判定指标（空串丢弃路径也计 format 耗时——格式化已发生）。
+    // R-10 方向 1：计时受 mCfg.trackWriteTimings 开关控制——热路径每记录
+    // 调用两次 steady_clock::now()（format 计时起点 + 写计时起点）固定开销，
+    // 默认关闭跳过计时统计，需要观测延迟时置 true 打开。
+    std::chrono::steady_clock::time_point tFormatStart;
+    if (mCfg.trackWriteTimings)
+        tFormatStart = std::chrono::steady_clock::now();
     std::string line = formatJsonLine(schema, hdr, fields, fieldsLen);
-    const uint64_t formatUs = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - tFormatStart).count());
-    mTimings.formatCount++;
-    mTimings.formatTotalUs += formatUs;
-    if (formatUs > mTimings.formatMaxUs) mTimings.formatMaxUs = formatUs;
-    if (formatUs > mLatencyWindow.formatMaxUs) mLatencyWindow.formatMaxUs = formatUs;
-    mLatencyWindow.histogram.recordFormat(formatUs);
+    if (mCfg.trackWriteTimings) {
+        const uint64_t formatUs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - tFormatStart).count());
+        mTimings.formatCount++;
+        mTimings.formatTotalUs += formatUs;
+        if (formatUs > mTimings.formatMaxUs) mTimings.formatMaxUs = formatUs;
+        if (formatUs > mLatencyWindow.formatMaxUs) mLatencyWindow.formatMaxUs = formatUs;
+        mLatencyWindow.histogram.recordFormat(formatUs);
+    }
     // R-09 方向 3：event_id 分布累计（含 format 失败——已尝试写该事件，
-    // 分布反映事件源活跃度；DROP 的 event 同样反映打点来源）
+    // 分布反映事件源活跃度；DROP 的 event 同样反映打点来源）。与计时开关
+    // 解耦：分布统计无 steady_clock 调用，恒记录
     mEventDist.record(schema.id);
 
     if (line.empty()) {
@@ -844,13 +923,26 @@ bool FileWriter::endBatch()
                   "rolling back batch to offset %zu", eventId, batchStart);
             it->second.stream.clear();
             it->second.stream.close();
-            // 整批回滚：截断回批次起点（本批该文件全部写入撤销）
-            const size_t rolled = rollbackFileTo(it->second.currentFilename,
-                                                 batchStart);
-            if (rolled != SIZE_MAX)
-                it->second.currentSize = rolled;
+            // 整批回滚：截断回批次起点（本批该文件全部写入撤销）。
+            // R-10 方向 3：sizeDegraded（openFile stat 失败，currentSize/
+            // batchStart 失真为 0）时禁止 rollback 到失真 0 基准——会
+            // ftruncate 清空文件已有内容；跳过回退直接重开，重开后 stat
+            // 恢复真实大小并清 degraded
+            if (!it->second.sizeDegraded) {
+                const size_t rolled = rollbackFileTo(it->second.currentFilename,
+                                                     batchStart);
+                if (rolled != SIZE_MAX)
+                    it->second.currentSize = rolled;
+            }
             // 流重置：回滚后重开（追加模式），下批继续可写
             it->second.stream.open(it->second.currentFilename, std::ios::app);
+            if (it->second.sizeDegraded) {
+                struct stat st;
+                if (stat(it->second.currentFilename.c_str(), &st) == 0) {
+                    it->second.currentSize = static_cast<size_t>(st.st_size);
+                    it->second.sizeDegraded = false;
+                }
+            }
             mDrops.dropBatchFlush++;
             allOk = false;
         }
@@ -863,11 +955,23 @@ bool FileWriter::endBatch()
                   "batch to offset %zu", mInvalidBatchStart);
             mInvalidStream.clear();
             mInvalidStream.close();
-            const size_t rolledInv =
-                rollbackFileTo(mInvalidFilename, mInvalidBatchStart);
-            if (rolledInv != SIZE_MAX)
-                mInvalidSize = rolledInv;
+            // R-10 方向 3：mInvalidSizeDegraded（stat 曾失败，mInvalidSize/
+            // mInvalidBatchStart 失真为 0）时禁止 rollback 到失真 0 基准，
+            // 跳过回退直接重开，重开后 stat 恢复真实大小并清 degraded
+            if (!mInvalidSizeDegraded) {
+                const size_t rolledInv =
+                    rollbackFileTo(mInvalidFilename, mInvalidBatchStart);
+                if (rolledInv != SIZE_MAX)
+                    mInvalidSize = rolledInv;
+            }
             mInvalidStream.open(mInvalidFilename, std::ios::app);
+            if (mInvalidSizeDegraded) {
+                struct stat st;
+                if (stat(mInvalidFilename.c_str(), &st) == 0) {
+                    mInvalidSize = static_cast<size_t>(st.st_size);
+                    mInvalidSizeDegraded = false;
+                }
+            }
             mDrops.dropBatchFlush++;
             allOk = false;
         }
@@ -944,6 +1048,18 @@ void FileWriter::rotateInvalid()
         struct stat st;
         if (stat(mInvalidFilename.c_str(), &st) == 0)
             mInvalidSize = static_cast<size_t>(st.st_size);
+    }
+    // R-10 方向 4：重开/轮转后重新 stat 记录 invalid 流 inode（rename 后
+    // 新文件 inode 变化；evictOldFiles 以 inode 集合判定跳过，须实时同步，
+    // 否则轮转后 invalid_records.log 被误删——unlink 后 fd 写已删 inode
+    // 空间泄漏，CXX-002）
+    struct stat stNow;
+    if (stat(mInvalidFilename.c_str(), &stNow) == 0) {
+        mInvalidDev = stNow.st_dev;
+        mInvalidIno = stNow.st_ino;
+        mInvalidHasInode = true;
+    } else {
+        mInvalidHasInode = false;
     }
 }
 
@@ -1053,16 +1169,30 @@ void FileWriter::writeInvalid(const uint8_t* data, size_t len,
         mInvalidStream.clear();
         mInvalidStream.close();
         // 方向 2：以回退后真实大小校准 mInvalidSize（防内存计数失真导致
-        // 后续轮转阈值判定错误 / 再 rollback 时误截已有诊断）
-        const size_t rolledInv = rollbackFileTo(mInvalidFilename, mInvalidSize);
-        if (rolledInv != SIZE_MAX)
-            mInvalidSize = rolledInv;
+        // 后续轮转阈值判定错误 / 再 rollback 时误截已有诊断）。
+        // R-10 方向 3：mInvalidSizeDegraded（stat 曾失败，mInvalidSize 失真
+        // 为 0）时禁止 rollback 到失真 0 基准——会 ftruncate 清空 invalid
+        // 已有诊断；跳过回退直接重开，重开后 stat 恢复真实大小并清 degraded
+        if (!mInvalidSizeDegraded) {
+            const size_t rolledInv = rollbackFileTo(mInvalidFilename, mInvalidSize);
+            if (rolledInv != SIZE_MAX)
+                mInvalidSize = rolledInv;
+        }
         mInvalidStream.open(mInvalidFilename, std::ios::app);
         if (!mInvalidStream.is_open()) {
             ALOGE("FileWriter: writeInvalid: recovery reopen failed, DROPPING reason=%s",
                   reason.c_str());
             mDrops.invalidWriteFailed++;
             return;
+        }
+        // R-10 方向 3：重开后 stat 恢复真实大小并清 degraded（跳过回退时
+        // mInvalidSize 仍为失真 0；恢复后轮转阈值判定可靠）
+        if (mInvalidSizeDegraded) {
+            struct stat st;
+            if (stat(mInvalidFilename.c_str(), &st) == 0) {
+                mInvalidSize = static_cast<size_t>(st.st_size);
+                mInvalidSizeDegraded = false;
+            }
         }
         mInvalidStream << line;
         if (mInvalidStream.bad()) {
@@ -1071,11 +1201,14 @@ void FileWriter::writeInvalid(const uint8_t* data, size_t len,
             mDrops.invalidWriteFailed++;
             mInvalidStream.clear();
             // 重试同样可能部分落盘：回退到写前偏移截断残留半行（LCV-07）。
-            // 方向 2：同时校准 mInvalidSize 为回退后真实大小
-            const size_t rolledInvRetry =
-                rollbackFileTo(mInvalidFilename, mInvalidSize);
-            if (rolledInvRetry != SIZE_MAX)
-                mInvalidSize = rolledInvRetry;
+            // 方向 2：同时校准 mInvalidSize 为回退后真实大小。
+            // R-10 方向 3：degraded（size 失真）时同样禁止回退到 0 基准
+            if (!mInvalidSizeDegraded) {
+                const size_t rolledInvRetry =
+                    rollbackFileTo(mInvalidFilename, mInvalidSize);
+                if (rolledInvRetry != SIZE_MAX)
+                    mInvalidSize = rolledInvRetry;
+            }
             return;
         }
         ALOGI("FileWriter: writeInvalid: recovered invalid stream");
@@ -1144,14 +1277,25 @@ void FileWriter::checkRotation()
                 truncateToLastNewline(fs.currentFilename);
                 // 追加模式打开旧轮转文件时同样恢复大小（与 openFile 一致）
                 struct stat st;
-                if (stat(fs.currentFilename.c_str(), &st) == 0)
+                if (stat(fs.currentFilename.c_str(), &st) == 0) {
                     fs.currentSize = static_cast<size_t>(st.st_size);
-                else
+                    fs.sizeDegraded = false;
+                    // R-10 方向 4：轮转新开文件更新 inode（同 openFile，
+                    // evictOldFiles 以 inode 集合判定打开中文件）
+                    fs.dev = st.st_dev;
+                    fs.ino = st.st_ino;
+                    fs.hasInode = true;
+                } else {
                     // 方向 5：轮转 stat 失败须可见——静默保持 0 会让该文件
                     // 轮转约束失效（可超限近一倍且无信号，与 openFile 同语义）
+                    // R-10 方向 3：stat 失败标 degraded（size 失真），写失败
+                    // 恢复禁止 rollback 到失真 0 基准（会清空整日志）
                     ALOGE("FileWriter: checkRotation: stat %s failed: %s "
                           "(rotation constraint degraded)",
                           fs.currentFilename.c_str(), strerror(errno));
+                    fs.sizeDegraded = true;
+                    fs.hasInode = false;
+                }
             }
         }
     }
@@ -1199,9 +1343,13 @@ std::vector<FileWriter::LogFile> FileWriter::scanLogFiles()
 
             std::string fullPath = dirPath + "/" + name;
             struct stat st;
+            // R-10 方向 4：stat 同时采集 inode（st_dev/st_ino），供
+            // evictOldFiles 以 inode 集合判定打开中文件（替代路径字符串
+            // 相等比较，消两侧拼法漂移误删打开文件）
             if (stat(fullPath.c_str(), &st) == 0)
                 files.push_back({fullPath, st.st_mtime,
-                                 static_cast<std::int64_t>(st.st_size)});
+                                 static_cast<std::int64_t>(st.st_size),
+                                 st.st_dev, st.st_ino});
         }
         closedir(sub);
     };
@@ -1233,25 +1381,36 @@ void FileWriter::evictOldFiles(std::vector<LogFile>& files)
 
     // 从最旧文件开始删除，直到总大小 <= maxBytes
     // 跳过当前正在写入的文件，避免删除后 writeRecord 写入失败
-    // NOTE（方向 2 脆弱点）："是否打开"的判定基于字符串路径相等比较
-    // （fs.currentFilename == f.path / f.path == mInvalidFilename）。
-    // 路径两侧拼法不同源：openFile 拼 mCfg.logDir + "/" + name，而
-    // scanLogFiles 拼 dirPath + "/" + name（uploaded 子目录为
-    // mCfg.logDir + "/uploaded" + "/" + name）。任一侧格式漂移（尾斜杠/
-    // 符号链接/相对路径/大小写）即比较失败，打开中的文件可能被误删——
-    // 当前一致性靠两侧同用 mCfg.logDir 前缀拼装保证，改动任一侧须同步。
+    // NOTE（R-10 方向 4 修订）："是否打开"的判定改用 inode 集合
+    // （st_dev + st_ino）比较，替代原路径字符串相等比较（fs.currentFilename
+    // == f.path / f.path == mInvalidFilename）。路径两侧拼法不同源：
+    // openFile 拼 mCfg.logDir + "/" + name，而 scanLogFiles 拼
+    // dirPath + "/" + name（uploaded 子目录为 mCfg.logDir + "/uploaded" +
+    // "/" + name）。任一侧格式漂移（尾斜杠/符号链接/相对路径/大小写）即
+    // 比较失败，打开中的文件可能被误删——inode 是文件身份的真值，与路径
+    // 拼法无关，两侧 stat 得同一 (dev,ino) 必然命中；符号链接/rename 后
+    // inode 变化属文件身份变化，语义正确。f.dev/f.ino 由 scanLogFiles 的
+    // stat 填充；打开文件 dev/ino 由 openFile/checkRotation/openInvalidStream
+    // 记录；任何一侧 stat 失败（hasInode=false）退化为不视为打开中——
+    // 两侧 stat 同时失败（文件不存在）时文件本身也不在淘汰扫描结果里，
+    // 不会出现"打开中文件 stat 失败被删"（打开中文件 stat 必成功）
     for (const auto& f : files) {
         if (totalSize <= maxBytes) break;
         bool isOpen = false;
+        // 事件文件：inode 集合判定（hasInode 双方都有效才比较）
         for (const auto& [id, fs] : mFiles) {
-            if (fs.currentFilename == f.path) {
+            if (fs.hasInode && f.ino != 0 &&
+                fs.dev == f.dev && fs.ino == f.ino) {
                 isOpen = true;
                 break;
             }
         }
         // invalid_records.log 正被 mInvalidStream 持有：unlink 后 fd 会继续写
-        // 已删除 inode，空间泄漏直至进程退出（CXX-002 资源生命周期）
-        if (f.path == mInvalidFilename)
+        // 已删除 inode，空间泄漏直至进程退出（CXX-002 资源生命周期）。
+        // R-10 方向 4：改用 invalid 流 inode 集合判定（替代 f.path ==
+        // mInvalidFilename 路径比较）
+        if (mInvalidHasInode && f.ino != 0 &&
+            mInvalidDev == f.dev && mInvalidIno == f.ino)
             isOpen = true;
         if (isOpen) {
             // 方向 2：跳过打开文件加 ratelimited 告警——持续超限时每轮

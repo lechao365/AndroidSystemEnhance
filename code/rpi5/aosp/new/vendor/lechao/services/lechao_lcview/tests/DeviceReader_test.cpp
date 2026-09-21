@@ -124,6 +124,26 @@ TEST_F(EpollDeviceReaderTest, RingSizeIoctlUnsupported_ReturnsZero) {
     EXPECT_EQ(mReader->getRingSizeBytes(), 0u);
 }
 
+// R-10 方向 2：GET_STATS 合并——refreshStats 单次 ioctl 拉取缓存，getter
+// 从缓存分发（心跳消四次 GET_STATS）。pipe 注入不支持 GET_STATS（ioctl
+// 恒失败），此处覆盖"refreshStats 失败 → 缓存无效 → getter 回退单次
+// ioctl 保容错语义"（缓存命中路径依赖真实设备，由板端 verify case 覆盖）
+TEST_F(EpollDeviceReaderTest, RefreshStatsFail_GetterFallsBackToIoctl) {
+    // refreshStats：pipe 不支持 GET_STATS → 清缓存有效位 + ioctlErr+1
+    ASSERT_TRUE(mReader->open());
+    mReader->refreshStats();
+    EXPECT_EQ(mReader->ioctlErr(), 1u);
+    // 缓存无效：getter 回退单次 ioctl（仍失败）→ 返 0 容错 + ioctlErr 累计
+    EXPECT_EQ(mReader->getTotalRecords(), 0u);
+    EXPECT_EQ(mReader->getDropped(), 0u);
+    EXPECT_EQ(mReader->getRingSizeBytes(), 0u);
+    EXPECT_EQ(mReader->getRingUsageBytes(), 0u);
+    EXPECT_EQ(mReader->ioctlErr(), 5u);
+    // 刷新失败后 close 幂等，无异常
+    mReader->close();
+    SUCCEED();
+}
+
 TEST_F(EpollDeviceReaderTest, CloseIdempotent) {
     // close 幂等：显式 close 与析构都可能触发
     ASSERT_TRUE(mReader->open());

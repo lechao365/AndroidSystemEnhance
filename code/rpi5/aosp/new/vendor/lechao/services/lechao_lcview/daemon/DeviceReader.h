@@ -73,6 +73,15 @@ public:
     // ioctlErr（ioctl 失败时心跳水位归 0，由 ioctlErr 区分真 0 与失败）。
     virtual uint32_t getRingUsageBytes() { return 0; }
 
+    // R-10 方向 2：单次 GET_STATS ioctl 拉取全部统计字段并缓存，供
+    // getTotalRecords/getDropped/getRingSizeBytes/getRingUsageBytes 从
+    // 缓存分发——心跳每 30s 四次 GET_STATS（total/dropped/ringSize/
+    // ringUsage）合并为一次 ioctl，消热路径 ioctl 放大。默认空实现
+    // （不强制 mock 覆盖，未 refresh 的 getter 仍回退单次 ioctl）；
+    // 生产 EpollDeviceReader 实现为缓存语义。失败计 ioctlErr 并清缓存
+    // 有效位（getter 回退单次 ioctl 保容错语义）。
+    virtual void refreshStats() {}
+
     // LCV-16/17：诊断计数（心跳可见性，失败返 0 与真实 0 可区分）。
     // 提上抽象接口：emitHeartbeat 经抽象 DeviceReader 注入（main_loop
     // 可测边界）即可读取，不再依赖具体 EpollDeviceReader。
@@ -101,6 +110,7 @@ public:
     uint32_t getDropped() override;
     uint32_t getRingSizeBytes() override;
     uint32_t getRingUsageBytes() override;
+    void refreshStats() override;
     void close() override;
 
     // LCV-16/17：诊断计数（心跳可见性，失败返 0 与真实 0 可区分）
@@ -114,6 +124,17 @@ private:
     // 不可区分的根因修复——心跳输出 ioctl_err/eof 字段供判红）
     uint64_t mIoctlErr = 0;
     uint64_t mEofCount = 0;
+    // R-10 方向 2：GET_STATS 缓存（refreshStats 单次 ioctl 拉取后，
+    // getTotalRecords/getDropped/getRingSizeBytes/getRingUsageBytes
+    // 从缓存分发）。mStatsValid 标记缓存有效：false 时 getter 回退单次
+    // ioctl（未 refresh / refresh 失败均保容错语义），true 时全走缓存
+    // 不再发 ioctl。逐字段标量缓存（不入 struct lcview_stats 类型——
+    // 头文件不依赖 ioctl 镜像头，测试 TU 无 ioctl 依赖）
+    uint32_t mCachedTotal = 0;
+    uint32_t mCachedDropped = 0;
+    uint32_t mCachedRingSize = 0;
+    uint32_t mCachedRingUsage = 0;
+    bool mStatsValid = false;
 };
 
 }  // namespace lcview

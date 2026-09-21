@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstdint>
 #include <ctime>
+#include <sys/types.h>
 
 // 文件写入配置结构体
 // logDir — 日志根目录
@@ -44,6 +45,11 @@ struct FileWriterConfig {
     // 场景可与 retentionScanEveryWrites=0 同用）
     size_t retentionScanMaxIntervalSec = 300;
     size_t maxInvalidFileSizeMb = 10;
+    // R-10 方向 1：写路径计时开关。热路径（writeRecord/writeLineFlush）
+    // 每记录调用两次 steady_clock::now()（format 计时 + write 计时）固定
+    // 开销；默认关闭（false）跳过计时统计，需要观测延迟/心跳 avg/max/
+    // 直方图时置 true 打开（心跳各耗时字段仅在打开时才有意义，关闭恒 0）
+    bool trackWriteTimings = false;
 };
 
 // FileWriter 类：将事件日志写入结构化 JSONL 文件
@@ -222,6 +228,19 @@ private:
         int seq = 0;                  // 当日文件序列号
         size_t currentSize = 0;       // 当前文件已写入字节数
         std::ofstream stream;         // 文件输出流
+        // R-10 方向 3：size 是否失真（degraded）。openFile/checkRotation
+        // 打开时 stat 失败即置 true——currentSize 未从持久层恢复（保持 0）
+        // 属失真值。失真状态下写失败恢复禁止 rollbackFileTo 到该失真
+        // 基准（0 会清空整个已有文件），改为跳过回退直接重开流再恢复
+        // 真实大小。stat 成功后清 false
+        bool sizeDegraded = false;
+        // R-10 方向 4：打开文件的 inode 标识（st_dev + st_ino）。evictOldFiles
+        // 淘汰扫描以 (dev,ino) 集合判定"是否正在打开"，替代原路径字符串相等
+        // 比较（两侧拼法不同源，任一侧格式漂移即误删打开中文件）。打开成功
+        // 且 stat 成功时记录；true 表示 inode 有效
+        dev_t dev = 0;
+        ino_t ino = 0;
+        bool hasInode = false;
     };
     // 写盘 + flush + 失败恢复（拆分自 writeRecord，行为不变）；
     // 返回是否成功写入（失败路径已累计 DROP 计数与写耗时）。
@@ -258,11 +277,15 @@ private:
     // 回滚失败也须可见，进心跳 dropped 求和）
     size_t rollbackFileTo(const std::string& path, size_t offset);
 
-    // 日志目录扫描结果：路径 + mtime + size（enforceRetention 淘汰用）
+    // 日志目录扫描结果：路径 + mtime + size（enforceRetention 淘汰用）。
+    // R-10 方向 4：dev/ino 为文件 inode 标识——evictOldFiles 以 inode 集合
+    // 判定"是否打开中"（替代路径字符串相等比较），stat 成功即填充
     struct LogFile {
         std::string path;
         time_t mtime;
         std::int64_t size;
+        dev_t dev = 0;
+        ino_t ino = 0;
     };
     // 扫描日志目录，收集全部 .jsonl/.log 文件（拆分自
     // enforceRetention 的扫描段，行为不变）
@@ -282,6 +305,17 @@ private:
     // invalid 当前文件已写入字节数（CXX-002：构造时 stat 从持久层恢复，
     // 写成功累计，轮转归零——供轮转阈值判定与失败恢复 rollback 基准）
     size_t mInvalidSize = 0;
+    // R-10 方向 3：invalid 流 size 是否失真（degraded）。openInvalidStream
+    // stat 失败即置 true——mInvalidSize 未恢复（保持 0）属失真值，写失败
+    // 恢复禁止 rollbackFileTo 到失真 0 基准（会清空 invalid_records.log
+    // 已有诊断），跳过回退直接重开。stat 成功后清 false
+    bool mInvalidSizeDegraded = false;
+    // R-10 方向 4：invalid 流的 inode 标识（st_dev + st_ino），evictOldFiles
+    // 以 inode 集合判定跳过（替代 f.path == mInvalidFilename 路径比较）；
+    // true 表示 inode 有效
+    dev_t mInvalidDev = 0;
+    ino_t mInvalidIno = 0;
+    bool mInvalidHasInode = false;
     // DROP 分类累计计数（10 条 DROP 路径，进 daemon 心跳）。
     // 方向 4：DROP 计数点收敛到 writeRecord 的 formatEmpty；formatOob
     // 保留供心跳格式兼容，当前无自增路径（同一次丢弃只计 1 次不虚高）
