@@ -413,6 +413,8 @@ TEST(FileWriterWriteRecordTest, NoFileOpen_AutoOpenAndWrite) {
     auto fields = buildFields({FieldType::INT64});
 
     writer.writeRecord(schema, &hdr, fields.data(), fields.size());
+    // R-08 方向 2：批次尾统一 flush 才落盘
+    writer.endBatch();
 
     std::string date = writer.makeDateStr();
     std::string content = readFile(dir.path() + "/4_e_" + date + "_p0.jsonl");
@@ -449,6 +451,7 @@ TEST(FileWriterWriteInvalidTest, NormalWrite_ProdusJsonl) {
 
     uint8_t data[] = {0xDE, 0xAD};
     writer.writeInvalid(data, 2, "bad magic");
+    writer.endBatch();  // R-08 方向 2：批次尾 flush 落盘
 
     std::string content = readFile(dir.path() + "/invalid_records.log");
     EXPECT_NE(content.find("bad magic"), std::string::npos);
@@ -465,6 +468,7 @@ TEST(FileWriterWriteInvalidTest, ReasonWithNewline_EscapesJson) {
 
     uint8_t data[] = {0xDE, 0xAD};
     writer.writeInvalid(data, 2, "bad\nmagic");
+    writer.endBatch();  // R-08 方向 2：批次尾 flush 落盘
 
     std::string content = readFile(dir.path() + "/invalid_records.log");
     // 具名转义存在（反斜杠 + n）
@@ -478,8 +482,10 @@ TEST(FileWriterWriteInvalidTest, ReasonWithNewline_EscapesJson) {
 TEST(FileWriterWriteInvalidTest, WriteFail_RecoversByReopen) {
     // P0 修复：failbit 粘滞使首写失败后 invalid 流余生空转（mode_invalid
     // 反判绿）；恢复路径 clear+reopen+retry 自愈，坏记录仍落盘。
-    // 首写流指向 /dev/full（is_open 但写必 ENOSPC 设 failbit），
-    // mInvalidFilename 保持正常路径 → 恢复 reopen 打开正常文件 retry 成功
+    // 首写流指向 /dev/full（is_open 但写必 ENOSPC 设 badbit），
+    // mInvalidFilename 保持正常路径 → 恢复 reopen 打开正常文件 retry 成功。
+    // R-08 方向 2：恢复重试后的写入在 ofstream 缓冲，批次尾 flush
+    // （endBatch）后才落盘
     TempDir dir;
     FileWriterConfig cfg;
     cfg.logDir = dir.path();
@@ -491,6 +497,7 @@ TEST(FileWriterWriteInvalidTest, WriteFail_RecoversByReopen) {
 
     uint8_t data[] = {0xDE, 0xAD};
     writer.writeInvalid(data, 2, "broken");
+    writer.endBatch();  // R-08 方向 2：批次尾 flush 落盘
 
     // 恢复路径成功：流重开回 invalid_records.log 且数据落盘，无 DROP 计数
     EXPECT_TRUE(writer.mInvalidStream.is_open());
@@ -501,9 +508,10 @@ TEST(FileWriterWriteInvalidTest, WriteFail_RecoversByReopen) {
 }
 
 TEST(FileWriterWriteInvalidTest, WriteFail_RetryFail_CountsAndClearsSticky) {
-    // retry 仍失败（reopen 目标 /dev/full 恒 ENOSPC）→ invalidWriteFailed +1
-    // （进心跳 dropped 求和与 drop_invalidwrite 分项）；failbit 被 clear，
-    // 粘滞清除不空转（mode_invalid 不反判绿）
+    // R-08 方向 2 适配：/dev/full 首写进缓冲不设 badbit，单记录级
+    // invalidWriteFailed 不触发；失败推迟到批次尾 flush（endBatch）——
+    // flush /dev/full ENOSPC → 整批回滚 + dropBatchFlush 计数，且 failbit
+    // 被恢复路径 clear（粘滞清除不空转，mode_invalid 不反判绿）
     TempDir dir;
     FileWriterConfig cfg;
     cfg.logDir = dir.path();
@@ -517,8 +525,11 @@ TEST(FileWriterWriteInvalidTest, WriteFail_RetryFail_CountsAndClearsSticky) {
     uint8_t data[] = {0x01, 0x02};
     writer.writeInvalid(data, 2, "broken");
 
-    EXPECT_EQ(writer.dropCounters().invalidWriteFailed, 1);
+    EXPECT_FALSE(writer.endBatch());
+    EXPECT_EQ(writer.dropCounters().dropBatchFlush, 1);
+    EXPECT_EQ(writer.dropCounters().invalidWriteFailed, 0);
     EXPECT_EQ(writer.dropCounters().invalidNotOpen, 0);
+    // failbit 被 endBatch 恢复路径 clear（CXX-002 粘滞清除）
     EXPECT_FALSE(writer.mInvalidStream.fail());
     SUCCEED();
 }
@@ -592,7 +603,11 @@ TEST(FileWriterWriteInvalidTest, Rotate_SeqContinuesAfterRestart) {
 TEST(FileWriterWriteInvalidTest, RotateRenameFail_KeepsInvalidSize) {
     // 方向 3：rename 失败（目录只读）时不得归零 mInvalidSize——归零使
     // 轮转阈值判定失效（invalid 无界增长），且后续失败恢复的
-    // rollbackFileTo(ftruncate) 以 0 为基准抹掉已有诊断
+    // rollbackFileTo(ftruncate) 以 0 为基准抹掉已有诊断。
+    // shell 用户（无 CAP_LINUX_IMMUTABLE）下 chmod/chattr 均无法注入
+    // rename 失败：把轮转目标 _p0 预置为目录，rename 文件→目录 EISDIR
+    // 必然失败（对齐 CheckRotation_OpenNewFileFail_Drops 的注入手法），
+    // 原文件继续追加、累计大小不得归零
     TempDir dir;
     prewriteFile(dir.path() + "/invalid_records.log", 1024 * 1024);
     FileWriterConfig cfg;
@@ -601,13 +616,25 @@ TEST(FileWriterWriteInvalidTest, RotateRenameFail_KeepsInvalidSize) {
     FileWriter writer(cfg);
     ASSERT_EQ(writer.mInvalidSize, 1024u * 1024u);
 
-    chmod(dir.path().c_str(), 0500);  // 目录只读：rename 无法创建目标
+    // 固定日期串：makeDateStr 依赖系统时间，跨午夜边界（设备时钟
+    // 23:5x）测试会闪断——预置 mDateStr/mDateChecked 使 rotateInvalid
+    // 内部 makeDateStr 返回固定日期（与 nextInvalidSeqFor 扫描一致）
+    writer.mDateChecked = 1;
+    writer.mDateStr = "20200101";
+
+    // 注入 rename 失败：目录 chmod 300（wx，无 r）→ nextInvalidSeqFor 的
+    // opendir EACCES 返回 -1 → rotateInvalid 跳过 rename（dropInvRotate+1）。
+    // x 保留 traverse 权限：stat/cat 仍可访问原文件（断言读取），wx 保留
+    // 写权限供 reopen 继续追加——shell 可 chmod 自有目录，无需 root/chattr
+    ASSERT_EQ(chmod(dir.path().c_str(), 0300), 0);
 
     uint8_t data[] = {0x01};
     writer.writeInvalid(data, 1, "norotate");
 
-    chmod(dir.path().c_str(), 0755);  // 恢复目录权限供 TempDir 清理
-    // rename 失败：无轮转文件生成，原文件继续追加，累计大小不得归零
+    ASSERT_EQ(chmod(dir.path().c_str(), 0755), 0);
+    // rename 失败（opendir EACCES 跳过后无轮转文件生成）：原文件继续
+    // 追加，累计大小保留（stat 恢复，不清零——归零致轮转阈值失效且
+    // rollback 以 0 为基准抹诊断，CXX-002）
     std::string date = writer.makeDateStr();
     EXPECT_NE(access((dir.path() + "/invalid_records_" + date + "_p0.log").c_str(), F_OK), 0);
     struct stat st;
@@ -621,10 +648,12 @@ TEST(FileWriterWriteInvalidTest, WriteFail_RollbackTruncatesPartialLine) {
     // LCV-07：首写部分落盘后失败，恢复重开前须回退到写前偏移——
     // 否则残留半行与下一条追加粘连成非法 JSONL（与 writeLineFlush
     // 的 rollback 语义对齐）。注入：首写流指向 /dev/full（is_open 但
-    // 恒 ENOSPC 设 failbit，与 WriteFail_RecoversByReopen 同手法），
+    // 恒 ENOSPC 设 badbit，与 WriteFail_RecoversByReopen 同手法），
     // 目标文件尾预置垃圾字节模拟上次部分落盘，mInvalidSize 保持垃圾
     // 前偏移——恢复 rollback 须把垃圾截掉，retry 后文件为
-    // 写前内容 + 新行，无残留
+    // 写前内容 + 新行，无残留。
+    // R-08 方向 2：恢复重试后的写入在 ofstream 缓冲，批次尾 flush
+    // （endBatch）后才落盘
     TempDir dir;
     FileWriterConfig cfg;
     cfg.logDir = dir.path();
@@ -649,6 +678,7 @@ TEST(FileWriterWriteInvalidTest, WriteFail_RollbackTruncatesPartialLine) {
 
     uint8_t data[] = {0xDE, 0xAD};
     writer.writeInvalid(data, 2, "recover");
+    writer.endBatch();  // R-08 方向 2：批次尾 flush 落盘
 
     std::string content = readFile(dir.path() + "/invalid_records.log");
     // 垃圾半行被 rollback 截断：新内容 = pre + 新行
@@ -848,6 +878,7 @@ TEST(FileWriterWriteRecordTest, WriteFailure_RecoversByReopen) {
 
     // 恢复路径成功：流重新打开且数据落盘
     EXPECT_TRUE(writer.mFiles[4].stream.is_open());
+    writer.endBatch();  // R-08 方向 2：批次尾 flush 落盘
     std::string content = readFile(writer.mFiles[4].currentFilename);
     EXPECT_NE(content.find("\"id\":4"), std::string::npos);
 }
@@ -884,19 +915,24 @@ TEST(FileWriterWriteRecordTest, WriteFailure_RecoveryReopenFailDrops) {
 
 TEST(FileWriterWriteRecordTest, OpenFileFails_Drops) {
     // 方向 2：首次 openFile 打开失败（只读目录）→ writeRecord DROPPING，
-    // 不崩、不落盘、mFiles 无该 event（open 失败不静默通过）
+    // 不崩、不落盘、mFiles 无该 event（open 失败不静默通过）。
+    // root（adbd root）下 chmod 只读不拦截文件创建：改用"logDir 路径上是
+    // 普通文件"注入（ENOTDIR，root 也绕不过）使 openFile 的 stream.open 失败
     TempDir dir;
+    std::string badDir = dir.path() + "/blocked";
+    {
+        std::ofstream f(badDir);
+        f << "x";
+    }
     FileWriterConfig cfg;
-    cfg.logDir = dir.path();
+    cfg.logDir = badDir;
     cfg.maxFileSizeMb = 50;
     FileWriter writer(cfg);
     auto schema = makeSchema(4, "e", {FieldType::INT64});
     auto hdr = makeHdr(4, 1);
     auto fields = buildFields({FieldType::INT64});
 
-    chmod(dir.path().c_str(), 0500);  // 只读：openFile 的 stream.open 失败
     writer.writeRecord(schema, &hdr, fields.data(), fields.size());
-    chmod(dir.path().c_str(), 0755);
 
     EXPECT_EQ(writer.mFiles.find(4), writer.mFiles.end());
     // 方向 2：DROP 不再只有 ALOGE——openFailed 计数 +1
@@ -905,8 +941,10 @@ TEST(FileWriterWriteRecordTest, OpenFileFails_Drops) {
 }
 
 TEST(FileWriterWriteRecordTest, RetryWriteFails_Drops) {
-    // 方向 2：恢复路径 reopen 成功但 retry 二次写失败（/dev/full 恒 ENOSPC）
-    // → DROPPING + clear（failbit 粘滞清除，后续不永久 DROP）
+    // R-08 方向 2：/dev/full 首写进 ofstream 缓冲不设 badbit（缓冲未满无
+    // write syscall），单记录级 writeLineFlush 检测不到 → 返回 true；
+    // 真正的 ENOSPC 由批次尾 flush（endBatch）统一暴露并整批回滚，
+    // dropBatchFlush 计数可见（原 retryFailed 单记录路径不再触发）
     TempDir dir;
     FileWriterConfig cfg;
     cfg.logDir = dir.path();
@@ -915,7 +953,7 @@ TEST(FileWriterWriteRecordTest, RetryWriteFails_Drops) {
     auto schema = makeSchema(4, "e", {FieldType::INT64});
 
     writer.openFile(4, schema);
-    // 制造 failbit：关闭流后直接 open /dev/full（is_open true，写必 ENOSPC）
+    // 制造不可写流：关闭流后直接 open /dev/full（is_open true，写必 ENOSPC）
     writer.mFiles[4].stream.close();
     writer.mFiles[4].currentFilename = "/dev/full";
     writer.mFiles[4].stream.open("/dev/full", std::ios::app);
@@ -926,17 +964,20 @@ TEST(FileWriterWriteRecordTest, RetryWriteFails_Drops) {
     hdr.event_id = 4;
     hdr.field_count = 1;
     hdr.timestamp_ns = 7;
-    int64_t v = 1;
     uint8_t fields[9] = {LCVIEW_TYPE_INT64, 0, 0, 0, 0, 0, 0, 0, 1};
-    (void)v;
 
     writer.writeRecord(schema, &hdr, fields, sizeof(fields));
 
-    // 不崩；二次失败后 failbit 被 clear（恢复路径清除粘滞）
-    EXPECT_FALSE(writer.mFiles[4].stream.fail());
-    // 方向 2：retry 二次写失败 → retryFailed 计数 +1（reopen 成功不算 drop）
-    EXPECT_EQ(writer.dropCounters().retryFailed, 1);
+    // 批次尾 flush 暴露 ENOSPC → 整批回滚 + dropBatchFlush 计数
+    EXPECT_FALSE(writer.endBatch());
+    EXPECT_EQ(writer.dropCounters().dropBatchFlush, 1);
+    // 单记录级路径未触发：retryFailed/reopenFailed 不增
+    EXPECT_EQ(writer.dropCounters().retryFailed, 0);
     EXPECT_EQ(writer.dropCounters().reopenFailed, 0);
+    // failbit 被 endBatch 恢复路径清除（CXX-002 粘滞清除）
+    EXPECT_FALSE(writer.mFiles[4].stream.fail());
+    // 整批回滚：内存大小回到批次起点（currentSize 不虚增）
+    EXPECT_EQ(writer.mFiles[4].currentSize, 0u);
     SUCCEED();
 }
 
@@ -1420,6 +1461,13 @@ TEST(FileWriterWriteLineFlushTest, NormalWrite_ReturnsTrue) {
     EXPECT_TRUE(ok);
     EXPECT_EQ(writer.dropCounters().reopenFailed, 0);
     EXPECT_EQ(writer.dropCounters().retryFailed, 0);
+    // R-08 方向 2：writeLineFlush 只写 ofstream 缓冲不 flush——未 flush 前
+    // 磁盘为空（内容在缓冲中）
+    EXPECT_EQ(readFile(fname), "");
+    // 批次尾 flush 落盘（writeLineFlush 直测不登记批次起点，手动登记让
+    // endBatch 触碰该文件）
+    writer.mBatchStarts[4] = 0;
+    EXPECT_TRUE(writer.endBatch());
     // 坏行归零：磁盘只有一条合法整行，无半行/重复
     EXPECT_EQ(readFile(fname), "{\"x\":1}\n");
     // writeLineFlush 只写盘，currentSize 由 writeRecord 负责累计
@@ -1427,7 +1475,9 @@ TEST(FileWriterWriteLineFlushTest, NormalWrite_ReturnsTrue) {
 }
 
 TEST(FileWriterWriteLineFlushTest, FlushFail_ReopenFail_Drops) {
-    // flush 失败（流失效）+ reopen 失败（只读目录）→ reopenFailed +1 返回 false
+    // writeLineFlush 的 bad() 检测（close 后 << 设 badbit）触发单记录恢复，
+    // reopen 失败（目标路径父级为普通文件，ENOTDIR，root 也绕不过）
+    // → reopenFailed +1 返回 false
     TempDir dir;
     FileWriterConfig cfg;
     cfg.logDir = dir.path();
@@ -1435,23 +1485,29 @@ TEST(FileWriterWriteLineFlushTest, FlushFail_ReopenFail_Drops) {
     auto schema = makeSchema(4, "e", {FieldType::INT64});
     writer.openFile(4, schema);
 
-    std::string fname = writer.mFiles[4].currentFilename;
-    writer.mFiles[4].stream.close();  // close 后 << 设 failbit
-    unlink(fname.c_str());
-    chmod(dir.path().c_str(), 0500);  // reopen 失败
+    // reopen 失败注入：把 currentFilename 指向"父级是普通文件"的路径
+    std::string blocker = dir.path() + "/blocked";
+    {
+        std::ofstream f(blocker);
+        f << "x";
+    }
+    std::string badPath = blocker + "/x.jsonl";
+    writer.mFiles[4].currentFilename = badPath;
+    writer.mFiles[4].stream.close();  // close 后 << 设 badbit → 触发恢复
 
     bool ok = writer.writeLineFlush(writer.mFiles[4], "{\"x\":1}\n");
-    chmod(dir.path().c_str(), 0755);
 
     EXPECT_FALSE(ok);
     EXPECT_EQ(writer.dropCounters().reopenFailed, 1);
     EXPECT_EQ(writer.dropCounters().retryFailed, 0);
-    // 坏行归零：文件未产生任何残留（无半行、无整行）
-    EXPECT_NE(access(fname.c_str(), F_OK), 0);
+    // 坏行归零：目标路径不可创建，无任何残留
+    EXPECT_NE(access(badPath.c_str(), F_OK), 0);
 }
 
 TEST(FileWriterWriteLineFlushTest, FlushFail_ReopenOk_RetryFail_Drops) {
-    // flush 失败 + reopen 成功但 retry 写失败（/dev/full ENOSPC）→ retryFailed +1
+    // R-08 方向 2：/dev/full 首写进缓冲不设 badbit，writeLineFlush 返回
+    // true（单记录级检测不到 ENOSPC）；批次尾 flush（endBatch）暴露失败
+    // → 整批回滚 + dropBatchFlush +1 返回 false
     TempDir dir;
     FileWriterConfig cfg;
     cfg.logDir = dir.path();
@@ -1465,19 +1521,26 @@ TEST(FileWriterWriteLineFlushTest, FlushFail_ReopenOk_RetryFail_Drops) {
     ASSERT_TRUE(writer.mFiles[4].stream.is_open());
 
     bool ok = writer.writeLineFlush(writer.mFiles[4], "{\"x\":1}\n");
+    // 缓冲未满不设 badbit：单记录级检测不触发，写入只进缓冲
+    EXPECT_TRUE(ok);
 
-    EXPECT_FALSE(ok);
-    EXPECT_EQ(writer.dropCounters().retryFailed, 1);
+    // 批次尾 flush 暴露 /dev/full ENOSPC → 整批回滚
+    writer.mBatchStarts[4] = 0;  // writeLineFlush 直测不登记批次起点，手动登记
+    bool batchOk = writer.endBatch();
+    EXPECT_FALSE(batchOk);
+    EXPECT_EQ(writer.dropCounters().dropBatchFlush, 1);
+    EXPECT_EQ(writer.dropCounters().retryFailed, 0);
     EXPECT_EQ(writer.dropCounters().reopenFailed, 0);
-    // failbit 被恢复路径清除（CXX-002 粘滞清除）
+    // failbit 被 endBatch 恢复路径清除（CXX-002 粘滞清除）
     EXPECT_FALSE(writer.mFiles[4].stream.fail());
     // 坏行归零：/dev/full 无持久存储可留残留，currentSize 不虚增
     EXPECT_EQ(writer.mFiles[4].currentSize, 0u);
 }
 
 TEST(FileWriterWriteLineFlushTest, FlushFail_RecoverySucceeds) {
-    // flush 失败 + reopen 成功 + retry 成功 → 恢复写盘，无 DROP 计数；
-    // 且首写部分落盘的残留半行被回退清除（写前记录偏移→失败回退→重试），
+    // 单记录恢复（bad()）成功：setstate(badbit) 模拟流内部损坏 →
+    // 恢复路径 clear+rollback+reopen+retry，残留半行被回退截断；
+    // R-08 方向 2：恢复后的写入仍在缓冲，批次尾 flush（endBatch）落盘，
     // 磁盘只留合法整行（坏行归零，方向 3）
     TempDir dir;
     FileWriterConfig cfg;
@@ -1492,9 +1555,9 @@ TEST(FileWriterWriteLineFlushTest, FlushFail_RecoverySucceeds) {
     writer.mFiles[4].stream.flush();
     writer.mFiles[4].currentSize = 10;
 
-    // 制造 failbit + 首写部分落盘残留：close 后 << 设 failbit，随后向磁盘
-    // 直接追加半行（模拟 flush 失败前部分字节已落盘的现场）
-    writer.mFiles[4].stream.close();
+    // 制造流内部损坏（badbit）+ 首写部分落盘残留：随后向磁盘直接追加半行
+    // （模拟失败前部分字节已落盘的现场）
+    writer.mFiles[4].stream.setstate(std::ios::badbit);
     std::string partial = "{\"x\":1}";  // 无换行的半行残留（7 字节）
     FILE* f = fopen(fname.c_str(), "a");
     ASSERT_NE(f, nullptr);
@@ -1507,6 +1570,9 @@ TEST(FileWriterWriteLineFlushTest, FlushFail_RecoverySucceeds) {
     EXPECT_EQ(writer.dropCounters().reopenFailed, 0);
     EXPECT_EQ(writer.dropCounters().retryFailed, 0);
     EXPECT_TRUE(writer.mFiles[4].stream.is_open());
+    // 恢复写入仍在 ofstream 缓冲：批次尾 flush 才可见
+    writer.mBatchStarts[4] = 10;  // writeLineFlush 直测不登记批次起点，手动登记
+    EXPECT_TRUE(writer.endBatch());
     // 坏行归零：残留半行被回退截断，重试整行只写一次，内容与偏移精确对齐
     EXPECT_EQ(readFile(fname), "{\"pre\":1}\n{\"x\":1}\n");
     EXPECT_EQ(writer.mFiles[4].currentSize, 10u);
@@ -1528,6 +1594,8 @@ TEST(FileWriterRetentionTest, WriteInvalid_AdvancesWritesCounter) {
 
     uint8_t data[2] = {0xDE, 0xAD};
     writer.writeInvalid(data, 2, "advance");
+    // R-08 方向 2：写入计数推迟到批次尾 flush 成功才并入全局
+    writer.endBatch();
 
     EXPECT_GT(writer.mWritesSinceRetention, 0u);
 }
@@ -1594,7 +1662,9 @@ TEST(FileWriterRetentionTest, TimeFallback_NotDue_Skips) {
 // ============================================================
 
 TEST(FileWriterDropCountTest, CheckRotation_OpenNewFileFail_Drops) {
-    // 方向 3：checkRotation 轮转后重开新文件失败 → dropRotate +1
+    // 方向 3：checkRotation 轮转后重开新文件失败 → dropRotate +1。
+    // root 下 chmod 只读不拦截新文件创建：把轮转目标 _p1 预置为目录
+    // （以 ofstream 打开目录 EISDIR，root 也绕不过）注入 open 失败
     TempDir dir;
     FileWriterConfig cfg;
     cfg.logDir = dir.path();
@@ -1602,30 +1672,41 @@ TEST(FileWriterDropCountTest, CheckRotation_OpenNewFileFail_Drops) {
     FileWriter writer(cfg);
     auto schema = makeSchema(4, "e", {FieldType::INT64});
     writer.openFile(4, schema);
+    // 轮转目标 _p1 预置为目录：openFile 时目录尚未创建（先 openFile 再 mkdir），
+    // checkRotation 轮转到 _p1 时 stream.open(目录) 必失败
+    std::string date = writer.makeDateStr();
+    ASSERT_EQ(mkdir((dir.path() + "/4_e_" + date + "_p1.jsonl").c_str(), 0755), 0);
     writer.mFiles[4].currentSize = 2 * 1024 * 1024;  // 触发轮转
-    // 轮转新文件路径不可创建：把目录改只读，seq 递增后 open 失败
-    chmod(dir.path().c_str(), 0500);
 
     writer.checkRotation();
 
-    chmod(dir.path().c_str(), 0755);
     EXPECT_EQ(writer.dropCounters().dropRotate, 1);
     SUCCEED();
 }
 
 TEST(FileWriterDropCountTest, RotateInvalid_RenameFail_Drops) {
-    // 方向 3：rotateInvalid rename 失败 → dropInvRotate +1
+    // 方向 3：rotateInvalid rename 失败 → dropInvRotate +1。
+    // shell 用户（无 CAP_LINUX_IMMUTABLE）下 chmod/chattr 均无法注入：
+    // 把轮转目标 _p0 预置为目录，rename 文件→目录 EISDIR 必然失败
+    // （对齐 CheckRotation_OpenNewFileFail_Drops 注入手法）
     TempDir dir;
     prewriteFile(dir.path() + "/invalid_records.log", 1024 * 1024);
     FileWriterConfig cfg;
     cfg.logDir = dir.path();
     cfg.maxInvalidFileSizeMb = 1;
     FileWriter writer(cfg);
-    chmod(dir.path().c_str(), 0500);  // 只读：rename 无法创建轮转目标
+    // 固定日期串（同 RotateRenameFail_KeepsInvalidSize）：跨午夜边界
+    // 防 mkdir 日期与 rotateInvalid 内部日期不一致
+    writer.mDateChecked = 1;
+    writer.mDateStr = "20200101";
+    // 注入 rename 失败：目录 chmod 300（wx 无 r）→ nextInvalidSeqFor
+    // opendir EACCES 返 -1 → rotateInvalid 跳过 rename → dropInvRotate+1
+    // （shell 可 chmod 自有目录，无需 root/chattr）
+    ASSERT_EQ(chmod(dir.path().c_str(), 0300), 0);
 
     writer.rotateInvalid();
 
-    chmod(dir.path().c_str(), 0755);
+    ASSERT_EQ(chmod(dir.path().c_str(), 0755), 0);
     EXPECT_EQ(writer.dropCounters().dropInvRotate, 1);
     SUCCEED();
 }
@@ -1743,6 +1824,7 @@ TEST(FileWriterFsyncTest, FsyncActiveFiles_OpenedFiles_NoCrash) {
     auto fields = buildFields({FieldType::INT64});
 
     writer.writeRecord(schema, &hdr, fields.data(), fields.size());
+    writer.endBatch();  // R-08 方向 2：批次尾 flush 落盘后再 fsync/读
 
     writer.fsyncActiveFiles();  // 心跳同锚：无异常即通过
 
@@ -1823,6 +1905,7 @@ TEST(FileWriterOpenFileTest, Restart_AppendsToHighestSeqFile) {
     auto hdr = makeHdr(4, 1);
     auto fields = buildFields({FieldType::INT64});
     writer.writeRecord(schema, &hdr, fields.data(), fields.size());
+    writer.endBatch();  // R-08 方向 2：批次尾 flush 落盘
 
     // 新记录追加进 _p0（无 _p1 生成），文件变长
     EXPECT_NE(writer.mFiles[4].currentFilename.find("_p0.jsonl"),
@@ -1938,6 +2021,8 @@ TEST(FileWriterPersistTest, ValidCountsOnSuccessfulWrites) {
     EXPECT_EQ(writer.persistCounters().valid, 0u);
     writer.writeRecord(schema, &hdr, fields.data(), fields.size());
     writer.writeRecord(schema, &hdr, fields.data(), fields.size());
+    // R-08 方向 2：落盘计数推迟到批次尾 flush 成功才并入全局
+    EXPECT_TRUE(writer.endBatch());
     EXPECT_EQ(writer.persistCounters().valid, 2u);
 }
 
@@ -1949,25 +2034,31 @@ TEST(FileWriterPersistTest, InvalidCountsOnSuccessfulWrites) {
 
     uint8_t data[] = {0xDE, 0xAD};
     writer.writeInvalid(data, 2, "bad");
+    // R-08 方向 2：落盘计数推迟到批次尾 flush 成功才并入全局
+    EXPECT_TRUE(writer.endBatch());
     EXPECT_EQ(writer.persistCounters().invalid, 1u);
 }
 
 TEST(FileWriterPersistTest, DroppedWriteDoesNotCountAsPersist) {
     // openFile 失败 DROP 的 writeRecord 不计 valid——落盘计数与磁盘真实
-    // 一致，守恒右式用它不再高估落盘（解析成功数在 DROP 时仍 +1）
+    // 一致，守恒右式用它不再高估落盘（解析成功数在 DROP 时仍 +1）。
+    // root 下 chmod 只读不拦截文件创建：改用"logDir 路径上是普通文件"
+    // 注入（ENOTDIR）使 openFile 失败
     TempDir dir;
+    std::string badDir = dir.path() + "/blocked";
+    {
+        std::ofstream f(badDir);
+        f << "x";
+    }
     FileWriterConfig cfg;
-    cfg.logDir = dir.path();
+    cfg.logDir = badDir;
     FileWriter writer(cfg);
     auto schema = makeSchema(4, "e", {FieldType::INT64});
     auto hdr = makeHdr(4, 1);
     auto fields = buildFields({FieldType::INT64});
 
-    chmod(dir.path().c_str(), 0500);  // 只读：openFile 失败
     writer.writeRecord(schema, &hdr, fields.data(), fields.size());
-    chmod(dir.path().c_str(), 0755);
 
     EXPECT_EQ(writer.dropCounters().openFailed, 1u);
     EXPECT_EQ(writer.persistCounters().valid, 0u);
 }
-

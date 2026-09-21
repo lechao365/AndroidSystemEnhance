@@ -23,8 +23,11 @@ init_daemon_domain(lechao_lciod_hal)
 # 允许使用 vendor binder —— 与 system 端的 iod 跨 partition 通信
 #   为什么必须：iod（system）和 iod_hal（vendor）在不同进程空间，需跨 hidl/binder 通信
 vndbinder_use(lechao_lciod_hal)
-# （LCD-014①：原 binder_call(lechao_lciod_hal, servicemanager) 已删——
-#   见文件头注释；vndservicemanager 交互由 vndbinder_use 内部覆盖）
+# R-08 方向 1 enforcing 验证修复：HAL 用 NDK AServiceManager_addService 默认
+# call system servicemanager（非 vndservicemanager，设备 enforcing 下 avc denied
+# { call } servicemanager 佐证），S6 清理误删此规则导致 HAL 启动即崩溃重启。
+# 恢复 binder_call 使 HAL 能向 system servicemanager 注册 vendor.lechao.lciod.IIoHal。
+binder_call(lechao_lciod_hal, servicemanager)
 
 # 允许 HAL 打开/读写/控制设备节点 /dev/vendor_lechao_usbd*
 #   chr_file = 字符设备，ioctl = 控制命令（如：配置 IO 引脚、读取数据）
@@ -35,9 +38,22 @@ allow lechao_lciod_hal lechao_lciod_hal_device:chr_file { open read write ioctl 
 #   这样 iod 端才能 find 到这个服务并建立通信
 allow lechao_lciod_hal lechao_lciod_hal_service:service_manager add;
 
-# 允许 HAL 搜索 /dev 目录 —— 内核注册设备节点时，HAL 需要遍历 /dev 查找设备
-#   收敛为仅 search：实际设备访问通过 chr_file 规则，read/open 目录非必需
-allow lechao_lciod_hal device:dir search;
+# 允许 HAL 搜索/读/开 /dev 目录 —— 内核注册设备节点时，HAL 需遍历
+# /dev 查找设备；R-08 方向 1 enforcing 验证修复：仅 search 不足，HAL
+# 启动时 opendir/readdir /dev（NDK binder 初始化遍历 dev 节点）被
+# avc denied { read } 拒绝导致启动崩溃，恢复 { search read open }
+allow lechao_lciod_hal device:dir { search read open };
 
 # 允许 HAL 写入 logd —— vendor 域默认无 logd 权限，不添加则 logcat 看不到 HAL 日志
 allow lechao_lciod_hal logd:unix_dgram_socket write;
+
+# R-08 方向 1：shell 域监控取数特批——devnode 收紧 0600 且 setenforce 1
+# enforcing 后，harness 经 adb root 取数（lciod_probe ioctl GET_STATS、
+# lechao_lciod_hal_test 真实分支 open devnode）运行在 shell 域（adb shell
+# 启动进程默认 shell 域，即使 uid=root 亦受 SELinux 域约束）。此 allow 是
+# enforcing 下"harness 取数路径不断供"的必要条件：只给 shell 域 read/ioctl/
+# getattr（监控读），不给 write（防普通监控侧篡改设备状态）。DAC 层 0600
+# 已挡普通 app；SELinux 层此处仅放行 shell（adb root 监控通道）。
+# 注意：te 业务访问仍只放行 lechao_lciod_hal 域（chr_file open/read/write/
+# ioctl/getattr），本规则仅监控通道特批，不扩普通域权限面。
+allow shell lechao_lciod_hal_device:chr_file { open read ioctl getattr };

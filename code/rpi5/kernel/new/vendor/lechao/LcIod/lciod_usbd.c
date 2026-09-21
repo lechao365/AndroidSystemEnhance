@@ -119,15 +119,18 @@ static void lcview_trace_disconnect(int device_index)
 /*
  * vendor_lechao_usbd_devnode — 自定义设备节点权限
  *
- * 设置 /dev/vendor_lechao_usbdN 节点为 0666 权限（所有用户可读写）。
- * 为什么这样做：因为 USB 设备监控需求通常来自普通用户态进程
- * （非 root），0666 避免了 sudo 或 udev 规则的额外配置。
+ * R-08 方向 1：收紧 /dev/vendor_lechao_usbdN 节点为 0600（仅 owner system
+ * 可读写）。原 0666 所有用户可读写——devnode 暴露 ioctl GET_STATS 等监控
+ * 接口与底层传输状态，任意 app 可读属权限过宽（信息泄露面）。收紧后：
+ *   - DAC 层：仅 system:system（HAL 运行 uid）可读写，普通 app/shell 拒绝
+ *   - SELinux 层：devnode 标 lechao_lciod_hal_device，te 只放行 lechao_lciod_hal
+ *     域 + shell 域（监控取数特批，见 lechao_lciod_hal.te / lechao_lciod.te）
  * 返回 NULL 表示使用内核默认的 devtmpfs 节点名。
  */
 static char *vendor_lechao_usbd_devnode(const struct device *dev, umode_t *mode)
 {
     if (mode)
-        *mode = 0666;
+        *mode = 0600;
     return NULL;
 }
 

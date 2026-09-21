@@ -24,6 +24,11 @@ BatchParseResult vendor::lechao::lcview::parseBatch(
     BatchParseResult result;
     size_t offset = 0;
 
+    // R-08 方向 2：批次级 flush 事务起点——本批所有 writeRecord/writeInvalid
+    // 只写 ofstream 缓冲不 flush，批次尾 endBatch 统一 flush + 失败整批回滚
+    // （消每记录一次 write syscall）
+    writer.beginBatch();
+
     while (offset + 4 <= len) {
         // 读取本条记录的总长度（含自身 4 字节）
         uint32_t total_len;
@@ -41,6 +46,9 @@ BatchParseResult vendor::lechao::lcview::parseBatch(
             ALOGE("lechao_lcview: parse: bad length at offset=%zu, total_len=%u, "
                   "drop %zu bytes to batch tail",
                   offset, total_len, len - offset);
+            // R-08 方向 2：提前出口同样须批次尾统一 flush（坏长度已把剩余
+            // 全部写 invalid，flush 后才落盘）
+            writer.endBatch();
             return result;
         }
 
@@ -95,6 +103,9 @@ BatchParseResult vendor::lechao::lcview::parseBatch(
               len - offset);
         result.invalidCnt++;
     }
+    // R-08 方向 2：批次尾统一 flush（含全部 writeRecord/writeInvalid 缓冲），
+    // 失败整批回滚在 endBatch 内部处理（dropBatchFlush 计数）
+    writer.endBatch();
     return result;
 }
 

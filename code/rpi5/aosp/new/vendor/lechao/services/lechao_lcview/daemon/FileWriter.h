@@ -85,6 +85,7 @@ public:
         uint64_t dropRotate = 0;     // checkRotation 轮转后重开新文件失败（方向 3）
         uint64_t dropInvRotate = 0;  // invalid 轮转失败（rename/reopen 任一失败，方向 3）
         uint64_t dropRollback = 0;   // 写失败恢复回退截断失败（rollbackFileTo，方向 3）
+        uint64_t dropBatchFlush = 0; // R-08 方向 2：批次尾 flush 失败整批回滚（文件级计数）
     };
     // 返回当前累计的 DROP 计数（心跳输出用）
     const DropCounters& dropCounters() const { return mDrops; }
@@ -116,6 +117,25 @@ public:
     };
     const WriteTimings& writeTimings() const { return mTimings; }
 
+    // R-08 方向 2：批次级 flush 事务。
+    // 批次 = parseBatch 一次调用处理的记录集合（flushSegment 攒出的 64KB
+    // 缓冲）。原每记录 flush（每次 write syscall），改批次尾统一 flush——
+    // 消每记录一次 write syscall 的系统调用放大。
+    // 语义：
+    //   beginBatch()：清空批次起点记录（parseBatch 开头调用）；
+    //   writeRecord/writeInvalid 首次触碰某文件时记录该文件"批次起点偏移"
+    //     （写前 currentSize），写入只进 ofstream 缓冲（不 flush）；
+    //   endBatch()：flush 本批触碰的全部事件文件 + invalid 流；任一 flush
+    //     失败即"写失败整批 rollback"——对该文件 rollbackFileTo(批次起点)
+    //     截断回批次起点，本批该文件写入全部撤销（半行/多行残留清零）。
+    //     失败文件计 dropBatchFlush 并返回 false（调用方按批丢弃计数）。
+    //   触碰文件集合经 mBatchStarts（eventId→起点）跟踪；invalid 流单独
+    //   记录 mInvalidBatchStart。
+    void beginBatch();
+    bool endBatch();
+    // 本批次触碰的事件文件数（endBatch flush 判空用，0=空批直接返回）
+    bool hasBatchTouched() const { return !mBatchStarts.empty(); }
+
 private:
     // 根据 event schema、日期和轮转序号生成文件名
     std::string makeFilename(const EventSchema& schema, const std::string& date, int seq);
@@ -144,6 +164,8 @@ private:
     // 返回是否成功写入（失败路径已累计 DROP 计数与写耗时）。
     // 失败恢复前先回退到写前偏移（截断首写可能部分落盘的残留半行），
     // 再重开重写——保证恢复后磁盘只有合法整行（坏行归零）
+    // R-08 方向 2：本函数不再 flush（批次尾统一 flush，见 endBatch），
+    // 只负责把 line 写入 ofstream 缓冲并做单记录级失败恢复。
     bool writeLineFlush(FileState& fs, const std::string& line);
     // 写路径耗时累计（微秒；供心跳输出平均微秒/条）
     void recordWriteTiming(std::chrono::steady_clock::time_point start);
@@ -217,4 +239,23 @@ private:
     // 每累计 kEvictSkipWarnEvery 次跳过才打 1 条 ALOGW，防超限场景
     // 每轮扫描刷屏（成员变量而非 static，避免多实例/测试间串扰）
     unsigned mEvictSkipWarnCount = 0;
+    // R-08 方向 4：缓存日期串（YYYYMMDD）跨天刷新——makeDateStr 原每次
+    // 调用 time()+localtime_r()+strftime()+构造 string（checkRotation 每轮
+    // 主循环调，含空批轮，固定开销）。缓存后仅在跨天时刷新（新日期串
+    // 与缓存不同才重算），消每主循环 time 系统调用。mDateStr 为缓存值，
+    // mDateChecked 标记本轮是否已核对（防同轮多次调用重复 time()）。
+    std::string mDateStr;
+    time_t mDateChecked = 0;
+    // R-08 方向 2：批次级 flush 事务的触碰文件起点跟踪（见 beginBatch/
+    // endBatch 注释）。mBatchStarts[eventId] = 本批次首次写该文件前的
+    // currentSize（rollback 基准）；mInvalidBatchStart = invalid 流本批次
+    // 首次写前的 mInvalidSize（无触碰时用 SIZE_MAX 标记）。
+    std::unordered_map<uint16_t, size_t> mBatchStarts;
+    size_t mInvalidBatchStart = SIZE_MAX;
+    // R-08 方向 2：批次内累计计数（endBatch 成功才并入全局 mPersist/
+    // mWritesSinceRetention；flush 失败整批回滚则丢弃，防守恒右式虚增）
+    uint64_t mBatchPersistValid = 0;
+    uint64_t mBatchPersistInvalid = 0;
+    uint64_t mBatchWritesSinceRetention = 0;
+    uint64_t mBatchInvalidWrites = 0;
 };

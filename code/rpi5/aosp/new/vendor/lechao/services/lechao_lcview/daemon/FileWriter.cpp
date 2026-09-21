@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -132,9 +133,17 @@ FileWriter::~FileWriter()
 
 // 获取当前本地时间的 YYYYMMDD 格式字符串
 // 用于文件名中的日期标签和轮转判断
+// R-08 方向 4：缓存跨天刷新——mDateStr 缓存最近一次计算的日期串，mDateChecked
+// 记录缓存对应的 time() 采样时刻。每次调用仅 time()（廉价系统调用）+ 与缓存
+// 核对；同一秒内多次调用直接复用缓存（同轮主循环多 FileState 共用同一天）。
+// 跨天（新日期串与缓存不同）或首次才真正 localtime_r+strftime 重算。
 std::string FileWriter::makeDateStr()
 {
     time_t now = time(nullptr);
+    // 缓存命中（同秒或同日）：避免每主循环 time+strftime 重复开销。
+    // mDateChecked 为 0 表示未初始化（首次须计算）。
+    if (mDateChecked != 0 && now == mDateChecked)
+        return mDateStr;
     struct tm tm_buf;
     // 方向 6：localtime_r 返回 nullptr 即失败（无效 time_t / 时区数据缺失），
     // 静默使用未初始化 tm_buf 是 UB（CXX-001 输入防御）——失败告警并回退
@@ -146,7 +155,9 @@ std::string FileWriter::makeDateStr()
     }
     char buf[16];
     strftime(buf, sizeof(buf), "%Y%m%d", &tm_buf);
-    return std::string(buf);
+    mDateStr = std::string(buf);
+    mDateChecked = now;
+    return mDateStr;
 }
 
 // 生成规范化的日志文件路径
@@ -323,60 +334,72 @@ static size_t utf8SeqLen(const std::string& s, size_t i)
 //   - 原实现仅转义具名控制字符与引号反斜杠，USB 描述符含换行时
 //     输出行即裂行（P0）。
 // 为什么手动实现而非用 JSON 库：formatJsonLine 需要最高性能，
-// 减少 JSON 库的字符串处理开销
-static void jsonEscapeString(std::ostringstream& oss, const std::string& s)
+// 减少 JSON 库的字符串处理开销。
+// R-08 方向 3：改 std::string 直接 append + hex 查表——原逐字符 oss << c
+// （单字符流插入，含操纵符状态机）改 out.append(1, c)，控制字符的 \u00XX
+// 十六进制用查表 kHexDigits 拼接，消逐字符 oss 流插入与 oss.str() 整串拷贝。
+namespace {
+// hex 查表：BINARY 字段与控制字符 \u00XX 编码共用，避免逐字节
+// ostringstream << hex << setw(2) 的操纵符状态机开销
+constexpr char kHexDigits[] = "0123456789abcdef";
+}  // namespace
+
+static void jsonEscapeString(std::string& out, const std::string& s)
 {
-    oss << "\"";
+    out.push_back('"');
     for (size_t i = 0; i < s.size(); i++) {
         unsigned char c = static_cast<unsigned char>(s[i]);
         switch (c) {
-        case '"':  oss << "\\\""; break;
-        case '\\': oss << "\\\\"; break;
-        case '\b': oss << "\\b"; break;
-        case '\f': oss << "\\f"; break;
-        case '\n': oss << "\\n"; break;
-        case '\r': oss << "\\r"; break;
-        case '\t': oss << "\\t"; break;
+        case '"':  out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\b': out += "\\b"; break;
+        case '\f': out += "\\f"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
         default:
             if (c < 0x20) {
-                oss << "\\u00" << std::hex << std::setw(2)
-                    << std::setfill('0') << static_cast<unsigned>(c)
-                    << std::dec;
+                // \u00XX：hex 查表直接拼，消 << hex << setw(2) << setfill
+                out += "\\u00";
+                out.push_back(kHexDigits[c >> 4]);
+                out.push_back(kHexDigits[c & 0x0f]);
             } else if (c >= 0x80) {
                 // 合法 UTF-8 序列整体直传，非法字节降级 \u00XX
                 size_t seq = utf8SeqLen(s, i);
                 if (seq > 0) {
-                    oss.write(s.data() + i, static_cast<std::streamsize>(seq));
+                    out.append(s.data() + i, seq);
                     i += seq - 1;
                 } else {
-                    oss << "\\u00" << std::hex << std::setw(2)
-                        << std::setfill('0') << static_cast<unsigned>(c)
-                        << std::dec;
+                    out += "\\u00";
+                    out.push_back(kHexDigits[c >> 4]);
+                    out.push_back(kHexDigits[c & 0x0f]);
                 }
             } else {
-                oss << c;
+                out.push_back(static_cast<char>(c));
             }
             break;
         }
     }
-    oss << "\"";
+    out.push_back('"');
 }
 
-// 将单个解码字段值追加到 JSON 输出流（拆分自 formatJsonLine，行为不变）
+// 将单个解码字段值追加到 JSON 输出（拆分自 formatJsonLine，行为不变）
 // INT32/INT64/FLOAT 数值直出、STRING 转义、BINARY hex 输出、未知类型 null
-static void appendFieldValue(std::ostringstream& oss, const DecodedField& df)
+// R-08 方向 3：std::string 直接 append（std::to_string / append），消逐字段
+// oss << 流插入与中间 str 拷贝（STRING 不再构造临时 string 再逐字符流出）
+static void appendFieldValue(std::string& out, const DecodedField& df)
 {
     switch (df.type) {
     case LCVIEW_TYPE_INT32: {
         int32_t val;
         memcpy(&val, df.value, 4);
-        oss << val;
+        out += std::to_string(val);
         break;
     }
     case LCVIEW_TYPE_INT64: {
         int64_t val;
         memcpy(&val, df.value, 8);
-        oss << val;
+        out += std::to_string(val);
         break;
     }
     case LCVIEW_TYPE_FLOAT: {
@@ -385,29 +408,45 @@ static void appendFieldValue(std::ostringstream& oss, const DecodedField& df)
         // LCV-04：NaN/Inf（除零等场景）的默认输出 "nan"/"inf" 非合法
         // JSON 数值——严格解析器对整行抛异常。降级 null 保整行可解析，
         // 数值丢失由消费端 null 判读
-        if (std::isnan(val) || std::isinf(val))
-            oss << "null";
-        else
+        if (std::isnan(val) || std::isinf(val)) {
+            out += "null";
+        } else {
             // LCV-20：默认 6 位有效数字截断 float 精度（约 7.2 位），
-            // 提升至 9 位保真输出（对整型/字符串输出无影响）
-            oss << std::setprecision(9) << val;
+            // 提升至 9 位保真输出（对整型/字符串输出无影响）。
+            // std::to_chars（float, 9 位）比 ostringstream setprecision 更轻；
+            // 兼容性：to_chars 输出最短可精确表示形式，用 setprecision(9)
+            // 语义保留 9 位有效数字（C++17 <charconv>，AOSP clang 支持）
+            char numBuf[64];
+            auto res = std::to_chars(numBuf, numBuf + sizeof(numBuf), val,
+                                     std::chars_format::general, 9);
+            if (res.ec == std::errc()) {
+                out.append(numBuf, res.ptr - numBuf);
+            } else {
+                out += "null";
+            }
+        }
         break;
     }
     case LCVIEW_TYPE_STRING: {
-        std::string s(reinterpret_cast<const char*>(df.value), df.valueLen);
-        jsonEscapeString(oss, s);
+        // 直接对源字节流转义 append，不再构造中间 string（原先构造
+        // std::string 再 jsonEscapeString 逐字符流入 oss，双重拷贝）
+        jsonEscapeString(out, std::string(
+            reinterpret_cast<const char*>(df.value), df.valueLen));
         break;
     }
     case LCVIEW_TYPE_BINARY: {
-        oss << "\"";
-        for (size_t j = 0; j < df.valueLen; j++)
-            oss << std::hex << std::setfill('0')
-                << std::setw(2) << (unsigned)df.value[j];
-        oss << "\"" << std::dec;
+        out.push_back('"');
+        for (size_t j = 0; j < df.valueLen; j++) {
+            const unsigned char b = df.value[j];
+            // hex 查表：两字节/字节，消 << hex << setfill(0) << setw(2)
+            out.push_back(kHexDigits[b >> 4]);
+            out.push_back(kHexDigits[b & 0x0f]);
+        }
+        out.push_back('"');
         break;
     }
     default:
-        oss << "null";
+        out += "null";
         break;
     }
 }
@@ -418,7 +457,9 @@ static void appendFieldValue(std::ostringstream& oss, const DecodedField& df)
 // 但不包含字段名（仅值），以节省磁盘空间
 // v3.4 优化: 使用 thread_local ostringstream 复用，避免每次调用
 // 创建/销毁 ostringstream 的堆分配开销。
-// std::str("") + clear() 重置流状态，不释放底层 buffer。
+// R-08 方向 3: 改 std::string 直接 append（thread_local string 复用底层
+// buffer 消堆分配）——消 oss.str() 整串拷贝（原每行把 ostringstream 内部
+// 缓冲整体拷贝进 string）与逐字段流插入开销。
 // NOTE: thread_local 在此场景下等价于 static，因为 writeRecord()
 // 仅在 daemon 主线程中被调用（单线程模型）。若将来多线程写入，
 // thread_local 可保证每个线程独立，无需额外同步。
@@ -427,14 +468,16 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
                                         const uint8_t* fields,
                                         size_t fieldsLen)
 {
-    thread_local std::ostringstream oss;
-    oss.str("");   // 清空内容
-    oss.clear();   // 重置错误状态
+    thread_local std::string out;
+    out.clear();   // 清空内容（保留底层 buffer 复用，消堆分配）
 
-    oss << "{\"ts\":" << hdr->timestamp_ns
-        << ",\"id\":" << hdr->event_id
-        << ",\"level\":" << (int)hdr->level
-        << ",\"f\":[";
+    out += "{\"ts\":";
+    out += std::to_string(hdr->timestamp_ns);
+    out += ",\"id\":";
+    out += std::to_string(hdr->event_id);
+    out += ",\"level\":";
+    out += std::to_string(static_cast<int>(hdr->level));
+    out += ",\"f\":[";
 
     const uint8_t* ptr = fields;
     const uint8_t* const end = fields + fieldsLen;
@@ -443,7 +486,7 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
     // SchemaParser::validate 共用同一 TLV 解码器；原此处手写
     // LCVIEW_NEED 宏 + switch 的越界/推进逻辑已收敛到解码器）
     for (size_t i = 0; i < schema.fields.size(); i++) {
-        if (i > 0) oss << ",";
+        if (i > 0) out.push_back(',');
 
         if (ptr >= end) {
             ALOGE("FileWriter: formatJsonLine: out-of-bounds at field %zu (need 1, remain %zd)",
@@ -463,10 +506,10 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
         }
         // kUnknown：未知类型输出 null 继续（与历史 default 语义一致，
         // 解码器已推进 1 字节 type）；kOk 正常解码，两者 df.type 均已填充
-        appendFieldValue(oss, df);
+        appendFieldValue(out, df);
     }
-    oss << "]}\n";
-    return oss.str();
+    out += "]}\n";
+    return out;
 }
 
 // 写路径耗时累计（微秒；供心跳输出平均微秒/条）
@@ -620,9 +663,12 @@ void FileWriter::fsyncActiveFiles()
         fsyncFileByPath(mInvalidFilename);
 }
 
-// 写盘 + flush + 失败恢复（拆分自 writeRecord，行为不变）。
-// 返回是否成功：失败路径已累计 DROP 计数（reopenFailed/retryFailed）
-// 与写耗时，调用方须直接返回
+// 写盘（R-08 方向 2：不再 flush，批次尾统一 flush 见 endBatch）+
+// 单记录失败恢复（拆分自 writeRecord）。
+// 返回是否成功：单记录级检测仅覆盖 ofstream 内部状态坏（bad()）——
+// 真正的磁盘写失败（/dev/full 等）只在 flush 时置 failbit，由 endBatch
+// 批次尾统一检测并整批 rollback 回批次起点。失败路径已累计 DROP 计数
+// （reopenFailed/retryFailed）与写耗时，调用方须直接返回
 bool FileWriter::writeLineFlush(FileState& fs, const std::string& line)
 {
     auto tWriteStart = std::chrono::steady_clock::now();
@@ -630,13 +676,12 @@ bool FileWriter::writeLineFlush(FileState& fs, const std::string& line)
     // 首次 flush 部分落盘后失败时，重试前须先回退到该偏移再重写，否则磁盘
     // 留半行加整行的坏行（app 重开并重写整行只追加不清残留）
     const size_t writeBase = fs.currentSize;
-    // 写 + 立即 flush：flush 失败才算真失败——ofstream 缓冲未满时 << 只在
-    // 内存缓冲不落盘、不设 failbit，只查 << 会漏掉磁盘写失败（RetryWriteFails
-    // 设备真跑暴露：/dev/full 写入 60B 缓冲未满 fail()==0，flush 才置位）
+    // 写：R-08 方向 2 去 flush——批次尾统一 flush（endBatch）消每记录一次
+    // write syscall。此处只查 bad()（流内部状态损坏），磁盘写失败由
+    // endBatch 的 flush 统一暴露并整批回滚。
     fs.stream << line;
-    fs.stream.flush();
-    if (fs.stream.fail()) {
-        ALOGE("FileWriter: write failed for event %u, attempting recovery",
+    if (fs.stream.bad()) {
+        ALOGE("FileWriter: stream bad for event %u, attempting recovery",
               fs.eventId);
         /* CXX-002: failbit 粘滞不清除会让该事件流从此永久失败，
          * 后续每条都 DROP（磁盘满恢复后也无法自愈的错误吞噬）。
@@ -658,8 +703,7 @@ bool FileWriter::writeLineFlush(FileState& fs, const std::string& line)
             return false;
         }
         fs.stream << line;
-        fs.stream.flush();
-        if (fs.stream.fail()) {
+        if (fs.stream.bad()) {
             ALOGE("FileWriter: retry write failed for event %u, DROPPING",
                   fs.eventId);
             mDrops.retryFailed++;
@@ -699,6 +743,11 @@ void FileWriter::writeRecord(const EventSchema& schema,
         }
     }
 
+    // R-08 方向 2：记录本批次首次触碰该文件的起点偏移（endBatch 整批
+    // rollback 基准）。map 里无则存当前 currentSize（本批第一条写前值）。
+    if (mBatchStarts.find(schema.id) == mBatchStarts.end())
+        mBatchStarts[schema.id] = it->second.currentSize;
+
     // 写路径耗时统计（方向 3）：formatJsonLine 与写盘分开累计，
     // 心跳输出平均微秒/条，作为微优化可判定指标
     auto tFormatStart = std::chrono::steady_clock::now();
@@ -719,18 +768,93 @@ void FileWriter::writeRecord(const EventSchema& schema,
 
     LC_ALOGD("lechao_lcview: write %u %s", schema.id, line.c_str());
 
-    // 写盘 + flush + 失败恢复（CXX-002，含写耗时累计）
+    // 写盘（R-08 方向 2：批次尾统一 flush，此处只写缓冲 + 单记录恢复）
     if (!writeLineFlush(it->second, line))
         return;
 
-    // 方向 5：真正落盘成功才累计（守恒右式数据源）——writeLineFlush
-    // 返回 true 即 flush 成功、磁盘已有完整行
-    mPersist.valid++;
+    // R-08 方向 2：落盘成功计数推迟到 endBatch——flush 在批次尾统一执行，
+    // 本批记录仅在 endBatch 全部 flush 成功后才计入 mPersist.valid（守恒
+    // 右式数据源）；flush 失败整批回滚则本批 valid 计数一并丢弃。
+    mBatchPersistValid++;
 
-    // 方向 4：写入计数累计，供 enforceRetention 按写入阈值降频扫描
-    mWritesSinceRetention++;
+    // 方向 4：写入计数同样推迟到 endBatch 成功（enforceRetention 按真实
+    // 落盘降频扫描，回滚批次不算写成功）
+    mBatchWritesSinceRetention++;
 
     it->second.currentSize += line.size();
+}
+
+// R-08 方向 2：批次级 flush 事务起点——清空批次触碰记录与累计计数。
+// parseBatch 每次调用（一个 64KB 攒包批次）开头调用。
+void FileWriter::beginBatch()
+{
+    mBatchStarts.clear();
+    mInvalidBatchStart = SIZE_MAX;
+    mBatchPersistValid = 0;
+    mBatchPersistInvalid = 0;
+    mBatchWritesSinceRetention = 0;
+    mBatchInvalidWrites = 0;
+}
+
+// R-08 方向 2：批次尾统一 flush + 写失败整批 rollback。
+// flush 本批触碰的全部事件文件 + invalid 流；任一 flush 失败即对该文件
+// rollbackFileTo(批次起点) 截断回批次起点，本批写入全部撤销（半行/多行
+// 残留清零），对应 valid 计数丢弃。成功则把批次计数并入全局。
+// 返回是否整批落盘成功（false = 至少一个文件 flush 失败已回滚）。
+bool FileWriter::endBatch()
+{
+    bool allOk = true;
+    // 事件文件：flush 触碰过的（mBatchStarts 记录起点），失败回滚到起点
+    for (const auto& [eventId, batchStart] : mBatchStarts) {
+        auto it = mFiles.find(eventId);
+        if (it == mFiles.end() || !it->second.stream.is_open())
+            continue;  // 本批中被 DROP（未写）的文件，无 flush 责任
+        it->second.stream.flush();
+        if (it->second.stream.fail()) {
+            ALOGE("FileWriter: endBatch flush failed for event %u, "
+                  "rolling back batch to offset %zu", eventId, batchStart);
+            it->second.stream.clear();
+            it->second.stream.close();
+            // 整批回滚：截断回批次起点（本批该文件全部写入撤销）
+            const size_t rolled = rollbackFileTo(it->second.currentFilename,
+                                                 batchStart);
+            if (rolled != SIZE_MAX)
+                it->second.currentSize = rolled;
+            // 流重置：回滚后重开（追加模式），下批继续可写
+            it->second.stream.open(it->second.currentFilename, std::ios::app);
+            mDrops.dropBatchFlush++;
+            allOk = false;
+        }
+    }
+    // invalid 流：批次触碰过才 flush（未触碰跳过）
+    if (mInvalidBatchStart != SIZE_MAX && mInvalidStream.is_open()) {
+        mInvalidStream.flush();
+        if (mInvalidStream.fail()) {
+            ALOGE("FileWriter: endBatch invalid flush failed, rolling back "
+                  "batch to offset %zu", mInvalidBatchStart);
+            mInvalidStream.clear();
+            mInvalidStream.close();
+            const size_t rolledInv =
+                rollbackFileTo(mInvalidFilename, mInvalidBatchStart);
+            if (rolledInv != SIZE_MAX)
+                mInvalidSize = rolledInv;
+            mInvalidStream.open(mInvalidFilename, std::ios::app);
+            mDrops.dropBatchFlush++;
+            allOk = false;
+        }
+    }
+    // 成功批次才并入全局落盘计数（守恒右式 + 保留策略触发）
+    if (allOk) {
+        mPersist.valid += mBatchPersistValid;
+        mPersist.invalid += mBatchPersistInvalid;
+        mWritesSinceRetention += mBatchWritesSinceRetention;
+        mWritesSinceRetention += mBatchInvalidWrites;
+    } else {
+        ALOGE("FileWriter: batch rolled back, dropped %llu valid + %llu invalid "
+              "records", static_cast<unsigned long long>(mBatchPersistValid),
+              static_cast<unsigned long long>(mBatchPersistInvalid));
+    }
+    return allOk;
 }
 
 // invalid 文件轮转（LCV-01）：close → rename 为 invalid_records_{date}_p{seq}.log
@@ -864,30 +988,39 @@ void FileWriter::writeInvalid(const uint8_t* data, size_t len,
     // 原始数据 hex 落盘上限：足够定位协议问题，又不至于在损坏风暴下写爆磁盘
     static constexpr size_t kMaxDumpBytes = 256;
 
-    // 整行先拼入局部流（reason 转义复用 jsonEscapeString），再一次性写盘
-    std::ostringstream line;
-    line << "{\"reason\":";
+    // 整行先拼入局部 string（reason 转义复用 jsonEscapeString，R-08 方向 3
+    // 改 std::string append + hex 查表），再一次性写盘
+    std::string line;
+    line += "{\"reason\":";
     jsonEscapeString(line, reason);
-    line << ",\"size\":" << len << ",\"data\":\"";
+    line += ",\"size\":";
+    line += std::to_string(len);
+    line += ",\"data\":\"";
     size_t dump = len < kMaxDumpBytes ? len : kMaxDumpBytes;
-    for (size_t i = 0; i < dump; i++)
-        line << std::hex << std::setfill('0') << std::setw(2)
-             << (unsigned)data[i];
-    line << std::dec << "\"}\n";
-    const std::string payload = line.str();
+    for (size_t i = 0; i < dump; i++) {
+        const unsigned char b = data[i];
+        line.push_back(kHexDigits[b >> 4]);
+        line.push_back(kHexDigits[b & 0x0f]);
+    }
+    line += "\"}\n";
 
-    // 写 + flush：fail 判定必须看 flush——ofstream 缓冲未满时 << 只在内存
-    // 缓冲不落盘、不设 failbit（与 writeLineFlush 同语义，CXX-002）
-    mInvalidStream << payload;
-    mInvalidStream.flush();
-    if (mInvalidStream.fail()) {
+    // R-08 方向 2：记录 invalid 流本批次首次触碰起点（endBatch 整批
+    // rollback 基准）。SIZE_MAX 表示本批尚未触碰。
+    if (mInvalidBatchStart == SIZE_MAX)
+        mInvalidBatchStart = mInvalidSize;
+
+    // 写：R-08 方向 2 去 flush——invalid 流批次尾统一 flush（endBatch）。
+    // 此处只查 bad()（流内部状态损坏），磁盘写失败由 endBatch 统一暴露
+    // 并整批回滚。failbit 粘滞清除在 endBatch 的 flush 失败恢复路径处理。
+    mInvalidStream << line;
+    if (mInvalidStream.bad()) {
         /* CXX-002: failbit 粘滞不清除会让 invalid 流从此永久失败——
          * 首写失败后余生空转，mode_invalid 反判绿（坏记录静默丢失）。
          * 恢复路径：clear 清粘滞 → 回退首写残留（LCV-07，与 writeLineFlush
          * 同语义：首写可能部分落盘，重开前须截断回写前偏移 mInvalidSize，
          * 否则残留半行与下一条追加粘连成非法 JSONL）→ 重开流 → 重试一次，
          * 仍失败计 invalidWriteFailed（进心跳 dropped 求和与分项） */
-        ALOGE("FileWriter: writeInvalid: write failed, attempting recovery");
+        ALOGE("FileWriter: writeInvalid: stream bad, attempting recovery");
         mInvalidStream.clear();
         mInvalidStream.close();
         // 方向 2：以回退后真实大小校准 mInvalidSize（防内存计数失真导致
@@ -902,9 +1035,8 @@ void FileWriter::writeInvalid(const uint8_t* data, size_t len,
             mDrops.invalidWriteFailed++;
             return;
         }
-        mInvalidStream << payload;
-        mInvalidStream.flush();
-        if (mInvalidStream.fail()) {
+        mInvalidStream << line;
+        if (mInvalidStream.bad()) {
             ALOGE("FileWriter: writeInvalid: retry write failed, DROPPING reason=%s",
                   reason.c_str());
             mDrops.invalidWriteFailed++;
@@ -920,13 +1052,11 @@ void FileWriter::writeInvalid(const uint8_t* data, size_t len,
         ALOGI("FileWriter: writeInvalid: recovered invalid stream");
     }
     // 写成功（含恢复重试成功）才累计，失败路径保持写前偏移供 rollback
-    mInvalidSize += payload.size();
-    // 方向 5：invalid 真正落盘成功才累计（守恒右式 invalid 项数据源）
-    mPersist.invalid++;
-    // 方向 1：writeInvalid 成功也推进写入计数——invalid 坏数据风暴也须
-    // 触发容量扫描（原只有 writeRecord 推进，纯 invalid 写入时保留策略
-    // 永不扫描，超限数据滞留）；enforceRetention 另有 300s 时间兜底
-    mWritesSinceRetention++;
+    mInvalidSize += line.size();
+    // R-08 方向 2：落盘计数推迟到 endBatch（invalid 流批次尾统一 flush，
+    // flush 成功才并入全局；守恒右式 invalid 项数据源防回滚虚增）
+    mBatchPersistInvalid++;
+    mBatchInvalidWrites++;
 }
 
 // 文件轮转检查：
