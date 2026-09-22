@@ -9,9 +9,10 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from check_lcview_events import (EVENTS_H_REL, SCHEMA_REL,  # noqa: E402
-                                 compare, parse_emit_sequences,
-                                 parse_event_id_macros, parse_schema)
+from check_lcview_events import (DISABLED_EVENTS, EVENTS_H_REL,  # noqa: E402
+                                 SCHEMA_REL, compare,  # noqa: E402
+                                 parse_emit_sequences,  # noqa: E402
+                                 parse_event_id_macros, parse_schema)  # noqa: E402
 
 _SCHEMA_OK = """{
   "version": 1,
@@ -122,8 +123,40 @@ class TestCompare(unittest.TestCase):
         self.assertIn("字段类型序漂移", msg)
 
     def test_emit_missing_returns_red(self):
-        # 内核无该事件发射点 → 判红（schema 定义的事件无处产生）
+        # 非停发事件内核无发射点 → 判红（schema 定义的事件无处产生）；
+        # usb_transport_start 已登记停发（R-11 方向 3），改用 end 事件验证
+        schema = _SCHEMA_OK.replace("usb_transport_start", "usb_transport_end")
+        events_h = _EVENTS_H_OK.replace(
+            "LCVIEW_EVENT_USB_TRANSPORT_START 4",
+            "LCVIEW_EVENT_USB_TRANSPORT_END 5")
+        d = self._repo(schema=schema, events_h=events_h,
+                       emit="/* no lcview emits */\n")
+        try:
+            rc, msg = compare(d)
+        finally:
+            self._cleanup(d)
+        self.assertEqual(rc, 1)
+        self.assertIn("无", msg)
+
+    def test_disabled_event_missing_emit_allowed(self):
+        # R-11 方向 3：登记在 DISABLED_EVENTS 的停发事件，内核不再发射
+        # （TRANSPORT_START 降为调试诊断），schema 保留定义 → 跳过判红
+        self.assertIn("LCVIEW_EVENT_USB_TRANSPORT_START", DISABLED_EVENTS)
         d = self._repo(emit="/* no lcview emits */\n")
+        try:
+            rc, msg = compare(d)
+        finally:
+            self._cleanup(d)
+        self.assertEqual(rc, 0, msg)
+
+    def test_non_disabled_missing_emit_still_red(self):
+        # 非停发事件（schema 定义未登记）无发射点 → 仍判红，防登记被滥用
+        schema = _SCHEMA_OK.replace("usb_transport_start", "usb_transport_end")
+        events_h = _EVENTS_H_OK.replace(
+            "LCVIEW_EVENT_USB_TRANSPORT_START 4",
+            "LCVIEW_EVENT_USB_TRANSPORT_END 5")
+        emit = "/* no lcview emits */\n"
+        d = self._repo(schema=schema, events_h=events_h, emit=emit)
         try:
             rc, msg = compare(d)
         finally:

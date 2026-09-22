@@ -53,6 +53,14 @@ _ADD_RE = re.compile(r"lcview_builder_add_(\w+)\(")
 # 提交/取消边界：commit 之后为下一发射点（cancel 属丢弃路径不入字段序）
 _COMMIT_RE = re.compile(r"lcview_builder_commit\(")
 
+# 停发事件登记（schema 保留定义供历史数据/用户态解析，内核不再发射）。
+# 登记原因：R-11 方向 3——TRANSPORT_START 是 per-SCSI-命令最高频事件，
+# 每次传输在 IO 路径逐命令分配 ~4KB GFP_ATOMIC builder 并写 ring，I/O
+# 洪水时开销可观且挤占环空间；传输时序已由 TRANSPORT_END（含 elapsed_ns）
+# 完整承载，START 事件降为调试诊断不再 commit（省 IO 路径 GFP_ATOMIC 分配）。
+# 登记后该事件跳过"内核无发射点"判红（schema 仍须在内核宏中定义 id）。
+DISABLED_EVENTS = {"LCVIEW_EVENT_USB_TRANSPORT_START"}
+
 
 def parse_schema(text: str) -> list[dict]:
     """解析 lcview_events.json → [{id, name, fields:[type...]}]；非法结构抛 ValueError。"""
@@ -151,6 +159,11 @@ def compare(repo: Path) -> tuple[int, str]:
         #    零字段事件 emit 记 []，emit.get(macro) 恒命中，不再误报"无发射点"）
         emit_fields = emit.get(macro)
         if emit_fields is None:
+            # R-11 方向 3：停发事件（DISABLED_EVENTS）登记后，schema 保留
+            # 定义供历史数据/用户态解析，但内核不再发射——跳过"无发射点"
+            # 判红；非停发事件缺失发射点仍判红（schema 定义无处产生）
+            if macro in DISABLED_EVENTS:
+                continue
             problems.append(f"事件 {ev['name']}: 内核无 {macro} 发射点（或字段序为空）")
             continue
         if emit_fields != ev["fields"]:

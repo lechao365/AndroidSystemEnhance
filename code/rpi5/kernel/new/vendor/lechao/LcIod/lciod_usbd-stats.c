@@ -92,13 +92,50 @@ static inline void vendor_lechao_usbd_record_last_event_locked(
 }
 
 /*
+ * vendor_lechao_usbd_rate_from_ns — 速率倒数近似（省 64 位除法）
+ * @bytes:      有效字节数
+ * @elapsed_ns: 耗时（纳秒）
+ *
+ * 计算 rate = bytes * NSEC_PER_SEC / elapsed_ns（字节/秒）的近似值。
+ *
+ * R-11 方向 1：直接 div64_u64 在除数超 32 位时走 libgcc 软件除法慢路径，
+ * per-END 每条命令执行 2 次，I/O 洪水时开销可观。本函数把除数按 2 的幂
+ * 同步缩放压入 32 位（分子同步缩放保持商近似），用 div_u64（ARM64 udiv
+ * 指令快路径）替代 64 位除法；分子先缩到安全范围防 bytes * NSEC_PER_SEC
+ * 溢出（CXX-002）。
+ */
+static inline u64 vendor_lechao_usbd_rate_from_ns(u64 bytes, u64 elapsed_ns)
+{
+    u64 numer = bytes;
+    u64 denom = elapsed_ns;
+    u32 den32;
+
+    if (!denom)
+        return 0;
+
+    /* 分子防溢出：先缩到 bytes * NSEC_PER_SEC 不溢出 u64 的范围 */
+    while (numer > (~0ULL / NSEC_PER_SEC)) {
+        numer >>= 8;
+        denom >>= 8;
+    }
+    /* 除数压入 32 位：正常传输耗时远小于 2^32 ns，循环通常不进入 */
+    while (denom >= (1ULL << 32)) {
+        numer >>= 8;
+        denom >>= 8;
+    }
+    den32 = denom ? (u32)denom : 1;
+    return div_u64(numer * NSEC_PER_SEC, den32);
+}
+
+/*
  * vendor_lechao_usbd_update_current_rate_locked — 计算瞬时传输速率
  * @rate_dev:   目标设备实例
  * @bytes:      本次传输的有效字节数
  * @elapsed_ns: 本次传输的耗时（纳秒）
  *
  * 计算公式：rate = bytes * NSEC_PER_SEC / elapsed_ns（字节/秒）
- * 同时更新 peak_rate（历史最高值）。
+ * 同时更新 peak_rate（历史最高值）。速率计算经
+ * vendor_lechao_usbd_rate_from_ns 倒数近似（R-11 方向 1）。
  *
  * 调用上下文：必须持有 rate_dev->lock 自旋锁。
  */
@@ -108,8 +145,7 @@ static inline void vendor_lechao_usbd_update_current_rate_locked(
 {
     u64 current_rate = 0;
 
-    if (elapsed_ns)
-        current_rate = div64_u64(bytes * NSEC_PER_SEC, elapsed_ns);
+    current_rate = vendor_lechao_usbd_rate_from_ns(bytes, elapsed_ns);
 
     rate_dev->stats.current_rate = current_rate;
     if (current_rate > rate_dev->stats.peak_rate)
@@ -159,10 +195,10 @@ static inline bool vendor_lechao_usbd_update_degrade_context_locked(
         return false;
     }
 
-    baseline_rate = div64_u64(rate_dev->last_degrade_window_bytes * NSEC_PER_SEC,
-                              window_ns);
+    baseline_rate = vendor_lechao_usbd_rate_from_ns(
+        rate_dev->last_degrade_window_bytes, window_ns);
     bool degraded = (baseline_rate > 0 &&
-                     rate_dev->stats.current_rate < div64_u64(baseline_rate, 2));
+                     rate_dev->stats.current_rate < (baseline_rate >> 1));
 
     rate_dev->last_degrade_window_start = now;
     rate_dev->last_degrade_window_bytes = bytes;
@@ -182,35 +218,28 @@ static inline bool vendor_lechao_usbd_update_degrade_context_locked(
  */
 
 /*
- * lcview_trace_transport_start — 发射传输开始事件
+ * lcview_trace_transport_start — 传输开始事件（R-11 方向 3：不再 commit）
  * @rate_dev:     目标设备实例
  * @srb:          SCSI 命令（用于提取方向和数据长度）
  * @device_index: 次设备号（用于用户态关联设备）
  *
- * 字段：device_index, direction, data_len
+ * TRANSPORT_START 是每次 SCSI 命令都触发的最高频事件（per-END 都有一次），
+ * 在 IO 路径上逐命令分配 ~4KB GFP_ATOMIC builder 并写 ring，I/O 洪水时
+ * 开销可观且挤占环空间驱逐正常记录。R-11 方向 3：事件级别保持 DEBUG，
+ * 但不再 commit——传输时序信息已由 TRANSPORT_END（含 elapsed_ns）完整
+ * 承载，START 事件降为调试诊断（usbd_debug 开启时仅打印日志），省掉
+ * IO 路径的 GFP_ATOMIC 分配。
  */
 static void lcview_trace_transport_start(struct vendor_lechao_usbd_device *rate_dev,
                                          struct scsi_cmnd *srb, int device_index)
 {
-    struct lcview_builder *b;
-    int rc;
-    int dir;
-
     if (!srb)
         return;
 
-    dir = vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction);
-
-    b = lcview_builder_start(LCVIEW_EVENT_USB_TRANSPORT_START, LCVIEW_LEVEL_DEBUG);
-    if (!b)
-        return;
-    rc  = lcview_builder_add_int(b, (int64_t)device_index);
-    rc |= lcview_builder_add_int(b, (int64_t)dir);
-    rc |= lcview_builder_add_int(b, (int64_t)scsi_bufflen(srb));
-    /* KRN-016：add 失败聚合处理——任一字段缺失都会使用户态
-     * 按 schema 解析错位，整体丢弃事件而非发射残缺记录。*/
-    if (rc || lcview_builder_commit(b, &lcview_ring))
-        lcview_builder_cancel(b);
+    LC_DBG("TRANSPORT_START(trace disabled): dev=%d dir=%d bytes=%u\n",
+           device_index,
+           vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction),
+           scsi_bufflen(srb));
 }
 
 /*
