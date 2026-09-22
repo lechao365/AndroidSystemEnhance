@@ -335,7 +335,8 @@ class TestModeSchema(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fake = FakeAdb(files={
                 f"{LOGS_DIR}/a.jsonl":
-                    _jsonl('{"ts": 1, "id": 8, "f": [0, 1, 2]}'),
+                    _jsonl('{"ts": 1, "seq": 42, "mono": 999, '
+                           '"id": 8, "f": [0, 1, 2]}'),
                 lc.SCHEMA_REMOTE: self.SCHEMA,
             })
             with mock.patch.object(lc, "adb", fake):
@@ -346,7 +347,20 @@ class TestModeSchema(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fake = FakeAdb(files={
                 f"{LOGS_DIR}/a.jsonl":
-                    _jsonl('{"ts": 1, "id": 9, "f": [0]}'),
+                    _jsonl('{"ts": 1, "seq": 43, "mono": 1000, '
+                           '"id": 9, "f": [0]}'),
+                lc.SCHEMA_REMOTE: self.SCHEMA,
+            })
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_schema(tmp, _args())
+        self.assertEqual(rc, 1)
+
+    def test_schema_seq_missing_fails(self):
+        # R-13 信封校验：seq 缺失判红（事件头未落盘信封）
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = FakeAdb(files={
+                f"{LOGS_DIR}/a.jsonl":
+                    _jsonl('{"ts": 1, "id": 8, "f": [0, 1, 2]}'),
                 lc.SCHEMA_REMOTE: self.SCHEMA,
             })
             with mock.patch.object(lc, "adb", fake):

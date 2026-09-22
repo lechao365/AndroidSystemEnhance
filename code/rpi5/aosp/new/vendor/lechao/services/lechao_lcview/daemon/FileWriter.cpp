@@ -490,6 +490,13 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
     out += std::to_string(hdr->event_id);
     out += ",\"level\":";
     out += std::to_string(static_cast<int>(hdr->level));
+    // R-13 方向 2：信封字段 seq/mono——seq 为内核全局递增事件序号（NTP
+    // 回拨时按此定序可靠，ts 为 wall 受校准调整不可作排序基）；mono 为
+    // CLOCK_MONOTONIC 单调时间戳（延迟/抖动分析不受时钟校准影响）。
+    out += ",\"seq\":";
+    out += std::to_string(hdr->seq_no);
+    out += ",\"mono\":";
+    out += std::to_string(hdr->mono_ns);
     out += ",\"f\":[";
 
     const uint8_t* ptr = fields;
@@ -521,6 +528,9 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
         // 解码器已推进 1 字节 type）；kOk 正常解码，两者 df.type 均已填充
         appendFieldValue(out, df);
     }
+    // R-13 方向 2：收到记录即记 seq（0 忽略——无 seq 语义的旧内核记录不
+    // 参与 gap 统计），供心跳窗口 gap 判定（see takeSeqGapWindow）
+    mSeqGap.record(hdr->seq_no);
     out += "]}\n";
     return out;
 }
@@ -557,6 +567,14 @@ FileWriter::EventDist FileWriter::takeEventDistWindow()
     EventDist d = mEventDist;
     mEventDist = EventDist{};
     return d;
+}
+
+// R-13 方向 2：取并重置窗口 seq 间隙统计（emitHeartbeat 每心跳调用）。
+FileWriter::SeqGapStats FileWriter::takeSeqGapWindow()
+{
+    SeqGapStats s = mSeqGap;
+    mSeqGap = SeqGapStats{};
+    return s;
 }
 
 // 回退文件到指定偏移：flush 失败后首写可能部分落盘，重试前须截断掉残留的

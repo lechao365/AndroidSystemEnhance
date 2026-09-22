@@ -11,7 +11,7 @@
 #   设备无 lechao_lcview_hal 进程可 kill，用例语义失效。
 # 用法：lcview_recover.sh daemon
 #   daemon — kill lechao_lcview → svc running + daemon 心跳（heartbeat, loop=）
-#            恢复 + dd 触发新事件落盘（delta --event 4）+ 轮转 seq 递增
+#            恢复 + dd 触发新事件落盘（delta --event 5，transport-start 停发）+ 轮转 seq 递增
 # 退出码：0 通过 / 1 失败（失败现场打印）/ 2 参数错误
 # ============================================================
 
@@ -109,7 +109,8 @@ kill_proc lechao_lcview || exit 1
 wait_service lechao_lcview || exit 1
 wait_heartbeat "heartbeat, loop=" "$(last_beat_ts "heartbeat, loop=")" \
   || exit 1
-# 4. dd 读 4MB 产生新事件（transfer-start event 4；块设备失败即判红）
+# 4. dd 读 4MB 产生新事件（transport-end event 5，R-13 判据修正：
+#    transport-start event 4 自 R-11 方向 3 停发，永不落盘；块设备失败即判红）
 if ! ADB shell "dd if=/dev/block/sda of=/dev/null bs=1M count=4 2>/dev/null" \
      >/dev/null; then
   echo "ERROR: dd 触发失败（块设备不可读？）"
@@ -117,8 +118,8 @@ if ! ADB shell "dd if=/dev/block/sda of=/dev/null bs=1M count=4 2>/dev/null" \
 fi
 sleep 3
 # 5. 新事件落盘断言（重启后链路写入新 JSONL 记录）；输出保留 NEW 明细供 6 步解析
-if ! DELTA_OUT=$(python3 "$PY" --mode delta --event 4); then
-  echo "ERROR: kill daemon 后新事件未落盘（delta --event 4）"
+if ! DELTA_OUT=$(python3 "$PY" --mode delta --event 5); then
+  echo "ERROR: kill daemon 后新事件未落盘（delta --event 5）"
   exit 1
 fi
 # 6. 轮转 seq 续接断言（防重启后从低 seq 重建文件回归）：

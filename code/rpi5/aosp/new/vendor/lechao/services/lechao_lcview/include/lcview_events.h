@@ -90,8 +90,8 @@
  * 缓冲预算（kBufSize）仍够大却与内核单条上限漂移的静默错配。 */
 #define LCVIEW_BUILDER_MAX_SIZE 4096
 
-/* --- 记录头结构（16B 固定头 + 变长字段区） --- */
-/* lcview_record_hdr：16 字节固定长度头部，所有事件共用。
+/* --- 记录头结构（R-13 方向 2 扩容：32B 固定头 + 变长字段区） --- */
+/* lcview_record_hdr：32 字节固定长度头部，所有事件共用。
  *   magic       — 魔数，用于快速校验
  *   event_id    — 事件类型 ID，映射到 JSON schema 定义
  *   level       — 日志级别
@@ -99,6 +99,10 @@
  *   reserved    — 保留字段，对齐用
  *   timestamp_ns— CLOCK_REALTIME 时钟纳秒时间戳（非单调，受 NTP 调整），
  *   用于跨设备日志时间对齐和延迟分析
+ *   seq_no      — 全局递增事件序号（R-13 方向 2：NTP 回拨时按此定序可靠）
+ *   reserved2   — 保留字段，对齐扩展（恒 0）
+ *   mono_ns     — CLOCK_MONOTONIC 单调纳秒时间戳（R-13 方向 2：延迟/抖动
+ *   分析不受时钟校准影响）
  *
  * lcview_field_hdr：每个字段前 1 字节类型标识，
  *   后接类型相关的值（定长 4/8 字节，或 2 字节长度前缀+变长）。
@@ -111,6 +115,9 @@ struct lcview_record_hdr {
     uint8_t  field_count;
     uint16_t reserved;
     uint64_t timestamp_ns;
+    uint32_t seq_no;
+    uint32_t reserved2;
+    uint64_t mono_ns;
 } __attribute__((packed));
 
 struct lcview_field_hdr {
@@ -126,6 +133,9 @@ struct lcview_record_hdr {
     uint8_t  field_count;
     uint16_t reserved;
     uint64_t timestamp_ns;
+    uint32_t seq_no;
+    uint32_t reserved2;
+    uint64_t mono_ns;
 };
 struct lcview_field_hdr {
     uint8_t  type;

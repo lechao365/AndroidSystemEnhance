@@ -54,7 +54,8 @@ SchemaParser makeSchema() {
 }
 
 std::vector<uint8_t> makeValidRecord() {
-    std::vector<uint8_t> buf(33, 0);
+    // R-13 方向 2：hdr 扩容 32B（16B→32B），缓冲须按 sizeof 计算防越界
+    std::vector<uint8_t> buf(sizeof(lcview_record_hdr) + 8 + 9, 0);
     auto* hdr = reinterpret_cast<lcview_record_hdr*>(buf.data());
     hdr->magic = LCVIEW_MAGIC;
     hdr->event_id = 4;
@@ -102,8 +103,8 @@ public:
         mServed++;
         return static_cast<ssize_t>(mBatch.size());
     }
-    uint32_t getOverrun() override { return 0; }
-    uint32_t getTotalRecords() override { return 0; }
+    uint64_t getOverrun() override { return 0; }
+    uint64_t getTotalRecords() override { return 0; }
     void close() override {}
     uint64_t ioctlErr() const override { return 0; }
     uint64_t eofCount() const override { return 0; }
@@ -124,16 +125,16 @@ public:
     bool open() override { return true; }
     ssize_t waitAndRead(uint8_t*, size_t, size_t, int) override { return -1; }
     void close() override {}
-    uint32_t getOverrun() override { return overrun; }
-    uint32_t getTotalRecords() override { return totalRecords; }
-    uint32_t getDropped() override { return dropped; }
+    uint64_t getOverrun() override { return overrun; }
+    uint64_t getTotalRecords() override { return totalRecords; }
+    uint64_t getDropped() override { return dropped; }
     uint32_t getRingSizeBytes() override { return ringSize; }
     uint64_t ioctlErr() const override { return ioctlErr_; }
     uint64_t eofCount() const override { return eof; }
 
-    uint32_t overrun = 0;
-    uint32_t totalRecords = 0;
-    uint32_t dropped = 0;
+    uint64_t overrun = 0;
+    uint64_t totalRecords = 0;
+    uint64_t dropped = 0;
     uint32_t ringSize = 256 * 1024;
     uint64_t ioctlErr_ = 0;
     uint64_t eof = 0;

@@ -50,17 +50,20 @@ public:
                                 int timeoutMs) = 0;
 
     // 查询并清零内核 ring buffer 溢出计数（失败返回 0）
-    virtual uint32_t getOverrun() = 0;
+    // R-13 方向 3：内核计数升 atomic64_t，返回升 uint64_t
+    virtual uint64_t getOverrun() = 0;
 
     // 查询内核 ring buffer 累计产生的记录总数（自驱动初始化起，含被
     // overrun 覆盖的记录）；与 getOverrun 互补支撑守恒校验（失败返回 0）
-    virtual uint32_t getTotalRecords() = 0;
+    // R-13 方向 3：内核计数升 u64，返回升 uint64_t 消 uptime 回绕
+    virtual uint64_t getTotalRecords() = 0;
 
     // 查询内核 ring buffer ENOSPC 丢弃累计（方向 7：驱逐预算超限丢弃，
     // 与 getTotalRecords 同源 GET_STATS；失败返回 0）。守恒左式
     // totalΔ = overrunΔ + droppedΔ + jsonlΔ + invalidΔ 由它闭合——丢弃
     // 的记录同样计入 total_records，右式吸收 dropped 后不误报负偏差。
-    virtual uint32_t getDropped() { return 0; }
+    // R-13 方向 3：返回升 uint64_t
+    virtual uint64_t getDropped() { return 0; }
 
     // 查询内核 ring buffer 总大小（方向 6：守恒容差按环推导，避免固定
     // 容差在 ring 配置变化时失配；失败返回 0，ioctlErr 计数区分）。非
@@ -105,9 +108,9 @@ public:
     bool open() override;
     ssize_t waitAndRead(uint8_t* buf, size_t offset, size_t cap,
                         int timeoutMs) override;
-    uint32_t getOverrun() override;
-    uint32_t getTotalRecords() override;
-    uint32_t getDropped() override;
+    uint64_t getOverrun() override;
+    uint64_t getTotalRecords() override;
+    uint64_t getDropped() override;
     uint32_t getRingSizeBytes() override;
     uint32_t getRingUsageBytes() override;
     void refreshStats() override;
@@ -117,9 +120,20 @@ public:
     uint64_t ioctlErr() const override { return mIoctlErr; }
     uint64_t eofCount() const override { return mEofCount; }
 
+    // R-13 方向 1：查询内核 ABI 版本（启动协商用）
+    // 返回 (ok, version)：ok=false 表示 ioctl 失败（旧内核缺命令/设备错），
+    // version 为成功时的内核 LCVIEW_ABI_VERSION。
+    static bool queryAbiVersion(int fd, uint32_t* version);
+
+    // R-13 方向 1：启动 ABI 协商结果（open() 内检测）。false = 内核缺
+    // LCVIEW_GET_ABI_VERSION 或版本不匹配，main() 据此显式退出判红。
+    bool abiOk() const { return mAbiOk; }
+
 private:
     int mFd = -1;
     int mEpfd = -1;
+    // R-13 方向 1：启动 ABI 协商结果（见 open()），false 时 daemon 应退出
+    bool mAbiOk = false;
     // LCV-16/17：ioctl 失败与 EOF 计数（失败返 0 与真实 0 在心跳中
     // 不可区分的根因修复——心跳输出 ioctl_err/eof 字段供判红）
     uint64_t mIoctlErr = 0;
@@ -129,9 +143,10 @@ private:
     // 从缓存分发）。mStatsValid 标记缓存有效：false 时 getter 回退单次
     // ioctl（未 refresh / refresh 失败均保容错语义），true 时全走缓存
     // 不再发 ioctl。逐字段标量缓存（不入 struct lcview_stats 类型——
-    // 头文件不依赖 ioctl 镜像头，测试 TU 无 ioctl 依赖）
-    uint32_t mCachedTotal = 0;
-    uint32_t mCachedDropped = 0;
+    // 头文件不依赖 ioctl 镜像头，测试 TU 无 ioctl 依赖）。
+    // R-13 方向 3：统计三字段升 u64，缓存字段同步升 uint64_t
+    uint64_t mCachedTotal = 0;
+    uint64_t mCachedDropped = 0;
     uint32_t mCachedRingSize = 0;
     uint32_t mCachedRingUsage = 0;
     bool mStatsValid = false;

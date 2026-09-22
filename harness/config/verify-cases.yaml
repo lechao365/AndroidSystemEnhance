@@ -52,8 +52,15 @@ cases:
   # 事件落盘 → JSONL 合法 → schema 匹配。hostcmd 在 workspace-verify
   # 目录执行，相对路径以其为根（不硬编码绝对路径）。
   # 注：fresh/ts 已移入 lcview-trigger probe 之后——事件驱动模型下 USB 常驻
-  # 无活动不产生新事件，静止态跑 fresh/ts 永不能过（曾实测 fresh 超窗 29069s）
-  lcview-pipeline: 'hostcmd:"cases/lcview_check.sh --mode files" hostcmd:"cases/lcview_check.sh --mode valid_json" hostcmd:"cases/lcview_check.sh --mode schema"'
+  # 无活动不产生新事件，静止态跑 fresh/ts 永不能过（曾实测 fresh 超窗 29069s）。
+  # R-13 判据修正：pipeline 前置 dd 读产载（transport_end event 5 落盘），
+  # 空日志状态自洽——设备日志清理后无历史数据时 files/valid_json/schema
+  # 不致"无记录可校验"假红（同 lcview-pipeline-warn 组内产载做法）。
+  # 产载 dd 容错（2026-09-22）：acceptance 执行瞬间 adb 传输偶发 44-48ms
+  # 快速失败（连续两轮同位置判红，独立复现 8 次全成功）——产载尽力而为，
+  # 真正判据是其后 files/valid_json/schema 对数据管道完整性的严格校验
+  # （有数据则校验、无数据仍判红，不因 dd 失败假绿）；失败仅打警告继续。
+  lcview-pipeline: 'hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null || echo \"warn: dd 产载失败，数据管道校验兜底\"" hostcmd:"sleep 2 && cases/lcview_check.sh --mode files" hostcmd:"cases/lcview_check.sh --mode valid_json" hostcmd:"cases/lcview_check.sh --mode schema"'
 
   # L2 传输触发（事件 4/5 覆盖）：照 trigger 写法——baseline → 真实 USB 动作
   # → delta 断言对应事件增量。
@@ -80,7 +87,10 @@ cases:
   # teardown 无法撤销（由 LCVIEW_ALLOW_DESTRUCTIVE_WRITE 守卫变量把守），
   # 快照/恢复只登记 authorized（可恢复状态面）
   lcview-transfer:
-    acceptance: 'hostcmd:"cases/lcview_check.sh --mode baseline --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"cases/lcview_check.sh --mode conserve --conserve-load-mb 4" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 4 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"{ [ \"${LCVIEW_ALLOW_DESTRUCTIVE_WRITE:-}\" = YES ] && [ -n \"${LCVIEW_BLOCK_DEV_WRITE:-}\" ]; } || { echo \"拒绝: 此命令会覆盖目标分区数据,须 LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES 且显式设置 LCVIEW_BLOCK_DEV_WRITE\" >&2; exit 1; } && adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE} bs=1M count=1\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 5 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}"'
+    # R-13 判据修正：TRANSPORT_START（event 4）自 R-11 方向 3 停发（trace disabled，
+    # 每次 SCSI 命令最高频事件降耗），delta --event 4 永不可达判红；读路径只产
+    # transport_end（event 5，仍在 commit），故删除 event 4 断言，保留 event 5。
+    acceptance: 'hostcmd:"cases/lcview_check.sh --mode baseline --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"cases/lcview_check.sh --mode conserve --conserve-load-mb 4" hostcmd:"{ [ \"${LCVIEW_ALLOW_DESTRUCTIVE_WRITE:-}\" = YES ] && [ -n \"${LCVIEW_BLOCK_DEV_WRITE:-}\" ]; } || { echo \"拒绝: 此命令会覆盖目标分区数据,须 LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES 且显式设置 LCVIEW_BLOCK_DEV_WRITE\" >&2; exit 1; } && adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE} bs=1M count=1\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 5 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}"'
     setup_snapshot:
       - 'adb shell "cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
     teardown:

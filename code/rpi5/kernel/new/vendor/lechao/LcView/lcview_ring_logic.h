@@ -107,11 +107,13 @@ int ring_read_fit_errno(int fit);
  * 若直接返回，计数已被清零而用户未收到 → overrun 低估（写路径继续
  * atomic_inc，丢失的增量不可恢复）。修复：失败时把读到的值加回。
  *
+ * R-13 方向 3：overrun_cnt 升 atomic64_t，参数升 uint64_t。
+ *
  * @read_val atomic_xchg 读到的原值
  * @copy_ok  copy_to_user 是否成功
  * @return 回加量（copy 失败为 read_val，成功为 0）
  */
-uint32_t ring_overrun_restore_amt(uint32_t read_val, bool copy_ok);
+uint64_t ring_overrun_restore_amt(uint64_t read_val, bool copy_ok);
 
 /*
  * builder_write_fits — builder 字段写入容量检查（含 4B 长度前缀）

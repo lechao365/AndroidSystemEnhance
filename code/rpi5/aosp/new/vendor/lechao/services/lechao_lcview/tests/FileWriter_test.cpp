@@ -170,6 +170,22 @@ TEST_F(FormatJsonLineTest, Int32Field_ProducesNumber) {
     EXPECT_NE(line.find("\"f\":[0]"), std::string::npos);
 }
 
+TEST_F(FormatJsonLineTest, Envelope_SeqAndMono_Embedded) {
+    // R-13 方向 2：信封字段 seq/mono 随记录落盘（NTP 回拨按 seq 定序可靠，
+    // mono 单调时间戳供延迟分析）。makeHdr 零初始化 seq/mono=0，这里显式
+    // 注入非零值断言 JSON 透传。
+    auto schema = makeSchema(4, "e", {FieldType::INT32});
+    auto hdr = makeHdr(4, 1);
+    hdr.seq_no = 42;
+    hdr.mono_ns = 999;
+    auto fields = buildFields({FieldType::INT32});
+    auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+    EXPECT_NE(line.find("\"seq\":42"), std::string::npos);
+    EXPECT_NE(line.find("\"mono\":999"), std::string::npos);
+    // 信封字段应位于字段数组之前
+    EXPECT_LT(line.find("\"mono\""), line.find("\"f\":["));
+}
+
 TEST_F(FormatJsonLineTest, Int64Field_ProducesNumber) {
     auto schema = makeSchema(4, "e", {FieldType::INT64});
     auto hdr = makeHdr(4, 1);
@@ -2241,4 +2257,69 @@ TEST(FileWriterEvictInodeTest, InvalidLogSkippedByInode) {
     writer.evictOldFiles(files);
 
     EXPECT_EQ(access(invalid.c_str(), F_OK), 0);  // invalid 流 inode 命中保留
+}
+
+// ============================================================
+// R-13 方向 2：SeqGapStats 窗口序列间隙统计
+// ============================================================
+
+TEST(SeqGapStatsTest, NoSeqIgnored) {
+    // seq==0 视为旧内核记录（无 seq 语义），不参与 gap 统计
+    FileWriter::SeqGapStats s;
+    s.record(0);
+    s.record(0);
+    EXPECT_EQ(s.count, 0u);
+    EXPECT_EQ(s.gap(), 0u);
+}
+
+TEST(SeqGapStatsTest, Contiguous_NoGap) {
+    // 连续序列（1,2,3,4,5）窗口内无间隙
+    FileWriter::SeqGapStats s;
+    s.record(5); s.record(6); s.record(7); s.record(8); s.record(9);
+    EXPECT_EQ(s.count, 5u);
+    EXPECT_EQ(s.firstSeq, 5u);
+    EXPECT_EQ(s.lastSeq, 9u);
+    EXPECT_EQ(s.gap(), 0u);
+}
+
+TEST(SeqGapStatsTest, GapDetected) {
+    // 序列跳跃（1,2,3,8,9）：span=9，count=5 → gap=4
+    FileWriter::SeqGapStats s;
+    s.record(1); s.record(2); s.record(3); s.record(8); s.record(9);
+    EXPECT_EQ(s.count, 5u);
+    EXPECT_EQ(s.gap(), 4u);
+}
+
+TEST(SeqGapStatsTest, Wrap_CountsWrapNoFakeGap) {
+    // u32 回绕（...4294967294, 4294967295, 0, 1）记录回绕次数，不产生
+    // 巨大假 gap（last=1, first=0，span=2, count=4 → gap 钳 0）
+    FileWriter::SeqGapStats s;
+    s.record(4294967294u);
+    s.record(4294967295u);
+    s.record(0u);
+    s.record(1u);
+    EXPECT_EQ(s.seqWrap, 1u);
+    EXPECT_EQ(s.gap(), 0u);
+}
+
+TEST(SeqGapStatsTest, TakeWindow_Resets) {
+    // takeSeqGapWindow 取并重置（emitHeartbeat 每心跳独立窗口）
+    TempDir dir;
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    FileWriter writer(cfg);
+    auto schema = makeSchema(4, "e", {FieldType::INT64});
+    auto hdr = makeHdr(4, 1);
+    hdr.seq_no = 10;
+    auto fields = buildFields({FieldType::INT64});
+    writer.writeRecord(schema, &hdr, fields.data(), fields.size());
+    EXPECT_TRUE(writer.endBatch());
+
+    FileWriter::SeqGapStats w1 = writer.takeSeqGapWindow();
+    EXPECT_EQ(w1.count, 1u);
+    EXPECT_EQ(w1.lastSeq, 10u);
+    EXPECT_EQ(w1.gap(), 0u);
+
+    FileWriter::SeqGapStats w2 = writer.takeSeqGapWindow();
+    EXPECT_EQ(w2.count, 0u);  // 已重置
 }

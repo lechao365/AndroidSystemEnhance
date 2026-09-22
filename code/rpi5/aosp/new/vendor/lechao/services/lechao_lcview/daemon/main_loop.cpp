@@ -182,7 +182,7 @@ ConserveBaseline::Result ConserveBaseline::updateAndCheck(const Sample& s)
 void LogHeartbeatWriter::write(const HeartbeatFields& hb)
 {
     ALOGI("lechao_lcview: heartbeat, loop=%llu, overrun=%lld, dropped=%llu, "
-          "readErr=%llu, total_records=%u, jsonl_records=%lld, "
+          "readErr=%llu, total_records=%llu, jsonl_records=%lld, "
           "invalid_records=%lld, ioctl_err=%llu, eof=%llu, "
           "drop_open=%llu drop_format=%llu drop_oob=%llu "
           "drop_reopen=%llu drop_retry=%llu drop_invalid=%llu "
@@ -192,12 +192,14 @@ void LogHeartbeatWriter::write(const HeartbeatFields& hb)
           "ring_usage=%uB/%uB window_peak=%lluB, "
           "max_format_us=%llu max_write_us=%llu, "
           "records/s=%llu bytes/s=%llu top_event=%u(%llu), "
-          "invalid_badlen=%lld invalid_schemadrift=%lld",
+          "invalid_badlen=%lld invalid_schemadrift=%lld, "
+          "seq_gap=%llu seq_received=%llu seq_last=%u",
           static_cast<unsigned long long>(hb.loop),
           static_cast<long long>(hb.overrun),
           static_cast<unsigned long long>(hb.dropped),
           static_cast<unsigned long long>(hb.readErr),
-          hb.totalRecords, hb.jsonlRecords, hb.invalidRecords,
+          static_cast<unsigned long long>(hb.totalRecords),
+          hb.jsonlRecords, hb.invalidRecords,
           static_cast<unsigned long long>(hb.ioctlErr),
           static_cast<unsigned long long>(hb.eofCount),
           static_cast<unsigned long long>(hb.dropOpen),
@@ -222,7 +224,10 @@ void LogHeartbeatWriter::write(const HeartbeatFields& hb)
           static_cast<unsigned>(hb.topEventId),
           static_cast<unsigned long long>(hb.topEventCnt),
           static_cast<long long>(hb.invalidBadLen),
-          static_cast<long long>(hb.invalidSchemaDrift));
+          static_cast<long long>(hb.invalidSchemaDrift),
+          static_cast<unsigned long long>(hb.seqGap),
+          static_cast<unsigned long long>(hb.seqReceived),
+          static_cast<unsigned>(hb.seqLast));
 }
 
 // 心跳段（每 30 loop）：直读内核 overrun/total_records，
@@ -265,8 +270,8 @@ void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
     // 缓存分发——消每心跳四次 GET_STATS ioctl 放大（getOverrun 是独立
     // GET_OVERRUN 读取即清零，不在此合并范围，仍单独调用）
     reader.refreshStats();
-    const uint32_t total = reader.getTotalRecords();
-    const uint32_t kernDropped = reader.getDropped();
+    const uint64_t total = reader.getTotalRecords();
+    const uint64_t kernDropped = reader.getDropped();
     const uint32_t ringSize = reader.getRingSizeBytes();
     const FileWriter::PersistCounters& pc = writer.persistCounters();
     // R-02 方向 3：守恒逻辑收口到 ConserveBaseline::updateAndCheck（纯函数，
@@ -302,6 +307,8 @@ void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
     uint32_t topEventId = 0;
     uint64_t topEventCnt = 0;
     dist.top(topEventId, topEventCnt);
+    // R-13 方向 2：取窗口 seq 间隙统计（gap = 序列跳跃量，独立于守恒 dev）
+    const FileWriter::SeqGapStats seqg = writer.takeSeqGapWindow();
     // R-09 方向 1/3：环水位、窗口峰值字节、窗口速率与 event 分布
     const uint32_t ringUsage = reader.getRingUsageBytes();
     // 窗口速率：秒 = 窗口累计字节/条 除以固定 30s 窗口（心跳周期常量）
@@ -340,6 +347,9 @@ void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
         .topEventCnt = topEventCnt,
         .invalidBadLen = window.invalidBadLen,
         .invalidSchemaDrift = window.invalidSchemaDrift,
+        .seqGap = seqg.gap(),
+        .seqReceived = seqg.count,
+        .seqLast = seqg.lastSeq,
     };
     out.write(hb);
 }

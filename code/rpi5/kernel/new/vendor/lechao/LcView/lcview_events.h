@@ -86,7 +86,22 @@
 #error "LcView 线上格式按小端契约裸 memcpy 序列化（LCV-02/KRN-002），不支持大端编译"
 #endif
 
-/* --- 记录头结构（16B 固定头 + 变长字段区） --- */
+/* --- 记录头结构（R-13 方向 2 扩容：24B 固定头 + 变长字段区） ---
+ * R-13 方向 2：一次扩容——原 16B 头 reserved(2B) 恒 0 改为承载 seq_no
+ * (uint32 原子递增，全局事件序号)，并在 16B 后追加 mono_ns (uint64,
+ * CLOCK_MONOTONIC 单调时间基)。seq_no 提供单调递增全局序号：NTP 回拨时
+ * wall(ts) 跳跃不影响排序可靠（按 seq_no 定序），daemon 心跳 gap = 内核
+ * 最大 seq 增量 - 落盘条数可判定序列间隙；mono_ns 供延迟/抖动分析不受
+ * 时钟校准影响。
+ * 布局（packed，小端契约同 16B 版）：
+ *   [0] magic(u16) [2] event_id(u16) [4] level(u8) [5] field_count(u8)
+ *   [6] reserved(u16，保留对齐，恒 0)
+ *   [8] timestamp_ns(u64, CLOCK_REALTIME wall)
+ *   [16] seq_no(u32, 原子递增全局事件序号)
+ *   [20] reserved2(u32, 保留对齐未来扩展，恒 0)
+ *   [24] mono_ns(u64, CLOCK_MONOTONIC)
+ *   合计 32 字节。
+ */
 #ifdef __KERNEL__
 struct lcview_record_hdr {
     uint16_t magic;
@@ -95,6 +110,9 @@ struct lcview_record_hdr {
     uint8_t  field_count;
     uint16_t reserved;
     uint64_t timestamp_ns;
+    uint32_t seq_no;
+    uint32_t reserved2;
+    uint64_t mono_ns;
 } __attribute__((packed));
 
 struct lcview_field_hdr {
@@ -110,6 +128,9 @@ struct lcview_record_hdr {
     uint8_t  field_count;
     uint16_t reserved;
     uint64_t timestamp_ns;
+    uint32_t seq_no;
+    uint32_t reserved2;
+    uint64_t mono_ns;
 };
 struct lcview_field_hdr {
     uint8_t  type;

@@ -62,11 +62,13 @@ inline constexpr int64_t computeConserveTolerance(uint32_t ringSizeBytes)
 // 推进；改为调用方持有后每心跳推进基线（相邻心跳窗口比较，uint32
 // total_records 永不回绕误报）。ioctl 失败（ioctlErr 增量，任一查询返 0
 // 伪装真实 0）时跳过守恒校验且不推进数值基线，防失败值失真。
+// R-13 方向 3：total/dropped 升 u64 消 uptime 回绕（内核计数已升
+// atomic64_t，基线同宽；内核重载检测 `s.total < total` 仍保留）。
 struct ConserveBaseline {
     bool initialized = false;
-    uint32_t total = 0;             // 内核 total_records 基线
+    uint64_t total = 0;             // 内核 total_records 基线（R-13 升 u64）
     int64_t overrun = 0;            // 用户态 overrunAccum 基线
-    uint64_t dropped = 0;           // 内核 dropped_cnt 基线（方向 7）
+    uint64_t dropped = 0;           // 内核 dropped_cnt 基线（方向 7，R-13 升 u64）
     uint64_t writerDrop = 0;        // FileWriter DROP 累计基线（R-07 方向 3）
     uint64_t persistedValid = 0;    // FileWriter 合法落盘基线（方向 5）
     uint64_t persistedInvalid = 0;  // FileWriter 非法落盘基线（方向 5）
@@ -76,9 +78,9 @@ struct ConserveBaseline {
     // 所需数据打包，经 updateAndCheck 统一消费——纯数据结构、无 ALOGI
     // 依赖，使守恒推进/告警逻辑可脱离日志系统单测。
     struct Sample {
-        uint32_t total;             // 本轮 getTotalRecords()
+        uint64_t total;             // 本轮 getTotalRecords()（R-13 升 u64）
         int64_t overrun;            // 本轮 overrunAccum（累计）
-        uint32_t dropped;           // 本轮 getDropped()
+        uint64_t dropped;           // 本轮 getDropped()（R-13 升 u64）
         uint64_t writerDrop;        // 本轮 FileWriter DROP 合计（R-07 方向 3）
         uint64_t ioctlErr;          // 本轮 reader.ioctlErr()
         uint64_t persistedValid;    // 本轮 writer.persistCounters().valid
@@ -143,7 +145,7 @@ struct HeartbeatFields {
     int64_t overrun = 0;             // 累计 overrun（用户态）
     uint64_t dropped = 0;            // dropped 求和（DropCounters 全分项）
     uint64_t readErr = 0;            // 读错误计数
-    uint32_t totalRecords = 0;       // 内核 total_records
+    uint64_t totalRecords = 0;       // 内核 total_records（R-13 方向 3 升 u64）
     long long jsonlRecords = 0;      // 合法落盘累计
     long long invalidRecords = 0;    // 非法落盘累计
     uint64_t ioctlErr = 0;           // DeviceReader ioctl 失败计数
@@ -170,6 +172,10 @@ struct HeartbeatFields {
     // R-09 方向 4：parseBatch invalid 按 reason 分类（区分坏长度/schema 漂移）
     long long invalidBadLen = 0;      // 坏长度/坏前缀类 invalid 累计
     long long invalidSchemaDrift = 0; // schema 漂移类 invalid 累计
+    // R-13 方向 2：事件序列间隙（seq gap）窗口指标
+    uint64_t seqGap = 0;              // 窗口内序列间隙（last-first+1 - count）
+    uint64_t seqReceived = 0;         // 窗口内收到（含 seq 语义）记录条数
+    uint32_t seqLast = 0;             // 窗口内最大 seq_no（定位回绕点）
 };
 
 // 心跳输出抽象接口（R-02 方向 3）：emitHeartbeat 的落盘端从 ALOGI 解耦为

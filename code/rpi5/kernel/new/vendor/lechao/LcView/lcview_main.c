@@ -74,12 +74,17 @@ static ssize_t lcview_stats_show(struct device *dev,
     /* R-07 方向 1：producer_dropped 由 builder 模块级计数导出（不经
      * struct lcview_stats，防 ABI 断言破坏）——与 total_records/dropped_cnt
      * 区分，供守恒右式吸收生产端丢弃 */
+    /* R-13 方向 3：统计三字段升 u64，打印改 %llu（u32 宽度截断高 32 位） */
+    /* R-13 方向 2：event_seq 全局事件序号游标（gap 判定直读，见 lcview_internal.h） */
     return scnprintf(buf, PAGE_SIZE,
-                     "total_records=%u overrun=%u dropped=%u "
-                     "producer_dropped=%u "
+                     "total_records=%llu overrun=%llu dropped=%llu "
+                     "producer_dropped=%u event_seq=%llu "
                      "ring_usage_bytes=%u ring_size_bytes=%u\n",
-                     st.total_records, st.overrun_cnt, st.dropped_cnt,
+                     (unsigned long long)st.total_records,
+                     (unsigned long long)st.overrun_cnt,
+                     (unsigned long long)st.dropped_cnt,
                      lcview_builder_producer_dropped_get(),
+                     (unsigned long long)lcview_event_seq_cur(),
                      st.ring_usage_bytes, st.ring_size_bytes);
 }
 static DEVICE_ATTR_RO(lcview_stats);
@@ -210,6 +215,7 @@ static __poll_t lcview_poll(struct file *file, poll_table *wait)
 static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
     uint32_t val;
+    uint64_t overrun64;
     uint8_t level;
     struct lcview_stats stats;
 
@@ -227,6 +233,19 @@ static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         break;
 
     /*
+     * 查询 ABI 版本（R-13 方向 1）：daemon 启动协商内核版本，不匹配
+     * 显式退出判红——旧内核缺本命令返 ENOTTY，daemon 即判红，消
+     * "新用户态 + 旧内核"静默降级/字段错读。
+     */
+    case LCVIEW_GET_ABI_VERSION:
+        val = LCVIEW_ABI_VERSION;
+        if (copy_to_user((void __user *)arg, &val, sizeof(val))) {
+            pr_err(PREFIX "GET_ABI_VERSION copy_to_user failed\n");
+            return -EFAULT;
+        }
+        break;
+
+    /*
      * 读取溢出计数并清零
      * "边读边清"语义：用户态轮询时可判断自上次查询以来是否发生过溢出
      *
@@ -237,13 +256,14 @@ static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
      * copy_to_user 失败时须按 ring_overrun_restore_amt 把读到的值加回，
      * 否则计数已被清零而用户未收到 → overrun 低估（写路径继续 inc，
      * 丢失的增量不可恢复）。
+     * R-13 方向 3：overrun_cnt 升 atomic64_t，载荷升 uint64_t 消回绕。
      */
     case LCVIEW_GET_OVERRUN:
-        val = (uint32_t)atomic_xchg(&lcview_ring.overrun_cnt, 0);
-        if (copy_to_user((void __user *)arg, &val, sizeof(val))) {
+        overrun64 = (uint64_t)atomic64_xchg(&lcview_ring.overrun_cnt, 0);
+        if (copy_to_user((void __user *)arg, &overrun64, sizeof(overrun64))) {
             pr_err(PREFIX "GET_OVERRUN copy_to_user failed\n");
-            atomic_add((int)ring_overrun_restore_amt(val, false),
-                       &lcview_ring.overrun_cnt);
+            atomic64_add(ring_overrun_restore_amt(overrun64, false),
+                         &lcview_ring.overrun_cnt);
             return -EFAULT;
         }
         break;

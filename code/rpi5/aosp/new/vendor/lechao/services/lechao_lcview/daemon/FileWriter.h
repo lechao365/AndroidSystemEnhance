@@ -186,6 +186,45 @@ public:
     // 返回并重置窗口 event 分布（emitHeartbeat 每心跳调用）
     EventDist takeEventDistWindow();
 
+    // R-13 方向 2：事件序列间隙（seq gap）窗口统计。
+    // 内核为每条事件分配全局递增 seq_no（hdr.seq_no），daemon formatJsonLine
+    // 收到记录时记录其 seq。窗口内 gap = (last_seq - first_seq + 1) - count：
+    // 正值表示窗口内存在序列跳跃（ring 驱逐 overrun / ENOSPC 丢弃 /
+    // FileWriter DROP / 读端漏读），把"丢事件量"从守恒 dev 中独立成可观测
+    // 指标（NTP 回拨时 ts 不可作排序基，seq 定序可靠）。
+    // seq==0 视为旧内核记录（无 seq 语义）不计入，防新旧内核混跑误报。
+    struct SeqGapStats {
+        uint64_t count = 0;     // 窗口内收到（含 seq 语义）的记录条数
+        uint32_t firstSeq = 0;  // 窗口内最小 seq_no
+        uint32_t lastSeq = 0;   // 窗口内最大 seq_no
+        uint32_t seqWrap = 0;   // 窗口内检测到 u32 回绕次数（seq 减小）
+        void reset() {
+            count = 0; firstSeq = 0; lastSeq = 0; seqWrap = 0;
+        }
+        // 记录一条 seq（0 忽略——无 seq 语义的旧内核记录不参与 gap 统计）
+        void record(uint32_t seq) {
+            if (seq == 0) return;
+            if (count == 0) {
+                firstSeq = lastSeq = seq;
+            } else if (seq >= lastSeq) {
+                lastSeq = seq;
+            } else {
+                seqWrap++;   // 回绕（内核重启或 u32 归零）
+                if (firstSeq == 0 || seq < firstSeq) firstSeq = seq;
+                lastSeq = seq;
+            }
+            count++;
+        }
+        // 窗口内序列间隙（回绕时不精确，仅累计不判红；无记录返 0）
+        uint64_t gap() const {
+            if (count == 0) return 0;
+            uint64_t span = static_cast<uint64_t>(lastSeq) - firstSeq + 1;
+            return (span > count) ? (span - count) : 0;
+        }
+    };
+    // 返回并重置窗口 seq 间隙统计（emitHeartbeat 每心跳调用）
+    SeqGapStats takeSeqGapWindow();
+
     // R-08 方向 2：批次级 flush 事务。
     // 批次 = parseBatch 一次调用处理的记录集合（flushSegment 攒出的 64KB
     // 缓冲）。原每记录 flush（每次 write syscall），改批次尾统一 flush——
@@ -359,4 +398,7 @@ private:
     uint64_t mBatchPersistInvalid = 0;
     uint64_t mBatchWritesSinceRetention = 0;
     uint64_t mBatchInvalidWrites = 0;
+    // R-13 方向 2：窗口 seq 间隙统计（formatJsonLine 收到记录时 record seq，
+    // 心跳 takeSeqGapWindow 取并重置）
+    SeqGapStats mSeqGap;
 };

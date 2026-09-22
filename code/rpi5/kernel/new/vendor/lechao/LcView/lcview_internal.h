@@ -78,9 +78,14 @@ struct lcview_ring {
     uint32_t      size;        /* 缓冲区总大小（字节） */
     uint32_t      write_pos;   /* 写指针（由 spin_lock 保护，指向下条写入位置） */
     uint32_t      read_pos;    /* 读指针（读时持锁修改，指向下条读取位置） */
-    atomic_t      overrun_cnt; /* 溢出逐出累计计数（边读边清） */
-    atomic_t      total_records; /* 累计写入记录数（仅统计，不清零） */
-    atomic_t      dropped_cnt; /* ENOSPC 丢弃累计计数（方向 7：驱逐预算超限丢弃，
+    /* R-13 方向 3：统计计数升 atomic64_t——total_records 在 I/O 洪水下
+     * u32 最快 ~71 分钟回绕（1M events/s），长期运行 + 守恒增量比较场景
+     * 回绕风险真实存在；升 u64 后 daemon 侧无需再防 uint32 回绕（内核
+     * 重载检测仍保留）。overrun_cnt 边读边清（增量语义）但同升 u64
+     * 一劳永逸，dropped_cnt 不清零累计同 total 生命周期同风险。 */
+    atomic64_t    overrun_cnt; /* 溢出逐出累计计数（边读边清） */
+    atomic64_t    total_records; /* 累计写入记录数（仅统计，不清零） */
+    atomic64_t    dropped_cnt; /* ENOSPC 丢弃累计计数（方向 7：驱逐预算超限丢弃，
                                 * 与 total_records 同步递增——该记录同样被内核收到，
                                 * 守恒左式 totalΔ = overrunΔ + droppedΔ + jsonlΔ + invalidΔ
                                 * 由此闭合，避免丢弃时守恒负向误报） */
@@ -129,9 +134,9 @@ struct lcview_builder {
  * 通过 LCVIEW_GET_STATS ioctl 返回给用户态
  */
 struct lcview_stats {
-    uint32_t total_records;    /* 累计写入记录总数（含 ENOSPC 丢弃，见 lcview_ring_write） */
-    uint32_t overrun_cnt;      /* 溢出逐出记录数 */
-    uint32_t dropped_cnt;      /* ENOSPC 丢弃累计（方向 7：驱逐预算超限丢弃，只读不清零） */
+    uint64_t total_records;    /* 累计写入记录总数（含 ENOSPC 丢弃，见 lcview_ring_write） */
+    uint64_t overrun_cnt;      /* 溢出逐出记录数 */
+    uint64_t dropped_cnt;      /* ENOSPC 丢弃累计（方向 7：驱逐预算超限丢弃，只读不清零） */
     uint32_t ring_usage_bytes; /* 当前已使用字节数 */
     uint32_t ring_size_bytes;  /* 环形缓冲区总大小 */
 };
@@ -225,5 +230,16 @@ void lcview_builder_cancel(struct lcview_builder *b);
  */
 void lcview_builder_producer_dropped_inc(void);
 uint32_t lcview_builder_producer_dropped_get(void);
+
+/* ========== 事件序号游标（R-13 方向 2） ========== */
+
+/*
+ * 当前全局事件序号游标（模块级 atomic64 递增，只读不消费）。
+ * daemon 心跳 gap 判定用：本心跳读到游标较上心跳增量 - 落盘条数 =
+ * 序列间隙（含 ring 驱逐/ENOSPC 丢弃/FileWriter DROP 的真实丢事件量）。
+ * 与 ring->total_records 同源（每 commit 递增一次），但独立生成器不随
+ * ring 驱逐归零，gap 判定不依赖 GET_STATS 缓存（sysfs 直读）。
+ */
+uint64_t lcview_event_seq_cur(void);
 
 #endif /* LCVIEW_INTERNAL_H */

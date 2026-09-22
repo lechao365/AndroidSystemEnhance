@@ -133,9 +133,9 @@ int lcview_ring_init(struct lcview_ring *ring, uint32_t size_kb)
     ring->write_pos = 0;
     ring->read_pos = 0;
     ring->shutdown = false;
-    atomic_set(&ring->overrun_cnt, 0);
-    atomic_set(&ring->total_records, 0);
-    atomic_set(&ring->dropped_cnt, 0);
+    atomic64_set(&ring->overrun_cnt, 0);
+    atomic64_set(&ring->total_records, 0);
+    atomic64_set(&ring->dropped_cnt, 0);
     atomic_set(&ring->readers, 0);
     spin_lock_init(&ring->lock);
     mutex_init(&ring->read_mutex);
@@ -216,9 +216,9 @@ static void ring_evict_one(struct lcview_ring *ring)
                             skipped_len);
     }
 
-    atomic_inc(&ring->overrun_cnt);
-    pr_debug(PREFIX "overrun #%d (evicted record at pos=%u)\n",
-             atomic_read(&ring->overrun_cnt), ring->read_pos);
+    atomic64_inc(&ring->overrun_cnt);
+    pr_debug(PREFIX "overrun #%lld (evicted record at pos=%u)\n",
+             atomic64_read(&ring->overrun_cnt), ring->read_pos);
 }
 
 /*
@@ -318,16 +318,16 @@ int lcview_ring_write(struct lcview_ring *ring,
         if (total > avail) {
             spin_unlock_irqrestore(&ring->lock, flags);
             /* KRN-014：满环在 I/O 洪水时可每条命令触发，限频防止日志风暴 */
-            pr_err_ratelimited(PREFIX "ring full, write failed (total=%u avail=%u evicted=%u)\n",
-                               total, avail, evicted);
+            pr_err_ratelimited(PREFIX "ring full, write failed (total=%llu avail=%u evicted=%u)\n",
+                               atomic64_read(&ring->total_records), avail, evicted);
             /*
              * 方向 7：ENOSPC 丢弃同样计入 total_records（该记录已被内核收到，
              * 属"产生但被丢弃"）并递增 dropped_cnt——否则守恒左式 totalΔ 不含
              * 该条而右式含 droppedΔ，dev 恒为负向误报。total_records 语义由
              * "成功写入数"扩展为"内核处理的记录总数（成功 + 预算超限丢弃）"。
              */
-            atomic_inc(&ring->total_records);
-            atomic_inc(&ring->dropped_cnt);
+            atomic64_inc(&ring->total_records);
+            atomic64_inc(&ring->dropped_cnt);
             return -ENOSPC;
         }
     }
@@ -341,11 +341,11 @@ int lcview_ring_write(struct lcview_ring *ring,
     ring_memcpy_in(ring, ring->write_pos, data, len);
     ring->write_pos = (ring->write_pos + len) % ring->size;
 
-    atomic_inc(&ring->total_records);
+    atomic64_inc(&ring->total_records);
     spin_unlock_irqrestore(&ring->lock, flags);
 
-    pr_debug(PREFIX "wrote record len=%u total_records=%d\n",
-             len, atomic_read(&ring->total_records));
+    pr_debug(PREFIX "wrote record len=%u total_records=%lld\n",
+             len, atomic64_read(&ring->total_records));
     wake_up_interruptible(&ring->waitq);
     return 0;
 }
@@ -625,9 +625,9 @@ uint32_t lcview_ring_avail_bytes(struct lcview_ring *ring)
  */
 void lcview_ring_get_stats(struct lcview_ring *ring, struct lcview_stats *stats)
 {
-    stats->total_records = atomic_read(&ring->total_records);
-    stats->overrun_cnt = atomic_read(&ring->overrun_cnt);
-    stats->dropped_cnt = atomic_read(&ring->dropped_cnt);
+    stats->total_records = atomic64_read(&ring->total_records);
+    stats->overrun_cnt = atomic64_read(&ring->overrun_cnt);
+    stats->dropped_cnt = atomic64_read(&ring->dropped_cnt);
     stats->ring_size_bytes = ring->size;
     stats->ring_usage_bytes = lcview_ring_avail_bytes(ring);
 }

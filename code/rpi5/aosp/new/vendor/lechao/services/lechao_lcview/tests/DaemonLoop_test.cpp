@@ -50,7 +50,8 @@ SchemaParser makeSchema() {
 }
 
 std::vector<uint8_t> makeValidRecord() {
-    std::vector<uint8_t> buf(33, 0);
+    // R-13 方向 2：hdr 扩容 32B（16B→32B），缓冲须按 sizeof 计算防越界
+    std::vector<uint8_t> buf(sizeof(lcview_record_hdr) + 8 + 9, 0);
     auto* hdr = reinterpret_cast<lcview_record_hdr*>(buf.data());
     hdr->magic = LCVIEW_MAGIC;
     hdr->event_id = 4;

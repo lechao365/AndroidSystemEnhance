@@ -122,7 +122,7 @@ int ring_read_fit_errno(int fit)
     return (fit == 0) ? 0 : -EMSGSIZE;
 }
 
-uint32_t ring_overrun_restore_amt(uint32_t read_val, bool copy_ok)
+uint64_t ring_overrun_restore_amt(uint64_t read_val, bool copy_ok)
 {
     return copy_ok ? 0 : read_val;
 }

@@ -782,11 +782,13 @@ class TestResolveAcceptance(unittest.TestCase):
 
     def test_inbuilt_lcview_pipeline_present(self):
         # L1 主用例（critical 3 项）已内聚到 verify-cases.yaml，hostcmd 相对路径可解析；
-        # fresh 已移入 trigger（静止态无新事件永不能过）
+        # fresh 已移入 trigger（静止态无新事件永不能过）；
+        # R-13 判据修正：前置 dd 读产载（transport_end 落盘）使空日志自洽
         acc, err = wa.resolve_acceptance(self._args(case="lcview-pipeline"))
         self.assertIsNone(err)
-        self.assertIn('hostcmd:"cases/lcview_check.sh --mode files"', acc)
+        self.assertIn('--mode files', acc)
         self.assertIn('hostcmd:"cases/lcview_check.sh --mode schema"', acc)
+        self.assertIn('dd if=${LCVIEW_BLOCK_DEV', acc)
         self.assertNotIn("--mode fresh", acc)
 
     def test_inbuilt_lcview_pipeline_warn_present(self):

@@ -102,6 +102,24 @@ bool EpollDeviceReader::open()
                   << " usage=" << stats.ring_usage_bytes << "B/"
                   << stats.ring_size_bytes << "B";
 
+    // R-13 方向 1：启动 ABI 协商。内核版本不匹配（ioctl 失败=旧内核缺命令
+    // 返 ENOTTY，或版本号低于 daemon 预期）→ mAbiOk=false，main() 据此
+    // 显式退出判红（return 1 交 init 重启，禁止静默降级运行——新用户态 +
+    // 旧内核会造成事件 hdr/统计结构错读的静默损坏）。
+    uint32_t kernAbi = 0;
+    if (!queryAbiVersion(mFd, &kernAbi)) {
+        mAbiOk = false;
+        LOG(ERROR) << "EpollDeviceReader: ABI version query failed "
+                      "(old kernel missing LCVIEW_GET_ABI_VERSION? ENOTTY)";
+    } else if (kernAbi != LCVIEW_ABI_VERSION) {
+        mAbiOk = false;
+        LOG(ERROR) << "EpollDeviceReader: ABI mismatch kernel=" << kernAbi
+                   << " daemon=" << LCVIEW_ABI_VERSION;
+    } else {
+        mAbiOk = true;
+        LOG(INFO) << "EpollDeviceReader: ABI version matched (" << kernAbi << ")";
+    }
+
     LOG(INFO) << "EpollDeviceReader: opened, fd=" << mFd;
     return true;
 }
@@ -154,10 +172,11 @@ ssize_t EpollDeviceReader::waitAndRead(uint8_t* buf, size_t offset,
     return n;
 }
 
-uint32_t EpollDeviceReader::getOverrun()
+uint64_t EpollDeviceReader::getOverrun()
 {
     // 内核语义：读取即清零，返回值为本次增量
-    uint32_t overrun = 0;
+    // R-13 方向 3：内核计数升 atomic64_t，载荷升 uint64_t
+    uint64_t overrun = 0;
     if (mFd >= 0 && ioctl(mFd, LCVIEW_GET_OVERRUN, &overrun) == 0)
         return overrun;
     mIoctlErr++;  // LCV-16：失败计数，心跳可见（返 0 与真实 0 可区分）
@@ -188,7 +207,7 @@ void EpollDeviceReader::refreshStats()
     LC_LOGE("ioctl GET_STATS failed: errno=" << errno);
 }
 
-uint32_t EpollDeviceReader::getTotalRecords()
+uint64_t EpollDeviceReader::getTotalRecords()
 {
     // 缓存有效时从缓存分发（R-10 方向 2，不再重复 ioctl）
     if (mStatsValid)
@@ -202,7 +221,7 @@ uint32_t EpollDeviceReader::getTotalRecords()
     return 0;
 }
 
-uint32_t EpollDeviceReader::getDropped()
+uint64_t EpollDeviceReader::getDropped()
 {
     // R-10 方向 2：缓存有效优先（与 getTotalRecords 同源同容错）
     if (mStatsValid)
@@ -259,4 +278,18 @@ void EpollDeviceReader::close()
         ::close(mFd);
         mFd = -1;
     }
+}
+
+bool EpollDeviceReader::queryAbiVersion(int fd, uint32_t* version)
+{
+    // R-13 方向 1：ABI 协商。旧内核未实现 LCVIEW_GET_ABI_VERSION 时 ioctl
+    // 返 -ENOTTY（lcview_main.c default 分支）——调用方（启动协商）据此
+    // 判"内核版本过旧"显式退出判红，消新用户态旧内核的静默降级/字段错读。
+    if (fd < 0 || !version)
+        return false;
+    uint32_t ver = 0;
+    if (ioctl(fd, LCVIEW_GET_ABI_VERSION, &ver) != 0)
+        return false;
+    *version = ver;
+    return true;
 }

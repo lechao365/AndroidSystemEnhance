@@ -9,7 +9,7 @@
 //
 // 分支覆盖目标：
 //   - 4B record total_len 前缀小端序（le32）：正常/边界值/大端序拒绝
-//   - 16B lcview_record_hdr 内存布局：magic 校验
+//   - lcview_record_hdr 内存布局（R-13 扩容 32B）：magic 校验
 //   - INT32/INT64/FLOAT 定长字段往返（各 case）
 //   - STRING/BINARY 变长字段 2B 长度前缀小端序（le16）：零长度/正常/大端序拒绝
 //   - daemon 解析循环分支：单 record/多 record/截断 batch/坏长度

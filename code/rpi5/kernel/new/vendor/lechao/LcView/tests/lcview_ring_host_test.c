@@ -268,7 +268,7 @@ static void test_overrun_restore(void)
     /* copy 失败：计数不得丢失（低估）——回加读到的值 */
     CHECK(ring_overrun_restore_amt(42, false) == 42);
     CHECK(ring_overrun_restore_amt(0, false) == 0);
-    CHECK(ring_overrun_restore_amt(UINT32_MAX, false) == UINT32_MAX);
+    CHECK(ring_overrun_restore_amt(UINT64_MAX, false) == UINT64_MAX);
     /* copy 成功：已清零交付，无回加 */
     CHECK(ring_overrun_restore_amt(42, true) == 0);
 }

@@ -28,6 +28,15 @@
 #define LCVIEW_IOC_MAGIC  'V'
 
 /*
+ * 【ABI 版本（R-13 方向 1，UAPI 世代重建）】
+ * 镜像源：内核 lcview_ioctl.h 的 LCVIEW_ABI_VERSION。每次 ABI 变更
+ * （ioctl 命令号/载荷类型/事件 hdr 布局/struct lcview_stats 字段）必须
+ * 递增版本号并双侧同步。daemon 启动经 LCVIEW_GET_ABI_VERSION ioctl 协商，
+ * 不匹配（旧内核返 ENOTTY 或版本号低）显式退出判红，禁止静默降级。
+ */
+#define LCVIEW_ABI_VERSION  2
+
+/*
  * 查询环形缓冲区中当前可读字节数
  * 用户态传入 uint32_t*，内核填入可用字节数
  */
@@ -36,18 +45,20 @@
 /*
  * 查询并清零溢出计数
  * 读完后内核自动将 overrun_cnt 重置为 0，实现"边读边清"语义
+ * 载荷 uint64_t（R-13 方向 3：计数升 atomic64_t 消 uptime 回绕）
  */
-#define LCVIEW_GET_OVERRUN      _IOR(LCVIEW_IOC_MAGIC, 2, uint32_t)
+#define LCVIEW_GET_OVERRUN      _IOR(LCVIEW_IOC_MAGIC, 2, uint64_t)
 
 /*
  * 内核 ring 统计结构（与内核 lcview_internal.h 的 struct lcview_stats
  * 逐字段一致；total_records/overrun_cnt 为内核自初始化起的累计计数，
- * 只读不清零，与 GET_OVERRUN 的"读取即清零"语义互补支撑守恒校验）
+ * 只读不清零，与 GET_OVERRUN 的"读取即清零"语义互补支撑守恒校验）。
+ * R-13 方向 3：统计三字段升 u64（ring_usage/size 仍 u32，字节数最大 4MB）。
  */
 struct lcview_stats {
-    uint32_t total_records;
-    uint32_t overrun_cnt;
-    uint32_t dropped_cnt;
+    uint64_t total_records;
+    uint64_t overrun_cnt;
+    uint64_t dropped_cnt;
     uint32_t ring_usage_bytes;
     uint32_t ring_size_bytes;
 };
@@ -64,21 +75,29 @@ struct lcview_stats {
  */
 #define LCVIEW_SET_LEVEL        _IOW(LCVIEW_IOC_MAGIC, 4, uint8_t)
 
+/*
+ * 查询当前 ABI 版本（R-13 方向 1）
+ * 用户态传入 uint32_t*，内核填入 LCVIEW_ABI_VERSION。
+ * 旧内核未实现本命令时 ioctl 返 -ENOTTY——daemon 启动协商即判红。
+ */
+#define LCVIEW_GET_ABI_VERSION  _IOR(LCVIEW_IOC_MAGIC, 5, uint32_t)
+
 /* struct 尺寸守卫：与内核镜像（lcview_internal.h）漂移即编译期报错
  * 逐字段 offsetof 断言（方向 3）：不仅守总尺寸，还逐字段校验偏移与内核
  * lcview_internal.h 的 struct lcview_stats 一致——仅 sizeof 相等挡不住
- * 字段顺序/类型互换（同 20B 不同布局），offsetof 逐字段钉死对齐。 */
+ * 字段顺序/类型互换（同 20B 不同布局），offsetof 逐字段钉死对齐。
+ * R-13 方向 3：前三字段升 u64 后偏移 0/8/16，后两字段 24/28。 */
 static_assert(offsetof(struct lcview_stats, total_records) == 0,
               "lcview_stats.total_records offset drift");
-static_assert(offsetof(struct lcview_stats, overrun_cnt) == 4,
+static_assert(offsetof(struct lcview_stats, overrun_cnt) == 8,
               "lcview_stats.overrun_cnt offset drift");
-static_assert(offsetof(struct lcview_stats, dropped_cnt) == 8,
+static_assert(offsetof(struct lcview_stats, dropped_cnt) == 16,
               "lcview_stats.dropped_cnt offset drift");
-static_assert(offsetof(struct lcview_stats, ring_usage_bytes) == 12,
+static_assert(offsetof(struct lcview_stats, ring_usage_bytes) == 24,
               "lcview_stats.ring_usage_bytes offset drift");
-static_assert(offsetof(struct lcview_stats, ring_size_bytes) == 16,
+static_assert(offsetof(struct lcview_stats, ring_size_bytes) == 28,
               "lcview_stats.ring_size_bytes offset drift");
-static_assert(sizeof(struct lcview_stats) == 20,
-              "lcview_stats must be 20 bytes (kernel mirror drift)");
+static_assert(sizeof(struct lcview_stats) == 32,
+              "lcview_stats must be 32 bytes (kernel mirror drift)");
 
 #endif /* LCVIEW_DAEMON_IOCTL_H */

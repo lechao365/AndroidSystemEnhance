@@ -56,8 +56,8 @@ static void test_add_str_callsite_overflow(void)
     if (!b)
         return;
 
-    /* 填满 16B 头 + 3B(prefix/type) + 4B(prefix/len) 后 data_offset=23，
-     * 剩余 LCVIEW_BUILDER_MAX_SIZE - 23 = 4073 字节可写变长数据。
+    /* 填满 32B 头 + 3B(prefix/type) + 4B(prefix/len) 后 data_offset=39，
+     * 剩余 LCVIEW_BUILDER_MAX_SIZE - 39 = 4057 字节可写变长数据。
      * 再加 1 字节 data 即需 data_offset+4+3+4074 > 4096 → -ENOSPC。
      * 修复前漏扣 4B 前缀：data_offset+3+4074=4100 > 4096 本也应超——
      * 该用例在 4096 边界上方区分，边界处判红见下面 data_offset 精确用例。
@@ -109,14 +109,16 @@ static void test_add_str_callsite_boundary(void)
     char blob[4078];
     memset(blob, 'y', 4077);
     blob[4077] = '\0';   /* strlen = 4077（补 NUL 防 strlen 越界 UB） */
-    /* data_offset=16：4(前缀)+3(type/len)+4077 = 4100 > 4096 → -ENOSPC */
+    /* data_offset=32（R-13 方向 2 hdr 扩容）：4(前缀)+3(type/len)+4077 =
+     * 4116 > 4096 → -ENOSPC */
     int rc = lcview_builder_add_str(b, blob);
     CHECK(rc == -ENOSPC);
 
-    /* 4073B 恰好：4+3+4073 = 4080 ≤ 4096 → 装得下 */
-    char small[4074];
-    memset(small, 'z', 4073);
-    small[4073] = '\0';  /* strlen = 4073（补 NUL 防 strlen 越界 UB） */
+    /* 4057B 恰好：32+4+3+4057 = 4096 → 装得下（R-13 hdr 32B 后极限
+     * 从 4073 下调到 4057） */
+    char small[4058];
+    memset(small, 'z', 4057);
+    small[4057] = '\0';  /* strlen = 4057（补 NUL 防 strlen 越界 UB） */
     struct lcview_builder *b2 = lcview_builder_new(LCVIEW_EVENT_USB_RATE_DEGRADED,
                                                    LCVIEW_LEVEL_INFO);
     CHECK(b2 != NULL);
@@ -131,11 +133,11 @@ static void test_add_str_callsite_boundary(void)
 
 /*
  * 调用点判红（方向 2）：lcview_ring_read 判损坏跳过须按 record_len（写侧
- * 写入的长度前缀）前移，而非只前移前缀+头（20B）。构造 record_len=4100
+ * 写入的长度前缀）前移，而非只前移前缀+头（36B）。构造 record_len=4100
  * （合法：4 ≤ 4100 ≤ ring->size=8192，但 > LCVIEW_BUILDER_MAX_SIZE 判损坏）
- * 的损坏记录，验证 read 后 read_pos 前移 4100 而非 20。
+ * 的损坏记录，验证 read 后 read_pos 前移 4100 而非 36。
  *
- * 修复前按固定 20 前移会让 read_pos 落进记录体中间，把后续记录当损坏
+ * 修复前按固定 36 前移会让 read_pos 落进记录体中间，把后续记录当损坏
  * 撕裂整个流；修复后按 record_len 前移，跳过量正确。
  */
 static void test_ring_read_callsite_corrupt_skip(void)
@@ -150,29 +152,29 @@ static void test_ring_read_callsite_corrupt_skip(void)
     memset(user, 0, sizeof(user));
 
     /* 一条损坏记录：长度前缀 4100（> MAX 判损坏，但 ≤ ring->size 可信），
-     * 后跟一条合法记录 20B（前缀 4 + 记录头 16），跳过损坏后正常读完
+     * 后跟一条合法记录 36B（前缀 4 + 记录头 32），跳过损坏后正常读完
      * 返回（copied_total>0 且 ring 空 → break，避免空环阻塞等待）。 */
     put_u32(ringbuf, 4100);
-    put_u32(ringbuf + 4100, 20);
+    put_u32(ringbuf + 4100, 36);
 
     ring.buf = ringbuf;
     ring.read_buf = readbuf;
     ring.size = sizeof(ringbuf);
-    ring.write_pos = 4100 + 20;  /* 损坏记录 4100B + 合法记录 20B */
+    ring.write_pos = 4100 + 36;  /* 损坏记录 4100B + 合法记录 36B */
     ring.read_pos = 0;
     ring.shutdown = false;  /* UAF 修复新语义：shutdown=true 时 read 入口直返
                              * 0，须走内部读路径才能判红跳过前移量 */
-    atomic_set(&ring.overrun_cnt, 0);
-    atomic_set(&ring.total_records, 0);
+    atomic64_set(&ring.overrun_cnt, 0);
+    atomic64_set(&ring.total_records, 0);
     atomic_set(&ring.readers, 0);
     init_waitqueue_head(&ring.exit_wait);
     mutex_init(&ring.read_mutex);
 
     /* read 判损坏后按 record_len=4100 前移 read_pos（% size），再读合法记录 */
     int n = lcview_ring_read(&ring, user, sizeof(user));
-    /* 跳过 4100B 损坏记录 + 读到 20B 合法记录，返回 20（修复前只跳 20 撕裂流） */
-    CHECK(n == 20);
-    CHECK(ring.read_pos == (0 + 4100 + 20) % sizeof(ringbuf)); /* 4120 */
+    /* 跳过 4100B 损坏记录 + 读到 36B 合法记录，返回 36（修复前只跳 36 撕裂流） */
+    CHECK(n == 36);
+    CHECK(ring.read_pos == (0 + 4100 + 36) % sizeof(ringbuf)); /* 4136 */
     /* 读调用退出后 readers 归零（destroy 可安全释放内存） */
     CHECK(atomic_read(&ring.readers) == 0);
 }
@@ -192,27 +194,27 @@ static void test_ring_read_callsite_corrupt_garbage(void)
     memset(readbuf, 0, sizeof(readbuf));
     memset(user, 0, sizeof(user));
 
-    /* 垃圾前缀 9000 > ring->size=8192 → 不可信，回落保守默认 20；
-     * 后跟合法记录 20B（前缀4+头16），跳过 20 后读合法记录正常返回。 */
+    /* 垃圾前缀 9000 > ring->size=8192 → 不可信，回落保守默认 36；
+     * 后跟合法记录 36B（前缀4+头32），跳过 36 后读合法记录正常返回。 */
     put_u32(ringbuf, 9000);
-    put_u32(ringbuf + 20, 20);
+    put_u32(ringbuf + 36, 36);
 
     ring.buf = ringbuf;
     ring.read_buf = readbuf;
     ring.size = sizeof(ringbuf);
-    ring.write_pos = 40;
+    ring.write_pos = 72;
     ring.read_pos = 0;
     ring.shutdown = false;
-    atomic_set(&ring.overrun_cnt, 0);
-    atomic_set(&ring.total_records, 0);
+    atomic64_set(&ring.overrun_cnt, 0);
+    atomic64_set(&ring.total_records, 0);
     atomic_set(&ring.readers, 0);
     init_waitqueue_head(&ring.exit_wait);
     mutex_init(&ring.read_mutex);
 
     int n = lcview_ring_read(&ring, user, sizeof(user));
-    CHECK(n == 20);
-    /* 默认跳过量 = 前缀 4 + 记录头 16 = 20，再读 20B 合法记录 → 40 */
-    CHECK(ring.read_pos == (0 + 20 + 20) % sizeof(ringbuf));
+    CHECK(n == 36);
+    /* 默认跳过量 = 前缀 4 + 记录头 32 = 36，再读 36B 合法记录 → 72 */
+    CHECK(ring.read_pos == (0 + 36 + 36) % sizeof(ringbuf));
     CHECK(atomic_read(&ring.readers) == 0);
 }
 
@@ -237,8 +239,8 @@ static void test_ring_write_callsite_huge_len(void)
     ring.write_pos = 0;
     ring.read_pos = 0;
     ring.shutdown = false;
-    atomic_set(&ring.overrun_cnt, 0);
-    atomic_set(&ring.total_records, 0);
+    atomic64_set(&ring.overrun_cnt, 0);
+    atomic64_set(&ring.total_records, 0);
     atomic_set(&ring.readers, 0);
     init_waitqueue_head(&ring.exit_wait);
     mutex_init(&ring.read_mutex);
@@ -262,11 +264,11 @@ static void test_builder_cancel_callsite_null(void)
 
 /*
  * 调用点判红（方向 7/方向 5）：短前缀记录判损坏跳过。
- * 记录长度下限由 4 改为 default_skip 20（前缀+记录头），[4,20)
- * 前缀判损坏且长度不可信——ring_corrupt_skip_len(10, size, 20) = 20。
+ * 记录长度下限由 4 改为 default_skip 36（前缀+记录头），[4,36)
+ * 前缀判损坏且长度不可信——ring_corrupt_skip_len(10, size, 36) = 36。
  * 修复前下限 4：10 ≥ 4 判合法，正常读给用户 n=10（非跳过）；
  * 且修复前 skip 下界也是 4，跳过 10 会落进记录体中间撕裂后续流。
- * 合法记录放在 pos 20，read 跳过默认 20 后读到。
+ * 合法记录放在 pos 36，read 跳过默认 36 后读到。
  */
 static void test_ring_read_callsite_short_prefix(void)
 {
@@ -279,27 +281,27 @@ static void test_ring_read_callsite_short_prefix(void)
     memset(readbuf, 0, sizeof(readbuf));
     memset(user, 0, sizeof(user));
 
-    /* 短前缀 10：< 20（前缀+头）判损坏且不可信；
-     * 后跟合法记录 20B（pos 20），跳过默认 20 后读合法记录正常返回。 */
+    /* 短前缀 10：< 36（前缀+头）判损坏且不可信；
+     * 后跟合法记录 36B（pos 36），跳过默认 36 后读合法记录正常返回。 */
     put_u32(ringbuf, 10);
-    put_u32(ringbuf + 20, 20);
+    put_u32(ringbuf + 36, 36);
 
     ring.buf = ringbuf;
     ring.read_buf = readbuf;
     ring.size = sizeof(ringbuf);
-    ring.write_pos = 40;   /* 损坏前缀 4B + 跳过空洞 16B + 合法记录 20B */
+    ring.write_pos = 72;   /* 损坏前缀 4B + 跳过空洞 32B + 合法记录 36B */
     ring.read_pos = 0;
     ring.shutdown = false;
-    atomic_set(&ring.overrun_cnt, 0);
-    atomic_set(&ring.total_records, 0);
+    atomic64_set(&ring.overrun_cnt, 0);
+    atomic64_set(&ring.total_records, 0);
     atomic_set(&ring.readers, 0);
     init_waitqueue_head(&ring.exit_wait);
     mutex_init(&ring.read_mutex);
 
     int n = lcview_ring_read(&ring, user, sizeof(user));
-    CHECK(n == 20);
-    /* 判损坏跳过 ring_corrupt_skip_len(10,...) = default 20，再读 20B → 40 */
-    CHECK(ring.read_pos == (0 + 20 + 20) % sizeof(ringbuf));
+    CHECK(n == 36);
+    /* 判损坏跳过 ring_corrupt_skip_len(10,...) = default 36，再读 36B → 72 */
+    CHECK(ring.read_pos == (0 + 36 + 36) % sizeof(ringbuf));
     CHECK(atomic_read(&ring.readers) == 0);
 }
 
@@ -312,7 +314,7 @@ static void test_ring_read_callsite_short_prefix(void)
  */
 static void test_ring_read_callsite_equal_size(void)
 {
-    uint8_t ringbuf[64];
+    uint8_t ringbuf[128];
     uint8_t readbuf[4096];
     uint8_t user[4096];
     struct lcview_ring ring;
@@ -321,27 +323,27 @@ static void test_ring_read_callsite_equal_size(void)
     memset(readbuf, 0, sizeof(readbuf));
     memset(user, 0, sizeof(user));
 
-    /* 等长前缀 64 == ring->size=64 → 判损坏（零推进消除）；
-     * 后跟合法记录 20B（pos 20），跳过默认 20 后读到。 */
-    put_u32(ringbuf, 64);
-    put_u32(ringbuf + 20, 20);
+    /* 等长前缀 128 == ring->size=128 → 判损坏（零推进消除）；
+     * 后跟合法记录 36B（pos 36），跳过默认 36 后读到。 */
+    put_u32(ringbuf, 128);
+    put_u32(ringbuf + 36, 36);
 
     ring.buf = ringbuf;
     ring.read_buf = readbuf;
     ring.size = sizeof(ringbuf);
-    ring.write_pos = 40;
+    ring.write_pos = 72;
     ring.read_pos = 0;
     ring.shutdown = false;
-    atomic_set(&ring.overrun_cnt, 0);
-    atomic_set(&ring.total_records, 0);
+    atomic64_set(&ring.overrun_cnt, 0);
+    atomic64_set(&ring.total_records, 0);
     atomic_set(&ring.readers, 0);
     init_waitqueue_head(&ring.exit_wait);
     mutex_init(&ring.read_mutex);
 
     int n = lcview_ring_read(&ring, user, sizeof(user));
-    CHECK(n == 20);
-    /* 等长判损坏 → ring_corrupt_skip_len(64,64,20) = 20，再读 20B → 40 */
-    CHECK(ring.read_pos == (0 + 20 + 20) % sizeof(ringbuf));
+    CHECK(n == 36);
+    /* 等长判损坏 → ring_corrupt_skip_len(128,128,36) = 36，再读 36B → 72 */
+    CHECK(ring.read_pos == (0 + 36 + 36) % sizeof(ringbuf));
     CHECK(atomic_read(&ring.readers) == 0);
 }
 
@@ -578,14 +580,14 @@ static void test_ring_write_enospc_counts_dropped(void)
     CHECK(rc == -ENOSPC);
 
     /* 方向 7：ENOSPC 丢弃同步计入 total_records 与 dropped_cnt */
-    CHECK(atomic_read(&ring.total_records) == written + 1);
-    CHECK(atomic_read(&ring.dropped_cnt) == 1);
+    CHECK(atomic64_read(&ring.total_records) == written + 1);
+    CHECK(atomic64_read(&ring.dropped_cnt) == 1);
     /* 被驱逐旧记录计 overrun（右式 overrun 项），overrun > 0 可见 */
-    CHECK(atomic_read(&ring.overrun_cnt) > 0);
+    CHECK(atomic64_read(&ring.overrun_cnt) > 0);
     /* 守恒自洽：total（成功+丢弃）>= overrun（驱逐）+ dropped（丢弃）——
      * 剩余在途（环中未读 409-256 条）补足等式 */
-    CHECK(atomic_read(&ring.total_records) >=
-          atomic_read(&ring.overrun_cnt) + atomic_read(&ring.dropped_cnt));
+    CHECK(atomic64_read(&ring.total_records) >=
+          atomic64_read(&ring.overrun_cnt) + atomic64_read(&ring.dropped_cnt));
 
     lcview_ring_destroy(&ring);
 }

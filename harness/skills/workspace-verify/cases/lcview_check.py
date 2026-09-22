@@ -162,7 +162,7 @@ def pull_schema(tmp):
 
 def load_all(pulled):
     """解析全部记录。返回 (records, bad_lines)。
-    records: [{ts, id, fields, file}]；bad_lines: [(file, lineno)]。"""
+    records: [{ts, id, seq, mono, fields, file}]；bad_lines: [(file, lineno)]。"""
     records, bad_lines = [], []
     for p in pulled:
         with open(p, encoding="utf-8", errors="replace") as fp:
@@ -175,6 +175,11 @@ def load_all(pulled):
                     records.append({
                         "ts": obj.get("ts"),
                         "id": obj.get("id"),
+                        # R-13 方向 2：信封字段 seq（全局递增序号）/mono
+                        # （CLOCK_MONOTONIC 单调时间戳）随记录透出，供
+                        # schema/ts 判据校验信封完整性
+                        "seq": obj.get("seq"),
+                        "mono": obj.get("mono"),
                         "fields": obj.get("f"),
                         "file": os.path.basename(p),
                     })
@@ -253,6 +258,16 @@ def mode_schema(tmp, _args):
         got = len(r["fields"]) if isinstance(r["fields"], list) else -1
         if expect is not None and got != expect:
             mism.append(f"{r['file']}: id={r['id']} 字段数 {got} != schema {expect}")
+        # R-13 方向 2：信封字段完整性（seq/mono 随记录落盘，供 NTP 回拨
+        # 排序与 gap 判定）。缺 seq/mono 或类型非法即判红——旧内核记录
+        # （无 seq）与 daemon 扩容后 schema 漂移在此暴露。
+        seq, mono = r["seq"], r["mono"]
+        if not isinstance(seq, int) or seq < 0:
+            mism.append(f"{r['file']}: id={r['id']} 信封 seq 缺失/非法"
+                        f"（{seq!r}），R-13 事件头未落盘")
+        if not isinstance(mono, int) or mono < 0:
+            mism.append(f"{r['file']}: id={r['id']} 信封 mono 缺失/非法"
+                        f"（{mono!r}），R-13 事件头未落盘")
     print(f"记录 {len(records)} 条，schema 不匹配 {len(mism)} 条")
     for m in mism[:10]:
         print(f"  MISMATCH: {m}")
