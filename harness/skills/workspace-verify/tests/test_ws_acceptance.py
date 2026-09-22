@@ -69,7 +69,79 @@ class TestParseAcceptance(unittest.TestCase):
                                         adb_exec=None,
                                         adb_logcat=lambda: "x\n")
         self.assertEqual(status, "fail")
-        self.assertIn("未命中锚点", detail)
+
+    def test_logfield_nonzero_semantics(self):
+        # R-12 方向 4：nonzero 判据——字段非零即存活判据。total_records 内核
+        # 直读计数非零证明采集链路真实存活（ENOTTY 静默失效读到 0 判红）。
+        # 5 段写法：期望值段为占位（0），第 5 段为进程名（pid 收窄）。
+        def adb_exec(cmd):
+            if cmd == "pidof lechao_lcview":
+                return "4242", 0
+            return "", 1
+
+        def adb_logcat(pid=None, force=False):
+            return ("4242: heartbeat, loop=30 total_records=5 ioctl_err=0\n"
+                    "4242: heartbeat, loop=60 total_records=7 ioctl_err=0\n")
+
+        status, detail = wa.execute_tag(
+            'logfield:"heartbeat, loop=|total_records|nonzero|0|lechao_lcview"',
+            adb_exec=adb_exec, adb_logcat=adb_logcat)
+        self.assertEqual(status, "pass")
+        status, detail = wa.execute_tag(
+            'logfield:"heartbeat, loop=|ioctl_err|nonzero|0|lechao_lcview"',
+            adb_exec=adb_exec, adb_logcat=adb_logcat)
+        self.assertEqual(status, "fail")
+
+    def test_logfield_incr_and_nondecr_semantics(self):
+        # R-12 方向 4：incr/nondecr 判据——取锚点末两行比较字段递增/非递减，
+        # 用于持续累计字段（loop/total_records）的活跃判据。
+        def adb_exec(cmd):
+            if cmd == "pidof lechao_lcview":
+                return "4242", 0
+            return "", 1
+
+        def adb_logcat(pid=None, force=False):
+            return ("4242: heartbeat, loop=30 total_records=5\n"
+                    "4242: heartbeat, loop=60 total_records=7\n")
+
+        status, detail = wa.execute_tag(
+            'logfield:"heartbeat, loop=|loop|incr|0|lechao_lcview"',
+            adb_exec=adb_exec, adb_logcat=adb_logcat)
+        self.assertEqual(status, "pass")
+        status, detail = wa.execute_tag(
+            'logfield:"heartbeat, loop=|total_records|incr|0|lechao_lcview"',
+            adb_exec=adb_exec, adb_logcat=adb_logcat)
+        self.assertEqual(status, "pass")
+        status, detail = wa.execute_tag(
+            'logfield:"heartbeat, loop=|total_records|nondecr|0|lechao_lcview"',
+            adb_exec=adb_exec, adb_logcat=adb_logcat)
+        self.assertEqual(status, "pass")
+        # 递减 → incr 判红，nondecr 也判红（严格递减）
+        def adb_logcat_decr(pid=None, force=False):
+            return ("4242: heartbeat, loop=30 total_records=7\n"
+                    "4242: heartbeat, loop=60 total_records=5\n")
+
+        status, detail = wa.execute_tag(
+            'logfield:"heartbeat, loop=|total_records|incr|0|lechao_lcview"',
+            adb_exec=adb_exec, adb_logcat=adb_logcat_decr)
+        self.assertEqual(status, "fail")
+        status, detail = wa.execute_tag(
+            'logfield:"heartbeat, loop=|total_records|nondecr|0|lechao_lcview"',
+            adb_exec=adb_exec, adb_logcat=adb_logcat_decr)
+        self.assertEqual(status, "fail")
+        # 单行锚点 → incr 需至少两行判红
+        status, detail = wa.execute_tag(
+            'logfield:"heartbeat, loop=|total_records|incr|0|lechao_lcview"',
+            adb_exec=adb_exec,
+            adb_logcat=lambda pid=None, force=False:
+            "4242: heartbeat, loop=30 total_records=7\n")
+        self.assertEqual(status, "fail")
+        # 未知比较符回归
+        status, detail = wa.execute_tag(
+            'logfield:"heartbeat, loop=|loop|bogus|0|lechao_lcview"',
+            adb_exec=adb_exec, adb_logcat=adb_logcat)
+        self.assertEqual(status, "fail")
+        self.assertIn("未知比较符", detail)
         # 语法错误（非 4 段）→ fail
         status, detail = wa.execute_tag('logfield:"a|b"',
                                         adb_exec=None, adb_logcat=adb_logcat)
@@ -689,7 +761,9 @@ class TestResolveAcceptance(unittest.TestCase):
         # readErr，防子串命中历史零值心跳假绿）+ logfresh 90s 时效判据 +
         # boot 判据；HAL 已退役，svc 只留 lechao_lcview，
         # conserve 已迁至 lcview-transfer 不在本用例）
-        # 五条 logfield 均带第 5 段进程名 lechao_lcview（按进程归属收窄）
+        # 七条 logfield 均带第 5 段进程名 lechao_lcview（按进程归属收窄）；
+        # R-12 方向 4 增查 ioctl_err=0（ENOTTY 静默失效）与 total_records
+        # nonzero（采集链路存活，期望值段占位 0）
         acc, err = wa.resolve_acceptance(self._args(case="lcview-liveness"))
         self.assertIsNone(err)
         self.assertEqual(
@@ -700,6 +774,8 @@ class TestResolveAcceptance(unittest.TestCase):
             'logfield:"heartbeat, loop=|drop_invalidwrite|=|0|lechao_lcview" '
             'logfield:"heartbeat, loop=|invalid_records|=|0|lechao_lcview" '
             'logfield:"heartbeat, loop=|readErr|=|0|lechao_lcview" '
+            'logfield:"heartbeat, loop=|ioctl_err|=|0|lechao_lcview" '
+            'logfield:"heartbeat, loop=|total_records|nonzero|0|lechao_lcview" '
             'logfresh:"heartbeat, loop=|90" boot')
         # log: 子串断言 0 已弃用（5000 行缓冲命中开机初期零值心跳假绿）
         self.assertNotIn('log:"overrun=0"', acc)

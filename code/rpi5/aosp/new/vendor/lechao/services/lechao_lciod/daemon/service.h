@@ -42,6 +42,17 @@ int64_t ComputeAverageRate(uint64_t readBytes, uint64_t writeBytes,
 uint64_t ComputeKbRate(uint64_t bytes, uint64_t ns);
 
 /*
+ * ComputeWindowKbRate — 10 秒 tick 差分时间桶吞吐核心（纯函数，供单测）
+ * 计算本 tick 与上一统计 tick 快照之间窗口增量速率（单位 KB/s）。
+ * 原累计平均（全程 bytes/全程 ns）会把变慢窗口摊平，无法定位跌落时刻；
+ * 差分桶取 curr - prev 算近 10s 即时速率，变慢直接反映在窗口速率跌落。
+ * 回退语义: 无快照（新接入，prev 为 0）或计数回绕（curr < prev，容器/环
+ * 重置）时返回全程累计速率（等同旧行为，不产生假低谷）。
+ */
+uint64_t ComputeWindowKbRate(uint64_t currBytes, uint64_t currNs,
+                             uint64_t prevBytes, uint64_t prevNs);
+
+/*
  * ProjectSystemIoStats — vendor IoStats → system IoStats 字段投影（纯函数，供单测）
  * 直传 21 字段；省略管理字段 currentRate / enabled / flags
  * （currentRate 经 getAverageRate 按需计算，enabled/flags 不暴露给上层）。

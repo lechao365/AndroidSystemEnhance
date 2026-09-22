@@ -160,7 +160,14 @@ cases:
   #       心跳（E1 首跑认旧进程心跳根因：logfield 取末行不按进程归属筛）；
   #       新进程首心跳未到（锚点未命中）时每 5s 重取，90s 超时判红，不回落
   #       全量筛（回落即旧进程行重新混入假绿）。
-  lcview-liveness: 'svc:lechao_lcview log:"heartbeat, loop=" logfield:"heartbeat, loop=|overrun|=|0|lechao_lcview" logfield:"heartbeat, loop=|dropped|=|0|lechao_lcview" logfield:"heartbeat, loop=|drop_invalidwrite|=|0|lechao_lcview" logfield:"heartbeat, loop=|invalid_records|=|0|lechao_lcview" logfield:"heartbeat, loop=|readErr|=|0|lechao_lcview" logfresh:"heartbeat, loop=|90" boot'
+  # L0 存活综合用例：svc + 心跳各字段判据 + 时效。logfield 5 段写法按
+  # 进程 pid 收窄（防旧进程心跳残留行混入）；R-12 方向 4 增查：
+  #   ioctl_err=0 —— 消新用户态旧内核 ENOTTY 静默失效：GET_STATS ioctl 不
+  #    支持时 ioctlErr 累计非零，此判据判红（旧判据 overrun/dropped/readErr
+  #    仍为 0 会假绿）；
+  #   total_records 存活（nonzero，值非零）—— 心跳 loop 持续递增但
+  #   采集链路若被 ENOTTY 切断 total_records 读 0，非零判据兜底判红。
+  lcview-liveness: 'svc:lechao_lcview log:"heartbeat, loop=" logfield:"heartbeat, loop=|overrun|=|0|lechao_lcview" logfield:"heartbeat, loop=|dropped|=|0|lechao_lcview" logfield:"heartbeat, loop=|drop_invalidwrite|=|0|lechao_lcview" logfield:"heartbeat, loop=|invalid_records|=|0|lechao_lcview" logfield:"heartbeat, loop=|readErr|=|0|lechao_lcview" logfield:"heartbeat, loop=|ioctl_err|=|0|lechao_lcview" logfield:"heartbeat, loop=|total_records|nonzero|0|lechao_lcview" logfresh:"heartbeat, loop=|90" boot'
   # L1 数据管道主用例：lciod_probe（GET_STATS ioctl 取数工具，
   # /system/bin）→ host 侧字段齐全性/数值合法性/abi_version 校验。
   # 防假绿：零设备判红（probe 空输出 exit 0，host 判红）、缺字段判红

@@ -138,19 +138,26 @@ struct lcview_builder *lcview_builder_new(uint16_t event_id, uint8_t level)
 
     /* KRN-006：先取空闲池，未命中再走 GFP_ATOMIC 分配 */
     b = builder_pool_get();
-    if (!b)
+    if (b) {
+        /* R-12 方向 1：池命中复用对象——buf 数据区由 add_* 从 data_offset
+         * 起覆盖写入、commit 按 data_offset 截断（total_len），旧残留不会
+         * 进入 ring；仅重置元数据与偏移，消原子上下文整块 ~4KB memset
+         * （I/O 热路径每命令一次，清零开销不可忽略）。新分配（kmalloc）
+         * 仍需整块清零初始化。 */
+    } else {
         b = kmalloc(sizeof(*b), GFP_ATOMIC);
-    if (!b) {
-        /* KRN-014：GFP_ATOMIC 失败在内存压力下可高频出现，限频防日志风暴 */
-        pr_err_ratelimited(PREFIX "kmalloc failed for event_id=%u\n", event_id);
-        /* R-07 方向 1：builder kmalloc 失败计入 producer_dropped_cnt——
-         * 该记录从未构造/从未写入 ring，与环级 ENOSPC（dropped_cnt，计
-         * total_records）不同，守恒左式不含它，sysfs 单独导出供右式吸收 */
-        lcview_builder_producer_dropped_inc();
-        return NULL;
+        if (!b) {
+            /* KRN-014：GFP_ATOMIC 失败在内存压力下可高频出现，限频防日志风暴 */
+            pr_err_ratelimited(PREFIX "kmalloc failed for event_id=%u\n", event_id);
+            /* R-07 方向 1：builder kmalloc 失败计入 producer_dropped_cnt——
+             * 该记录从未构造/从未写入 ring，与环级 ENOSPC（dropped_cnt，计
+             * total_records）不同，守恒左式不含它，sysfs 单独导出供右式吸收 */
+            lcview_builder_producer_dropped_inc();
+            return NULL;
+        }
+        memset(b, 0, sizeof(*b));
     }
 
-    memset(b, 0, sizeof(*b));
     b->event_id = event_id;
     b->level = level;
     b->field_count = 0;

@@ -310,6 +310,29 @@ def execute_tag(tag, adb_exec, adb_logcat, host_env=None, endpoint=None):
         if not m:
             return "fail", f"logfield: 锚点末行无字段 {field}（{last[:120]}）"
         actual = int(m.group(1))
+
+        # R-12 方向 4：非零/递增语义（比较符不消费第 4 段期望值，仅作占位）。
+        # nonzero：字段值非零——用于"存活"判据（如 total_records 内核直读
+        #   计数非零，证明采集链路真实存活；ENOTTY 静默失效时读到 0 判红）。
+        # incr/nondecr：取锚点末两行比较字段值递增/非递减——用于持续累计
+        #   字段（loop/total_records）的活跃判据，比固定期望更能表达"仍在增长"。
+        if op == "nonzero":
+            ok = actual != 0
+            return ("pass" if ok else "fail",
+                    f"logfield {field}={actual} 非零（锚点末行: {last[:120]}）")
+        if op in ("incr", "nondecr"):
+            if len(lines) < 2:
+                return "fail", f"logfield: 比较符 {op!r} 需要锚点至少两行"
+            prev_line = lines[-2]
+            mp = re.search(rf"{re.escape(field)}=(-?\d+)", prev_line)
+            if not mp:
+                return "fail", f"logfield: 锚点倒数第二行无字段 {field}（{prev_line[:120]}）"
+            prev_val = int(mp.group(1))
+            ok = actual > prev_val if op == "incr" else actual >= prev_val
+            return ("pass" if ok else "fail",
+                    f"logfield {field}={actual} {op} 上一行 {prev_val}"
+                    f"（锚点末行: {last[:120]}）")
+
         try:
             expect = int(expect_s)
         except ValueError:
@@ -318,7 +341,8 @@ def execute_tag(tag, adb_exec, adb_logcat, host_env=None, endpoint=None):
               ">": actual > expect, "<": actual < expect,
               ">=": actual >= expect, "<=": actual <= expect}.get(op, None)
         if ok is None:
-            return "fail", f"logfield: 未知比较符 {op!r}（须 = != > < >= <=）"
+            return "fail", (f"logfield: 未知比较符 {op!r}"
+                            f"（须 = != > < >= <= nonzero incr nondecr）")
         return ("pass" if ok else "fail",
                 f"logfield {field}={actual} {op} {expect}（锚点末行: {last[:120]}）")
     if kind == "logfresh":
