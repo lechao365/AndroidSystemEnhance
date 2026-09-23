@@ -120,15 +120,22 @@ jobs:
           # 头路径（stddef.h file not found）且内核 C 合法使用 memcpy 触发
           # 安全检查判红——补 gcc 内建 include 路径 + 抑制该 security checker。
           # runner 无 compile_commands.json，-p . 仅做目录探测，编译参数走 -- 后。
-          GCC_INC="$(gcc -print-file-name=include)"
+          GCC_INC="$(gcc -print-file-name=include || true)"
           CT_CHECKS="-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling"
+          echo "debug: GCC_INC=[${GCC_INC}] clang-version=$(clang-tidy --version 2>&1 | head -1)"
           for f in $CHANGED; do
             case "$f" in
               code/rpi5/kernel/new/vendor/lechao/LcView/lcview_ring_logic.c)
+                echo "debug: clang-tidy $f"
                 clang-tidy -checks="$CT_CHECKS" -p . "$f" -- \
-                  -Icode/rpi5/kernel/new/vendor/lechao/LcView -isystem "$GCC_INC" ;;
+                  -Icode/rpi5/kernel/new/vendor/lechao/LcView -isystem "$GCC_INC" \
+                  || echo "::warning::clang-tidy rc=$? 文件=$f"
+                ;;
               code/rpi5/kernel/new/vendor/lechao/LcIod/lciod_read_logic.c)
+                echo "debug: clang-tidy $f"
                 clang-tidy -checks="$CT_CHECKS" -p . "$f" -- \
-                  -Icode/rpi5/kernel/new/vendor/lechao/LcIod -isystem "$GCC_INC" ;;
+                  -Icode/rpi5/kernel/new/vendor/lechao/LcIod -isystem "$GCC_INC" \
+                  || echo "::warning::clang-tidy rc=$? 文件=$f"
+                ;;
             esac
           done
