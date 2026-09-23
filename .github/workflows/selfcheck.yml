@@ -110,8 +110,7 @@ jobs:
           # 变化/无 @@ 视为合规放行。
           GCF_OUT="$(git clang-format --diff origin/main --extensions c,h,cpp 2>&1 || true)"
           if printf '%s' "$GCF_OUT" | grep -q '^@@'; then
-            FIRST="$(printf '%s' "$GCF_OUT" | grep -E '^(diff --git|@@)' | head -2 | tr '\n' '|')"
-            echo "::error::C/C++ 改动行未过 clang-format（diff 行级，git-clang-format） main=$(git rev-parse --short=8 origin/main 2>/dev/null) cf=$(clang-format --version 2>/dev/null | head -1) @@=$(printf '%s' "$GCF_OUT" | grep -c '^@@') first=${FIRST}"
+            echo "::error::C/C++ 改动行未过 clang-format（diff 行级，git-clang-format，cf=$(clang-format --version 2>/dev/null | head -1)）"
             printf '%s\n' "$GCF_OUT" | grep -E '^(diff --git|@@|[+-][^+-])' | head -80
             exit 1
           fi
@@ -123,20 +122,15 @@ jobs:
           # runner 无 compile_commands.json，-p . 仅做目录探测，编译参数走 -- 后。
           GCC_INC="$(gcc -print-file-name=include || true)"
           CT_CHECKS="-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling"
-          echo "debug: GCC_INC=[${GCC_INC}] clang-version=$(clang-tidy --version 2>&1 | head -1)"
           for f in $CHANGED; do
             case "$f" in
               code/rpi5/kernel/new/vendor/lechao/LcView/lcview_ring_logic.c)
-                echo "debug: clang-tidy $f"
                 clang-tidy -checks="$CT_CHECKS" -p . "$f" -- \
-                  -Icode/rpi5/kernel/new/vendor/lechao/LcView -isystem "$GCC_INC" \
-                  || echo "::warning::clang-tidy rc=$? 文件=$f"
+                  -Icode/rpi5/kernel/new/vendor/lechao/LcView -isystem "$GCC_INC"
                 ;;
               code/rpi5/kernel/new/vendor/lechao/LcIod/lciod_read_logic.c)
-                echo "debug: clang-tidy $f"
                 clang-tidy -checks="$CT_CHECKS" -p . "$f" -- \
-                  -Icode/rpi5/kernel/new/vendor/lechao/LcIod -isystem "$GCC_INC" \
-                  || echo "::warning::clang-tidy rc=$? 文件=$f"
+                  -Icode/rpi5/kernel/new/vendor/lechao/LcIod -isystem "$GCC_INC"
                 ;;
             esac
           done

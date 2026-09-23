@@ -7,7 +7,10 @@ typedef struct
     long long counter;
 } atomic64_t;
 #define ATOMIC_INIT(i) { (i) }
-#define ATOMIC64_INIT(i) {(i)}
+#define ATOMIC64_INIT(i)                                                                           \
+    {                                                                                              \
+        (i)                                                                                        \
+    }
 static inline void atomic_set(atomic_t *v, int i) { v->counter = i; }
 static inline int atomic_read(const atomic_t *v) { return v->counter; }
 static inline void atomic_inc(atomic_t *v) { v->counter++; }
