@@ -110,7 +110,8 @@ jobs:
           # 变化/无 @@ 视为合规放行。
           GCF_OUT="$(git clang-format --diff origin/main --extensions c,h,cpp 2>&1 || true)"
           if printf '%s' "$GCF_OUT" | grep -q '^@@'; then
-            echo "::error::C/C++ 改动行未过 clang-format（diff 行级，git-clang-format） main=$(git rev-parse --short=8 origin/main 2>/dev/null) cf=$(clang-format --version 2>/dev/null | head -1) @@=$(printf '%s' "$GCF_OUT" | grep -c '^@@')"
+            FIRST="$(printf '%s' "$GCF_OUT" | grep -E '^(diff --git|@@)' | head -2 | tr '\n' '|')"
+            echo "::error::C/C++ 改动行未过 clang-format（diff 行级，git-clang-format） main=$(git rev-parse --short=8 origin/main 2>/dev/null) cf=$(clang-format --version 2>/dev/null | head -1) @@=$(printf '%s' "$GCF_OUT" | grep -c '^@@') first=${FIRST}"
             printf '%s\n' "$GCF_OUT" | grep -E '^(diff --git|@@|[+-][^+-])' | head -80
             exit 1
           fi
