@@ -606,19 +606,19 @@ baselines:
   source_commit: f7fe03568c1d
   sync_manifest: data/verify-results/20260923-155641-manual-2609231556.md
   build_result: PASS
-  package_result: UNKNOWN
+  package_result: PASS
   board_verify: PASS
   evidence_scope: lciod-liveness,lciod-perf,lciod-pipeline,lciod-recover-hal,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
   evidence:
     build_result: PASS
-    package_result: UNKNOWN
+    package_result: PASS
     board_verify: PASS
     sync_manifest: data/verify-results/20260923-155641-manual-2609231556.md
     ki_gate: pass
     evidence_scope: lciod-liveness,lciod-perf,lciod-pipeline,lciod-recover-hal,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
     known_issues_carried: KI-FLAKE-20d380d0f753-e1789e,KI-FLAKE-cefa39e1699f-1bac08
-    package_evidence: ''
-    package_rc: null
+    package_evidence: data/verify-results/20260923-155641-manual-2609231556.md
+    package_rc: 0
     cases_coverage:
       result: full
       missing: []
