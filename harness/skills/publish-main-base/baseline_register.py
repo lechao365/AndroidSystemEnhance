@@ -426,14 +426,17 @@ def main(argv=None):
         if r.returncode != 0:
             print(f"error: 树对比失败: {r.stderr.strip()}", file=sys.stderr)
             return 1
-        # 排除项：登记 yaml（promote 元提交必然改动）与 docs/（文档同步提交）
+        # 排除项：harness/（工具链代码——发布工具修复随 dev 进 main，非设备
+        # 内容，由 selfcheck 验证；不排除则候选登记后发布的工具修复提交让树
+        # 等价断言必红回滚，2026-09-23 BL-20260923-01 实测）与登记 yaml（promote
+        # 元提交必然改动）与 docs/（文档同步提交）
         # 与 data/baselines/（promote 生成的证据快照目录，随晋升提交入库）
         # 与 data/known-issues/（保留目录——promote 归档不删文件，批内新登记
         # 问题随晋升提交入库；不排除则登记变更让树等价断言必红回滚）
         # 与 data/verify-results/（验证收据目录——纯收据提交纳入 BH 回溯跳过
         # 后，BH 之后的收据提交新增的收据文件不在 tag 树而 main squash 树含之，
         # 不排除则树等价断言必红回滚；收据是验证证据非发布内容，排除安全）
-        excludes = ("harness/config/baseline-status.yaml", "docs/",
+        excludes = ("harness/", "docs/",
                     "data/baselines/", "data/known-issues/",
                     "data/verify-results/")
         diffs = [ln for ln in r.stdout.splitlines()

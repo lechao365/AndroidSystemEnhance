@@ -59,7 +59,8 @@ class TestContentTree(unittest.TestCase):
         # EXCLUDE_PATHS 各前缀项均不进树（含收据目录与运行态 harness/log）
         for p in ("docs/x.md", "data/verify-results/r.md",
                   "data/baselines/s.md", "data/known-issues/k.md",
-                  "harness/log/cross-device/t.json"):
+                  "harness/log/cross-device/t.json",
+                  "harness/skills/publish-main-base/publish_main_base.sh"):
             f = self.root / p
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text("x\n", encoding="utf-8")
@@ -69,8 +70,9 @@ class TestContentTree(unittest.TestCase):
         paths = self._tree_paths(tree)
         self.assertEqual(paths, {"a.txt"})
         self.assertNotIn("harness/config/baseline-status.yaml", paths)
-        # 默认排除集合语义：六类前缀
-        self.assertEqual(len(EXCLUDE_PATHS), 6)
+        self.assertNotIn("harness/skills/publish-main-base/publish_main_base.sh", paths)
+        # 默认排除集合语义：七类前缀（harness/ 工具链 + 五类证据/文档 + 登记 yaml）
+        self.assertEqual(len(EXCLUDE_PATHS), 7)
 
     def test_ref_mode_matches_worktree_after_receipt_commit(self):
         # 绑定语义核心：收据落盘时工作树树（排除后）== 收据随批提交后

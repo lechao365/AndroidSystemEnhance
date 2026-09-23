@@ -217,3 +217,4 @@
 2026-09-23 15:12:50 manual-2609231512 skip build=skip board=skip acc=- atomic.h 宏按 clang-format 18.1.3 归一并精简 se
 2026-09-23 15:54:17 manual-2609231553 pass build=pass board=pass acc={"run_id":"572b3c871f9f41e9b3821f434b21e 
 2026-09-23 15:56:52 manual-2609231556 pass build=pass board=pass acc={"run_id":"572b3c871f9f41e9b3821f434b21e 
+2026-09-23 22:07:18 manual-2609232207 skip build=skip board=skip acc=- harness 回溯豁免 baseline-status.yaml 登记提交（防

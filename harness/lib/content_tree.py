@@ -33,6 +33,7 @@ import tempfile
 
 # 两侧统一的排除集合（前缀匹配：目录带 / 结尾，文件全名）
 EXCLUDE_PATHS = (
+    "harness/",
     "harness/config/baseline-status.yaml",
     "docs/",
     "data/baselines/",
