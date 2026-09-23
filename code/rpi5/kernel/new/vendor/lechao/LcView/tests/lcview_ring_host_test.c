@@ -127,41 +127,44 @@ static void test_memcpy_in(void)
 static void test_evict(void)
 {
     uint8_t buf[16];
+    uint8_t big[32];
     uint32_t read_pos, out_len;
     int rc;
 
-    /* 正常驱逐（不跨尾部）：read_pos += len */
-    memset(buf, 0, sizeof(buf));
-    put_u32(buf, 8);
+    /* 正常驱逐（不跨尾部）：read_pos += len。
+     * 方向 3 后下界 = default_record_len(20)，正常记录须 >= 20 且
+     * size > 20（buf[16] 装不下合法记录），故用 big[32]。 */
+    memset(big, 0, sizeof(big));
+    put_u32(big, 20); /* 合法最小记录 20B */
     read_pos = 0;
     out_len = 99;
-    rc = ring_evict_one_core(buf, 16, &read_pos, 8, 20, &out_len);
+    rc = ring_evict_one_core(big, 32, &read_pos, 8, 20, &out_len);
     CHECK(rc == 1);
-    CHECK(read_pos == 8);
-    CHECK(out_len == 8);
+    CHECK(read_pos == 20);
+    CHECK(out_len == 20);
 
     /* 正常驱逐 + read_pos 环绕 % size */
-    memset(buf, 0, sizeof(buf));
-    put_u32(buf + 10, 12);                 /* 记录长度 12，前缀在 pos=10 */
-    read_pos = 10;                         /* write=0 环内有 6 字节数据 */
+    memset(big, 0, sizeof(big));
+    put_u32(big + 10, 24); /* 记录长度 24，前缀在 pos=10 */
+    read_pos = 10;         /* write=0 环内有 10+24=34>32 数据（环绕） */
     out_len = 0;
-    rc = ring_evict_one_core(buf, 16, &read_pos, 0, 20, &out_len);
+    rc = ring_evict_one_core(big, 32, &read_pos, 0, 20, &out_len);
     CHECK(rc == 1);
-    CHECK(read_pos == (10 + 12) % 16);     /* 6 */
-    CHECK(out_len == 12);
+    CHECK(read_pos == (10 + 24) % 32); /* 2 */
+    CHECK(out_len == 24);
 
-    /* 长度前缀跨尾部读取：pos=14，4 字节 = buf[14..15]+buf[0..1] */
-    memset(buf, 0, sizeof(buf));
-    buf[14] = 0x0A;
-    buf[15] = 0x00;
-    buf[0] = 0x00;
-    buf[1] = 0x00;                         /* old_len = 10 */
-    read_pos = 14;
+    /* 长度前缀跨尾部读取：pos=30，4 字节 = big[30..31]+big[0..1] */
+    memset(big, 0, sizeof(big));
+    big[30] = 0x14;
+    big[31] = 0x00;
+    big[0] = 0x00;
+    big[1] = 0x00; /* old_len = 20 */
+    read_pos = 30;
     out_len = 0;
-    rc = ring_evict_one_core(buf, 16, &read_pos, 8, 20, &out_len);
+    rc = ring_evict_one_core(big, 32, &read_pos, 8, 20, &out_len);
     CHECK(rc == 1);
-    CHECK(read_pos == (14 + 10) % 16);     /* 8 */
-    CHECK(out_len == 10);
+    CHECK(read_pos == (30 + 20) % 32); /* 18 */
+    CHECK(out_len == 20);
 
     /* 损坏：长度 0 → 保守跳过 default_record_len */
     memset(buf, 0, sizeof(buf));         /* 前缀全 0 → old_len == 0 */
@@ -182,6 +185,18 @@ static void test_evict(void)
     CHECK(read_pos == 20 % 16);          /* 4 */
     CHECK(out_len == 0xFFFF);
 
+    /* 方向 4/7：损坏等长 old_len == size → 保守跳过（零推进消除）。
+     * 修复前上界 >：16 > 16 不判损坏，按 old_len 推进 (0+16)%16 == 0
+     * 零推进死循环。 */
+    memset(buf, 0, sizeof(buf));
+    put_u32(buf, 16); /* old_len == 16 == size */
+    read_pos = 0;
+    out_len = 0;
+    rc = ring_evict_one_core(buf, 16, &read_pos, 8, 20, &out_len);
+    CHECK(rc == 2);
+    CHECK(read_pos == 20 % 16); /* 4 */
+    CHECK(out_len == 16);
+
     /* 空环：read_pos == write_pos → 不驱逐、不推进 */
     read_pos = 5;
     out_len = 77;
@@ -189,6 +204,37 @@ static void test_evict(void)
     CHECK(rc == 0);
     CHECK(read_pos == 5);
     CHECK(out_len == 0);
+
+    /* 方向 3/6 判红：损坏下界 [1, default_record_len)——old_len 小于
+     * default_record_len（20）判损坏回落保守跳过，与读路径下界一致；
+     * 修复前下界仅 0，长度 1..19 会按 old_len 正常推进撕裂后续流。 */
+    {
+        uint32_t len;
+        for (len = 1; len < 20; len++)
+        {
+            memset(buf, 0, sizeof(buf));
+            put_u32(buf, len);
+            read_pos = 0;
+            out_len = 0;
+            rc = ring_evict_one_core(buf, 16, &read_pos, 8, 20, &out_len);
+            CHECK(rc == 2);
+            CHECK(read_pos == 20 % 16); /* 4 */
+            CHECK(out_len == len);
+        }
+    }
+    /* 边界 old_len == default_record_len：合法最小记录，正常推进
+     * （size 须 > 20，故用 64B 缓冲） */
+    {
+        uint8_t big[64];
+        memset(big, 0, sizeof(big));
+        put_u32(big, 20);
+        read_pos = 0;
+        out_len = 0;
+        rc = ring_evict_one_core(big, 64, &read_pos, 8, 20, &out_len);
+        CHECK(rc == 1);
+        CHECK(read_pos == 20);
+        CHECK(out_len == 20);
+    }
 }
 
 /* ring_read_fit_check：KRN-001 假 EOF 收口语义 */
@@ -223,7 +269,7 @@ static void test_overrun_restore(void)
     /* copy 失败：计数不得丢失（低估）——回加读到的值 */
     CHECK(ring_overrun_restore_amt(42, false) == 42);
     CHECK(ring_overrun_restore_amt(0, false) == 0);
-    CHECK(ring_overrun_restore_amt(UINT32_MAX, false) == UINT32_MAX);
+    CHECK(ring_overrun_restore_amt(UINT64_MAX, false) == UINT64_MAX);
     /* copy 成功：已清零交付，无回加 */
     CHECK(ring_overrun_restore_amt(42, true) == 0);
 }
@@ -256,11 +302,13 @@ static void test_builder_str_fits(void)
 
 /* ring_corrupt_skip_len：损坏记录跳过前移量判红（方向 2 判红）
  * 记录在环中实占 record_len 字节，只前移前缀+头（20B）会撕裂后续流；
- * 但垃圾前缀（<4 或 > ring->size）须回落保守默认，防止跳过头。 */
+ * 但垃圾前缀须回落保守默认，防止跳过头。可信区间 [default_skip, ring_size)。
+ * 方向 5：下界由前缀 4 改 default_skip 20，[4,20) 不再信任伪造长度；
+ * 方向 4/7：上界 >= ring_size，等长零推进消除。 */
 static void test_corrupt_skip(void)
 {
     const uint32_t def = 20; /* 前缀 4 + 记录头 16 */
-    /* 可信前缀（含超 MAX 但 ≤ ring->size，如 4100）→ 按 record_len 前移 */
+    /* 可信前缀（含超 MAX 但 < ring->size，如 4100）→ 按 record_len 前移 */
     CHECK(ring_corrupt_skip_len(4100, 8192, def) == 4100);
     CHECK(ring_corrupt_skip_len(4096, 8192, def) == 4096);
     CHECK(ring_corrupt_skip_len(20, 8192, def) == 20);
@@ -268,6 +316,11 @@ static void test_corrupt_skip(void)
     CHECK(ring_corrupt_skip_len(0, 8192, def) == def);
     CHECK(ring_corrupt_skip_len(3, 8192, def) == def);
     CHECK(ring_corrupt_skip_len(9000, 8192, def) == def);
+    /* 方向 5/7：下界 [4,20) 不可信，回落默认 */
+    CHECK(ring_corrupt_skip_len(4, 8192, def) == def);
+    CHECK(ring_corrupt_skip_len(19, 8192, def) == def);
+    /* 方向 4/7：等长 record_len == ring_size → 不可信（零推进消除） */
+    CHECK(ring_corrupt_skip_len(8192, 8192, def) == def);
 }
 
 int main(void)

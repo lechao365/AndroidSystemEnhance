@@ -26,6 +26,7 @@
 #include <thread>
 #include <chrono>
 #include <cerrno>
+#include <unordered_map>
 #include <aidl/system/lechao/lciod/BnIoService.h>
 #include <aidl/system/lechao/lciod/IIoService.h>
 #include <aidl/vendor/lechao/lciod/IIoHal.h>
@@ -49,6 +50,19 @@ using lechao::lciod::ParseMinorFromPath;
  * device_io.h kMaxReadEventTimeoutMs 同值——HAL 侧为最终防线） */
 static const int kMaxReadEventTimeoutMs = 1000;
 
+/*
+ * R-12 方向 2：事件日志专属 tag + 可配置级别。
+ * 原 LC_ALOGD("event: ...") 受 persist.vendor.lechao.loglevel 控制，生产默认
+ * 关闭 → 事件被过滤静默（新用户态旧内核 ENOTTY、传输异常等无日志可判，
+ * 故障无感）。改专属 tag lechao_lciod_event：默认 INFO 生产级别可见（不再
+ * 被过滤），debugVerbose 开启时提升 DEBUG 显示更多细节——事件不再静默。
+ */
+static inline int EventLogLevel()
+{
+    return ::lechao::debugVerbose() ? ANDROID_LOG_DEBUG : ANDROID_LOG_INFO;
+}
+#define EVENT_ALOG(...) __android_log_print(EventLogLevel(), "lechao_lciod_event", __VA_ARGS__)
+
 /* --- 纯计算函数（声明见 service.h，独立于 binder 环境可单测） --- */
 
 int64_t ComputeAverageRate(uint64_t readBytes, uint64_t writeBytes,
@@ -69,6 +83,18 @@ uint64_t ComputeKbRate(uint64_t bytes, uint64_t ns) {
     // 128 位中间量防止速率失真
     __uint128_t rate = (static_cast<__uint128_t>(bytes) * 1000000000ULL) / ns / 1024ULL;
     return static_cast<uint64_t>(rate);
+}
+
+uint64_t ComputeWindowKbRate(uint64_t currBytes, uint64_t currNs, uint64_t prevBytes,
+                             uint64_t prevNs)
+{
+    // 回退语义：无快照（新接入 prev=0）或计数回绕（curr < prev，容器/环
+    // 重置）时，窗口增量负值无意义，返回全程累计速率等同旧行为；
+    // 否则返回窗口增量差分速率（近 10s 即时吞吐）。
+    bool valid = currBytes >= prevBytes && currNs >= prevNs;
+    if (!valid)
+        return ComputeKbRate(currBytes, currNs);
+    return ComputeKbRate(currBytes - prevBytes, currNs - prevNs);
 }
 
 /* --- 字段投影纯函数（声明见 service.h，独立于 binder 环境可单测） --- */
@@ -246,6 +272,20 @@ void IoServiceImpl::start_monitor() {
         std::vector<int32_t> deviceMinors;  /* 当前活跃设备 minor 列表（按 HAL 返回顺序，已排序） */
 
         /*
+         * R-12 方向 3：10 秒 tick 差分时间桶吞吐。原统计用 ComputeKbRate
+         * (累计 bytes / 累计 ns) 算的是接入以来全程平均速率——某个 10s 窗口
+         * 变慢会被长期均值稀释，无法定位变慢时刻。改差分桶：每 200 tick
+         * 保存本 tick 的累计字节/耗时快照，下个统计 tick 用差值算窗口吞吐
+         * （近 10s 即时速率），变慢时刻直接反映在窗口速率跌落上。首 tick
+         * 无快照时回退累计值（等同原行为，不产生假低谷）。
+         */
+        struct TickSnapshot
+        {
+            uint64_t readBytes = 0, readNs = 0, writeBytes = 0, writeNs = 0;
+        };
+        std::unordered_map<int32_t, TickSnapshot> tickSnap;
+
+        /*
          * LCD-018：绝对时间对齐调度。原 sleep_for(50ms) 的实际周期 =
          * 50ms + 本轮处理耗时（多设备 readEvent 各至多 50ms timeout），
          * "每 200 tick = 10s" 的刷新/统计节拍持续漂移放大（4 设备
@@ -317,9 +357,11 @@ void IoServiceImpl::start_monitor() {
                     const char *dir = (vev.dataDirection == 1) ? "READ"
                                       : (vev.dataDirection == 2) ? "WRITE" : "NONE";
 
-                    LC_ALOGD("event: minor=%d type=%s(%d) val=%d dir=%s ts=%llu",
-                          minor, type_name, vev.eventType, vev.eventValue, dir,
-                          (unsigned long long)vev.timestampNs);
+                    /* R-12 方向 2：专属 tag 可配置级别（INFO 生产可见，
+                     * debug 时 DEBUG），事件不再静默 */
+                    EVENT_ALOG("event: minor=%d type=%s(%d) val=%d dir=%s ts=%llu", minor,
+                               type_name, vev.eventType, vev.eventValue, dir,
+                               (unsigned long long)vev.timestampNs);
                 } else if (!ev_status.isOk()) {
                     /* 单设备失败仅告警，继续下一个设备 */
                     LC_ALOGW("monitor: readEvent failed for minor=%d: %s", minor,
@@ -332,12 +374,33 @@ void IoServiceImpl::start_monitor() {
                     auto st_status = hal->getStats(minor, &stats);
                     if (!st_status.isOk()) {
                         ALOGW("monitor: getStats failed for minor=%d", minor);
+                        /* 统计失败不清快照——下 tick 差分仍基于本 tick，
+                         * 避免失败窗口被误计为 0 速率假低谷 */
                         continue;  /* 跳过该设备统计，继续下一个 */
                     }
 
-                    /* 计算 KB/s 速率（换算核心收敛到 ComputeKbRate，除零防护可单测） */
-                    uint64_t read_rate = ComputeKbRate(stats.readBytes, stats.readNs);
-                    uint64_t write_rate = ComputeKbRate(stats.writeBytes, stats.writeNs);
+                    /*
+                     * R-12 方向 3：差分时间桶吞吐。取本 tick 累计与上一
+                     * 统计 tick 快照之差为窗口增量，算近 10s 即时速率；
+                     * 新接入/回绕回退全程累计（ComputeWindowKbRate 内敛）。
+                     * 旧实现累计平均会把变慢窗口摊平，无法定位跌落时刻。
+                     */
+                    auto it = tickSnap.find(minor);
+                    uint64_t rb = stats.readBytes, rn = stats.readNs;
+                    uint64_t wb = stats.writeBytes, wn = stats.writeNs;
+                    uint64_t prevRb = 0, prevRn = 0, prevWb = 0, prevWn = 0;
+                    if (it != tickSnap.end())
+                    {
+                        prevRb = it->second.readBytes;
+                        prevRn = it->second.readNs;
+                        prevWb = it->second.writeBytes;
+                        prevWn = it->second.writeNs;
+                    }
+                    tickSnap[minor] = {rb, rn, wb, wn};
+
+                    /* 计算 KB/s 速率（换算核心收敛到 ComputeKbRate/ComputeWindowKbRate） */
+                    uint64_t read_rate = ComputeWindowKbRate(rb, rn, prevRb, prevRn);
+                    uint64_t write_rate = ComputeWindowKbRate(wb, wn, prevWb, prevWn);
 
                     ALOGI("monitor: minor=%d read_rate=%llu KB/s, write_rate=%llu KB/s, "
                           "rx_pkts=%lld, tx_pkts=%lld, event_drop=%lld",

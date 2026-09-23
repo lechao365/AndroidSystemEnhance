@@ -85,12 +85,17 @@ int clamp_read_timeout_ms(int timeout_ms);
  * @fd: 设备 fd（需保持打开，用于 poll/read）
  * @event: 输出参数，接收最新事件
  * @timeout_ms: poll 超时时间（毫秒），0 表示非阻塞
+ * @dropped: 可选输出参数（可为 NULL），排空时被丢弃的中间事件条数——
+ *   R-11 方向 4 丢弃显式化：保留"只取最新"语义，同时把丢弃计数透出，
+ *   使事件完整性可见（调用方日志/监控据此感知积压）。
  * 返回: 0 成功（至少读到一条事件），-1 失败或超时
  *
  * 实现细节：先 poll 等待数据就绪，然后循环 read 排空缓冲区，
- * 只保留最后一条（最新）事件。中间事件被丢弃并打印警告。
+ * 只保留最后一条（最新）事件。中间事件被丢弃并打印警告，
+ * 丢弃条数（count-1）经 @dropped 输出（若提供）。
  */
-int read_event(int fd, struct vendor_lechao_usbd_event *event, int timeout_ms);
+int read_event(int fd, struct vendor_lechao_usbd_event *event, int timeout_ms,
+               uint32_t *dropped = nullptr);
 
 /*
  * list_devices — 枚举系统中所有匹配 /dev/vendor_lechao_usbd* 的设备节点

@@ -23,6 +23,7 @@
 #include "FileWriter.h"
 #include "batch_parser.h"
 #include "DeviceReader.h"
+#include "../include/lcview_ioctl.h"
 #include "../include/lcview_events.h"
 #include <log/log.h>
 #include <thread>
@@ -49,10 +50,12 @@ int main(int argc, char* argv[])
     //   因为 schema 文件所在的 vendor 分区可能在启动早期尚未挂载完成。
     //   替代旧版本直接 FATAL 退出的策略，提高启动可靠性。
     //   （重试逻辑抽入 batch_parser 可测函数）
-    const bool schemaOk = loadSchemaWithRetry(schema, schemaPath, 30);
+    const bool schemaOk = loadSchemaWithRetry(schema, schemaPath, gRunning, 30);
     if (!schemaOk) {
         ALOGE("lechao_lcview: failed to load schema from %s", schemaPath.c_str());
-        return 1;
+        // 方向 4：退出码抽纯函数——未运行（关停中断，gRunning=false）
+        // 返回 0 优雅退出，init 不判崩溃；真失败返回 1 交 init 重启重试
+        return schemaLoadExitCode(schemaOk, gRunning);
     }
     ALOGI("lechao_lcview: loaded %zu event schemas", schema.eventCount());
 
@@ -82,6 +85,17 @@ int main(int argc, char* argv[])
     if (!gRunning) {
         ALOGI("lechao_lcview: exiting (stopped during open)");
         return 0;
+    }
+    // R-13 方向 1：启动 ABI 协商判红——设备打开成功但内核版本不匹配
+    // （旧内核缺 LCVIEW_GET_ABI_VERSION 返 ENOTTY，或版本号低于 daemon
+    // 预期），显式退出交 init 重启，禁止静默降级运行（新用户态 + 旧内核
+    // 会因事件 hdr/统计结构扩容错读造成静默数据损坏）。
+    if (!reader.abiOk())
+    {
+        ALOGE("lechao_lcview: kernel ABI mismatch, exiting for init restart"
+              " (daemon ABI=%d)",
+              LCVIEW_ABI_VERSION);
+        return 1;
     }
     ALOGI("lechao_lcview: device opened, entering main loop");
 

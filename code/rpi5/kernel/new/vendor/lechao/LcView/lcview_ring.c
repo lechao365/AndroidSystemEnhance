@@ -43,6 +43,9 @@ extern int lcview_debug;
 
 #define PREFIX KERNEL_LCVIEW_TAG ": ring: "
 
+/* 读取实现，由 lcview_ring_read 包装调用（见下） */
+static int lcview_ring_read_internal(struct lcview_ring *ring, uint8_t __user *buf, uint32_t len);
+
 /*
  * ring_avail_write — 计算环形缓冲区中可写入的空闲空间
  *
@@ -129,10 +132,14 @@ int lcview_ring_init(struct lcview_ring *ring, uint32_t size_kb)
     ring->write_pos = 0;
     ring->read_pos = 0;
     ring->shutdown = false;
-    atomic_set(&ring->overrun_cnt, 0);
-    atomic_set(&ring->total_records, 0);
+    atomic64_set(&ring->overrun_cnt, 0);
+    atomic64_set(&ring->total_records, 0);
+    atomic64_set(&ring->dropped_cnt, 0);
+    atomic_set(&ring->readers, 0);
     spin_lock_init(&ring->lock);
+    mutex_init(&ring->read_mutex);
     init_waitqueue_head(&ring->waitq);
+    init_waitqueue_head(&ring->exit_wait);
 
     pr_info(PREFIX "initialized ring=%uKB read_buf=%uB\n",
             size / 1024, LCVIEW_BUILDER_MAX_SIZE);
@@ -144,12 +151,16 @@ int lcview_ring_init(struct lcview_ring *ring, uint32_t size_kb)
  * lcview_ring_destroy — 销毁环形缓冲区
  *
  * 设置 shutdown 标志后唤醒等待中的 reader，使其感知关闭事件并退出。
- * 然后释放两个 vmalloc 缓冲区。
+ * 然后经 wait_event(exit_wait) 等所有在途 read 调用（readers 计数）归零，
+ * 最后才释放两个 vmalloc 缓冲区。
  *
- * 为什么先设 shutdown 再释放内存？
- * 因为 reader 可能在等待队列中睡眠，wake_up_interruptible 之后 reader
- * 会检查 shutdown 标志并退出临界区，然后我们才能安全释放内存。
- * 如果不先设 shutdown，reader 可能刚被唤醒就去读已被释放的 buf。
+ * 为什么先设 shutdown 再等 readers 归零再释放内存？
+ * 因为 reader 可能在等待队列中睡眠，或在锁外 copy_to_user / 锁内
+ * memcpy 的任意点访问 buf / read_buf。wake_up_interruptible 之后 reader
+ * 会检查 shutdown 标志并退出，但"唤醒"与"真正退出"之间存在窗口——
+ * 若不等 readers 归零就 vfree，正在 copy_to_user 的 reader 会读已释放的
+ * read_buf（UAF）。readers 归零是"已无任何 reader 引用 buf"的可靠信号，
+ * 只有归零后才能安全释放内存。
  */
 void lcview_ring_destroy(struct lcview_ring *ring)
 {
@@ -159,6 +170,9 @@ void lcview_ring_destroy(struct lcview_ring *ring)
     ring->shutdown = true;
     spin_unlock_irqrestore(&ring->lock, flags);
     wake_up_interruptible(&ring->waitq);
+
+    /* 等所有在途 read 调用退出（readers 归零）再释放，杜绝 UAF */
+    wait_event(ring->exit_wait, atomic_read(&ring->readers) == 0);
 
     vfree(ring->read_buf);
     ring->read_buf = NULL;
@@ -201,9 +215,9 @@ static void ring_evict_one(struct lcview_ring *ring)
                             skipped_len);
     }
 
-    atomic_inc(&ring->overrun_cnt);
-    pr_debug(PREFIX "overrun #%d (evicted record at pos=%u)\n",
-             atomic_read(&ring->overrun_cnt), ring->read_pos);
+    atomic64_inc(&ring->overrun_cnt);
+    pr_debug(PREFIX "overrun #%lld (evicted record at pos=%u)\n", atomic64_read(&ring->overrun_cnt),
+             ring->read_pos);
 }
 
 /*
@@ -231,15 +245,23 @@ static void ring_evict_one(struct lcview_ring *ring)
 int lcview_ring_write(struct lcview_ring *ring,
                       const uint8_t *data, uint32_t len)
 {
-    uint32_t total = LCVIEW_LEN_PREFIX_SIZE + len;
+    uint32_t total;
     uint32_t avail;
     unsigned long flags;
 
-    if (total > ring->size) {
-        pr_err(PREFIX "record too large: %u > ring_size %u\n",
-               total, ring->size);
+    /*
+     * 修回绕（方向 1）：先判 len 大于 ring->size - 4 拒 -EMSGSIZE。
+     * 若先算 total = 4 + len，len 接近 UINT32_MAX 时 total 溢出回绕成
+     * 小值，绕过 total > ring->size 检查后进入写路径，memcpy 越界。
+     * 改先判 len 本身（len ≤ ring->size - 4 时 total 必不溢出）。
+     */
+    if (len > ring->size - LCVIEW_LEN_PREFIX_SIZE)
+    {
+        pr_err(PREFIX "record too large: len=%u > ring_size-%u=%u\n", len, LCVIEW_LEN_PREFIX_SIZE,
+               ring->size - LCVIEW_LEN_PREFIX_SIZE);
         return -EMSGSIZE;
     }
+    total = LCVIEW_LEN_PREFIX_SIZE + len;
 
     spin_lock_irqsave(&ring->lock, flags);
 
@@ -272,8 +294,10 @@ int lcview_ring_write(struct lcview_ring *ring,
      * KRN-008：单次 write 驱逐预算。极端场景（256KB 环 + 全 20B 小记录）
      * 需要驱逐 ~13000 条腾空间，持锁 ~1.3ms，阻塞同锁读者与并发写者。
      * 预算 256 条（≈26µs 持锁上限）：256×20B=5KB 覆盖常规腾空间需求；
-     * 超限返回 -ENOSPC 丢弃本次写入——该场景本就是 overrun（计数继续
-     * 递增），牺牲单条写入换取读写路径的低延迟。
+     * 超限返回 -ENOSPC 丢弃本次写入——该场景本就是 overrun（驱逐仍在
+     * 预算内进行，overrun 计数继续递增），方向 7 起丢弃的记录计入
+     * dropped_cnt 并同步递增 total_records（守恒左式闭合），牺牲单条
+     * 写入换取读写路径的低延迟。
      */
     {
         uint32_t evicted = 0;
@@ -293,8 +317,16 @@ int lcview_ring_write(struct lcview_ring *ring,
         if (total > avail) {
             spin_unlock_irqrestore(&ring->lock, flags);
             /* KRN-014：满环在 I/O 洪水时可每条命令触发，限频防止日志风暴 */
-            pr_err_ratelimited(PREFIX "ring full, write failed (total=%u avail=%u evicted=%u)\n",
-                               total, avail, evicted);
+            pr_err_ratelimited(PREFIX "ring full, write failed (total=%llu avail=%u evicted=%u)\n",
+                               atomic64_read(&ring->total_records), avail, evicted);
+            /*
+             * 方向 7：ENOSPC 丢弃同样计入 total_records（该记录已被内核收到，
+             * 属"产生但被丢弃"）并递增 dropped_cnt——否则守恒左式 totalΔ 不含
+             * 该条而右式含 droppedΔ，dev 恒为负向误报。total_records 语义由
+             * "成功写入数"扩展为"内核处理的记录总数（成功 + 预算超限丢弃）"。
+             */
+            atomic64_inc(&ring->total_records);
+            atomic64_inc(&ring->dropped_cnt);
             return -ENOSPC;
         }
     }
@@ -308,17 +340,73 @@ int lcview_ring_write(struct lcview_ring *ring,
     ring_memcpy_in(ring, ring->write_pos, data, len);
     ring->write_pos = (ring->write_pos + len) % ring->size;
 
-    atomic_inc(&ring->total_records);
+    atomic64_inc(&ring->total_records);
     spin_unlock_irqrestore(&ring->lock, flags);
 
-    pr_debug(PREFIX "wrote record len=%u total_records=%d\n",
-             len, atomic_read(&ring->total_records));
+    pr_debug(PREFIX "wrote record len=%u total_records=%lld\n", len,
+             atomic64_read(&ring->total_records));
     wake_up_interruptible(&ring->waitq);
     return 0;
 }
 
 /*
- * lcview_ring_read — 从环形缓冲区读取事件记录到用户缓冲区
+ * lcview_ring_read — 从环形缓冲区读取事件记录到用户缓冲区（串行化 + UAF 安全包装）
+ *
+ * 并发与生命周期契约（方向 3：read 串行化）：
+ *   1. 入口 atomic_inc(&ring->readers)，标记一个在途读调用——先于
+ *      mutex_lock：排队等 read_mutex 的 reader 同样计入在途读，destroy
+ *      的 wait_event(exit_wait, readers==0) 会等其拿到锁后查 shutdown
+ *      直返归零，杜绝"等待者越过归零判定后访问已释放内存"的 UAF。
+ *   2. mutex_lock(&ring->read_mutex) 串行化 read 调用：read 路径会睡眠
+ *      （wait_event_interruptible / copy_to_user）不能持 spinlock，并发
+ *      读者若仅靠 spin_lock 互斥会在锁外 copy_to_user 阶段交错推进
+ *      read_pos，撕裂记录流。mutex 保证同一时刻只有一个 read 在途推进
+ *      读指针与使用 read_buf。
+ *   3. 持 spin_lock 检查 shutdown：已销毁（shutdown=true）时直接返回
+ *      0（EOF），不触碰 buf / read_buf。
+ *   4. 调内部实现 lcview_ring_read_internal 执行真正的读取。
+ *   5. 出口 mutex_unlock 释放串行化锁；atomic_dec_and_test(&ring->readers)
+ *      归零时 wake_up(exit_wait)，唤醒可能正 wait_event(exit_wait) 睡眠的
+ *      lcview_ring_destroy。
+ *
+ * destroy 经 wait_event(exit_wait, readers == 0) 等所有在途 read 退出后
+ * 才 vfree buf / read_buf，杜绝"reader 还在 copy_to_user 内存已被释放"的 UAF。
+ */
+int lcview_ring_read(struct lcview_ring *ring, uint8_t __user *buf, uint32_t len)
+{
+    int ret;
+    unsigned long flags;
+
+    atomic_inc(&ring->readers);
+    mutex_lock(&ring->read_mutex);
+
+    /* 入口查 shutdown：销毁后新读直接 EOF，不进内部函数触碰已释放内存 */
+    spin_lock_irqsave(&ring->lock, flags);
+    if (ring->shutdown)
+    {
+        spin_unlock_irqrestore(&ring->lock, flags);
+        ret = 0;
+        goto out;
+    }
+    spin_unlock_irqrestore(&ring->lock, flags);
+
+    ret = lcview_ring_read_internal(ring, buf, len);
+
+out:
+    mutex_unlock(&ring->read_mutex);
+    /* 读调用退出：归零唤醒 destroy（readers==0 是"可安全释放内存"的信号） */
+    if (atomic_dec_and_test(&ring->readers))
+        wake_up(&ring->exit_wait);
+    return ret;
+}
+
+/*
+ * lcview_ring_read_internal — 环形缓冲区读取实现（不含入口 shutdown 检查）
+ *
+ * 由 lcview_ring_read 包装调用，调用者已 inc readers 且确认非 shutdown。
+ * 本函数内仍须在循环中检查 shutdown：读期间 destroy 可能置位，须尽快
+ * 退出（方向 3：shutdown 即 break，已拷贝数据照常返回），配合包装出口
+ * 的 readers 归零让 destroy 得以安全释放内存。
  *
  * 读取策略：
  *   1. 在循环中尽可能多地读取记录，直到填满用户缓冲区 (len) 或数据读完
@@ -337,11 +425,10 @@ int lcview_ring_write(struct lcview_ring *ring,
  * 用户态通常一次性提供大缓冲区（如 64KB 或更大），批量读取多条记录
  * 可以减少系统调用次数，提高吞吐量。
  *
- * 为什么 shutdown + empty 时返回 0 而非负值？
+ * 为什么 shutdown 后返回 0 而非负值？
  * 返回 0 表示 EOF，用户态 reader 应关闭设备并退出。
  */
-int lcview_ring_read(struct lcview_ring *ring,
-                     uint8_t __user *buf, uint32_t len)
+static int lcview_ring_read_internal(struct lcview_ring *ring, uint8_t __user *buf, uint32_t len)
 {
     uint32_t copied_total = 0;
     int ret;
@@ -371,24 +458,27 @@ int lcview_ring_read(struct lcview_ring *ring,
         }
 
         /*
-         * 已经读取到部分数据后，如果此时 ring 为空，则直接返回已读数据，
-         * 避免为了填满整个用户缓冲区而无限阻塞。
+         * 方向 3：shutdown 即 break，已拷贝数据照常返回。
+         * 读期间 destroy 可能置位 shutdown——立刻停止交付剩余记录，
+         * 让包装出口的 readers 归零尽快解除 destroy 的 wait_event，
+         * 缩短销毁窗口。已拷贝的字节数随 break 后的 return 照常交付
+         * （copied_total==0 时返回 0 即 EOF）。原"shutdown+empty 才返回"
+         * 会继续消费 shutdown 后残留的记录，拖延销毁且无必要。
          */
-        if (copied_total > 0 && ring->write_pos == ring->read_pos) {
+        if (ring->shutdown)
+        {
             spin_unlock_irqrestore(&ring->lock, flags);
             break;
         }
 
         /*
-         * 如果 shutdown 且缓冲区已空，终止读取。
-         * 如果已经拷贝了一些数据给用户态，先返回已拷贝的字节数；
-         * 否则返回 0 表示 EOF。
+         * 已经读取到部分数据后，如果此时 ring 为空，则直接返回已读数据，
+         * 避免为了填满整个用户缓冲区而无限阻塞。
          */
-        if (ring->shutdown && ring->write_pos == ring->read_pos) {
+        if (copied_total > 0 && ring->write_pos == ring->read_pos)
+        {
             spin_unlock_irqrestore(&ring->lock, flags);
-            if (copied_total > 0)
-                return (int)copied_total;
-            return 0;
+            break;
         }
 
         rpos = ring->read_pos;
@@ -406,25 +496,34 @@ int lcview_ring_read(struct lcview_ring *ring,
         /*
          * 校验记录长度：
          * - 最小合法值: LCVIEW_LEN_PREFIX_SIZE (4) + 记录头 (16) = 20
-         * - 最大合法值: min(LCVIEW_BUILDER_MAX_SIZE, ring->size)
+         *   方向 5：下限由 4 改 20（前缀+记录头）。[4,20) 的记录连
+         *   记录头都放不下，判损坏跳过——防伪造/损坏前缀导致的撕裂。
+         * - 上界（两档，语义不同）：
+         *   · record_len > LCVIEW_BUILDER_MAX_SIZE 判损坏：写侧可达的
+         *     最大记录总长恰为 4096（4 前缀 + 16 头 + 4076 数据），
+         *     方向 2 恢复严格大于——满长 4096 记录合法交付，>= 会
+         *     误伤满长记录判损坏跳过（丢记录）。
+         *   · record_len >= ring->size 判损坏：等长时按 record_len
+         *     前移会 (rpos + size) % size == rpos 零推进死循环，保留 >=。
          *
          * 如果记录损坏，使用保守的默认大小跳过这条记录。
          * 跳过策略：推进到前缀 + 记录头大小的位置，尝试从下一条继续。
          * 这样可以最大程度地从数据损坏中恢复，而不是永久阻塞 reader。
          */
-        if (record_len < LCVIEW_LEN_PREFIX_SIZE ||
-            record_len > LCVIEW_BUILDER_MAX_SIZE ||
-            record_len > ring->size) {
+        if (record_len < LCVIEW_LEN_PREFIX_SIZE + sizeof(struct lcview_record_hdr) ||
+            record_len > LCVIEW_BUILDER_MAX_SIZE || record_len >= ring->size)
+        {
             pr_warn_ratelimited(PREFIX "corrupted record at pos=%u, len=%u, skipping\n",
                                 rpos, record_len);
             /*
              * 损坏记录跳过量须按 record_len（写侧写入的长度前缀）前移：
              * 记录在环中实际占用 record_len 字节，只前移前缀+头（20B）
              * 会让 read_pos 落进记录体中间，把后续记录当损坏撕裂整个流。
-             * record_len 在环内可信（[前缀, ring->size]）时按 record_len
-             * 前移；不可信（<前缀 或 > ring->size，垃圾前缀）才用保守
-             * 默认跳过量（前缀 + 记录头），防止跳过头。判定内聚于 logic
-             * 层 ring_corrupt_skip_len 供单测判红。
+             * record_len 可信（[default_skip, ring->size)）时按 record_len
+             * 前移；不可信（<default_skip 或 >= ring->size，伪造/垃圾
+             * 前缀，方向 4/5）才用保守默认跳过量（前缀 + 记录头），
+             * 防止跳过头。判定内聚于 logic 层 ring_corrupt_skip_len 供
+             * 单测判红。
              */
             ring->read_pos = (rpos + ring_corrupt_skip_len(
                 record_len, ring->size,
@@ -526,8 +625,9 @@ uint32_t lcview_ring_avail_bytes(struct lcview_ring *ring)
  */
 void lcview_ring_get_stats(struct lcview_ring *ring, struct lcview_stats *stats)
 {
-    stats->total_records = atomic_read(&ring->total_records);
-    stats->overrun_cnt = atomic_read(&ring->overrun_cnt);
+    stats->total_records = atomic64_read(&ring->total_records);
+    stats->overrun_cnt = atomic64_read(&ring->overrun_cnt);
+    stats->dropped_cnt = atomic64_read(&ring->dropped_cnt);
     stats->ring_size_bytes = ring->size;
     stats->ring_usage_bytes = lcview_ring_avail_bytes(ring);
 }

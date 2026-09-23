@@ -31,3 +31,5 @@ KI-20260912-003 pre-existing false checker-hardening fixed
 KI-20260912-004 pre-existing false checker-hardening fixed
 KI-FLAKE-c3869bdc645e-377de5 pre-existing false auto-flake fixed
 KI-FLAKE-26cacb40dfd6-c1860c pre-existing false auto-flake wontfix
+KI-FLAKE-20d380d0f753-e1789e pre-existing false auto-flake open
+KI-FLAKE-cefa39e1699f-1bac08 pre-existing false auto-flake open

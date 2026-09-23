@@ -56,8 +56,11 @@ void ring_memcpy_in_core(uint8_t *buf, uint32_t size, uint32_t pos,
  * ring_evict_one_core — 驱逐（跳过）一条最旧记录，推进 read_pos
  *
  * 从 read_pos 读取 4 字节长度前缀（处理跨尾部换行），推进
- * read_pos = (read_pos + old_len) % size。防御损坏记录（old_len 为 0 或
- * > size）时用 default_record_len 保守跳过，避免推进过多致永久错乱。
+ * read_pos = (read_pos + old_len) % size。防御损坏记录（old_len <
+ * default_record_len 或 >= size）时用 default_record_len 保守跳过，
+ * 避免推进过多致永久错乱（方向 3：下界 [1, default_record_len) 与
+ * 读路径一致判损坏防撕裂；方向 4：等长 old_len == size 会零推进
+ * 死循环，一并判损坏）。
  *
  * @buf/@{size}       环形缓冲区内存与大小
  * @read_pos          入/出：驱逐后推进到的读指针
@@ -104,11 +107,13 @@ int ring_read_fit_errno(int fit);
  * 若直接返回，计数已被清零而用户未收到 → overrun 低估（写路径继续
  * atomic_inc，丢失的增量不可恢复）。修复：失败时把读到的值加回。
  *
+ * R-13 方向 3：overrun_cnt 升 atomic64_t，参数升 uint64_t。
+ *
  * @read_val atomic_xchg 读到的原值
  * @copy_ok  copy_to_user 是否成功
  * @return 回加量（copy 失败为 read_val，成功为 0）
  */
-uint32_t ring_overrun_restore_amt(uint32_t read_val, bool copy_ok);
+uint64_t ring_overrun_restore_amt(uint64_t read_val, bool copy_ok);
 
 /*
  * builder_write_fits — builder 字段写入容量检查（含 4B 长度前缀）
@@ -149,11 +154,11 @@ int builder_str_field_fits(uint32_t data_offset, uint32_t data_len,
 /*
  * ring_corrupt_skip_len — 损坏记录读取跳过的前移量计算
  *
- * 判损坏时（record_len < 前缀 或 > MAX 或 > 环大小）跳过该记录。
+ * 判损坏时（record_len < 前缀+头 或 >= MAX 或 >= 环大小）跳过该记录。
  * 记录在环中实际占用 record_len 字节（写侧长度前缀即记录总长），
  * 前移须按 record_len，否则 read_pos 落进记录体中间把后续流撕裂；
- * 仅当 record_len 完全不可信（<前缀 或 >环大小，垃圾前缀）才用
- * 保守默认跳过量（前缀 + 记录头），防止跳过头。
+ * 仅当 record_len 完全不可信（<default_skip 或 >= 环大小，伪造/垃圾
+ * 前缀）才用保守默认跳过量（前缀 + 记录头），防止跳过头。
  *
  * @record_len  读到的长度前缀
  * @ring_size   环形缓冲区大小

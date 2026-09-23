@@ -50,7 +50,7 @@ jobs:
           # 输出中全部 *_rc（含 pyenv_rc/ioctl_rc）任一非零即失败——否则测试
           # 失败也绿（CI 只跑不判）；键集合与 ws_report 必查键同源
           fail=""
-          for rc_name in pytest_rc refs_rc config_rc contract_rc pyenv_rc ioctl_rc manifest_rc discipline_rc scan_rc ruff_rc host_rc quotepath_rc known_issues_rc commit_coverage_rc; do
+          for rc_name in pytest_rc refs_rc config_rc contract_rc pyenv_rc ioctl_rc manifest_rc discipline_rc scan_rc ruff_rc host_rc quotepath_rc known_issues_rc commit_coverage_rc lcview_events_rc; do
             echo "$out" | grep -Eq "${rc_name}=0" \
               || { echo "error: ${rc_name} 非零，自检失败"; fail="$fail $rc_name"; }
           done
@@ -90,7 +90,7 @@ jobs:
           make -C code/rpi5/kernel/new/vendor/lechao/LcView/tests test
           make -C code/rpi5/kernel/new/vendor/lechao/LcIod/tests test
 
-      - name: C/C++ 静态检查（diff 驱动，无 C 改动跳过）
+      - name: C/C++ 静态检查（diff 行级驱动，无 C 改动跳过）
         run: |
           set -euo pipefail
           git fetch --quiet origin main || true
@@ -102,15 +102,35 @@ jobs:
             exit 0
           fi
           echo "检查文件: $CHANGED"
-          for f in $CHANGED; do
-            clang-format --dry-run --Werror "$f"
-          done
-          # clang-tidy 仅对 host 单测纯逻辑文件（独立可编译，带 -I 旗标）
+          # clang-format 改为 diff 行级校验（git-clang-format）：仅对相对
+          # origin/main 改动的行强制归一，存量未改动行不检查（与 .clang-format
+          # 头注释及 P0-B diff 驱动设计意图一致——整文件 clang-format --Werror
+          # 会把存量格式问题一并判红，导致改过存量的文件永远无法推送）。
+          # git-clang-format 输出含 @@ 即存在改动行不合规 → 判红；纯 mode
+          # 变化/无 @@ 视为合规放行。
+          GCF_OUT="$(git clang-format --diff origin/main --extensions c,h,cpp 2>&1 || true)"
+          if printf '%s' "$GCF_OUT" | grep -q '^@@'; then
+            echo "::error::C/C++ 改动行未过 clang-format（diff 行级，git-clang-format，cf=$(clang-format --version 2>/dev/null | head -1)）"
+            printf '%s\n' "$GCF_OUT" | grep -E '^(diff --git|@@|[+-][^+-])' | head -80
+            exit 1
+          fi
+          echo "C/C++ 改动行 clang-format 校验通过（diff 行级）"
+          # clang-tidy 仅对 host 单测纯逻辑文件（独立可编译，带 -I 旗标）。
+          # 修复（批次 260923 方向）：clang-tidy 独立编译内核 C 文件时缺系统
+          # 头路径（stddef.h file not found）且内核 C 合法使用 memcpy 触发
+          # 安全检查判红——补 gcc 内建 include 路径 + 抑制该 security checker。
+          # runner 无 compile_commands.json，-p . 仅做目录探测，编译参数走 -- 后。
+          GCC_INC="$(gcc -print-file-name=include || true)"
+          CT_CHECKS="-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling"
           for f in $CHANGED; do
             case "$f" in
               code/rpi5/kernel/new/vendor/lechao/LcView/lcview_ring_logic.c)
-                clang-tidy -p . "$f" -- -Icode/rpi5/kernel/new/vendor/lechao/LcView ;;
+                clang-tidy -checks="$CT_CHECKS" -p . "$f" -- \
+                  -Icode/rpi5/kernel/new/vendor/lechao/LcView -isystem "$GCC_INC"
+                ;;
               code/rpi5/kernel/new/vendor/lechao/LcIod/lciod_read_logic.c)
-                clang-tidy -p . "$f" -- -Icode/rpi5/kernel/new/vendor/lechao/LcIod ;;
+                clang-tidy -checks="$CT_CHECKS" -p . "$f" -- \
+                  -Icode/rpi5/kernel/new/vendor/lechao/LcIod -isystem "$GCC_INC"
+                ;;
             esac
           done

@@ -17,12 +17,48 @@
 
 using namespace vendor::lechao::lcview;
 
+// R-09 方向 4：reason 分类映射（纯函数）。SchemaParser 动态 errMsg 与
+// parseBatch 常量 reason 统一归类（见 batch_parser.h 头注释）：
+//   返 0 = 其他（unknown event_id 边界、schema vanished 防御分支）
+//   返 1 = 坏长度/坏前缀类（wire 损坏/截断/错位，与 schema 无关）
+//   返 2 = schema 漂移类（字段数/类型与 schema 定义不符）
+int vendor::lechao::lcview::classifyInvalidReason(const std::string &reason)
+{
+    // 坏长度/坏前缀：长度前缀、固定头、尾部残留、wire 损坏、越界截断、
+    // 未知字段类型——数据在传输/缓冲环节损坏，schema 无关
+    static const char *kBadLenMarks[] = {
+        "bad length",          "record too small",
+        "trailing bytes",      "data too short for header",
+        "bad magic",           "unexpected EOF at field",
+        "data exceeds record", "record length mismatch",
+        "unknown field type",
+    };
+    for (const char *mark : kBadLenMarks)
+    {
+        if (reason.find(mark) != std::string::npos)
+            return 1;
+    }
+    // schema 漂移：字段数与类型不匹配——schema 文件过期或与内核打点
+    // 版本不同步（需重编 schema / 升级 schema 定义）
+    if (reason.find("field count mismatch") != std::string::npos)
+        return 2;
+    if (reason.find("type mismatch at field") != std::string::npos)
+        return 2;
+    // unknown event_id / schema vanished 等边界与防御分支归其他
+    return 0;
+}
+
 BatchParseResult vendor::lechao::lcview::parseBatch(
     SchemaParser& schema, FileWriter& writer,
     const uint8_t* data, size_t len)
 {
     BatchParseResult result;
     size_t offset = 0;
+
+    // R-08 方向 2：批次级 flush 事务起点——本批所有 writeRecord/writeInvalid
+    // 只写 ofstream 缓冲不 flush，批次尾 endBatch 统一 flush + 失败整批回滚
+    // （消每记录一次 write syscall）
+    writer.beginBatch();
 
     while (offset + 4 <= len) {
         // 读取本条记录的总长度（含自身 4 字节）
@@ -37,10 +73,16 @@ BatchParseResult vendor::lechao::lcview::parseBatch(
             // 批尾的全部字节，直接 return 终止（不走循环后 trailing 分支，
             // 避免同段数据重复落盘/重复计数）
             result.invalidCnt++;
-            writer.writeInvalid(data + offset, len - offset, "bad length");
+            // R-09 方向 4：reason 分类计数（坏长度→badLenCnt，心跳可见）
+            const char *badReason = "bad length";
+            result.badLenCnt++;
+            writer.writeInvalid(data + offset, len - offset, badReason);
             ALOGE("lechao_lcview: parse: bad length at offset=%zu, total_len=%u, "
                   "drop %zu bytes to batch tail",
                   offset, total_len, len - offset);
+            // R-08 方向 2：提前出口同样须批次尾统一 flush（坏长度已把剩余
+            // 全部写 invalid，flush 后才落盘）
+            writer.endBatch();
             return result;
         }
 
@@ -53,6 +95,7 @@ BatchParseResult vendor::lechao::lcview::parseBatch(
                   recordDataLen, sizeof(struct lcview_record_hdr));
             writer.writeInvalid(recordStart, recordDataLen, "record too small");
             result.invalidCnt++;
+            result.badLenCnt++; // R-09 方向 4：坏长度类（净长不足固定头）
             offset += total_len;
             continue;
         }
@@ -77,11 +120,20 @@ BatchParseResult vendor::lechao::lcview::parseBatch(
                       hdr->event_id);
                 writer.writeInvalid(recordStart, recordDataLen, "schema vanished");
                 result.invalidCnt++;
+                result.miscInvalidCnt++; // R-09 方向 4：防御分支归其他
             }
         } else {
             writer.writeInvalid(recordStart, recordDataLen, errMsg);
             ALOGE("lechao_lcview: parse: validate failed: %s", errMsg.c_str());
             result.invalidCnt++;
+            // R-09 方向 4：动态 errMsg 按 classifyInvalidReason 归类
+            const int cls = classifyInvalidReason(errMsg);
+            if (cls == 1)
+                result.badLenCnt++;
+            else if (cls == 2)
+                result.schemaDriftCnt++;
+            else
+                result.miscInvalidCnt++;
         }
 
         offset += total_len;
@@ -94,21 +146,43 @@ BatchParseResult vendor::lechao::lcview::parseBatch(
         ALOGE("lechao_lcview: parse: %zu trailing bytes at batch tail",
               len - offset);
         result.invalidCnt++;
+        result.badLenCnt++; // R-09 方向 4：坏长度类（尾部残留读不出长度前缀）
     }
+    // R-08 方向 2：批次尾统一 flush（含全部 writeRecord/writeInvalid 缓冲），
+    // 失败整批回滚在 endBatch 内部处理（dropBatchFlush 计数）
+    writer.endBatch();
     return result;
 }
 
-bool vendor::lechao::lcview::loadSchemaWithRetry(
-    SchemaParser& schema, const std::string& path, int maxRetries,
-    std::chrono::milliseconds interval)
+bool vendor::lechao::lcview::loadSchemaWithRetry(SchemaParser &schema, const std::string &path,
+                                                 const std::atomic<bool> &running, int maxRetries,
+                                                 std::chrono::milliseconds interval)
 {
-    int schemaRetry = 0;
-    while (!schema.loadFromFile(path) && schemaRetry < maxRetries) {
-        ALOGW("lechao_lcview: schema not ready, retrying... (%d/%d)",
-              ++schemaRetry, maxRetries);
+    // 方向 4：可中断 + 尝试次数语义。
+    //   running：循环条件显式查 running，schema 重试期间收到停止信号
+    //   （gRunning=false）立即退出，不再等满 maxRetries×interval——
+    //   否则 init stop 被最长 15s 的重试窗口卡住（无法及时响应）。
+    //   日志从"第 N 次重试 (N/30)"改为"第 N 次尝试失败（attempt N/30）"：
+    //   attempt 即本轮已尝试加载的次数，语义与 maxRetries（尝试上限）
+    //   同尺度，弱 LLM/排查时直接可读，不再混淆"重试次数 vs 尝试次数"。
+    int attempt = 0;
+    while (!schema.loadFromFile(path) && running.load() && attempt < maxRetries)
+    {
+        attempt++;
+        ALOGW("lechao_lcview: schema load attempt %d/%d failed, retrying", attempt, maxRetries);
         std::this_thread::sleep_for(interval);
     }
     return schema.eventCount() > 0;
+}
+
+int vendor::lechao::lcview::schemaLoadExitCode(bool schemaOk, bool running)
+{
+    // 方向 4：未运行（关停中断，running=false）返回 0——schema 重试窗口
+    // 被 SIGTERM 打断时优雅退出，init 不再判崩溃重启；真失败返回 1 交
+    // init 重启重试
+    if (schemaOk)
+        return 0;
+    return running ? 1 : 0;
 }
 
 bool vendor::lechao::lcview::shouldFlushBatch(

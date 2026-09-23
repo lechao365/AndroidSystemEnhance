@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <memory>
@@ -49,7 +50,8 @@ SchemaParser makeSchema() {
 }
 
 std::vector<uint8_t> makeValidRecord() {
-    std::vector<uint8_t> buf(33, 0);
+    // R-13 方向 2：hdr 扩容 32B（16B→32B），缓冲须按 sizeof 计算防越界
+    std::vector<uint8_t> buf(sizeof(lcview_record_hdr) + 8 + 9, 0);
     auto* hdr = reinterpret_cast<lcview_record_hdr*>(buf.data());
     hdr->magic = LCVIEW_MAGIC;
     hdr->event_id = 4;
@@ -200,21 +202,48 @@ TEST_F(DaemonLoopTest, MixedBatch_ValidAndInvalidCounts) {
 
 TEST(DaemonLoopHelperTest, SchemaLoadRetry_EventualSuccess) {
     // schema 路径不存在 → 重试失败；maxRetries=0 直接失败
+    // 方向 4 适配：新增 running 参数（测试传本地 atomic，生产传 gRunning）
+    std::atomic<bool> running{true};
     SchemaParser sp;
-    EXPECT_FALSE(loadSchemaWithRetry(sp, "/nonexistent/lcview_events.json", 0,
+    EXPECT_FALSE(loadSchemaWithRetry(sp, "/nonexistent/lcview_events.json", running, 0,
                                      std::chrono::milliseconds(1)));
 }
 
 TEST(DaemonLoopHelperTest, SchemaLoadRetry_SuccessOnFirstTry) {
     // 真实配置（上板路径 /vendor/etc/lcview_events.json）一次加载成功
+    std::atomic<bool> running{true};
     SchemaParser sp;
     if (access("/vendor/etc/lcview_events.json", R_OK) == 0) {
-        EXPECT_TRUE(loadSchemaWithRetry(sp, "/vendor/etc/lcview_events.json", 0,
+        EXPECT_TRUE(loadSchemaWithRetry(sp, "/vendor/etc/lcview_events.json", running, 0,
                                         std::chrono::milliseconds(1)));
         EXPECT_EQ(sp.eventCount(), 10u);
     } else {
         GTEST_SKIP() << "真配置不存在（host 环境）";
     }
+}
+
+TEST(DaemonLoopHelperTest, SchemaLoadRetry_InterruptibleByRunning)
+{
+    // 方向 4：running=false 时重试循环立即中断——schema 加载重试期间收到
+    // SIGTERM（gRunning 置 false）不再等满 maxRetries×interval。
+    // maxRetries 大 + interval 长：若 running 不生效会等满（测试卡死超时），
+    // 快速返回即证明中断生效
+    std::atomic<bool> running{false};
+    SchemaParser sp;
+    EXPECT_FALSE(loadSchemaWithRetry(sp, "/nonexistent/lcview_events.json", running, 1000,
+                                     std::chrono::milliseconds(100)));
+}
+
+TEST(DaemonLoopHelperTest, SchemaExitCode_StoppedReturnsZero)
+{
+    // 方向 4：未运行（关停中断 running=false）返回 0——init stop 在 schema
+    // 重试窗口内被 SIGTERM 打断时优雅退出，不判崩溃重启
+    EXPECT_EQ(schemaLoadExitCode(false, false), 0);
+    // 加载成功返回 0（正常继续）
+    EXPECT_EQ(schemaLoadExitCode(true, true), 0);
+    EXPECT_EQ(schemaLoadExitCode(true, false), 0);
+    // 真失败（running 仍 true）返回 1，交 init 重启重试
+    EXPECT_EQ(schemaLoadExitCode(false, true), 1);
 }
 
 // ============================================================
@@ -250,8 +279,9 @@ TEST(DaemonLoopHelperTest, Flush_TimeoutOrAge_TriggersFlush) {
 // ============================================================
 
 TEST(DaemonLoopHelperTest, PreventiveFlush_RemainingBelowMinRead_TriggersFlush) {
-    // 方向 1：缓冲剩余空间 < 内核最小读单位（4096）须先 flush——否则
-    // 内核 read 因 cap-offset 过小返 -EINVAL，主循环退出交 init 重启成环
+    // 方向 1：缓冲剩余空间 < 单条记录上限（minRead=4096）须先 flush——否则
+    // 首条记录放不下剩余缓冲返 -EMSGSIZE（KRN-001），缓冲不足反复空转
+    // （契约收敛：内核 read 无 4096 读下限，靠记录上限与 flush 闭合）
     const size_t cap = 64 * 1024;
     const size_t minRead = 4096;
     // 剩余恰好 4096：不 flush（边界闭合，>= minRead 合法）

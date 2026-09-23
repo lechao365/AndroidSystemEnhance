@@ -14,6 +14,10 @@
 #              --reset 传给设备工具归零计数，delta 断言简化为绝对值）
 #   delta    — 对比基线，--expect 字段必须严格增加（防假绿：
 #              缺基线/缺字段/未增均判红）
+#   perf     — 性能采集（R-02 方向 2，只报数不设门禁）：dd 读块设备
+#              --load-mb MB（默认 64）驱动真实 USB 传输 → probe 前后
+#              快照差分算 per-IO ns（Δread_ns/Δread_cmds）、吞吐
+#              （Δread_bytes/dd 秒）、最近传输延迟（last_transport_latency_ns）
 #
 # 退出码：0 校验通过 / 1 校验失败 / 2 设备不可达或参数错误
 # ============================================================
@@ -247,20 +251,157 @@ def diff_devices(baseline, devices, expect_fields):
     return errors, report
 
 
+def _snapshot_numeric(devices):
+    """按 minor 索引数值字段快照（perf 前后差分用）；缺数值字段返回 None。
+
+    read_bytes/read_cmds/read_ns 为内核累计计数，perf 需前后两次 probe 差值
+    才得 dd 负载窗口增量。字段缺失（数值非数字）返回 None 由调用方判红。
+    """
+    snap = {}
+    for dev in devices:
+        minor = str(dev.get("minor", "?"))
+        snap[minor] = {}
+        for f in ("read_bytes", "read_cmds", "read_ns", "write_bytes",
+                  "write_cmds", "write_ns", "last_transport_latency_ns"):
+            if f not in dev:
+                return None
+            try:
+                snap[minor][f] = int(dev[f], 0)
+            except ValueError:
+                return None
+    return snap
+
+
+def mode_perf(args):
+    """性能采集（dd 负载驱动真实 USB 传输，probe 前后差分；只报数不设门禁）。
+
+    dd 读块设备 --load-mb MB（默认 64，与 lcview-perf 同负载，对齐性能基线）
+    触发 read_bytes/read_cmds 增量 → 算：
+    - per-IO ns = Δread_ns / Δread_cmds（内核每次读命令平均耗时，纳秒）
+    - 吞吐 MB/s = Δread_bytes / dd_s / 1e6（字节吞吐，与 lcview 事件吞吐
+      视角互补——lciod 内核计数直接观测 USBD 栈传输量）
+    - 最近传输延迟 ns = last_transport_latency_ns（内核记录最近一次传输
+      端到端耗时，dd 后快照）
+    输出 human 可读行 + METRICS JSON 行（供 ws_report --metrics 结构化存档）。
+    dd 有 IO 副作用，不并入 liveness，按需触发（同 lcview-perf）。
+    """
+    load_mb = args.load_mb or 64
+    dev = args.block_dev or "/dev/block/sda"
+
+    def _probe():
+        devices = parse_probe_output(run_probe())
+        # perf 前/后快照都须通过 stats 校验（enabled=1/字段齐全/abi），
+        # 防"监控被禁用仍全绿"假绿污染性能基线
+        errors = validate_devices(devices)
+        if errors:
+            for e in errors:
+                print(f"FAIL: {e}")
+            return None
+        return devices
+
+    before = _probe()
+    if before is None:
+        print("ERROR: dd 前 probe 快照校验未通过，拒绝采集")
+        return 1
+    snap0 = _snapshot_numeric(before)
+    if snap0 is None:
+        print("ERROR: dd 前 probe 快照缺数值字段，拒绝采集")
+        return 1
+
+    # dd 读负载（host 侧单调钟计时；与 lcview perf 同语义，不含人工 sleep）
+    t0 = time.monotonic()
+    out, rc = adb(["shell",
+                   f"dd if={dev} of=/dev/null bs=1M count={load_mb} 2>/dev/null"],
+                  timeout=args.dd_timeout or 300)
+    dd_s = time.monotonic() - t0
+    if rc == -1:
+        return -1  # adb 超时透传
+    if rc != 0:
+        print(f"ERROR: dd 负载执行失败 rc={rc}（块设备 {dev} 不可读？）")
+        return 1
+    if dd_s <= 0:
+        print("ERROR: dd 计时非正（dd_s<=0），负载未执行或计时异常，判红防假基线")
+        return 1
+
+    after = _probe()
+    if after is None:
+        print("ERROR: dd 后 probe 快照校验未通过，拒绝采集")
+        return 1
+    snap1 = _snapshot_numeric(after)
+    if snap1 is None:
+        print("ERROR: dd 后 probe 快照缺数值字段，拒绝采集")
+        return 1
+
+    # 差分计算（多设备逐台；无增量判红——dd 未触发传输即 perf 无意义）
+    metrics_list, lines = [], []
+    for dev_i in after:
+        minor = str(dev_i.get("minor", "?"))
+        tag = f"minor={minor}"
+        if minor not in snap0:
+            print(f"ERROR: {tag} 不在 dd 前快照中（新出现？重跑）")
+            return 1
+        d = snap1[minor]
+        b = snap0[minor]
+        rd = d["read_bytes"] - b["read_bytes"]
+        rc_delta = d["read_cmds"] - b["read_cmds"]
+        rns = d["read_ns"] - b["read_ns"]
+        per_io_ns = (rns / rc_delta) if rc_delta > 0 else 0.0
+        mbps = (rd / 1e6) / dd_s if dd_s > 0 else 0.0
+        lat_ns = d["last_transport_latency_ns"]
+        if rd <= 0 or rc_delta <= 0:
+            print(f"ERROR: {tag} dd 后 read_bytes/read_cmds 无增量（触发未生效，"
+                  f"块设备未就绪？），拒绝出 perf 基线")
+            return 1
+        metrics_list.append({
+            "minor": minor,
+            "per_io_ns": round(per_io_ns, 1),
+            "throughput_mbps": round(mbps, 3),
+            "last_latency_ns": lat_ns,
+            "read_bytes_delta": rd,
+            "read_cmds_delta": rc_delta,
+        })
+        lines.append(
+            f"{tag}: per-IO={per_io_ns:.1f} ns，吞吐={mbps:.3f} MB/s，"
+            f"最近传输延迟={lat_ns} ns（Δ{rd}B/{rc_delta}cmds）")
+
+    metrics = {
+        "load_mb": load_mb,
+        "dd_s": round(dd_s, 3),
+        "devices": metrics_list,
+    }
+    for ln in lines:
+        print(ln)
+    print("METRICS " + json.dumps(metrics, ensure_ascii=False))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="lciod 板端数据校验器（host 侧）")
     ap.add_argument("--mode", required=True,
-                    choices=["stats", "baseline", "delta"])
+                    choices=["stats", "baseline", "delta", "perf"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
                     help="delta 模式：必须严格增加的字段（如 read_bytes）")
     ap.add_argument("--baseline", default=BASELINE_DEFAULT,
                     help="baseline/delta 快照路径")
+    ap.add_argument("--load-mb", type=int, default=64,
+                    help="perf 模式 dd 读负载（MB），默认 64（与 lcview-perf 一致）")
+    ap.add_argument("--block-dev", default="/dev/block/sda",
+                    help="perf 模式 dd 读块设备路径")
+    ap.add_argument("--dd-timeout", type=int, default=300,
+                    help="perf 模式 dd 执行 adb 超时（秒）")
     args = ap.parse_args()
 
     ensure_connected()
     report = []  # delta 模式增量报告；stats/baseline 无 report（统一打印）
+
+    if args.mode == "perf":
+        rc = mode_perf(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
 
     if args.mode == "stats":
         devices = parse_probe_output(run_probe())

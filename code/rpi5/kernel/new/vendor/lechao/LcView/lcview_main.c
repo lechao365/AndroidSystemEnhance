@@ -28,6 +28,7 @@
 #include <linux/device.h>
 #include <linux/poll.h>
 #include <linux/uaccess.h>
+#include <linux/capability.h>
 #include "lcview_internal.h"
 #include "lcview_ioctl.h"
 #include "lcview_ring_logic.h"
@@ -70,11 +71,19 @@ static ssize_t lcview_stats_show(struct device *dev,
 {
     struct lcview_stats st;
     lcview_ring_get_stats(&lcview_ring, &st);
+    /* R-07 方向 1：producer_dropped 由 builder 模块级计数导出（不经
+     * struct lcview_stats，防 ABI 断言破坏）——与 total_records/dropped_cnt
+     * 区分，供守恒右式吸收生产端丢弃 */
+    /* R-13 方向 3：统计三字段升 u64，打印改 %llu（u32 宽度截断高 32 位） */
+    /* R-13 方向 2：event_seq 全局事件序号游标（gap 判定直读，见 lcview_internal.h） */
     return scnprintf(buf, PAGE_SIZE,
-                     "total_records=%u overrun=%u ring_usage_bytes=%u "
-                     "ring_size_bytes=%u\n",
-                     st.total_records, st.overrun_cnt,
-                     st.ring_usage_bytes, st.ring_size_bytes);
+                     "total_records=%llu overrun=%llu dropped=%llu "
+                     "producer_dropped=%u event_seq=%llu "
+                     "ring_usage_bytes=%u ring_size_bytes=%u\n",
+                     (unsigned long long)st.total_records, (unsigned long long)st.overrun_cnt,
+                     (unsigned long long)st.dropped_cnt, lcview_builder_producer_dropped_get(),
+                     (unsigned long long)lcview_event_seq_cur(), st.ring_usage_bytes,
+                     st.ring_size_bytes);
 }
 static DEVICE_ATTR_RO(lcview_stats);
 
@@ -97,8 +106,12 @@ static atomic_t device_opened = ATOMIC_INIT(0);
  * 当前最低日志等级
  * 低于此级别的事件会被 lcview_builder_start 过滤掉，不分配也不写入
  * 默认 LCVIEW_LEVEL_DEBUG = 0（不过滤）
+ *
+ * 方向 2：min_level 改 atomic_t，读写原子化消竞争——SET_LEVEL ioctl
+ * 写与 builder_start 读可跨 CPU 并发，普通 uint8_t 读写存在撕裂/缓存
+ * 不一致竞争，atomic_set/atomic_read 保证原子且编译期内存屏障。
  */
-static uint8_t min_level = LCVIEW_LEVEL_DEBUG;
+static atomic_t min_level = ATOMIC_INIT(LCVIEW_LEVEL_DEBUG);
 
 /* 模块参数：环形缓冲区大小（KB），默认 256KB，最大 4096KB */
 static uint32_t ring_size_kb = LCVIEW_RING_DEFAULT_KB;
@@ -200,6 +213,7 @@ static __poll_t lcview_poll(struct file *file, poll_table *wait)
 static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
     uint32_t val;
+    uint64_t overrun64;
     uint8_t level;
     struct lcview_stats stats;
 
@@ -217,6 +231,20 @@ static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         break;
 
     /*
+     * 查询 ABI 版本（R-13 方向 1）：daemon 启动协商内核版本，不匹配
+     * 显式退出判红——旧内核缺本命令返 ENOTTY，daemon 即判红，消
+     * "新用户态 + 旧内核"静默降级/字段错读。
+     */
+    case LCVIEW_GET_ABI_VERSION:
+        val = LCVIEW_ABI_VERSION;
+        if (copy_to_user((void __user *)arg, &val, sizeof(val)))
+        {
+            pr_err(PREFIX "GET_ABI_VERSION copy_to_user failed\n");
+            return -EFAULT;
+        }
+        break;
+
+    /*
      * 读取溢出计数并清零
      * "边读边清"语义：用户态轮询时可判断自上次查询以来是否发生过溢出
      *
@@ -227,13 +255,14 @@ static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
      * copy_to_user 失败时须按 ring_overrun_restore_amt 把读到的值加回，
      * 否则计数已被清零而用户未收到 → overrun 低估（写路径继续 inc，
      * 丢失的增量不可恢复）。
+     * R-13 方向 3：overrun_cnt 升 atomic64_t，载荷升 uint64_t 消回绕。
      */
     case LCVIEW_GET_OVERRUN:
-        val = (uint32_t)atomic_xchg(&lcview_ring.overrun_cnt, 0);
-        if (copy_to_user((void __user *)arg, &val, sizeof(val))) {
+        overrun64 = (uint64_t)atomic64_xchg(&lcview_ring.overrun_cnt, 0);
+        if (copy_to_user((void __user *)arg, &overrun64, sizeof(overrun64)))
+        {
             pr_err(PREFIX "GET_OVERRUN copy_to_user failed\n");
-            atomic_add((int)ring_overrun_restore_amt(val, false),
-                       &lcview_ring.overrun_cnt);
+            atomic64_add(ring_overrun_restore_amt(overrun64, false), &lcview_ring.overrun_cnt);
             return -EFAULT;
         }
         break;
@@ -254,8 +283,17 @@ static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
     /*
      * 设置最低日志级别
      * 级别值校验：必须在 LCVIEW_LEVEL_DEBUG(0) ~ LCVIEW_LEVEL_ERROR(3) 范围内
+     *
+     * 方向 3：SET_LEVEL 加 capable(CAP_SYS_ADMIN) 校验——日志级别过滤
+     * 影响全部消费者读取内容（低级别事件被丢弃），须仅限管理员设置，
+     * 非特权进程调用返回 -EPERM。
      */
     case LCVIEW_SET_LEVEL:
+        if (!capable(CAP_SYS_ADMIN))
+        {
+            pr_warn(PREFIX "SET_LEVEL denied: need CAP_SYS_ADMIN\n");
+            return -EPERM;
+        }
         if (copy_from_user(&level, (void __user *)arg, sizeof(level))) {
             pr_err(PREFIX "SET_LEVEL invalid\n");
             return -EFAULT;
@@ -264,7 +302,7 @@ static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
             pr_err(PREFIX "SET_LEVEL invalid\n");
             return -EINVAL;
         }
-        min_level = level;
+        atomic_set(&min_level, level);
         break;
 
     /*
@@ -315,8 +353,14 @@ static const struct file_operations lcview_fops = {
  */
 struct lcview_builder *lcview_builder_start(uint16_t event_id, uint8_t level)
 {
-    if (level < min_level)
+    if (level < (uint8_t)atomic_read(&min_level))
+    {
+        /* R-07 方向 1：level 过滤丢弃计入 producer_dropped_cnt——被过滤
+         * 事件从未构造/从未写入 ring（不分配），守恒左式 total_records 不含
+         * 它，sysfs 单独导出供守恒右式吸收，防"产生未计数"正向漂移误判 */
+        lcview_builder_producer_dropped_inc();
         return NULL;
+    }
     return lcview_builder_new(event_id, level);
 }
 EXPORT_SYMBOL(lcview_builder_start);
@@ -338,6 +382,11 @@ EXPORT_SYMBOL(lcview_builder_add_float);
 EXPORT_SYMBOL(lcview_builder_add_binary);
 EXPORT_SYMBOL(lcview_builder_commit);
 EXPORT_SYMBOL(lcview_builder_cancel);
+/* lcview_builder_free 与 lcview_builder_start 配对导出（方向 2）：
+ * 跨模块调用者经 builder_start 分配后必须能归还构建器（空闲池归还/释放），
+ * 未导出时外部模块链接报"undefined symbol"，构建器泄漏——start/free 同
+ * 生命周期必须同侧可链接 */
+EXPORT_SYMBOL(lcview_builder_free);
 
 /*
  * lcview_init — 模块初始化入口 (module_init)
@@ -426,3 +475,10 @@ static void __exit lcview_exit(void)
 
 module_init(lcview_init);
 module_exit(lcview_exit);
+
+/* GPL 合规声明：本驱动基于 GPL-2.0 内核模块接口实现，
+ * 显式声明 GPL 使 GPL-only 符号（spin_lock_irqsave 等）可正常链接 */
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Lechao");
+MODULE_DESCRIPTION("LcView structured event logging kernel driver");
+MODULE_VERSION("1.0");

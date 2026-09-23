@@ -21,6 +21,7 @@
 
 #include <linux/kernel.h>
 #include <linux/spinlock.h>
+#include <linux/mutex.h>
 #include <linux/wait.h>
 #include <linux/atomic.h>
 #include "lcview_events.h"
@@ -52,12 +53,24 @@
  *
  * 并发模型：写者（lcview_ring_write）可能在多个上下文并发调用
  * （USB 中断回调、lciod notifier 等），靠 spin_lock_irqsave 互斥；
- * 读者（lcview_ring_read）因设备单打开限制为单消费者。
- * 读者同样持锁读取记录头到 read_buf，随后解锁执行 copy_to_user
- * 以减少持锁时间。
+ * 读者（lcview_ring_read）因设备单打开限制为单消费者，但多个打开
+ * 实例经单打开 cmpxchg 限制前仍可能并发调用 read——read 会睡眠
+ * （wait_event_interruptible / copy_to_user）不能持 spinlock，故
+ * 用 read_mutex 串行化 read 调用，保护 read_pos 与 read_buf 不被
+ * 并发读者竞争撕裂。读者锁内拷贝记录头到 read_buf，随后解锁执行
+ * copy_to_user 以减少持锁时间。
  *
  * 空间不足时写者自动驱逐最旧记录 (ring_evict_one)，保证最新事件不丢失。
  * 适用于"最新 N 条"日志场景，而非可靠传输。
+ *
+ * 生命周期防护（防 UAF）：lcview_ring_read 入口 atomic_inc(readers)，
+ * 出口 atomic_dec_and_test 归零时 wake_up(exit_wait)；lcview_ring_destroy
+ * 置 shutdown 后经 wait_event(exit_wait) 等 readers 归零，才 vfree buf/
+ * read_buf。readers 计数在 mutex_lock 之前 inc——等待 read_mutex 的
+ * reader 同样计入在途读，destroy 的 wait_event 会等其拿到锁后因
+ * shutdown 直返归零，杜绝"持锁等待者越过归零判定后访问已释放内存"。
+ * 写者路径由 spin_lock 与 shutdown 检查互斥闭环（销毁前持锁
+ * 置 shutdown，后续写者查 shutdown 拒绝），无需计数。
  */
 struct lcview_ring {
     uint8_t      *buf;         /* 环形缓冲区内存（vmalloc 分配） */
@@ -65,11 +78,29 @@ struct lcview_ring {
     uint32_t      size;        /* 缓冲区总大小（字节） */
     uint32_t      write_pos;   /* 写指针（由 spin_lock 保护，指向下条写入位置） */
     uint32_t      read_pos;    /* 读指针（读时持锁修改，指向下条读取位置） */
-    atomic_t      overrun_cnt; /* 溢出逐出累计计数（边读边清） */
-    atomic_t      total_records; /* 累计写入记录数（仅统计，不清零） */
+    /* R-13 方向 3：统计计数升 atomic64_t——total_records 在 I/O 洪水下
+     * u32 最快 ~71 分钟回绕（1M events/s），长期运行 + 守恒增量比较场景
+     * 回绕风险真实存在；升 u64 后 daemon 侧无需再防 uint32 回绕（内核
+     * 重载检测仍保留）。overrun_cnt 边读边清（增量语义）但同升 u64
+     * 一劳永逸，dropped_cnt 不清零累计同 total 生命周期同风险。 */
+    atomic64_t overrun_cnt;   /* 溢出逐出累计计数（边读边清） */
+    atomic64_t total_records; /* 累计写入记录数（仅统计，不清零） */
+    atomic64_t dropped_cnt;   /* ENOSPC 丢弃累计计数（方向 7：驱逐预算超限丢弃，
+                               * 与 total_records 同步递增——该记录同样被内核收到，
+                               * 守恒左式 totalΔ = overrunΔ + droppedΔ + jsonlΔ + invalidΔ
+                               * 由此闭合，避免丢弃时守恒负向误报） */
+    /* 说明：R-07 方向 1 的 producer_dropped_cnt 不再放本结构——builder kmalloc
+     * 失败点（lcview_builder.c）与 level 过滤点（lcview_main.c）计数，host 单测
+     * 编 builder.c 不编 lcview_main.c（无全局 lcview_ring 实体），若挂在 ring 结构
+     * 会致 host 链接 undefined reference。改为 lcview_builder.c 模块级静态计数 +
+     * getter/setter 导出（见 lcview_builder_producer_dropped_*），经 sysfs 导出
+     * 供守恒右式吸收，不动 struct lcview_stats 防 ABI 断言破坏。 */
     spinlock_t    lock;        /* 保护 write_pos/read_pos 的自旋锁 */
+    struct mutex read_mutex; /* 串行化 read 调用（方向 3）：并发读者防 read_pos 撕裂 */
     wait_queue_head_t waitq;   /* 读取等待队列，写完后 wake_up 唤醒 reader */
     bool          shutdown;    /* destroy 标记，通知等待中的 reader 退出 */
+    atomic_t readers; /* 在途读调用计数，destroy 等其归零再释放内存（防 UAF） */
+    wait_queue_head_t exit_wait; /* 读调用归零等待队列，destroy 睡眠等所有 reader 退出 */
 };
 
 /* 全局环形缓冲区实例，在 lcview_main.c 中定义 */
@@ -103,8 +134,9 @@ struct lcview_builder {
  * 通过 LCVIEW_GET_STATS ioctl 返回给用户态
  */
 struct lcview_stats {
-    uint32_t total_records;    /* 累计写入记录总数 */
-    uint32_t overrun_cnt;      /* 溢出逐出记录数 */
+    uint64_t total_records; /* 累计写入记录总数（含 ENOSPC 丢弃，见 lcview_ring_write） */
+    uint64_t overrun_cnt; /* 溢出逐出记录数 */
+    uint64_t dropped_cnt; /* ENOSPC 丢弃累计（方向 7：驱逐预算超限丢弃，只读不清零） */
     uint32_t ring_usage_bytes; /* 当前已使用字节数 */
     uint32_t ring_size_bytes;  /* 环形缓冲区总大小 */
 };
@@ -186,5 +218,28 @@ int  lcview_builder_commit(struct lcview_builder *b, struct lcview_ring *ring);
 
 /* 取消构建并释放资源 */
 void lcview_builder_cancel(struct lcview_builder *b);
+
+/* ========== 生产者丢弃计数（R-07 方向 1） ========== */
+
+/*
+ * 生产端丢弃累计计数（builder kmalloc 失败 + level 过滤）。
+ * 与环级 dropped_cnt（ENOSPC，计 total_records）区分：producer_dropped
+ * 的记录从未写入 ring、不计入 total_records，守恒左式不含它，经 sysfs
+ * 导出供守恒右式吸收。模块级静态计数（lcview_builder.c），host 单测编
+ * 本文件即自带，不依赖全局 lcview_ring 实体。
+ */
+void lcview_builder_producer_dropped_inc(void);
+uint32_t lcview_builder_producer_dropped_get(void);
+
+/* ========== 事件序号游标（R-13 方向 2） ========== */
+
+/*
+ * 当前全局事件序号游标（模块级 atomic64 递增，只读不消费）。
+ * daemon 心跳 gap 判定用：本心跳读到游标较上心跳增量 - 落盘条数 =
+ * 序列间隙（含 ring 驱逐/ENOSPC 丢弃/FileWriter DROP 的真实丢事件量）。
+ * 与 ring->total_records 同源（每 commit 递增一次），但独立生成器不随
+ * ring 驱逐归零，gap 判定不依赖 GET_STATS 缓存（sysfs 直读）。
+ */
+uint64_t lcview_event_seq_cur(void);
 
 #endif /* LCVIEW_INTERNAL_H */

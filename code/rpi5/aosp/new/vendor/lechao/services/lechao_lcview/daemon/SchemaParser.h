@@ -79,6 +79,8 @@ private:
 
     // 使用哈希表以 O(1) 复杂度按 event_id 查找 schema
     std::unordered_map<uint16_t, EventSchema> mSchemaMap;
-    // schema 版本号（从 JSON 配置读取），为将来迁移预留
+    // schema 版本号（从 JSON 配置读取）。**死字段**：当前无任何消费路径
+    // （parseJson 仅作元数据解析存储，validate/find 均不依赖），仅保留
+    // 加载兼容与 schema 自描述；二期做版本迁移/热切换时再启用
     int mVersion = 0;
 };

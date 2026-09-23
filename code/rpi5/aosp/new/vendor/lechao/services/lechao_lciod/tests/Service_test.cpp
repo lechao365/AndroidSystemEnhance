@@ -68,6 +68,40 @@ TEST(ComputeKbRateTest, LargeBytes_NoOverflow) {
     EXPECT_EQ(ComputeKbRate(20000000000ULL, 1000000000ULL), 19531250u);
 }
 
+/* --- ComputeWindowKbRate：10 秒 tick 差分时间桶吞吐（R-12 方向 3） --- */
+
+TEST(ComputeWindowKbRateTest, NoSnapshot_FallsBackToCumulative)
+{
+    // 设备新接入（prev=0）：窗口增量即全程累计，等同旧行为
+    EXPECT_EQ(ComputeWindowKbRate(1048576, 1000000000ULL, 0, 0), 1024u);
+}
+
+TEST(ComputeWindowKbRateTest, WindowDelta_ReflectsRecentWindow)
+{
+    // 全程累计 1MB/s，但本窗口（10s）只传了 10KB/10s = 1KB/s——差分桶
+    // 应返回窗口即时速率 1KB/s（旧累计平均会摊平为 1MB/s 无法定位变慢）
+    uint64_t prevBytes = 1024ULL * 1024ULL * 100;  // 100MB 累计
+    uint64_t prevNs = 100ULL * 1000000000ULL;      // 100s
+    uint64_t currBytes = prevBytes + 10 * 1024;    // 本窗口 +10KB
+    uint64_t currNs = prevNs + 10 * 1000000000ULL; // 本窗口 +10s
+    EXPECT_EQ(ComputeWindowKbRate(currBytes, currNs, prevBytes, prevNs), 1u);
+}
+
+TEST(ComputeWindowKbRateTest, WindowDelta_BelowOneKB_TruncatesToZero)
+{
+    // 本窗口 512B / 10s → 0（整数截断，与 ComputeKbRate 一致）
+    uint64_t prevBytes = 1024 * 1024, prevNs = 100 * 1000000000ULL;
+    EXPECT_EQ(ComputeWindowKbRate(prevBytes + 512, prevNs + 10 * 1000000000ULL, prevBytes, prevNs),
+              0u);
+}
+
+TEST(ComputeWindowKbRateTest, CounterWrap_FallsBackToCumulative)
+{
+    // 计数回绕（curr < prev，容器/环重置）：差分无意义，回退全程累计
+    EXPECT_EQ(ComputeWindowKbRate(1048576, 1000000000ULL, 2000000, 2000000000ULL),
+              ComputeKbRate(1048576, 1000000000ULL));
+}
+
 /* --- 字段投影：vendor → system（21 字段直传 + 管理字段省略） --- */
 
 TEST(ProjectionTest, IoStats_All21FieldsPassedThrough) {

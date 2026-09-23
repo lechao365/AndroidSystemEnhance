@@ -38,3 +38,16 @@ class TestTriggerFirstRootWait(unittest.TestCase):
         self.assertIn("lcview-liveness", self.data["cases"])
         self.assertIn("lciod-liveness", self.data["cases"])
         self.assertTrue(self.data.get("modules"))
+
+    def test_lcview_liveness_checks_ioctl_and_total_records(self):
+        # R-12 方向 4：liveness 心跳判据须增查 ioctl_err=0（消新用户态旧内核
+        # ENOTTY 静默失效：ioctlErr 累计非零判红）与 total_records 存活
+        # （nonzero：采集链路被切断读 0 判红），旧判据 overrun/dropped/readErr
+        # 全 0 时仍可判红，不得假绿。
+        acceptance = self.data["cases"]["lcview-liveness"]
+        self.assertIn('logfield:"heartbeat, loop=|ioctl_err|=|0|lechao_lcview"',
+                      acceptance)
+        self.assertIn('logfield:"heartbeat, loop=|total_records|nonzero|0|lechao_lcview"',
+                      acceptance)
+        self.assertIn('logfield:"heartbeat, loop=|readErr|=|0|lechao_lcview"',
+                      acceptance)

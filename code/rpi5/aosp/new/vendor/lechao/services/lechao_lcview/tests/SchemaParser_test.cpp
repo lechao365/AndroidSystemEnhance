@@ -51,7 +51,8 @@ constexpr const char* kAllFieldTypesJson = R"({
 
 // 构造一条合法 record（与 schema id=4 匹配：STRING + INT64）
 std::vector<uint8_t> buildValidRecord() {
-    std::vector<uint8_t> buf(33, 0);
+    // R-13 方向 2：hdr 扩容 32B（16B→32B），缓冲须按 sizeof 计算防越界
+    std::vector<uint8_t> buf(sizeof(lcview_record_hdr) + 8 + 9, 0);
     auto* hdr = reinterpret_cast<lcview_record_hdr*>(buf.data());
     hdr->magic = LCVIEW_MAGIC;
     hdr->event_id = 4;
@@ -251,6 +252,48 @@ TEST(SchemaParserParseJsonTest, ProductionConfig_LoadsAll10Events) {
         EXPECT_FALSE(s->name.empty());
         EXPECT_FALSE(s->fields.empty()) << "事件 " << id << " 无字段";
     }
+}
+
+// 方向 1 对齐：生产配置 id=10/11/12 字段为 device_index/status、
+// id=13 为 device_index/latency_ns（与内核 lcview_trace_* 发射序列一致：
+// lcview_trace_stall/timeout/data_corrupt 发射 (device_index, status)，
+// lcview_trace_rate_degraded 发射 (device_index, latency_ns)）。
+// 用内联 JSON 断言字段名序列（含字段顺序），host 环境不依赖 /vendor/etc
+// 文件，字段错位（解析端按 schema 顺序对位）会在此用例判红
+TEST(SchemaParserParseJsonTest, UsbStallAndRateDegraded_FieldNameSequence)
+{
+    constexpr const char *json = R"({
+      "events": [
+        {"id": 10, "name": "usb_stall", "fields": [
+          {"name": "device_index", "type": "int64"},
+          {"name": "status", "type": "int64"}]},
+        {"id": 11, "name": "usb_timeout", "fields": [
+          {"name": "device_index", "type": "int64"},
+          {"name": "status", "type": "int64"}]},
+        {"id": 12, "name": "usb_data_corrupt", "fields": [
+          {"name": "device_index", "type": "int64"},
+          {"name": "status", "type": "int64"}]},
+        {"id": 13, "name": "usb_rate_degraded", "fields": [
+          {"name": "device_index", "type": "int64"},
+          {"name": "latency_ns", "type": "int64"}]}
+      ]
+    })";
+    SchemaParser sp;
+    ASSERT_TRUE(sp.parseJson(json));
+    auto names = [&](uint16_t id)
+    {
+        std::vector<std::string> out;
+        const EventSchema *s = sp.find(id);
+        if (!s)
+            return out;
+        for (const auto &f : s->fields)
+            out.push_back(f.name);
+        return out;
+    };
+    EXPECT_EQ(names(10), (std::vector<std::string>{"device_index", "status"}));
+    EXPECT_EQ(names(11), (std::vector<std::string>{"device_index", "status"}));
+    EXPECT_EQ(names(12), (std::vector<std::string>{"device_index", "status"}));
+    EXPECT_EQ(names(13), (std::vector<std::string>{"device_index", "latency_ns"}));
 }
 
 // ============================================================

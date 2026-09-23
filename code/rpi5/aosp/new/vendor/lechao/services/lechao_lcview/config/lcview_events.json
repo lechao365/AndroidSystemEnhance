@@ -66,8 +66,8 @@
       "name": "usb_stall",
       "desc": "USB endpoint stall",
       "fields": [
-        {"name": "duration_ns",     "type": "int64"},
-        {"name": "result",          "type": "int64"}
+        {"name": "device_index",    "type": "int64"},
+        {"name": "status",          "type": "int64"}
       ]
     },
     {
@@ -75,8 +75,8 @@
       "name": "usb_timeout",
       "desc": "USB transfer timeout",
       "fields": [
-        {"name": "duration_ns",     "type": "int64"},
-        {"name": "result",          "type": "int64"}
+        {"name": "device_index",    "type": "int64"},
+        {"name": "status",          "type": "int64"}
       ]
     },
     {
@@ -84,8 +84,8 @@
       "name": "usb_data_corrupt",
       "desc": "USB data corruption detected",
       "fields": [
-        {"name": "duration_ns",     "type": "int64"},
-        {"name": "result",          "type": "int64"}
+        {"name": "device_index",    "type": "int64"},
+        {"name": "status",          "type": "int64"}
       ]
     },
     {
@@ -93,8 +93,8 @@
       "name": "usb_rate_degraded",
       "desc": "USB rate degraded",
       "fields": [
-        {"name": "duration_ns",     "type": "int64"},
-        {"name": "current_rate",    "type": "int64"}
+        {"name": "device_index",    "type": "int64"},
+        {"name": "latency_ns",      "type": "int64"}
       ]
     }
   ]

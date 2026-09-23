@@ -92,13 +92,52 @@ static inline void vendor_lechao_usbd_record_last_event_locked(
 }
 
 /*
+ * vendor_lechao_usbd_rate_from_ns — 速率倒数近似（省 64 位除法）
+ * @bytes:      有效字节数
+ * @elapsed_ns: 耗时（纳秒）
+ *
+ * 计算 rate = bytes * NSEC_PER_SEC / elapsed_ns（字节/秒）的近似值。
+ *
+ * R-11 方向 1：直接 div64_u64 在除数超 32 位时走 libgcc 软件除法慢路径，
+ * per-END 每条命令执行 2 次，I/O 洪水时开销可观。本函数把除数按 2 的幂
+ * 同步缩放压入 32 位（分子同步缩放保持商近似），用 div_u64（ARM64 udiv
+ * 指令快路径）替代 64 位除法；分子先缩到安全范围防 bytes * NSEC_PER_SEC
+ * 溢出（CXX-002）。
+ */
+static inline u64 vendor_lechao_usbd_rate_from_ns(u64 bytes, u64 elapsed_ns)
+{
+    u64 numer = bytes;
+    u64 denom = elapsed_ns;
+    u32 den32;
+
+    if (!denom)
+        return 0;
+
+    /* 分子防溢出：先缩到 bytes * NSEC_PER_SEC 不溢出 u64 的范围 */
+    while (numer > (~0ULL / NSEC_PER_SEC))
+    {
+        numer >>= 8;
+        denom >>= 8;
+    }
+    /* 除数压入 32 位：正常传输耗时远小于 2^32 ns，循环通常不进入 */
+    while (denom >= (1ULL << 32))
+    {
+        numer >>= 8;
+        denom >>= 8;
+    }
+    den32 = denom ? (u32)denom : 1;
+    return div_u64(numer * NSEC_PER_SEC, den32);
+}
+
+/*
  * vendor_lechao_usbd_update_current_rate_locked — 计算瞬时传输速率
  * @rate_dev:   目标设备实例
  * @bytes:      本次传输的有效字节数
  * @elapsed_ns: 本次传输的耗时（纳秒）
  *
  * 计算公式：rate = bytes * NSEC_PER_SEC / elapsed_ns（字节/秒）
- * 同时更新 peak_rate（历史最高值）。
+ * 同时更新 peak_rate（历史最高值）。速率计算经
+ * vendor_lechao_usbd_rate_from_ns 倒数近似（R-11 方向 1）。
  *
  * 调用上下文：必须持有 rate_dev->lock 自旋锁。
  */
@@ -108,8 +147,7 @@ static inline void vendor_lechao_usbd_update_current_rate_locked(
 {
     u64 current_rate = 0;
 
-    if (elapsed_ns)
-        current_rate = div64_u64(bytes * NSEC_PER_SEC, elapsed_ns);
+    current_rate = vendor_lechao_usbd_rate_from_ns(bytes, elapsed_ns);
 
     rate_dev->stats.current_rate = current_rate;
     if (current_rate > rate_dev->stats.peak_rate)
@@ -159,10 +197,8 @@ static inline bool vendor_lechao_usbd_update_degrade_context_locked(
         return false;
     }
 
-    baseline_rate = div64_u64(rate_dev->last_degrade_window_bytes * NSEC_PER_SEC,
-                              window_ns);
-    bool degraded = (baseline_rate > 0 &&
-                     rate_dev->stats.current_rate < div64_u64(baseline_rate, 2));
+    baseline_rate = vendor_lechao_usbd_rate_from_ns(rate_dev->last_degrade_window_bytes, window_ns);
+    bool degraded = (baseline_rate > 0 && rate_dev->stats.current_rate < (baseline_rate >> 1));
 
     rate_dev->last_degrade_window_start = now;
     rate_dev->last_degrade_window_bytes = bytes;
@@ -182,35 +218,26 @@ static inline bool vendor_lechao_usbd_update_degrade_context_locked(
  */
 
 /*
- * lcview_trace_transport_start — 发射传输开始事件
+ * lcview_trace_transport_start — 传输开始事件（R-11 方向 3：不再 commit）
  * @rate_dev:     目标设备实例
  * @srb:          SCSI 命令（用于提取方向和数据长度）
  * @device_index: 次设备号（用于用户态关联设备）
  *
- * 字段：device_index, direction, data_len
+ * TRANSPORT_START 是每次 SCSI 命令都触发的最高频事件（per-END 都有一次），
+ * 在 IO 路径上逐命令分配 ~4KB GFP_ATOMIC builder 并写 ring，I/O 洪水时
+ * 开销可观且挤占环空间驱逐正常记录。R-11 方向 3：事件级别保持 DEBUG，
+ * 但不再 commit——传输时序信息已由 TRANSPORT_END（含 elapsed_ns）完整
+ * 承载，START 事件降为调试诊断（usbd_debug 开启时仅打印日志），省掉
+ * IO 路径的 GFP_ATOMIC 分配。
  */
 static void lcview_trace_transport_start(struct vendor_lechao_usbd_device *rate_dev,
                                          struct scsi_cmnd *srb, int device_index)
 {
-    struct lcview_builder *b;
-    int rc;
-    int dir;
-
     if (!srb)
         return;
 
-    dir = vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction);
-
-    b = lcview_builder_start(LCVIEW_EVENT_USB_TRANSPORT_START, LCVIEW_LEVEL_DEBUG);
-    if (!b)
-        return;
-    rc  = lcview_builder_add_int(b, (int64_t)device_index);
-    rc |= lcview_builder_add_int(b, (int64_t)dir);
-    rc |= lcview_builder_add_int(b, (int64_t)scsi_bufflen(srb));
-    /* KRN-016：add 失败聚合处理——任一字段缺失都会使用户态
-     * 按 schema 解析错位，整体丢弃事件而非发射残缺记录。*/
-    if (rc || lcview_builder_commit(b, &lcview_ring))
-        lcview_builder_cancel(b);
+    LC_DBG("TRANSPORT_START(trace disabled): dev=%d dir=%d bytes=%u\n", device_index,
+           vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction), scsi_bufflen(srb));
 }
 
 /*
@@ -413,8 +440,10 @@ static inline void vendor_lechao_usbd_event_push(
             VENDOR_LECHAO_USBD_EVENT_BUF_SIZE, &new_tail, &dropped);
         if (dropped) {
             pr_warn_ratelimited(PREFIX "event_push ring overflow, dropped old event\n");
-            /* 统计丢弃事件数，归 event_lock 保护域；fill_stats 在 dev->lock 下读取为原子读 */
-            dev->stats.event_drop_count++;
+            /* R-06 方向 3：丢弃计数改 atomic64_t 自增——写侧在 event_lock 域，
+             * 读侧（fill_stats）在 dev->lock 域，两个锁域无同步，普通 ++ 构成
+             * 形式化数据竞争；原子自增与原子读消除竞争，且不破坏 ABI 结构。 */
+            atomic64_inc(&dev->event_drop_cnt);
             dev->event_tail = new_tail;
         }
     }
@@ -459,6 +488,8 @@ void vendor_lechao_usbd_do_reset(struct vendor_lechao_usbd_device *rate_dev)
     rate_dev->stats.stall_count = 0;
     rate_dev->stats.corrupt_count = 0;
     rate_dev->stats.timeout_count = 0;
+    /* R-06 方向 3：atomic 清零（do_reset 持 dev->lock，与 event_lock 域自增跨锁域，须原子） */
+    atomic64_set(&rate_dev->event_drop_cnt, 0);
     rate_dev->stats.event_drop_count = 0;
     rate_dev->transport_start_time = ktime_set(0, 0);
     rate_dev->transport_active = false;
@@ -536,7 +567,14 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
     } trace = { 0 };
 
     rate_dev = container_of(nb, struct vendor_lechao_usbd_device, nb);
-    if (!rate_dev->enabled)
+    /*
+     * R-06 方向 1：enabled 锁外读取统一 READ_ONCE——写侧 apply_config_locked
+     * 在 dev->lock 下写（WRITE_ONCE 配对），本处 handle_event 顶部在取锁前
+     * 裸读，属无同步并发访问（KCSAN 可报 bool 数据竞争）。虽 bool 单字节撕裂
+     * 概率极低，但缺内存序保证且 disable 语义（enabled=false 早退）依赖读可见性，
+     * 统一 READ_ONCE 消除形式化竞争。
+     */
+    if (!READ_ONCE(rate_dev->enabled))
         return NOTIFY_DONE;
 
     trace.device_index = rate_dev->minor;
@@ -729,13 +767,4 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
     }
 
     return NOTIFY_OK;
-}
-
-int vendor_lechao_usbd_stats_init(void)
-{
-    return 0;
-}
-
-void vendor_lechao_usbd_stats_exit(void)
-{
 }

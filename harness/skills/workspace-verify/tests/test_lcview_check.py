@@ -120,6 +120,8 @@ def _args(**kw):
     a.perf_timeout = kw.get("perf_timeout", 60)
     a.perf_sample_ms = kw.get("perf_sample_ms", 100)
     a.dd_timeout = kw.get("dd_timeout", 300)
+    a.perf_baseline = kw.get("perf_baseline", lc.PERF_BASELINE_DEFAULT)
+    a.perf_save_baseline = kw.get("perf_save_baseline", False)
     return a
 
 
@@ -135,7 +137,8 @@ class FakeAdb:
                  dd_rc=0, dd_out="", pidof_rc=0, pidof_out="",
                  proc_rc=0, proc_out="", stats_rc=0, stats_out="",
                  sysfs_rc=0, sysfs_out="", sysfs_seq=None,
-                 wc_rc=0, wc_out="", wc_seq=None):
+                 wc_rc=0, wc_out="", wc_seq=None,
+                 stat_seq=None, io_out="", io_rc=0, io_seq=None):
         self.files = dict(files or {})
         self.ls_rc = ls_rc
         self.pull_rc = pull_rc
@@ -159,6 +162,13 @@ class FakeAdb:
         self.wc_rc = wc_rc
         self.wc_out = wc_out
         self.wc_seq = list(wc_seq or [])
+        # R-03 方向 1：daemon stat（CPU tick）与 io（syscr/syscw）分离响应——
+        # stat 双拍（dd 前/后各一帧，stat_seq 依次弹出），io 支持双拍
+        # （io_seq 依次弹出，测计数差分；缺省回退 io_out 固定值）
+        self.stat_seq = list(stat_seq or [])
+        self.io_out = io_out
+        self.io_rc = io_rc
+        self.io_seq = list(io_seq or [])
         self.calls = []
 
     def __call__(self, args, timeout=60):
@@ -177,6 +187,14 @@ class FakeAdb:
                 return (self.dd_out, self.dd_rc)
             if cmd.startswith("pidof "):
                 return (self.pidof_out, self.pidof_rc)
+            if cmd.startswith("cat /proc/") and "/stat" in cmd:
+                if self.stat_seq:
+                    return (self.stat_seq.pop(0), self.proc_rc)
+                return (self.proc_out, self.proc_rc)
+            if cmd.startswith("cat /proc/") and "/io" in cmd:
+                if self.io_seq:
+                    return (self.io_seq.pop(0), self.io_rc)
+                return (self.io_out, self.io_rc)
             if cmd.startswith("cat /proc/"):
                 return (self.proc_out, self.proc_rc)
             if cmd.startswith("lcview_stats"):
@@ -317,7 +335,8 @@ class TestModeSchema(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fake = FakeAdb(files={
                 f"{LOGS_DIR}/a.jsonl":
-                    _jsonl('{"ts": 1, "id": 8, "f": [0, 1, 2]}'),
+                    _jsonl('{"ts": 1, "seq": 42, "mono": 999, '
+                           '"id": 8, "f": [0, 1, 2]}'),
                 lc.SCHEMA_REMOTE: self.SCHEMA,
             })
             with mock.patch.object(lc, "adb", fake):
@@ -328,7 +347,20 @@ class TestModeSchema(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fake = FakeAdb(files={
                 f"{LOGS_DIR}/a.jsonl":
-                    _jsonl('{"ts": 1, "id": 9, "f": [0]}'),
+                    _jsonl('{"ts": 1, "seq": 43, "mono": 1000, '
+                           '"id": 9, "f": [0]}'),
+                lc.SCHEMA_REMOTE: self.SCHEMA,
+            })
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_schema(tmp, _args())
+        self.assertEqual(rc, 1)
+
+    def test_schema_seq_missing_fails(self):
+        # R-13 信封校验：seq 缺失判红（事件头未落盘信封）
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = FakeAdb(files={
+                f"{LOGS_DIR}/a.jsonl":
+                    _jsonl('{"ts": 1, "id": 8, "f": [0, 1, 2]}'),
                 lc.SCHEMA_REMOTE: self.SCHEMA,
             })
             with mock.patch.object(lc, "adb", fake):
@@ -706,9 +738,9 @@ class TestBaselineExplicit(unittest.TestCase):
             self.assertTrue(lc._baseline_explicit(None))
 
 
-def _sysfs(total=0, overrun=0, ring=0):
-    return (f"total_records={total} overrun={overrun} ring_usage_bytes={ring} "
-            f"ring_size_bytes=262144")
+def _sysfs(total=0, overrun=0, dropped=0, ring=0):
+    return (f"total_records={total} overrun={overrun} dropped={dropped} "
+            f"ring_usage_bytes={ring} ring_size_bytes=262144")
 
 
 def _wc(lines):
@@ -718,8 +750,10 @@ def _wc(lines):
 class TestModeConserve(unittest.TestCase):
     # conserve v4：两段式采样（静止确认段 2 拍 + 负载采样段 2 拍，共 3 拍）。
     # 静止确认段增量归零 → 起点无积压；负载段比较内核产生增量
-    # （Δtotal-Δoverrun）vs 磁盘 JSONL 落盘增量，负向（落盘>产生）在
+    # （Δtotal-Δoverrun-Δdropped）vs 磁盘 JSONL 落盘增量，负向（落盘>产生）在
     # 起点无积压时为真异常判红，仅追赶期（起点有积压）放行。
+    # dropped（ENOSPC 丢弃）计入 total_records 却未落盘，须从左式减除，
+    # 否则 ENOSPC 被误当在途积压判红（方向 1）。
     def _run(self, sysfs_seq, wc_seq, **kw):
         fake = FakeAdb(sysfs_seq=sysfs_seq, wc_seq=wc_seq,
                        dd_rc=kw.get("dd_rc", 0))
@@ -766,6 +800,18 @@ class TestModeConserve(unittest.TestCase):
             self._run([(_sysfs(total=100), 0), (_sysfs(total=100), 0),
                        (_sysfs(total=110), 0)],
                       [(_wc(90), 0), (_wc(90), 0), (_wc(120), 0)]), 1)
+
+    def test_conserve_enospc_dropped_not_inflight(self):
+        # ENOSPC 丢弃（dropped 增量）计入 total_records 却未落盘：左式
+        # produced 须减 Δdropped——否则被误当在途积压判红（方向 1）
+        # 构造：total 100→132（Δ32），dropped 0→16（Δ16，ENOSPC 丢弃），
+        # landed 90→105（Δ15）→ 真实 produced = 32-16 = 16，in_flight=1 OK；
+        # 若不减 dropped 则 produced=32、in_flight=17 > 16 误判红
+        self.assertEqual(
+            self._run([(_sysfs(total=100, dropped=0), 0),
+                       (_sysfs(total=100, dropped=0), 0),
+                       (_sysfs(total=132, dropped=16), 0)],
+                      [(_wc(90), 0), (_wc(90), 0), (_wc(105), 0)]), 0)
 
     def test_conserve_negative_release_with_backlog_ok(self):
         # 静止确认段有增量（起点有积压，追赶期）→ 负载窗口落盘 40 > 产生 5
@@ -934,6 +980,311 @@ class TestModePerf(unittest.TestCase):
         fake = FakeAdb(dd_rc=-1)
         rc = self._run(fake, totals=[100], jsonls=[90])
         self.assertEqual(rc, -1)
+
+    # ── R-03 方向 1：采样可信度回炉单测 ──────────────────────────
+    def test_perf_cpu_dd_window_diff(self):
+        # CPU 改 dd 窗口双拍差分：dd 前 tick=100，dd 后 tick=110（10 tick，
+        # USER_HZ=100，dd_s=1s）→ 10%（不在 dd 前单点快照取值）
+        fake = FakeAdb(dd_rc=0,
+                       pidof_out="1234\n", pidof_rc=0,
+                       proc_out="VmHWM:\t    5516 kB\n", proc_rc=0,
+                       stat_seq=["1234 (lechao_lcview) S 0 0 0 0 "
+                                 "0 0 0 0 0 0 0 100 100\n",
+                                 "1234 (lechao_lcview) S 0 0 0 0 "
+                                 "0 0 0 0 0 0 0 110 100\n"])
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(lc, "adb", fake):
+                with mock.patch.object(lc, "kernel_total",
+                                       side_effect=[100, 1321, 1321]):
+                    with mock.patch.object(lc, "jsonl_line_count",
+                                           side_effect=[90, 1311, 1311]):
+                        with mock.patch.object(lc.time, "sleep"):
+                            with mock.patch.object(lc.time, "monotonic",
+                                                   side_effect=[100.0, 101.0,
+                                                                101.0, 101.1]):
+                                with contextlib.redirect_stdout(out):
+                                    rc = lc.mode_perf(tmp, _args())
+        self.assertEqual(rc, 0)
+        line = [ln for ln in out.getvalue().splitlines()
+                if ln.startswith("METRICS ")]
+        metrics = json.loads(line[0][len("METRICS "):])
+        # utime 100→110 = 10 tick，USER_HZ 100，dd_s 1.0 → 10%
+        self.assertEqual(metrics["daemon_cpu_pct"], 10.0)
+
+    def test_perf_syscall_io_diff(self):
+        # syscall 改 /proc/<pid>/io 的 syscr/syscw 双拍计数差：dd 前
+        # syscr=1000/syscw=500，dd 后 syscr=1020/syscw=512 → 增量 20/12
+        fake = FakeAdb(dd_rc=0,
+                       pidof_out="1234\n", pidof_rc=0,
+                       proc_out="VmHWM:\t    5516 kB\n", proc_rc=0,
+                       io_seq=["rchar: 1000\nwchar: 200\nsyscr: 1000\n"
+                               "syscw: 500\nread_bytes: 0\nwrite_bytes: 0\n",
+                               "rchar: 1000\nwchar: 200\nsyscr: 1020\n"
+                               "syscw: 512\nread_bytes: 0\nwrite_bytes: 0\n"])
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(lc, "adb", fake):
+                with mock.patch.object(lc, "kernel_total",
+                                       side_effect=[100, 1321, 1321]):
+                    with mock.patch.object(lc, "jsonl_line_count",
+                                           side_effect=[90, 1311, 1311]):
+                        with mock.patch.object(lc.time, "sleep"):
+                            with mock.patch.object(lc.time, "monotonic",
+                                                   side_effect=[100.0, 101.0,
+                                                                101.0, 101.1]):
+                                with contextlib.redirect_stdout(out):
+                                    rc = lc.mode_perf(tmp, _args())
+        self.assertEqual(rc, 0)
+        line = [ln for ln in out.getvalue().splitlines()
+                if ln.startswith("METRICS ")]
+        metrics = json.loads(line[0][len("METRICS "):])
+        self.assertEqual(metrics["syscr_delta"], 20)
+        self.assertEqual(metrics["syscw_delta"], 12)
+
+    def test_perf_ring_water_immediate(self):
+        # 环水位改 dd 后立即采样（drain 前）：sysfs 首帧即 dd 后峰值
+        # （ring_usage_bytes=131072/ring_size_bytes=262144 → 50%），
+        # 不被 drain 耗时稀释——原 dd 后经 drain 才采样会取到回落低位
+        fake = FakeAdb(dd_rc=0,
+                       pidof_out="1234\n", pidof_rc=0,
+                       proc_out="VmHWM:\t    5516 kB\n", proc_rc=0,
+                       sysfs_out="total_records=1321 overrun=0 dropped=0 "
+                                 "ring_usage_bytes=131072 "
+                                 "ring_size_bytes=262144\n")
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(lc, "adb", fake):
+                with mock.patch.object(lc, "kernel_total",
+                                       side_effect=[100, 1321, 1321]):
+                    with mock.patch.object(lc, "jsonl_line_count",
+                                           side_effect=[90, 1311, 1311]):
+                        with mock.patch.object(lc.time, "sleep"):
+                            with mock.patch.object(lc.time, "monotonic",
+                                                   side_effect=[100.0, 101.0,
+                                                                101.0, 101.1]):
+                                with contextlib.redirect_stdout(out):
+                                    rc = lc.mode_perf(tmp, _args())
+        self.assertEqual(rc, 0)
+        line = [ln for ln in out.getvalue().splitlines()
+                if ln.startswith("METRICS ")]
+        metrics = json.loads(line[0][len("METRICS "):])
+        # 环水位 = 131072/262144 = 50%（dd 后立即采样帧）
+        self.assertEqual(metrics["ring_water_pct"], 50.0)
+        self.assertEqual(metrics["ring_usage_bytes"], 131072)
+        self.assertEqual(metrics["overrun_delta"], 0)
+
+
+# ============================================================
+# R-04 方向 1：性能基线入库与回归判红（perf_regression_gate）
+# ============================================================
+
+class TestPerfRegressionGate(unittest.TestCase):
+    _BASE = {
+        "throughput_evs": 1000.0,
+        "drain_ms_per_event": 10.0,
+        "drain_p99_ms": 20.0,
+        "daemon_rss_kb": 5000,
+    }
+
+    def _tmp_base(self, base=None):
+        """写临时基线文件，返回路径。"""
+        path = Path(tempfile.gettempdir()) / "lcview_perf_gate_test.json"
+        with open(path, "w", encoding="utf-8") as fp:
+            json.dump(base or self._BASE, fp)
+        return str(path)
+
+    def _metrics(self, **over):
+        m = dict(self._BASE)
+        m.update(over)
+        return m
+
+    def test_gate_within_tolerance_ok(self):
+        # 吞吐/延迟/p99/RSS 均在 ±30% 容差内 → 门禁通过
+        path = self._tmp_base()
+        try:
+            rc = lc.perf_regression_gate(
+                self._metrics(throughput_evs=1200.0, drain_p99_ms=24.0),
+                path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 0)
+
+    def test_gate_throughput_drop_red(self):
+        # 吞吐腰斩（1000→500，-50% > -30%）→ 判红（性能劣化）
+        path = self._tmp_base()
+        try:
+            rc = lc.perf_regression_gate(
+                self._metrics(throughput_evs=500.0), path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 1)
+        out = sys.stdout
+        self.assertIsNotNone(out)
+
+    def test_gate_throughput_improve_not_red(self):
+        # 吞吐提升（1000→1500，+50%）→ 改善不判红（涨优方向）
+        path = self._tmp_base()
+        try:
+            rc = lc.perf_regression_gate(
+                self._metrics(throughput_evs=1500.0), path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 0)
+
+    def test_gate_latency_degrade_red(self):
+        # 延迟劣化（10→20ms，+100% > +30%）→ 判红（降优方向劣化）
+        path = self._tmp_base()
+        try:
+            rc = lc.perf_regression_gate(
+                self._metrics(drain_ms_per_event=20.0), path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 1)
+
+    def test_gate_latency_improve_not_red(self):
+        # 延迟改善（10→5ms，-50%）→ 改善不判红
+        path = self._tmp_base()
+        try:
+            rc = lc.perf_regression_gate(
+                self._metrics(drain_ms_per_event=5.0), path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 0)
+
+    def test_gate_rss_inflate_red(self):
+        # RSS 膨胀（5000→9000，+80% > +30%）→ 判红（内存劣化）
+        path = self._tmp_base()
+        try:
+            rc = lc.perf_regression_gate(
+                self._metrics(daemon_rss_kb=9000), path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 1)
+
+    def test_gate_p99_degrade_red(self):
+        # p99 劣化（20→30ms，+50% > +30%）→ 判红
+        path = self._tmp_base()
+        try:
+            rc = lc.perf_regression_gate(
+                self._metrics(drain_p99_ms=30.0), path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(rc, 1)
+
+    def test_gate_no_baseline_first_run_auto_save_ok(self):
+        # R-05 方向 1：基线文件不存在且未 save → 首跑自动建档判绿（基准快照），
+        # 不判红（消"首跑必判红"死锁）；再次跑同值比对通过（自洽）
+        path = str(Path(tempfile.gettempdir()) / "lcview_perf_first_run.json")
+        try:
+            if os.path.exists(path):
+                os.unlink(path)
+            rc = lc.perf_regression_gate(self._metrics(), path)
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(path))
+            with open(path, encoding="utf-8") as fp:
+                saved = json.load(fp)
+            self.assertEqual(saved["throughput_evs"], 1000.0)
+            self.assertIn("created", saved)
+            # 第二次跑：基线已存在 → 容差比对通过（同值自洽）
+            rc2 = lc.perf_regression_gate(self._metrics(), path)
+            self.assertEqual(rc2, 0)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_gate_save_baseline_writes_file(self):
+        # save=True 写基线文件；再比对同值应通过（建档后自洽）
+        path = str(Path(tempfile.gettempdir()) / "lcview_perf_save_test.json")
+        try:
+            if os.path.exists(path):
+                os.unlink(path)
+            rc = lc.perf_regression_gate(self._metrics(), path, save=True)
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(path))
+            with open(path, encoding="utf-8") as fp:
+                saved = json.load(fp)
+            self.assertEqual(saved["throughput_evs"], 1000.0)
+            # 建档后同值比对通过（自洽）
+            rc2 = lc.perf_regression_gate(self._metrics(), path)
+            self.assertEqual(rc2, 0)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_gate_save_then_degrade_red(self):
+        # save 建档 → 构造超阈值吞吐劣化样本 → 判红（负例验证判红链路）
+        path = str(Path(tempfile.gettempdir()) / "lcview_perf_save_deg.json")
+        try:
+            if os.path.exists(path):
+                os.unlink(path)
+            rc = lc.perf_regression_gate(self._metrics(), path, save=True)
+            self.assertEqual(rc, 0)
+            rc2 = lc.perf_regression_gate(
+                self._metrics(throughput_evs=400.0), path)
+            self.assertEqual(rc2, 1)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_gate_mode_perf_gate_disabled_by_default(self):
+        # mode_perf 未显式传 perf 基线 → 门禁关闭（只报数，R-02/03 语义）
+        fake = FakeAdb(dd_rc=0,
+                       pidof_out="1234\n", pidof_rc=0,
+                       proc_out="VmHWM:\t    5516 kB\n", proc_rc=0,
+                       sysfs_out="total_records=1321 overrun=0 dropped=0 "
+                                 "ring_usage_bytes=131072 "
+                                 "ring_size_bytes=262144\n")
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(lc, "adb", fake):
+                with mock.patch.object(lc, "kernel_total",
+                                       side_effect=[100, 1321, 1321]):
+                    with mock.patch.object(lc, "jsonl_line_count",
+                                           side_effect=[90, 1311, 1311]):
+                        with mock.patch.object(lc.time, "sleep"):
+                            with mock.patch.object(lc.time, "monotonic",
+                                                   side_effect=[100.0, 101.0,
+                                                                101.0, 101.1]):
+                                with contextlib.redirect_stdout(out):
+                                    rc = lc.mode_perf(tmp, _args())
+        self.assertEqual(rc, 0)
+        self.assertIn("METRICS ", out.getvalue())
+
+    def test_gate_mode_perf_save_baseline_ok(self):
+        # mode_perf --perf-save-baseline → 建档 + rc=0（门禁启用且存档成功）
+        path = str(Path(tempfile.gettempdir()) / "lcview_perf_mode_save.json")
+        try:
+            if os.path.exists(path):
+                os.unlink(path)
+            fake = FakeAdb(dd_rc=0,
+                           pidof_out="1234\n", pidof_rc=0,
+                           proc_out="VmHWM:\t    5516 kB\n", proc_rc=0,
+                           sysfs_out="total_records=1321 overrun=0 dropped=0 "
+                                     "ring_usage_bytes=131072 "
+                                     "ring_size_bytes=262144\n")
+            out = io.StringIO()
+            with tempfile.TemporaryDirectory() as tmp:
+                with mock.patch.object(lc, "adb", fake):
+                    with mock.patch.object(lc, "kernel_total",
+                                           side_effect=[100, 1321, 1321]):
+                        with mock.patch.object(lc, "jsonl_line_count",
+                                               side_effect=[90, 1311, 1311]):
+                            with mock.patch.object(lc.time, "sleep"):
+                                with mock.patch.object(lc.time, "monotonic",
+                                                       side_effect=[100.0, 101.0,
+                                                                    101.0, 101.1]):
+                                    with contextlib.redirect_stdout(out):
+                                        rc = lc.mode_perf(
+                                            tmp,
+                                            _args(perf_baseline=path,
+                                                  perf_save_baseline=True))
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.exists(path))
+            self.assertIn("性能基线已存档", out.getvalue())
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
 
 
 if __name__ == "__main__":

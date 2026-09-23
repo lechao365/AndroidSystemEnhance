@@ -73,16 +73,19 @@ static void lcview_trace_probe(int device_index, u16 vid, u16 pid,
                                const char *vendor, const char *product)
 {
     struct lcview_builder *b;
+    int rc;
 
     b = lcview_builder_start(LCVIEW_EVENT_USB_PROBE, LCVIEW_LEVEL_INFO);
     if (!b)
         return;
-    lcview_builder_add_int(b, (int64_t)device_index);
-    lcview_builder_add_int(b, (int64_t)vid);
-    lcview_builder_add_int(b, (int64_t)pid);
-    lcview_builder_add_str(b, vendor);
-    lcview_builder_add_str(b, product);
-    if (lcview_builder_commit(b, &lcview_ring))
+    rc = lcview_builder_add_int(b, (int64_t)device_index);
+    rc |= lcview_builder_add_int(b, (int64_t)vid);
+    rc |= lcview_builder_add_int(b, (int64_t)pid);
+    rc |= lcview_builder_add_str(b, vendor);
+    rc |= lcview_builder_add_str(b, product);
+    /* KRN-016：add 失败聚合处理——任一字段缺失都会使用户态
+     * 按 schema 解析错位，整体丢弃事件而非发射残缺记录。*/
+    if (rc || lcview_builder_commit(b, &lcview_ring))
         lcview_builder_cancel(b);
 }
 
@@ -95,12 +98,15 @@ static void lcview_trace_probe(int device_index, u16 vid, u16 pid,
 static void lcview_trace_disconnect(int device_index)
 {
     struct lcview_builder *b;
+    int rc;
 
     b = lcview_builder_start(LCVIEW_EVENT_USB_DISCONNECT, LCVIEW_LEVEL_INFO);
     if (!b)
         return;
-    lcview_builder_add_int(b, (int64_t)device_index);
-    if (lcview_builder_commit(b, &lcview_ring))
+    rc = lcview_builder_add_int(b, (int64_t)device_index);
+    /* KRN-016：add 失败聚合处理——任一字段缺失都会使用户态
+     * 按 schema 解析错位，整体丢弃事件而非发射残缺记录。*/
+    if (rc || lcview_builder_commit(b, &lcview_ring))
         lcview_builder_cancel(b);
 }
 
@@ -113,15 +119,18 @@ static void lcview_trace_disconnect(int device_index)
 /*
  * vendor_lechao_usbd_devnode — 自定义设备节点权限
  *
- * 设置 /dev/vendor_lechao_usbdN 节点为 0666 权限（所有用户可读写）。
- * 为什么这样做：因为 USB 设备监控需求通常来自普通用户态进程
- * （非 root），0666 避免了 sudo 或 udev 规则的额外配置。
+ * R-08 方向 1：收紧 /dev/vendor_lechao_usbdN 节点为 0600（仅 owner system
+ * 可读写）。原 0666 所有用户可读写——devnode 暴露 ioctl GET_STATS 等监控
+ * 接口与底层传输状态，任意 app 可读属权限过宽（信息泄露面）。收紧后：
+ *   - DAC 层：仅 system:system（HAL 运行 uid）可读写，普通 app/shell 拒绝
+ *   - SELinux 层：devnode 标 lechao_lciod_hal_device，te 只放行 lechao_lciod_hal
+ *     域 + shell 域（监控取数特批，见 lechao_lciod_hal.te / lechao_lciod.te）
  * 返回 NULL 表示使用内核默认的 devtmpfs 节点名。
  */
 static char *vendor_lechao_usbd_devnode(const struct device *dev, umode_t *mode)
 {
     if (mode)
-        *mode = 0666;
+        *mode = 0600;
     return NULL;
 }
 
@@ -231,7 +240,7 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
     struct vendor_lechao_usbd_event ev;
     uint32_t consumed_pos;  /* 本次读取的事件槽位（读取前 tail），供回滚守卫 */
     unsigned long flags;
-    int ret;
+    int decision;
 
     LC_DBG("read: count=%zu\n", count);
 
@@ -240,44 +249,51 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
         return -EINVAL;
     }
 
-    /* 非阻塞快速路径：ring 空 + 未 shutdown 时立即返回 -EAGAIN */
-    if (file->f_flags & O_NONBLOCK) {
-        spin_lock_irqsave(&dev->event_lock, flags);
-        bool empty = (dev->event_head == dev->event_tail);
+    /*
+     * R-05 方向 2：read 路径统一 poll 驱动 + 非阻塞 read 循环。
+     *
+     * 原实现把"O_NONBLOCK 快速路径采样"与"阻塞 for 循环消费"分成两段：
+     *   - 快速路径锁内采样 empty/shutdown 后解锁，decision==-1（非空）时
+     *     落入 for 循环；
+     *   - for 循环第一件事 wait_event_interruptible 等新事件，而 ring 里
+     *     的数据可能已在"采样 → wait"窗口内被并发读者消费（poll 报过
+     *     POLLIN 就绪、HAL 排空循环连续 read），wait 条件不满足即挂起等
+     *     新事件——但上层 poll 已判定就绪才来 read，read 却阻塞 → HAL
+     *     排空循环挂死（poll(0) 认为还有数据，read 卡住等永不来的新事件）。
+     *
+     * 修复：read 统一为非阻塞语义（不论 f_flags）——上层 poll() 负责等
+     * 就绪，read 只做"锁内取一条非空事件返回，空环按 decision 分流 EOF/
+     * EAGAIN"。消除采样与消费两段式竞态：单锁临界区内完成 empty 采样 +
+     * 事件消费，poll 就绪判定与 read 消费原子一致，HAL 排空循环读不到
+     * 就绪事件即 -EAGAIN 退出、由 poll 重新等，不会挂死。
+     *
+     * 语义变更：阻塞 fd 的 read 不再阻塞（原 wait_event 行为移除）。对
+     * 本驱动唯一消费者 HAL（read_event 恒先 poll 后 read 排空）无影响；
+     * 其它阻塞 read 调用方需自行 poll/select 等就绪——与字符设备
+     * "poll 就绪后 read 不阻塞"的惯用法一致。
+     */
+    spin_lock_irqsave(&dev->event_lock, flags);
+    if (READ_ONCE(dev->event_head) != READ_ONCE(dev->event_tail))
+    {
+        ev = dev->event_buf[dev->event_tail];
+        consumed_pos = dev->event_tail;
+        dev->event_tail = (dev->event_tail + 1) % VENDOR_LECHAO_USBD_EVENT_BUF_SIZE;
+        spin_unlock_irqrestore(&dev->event_lock, flags);
+    }
+    else
+    {
+        bool empty = true;
         bool shutdown = READ_ONCE(dev->event_shutdown);
         spin_unlock_irqrestore(&dev->event_lock, flags);
         /*
          * KRN-004：判定逻辑抽至 lciod_read_logic.c（host 单测覆盖
-         * 四象限语义）。返回 1→-EAGAIN（空环重试）、0→0（EOF）、
-         * -1→落到下面循环取事件（非空 drain，shutdown 不越过非空判定）。
+         * 四象限语义）。空环时分流：1→-EAGAIN（空环重试）、0→0（EOF）。
+         * 非空分支不会到此处（上方已消费）。
          */
-        int decision = lciod_nonblock_read_decision(empty, shutdown);
+        decision = lciod_nonblock_read_decision(empty, shutdown);
         if (decision == 1)
             return -EAGAIN;
-        if (decision == 0)
-            return 0;
-        /* decision == -1：ring 非空，落到下面的循环（首次 wait 不阻塞） */
-    }
-
-    for (;;) {
-        ret = wait_event_interruptible(dev->event_wq,
-                dev->event_head != dev->event_tail || READ_ONCE(dev->event_shutdown));
-        if (ret)
-            return ret;
-
-        spin_lock_irqsave(&dev->event_lock, flags);
-        if (dev->event_head != dev->event_tail) {
-            ev = dev->event_buf[dev->event_tail];
-            consumed_pos = dev->event_tail;
-            dev->event_tail = (dev->event_tail + 1) % VENDOR_LECHAO_USBD_EVENT_BUF_SIZE;
-            spin_unlock_irqrestore(&dev->event_lock, flags);
-            break;
-        }
-        if (READ_ONCE(dev->event_shutdown)) {
-            spin_unlock_irqrestore(&dev->event_lock, flags);
-            return 0;
-        }
-        spin_unlock_irqrestore(&dev->event_lock, flags);
+        return 0;
     }
 
     if (copy_to_user(buf, &ev, sizeof(ev))) {
@@ -326,7 +342,7 @@ static __poll_t vendor_lechao_usbd_poll(struct file *file, poll_table *wait)
 
     poll_wait(file, &dev->event_wq, wait);
 
-    if (dev->event_head != dev->event_tail)
+    if (READ_ONCE(dev->event_head) != READ_ONCE(dev->event_tail))
         mask |= EPOLLIN | EPOLLRDNORM;
     if (READ_ONCE(dev->event_shutdown))
         mask |= EPOLLHUP;
@@ -353,9 +369,41 @@ static void vendor_lechao_usbd_apply_config_locked(
     rate_dev->config.enabled = !!cfg->enabled;
     memset(rate_dev->config.reserved, 0, sizeof(rate_dev->config.reserved));
     rate_dev->config.flags = cfg->flags;
-    rate_dev->enabled = !!rate_dev->config.enabled;
+    /*
+     * R-06 方向 1：enabled 写侧 WRITE_ONCE 与 handle_event 锁外 READ_ONCE 配对
+     * （无锁读侧依赖 disable 语义的可见性，持锁写亦须显式内存序标记）。
+     */
+    WRITE_ONCE(rate_dev->enabled, !!rate_dev->config.enabled);
     rate_dev->stats.enabled = rate_dev->config.enabled;
     rate_dev->stats.flags = rate_dev->config.flags;
+
+    /*
+     * R-05 方向 3：disable 路径清理 transport_active（消 notifier 早退后
+     * END 残留）。
+     *
+     * 背景：transport_active 在 TRANSPORT_START 置位（lciod_usbd-stats.c
+     * handle_event）、TRANSPORT_END 消费后清零。当配置 enabled=false 时，
+     * handle_event 在锁外早退（`if (!rate_dev->enabled) return NOTIFY_DONE;`），
+     * 中间的传输不会收到 END —— transport_active 残留 true。
+     *
+     * 后果：disable 期间传输中断 → 重新 enable 后，若无新 START 先到，
+     * 残留的 transport_active 会把不配对的 END（或下一轮首个 END）误当
+     * 正常传输处理：错误累计延迟/字节、发射无 START 配对的 END trace，
+     * 污染统计与事件流（check_lcview_events 双向契约认为 END 必有 START）。
+     *
+     * 修复：enabled 由 1→0（disable）时重置传输状态机（transport_active/
+     * 起始时间/错误标志），与 vendor_lechao_usbd_do_reset 的 transport 段
+     * 一致——disable 语义即"停止追踪传输"，残留状态须随 disable 清空。
+     * 保持持锁（本函数调用方已持 rate_dev->lock）与 do_reset 同锁域。
+     */
+    if (!rate_dev->config.enabled)
+    {
+        rate_dev->transport_active = false;
+        rate_dev->transport_start_time = ktime_set(0, 0);
+        rate_dev->last_transport_error = false;
+        rate_dev->last_transport_latency_ns = 0;
+        rate_dev->stats.last_transport_latency_ns = 0;
+    }
 }
 
 /*
@@ -374,6 +422,9 @@ static void vendor_lechao_usbd_fill_stats_locked(
     struct vendor_lechao_usbd_stats *stats)
 {
     memcpy(stats, &rate_dev->stats, sizeof(*stats));
+    /* R-06 方向 3：event_drop_count 从 atomic 计数读取（原子读，与 event_lock
+     * 域自增跨锁域），覆盖 memcpy 带入的陈旧 ABI 值。 */
+    stats->event_drop_count = atomic64_read(&rate_dev->event_drop_cnt);
     stats->last_transport_latency_ns = rate_dev->last_transport_latency_ns;
     stats->enabled = rate_dev->config.enabled;
     stats->flags = rate_dev->config.flags;
@@ -546,6 +597,7 @@ struct vendor_lechao_usbd_device *vendor_lechao_usbd_device_alloc(struct us_data
     rate_dev->stats.enabled = rate_dev->config.enabled;
     rate_dev->stats.flags = rate_dev->config.flags;
     rate_dev->stats.probe_count = 1;
+    atomic64_set(&rate_dev->event_drop_cnt, 0);
     rate_dev->transport_start_time = ktime_set(0, 0);
     rate_dev->transport_active = false;
     rate_dev->last_degrade_window_start = ktime_set(0, 0);
@@ -574,6 +626,26 @@ struct vendor_lechao_usbd_device *vendor_lechao_usbd_device_alloc(struct us_data
             rate_dev->stats.product[0] = '\0';
     }
 
+    /*
+     * R-06 方向 4：PROBE 入链前复查 us 存活。
+     *
+     * usb_string() 可睡眠，从 device_alloc 进入 usb_string 到返回这段窗口内
+     * 若发生物理拔出，USB core 会先把 usb_device->state 置为
+     * USB_STATE_NOTATTACHED（usb-storage 的 quiesce_and_remove_host 同样以此
+     * 判断设备已消失），随后 usb_stor_disconnect 的 release_everything 才释放
+     * us_data。若此时仍把 rate_dev 入链，add_to_list 之后对 us->notifier /
+     * us->pusb_dev 的访问将落在已释放的 us_data 上（UAF 滞留僵尸设备）。
+     * 因此 usb_string 完成后、返回前复查设备存活，发现已拔出则自释放并
+     * 返回 -ENODEV，调用方不得入链。
+     */
+    if (us->pusb_dev->state == USB_STATE_NOTATTACHED)
+    {
+        pr_warn(PREFIX "device unplugged during probe alloc, aborting\n");
+        ida_free(&vendor_lechao_usbd_ida, minor);
+        kfree(rate_dev);
+        return ERR_PTR(-ENODEV);
+    }
+
     return rate_dev;
 }
 
@@ -593,11 +665,26 @@ struct vendor_lechao_usbd_device *vendor_lechao_usbd_device_alloc(struct us_data
  *   调用（如果 usb-storage 正在传输中），因此需要保证设备结构
  *   体已经初始化完成。
  */
-void vendor_lechao_usbd_device_add_to_list(struct vendor_lechao_usbd_device *rate_dev)
+/*
+ * R-06 方向 2：add_to_list 改返回错误码——notifier 注册 / cdev_add /
+ * device_create 任一失败都上报调用方（0 成功 / 负 errno），失败路径内部
+ * 回滚已做操作并 kref_put 释放 rate_dev（调用方不得再引用）。
+ */
+int vendor_lechao_usbd_device_add_to_list(struct vendor_lechao_usbd_device *rate_dev)
 {
     int ret;
 
-    atomic_notifier_chain_register(&rate_dev->us->notifier, &rate_dev->nb);
+    ret = atomic_notifier_chain_register(&rate_dev->us->notifier, &rate_dev->nb);
+    if (ret)
+    {
+        /*
+         * 返回值检查：-EEXIST 表示 us_data 上已注册同名 notifier（重复 PROBE
+         * 或 us_data 异常复用），本设备未注册成功，无资源可回滚，直接上报。
+         */
+        pr_err(PREFIX "notifier_chain_register failed: %d\n", ret);
+        kref_put(&rate_dev->kref, vendor_lechao_usbd_device_release);
+        return ret;
+    }
 
     cdev_init(&rate_dev->cdev, &vendor_lechao_usbd_fops);
     rate_dev->cdev.owner = THIS_MODULE;
@@ -606,18 +693,19 @@ void vendor_lechao_usbd_device_add_to_list(struct vendor_lechao_usbd_device *rat
         pr_err(PREFIX "cdev_add failed: %d\n", ret);
         atomic_notifier_chain_unregister(&rate_dev->us->notifier, &rate_dev->nb);
         kref_put(&rate_dev->kref, vendor_lechao_usbd_device_release);
-        return;
+        return ret;
     }
 
     rate_dev->dev = device_create(vendor_lechao_usbd_class, NULL, 
                                    MKDEV(vendor_lechao_usbd_major, rate_dev->minor),
                                    rate_dev, VENDOR_LECHAO_USBD_NAME "%d", rate_dev->minor);
     if (IS_ERR(rate_dev->dev)) {
-        pr_err(PREFIX "device_create failed: %ld\n", PTR_ERR(rate_dev->dev));
+        ret = PTR_ERR(rate_dev->dev);
+        pr_err(PREFIX "device_create failed: %d\n", ret);
         cdev_del(&rate_dev->cdev);
         atomic_notifier_chain_unregister(&rate_dev->us->notifier, &rate_dev->nb);
         kref_put(&rate_dev->kref, vendor_lechao_usbd_device_release);
-        return;
+        return ret;
     }
 
     list_add_tail(&rate_dev->list, &vendor_lechao_usbd_devices);
@@ -629,6 +717,7 @@ void vendor_lechao_usbd_device_add_to_list(struct vendor_lechao_usbd_device *rat
     /* LcView: trace USB device PROBE (vid/pid/vendor/product) */
     lcview_trace_probe(rate_dev->minor, rate_dev->stats.vid, rate_dev->stats.pid,
                        rate_dev->stats.vendor, rate_dev->stats.product);
+    return 0;
 }
 
 /*
@@ -709,14 +798,19 @@ static int vendor_lechao_usbd_vendor_notifier(struct notifier_block *nb,
         if (found)
             break;
 
-        new_dev = vendor_lechao_usbd_device_alloc(us);
-        if (IS_ERR(new_dev)) {
-            pr_warn(PREFIX "failed to alloc device: %ld\n",
-                    PTR_ERR(new_dev));
-            break;
-        }
-
+        /*
+         * R-06 方向 4：alloc 与 add_to_list 全程持全局 mutex（alloc 内
+         * usb_string 可睡眠，进程上下文 OK）。disconnect 的 DISCONNECT
+         * notifier 同样经 blocking_notifier_call_chain 同步调用且在此
+         * mutex 上等待——若 PROBE 持锁期间设备拔出，DISCONNECT 阻塞在
+         * mutex 上，usb_stor_disconnect 主流程亦阻塞等待 notifier 返回，
+         * us_data 在 PROBE 释放锁前不会被 release_everything 释放，故
+         * 锁内访问 us 安全；device_alloc 内部已复查 us 存活（NOTATTACHED
+         * 即 -ENODEV），复查失败自释放，不存在"已分配未入链"滞留设备，
+         * DISCONNECT 侧链表状态始终一致。
+         */
         mutex_lock(&vendor_lechao_usbd_mutex);
+        found = false;
         list_for_each_entry(pos, &vendor_lechao_usbd_devices, list) {
             if (pos->us == us) {
                 found = true;
@@ -724,9 +818,19 @@ static int vendor_lechao_usbd_vendor_notifier(struct notifier_block *nb,
             }
         }
         if (!found)
-            vendor_lechao_usbd_device_add_to_list(new_dev);
-        else
-            kref_put(&new_dev->kref, vendor_lechao_usbd_device_release);
+        {
+            new_dev = vendor_lechao_usbd_device_alloc(us);
+            if (IS_ERR(new_dev))
+            {
+                pr_warn(PREFIX "failed to alloc device: %ld\n", PTR_ERR(new_dev));
+            }
+            else
+            {
+                /* R-06 方向 2：add_to_list 失败已自释放 new_dev，仅记录告警 */
+                if (vendor_lechao_usbd_device_add_to_list(new_dev))
+                    pr_warn(PREFIX "failed to add device to list\n");
+            }
+        }
         mutex_unlock(&vendor_lechao_usbd_mutex);
         break;
     }
@@ -795,8 +899,11 @@ static struct notifier_block vendor_lechao_usbd_vendor_nb = {
  *
  * 为什么遍历 USB 接口而非直接匹配 us_data：
  *   usb_for_each_dev 遍历的是 struct usb_device，需要通过
- *   USB 接口的驱动名匹配 "usb-storage"，再通过 dev_get_drvdata
- *   获取 Scsi_Host，最后转为 us_data。这是一条间接但完整路径。
+ *   USB 接口的驱动名匹配 "usb-storage"。usb-storage 在 probe 时经
+ *   usb_set_intfdata(intf, us) 把接口私有数据设为 us_data*，因此
+ *   dev_get_drvdata(&intf->dev) 返回的就是 struct us_data*，
+ *   无需再经 Scsi_Host 中转（方向 2：删除 scsi_host_get/host_to_us
+ *   误用——drvdata 不是 Scsi_Host，强制转换既类型错又无谓持引用）。
  *
  * 为什么 check us->notifier.head：
  *   确保 us_data 的 notifier 链已经初始化，防止在关键路径上
@@ -810,9 +917,8 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
     if (!udev->actconfig)
         return 0;
 
-    for (i = 0; i < udev->actconfig->desc.bNumInterfaces; i++) {
-        void *drvdata;
-        struct Scsi_Host *shost;
+    for (i = 0; i < udev->actconfig->desc.bNumInterfaces; i++)
+    {
         struct us_data *us;
         struct vendor_lechao_usbd_device *pos;
         struct vendor_lechao_usbd_device *new_dev = NULL;
@@ -825,16 +931,11 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
         if (strcmp(intf->dev.driver->name, "usb-storage") != 0)
             continue;
 
-        drvdata = dev_get_drvdata(&intf->dev);
-        shost = drvdata ? scsi_host_get(drvdata) : NULL;
-        if (!shost)
+        /* usb-storage 的 intfdata 即 us_data（probe 时 usb_set_intfdata），
+         * 直接取用，删 scsi_host_get 与 host_to_us 的类型误用（方向 2）。 */
+        us = dev_get_drvdata(&intf->dev);
+        if (!us || !us->notifier.head)
             continue;
-
-        us = host_to_us(shost);
-        if (!us || !us->notifier.head) {
-            scsi_host_put(shost);
-            continue;
-        }
 
         mutex_lock(&vendor_lechao_usbd_mutex);
         list_for_each_entry(pos, &vendor_lechao_usbd_devices, list) {
@@ -845,15 +946,12 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
         }
         mutex_unlock(&vendor_lechao_usbd_mutex);
 
-        if (found) {
-            scsi_host_put(shost);
+        if (found)
             continue;
-        }
 
         new_dev = vendor_lechao_usbd_device_alloc(us);
         if (IS_ERR(new_dev)) {
             pr_warn(PREFIX "failed to alloc device: %ld\n", PTR_ERR(new_dev));
-            scsi_host_put(shost);
             continue;
         }
 
@@ -865,13 +963,13 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
             }
         }
         if (!found) {
-            vendor_lechao_usbd_device_add_to_list(new_dev);
+            /* R-06 方向 2：add_to_list 失败已自释放 new_dev，仅记录告警 */
+            if (vendor_lechao_usbd_device_add_to_list(new_dev))
+                pr_warn(PREFIX "failed to add device to list\n");
         } else {
             kref_put(&new_dev->kref, vendor_lechao_usbd_device_release);
         }
         mutex_unlock(&vendor_lechao_usbd_mutex);
-
-        scsi_host_put(shost);
     }
     return 0;
 }
@@ -990,3 +1088,4 @@ module_exit(vendor_lechao_usbd_monitor_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Lechao");
 MODULE_DESCRIPTION("USB Storage Rate Monitor for Lechao Vendor");
+MODULE_VERSION("1.0");

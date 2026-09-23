@@ -136,22 +136,42 @@ ndk::ScopedAStatus IoHalImpl::listDevices(std::vector<std::string>* _aidl_return
  *   - 整数字段直接赋值
  *   - 字符串 vendor/product 拷贝（strnlen 限长防越界）
  *
- * 注意: 每次调用临时打开 fd，调用后立即关闭（不占用持久 fd）
+ * 注意: R-11 方向 2——复用持久 fd（entry->fd），消除每次 open/close。
+ * 懒打开并缓存；设备移除（ENODEV/EIO）时关闭 fd 置 -1（与 readEvent
+ * 同款失效处理）。ioctl 与 read/poll 共用同一 fd 不冲突。
  */
 ndk::ScopedAStatus IoHalImpl::getStats(int32_t in_deviceMinor, IoStats* _aidl_return) {
     *_aidl_return = {};  /* 失败前清零，避免上层读到未初始化字段 */
     auto* entry = resolve_device(in_deviceMinor);
     if (!entry) { LC_LOGW("getStats: device not found for minor"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
 
-    /* 临时打开 fd，避免占用 readEvent 的持久 fd */
-    int fd = ::open_device(entry->path.c_str());
-    if (fd < 0) { int saved = errno; LC_LOGE("getStats: open device failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
+    /* R-11 方向 2：复用持久 fd，懒打开一次后缓存，不再逐调用 open/close */
+    if (entry->fd < 0)
+    {
+        LC_LOGD("getStats: reopening persistent fd");
+        entry->fd = ::open_device(entry->path.c_str());
+    }
+    if (entry->fd < 0)
+    {
+        int saved = errno;
+        LC_LOGE("getStats: open device failed: " << strerror(saved));
+        return ndk::ScopedAStatus::fromServiceSpecificError(-saved);
+    }
 
     struct vendor_lechao_usbd_stats raw;
-    int ret = ::get_stats(fd, &raw);
-    int saved = errno;  // close(fd) 可能改 errno，先存再关
-    close(fd);
-    if (ret < 0) { LC_LOGE("getStats: ioctl GET_STATS failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
+    int ret = ::get_stats(entry->fd, &raw);
+    int saved = errno; // 后续日志可能改 errno，先存
+    if (ret < 0)
+    {
+        LC_LOGE("getStats: ioctl GET_STATS failed: " << strerror(saved));
+        if (saved == ENODEV || saved == EIO)
+        {
+            LC_LOGW("getStats: device removed (errno=" << saved << ")");
+            ::close_device(entry->fd);
+            entry->fd = -1;
+        }
+        return ndk::ScopedAStatus::fromServiceSpecificError(-saved);
+    }
 
     /* --- 字段映射: raw → _aidl_return --- */
     _aidl_return->vid = raw.vid;
@@ -284,7 +304,13 @@ ndk::ScopedAStatus IoHalImpl::readEvent(int32_t in_deviceMinor, int32_t in_timeo
      * 瘫痪全部客户端。钳位后 -1 → 0（非阻塞），>1s → 1s */
     int timeout_ms = ::clamp_read_timeout_ms(in_timeoutMs);
     struct vendor_lechao_usbd_event raw;
-    int ret = ::read_event(entry->fd, &raw, timeout_ms);
+    /* R-11 方向 4：丢弃计数透出——read_event 排空中间事件时把丢弃条数
+     * 经 dropped 输出，此处记录日志使事件完整性可见（积压可观测） */
+    uint32_t dropped = 0;
+    int ret = ::read_event(entry->fd, &raw, timeout_ms, &dropped);
+    if (dropped > 0)
+        LC_LOGW("readEvent: drained " << (dropped + 1) << " events from kernel, " << dropped
+                                      << " dropped (minor=" << in_deviceMinor << ")");
 
     if (ret < 0) {
         /* ETIMEDOUT/EAGAIN 是"暂无事件"的正常语义，返回 ok + valid=false */

@@ -73,6 +73,9 @@ struct vendor_lechao_usbd_device {
     bool last_transport_error;         /* 当前传输周期内是否发生过错误（TRANSPORT_END 时检查） */
     bool removing;                     /* 设备正在被移除（READ_ONCE/WRITE_ONCE 访问，防止 open 竞态） */
     bool enabled;                      /* 监控是否启用（与 config.enabled 同步） */
+    atomic64_t event_drop_cnt; /* R-06 方向 3：环形缓冲区丢弃事件计数（atomic 统一锁域，
+                                * 避免 event_lock 写与 dev->lock 读的形式化竞争；统计读走
+                                * atomic64_read 后再赋给 ABI 字段 stats.event_drop_count） */
 
     struct vendor_lechao_usbd_event event_buf[VENDOR_LECHAO_USBD_EVENT_BUF_SIZE]; /* 事件环形缓冲区 */
     unsigned int event_head;          /* 环形缓冲区写入位置（push 时推进） */
@@ -90,13 +93,6 @@ struct vendor_lechao_usbd_device {
  * 调用上下文：必须持有 rate_dev->lock 自旋锁。
  */
 void vendor_lechao_usbd_do_reset(struct vendor_lechao_usbd_device *rate_dev);
-
-/*
- * vendor_lechao_usbd_stats_init / _exit — 统计子模块初始化/清理
- * 当前为空实现，预留未来扩展（如 procfs/debugfs 注册）。
- */
-int vendor_lechao_usbd_stats_init(void);
-void vendor_lechao_usbd_stats_exit(void);
 
 /*
  * vendor_lechao_usbd_handle_event — notifier 回调入口
@@ -136,7 +132,10 @@ struct vendor_lechao_usbd_device *vendor_lechao_usbd_device_alloc(struct us_data
  *
  * 依次注册 notifier → cdev → sysfs 节点 → 加入链表 → LcView 打点。
  * 调用上下文：进程上下文（持有全局 mutex）。
+ * 返回值：0 成功；负 errno 表示 notifier 注册 / cdev_add / device_create
+ * 任一失败（R-06 方向 2）。失败时内部已回滚并 kref_put 释放 rate_dev，
+ * 调用方不得再引用。
  */
-void vendor_lechao_usbd_device_add_to_list(struct vendor_lechao_usbd_device *rate_dev);
+int vendor_lechao_usbd_device_add_to_list(struct vendor_lechao_usbd_device *rate_dev);
 
 #endif /* _VENDOR_LECHAO_USBD_INTERNAL_H */

@@ -4,7 +4,7 @@
 #
 # 模块组成（四合一链接为 lcview.o / lcview.ko）：
 #   lcview_main.o      — 字符设备驱动核心 (open/read/poll/ioctl) + EXPORT_SYMBOL 入口
-#   lcview_ring.o      — 环形缓冲区实现（无锁写 + overflow eviction + 阻塞读）
+#   lcview_ring.o      — 环形缓冲区实现（spinlock 互斥写 + overflow eviction + 阻塞读）
 #   lcview_ring_logic.o — 环形缓冲区纯索引逻辑（与 tests/ host 单测共用，
 #                         改动后须跑 host 单测：make -C tests/ test）
 #   lcview_builder.o   — Builder 模式结构化事件构建 API

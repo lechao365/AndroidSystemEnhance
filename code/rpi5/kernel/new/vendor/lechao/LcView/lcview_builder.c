@@ -20,8 +20,8 @@
  *    避免 printf 格式串与参数不匹配的问题。
  *
  * 序列化格式：
- *   [0..15]       — lcview_record_hdr (16B, packed)
- *   [16..]        — TLV 字段序列:
+ *   [0..31]       — lcview_record_hdr (32B, packed，R-13 方向 2 扩容)
+ *   [32..]        — TLV 字段序列:
  *     对于固定长度类型 (INT32/INT64/FLOAT)：
  *       type(1B) + value(NB)
  *     对于变长类型 (STRING/BINARY)：
@@ -56,6 +56,43 @@ extern int lcview_debug;
  */
 static struct lcview_builder *builder_pool_slot;
 
+/*
+ * R-07 方向 1：生产者丢弃累计计数（模块级静态，host 单测编本文件即自带）。
+ * 语义：记录尚未构造/构造失败即丢弃（builder kmalloc 失败 + level 过滤），
+ * 从未写入 ring、不计入 total_records——守恒左式不含它，sysfs 单独导出供
+ * 右式吸收。与 ring 结构解耦（不挂 struct lcview_ring）避免 host 单测链接
+ * 依赖全局 lcview_ring 实体（host 编 builder.c 不编 lcview_main.c）。
+ */
+static atomic_t producer_dropped_cnt = ATOMIC_INIT(0);
+
+/* 生产端丢弃计数 +1（builder kmalloc 失败与 level 过滤共用） */
+void lcview_builder_producer_dropped_inc(void) { atomic_inc(&producer_dropped_cnt); }
+
+/* 读取生产端丢弃累计（sysfs 导出用；只读不清零，与 total_records 同语义） */
+uint32_t lcview_builder_producer_dropped_get(void)
+{
+    return (uint32_t)atomic_read(&producer_dropped_cnt);
+}
+
+/*
+ * R-13 方向 2：全局事件序号生成器。
+ * 模块级 atomic64_t 递增（非并发直访/原子），每事件 commit 取一次并截断
+ * 到 uint32（seq_no 字段 u32；u32 满 42 亿事件才回绕一次，daemon 心跳
+ * gap 按相邻窗口增量比较，回绕由 uint64 生成器与窗口差分吸收）。放本
+ * 文件模块级静态（与 producer_dropped_cnt 同理由）：host 单测编 builder.c
+ * 即自带，不依赖全局 lcview_ring 实体。仅向上递增不重置，重启内核归零。
+ */
+static atomic64_t event_seq_gen = ATOMIC64_INIT(0);
+
+/* 取下一事件序号（截断到 uint32，供 hdr.seq_no） */
+static uint32_t lcview_next_event_seq(void)
+{
+    return (uint32_t)atomic64_inc_return(&event_seq_gen);
+}
+
+/* 读取当前事件序号游标（gap 判定/诊断用；只读递增不消费） */
+uint64_t lcview_event_seq_cur(void) { return (uint64_t)atomic64_read(&event_seq_gen); }
+
 static inline struct lcview_builder *builder_pool_get(void)
 {
     return xchg(&builder_pool_slot, NULL);
@@ -63,8 +100,14 @@ static inline struct lcview_builder *builder_pool_get(void)
 
 static inline void builder_pool_put(struct lcview_builder *b)
 {
-    /* 槽已占用则释放新来的对象（池容量恒为 1） */
-    if (xchg(&builder_pool_slot, b))
+    /*
+     * 仅槽空时存入；槽已占用则直接释放新来的对象（池容量恒为 1）。
+     * 用 cmpxchg 先判后存，杜绝 xchg 先存再 free 的槽悬垂 UAF：
+     * 并发 get 可能在 xchg 存入 b 后立刻取走 b，随后 xchg 分支又
+     * kfree(b)（释放已被取走、正在使用的对象）。cmpxchg 失败即 b
+     * 从未入槽，任何并发 get 都不可能取到它，释放安全。
+     */
+    if (cmpxchg(&builder_pool_slot, NULL, b) != NULL)
         kfree(b);
 }
 
@@ -111,25 +154,40 @@ struct lcview_builder *lcview_builder_new(uint16_t event_id, uint8_t level)
 
     /* KRN-006：先取空闲池，未命中再走 GFP_ATOMIC 分配 */
     b = builder_pool_get();
-    if (!b)
+    if (b)
+    {
+        /* R-12 方向 1：池命中复用对象——buf 数据区由 add_* 从 data_offset
+         * 起覆盖写入、commit 按 data_offset 截断（total_len），旧残留不会
+         * 进入 ring；仅重置元数据与偏移，消原子上下文整块 ~4KB memset
+         * （I/O 热路径每命令一次，清零开销不可忽略）。新分配（kmalloc）
+         * 仍需整块清零初始化。 */
+    }
+    else
+    {
         b = kmalloc(sizeof(*b), GFP_ATOMIC);
-    if (!b) {
-        /* KRN-014：GFP_ATOMIC 失败在内存压力下可高频出现，限频防日志风暴 */
-        pr_err_ratelimited(PREFIX "kmalloc failed for event_id=%u\n", event_id);
-        return NULL;
+        if (!b)
+        {
+            /* KRN-014：GFP_ATOMIC 失败在内存压力下可高频出现，限频防日志风暴 */
+            pr_err_ratelimited(PREFIX "kmalloc failed for event_id=%u\n", event_id);
+            /* R-07 方向 1：builder kmalloc 失败计入 producer_dropped_cnt——
+             * 该记录从未构造/从未写入 ring，与环级 ENOSPC（dropped_cnt，计
+             * total_records）不同，守恒左式不含它，sysfs 单独导出供右式吸收 */
+            lcview_builder_producer_dropped_inc();
+            return NULL;
+        }
+        memset(b, 0, sizeof(*b));
     }
 
-    memset(b, 0, sizeof(*b));
     b->event_id = event_id;
     b->level = level;
     b->field_count = 0;
     b->committed = false;
 
     /*
-     * 预留记录头空间 (16B)：
-     * buf[0..15] 保留给 lcview_record_hdr
-     * buf[16..]  用于字段值的 TLV 序列化
-     * commit 时才会把头部信息写入 buf[0..15]
+     * 预留记录头空间 (32B，R-13 方向 2 扩容)：
+     * buf[0..31] 保留给 lcview_record_hdr
+     * buf[32..]  用于字段值的 TLV 序列化
+     * commit 时才会把头部信息写入 buf[0..31]
      */
     b->data_offset = sizeof(struct lcview_record_hdr);
 
@@ -309,9 +367,15 @@ int lcview_builder_add_binary(struct lcview_builder *b,
  *
  * 调用场景：构建过程中遇到不可恢复的错误，或构建器不再需要。
  * 释放 builder 内存，记录取消事件（用于调试日志流完整性问题）。
+ *
+ * 方向 4：空指针容忍直接返回——调用方可能在 builder 创建失败
+ * （lcview_builder_start 返回 NULL）后无分支判断直接 cancel，
+ * 对 NULL 解引用会内核崩溃，此处防御性兜底。
  */
 void lcview_builder_cancel(struct lcview_builder *b)
 {
+    if (!b)
+        return;
     pr_debug(PREFIX "cancelled event_id=%u level=%u fields=%u\n",
              b->event_id, b->level, b->field_count);
     lcview_builder_free(b);
@@ -359,10 +423,16 @@ int lcview_builder_commit(struct lcview_builder *b, struct lcview_ring *ring)
      * 便于用户态解析时将时间戳转换为可读的时间字符串。
      * 缺点：受 NTP 调整影响可能跳跃。如果日志用于性能分析，
      * 建议改用 ktime_get_ns() (CLOCK_MONOTONIC)。
+     * R-13 方向 2：wall 仍作 ts，另加 mono_ns（CLOCK_MONOTONIC 单调基，
+     * 不受 NTP 校准）与 seq_no（全局递增序号）——NTP 回拨时按 seq_no 定序
+     * 可靠，排序不再依赖 wall 单调性。
      */
     hdr.timestamp_ns = ktime_get_real_ns();
+    hdr.seq_no = lcview_next_event_seq();
+    hdr.reserved2 = 0;
+    hdr.mono_ns = ktime_get_ns();
 
-    /* 将头写入 buffer 头部预留位置 (buf[0..15]) */
+    /* 将头写入 buffer 头部预留位置 (buf[0..31]) */
     memcpy(b->buf, &hdr, sizeof(hdr));
     total_len = b->data_offset;
 
@@ -373,14 +443,13 @@ int lcview_builder_commit(struct lcview_builder *b, struct lcview_ring *ring)
      */
     ret = lcview_ring_write(ring, b->buf, total_len);
     if (ret == 0) {
-        LC_DBG("committed event_id=%u level=%u fields=%u len=%u ts=%llu\n",
-                 b->event_id, b->level, b->field_count,
-                 total_len, hdr.timestamp_ns);
+        LC_DBG("committed event_id=%u level=%u fields=%u len=%u ts=%llu seq=%u\n", b->event_id,
+               b->level, b->field_count, total_len, hdr.timestamp_ns, hdr.seq_no);
         b->committed = true;
         lcview_builder_free(b);
     } else {
-        pr_warn(PREFIX "commit failed event_id=%u err=%d\n",
-                b->event_id, ret);
+        /* KRN-014：commit 失败在环满/I/O 洪水时可每条命令触发，限频防日志风暴 */
+        pr_warn_ratelimited(PREFIX "commit failed event_id=%u err=%d\n", b->event_id, ret);
     }
 
     return ret;

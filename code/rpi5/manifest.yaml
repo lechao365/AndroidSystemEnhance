@@ -70,6 +70,8 @@ kernel:
       source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/errno.h
     - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/kernel.h
       source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/kernel.h
+    - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/mutex.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/mutex.h
     - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/slab.h
       source: rpi5-kernel-build/common/vendor/lechao/LcView/tests/host_shim/linux/slab.h
     - patch: kernel/new/vendor/lechao/LcView/tests/host_shim/linux/spinlock.h
@@ -263,6 +265,8 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lcview/include/Android.bp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/include/lcview_events.h
       source: aosp/vendor/lechao/services/lechao_lcview/include/lcview_events.h
+    - patch: aosp/new/vendor/lechao/services/lechao_lcview/include/lcview_ioctl.h
+      source: aosp/vendor/lechao/services/lechao_lcview/include/lcview_ioctl.h
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/tests/Android.bp
       source: aosp/vendor/lechao/services/lechao_lcview/tests/Android.bp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/tests/DaemonLoop_test.cpp
@@ -282,11 +286,11 @@ aosp:
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/tools/usbreset.c
       source: aosp/vendor/lechao/services/lechao_lcview/tools/usbreset.c
 others:
+  - patch: others/usb-verify/.gitignore
+    source: null
   - patch: others/usb-verify/Makefile
     source: null
   - patch: others/usb-verify/README.md
-    source: null
-  - patch: others/usb-verify/fault-verify
     source: null
   - patch: others/usb-verify/include/fv_ioctl_compat.h
     source: null

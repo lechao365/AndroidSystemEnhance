@@ -24,12 +24,14 @@
 /*
  * DeviceEntry — 设备节点缓存条目
  * 用于跟踪每个 minor 编号对应的设备路径和持久化 fd。
- * readEvent() 需要持久 fd（不能每次都重新打开），
- * 其他方法（getStats/resetState/getConfig/setConfig）则每次临时打开。
+ * readEvent() 需要持久 fd（不能每次都重新打开），getStats() 自 R-11
+ * 方向 2 起也复用该持久 fd（懒打开缓存，消逐调用 open/close）；
+ * resetState/getConfig/setConfig 仍临时打开。
  */
 struct DeviceEntry {
     std::string path; /* 设备节点路径，如 "/dev/vendor_lechao_usbd0" */
-    int fd = -1;      /* 持久化 fd，用于 readEvent poll/read；-1 表示已关闭 */
+    int fd = -1;      /* 持久化 fd，用于 readEvent poll/read 与 getStats ioctl；
+                       * -1 表示已关闭 */
 };
 
 /*

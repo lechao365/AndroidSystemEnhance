@@ -30,6 +30,7 @@ _HOT_PATHS = [
     "harness/lib/check_skill_refs.py",
     "harness/lib/check_config.py",
     "harness/lib/check_ioctl_headers.py",
+    "harness/lib/check_lcview_events.py",
     "harness/lib/check_test_discipline.py",
     "harness/lib/selfcheck.py",
     "harness/lib/check_ruff.py",

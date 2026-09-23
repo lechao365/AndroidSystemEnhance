@@ -75,14 +75,17 @@ class TestLcviewEventsConsistency(unittest.TestCase):
         self.assertEqual(kf, uf)
         self.assertEqual(
             kf, ["magic", "event_id", "level", "field_count",
-                 "reserved", "timestamp_ns"])
+                 "reserved", "timestamp_ns", "seq_no", "reserved2",
+                 "mono_ns"])
 
-    def test_hdr_size_16_bytes(self):
-        # 固定 16 字节头：u16+u16+u8+u8+u16+u64（packed 1 字节对齐）
+    def test_hdr_size_32_bytes(self):
+        # 固定 32 字节头（R-13 一次扩容）：u16+u16+u8+u8+u16+u64+u32+u32+u64
+        # （packed 1 字节对齐）
         self.assertEqual(_hdr_fields(self.kernel), _hdr_fields(self.user))
         sizes = {"magic": 2, "event_id": 2, "level": 1, "field_count": 1,
-                 "reserved": 2, "timestamp_ns": 8}
-        self.assertEqual(sum(sizes.values()), 16)
+                 "reserved": 2, "timestamp_ns": 8, "seq_no": 4, "reserved2": 4,
+                 "mono_ns": 8}
+        self.assertEqual(sum(sizes.values()), 32)
 
 
 if __name__ == "__main__":

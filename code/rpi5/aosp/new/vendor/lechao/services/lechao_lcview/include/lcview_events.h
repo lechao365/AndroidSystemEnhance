@@ -62,14 +62,47 @@
  * [0x56, 0x4C]（低字节在前），独立解析器/抓包判断时注意。 */
 #define LCVIEW_MAGIC  0x4C56
 
-/* --- 记录头结构（16B 固定头 + 变长字段区） --- */
-/* lcview_record_hdr：16 字节固定长度头部，所有事件共用。
+/* 字节序契约（CXX-001 / LCV-02 / KRN-002，与内核 lcview_events.h 同款守卫）：
+ * 本头定义的线上格式（lcview_record_hdr + TLV 字段）为主机序裸 memcpy
+ * 序列化——事实上的小端契约：内核写入端（lcview_builder/lcview_ring）
+ * 与用户态解析端（record_codec/SchemaParser/FileWriter）同机同序
+ * （ARM64 LE）三方自洽。
+ * 若未来跨大小端设备传输或引入显式字节序转换，必须内核与用户态
+ * 同步改造，禁止单侧修改。
+ * 下面的编译守卫保证大端环境直接编译失败，防隐性错误。 */
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) &&                                 \
+    (__BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__)
+#error "LcView 线上格式按小端契约裸 memcpy 序列化（LCV-02/KRN-002），不支持大端编译"
+#endif
+
+/* --- 单条记录大小上限 --- */
+/* 单条事件序列化后的硬上限（4KB）。真相源：内核 lcview_internal.h 的
+ * LCVIEW_BUILDER_MAX_SIZE（lcview_builder 预分配缓冲），内核写入端
+ * （lcview_builder 边界检查）与读端（lcview_ring_read 判损坏上限）以及
+ * 用户态读缓冲预算均以此为契约，改须内核+用户态两侧同步，禁止单侧修改。
+ * 用户态 daemon 主循环的预防性 flush 阈值（kMinReadSize）据此闭合
+ * EMSGSIZE：缓冲剩余空间恒 >= 本值，首条记录必放得下。 */
+#define LCVIEW_MAX_RECORD_SIZE 4096
+
+/* 内核 builder 预分配缓冲上限镜像（真相源内核 lcview_internal.h）。用户态
+ * 契约宏 LCVIEW_MAX_RECORD_SIZE 必须与内核真相源 LCVIEW_BUILDER_MAX_SIZE
+ * 相等——main_loop.cpp 以 static_assert 门禁钉死，防两侧仅一处修改后
+ * 缓冲预算（kBufSize）仍够大却与内核单条上限漂移的静默错配。 */
+#define LCVIEW_BUILDER_MAX_SIZE 4096
+
+/* --- 记录头结构（R-13 方向 2 扩容：32B 固定头 + 变长字段区） --- */
+/* lcview_record_hdr：32 字节固定长度头部，所有事件共用。
  *   magic       — 魔数，用于快速校验
  *   event_id    — 事件类型 ID，映射到 JSON schema 定义
  *   level       — 日志级别
  *   field_count — 字段数量（与 schema 中的字段数匹配）
  *   reserved    — 保留字段，对齐用
- *   timestamp_ns— 单调时钟纳秒时间戳，用于排序和延迟分析
+ *   timestamp_ns— CLOCK_REALTIME 时钟纳秒时间戳（非单调，受 NTP 调整），
+ *   用于跨设备日志时间对齐和延迟分析
+ *   seq_no      — 全局递增事件序号（R-13 方向 2：NTP 回拨时按此定序可靠）
+ *   reserved2   — 保留字段，对齐扩展（恒 0）
+ *   mono_ns     — CLOCK_MONOTONIC 单调纳秒时间戳（R-13 方向 2：延迟/抖动
+ *   分析不受时钟校准影响）
  *
  * lcview_field_hdr：每个字段前 1 字节类型标识，
  *   后接类型相关的值（定长 4/8 字节，或 2 字节长度前缀+变长）。
@@ -82,6 +115,9 @@ struct lcview_record_hdr {
     uint8_t  field_count;
     uint16_t reserved;
     uint64_t timestamp_ns;
+    uint32_t seq_no;
+    uint32_t reserved2;
+    uint64_t mono_ns;
 } __attribute__((packed));
 
 struct lcview_field_hdr {
@@ -97,6 +133,9 @@ struct lcview_record_hdr {
     uint8_t  field_count;
     uint16_t reserved;
     uint64_t timestamp_ns;
+    uint32_t seq_no;
+    uint32_t reserved2;
+    uint64_t mono_ns;
 };
 struct lcview_field_hdr {
     uint8_t  type;
