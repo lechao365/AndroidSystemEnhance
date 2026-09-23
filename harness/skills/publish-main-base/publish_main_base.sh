@@ -229,11 +229,14 @@ while :; do
       # meta（无内容改动）——classify 只认 构建(baseline)/文档( 标题，登记类
       # 收据提交按 content 处理曾致 BH 停在收据提交上、PARENT==VC 判定恒 false
       # 误拒 --prepare。仅跳过"标题带 (baseline) 的登记类 + 改动面全部在收据
-      # 目录"的提交（夹带代码仍按 content 拦截；普通 修复(test) 收据入库提交
-      # 不做内容跳过，防越过验证锚点误放行）
+      # 目录或 baseline-status.yaml"的提交（夹带代码仍按 content 拦截；普通
+      # 修复(test) 收据入库提交不做内容跳过，防越过验证锚点误放行）——登记类
+      # 提交改 baseline-status.yaml（candidate 登记/package_result 回填等）与
+      # 收据目录同属登记证据链，豁免防误拦发布（2026-09-23 BL-20260923-01
+      # package 回填提交 1cbf571 实测被误当内容提交致 NEED_VERIFY）
       case "$MSG" in
         *"(baseline)"*)
-          RECEIPT_ONLY=$(git -c core.quotepath=false show --name-only --format= "$BH" | grep -v '^$' | grep -v '^data/verify-results/' || true)
+          RECEIPT_ONLY=$(git -c core.quotepath=false show --name-only --format= "$BH" | grep -v '^$' | grep -v '^data/verify-results/' | grep -v '^harness/config/baseline-status.yaml' || true)
           if [ -z "$RECEIPT_ONLY" ]; then
             SKIP_META=$((SKIP_META+1))
             if ! BH=$(git rev-parse "$BH^"); then echo "error: BH 回溯越界（$BH 无父提交）" >&2; exit 1; fi
