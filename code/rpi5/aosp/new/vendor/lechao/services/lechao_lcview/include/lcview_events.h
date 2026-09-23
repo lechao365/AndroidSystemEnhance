@@ -70,7 +70,7 @@
  * 若未来跨大小端设备传输或引入显式字节序转换，必须内核与用户态
  * 同步改造，禁止单侧修改。
  * 下面的编译守卫保证大端环境直接编译失败，防隐性错误。 */
-#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) &&                                 \
     (__BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__)
 #error "LcView 线上格式按小端契约裸 memcpy 序列化（LCV-02/KRN-002），不支持大端编译"
 #endif

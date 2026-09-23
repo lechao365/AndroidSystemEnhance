@@ -85,7 +85,8 @@ int ring_evict_one_core(uint8_t *buf, uint32_t size, uint32_t *read_pos,
      * （防伪造/损坏前缀按短长度推进撕裂后续流）。
      * 方向 4：上界由 > 改 >=——old_len == size 时按 old_len 推进
      * (rpos + size) % size == rpos 零推进死循环，判损坏用默认跳过。 */
-    if (old_len < default_record_len || old_len >= size) {
+    if (old_len < default_record_len || old_len >= size)
+    {
         *read_pos = (rpos + default_record_len) % size;
         return 2;
     }

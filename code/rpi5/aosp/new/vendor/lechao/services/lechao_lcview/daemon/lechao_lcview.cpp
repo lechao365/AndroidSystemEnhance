@@ -90,9 +90,11 @@ int main(int argc, char* argv[])
     // （旧内核缺 LCVIEW_GET_ABI_VERSION 返 ENOTTY，或版本号低于 daemon
     // 预期），显式退出交 init 重启，禁止静默降级运行（新用户态 + 旧内核
     // 会因事件 hdr/统计结构扩容错读造成静默数据损坏）。
-    if (!reader.abiOk()) {
+    if (!reader.abiOk())
+    {
         ALOGE("lechao_lcview: kernel ABI mismatch, exiting for init restart"
-              " (daemon ABI=%d)", LCVIEW_ABI_VERSION);
+              " (daemon ABI=%d)",
+              LCVIEW_ABI_VERSION);
         return 1;
     }
     ALOGI("lechao_lcview: device opened, entering main loop");

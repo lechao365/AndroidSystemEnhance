@@ -88,7 +88,8 @@ TEST_F(EpollDeviceReaderTest, ReadFromClosedFd_ReturnsEBADF) {
     EXPECT_EQ(errno, EBADF);
 }
 
-TEST_F(EpollDeviceReaderTest, InvalidOffsetCap_ReturnsEINVAL) {
+TEST_F(EpollDeviceReaderTest, InvalidOffsetCap_ReturnsEINVAL)
+{
     // 方向 1：offset >= cap 是调用方参数错误 → -1 + errno=EINVAL
     // （与 fd 未打开的设备状态错误 EBADF 解耦，不再混判）
     ASSERT_TRUE(mReader->open());
@@ -110,14 +111,16 @@ TEST_F(EpollDeviceReaderTest, TotalRecordsIoctlUnsupported_ReturnsZero) {
     EXPECT_EQ(mReader->getTotalRecords(), 0u);
 }
 
-TEST_F(EpollDeviceReaderTest, DroppedIoctlUnsupported_ReturnsZero) {
+TEST_F(EpollDeviceReaderTest, DroppedIoctlUnsupported_ReturnsZero)
+{
     // 方向 7：ioctl 失败（pipe 不支持 GET_STATS）→ 返 0（getDropped 容错
     // 语义，与 getTotalRecords 同源同容错）
     ASSERT_TRUE(mReader->open());
     EXPECT_EQ(mReader->getDropped(), 0u);
 }
 
-TEST_F(EpollDeviceReaderTest, RingSizeIoctlUnsupported_ReturnsZero) {
+TEST_F(EpollDeviceReaderTest, RingSizeIoctlUnsupported_ReturnsZero)
+{
     // 方向 6：ioctl 失败（pipe 不支持 GET_STATS）→ 返 0（getRingSizeBytes
     // 容错语义；容差退化为最小档，由 ioctl 失败跳过守恒兜底）
     ASSERT_TRUE(mReader->open());
@@ -128,7 +131,8 @@ TEST_F(EpollDeviceReaderTest, RingSizeIoctlUnsupported_ReturnsZero) {
 // 从缓存分发（心跳消四次 GET_STATS）。pipe 注入不支持 GET_STATS（ioctl
 // 恒失败），此处覆盖"refreshStats 失败 → 缓存无效 → getter 回退单次
 // ioctl 保容错语义"（缓存命中路径依赖真实设备，由板端 verify case 覆盖）
-TEST_F(EpollDeviceReaderTest, RefreshStatsFail_GetterFallsBackToIoctl) {
+TEST_F(EpollDeviceReaderTest, RefreshStatsFail_GetterFallsBackToIoctl)
+{
     // refreshStats：pipe 不支持 GET_STATS → 清缓存有效位 + ioctlErr+1
     ASSERT_TRUE(mReader->open());
     mReader->refreshStats();
@@ -154,7 +158,8 @@ TEST_F(EpollDeviceReaderTest, CloseIdempotent) {
 
 /* 方向 2：read errno 可恢复白名单（R-07 方向 2 移除 EMSGSIZE；不加 EINVAL） */
 
-TEST(RecoverableErrnoTest, EmsgsizeIsNotRecoverable) {
+TEST(RecoverableErrnoTest, EmsgsizeIsNotRecoverable)
+{
     // R-07 方向 2：EMSGSIZE 移出可恢复白名单——它语义是"内核有数据但剩余
     // 缓冲放不下首条记录"，与"本次无数据"（EINTR/EAGAIN）截然不同。
     // 原并入白名单后 waitAndRead 返 0，上层不 flush 不消费 → epoll LT

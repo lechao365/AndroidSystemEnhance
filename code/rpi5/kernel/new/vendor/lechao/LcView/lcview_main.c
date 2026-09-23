@@ -80,12 +80,10 @@ static ssize_t lcview_stats_show(struct device *dev,
                      "total_records=%llu overrun=%llu dropped=%llu "
                      "producer_dropped=%u event_seq=%llu "
                      "ring_usage_bytes=%u ring_size_bytes=%u\n",
-                     (unsigned long long)st.total_records,
-                     (unsigned long long)st.overrun_cnt,
-                     (unsigned long long)st.dropped_cnt,
-                     lcview_builder_producer_dropped_get(),
-                     (unsigned long long)lcview_event_seq_cur(),
-                     st.ring_usage_bytes, st.ring_size_bytes);
+                     (unsigned long long)st.total_records, (unsigned long long)st.overrun_cnt,
+                     (unsigned long long)st.dropped_cnt, lcview_builder_producer_dropped_get(),
+                     (unsigned long long)lcview_event_seq_cur(), st.ring_usage_bytes,
+                     st.ring_size_bytes);
 }
 static DEVICE_ATTR_RO(lcview_stats);
 
@@ -239,7 +237,8 @@ static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
      */
     case LCVIEW_GET_ABI_VERSION:
         val = LCVIEW_ABI_VERSION;
-        if (copy_to_user((void __user *)arg, &val, sizeof(val))) {
+        if (copy_to_user((void __user *)arg, &val, sizeof(val)))
+        {
             pr_err(PREFIX "GET_ABI_VERSION copy_to_user failed\n");
             return -EFAULT;
         }
@@ -260,10 +259,10 @@ static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
      */
     case LCVIEW_GET_OVERRUN:
         overrun64 = (uint64_t)atomic64_xchg(&lcview_ring.overrun_cnt, 0);
-        if (copy_to_user((void __user *)arg, &overrun64, sizeof(overrun64))) {
+        if (copy_to_user((void __user *)arg, &overrun64, sizeof(overrun64)))
+        {
             pr_err(PREFIX "GET_OVERRUN copy_to_user failed\n");
-            atomic64_add(ring_overrun_restore_amt(overrun64, false),
-                         &lcview_ring.overrun_cnt);
+            atomic64_add(ring_overrun_restore_amt(overrun64, false), &lcview_ring.overrun_cnt);
             return -EFAULT;
         }
         break;
@@ -290,7 +289,8 @@ static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
      * 非特权进程调用返回 -EPERM。
      */
     case LCVIEW_SET_LEVEL:
-        if (!capable(CAP_SYS_ADMIN)) {
+        if (!capable(CAP_SYS_ADMIN))
+        {
             pr_warn(PREFIX "SET_LEVEL denied: need CAP_SYS_ADMIN\n");
             return -EPERM;
         }
@@ -353,7 +353,8 @@ static const struct file_operations lcview_fops = {
  */
 struct lcview_builder *lcview_builder_start(uint16_t event_id, uint8_t level)
 {
-    if (level < (uint8_t)atomic_read(&min_level)) {
+    if (level < (uint8_t)atomic_read(&min_level))
+    {
         /* R-07 方向 1：level 过滤丢弃计入 producer_dropped_cnt——被过滤
          * 事件从未构造/从未写入 ring（不分配），守恒左式 total_records 不含
          * 它，sysfs 单独导出供守恒右式吸收，防"产生未计数"正向漂移误判 */

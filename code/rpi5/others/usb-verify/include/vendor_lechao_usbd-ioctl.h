@@ -147,7 +147,7 @@ enum vendor_lechao_usbd_event_type {
  * 禁止单侧改布局。下方编译守卫防大端环境隐性错误（与内核真相源
  * lciod_usbd-ioctl.h 同款）。
  */
-#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) &&                                 \
     (__BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__)
 #error "vendor_lechao_usbd_event 按小端契约裸传输（LCD-004），不支持大端编译"
 #endif

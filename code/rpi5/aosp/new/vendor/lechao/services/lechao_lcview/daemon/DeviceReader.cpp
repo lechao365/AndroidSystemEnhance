@@ -107,15 +107,20 @@ bool EpollDeviceReader::open()
     // 显式退出判红（return 1 交 init 重启，禁止静默降级运行——新用户态 +
     // 旧内核会造成事件 hdr/统计结构错读的静默损坏）。
     uint32_t kernAbi = 0;
-    if (!queryAbiVersion(mFd, &kernAbi)) {
+    if (!queryAbiVersion(mFd, &kernAbi))
+    {
         mAbiOk = false;
         LOG(ERROR) << "EpollDeviceReader: ABI version query failed "
                       "(old kernel missing LCVIEW_GET_ABI_VERSION? ENOTTY)";
-    } else if (kernAbi != LCVIEW_ABI_VERSION) {
+    }
+    else if (kernAbi != LCVIEW_ABI_VERSION)
+    {
         mAbiOk = false;
         LOG(ERROR) << "EpollDeviceReader: ABI mismatch kernel=" << kernAbi
                    << " daemon=" << LCVIEW_ABI_VERSION;
-    } else {
+    }
+    else
+    {
         mAbiOk = true;
         LOG(INFO) << "EpollDeviceReader: ABI version matched (" << kernAbi << ")";
     }
@@ -129,11 +134,13 @@ ssize_t EpollDeviceReader::waitAndRead(uint8_t* buf, size_t offset,
 {
     // 参数防御拆分（方向 1）：fd 未打开/未注册是设备状态错误 → EBADF；
     // offset >= cap 是调用方参数错误 → EINVAL（与设备状态解耦，语义明确）
-    if (mFd < 0 || mEpfd < 0) {
+    if (mFd < 0 || mEpfd < 0)
+    {
         errno = EBADF;
         return -1;
     }
-    if (offset >= cap) {
+    if (offset >= cap)
+    {
         errno = EINVAL;
         return -1;
     }
@@ -158,7 +165,7 @@ ssize_t EpollDeviceReader::waitAndRead(uint8_t* buf, size_t offset,
     if (n < 0 && errno == EMSGSIZE)
         return -EMSGSIZE;
     if (n < 0 && isRecoverableReadErrno(errno))
-        return 0;  // 可恢复（EINTR/EAGAIN），视作本次无数据
+        return 0; // 可恢复（EINTR/EAGAIN），视作本次无数据
     // n == 0：EOF（内核 shutdown 后期望用户态退出，模块卸载场景；
     // LCV-17：与正常 timeout 同返 0 会伪装正常——置 ENODEV 返回 -1，
     // 上层按设备不可用收尾，不再被当作"本次无数据"）
@@ -194,7 +201,8 @@ void EpollDeviceReader::refreshStats()
 {
     mStatsValid = false;
     struct lcview_stats stats = {};
-    if (mFd >= 0 && ioctl(mFd, LCVIEW_GET_STATS, &stats) == 0) {
+    if (mFd >= 0 && ioctl(mFd, LCVIEW_GET_STATS, &stats) == 0)
+    {
         // R-10 方向 2：逐字段缓存（标量成员，见 DeviceReader.h 注释）
         mCachedTotal = stats.total_records;
         mCachedDropped = stats.dropped_cnt;
@@ -280,7 +288,7 @@ void EpollDeviceReader::close()
     }
 }
 
-bool EpollDeviceReader::queryAbiVersion(int fd, uint32_t* version)
+bool EpollDeviceReader::queryAbiVersion(int fd, uint32_t *version)
 {
     // R-13 方向 1：ABI 协商。旧内核未实现 LCVIEW_GET_ABI_VERSION 时 ioctl
     // 返 -ENOTTY（lcview_main.c default 分支）——调用方（启动协商）据此

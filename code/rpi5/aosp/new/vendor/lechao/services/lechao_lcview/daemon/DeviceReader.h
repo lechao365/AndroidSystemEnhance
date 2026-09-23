@@ -123,13 +123,13 @@ public:
     // R-13 方向 1：查询内核 ABI 版本（启动协商用）
     // 返回 (ok, version)：ok=false 表示 ioctl 失败（旧内核缺命令/设备错），
     // version 为成功时的内核 LCVIEW_ABI_VERSION。
-    static bool queryAbiVersion(int fd, uint32_t* version);
+    static bool queryAbiVersion(int fd, uint32_t *version);
 
     // R-13 方向 1：启动 ABI 协商结果（open() 内检测）。false = 内核缺
     // LCVIEW_GET_ABI_VERSION 或版本不匹配，main() 据此显式退出判红。
     bool abiOk() const { return mAbiOk; }
 
-private:
+  private:
     int mFd = -1;
     int mEpfd = -1;
     // R-13 方向 1：启动 ABI 协商结果（见 open()），false 时 daemon 应退出

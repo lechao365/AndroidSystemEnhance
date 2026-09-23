@@ -29,7 +29,7 @@
  * daemon 启动时经 LCVIEW_GET_ABI_VERSION ioctl 协商：不匹配（旧内核缺命令
  * 返 ENOTTY，或版本号低于预期）则显式退出判红，禁止静默降级运行。
  */
-#define LCVIEW_ABI_VERSION  2
+#define LCVIEW_ABI_VERSION 2
 
 /*
  * 查询环形缓冲区中当前可读字节数
@@ -42,7 +42,7 @@
  * 读完后内核自动将 overrun_cnt 重置为 0，实现"边读边清"语义
  * 载荷 uint64_t（R-13 方向 3：计数升 atomic64_t 消 uptime 回绕）
  */
-#define LCVIEW_GET_OVERRUN      _IOR(LCVIEW_IOC_MAGIC, 2, uint64_t)
+#define LCVIEW_GET_OVERRUN _IOR(LCVIEW_IOC_MAGIC, 2, uint64_t)
 
 /*
  * 查询当前 ABI 版本（R-13 方向 1）
@@ -50,7 +50,7 @@
  * 旧内核未实现本命令时 ioctl 返 -ENOTTY——daemon 启动协商即判红，
  * 消"新用户态 + 旧内核"的静默降级/字段错读（与 GET_STATS 同判据面）。
  */
-#define LCVIEW_GET_ABI_VERSION  _IOR(LCVIEW_IOC_MAGIC, 5, uint32_t)
+#define LCVIEW_GET_ABI_VERSION _IOR(LCVIEW_IOC_MAGIC, 5, uint32_t)
 
 /*
  * 查询完整统计信息（记录总数、溢出数、环形缓冲区大小与使用量）

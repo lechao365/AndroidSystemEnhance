@@ -57,11 +57,11 @@ static const int kMaxReadEventTimeoutMs = 1000;
  * 故障无感）。改专属 tag lechao_lciod_event：默认 INFO 生产级别可见（不再
  * 被过滤），debugVerbose 开启时提升 DEBUG 显示更多细节——事件不再静默。
  */
-static inline int EventLogLevel() {
+static inline int EventLogLevel()
+{
     return ::lechao::debugVerbose() ? ANDROID_LOG_DEBUG : ANDROID_LOG_INFO;
 }
-#define EVENT_ALOG(...) \
-    __android_log_print(EventLogLevel(), "lechao_lciod_event", __VA_ARGS__)
+#define EVENT_ALOG(...) __android_log_print(EventLogLevel(), "lechao_lciod_event", __VA_ARGS__)
 
 /* --- 纯计算函数（声明见 service.h，独立于 binder 环境可单测） --- */
 
@@ -85,8 +85,9 @@ uint64_t ComputeKbRate(uint64_t bytes, uint64_t ns) {
     return static_cast<uint64_t>(rate);
 }
 
-uint64_t ComputeWindowKbRate(uint64_t currBytes, uint64_t currNs,
-                             uint64_t prevBytes, uint64_t prevNs) {
+uint64_t ComputeWindowKbRate(uint64_t currBytes, uint64_t currNs, uint64_t prevBytes,
+                             uint64_t prevNs)
+{
     // 回退语义：无快照（新接入 prev=0）或计数回绕（curr < prev，容器/环
     // 重置）时，窗口增量负值无意义，返回全程累计速率等同旧行为；
     // 否则返回窗口增量差分速率（近 10s 即时吞吐）。
@@ -278,7 +279,8 @@ void IoServiceImpl::start_monitor() {
          * （近 10s 即时速率），变慢时刻直接反映在窗口速率跌落上。首 tick
          * 无快照时回退累计值（等同原行为，不产生假低谷）。
          */
-        struct TickSnapshot {
+        struct TickSnapshot
+        {
             uint64_t readBytes = 0, readNs = 0, writeBytes = 0, writeNs = 0;
         };
         std::unordered_map<int32_t, TickSnapshot> tickSnap;
@@ -357,9 +359,9 @@ void IoServiceImpl::start_monitor() {
 
                     /* R-12 方向 2：专属 tag 可配置级别（INFO 生产可见，
                      * debug 时 DEBUG），事件不再静默 */
-                    EVENT_ALOG("event: minor=%d type=%s(%d) val=%d dir=%s ts=%llu",
-                          minor, type_name, vev.eventType, vev.eventValue, dir,
-                          (unsigned long long)vev.timestampNs);
+                    EVENT_ALOG("event: minor=%d type=%s(%d) val=%d dir=%s ts=%llu", minor,
+                               type_name, vev.eventType, vev.eventValue, dir,
+                               (unsigned long long)vev.timestampNs);
                 } else if (!ev_status.isOk()) {
                     /* 单设备失败仅告警，继续下一个设备 */
                     LC_ALOGW("monitor: readEvent failed for minor=%d: %s", minor,
@@ -387,7 +389,8 @@ void IoServiceImpl::start_monitor() {
                     uint64_t rb = stats.readBytes, rn = stats.readNs;
                     uint64_t wb = stats.writeBytes, wn = stats.writeNs;
                     uint64_t prevRb = 0, prevRn = 0, prevWb = 0, prevWn = 0;
-                    if (it != tickSnap.end()) {
+                    if (it != tickSnap.end())
+                    {
                         prevRb = it->second.readBytes;
                         prevRn = it->second.readNs;
                         prevWb = it->second.writeBytes;

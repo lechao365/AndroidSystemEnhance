@@ -78,9 +78,11 @@ TEST_F(DeviceIoTest, ReadEvent_DrainsMultiple_KeepsLatestOnly) {
     EXPECT_EQ(out.event_value, 30u);
 }
 
-TEST_F(DeviceIoTest, ReadEvent_DrainReportsDroppedCount) {
+TEST_F(DeviceIoTest, ReadEvent_DrainReportsDroppedCount)
+{
     // R-11 方向 4：drain 中间事件丢弃显式化——@dropped 输出丢弃条数
-    for (uint32_t i = 1; i <= 3; ++i) {
+    for (uint32_t i = 1; i <= 3; ++i)
+    {
         const auto ev = MakeEvent(i, i, i * 10);
         ASSERT_EQ(::write(mPipe[1], &ev, sizeof(ev)), (ssize_t)sizeof(ev));
     }
@@ -89,17 +91,18 @@ TEST_F(DeviceIoTest, ReadEvent_DrainReportsDroppedCount) {
     uint32_t dropped = 0;
     errno = 0;
     EXPECT_EQ(read_event(mPipe[0], &out, 500, &dropped), 0);
-    EXPECT_EQ(dropped, 2u);          // 3 条排空，丢弃 2 条中间事件
-    EXPECT_EQ(out.event_type, 3u);   // 保留最新
+    EXPECT_EQ(dropped, 2u);        // 3 条排空，丢弃 2 条中间事件
+    EXPECT_EQ(out.event_type, 3u); // 保留最新
 }
 
-TEST_F(DeviceIoTest, ReadEvent_SingleEvent_DroppedStaysZero) {
+TEST_F(DeviceIoTest, ReadEvent_SingleEvent_DroppedStaysZero)
+{
     // R-11 方向 4：单条事件无丢弃，dropped 保持 0（不产生垃圾计数）
     const auto ev = MakeEvent(7, 7, 77);
     ASSERT_EQ(::write(mPipe[1], &ev, sizeof(ev)), (ssize_t)sizeof(ev));
 
     vendor_lechao_usbd_event out{};
-    uint32_t dropped = 123;  // 预置非零，验证被清零/置 0 的确定性
+    uint32_t dropped = 123; // 预置非零，验证被清零/置 0 的确定性
     errno = 0;
     EXPECT_EQ(read_event(mPipe[0], &out, 500, &dropped), 0);
     EXPECT_EQ(dropped, 0u);

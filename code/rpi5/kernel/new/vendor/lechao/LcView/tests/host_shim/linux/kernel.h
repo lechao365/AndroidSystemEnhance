@@ -62,8 +62,7 @@ static inline void *xchg(void *ptr, void *val)
 static inline void *cmpxchg(void *ptr, void *old, void *new_)
 {
     void *cur = old;
-    __atomic_compare_exchange_n((uintptr_t *)ptr, (uintptr_t *)&cur,
-                                (uintptr_t)new_, 0,
+    __atomic_compare_exchange_n((uintptr_t *)ptr, (uintptr_t *)&cur, (uintptr_t)new_, 0,
                                 __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
     return cur;
 }

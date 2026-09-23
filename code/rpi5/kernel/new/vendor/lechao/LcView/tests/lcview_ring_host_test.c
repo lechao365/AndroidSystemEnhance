@@ -135,7 +135,7 @@ static void test_evict(void)
      * 方向 3 后下界 = default_record_len(20)，正常记录须 >= 20 且
      * size > 20（buf[16] 装不下合法记录），故用 big[32]。 */
     memset(big, 0, sizeof(big));
-    put_u32(big, 20);                    /* 合法最小记录 20B */
+    put_u32(big, 20); /* 合法最小记录 20B */
     read_pos = 0;
     out_len = 99;
     rc = ring_evict_one_core(big, 32, &read_pos, 8, 20, &out_len);
@@ -145,12 +145,12 @@ static void test_evict(void)
 
     /* 正常驱逐 + read_pos 环绕 % size */
     memset(big, 0, sizeof(big));
-    put_u32(big + 10, 24);                 /* 记录长度 24，前缀在 pos=10 */
-    read_pos = 10;                         /* write=0 环内有 10+24=34>32 数据（环绕） */
+    put_u32(big + 10, 24); /* 记录长度 24，前缀在 pos=10 */
+    read_pos = 10;         /* write=0 环内有 10+24=34>32 数据（环绕） */
     out_len = 0;
     rc = ring_evict_one_core(big, 32, &read_pos, 0, 20, &out_len);
     CHECK(rc == 1);
-    CHECK(read_pos == (10 + 24) % 32);     /* 2 */
+    CHECK(read_pos == (10 + 24) % 32); /* 2 */
     CHECK(out_len == 24);
 
     /* 长度前缀跨尾部读取：pos=30，4 字节 = big[30..31]+big[0..1] */
@@ -158,12 +158,12 @@ static void test_evict(void)
     big[30] = 0x14;
     big[31] = 0x00;
     big[0] = 0x00;
-    big[1] = 0x00;                         /* old_len = 20 */
+    big[1] = 0x00; /* old_len = 20 */
     read_pos = 30;
     out_len = 0;
     rc = ring_evict_one_core(big, 32, &read_pos, 8, 20, &out_len);
     CHECK(rc == 1);
-    CHECK(read_pos == (30 + 20) % 32);     /* 18 */
+    CHECK(read_pos == (30 + 20) % 32); /* 18 */
     CHECK(out_len == 20);
 
     /* 损坏：长度 0 → 保守跳过 default_record_len */
@@ -189,12 +189,12 @@ static void test_evict(void)
      * 修复前上界 >：16 > 16 不判损坏，按 old_len 推进 (0+16)%16 == 0
      * 零推进死循环。 */
     memset(buf, 0, sizeof(buf));
-    put_u32(buf, 16);                    /* old_len == 16 == size */
+    put_u32(buf, 16); /* old_len == 16 == size */
     read_pos = 0;
     out_len = 0;
     rc = ring_evict_one_core(buf, 16, &read_pos, 8, 20, &out_len);
     CHECK(rc == 2);
-    CHECK(read_pos == 20 % 16);          /* 4 */
+    CHECK(read_pos == 20 % 16); /* 4 */
     CHECK(out_len == 16);
 
     /* 空环：read_pos == write_pos → 不驱逐、不推进 */
@@ -210,14 +210,15 @@ static void test_evict(void)
      * 修复前下界仅 0，长度 1..19 会按 old_len 正常推进撕裂后续流。 */
     {
         uint32_t len;
-        for (len = 1; len < 20; len++) {
+        for (len = 1; len < 20; len++)
+        {
             memset(buf, 0, sizeof(buf));
             put_u32(buf, len);
             read_pos = 0;
             out_len = 0;
             rc = ring_evict_one_core(buf, 16, &read_pos, 8, 20, &out_len);
             CHECK(rc == 2);
-            CHECK(read_pos == 20 % 16);   /* 4 */
+            CHECK(read_pos == 20 % 16); /* 4 */
             CHECK(out_len == len);
         }
     }

@@ -114,12 +114,14 @@ static inline u64 vendor_lechao_usbd_rate_from_ns(u64 bytes, u64 elapsed_ns)
         return 0;
 
     /* 分子防溢出：先缩到 bytes * NSEC_PER_SEC 不溢出 u64 的范围 */
-    while (numer > (~0ULL / NSEC_PER_SEC)) {
+    while (numer > (~0ULL / NSEC_PER_SEC))
+    {
         numer >>= 8;
         denom >>= 8;
     }
     /* 除数压入 32 位：正常传输耗时远小于 2^32 ns，循环通常不进入 */
-    while (denom >= (1ULL << 32)) {
+    while (denom >= (1ULL << 32))
+    {
         numer >>= 8;
         denom >>= 8;
     }
@@ -195,10 +197,8 @@ static inline bool vendor_lechao_usbd_update_degrade_context_locked(
         return false;
     }
 
-    baseline_rate = vendor_lechao_usbd_rate_from_ns(
-        rate_dev->last_degrade_window_bytes, window_ns);
-    bool degraded = (baseline_rate > 0 &&
-                     rate_dev->stats.current_rate < (baseline_rate >> 1));
+    baseline_rate = vendor_lechao_usbd_rate_from_ns(rate_dev->last_degrade_window_bytes, window_ns);
+    bool degraded = (baseline_rate > 0 && rate_dev->stats.current_rate < (baseline_rate >> 1));
 
     rate_dev->last_degrade_window_start = now;
     rate_dev->last_degrade_window_bytes = bytes;
@@ -236,10 +236,8 @@ static void lcview_trace_transport_start(struct vendor_lechao_usbd_device *rate_
     if (!srb)
         return;
 
-    LC_DBG("TRANSPORT_START(trace disabled): dev=%d dir=%d bytes=%u\n",
-           device_index,
-           vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction),
-           scsi_bufflen(srb));
+    LC_DBG("TRANSPORT_START(trace disabled): dev=%d dir=%d bytes=%u\n", device_index,
+           vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction), scsi_bufflen(srb));
 }
 
 /*

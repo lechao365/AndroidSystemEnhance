@@ -73,9 +73,9 @@ struct vendor_lechao_usbd_device {
     bool last_transport_error;         /* 当前传输周期内是否发生过错误（TRANSPORT_END 时检查） */
     bool removing;                     /* 设备正在被移除（READ_ONCE/WRITE_ONCE 访问，防止 open 竞态） */
     bool enabled;                      /* 监控是否启用（与 config.enabled 同步） */
-    atomic64_t event_drop_cnt;         /* R-06 方向 3：环形缓冲区丢弃事件计数（atomic 统一锁域，
-                                        * 避免 event_lock 写与 dev->lock 读的形式化竞争；统计读走
-                                        * atomic64_read 后再赋给 ABI 字段 stats.event_drop_count） */
+    atomic64_t event_drop_cnt; /* R-06 方向 3：环形缓冲区丢弃事件计数（atomic 统一锁域，
+                                * 避免 event_lock 写与 dev->lock 读的形式化竞争；统计读走
+                                * atomic64_read 后再赋给 ABI 字段 stats.event_drop_count） */
 
     struct vendor_lechao_usbd_event event_buf[VENDOR_LECHAO_USBD_EVENT_BUF_SIZE]; /* 事件环形缓冲区 */
     unsigned int event_head;          /* 环形缓冲区写入位置（push 时推进） */

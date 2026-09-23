@@ -9,35 +9,43 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-struct mutex {
-    int locked;     /* 1 = 已持有，0 = 空闲 */
-    int init_done;  /* 1 = 已 mutex_init，0 = 未初始化 */
+struct mutex
+{
+    int locked;    /* 1 = 已持有，0 = 空闲 */
+    int init_done; /* 1 = 已 mutex_init，0 = 未初始化 */
 };
 
-#define mutex_init(m) do { \
-    (m)->init_done = 1; \
-    (m)->locked = 0; \
-} while (0)
+#define mutex_init(m)                                                                              \
+    do                                                                                             \
+    {                                                                                              \
+        (m)->init_done = 1;                                                                        \
+        (m)->locked = 0;                                                                           \
+    } while (0)
 
-#define mutex_lock(m) do { \
-    if (!(m)->init_done) { \
-        fprintf(stderr, "FAIL mutex_lock: uninitialized mutex (%s:%d)\n", \
-                __FILE__, __LINE__); \
-        abort(); \
-    } \
-    if ((m)->locked) { \
-        fprintf(stderr, "FAIL mutex_lock: double lock (%s:%d)\n", \
-                __FILE__, __LINE__); \
-        abort(); \
-    } \
-    (m)->locked = 1; \
-} while (0)
+#define mutex_lock(m)                                                                              \
+    do                                                                                             \
+    {                                                                                              \
+        if (!(m)->init_done)                                                                       \
+        {                                                                                          \
+            fprintf(stderr, "FAIL mutex_lock: uninitialized mutex (%s:%d)\n", __FILE__, __LINE__); \
+            abort();                                                                               \
+        }                                                                                          \
+        if ((m)->locked)                                                                           \
+        {                                                                                          \
+            fprintf(stderr, "FAIL mutex_lock: double lock (%s:%d)\n", __FILE__, __LINE__);         \
+            abort();                                                                               \
+        }                                                                                          \
+        (m)->locked = 1;                                                                           \
+    } while (0)
 
-#define mutex_unlock(m) do { \
-    if (!(m)->init_done || !(m)->locked) { \
-        fprintf(stderr, "FAIL mutex_unlock: unlock without lock (%s:%d)\n", \
-                __FILE__, __LINE__); \
-        abort(); \
-    } \
-    (m)->locked = 0; \
-} while (0)
+#define mutex_unlock(m)                                                                            \
+    do                                                                                             \
+    {                                                                                              \
+        if (!(m)->init_done || !(m)->locked)                                                       \
+        {                                                                                          \
+            fprintf(stderr, "FAIL mutex_unlock: unlock without lock (%s:%d)\n", __FILE__,          \
+                    __LINE__);                                                                     \
+            abort();                                                                               \
+        }                                                                                          \
+        (m)->locked = 0;                                                                           \
+    } while (0)

@@ -119,11 +119,12 @@ private:
 // 可控计数器值 reader（R-03 方向 3）：直调 emitHeartbeat 断言字段透传——
 // 各内核计数器可注入非零值，验证收集逻辑真实把这些值送入 HeartbeatFields
 // （原单测只构造 HeartbeatFields 直写，不覆盖收集路径）
-class ControlledDeviceReader : public DeviceReader {
-public:
+class ControlledDeviceReader : public DeviceReader
+{
+  public:
     ControlledDeviceReader() = default;
     bool open() override { return true; }
-    ssize_t waitAndRead(uint8_t*, size_t, size_t, int) override { return -1; }
+    ssize_t waitAndRead(uint8_t *, size_t, size_t, int) override { return -1; }
     void close() override {}
     uint64_t getOverrun() override { return overrun; }
     uint64_t getTotalRecords() override { return totalRecords; }
@@ -199,30 +200,33 @@ TEST_F(MainLoopTest, ReaderBatchThenFatal_WriterGetsBatch) {
 // jsonlΔ + invalidΔ)；容差按环推导（方向 6）
 // ============================================================
 
-namespace {
+namespace
+{
 // 默认 ring 256KB 推导容差：(262144+65536)/20 = 16384（与原固定容差一致）
 constexpr int64_t kDefaultTol = computeConserveTolerance(256 * 1024);
-}  // namespace
+} // namespace
 
-TEST(MainLoopConservationTest, ZeroDeviation_NoAlarm) {
+TEST(MainLoopConservationTest, ZeroDeviation_NoAlarm)
+{
     // 完全守恒：产生全落盘，dev=0
     EXPECT_FALSE(shouldAlarmConservation(100, 0, 0, 0, 100, 0, kDefaultTol));
     // overrun/invalid 计入后守恒成立
     EXPECT_FALSE(shouldAlarmConservation(100, 10, 0, 0, 80, 10, kDefaultTol));
 }
 
-TEST(MainLoopConservationTest, DroppedIsAbsorbedByLeftSide) {
+TEST(MainLoopConservationTest, DroppedIsAbsorbedByLeftSide)
+{
     // 方向 7：ENOSPC 丢弃计入守恒右式（droppedDelta）后被吸收——
     // 产生 100、丢弃 100（未落盘）dev=0，不误报负偏差
     EXPECT_FALSE(shouldAlarmConservation(100, 0, 100, 0, 0, 0, kDefaultTol));
     // 混合去向：驱逐 10 + 丢弃 5 + 合法落盘 80 + 非法落盘 5 = 100
     EXPECT_FALSE(shouldAlarmConservation(100, 10, 5, 0, 80, 5, kDefaultTol));
     // 丢弃超过产生（计数漂移/重复丢弃）→ 负偏差超容差告警
-    EXPECT_TRUE(shouldAlarmConservation(100, 0, 100 + kDefaultTol + 1, 0, 0, 0,
-                                        kDefaultTol));
+    EXPECT_TRUE(shouldAlarmConservation(100, 0, 100 + kDefaultTol + 1, 0, 0, 0, kDefaultTol));
 }
 
-TEST(MainLoopConservationTest, WriterDropAbsorbedByLeftSide) {
+TEST(MainLoopConservationTest, WriterDropAbsorbedByLeftSide)
+{
     // R-07 方向 3：FileWriter DROP 增量（writerDropDelta）计入守恒右式后
     // 被吸收——产生 100、写路径丢弃 100（openFailed/formatEmpty/...）
     // 且未落盘 dev=0，消除丢记录正向偏差（原右式无该去向，dev=+100 被
@@ -231,41 +235,38 @@ TEST(MainLoopConservationTest, WriterDropAbsorbedByLeftSide) {
     // 混合：驱逐 10 + 内核丢弃 5 + 写路径丢弃 5 + 合法落盘 70 + 非法落盘 10
     EXPECT_FALSE(shouldAlarmConservation(100, 10, 5, 5, 70, 10, kDefaultTol));
     // 写路径丢弃超过产生（计数漂移/重复丢弃）→ 负偏差超容差告警
-    EXPECT_TRUE(shouldAlarmConservation(100, 0, 0, 100 + kDefaultTol + 1, 0, 0,
-                                        kDefaultTol));
+    EXPECT_TRUE(shouldAlarmConservation(100, 0, 0, 100 + kDefaultTol + 1, 0, 0, kDefaultTol));
 }
 
-TEST(MainLoopConservationTest, InFlightWithinTolerance_NoAlarm) {
+TEST(MainLoopConservationTest, InFlightWithinTolerance_NoAlarm)
+{
     // 在途积压未超容差：不告警（容差边界 dev == tol 严格大于才告警）
     EXPECT_FALSE(shouldAlarmConservation(1000, 0, 0, 0, 900, 0, kDefaultTol));
-    EXPECT_FALSE(shouldAlarmConservation(1000 + kDefaultTol, 0, 0, 0, 1000, 0,
-                                         kDefaultTol));
+    EXPECT_FALSE(shouldAlarmConservation(1000 + kDefaultTol, 0, 0, 0, 1000, 0, kDefaultTol));
     // 负向同理：落盘略超产生但在容差内
-    EXPECT_FALSE(shouldAlarmConservation(1000, 0, 0, 0, 1000 + kDefaultTol, 0,
-                                         kDefaultTol));
+    EXPECT_FALSE(shouldAlarmConservation(1000, 0, 0, 0, 1000 + kDefaultTol, 0, kDefaultTol));
 }
 
-TEST(MainLoopConservationTest, PositiveDeviationBeyondTolerance_Alarms) {
+TEST(MainLoopConservationTest, PositiveDeviationBeyondTolerance_Alarms)
+{
     // 产生未落盘超容差：丢记录/在途积压异常告警
-    EXPECT_TRUE(shouldAlarmConservation(1000 + kDefaultTol + 1, 0, 0, 0, 1000,
-                                        0, kDefaultTol));
+    EXPECT_TRUE(shouldAlarmConservation(1000 + kDefaultTol + 1, 0, 0, 0, 1000, 0, kDefaultTol));
 }
 
-TEST(MainLoopConservationTest, NegativeDeviationBeyondTolerance_Alarms) {
+TEST(MainLoopConservationTest, NegativeDeviationBeyondTolerance_Alarms)
+{
     // 落盘超过产生超容差：重复落盘/计数漂移告警
-    EXPECT_TRUE(shouldAlarmConservation(1000, 0, 0, 0, 1000 + kDefaultTol + 1,
-                                        0, kDefaultTol));
+    EXPECT_TRUE(shouldAlarmConservation(1000, 0, 0, 0, 1000 + kDefaultTol + 1, 0, kDefaultTol));
 }
 
-TEST(MainLoopConservationTest, ToleranceDerivedFromRingSize) {
+TEST(MainLoopConservationTest, ToleranceDerivedFromRingSize)
+{
     // 方向 6：默认 ring 256KB → (262144+65536)/20 = 16384（与原固定容差一致）
     EXPECT_EQ(computeConserveTolerance(256 * 1024), 16384);
     // 更大 ring → 更大容差（容忍更大在途积压）
-    EXPECT_GT(computeConserveTolerance(4096 * 1024),
-              computeConserveTolerance(256 * 1024));
+    EXPECT_GT(computeConserveTolerance(4096 * 1024), computeConserveTolerance(256 * 1024));
     // 更小 ring → 更小容差（更灵敏）
-    EXPECT_LT(computeConserveTolerance(64 * 1024),
-              computeConserveTolerance(256 * 1024));
+    EXPECT_LT(computeConserveTolerance(64 * 1024), computeConserveTolerance(256 * 1024));
     // ring 为 0（ioctl 失败兜底值）→ 仅用户缓冲档位
     EXPECT_EQ(computeConserveTolerance(0), 65536 / 20);
 }
@@ -276,23 +277,23 @@ TEST(MainLoopConservationTest, ToleranceDerivedFromRingSize) {
 // 纯函数直测（不依赖 emitHeartbeat / ALOGI），覆盖正负向告警与防回绕推进。
 // ============================================================
 
-namespace {
+namespace
+{
 
 // 构造一轮采样（ioctl 正常，全计数可指定）
-ConserveBaseline::Sample makeSample(uint32_t total, int64_t overrun,
-                                    uint32_t dropped, uint64_t valid,
-                                    uint64_t invalid,
-                                    uint32_t ring = 256 * 1024,
-                                    uint64_t ioctlErr = 0,
-                                    uint64_t writerDrop = 0) {
+ConserveBaseline::Sample makeSample(uint32_t total, int64_t overrun, uint32_t dropped,
+                                    uint64_t valid, uint64_t invalid, uint32_t ring = 256 * 1024,
+                                    uint64_t ioctlErr = 0, uint64_t writerDrop = 0)
+{
     return ConserveBaseline::Sample{
         total, overrun, dropped, writerDrop, ioctlErr, valid, invalid, ring,
     };
 }
 
-}  // namespace
+} // namespace
 
-TEST(MainLoopBaselineTest, FirstSample_InitializesNoAlarm) {
+TEST(MainLoopBaselineTest, FirstSample_InitializesNoAlarm)
+{
     // 首心跳（initialized=false）：仅建基线，不告警
     ConserveBaseline bl;
     auto r = bl.updateAndCheck(makeSample(1000, 10, 0, 900, 0));
@@ -305,25 +306,25 @@ TEST(MainLoopBaselineTest, FirstSample_InitializesNoAlarm) {
     EXPECT_EQ(bl.total, 2000u);
 }
 
-TEST(MainLoopBaselineTest, IoctlError_SkipsNumericalAdvance) {
+TEST(MainLoopBaselineTest, IoctlError_SkipsNumericalAdvance)
+{
     // ioctlErr 增量（任一查询失败）：跳过守恒校验与数值推进，仅推进 ioctlErr
     ConserveBaseline bl;
     bl.updateAndCheck(makeSample(1000, 10, 0, 900, 0));
-    auto r = bl.updateAndCheck(makeSample(1000, 10, 0, 900, 0,
-                                          256 * 1024, 5 /* ioctlErr 变化 */));
-    EXPECT_FALSE(r.broken);  // 失败值不作判定依据
+    auto r = bl.updateAndCheck(makeSample(1000, 10, 0, 900, 0, 256 * 1024, 5 /* ioctlErr 变化 */));
+    EXPECT_FALSE(r.broken); // 失败值不作判定依据
     EXPECT_EQ(bl.ioctlErr, 5u);
-    EXPECT_EQ(bl.total, 1000u);  // 数值基线保持上轮成功值
+    EXPECT_EQ(bl.total, 1000u); // 数值基线保持上轮成功值
     // ioctlErr 保持（无新失败，计数单调不回落）：数值推进恢复——本轮
     // 产生 500 落盘 500，守恒成立且基线推进到 1500
-    auto r3 = bl.updateAndCheck(makeSample(1500, 15, 0, 1400, 0,
-                                           256 * 1024, 5));
+    auto r3 = bl.updateAndCheck(makeSample(1500, 15, 0, 1400, 0, 256 * 1024, 5));
     EXPECT_FALSE(r3.broken);
     EXPECT_EQ(r3.totalDelta, 500u);
     EXPECT_EQ(bl.total, 1500u);
 }
 
-TEST(MainLoopBaselineTest, PositiveDeviation_AlarmsWithWindowDeltas) {
+TEST(MainLoopBaselineTest, PositiveDeviation_AlarmsWithWindowDeltas)
+{
     // 产生未落盘超容差：告警且 Result 携带窗口增量（日志直接引用）
     ConserveBaseline bl;
     bl.updateAndCheck(makeSample(1000, 10, 0, 900, 0));
@@ -342,7 +343,8 @@ TEST(MainLoopBaselineTest, PositiveDeviation_AlarmsWithWindowDeltas) {
     EXPECT_EQ(r_alarm.tolerance, kDefaultTol);
 }
 
-TEST(MainLoopBaselineTest, NegativeDeviation_Alarms) {
+TEST(MainLoopBaselineTest, NegativeDeviation_Alarms)
+{
     // 落盘超过产生超容差：重复落盘/计数漂移告警
     ConserveBaseline bl;
     bl.updateAndCheck(makeSample(1000, 10, 0, 900, 0));
@@ -352,7 +354,8 @@ TEST(MainLoopBaselineTest, NegativeDeviation_Alarms) {
     EXPECT_EQ(r.dev, -17000);
 }
 
-TEST(MainLoopBaselineTest, DroppedAndInvalidAbsorbed) {
+TEST(MainLoopBaselineTest, DroppedAndInvalidAbsorbed)
+{
     // 方向 7 + 方向 5：dropped（ENOSPC 丢弃）/invalid（非法落盘）计入右式
     // 后被吸收——产生 100、丢弃 100（未落盘）dev=0 不告警
     ConserveBaseline bl;
@@ -370,20 +373,21 @@ TEST(MainLoopBaselineTest, DroppedAndInvalidAbsorbed) {
     EXPECT_EQ(r2.dev, 0);
 }
 
-TEST(MainLoopBaselineTest, WriterDropAbsorbedWithBaselineAdvance) {
+TEST(MainLoopBaselineTest, WriterDropAbsorbedWithBaselineAdvance)
+{
     // R-07 方向 3：FileWriter DROP 增量进守恒右式且随基线推进——首心跳
     // 建基线（writerDrop=5），次心跳 writerDrop=105（+100），产生 +100
     // 全被写路径丢弃（未落盘），dev=0 不告警
     ConserveBaseline bl;
     bl.updateAndCheck(makeSample(100, 0, 0, 100, 0, 256 * 1024, 0, 5));
-    auto r = bl.updateAndCheck(makeSample(200, 0, 0, 100, 0, 256 * 1024, 0,
-                                          105));
+    auto r = bl.updateAndCheck(makeSample(200, 0, 0, 100, 0, 256 * 1024, 0, 105));
     EXPECT_FALSE(r.broken);
     EXPECT_EQ(r.writerDropDelta, 100u);
     EXPECT_EQ(r.dev, 0);
 }
 
-TEST(MainLoopBaselineTest, KernelCountRollback_RebuildsBaseline) {
+TEST(MainLoopBaselineTest, KernelCountRollback_RebuildsBaseline)
+{
     // R-07 方向 4：total 或 dropped 回退（当前采样 < 基线）即整体重建同锚，
     // 不告警——模拟内核模块重载/重启后计数器清零（旧基线是重载前大值，
     // 直接算增量会下溢成巨大值误报守恒破坏）
@@ -391,9 +395,9 @@ TEST(MainLoopBaselineTest, KernelCountRollback_RebuildsBaseline) {
     bl.updateAndCheck(makeSample(100000, 0, 5000, 90000, 0));
     // 内核重载清零：total 100000→1000、dropped 5000→0，均回退
     auto r = bl.updateAndCheck(makeSample(1000, 0, 0, 90000, 0));
-    EXPECT_FALSE(r.broken);          // 不得误报
-    EXPECT_EQ(r.totalDelta, 0u);     // 本窗口不判定增量
-    EXPECT_EQ(bl.total, 1000u);      // 基线重建到重载后值（同锚）
+    EXPECT_FALSE(r.broken);      // 不得误报
+    EXPECT_EQ(r.totalDelta, 0u); // 本窗口不判定增量
+    EXPECT_EQ(bl.total, 1000u);  // 基线重建到重载后值（同锚）
     EXPECT_EQ(bl.dropped, 0u);
     // 重建后下一心跳恢复正常增量判定（total 1000→2000）
     auto r2 = bl.updateAndCheck(makeSample(2000, 0, 0, 90000, 0));
@@ -401,14 +405,15 @@ TEST(MainLoopBaselineTest, KernelCountRollback_RebuildsBaseline) {
     EXPECT_EQ(r2.totalDelta, 1000u);
 }
 
-TEST(MainLoopBaselineTest, DroppedRollback_RebuildsBaseline) {
+TEST(MainLoopBaselineTest, DroppedRollback_RebuildsBaseline)
+{
     // R-07 方向 4：仅 dropped 回退（total 正常）同样触发整体重建——内核
     // 只清零 dropped 不清 total（异常现场），防 droppedΔ 下溢误报
     ConserveBaseline bl;
     bl.updateAndCheck(makeSample(1000, 0, 5000, 900, 0));
     auto r = bl.updateAndCheck(makeSample(2000, 0, 0, 1800, 0));
     EXPECT_FALSE(r.broken);
-    EXPECT_EQ(bl.total, 2000u);      // 同锚重建（total 也重取当前值）
+    EXPECT_EQ(bl.total, 2000u); // 同锚重建（total 也重取当前值）
     EXPECT_EQ(bl.dropped, 0u);
 }
 
@@ -417,25 +422,28 @@ TEST(MainLoopBaselineTest, DroppedRollback_RebuildsBaseline) {
 // 心跳内容不再依赖 ALOGI 格式，接口层字段集即契约（单测直验字段值）。
 // ============================================================
 
-namespace {
+namespace
+{
 
 // 记录型 writer：捕获最近一次 HeartbeatFields，供断言
-class RecordingHeartbeatWriter : public IHeartbeatWriter {
-public:
-    void write(const HeartbeatFields& hb) override { last = hb; }
+class RecordingHeartbeatWriter : public IHeartbeatWriter
+{
+  public:
+    void write(const HeartbeatFields &hb) override { last = hb; }
     HeartbeatFields last;
 };
 
-}  // namespace
+} // namespace
 
-TEST(MainLoopHeartbeatWriterTest, FieldsPassThrough) {
+TEST(MainLoopHeartbeatWriterTest, FieldsPassThrough)
+{
     // R-03 方向 3：直调生产函数 emitHeartbeat（去 static 后可测边界），注入
     // ControlledDeviceReader + 真实 FileWriter + 记录型 writer，断言字段真实
     // 透传——覆盖收集逻辑（reader 计数器值 + 入参 → HeartbeatFields），
     // 原单测只构造 HeartbeatFields 直写，不覆盖收集路径，字段错位/漏取
     // 在收集层被静默吞掉无法暴露。
     std::string tmpl = "/data/local/tmp/lcview_hb_XXXXXX";
-    char* tmp = mkdtemp(tmpl.data());
+    char *tmp = mkdtemp(tmpl.data());
     ASSERT_NE(tmp, nullptr);
     FileWriterConfig cfg;
     cfg.logDir = tmp;
@@ -447,12 +455,11 @@ TEST(MainLoopHeartbeatWriterTest, FieldsPassThrough) {
     // dropped 求和的分项），验证这些字段经 emitHeartbeat 透传到 writer
     SchemaParser sp = makeSchema();
     auto rec = makeValidRecord();
-    const auto* hdr = reinterpret_cast<const lcview_record_hdr*>(rec.data());
-    const uint8_t* fields = rec.data() + sizeof(lcview_record_hdr);
-    const EventSchema* schema = sp.find(hdr->event_id);
+    const auto *hdr = reinterpret_cast<const lcview_record_hdr *>(rec.data());
+    const uint8_t *fields = rec.data() + sizeof(lcview_record_hdr);
+    const EventSchema *schema = sp.find(hdr->event_id);
     ASSERT_NE(schema, nullptr);
-    writer.writeRecord(*schema, hdr, fields,
-                       rec.size() - sizeof(lcview_record_hdr));
+    writer.writeRecord(*schema, hdr, fields, rec.size() - sizeof(lcview_record_hdr));
 
     // 可控 reader：内核计数器非零值注入
     ControlledDeviceReader reader;
@@ -466,11 +473,10 @@ TEST(MainLoopHeartbeatWriterTest, FieldsPassThrough) {
     int64_t overrunAccum = 0;
     ConserveBaseline conserve;
     RecordingHeartbeatWriter w;
-    WindowStats window;  // R-09：窗口统计（峰值/速率/分类）透传
+    WindowStats window; // R-09：窗口统计（峰值/速率/分类）透传
     // 首心跳：ioctl 正常 → 建基线（updateAndCheck 返回 false 不告警，字段
     // 仍须完整透传）
-    emitHeartbeat(42, reader, writer, overrunAccum, 1, 900, 5, conserve, w,
-                  window);
+    emitHeartbeat(42, reader, writer, overrunAccum, 1, 900, 5, conserve, w, window);
 
     EXPECT_EQ(w.last.loop, 42u);
     // overrunAccum 累计 reader.getOverrun()=7

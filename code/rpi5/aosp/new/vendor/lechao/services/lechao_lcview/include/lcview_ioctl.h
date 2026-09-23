@@ -25,7 +25,7 @@
 #include <sys/ioctl.h>
 
 /* ioctl 魔数，用于生成唯一命令号（与内核 LCVIEW_IOC_MAGIC 一致） */
-#define LCVIEW_IOC_MAGIC  'V'
+#define LCVIEW_IOC_MAGIC 'V'
 
 /*
  * 【ABI 版本（R-13 方向 1，UAPI 世代重建）】
@@ -34,20 +34,20 @@
  * 递增版本号并双侧同步。daemon 启动经 LCVIEW_GET_ABI_VERSION ioctl 协商，
  * 不匹配（旧内核返 ENOTTY 或版本号低）显式退出判红，禁止静默降级。
  */
-#define LCVIEW_ABI_VERSION  2
+#define LCVIEW_ABI_VERSION 2
 
 /*
  * 查询环形缓冲区中当前可读字节数
  * 用户态传入 uint32_t*，内核填入可用字节数
  */
-#define LCVIEW_GET_AVAIL_BYTES  _IOR(LCVIEW_IOC_MAGIC, 1, uint32_t)
+#define LCVIEW_GET_AVAIL_BYTES _IOR(LCVIEW_IOC_MAGIC, 1, uint32_t)
 
 /*
  * 查询并清零溢出计数
  * 读完后内核自动将 overrun_cnt 重置为 0，实现"边读边清"语义
  * 载荷 uint64_t（R-13 方向 3：计数升 atomic64_t 消 uptime 回绕）
  */
-#define LCVIEW_GET_OVERRUN      _IOR(LCVIEW_IOC_MAGIC, 2, uint64_t)
+#define LCVIEW_GET_OVERRUN _IOR(LCVIEW_IOC_MAGIC, 2, uint64_t)
 
 /*
  * 内核 ring 统计结构（与内核 lcview_internal.h 的 struct lcview_stats
@@ -55,7 +55,8 @@
  * 只读不清零，与 GET_OVERRUN 的"读取即清零"语义互补支撑守恒校验）。
  * R-13 方向 3：统计三字段升 u64（ring_usage/size 仍 u32，字节数最大 4MB）。
  */
-struct lcview_stats {
+struct lcview_stats
+{
     uint64_t total_records;
     uint64_t overrun_cnt;
     uint64_t dropped_cnt;
@@ -67,20 +68,20 @@ struct lcview_stats {
  * 查询完整统计信息（记录总数、溢出数、环形缓冲区大小与使用量）
  * 承载 getTotalRecords（心跳守恒校验数据源）与启动诊断快照
  */
-#define LCVIEW_GET_STATS        _IOR(LCVIEW_IOC_MAGIC, 3, struct lcview_stats)
+#define LCVIEW_GET_STATS _IOR(LCVIEW_IOC_MAGIC, 3, struct lcview_stats)
 
 /*
  * 设置最低日志等级
  * 传入 uint8_t 级别值 (LCVIEW_LEVEL_*)，低于此级别的事件被丢弃
  */
-#define LCVIEW_SET_LEVEL        _IOW(LCVIEW_IOC_MAGIC, 4, uint8_t)
+#define LCVIEW_SET_LEVEL _IOW(LCVIEW_IOC_MAGIC, 4, uint8_t)
 
 /*
  * 查询当前 ABI 版本（R-13 方向 1）
  * 用户态传入 uint32_t*，内核填入 LCVIEW_ABI_VERSION。
  * 旧内核未实现本命令时 ioctl 返 -ENOTTY——daemon 启动协商即判红。
  */
-#define LCVIEW_GET_ABI_VERSION  _IOR(LCVIEW_IOC_MAGIC, 5, uint32_t)
+#define LCVIEW_GET_ABI_VERSION _IOR(LCVIEW_IOC_MAGIC, 5, uint32_t)
 
 /* struct 尺寸守卫：与内核镜像（lcview_internal.h）漂移即编译期报错
  * 逐字段 offsetof 断言（方向 3）：不仅守总尺寸，还逐字段校验偏移与内核

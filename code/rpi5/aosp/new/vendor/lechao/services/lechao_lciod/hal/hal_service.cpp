@@ -146,18 +146,26 @@ ndk::ScopedAStatus IoHalImpl::getStats(int32_t in_deviceMinor, IoStats* _aidl_re
     if (!entry) { LC_LOGW("getStats: device not found for minor"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
 
     /* R-11 方向 2：复用持久 fd，懒打开一次后缓存，不再逐调用 open/close */
-    if (entry->fd < 0) {
+    if (entry->fd < 0)
+    {
         LC_LOGD("getStats: reopening persistent fd");
         entry->fd = ::open_device(entry->path.c_str());
     }
-    if (entry->fd < 0) { int saved = errno; LC_LOGE("getStats: open device failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
+    if (entry->fd < 0)
+    {
+        int saved = errno;
+        LC_LOGE("getStats: open device failed: " << strerror(saved));
+        return ndk::ScopedAStatus::fromServiceSpecificError(-saved);
+    }
 
     struct vendor_lechao_usbd_stats raw;
     int ret = ::get_stats(entry->fd, &raw);
-    int saved = errno;  // 后续日志可能改 errno，先存
-    if (ret < 0) {
+    int saved = errno; // 后续日志可能改 errno，先存
+    if (ret < 0)
+    {
         LC_LOGE("getStats: ioctl GET_STATS failed: " << strerror(saved));
-        if (saved == ENODEV || saved == EIO) {
+        if (saved == ENODEV || saved == EIO)
+        {
             LC_LOGW("getStats: device removed (errno=" << saved << ")");
             ::close_device(entry->fd);
             entry->fd = -1;
@@ -301,9 +309,8 @@ ndk::ScopedAStatus IoHalImpl::readEvent(int32_t in_deviceMinor, int32_t in_timeo
     uint32_t dropped = 0;
     int ret = ::read_event(entry->fd, &raw, timeout_ms, &dropped);
     if (dropped > 0)
-        LC_LOGW("readEvent: drained " << (dropped + 1)
-                 << " events from kernel, " << dropped << " dropped (minor="
-                 << in_deviceMinor << ")");
+        LC_LOGW("readEvent: drained " << (dropped + 1) << " events from kernel, " << dropped
+                                      << " dropped (minor=" << in_deviceMinor << ")");
 
     if (ret < 0) {
         /* ETIMEDOUT/EAGAIN 是"暂无事件"的正常语义，返回 ok + valid=false */

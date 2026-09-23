@@ -28,9 +28,9 @@ struct BatchParseResult {
     unsigned validCnt = 0;
     unsigned invalidCnt = 0;
     // R-09 方向 4：invalid 按 reason 分类（区分坏长度/schema 漂移）
-    unsigned badLenCnt = 0;        // 坏长度/坏前缀类（wire 损坏/截断/错位）
-    unsigned schemaDriftCnt = 0;   // schema 漂移类（字段数/类型与 schema 不符）
-    unsigned miscInvalidCnt = 0;   // 其他 invalid（含 unknown event_id 边界）
+    unsigned badLenCnt = 0;      // 坏长度/坏前缀类（wire 损坏/截断/错位）
+    unsigned schemaDriftCnt = 0; // schema 漂移类（字段数/类型与 schema 不符）
+    unsigned miscInvalidCnt = 0; // 其他 invalid（含 unknown event_id 边界）
 };
 
 // R-09 方向 4：reason 分类映射（纯函数）。SchemaParser validate/validateFields
@@ -42,7 +42,7 @@ struct BatchParseResult {
 //   - schema 漂移：field count mismatch/type mismatch at field——schema
 //     文件过期或与内核打点版本不同步；
 //   - 其余（含 unknown event_id 边界、schema vanished 防御分支）归其他。
-int classifyInvalidReason(const std::string& reason);
+int classifyInvalidReason(const std::string &reason);
 
 // 解析一个批次（4B 长度前缀 + 二进制记录序列），写盘并返回统计。
 // LCV-06：接口收为 data/len 指针对——调用方（主循环 flushSegment）
@@ -57,10 +57,9 @@ BatchParseResult parseBatch(SchemaParser& schema, FileWriter& writer,
 // running 为可中断开关（生产传全局 gRunning）：重试期间收到停止信号
 // （SIGTERM 置 gRunning=false）立即退出，不再等满 maxRetries×interval
 // （原实现最长 15s 无法及时响应 init stop，方向 4）
-bool loadSchemaWithRetry(SchemaParser& schema, const std::string& path,
-                         const std::atomic<bool>& running, int maxRetries,
-                         std::chrono::milliseconds interval =
-                             std::chrono::milliseconds(500));
+bool loadSchemaWithRetry(SchemaParser &schema, const std::string &path,
+                         const std::atomic<bool> &running, int maxRetries,
+                         std::chrono::milliseconds interval = std::chrono::milliseconds(500));
 
 // schema 加载失败时的 main 退出码（方向 4，纯函数）：
 // 加载成功 → 0（正常继续）；因关停中断（running=false，重试窗口被

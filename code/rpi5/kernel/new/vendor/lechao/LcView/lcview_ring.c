@@ -44,8 +44,7 @@ extern int lcview_debug;
 #define PREFIX KERNEL_LCVIEW_TAG ": ring: "
 
 /* 读取实现，由 lcview_ring_read 包装调用（见下） */
-static int lcview_ring_read_internal(struct lcview_ring *ring,
-                                     uint8_t __user *buf, uint32_t len);
+static int lcview_ring_read_internal(struct lcview_ring *ring, uint8_t __user *buf, uint32_t len);
 
 /*
  * ring_avail_write — 计算环形缓冲区中可写入的空闲空间
@@ -217,8 +216,8 @@ static void ring_evict_one(struct lcview_ring *ring)
     }
 
     atomic64_inc(&ring->overrun_cnt);
-    pr_debug(PREFIX "overrun #%lld (evicted record at pos=%u)\n",
-             atomic64_read(&ring->overrun_cnt), ring->read_pos);
+    pr_debug(PREFIX "overrun #%lld (evicted record at pos=%u)\n", atomic64_read(&ring->overrun_cnt),
+             ring->read_pos);
 }
 
 /*
@@ -256,9 +255,9 @@ int lcview_ring_write(struct lcview_ring *ring,
      * 小值，绕过 total > ring->size 检查后进入写路径，memcpy 越界。
      * 改先判 len 本身（len ≤ ring->size - 4 时 total 必不溢出）。
      */
-    if (len > ring->size - LCVIEW_LEN_PREFIX_SIZE) {
-        pr_err(PREFIX "record too large: len=%u > ring_size-%u=%u\n",
-               len, LCVIEW_LEN_PREFIX_SIZE,
+    if (len > ring->size - LCVIEW_LEN_PREFIX_SIZE)
+    {
+        pr_err(PREFIX "record too large: len=%u > ring_size-%u=%u\n", len, LCVIEW_LEN_PREFIX_SIZE,
                ring->size - LCVIEW_LEN_PREFIX_SIZE);
         return -EMSGSIZE;
     }
@@ -344,8 +343,8 @@ int lcview_ring_write(struct lcview_ring *ring,
     atomic64_inc(&ring->total_records);
     spin_unlock_irqrestore(&ring->lock, flags);
 
-    pr_debug(PREFIX "wrote record len=%u total_records=%lld\n",
-             len, atomic64_read(&ring->total_records));
+    pr_debug(PREFIX "wrote record len=%u total_records=%lld\n", len,
+             atomic64_read(&ring->total_records));
     wake_up_interruptible(&ring->waitq);
     return 0;
 }
@@ -373,8 +372,7 @@ int lcview_ring_write(struct lcview_ring *ring,
  * destroy 经 wait_event(exit_wait, readers == 0) 等所有在途 read 退出后
  * 才 vfree buf / read_buf，杜绝"reader 还在 copy_to_user 内存已被释放"的 UAF。
  */
-int lcview_ring_read(struct lcview_ring *ring,
-                     uint8_t __user *buf, uint32_t len)
+int lcview_ring_read(struct lcview_ring *ring, uint8_t __user *buf, uint32_t len)
 {
     int ret;
     unsigned long flags;
@@ -384,7 +382,8 @@ int lcview_ring_read(struct lcview_ring *ring,
 
     /* 入口查 shutdown：销毁后新读直接 EOF，不进内部函数触碰已释放内存 */
     spin_lock_irqsave(&ring->lock, flags);
-    if (ring->shutdown) {
+    if (ring->shutdown)
+    {
         spin_unlock_irqrestore(&ring->lock, flags);
         ret = 0;
         goto out;
@@ -429,8 +428,7 @@ out:
  * 为什么 shutdown 后返回 0 而非负值？
  * 返回 0 表示 EOF，用户态 reader 应关闭设备并退出。
  */
-static int lcview_ring_read_internal(struct lcview_ring *ring,
-                                     uint8_t __user *buf, uint32_t len)
+static int lcview_ring_read_internal(struct lcview_ring *ring, uint8_t __user *buf, uint32_t len)
 {
     uint32_t copied_total = 0;
     int ret;
@@ -467,7 +465,8 @@ static int lcview_ring_read_internal(struct lcview_ring *ring,
          * （copied_total==0 时返回 0 即 EOF）。原"shutdown+empty 才返回"
          * 会继续消费 shutdown 后残留的记录，拖延销毁且无必要。
          */
-        if (ring->shutdown) {
+        if (ring->shutdown)
+        {
             spin_unlock_irqrestore(&ring->lock, flags);
             break;
         }
@@ -476,7 +475,8 @@ static int lcview_ring_read_internal(struct lcview_ring *ring,
          * 已经读取到部分数据后，如果此时 ring 为空，则直接返回已读数据，
          * 避免为了填满整个用户缓冲区而无限阻塞。
          */
-        if (copied_total > 0 && ring->write_pos == ring->read_pos) {
+        if (copied_total > 0 && ring->write_pos == ring->read_pos)
+        {
             spin_unlock_irqrestore(&ring->lock, flags);
             break;
         }
@@ -511,8 +511,8 @@ static int lcview_ring_read_internal(struct lcview_ring *ring,
          * 这样可以最大程度地从数据损坏中恢复，而不是永久阻塞 reader。
          */
         if (record_len < LCVIEW_LEN_PREFIX_SIZE + sizeof(struct lcview_record_hdr) ||
-            record_len > LCVIEW_BUILDER_MAX_SIZE ||
-            record_len >= ring->size) {
+            record_len > LCVIEW_BUILDER_MAX_SIZE || record_len >= ring->size)
+        {
             pr_warn_ratelimited(PREFIX "corrupted record at pos=%u, len=%u, skipping\n",
                                 rpos, record_len);
             /*

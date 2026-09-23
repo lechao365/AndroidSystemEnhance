@@ -205,8 +205,7 @@ TEST(DaemonLoopHelperTest, SchemaLoadRetry_EventualSuccess) {
     // 方向 4 适配：新增 running 参数（测试传本地 atomic，生产传 gRunning）
     std::atomic<bool> running{true};
     SchemaParser sp;
-    EXPECT_FALSE(loadSchemaWithRetry(sp, "/nonexistent/lcview_events.json",
-                                     running, 0,
+    EXPECT_FALSE(loadSchemaWithRetry(sp, "/nonexistent/lcview_events.json", running, 0,
                                      std::chrono::milliseconds(1)));
 }
 
@@ -215,8 +214,7 @@ TEST(DaemonLoopHelperTest, SchemaLoadRetry_SuccessOnFirstTry) {
     std::atomic<bool> running{true};
     SchemaParser sp;
     if (access("/vendor/etc/lcview_events.json", R_OK) == 0) {
-        EXPECT_TRUE(loadSchemaWithRetry(sp, "/vendor/etc/lcview_events.json",
-                                        running, 0,
+        EXPECT_TRUE(loadSchemaWithRetry(sp, "/vendor/etc/lcview_events.json", running, 0,
                                         std::chrono::milliseconds(1)));
         EXPECT_EQ(sp.eventCount(), 10u);
     } else {
@@ -224,19 +222,20 @@ TEST(DaemonLoopHelperTest, SchemaLoadRetry_SuccessOnFirstTry) {
     }
 }
 
-TEST(DaemonLoopHelperTest, SchemaLoadRetry_InterruptibleByRunning) {
+TEST(DaemonLoopHelperTest, SchemaLoadRetry_InterruptibleByRunning)
+{
     // 方向 4：running=false 时重试循环立即中断——schema 加载重试期间收到
     // SIGTERM（gRunning 置 false）不再等满 maxRetries×interval。
     // maxRetries 大 + interval 长：若 running 不生效会等满（测试卡死超时），
     // 快速返回即证明中断生效
     std::atomic<bool> running{false};
     SchemaParser sp;
-    EXPECT_FALSE(loadSchemaWithRetry(sp, "/nonexistent/lcview_events.json",
-                                     running, 1000,
+    EXPECT_FALSE(loadSchemaWithRetry(sp, "/nonexistent/lcview_events.json", running, 1000,
                                      std::chrono::milliseconds(100)));
 }
 
-TEST(DaemonLoopHelperTest, SchemaExitCode_StoppedReturnsZero) {
+TEST(DaemonLoopHelperTest, SchemaExitCode_StoppedReturnsZero)
+{
     // 方向 4：未运行（关停中断 running=false）返回 0——init stop 在 schema
     // 重试窗口内被 SIGTERM 打断时优雅退出，不判崩溃重启
     EXPECT_EQ(schemaLoadExitCode(false, false), 0);

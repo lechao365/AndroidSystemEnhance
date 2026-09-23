@@ -78,7 +78,7 @@ static void lcview_trace_probe(int device_index, u16 vid, u16 pid,
     b = lcview_builder_start(LCVIEW_EVENT_USB_PROBE, LCVIEW_LEVEL_INFO);
     if (!b)
         return;
-    rc  = lcview_builder_add_int(b, (int64_t)device_index);
+    rc = lcview_builder_add_int(b, (int64_t)device_index);
     rc |= lcview_builder_add_int(b, (int64_t)vid);
     rc |= lcview_builder_add_int(b, (int64_t)pid);
     rc |= lcview_builder_add_str(b, vendor);
@@ -273,12 +273,15 @@ static ssize_t vendor_lechao_usbd_read(struct file *file, char __user *buf,
      * "poll 就绪后 read 不阻塞"的惯用法一致。
      */
     spin_lock_irqsave(&dev->event_lock, flags);
-    if (READ_ONCE(dev->event_head) != READ_ONCE(dev->event_tail)) {
+    if (READ_ONCE(dev->event_head) != READ_ONCE(dev->event_tail))
+    {
         ev = dev->event_buf[dev->event_tail];
         consumed_pos = dev->event_tail;
         dev->event_tail = (dev->event_tail + 1) % VENDOR_LECHAO_USBD_EVENT_BUF_SIZE;
         spin_unlock_irqrestore(&dev->event_lock, flags);
-    } else {
+    }
+    else
+    {
         bool empty = true;
         bool shutdown = READ_ONCE(dev->event_shutdown);
         spin_unlock_irqrestore(&dev->event_lock, flags);
@@ -393,7 +396,8 @@ static void vendor_lechao_usbd_apply_config_locked(
      * 一致——disable 语义即"停止追踪传输"，残留状态须随 disable 清空。
      * 保持持锁（本函数调用方已持 rate_dev->lock）与 do_reset 同锁域。
      */
-    if (!rate_dev->config.enabled) {
+    if (!rate_dev->config.enabled)
+    {
         rate_dev->transport_active = false;
         rate_dev->transport_start_time = ktime_set(0, 0);
         rate_dev->last_transport_error = false;
@@ -634,7 +638,8 @@ struct vendor_lechao_usbd_device *vendor_lechao_usbd_device_alloc(struct us_data
      * 因此 usb_string 完成后、返回前复查设备存活，发现已拔出则自释放并
      * 返回 -ENODEV，调用方不得入链。
      */
-    if (us->pusb_dev->state == USB_STATE_NOTATTACHED) {
+    if (us->pusb_dev->state == USB_STATE_NOTATTACHED)
+    {
         pr_warn(PREFIX "device unplugged during probe alloc, aborting\n");
         ida_free(&vendor_lechao_usbd_ida, minor);
         kfree(rate_dev);
@@ -670,7 +675,8 @@ int vendor_lechao_usbd_device_add_to_list(struct vendor_lechao_usbd_device *rate
     int ret;
 
     ret = atomic_notifier_chain_register(&rate_dev->us->notifier, &rate_dev->nb);
-    if (ret) {
+    if (ret)
+    {
         /*
          * 返回值检查：-EEXIST 表示 us_data 上已注册同名 notifier（重复 PROBE
          * 或 us_data 异常复用），本设备未注册成功，无资源可回滚，直接上报。
@@ -811,12 +817,15 @@ static int vendor_lechao_usbd_vendor_notifier(struct notifier_block *nb,
                 break;
             }
         }
-        if (!found) {
+        if (!found)
+        {
             new_dev = vendor_lechao_usbd_device_alloc(us);
-            if (IS_ERR(new_dev)) {
-                pr_warn(PREFIX "failed to alloc device: %ld\n",
-                        PTR_ERR(new_dev));
-            } else {
+            if (IS_ERR(new_dev))
+            {
+                pr_warn(PREFIX "failed to alloc device: %ld\n", PTR_ERR(new_dev));
+            }
+            else
+            {
                 /* R-06 方向 2：add_to_list 失败已自释放 new_dev，仅记录告警 */
                 if (vendor_lechao_usbd_device_add_to_list(new_dev))
                     pr_warn(PREFIX "failed to add device to list\n");
@@ -908,7 +917,8 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
     if (!udev->actconfig)
         return 0;
 
-    for (i = 0; i < udev->actconfig->desc.bNumInterfaces; i++) {
+    for (i = 0; i < udev->actconfig->desc.bNumInterfaces; i++)
+    {
         struct us_data *us;
         struct vendor_lechao_usbd_device *pos;
         struct vendor_lechao_usbd_device *new_dev = NULL;

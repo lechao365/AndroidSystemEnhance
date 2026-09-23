@@ -56,22 +56,22 @@ void installSignalHandlers() {
 // 读取段：单次 epoll 读 + 读计数 + 致命读错误处理
 // 返回原始读字节数；n<0 表示致命读错误（已打日志并累计 readErr，
 // 调用方须退出主循环交 init 重启）
-static ssize_t readOnce(DeviceReader& reader, uint8_t* buf, size_t bufSize,
-                        int timeoutMs, size_t& offset, uint64_t& readOk,
-                        uint64_t& readEmpty, uint64_t& readErr,
-                        uint64_t& msgTooBig,
-                        std::chrono::steady_clock::time_point& dataArrivedAt)
+static ssize_t readOnce(DeviceReader &reader, uint8_t *buf, size_t bufSize, int timeoutMs,
+                        size_t &offset, uint64_t &readOk, uint64_t &readEmpty, uint64_t &readErr,
+                        uint64_t &msgTooBig, std::chrono::steady_clock::time_point &dataArrivedAt)
 {
     ssize_t n = reader.waitAndRead(buf, offset, bufSize, timeoutMs);
     // R-07 方向 2：EMSGSIZE 专门信号（DeviceReader 返回 -EMSGSIZE）——
     // 内核有数据但剩余缓冲放不下首条记录。非致命：限频日志 + msgTooBig
     // 计数后透传，runMainLoop 据此强制 flush 清缓冲（offset>0 时）消忙轮询。
-    if (n == -EMSGSIZE) {
+    if (n == -EMSGSIZE)
+    {
         msgTooBig++;
         // CXX-003：限频日志防高频刷屏（EMSGSIZE 若持续触发属异常现场）
         static std::atomic<uint64_t> sMsgTooBigWarn;
         uint64_t count = sMsgTooBigWarn.fetch_add(1);
-        if (count % 100 == 0 || msgTooBig == 1) {
+        if (count % 100 == 0 || msgTooBig == 1)
+        {
             ALOGW("lechao_lcview: read EMSGSIZE (kernel record too big for "
                   "remaining buffer), msgTooBig=%llu offset=%zu",
                   static_cast<unsigned long long>(msgTooBig), offset);
@@ -103,14 +103,13 @@ static ssize_t readOnce(DeviceReader& reader, uint8_t* buf, size_t bufSize,
 // 守恒告警判定（方向 3/7）：dev = totalΔ - (overrunΔ + droppedΔ + writerDropΔ +
 // jsonlΔ + invalidΔ)，|dev| 超容差即判告警（正值：产生未落盘在途积压/丢记录；
 // 负值：落盘超过产生，重复落盘/计数漂移）。纯函数，供 emitHeartbeat 与单测共用。
-bool shouldAlarmConservation(uint64_t totalDelta, uint64_t overrunDelta,
-                             uint64_t droppedDelta, uint64_t writerDropDelta,
-                             uint64_t jsonlDelta, uint64_t invalidDelta,
+bool shouldAlarmConservation(uint64_t totalDelta, uint64_t overrunDelta, uint64_t droppedDelta,
+                             uint64_t writerDropDelta, uint64_t jsonlDelta, uint64_t invalidDelta,
                              int64_t tolerance)
 {
-    const int64_t dev = static_cast<int64_t>(totalDelta)
-        - static_cast<int64_t>(overrunDelta + droppedDelta + writerDropDelta
-                               + jsonlDelta + invalidDelta);
+    const int64_t dev = static_cast<int64_t>(totalDelta) -
+                        static_cast<int64_t>(overrunDelta + droppedDelta + writerDropDelta +
+                                             jsonlDelta + invalidDelta);
     return dev > tolerance || dev < -tolerance;
 }
 
@@ -118,16 +117,18 @@ bool shouldAlarmConservation(uint64_t totalDelta, uint64_t overrunDelta,
 // 语义见 main_loop.h ConserveBaseline::updateAndCheck 注释；实现把"ioctl
 // 失败跳过数值推进 / 首心跳建基线 / 后续心跳增量判定 + 推进"三态收口，
 // emitHeartbeat 不再内联守恒逻辑（可测边界），只消费 Result 打告警日志。
-ConserveBaseline::Result ConserveBaseline::updateAndCheck(const Sample& s)
+ConserveBaseline::Result ConserveBaseline::updateAndCheck(const Sample &s)
 {
     Result r;
-    if (s.ioctlErr != ioctlErr) {
+    if (s.ioctlErr != ioctlErr)
+    {
         // 方向 6：本轮 ioctl 失败，跳过守恒校验并仅推进 ioctlErr 基线；
         // 数值基线保持上次成功值（防失败返 0 失真）
         ioctlErr = s.ioctlErr;
         return r;
     }
-    if (!initialized) {
+    if (!initialized)
+    {
         // 首心跳（ioctl 成功）：建立基线，次心跳起按增量比较
         initialized = true;
         total = s.total;
@@ -142,7 +143,8 @@ ConserveBaseline::Result ConserveBaseline::updateAndCheck(const Sample& s)
     // 典型场景为内核模块重载/重启后计数器清零（uint32 回绕），此时旧基线是
     // 重载前大值，直接算增量会下溢成巨大值误报守恒破坏。检测到任一内核
     // 计数回退即放弃窗口增量判定，整体重建基线（同锚），防 uint64 回绕误报。
-    if (s.total < total || s.dropped < dropped) {
+    if (s.total < total || s.dropped < dropped)
+    {
         total = s.total;
         overrun = s.overrun;
         dropped = s.dropped;
@@ -156,16 +158,14 @@ ConserveBaseline::Result ConserveBaseline::updateAndCheck(const Sample& s)
     r.droppedDelta = static_cast<uint64_t>(s.dropped - dropped);
     r.writerDropDelta = static_cast<uint64_t>(s.writerDrop - writerDrop);
     r.jsonlDelta = static_cast<uint64_t>(s.persistedValid - persistedValid);
-    r.invalidDelta = static_cast<uint64_t>(s.persistedInvalid
-                                           - persistedInvalid);
+    r.invalidDelta = static_cast<uint64_t>(s.persistedInvalid - persistedInvalid);
     r.tolerance = computeConserveTolerance(s.ringSizeBytes);
-    r.dev = static_cast<int64_t>(r.totalDelta)
-        - static_cast<int64_t>(r.overrunDelta + r.droppedDelta
-                               + r.writerDropDelta + r.jsonlDelta
-                               + r.invalidDelta);
-    r.broken = shouldAlarmConservation(
-        r.totalDelta, r.overrunDelta, r.droppedDelta, r.writerDropDelta,
-        r.jsonlDelta, r.invalidDelta, r.tolerance);
+    r.dev = static_cast<int64_t>(r.totalDelta) -
+            static_cast<int64_t>(r.overrunDelta + r.droppedDelta + r.writerDropDelta +
+                                 r.jsonlDelta + r.invalidDelta);
+    r.broken =
+        shouldAlarmConservation(r.totalDelta, r.overrunDelta, r.droppedDelta, r.writerDropDelta,
+                                r.jsonlDelta, r.invalidDelta, r.tolerance);
     // 方向 6：每心跳推进数值基线（防 uint32 total_records 回绕）
     total = s.total;
     overrun = s.overrun;
@@ -179,55 +179,46 @@ ConserveBaseline::Result ConserveBaseline::updateAndCheck(const Sample& s)
 // 生产心跳 writer：格式化 HeartbeatFields 为 ALOGI 心跳行（原 emitHeartbeat
 // 内联 ALOGI 移此），供 runMainLoop 生产注入（liveness 判据 logfield 字段
 // 顺序与内容保持兼容，不得变更字段名；R-09 新增字段只追加行尾）。
-void LogHeartbeatWriter::write(const HeartbeatFields& hb)
+void LogHeartbeatWriter::write(const HeartbeatFields &hb)
 {
-    ALOGI("lechao_lcview: heartbeat, loop=%llu, overrun=%lld, dropped=%llu, "
-          "readErr=%llu, total_records=%llu, jsonl_records=%lld, "
-          "invalid_records=%lld, ioctl_err=%llu, eof=%llu, "
-          "drop_open=%llu drop_format=%llu drop_oob=%llu "
-          "drop_reopen=%llu drop_retry=%llu drop_invalid=%llu "
-          "drop_invalidwrite=%llu "
-          "drop_rotate=%llu drop_invrotate=%llu drop_rollback=%llu, "
-          "avg_format_us=%llu avg_write_us=%llu, "
-          "ring_usage=%uB/%uB window_peak=%lluB, "
-          "max_format_us=%llu max_write_us=%llu, "
-          "records/s=%llu bytes/s=%llu top_event=%u(%llu), "
-          "invalid_badlen=%lld invalid_schemadrift=%lld, "
-          "seq_gap=%llu seq_received=%llu seq_last=%u",
-          static_cast<unsigned long long>(hb.loop),
-          static_cast<long long>(hb.overrun),
-          static_cast<unsigned long long>(hb.dropped),
-          static_cast<unsigned long long>(hb.readErr),
-          static_cast<unsigned long long>(hb.totalRecords),
-          hb.jsonlRecords, hb.invalidRecords,
-          static_cast<unsigned long long>(hb.ioctlErr),
-          static_cast<unsigned long long>(hb.eofCount),
-          static_cast<unsigned long long>(hb.dropOpen),
-          static_cast<unsigned long long>(hb.dropFormat),
-          static_cast<unsigned long long>(hb.dropOob),
-          static_cast<unsigned long long>(hb.dropReopen),
-          static_cast<unsigned long long>(hb.dropRetry),
-          static_cast<unsigned long long>(hb.dropInvalid),
-          static_cast<unsigned long long>(hb.dropInvalidWrite),
-          static_cast<unsigned long long>(hb.dropRotate),
-          static_cast<unsigned long long>(hb.dropInvRotate),
-          static_cast<unsigned long long>(hb.dropRollback),
-          static_cast<unsigned long long>(hb.avgFormatUs),
-          static_cast<unsigned long long>(hb.avgWriteUs),
-          static_cast<unsigned>(hb.ringUsageBytes),
-          static_cast<unsigned>(hb.ringSizeBytes),
-          static_cast<unsigned long long>(hb.windowPeakBytes),
-          static_cast<unsigned long long>(hb.maxFormatUs),
-          static_cast<unsigned long long>(hb.maxWriteUs),
-          static_cast<unsigned long long>(hb.recordsPerSec),
-          static_cast<unsigned long long>(hb.bytesPerSec),
-          static_cast<unsigned>(hb.topEventId),
-          static_cast<unsigned long long>(hb.topEventCnt),
-          static_cast<long long>(hb.invalidBadLen),
-          static_cast<long long>(hb.invalidSchemaDrift),
-          static_cast<unsigned long long>(hb.seqGap),
-          static_cast<unsigned long long>(hb.seqReceived),
-          static_cast<unsigned>(hb.seqLast));
+    ALOGI(
+        "lechao_lcview: heartbeat, loop=%llu, overrun=%lld, dropped=%llu, "
+        "readErr=%llu, total_records=%llu, jsonl_records=%lld, "
+        "invalid_records=%lld, ioctl_err=%llu, eof=%llu, "
+        "drop_open=%llu drop_format=%llu drop_oob=%llu "
+        "drop_reopen=%llu drop_retry=%llu drop_invalid=%llu "
+        "drop_invalidwrite=%llu "
+        "drop_rotate=%llu drop_invrotate=%llu drop_rollback=%llu, "
+        "avg_format_us=%llu avg_write_us=%llu, "
+        "ring_usage=%uB/%uB window_peak=%lluB, "
+        "max_format_us=%llu max_write_us=%llu, "
+        "records/s=%llu bytes/s=%llu top_event=%u(%llu), "
+        "invalid_badlen=%lld invalid_schemadrift=%lld, "
+        "seq_gap=%llu seq_received=%llu seq_last=%u",
+        static_cast<unsigned long long>(hb.loop), static_cast<long long>(hb.overrun),
+        static_cast<unsigned long long>(hb.dropped), static_cast<unsigned long long>(hb.readErr),
+        static_cast<unsigned long long>(hb.totalRecords), hb.jsonlRecords, hb.invalidRecords,
+        static_cast<unsigned long long>(hb.ioctlErr), static_cast<unsigned long long>(hb.eofCount),
+        static_cast<unsigned long long>(hb.dropOpen),
+        static_cast<unsigned long long>(hb.dropFormat), static_cast<unsigned long long>(hb.dropOob),
+        static_cast<unsigned long long>(hb.dropReopen),
+        static_cast<unsigned long long>(hb.dropRetry),
+        static_cast<unsigned long long>(hb.dropInvalid),
+        static_cast<unsigned long long>(hb.dropInvalidWrite),
+        static_cast<unsigned long long>(hb.dropRotate),
+        static_cast<unsigned long long>(hb.dropInvRotate),
+        static_cast<unsigned long long>(hb.dropRollback),
+        static_cast<unsigned long long>(hb.avgFormatUs),
+        static_cast<unsigned long long>(hb.avgWriteUs), static_cast<unsigned>(hb.ringUsageBytes),
+        static_cast<unsigned>(hb.ringSizeBytes),
+        static_cast<unsigned long long>(hb.windowPeakBytes),
+        static_cast<unsigned long long>(hb.maxFormatUs),
+        static_cast<unsigned long long>(hb.maxWriteUs),
+        static_cast<unsigned long long>(hb.recordsPerSec),
+        static_cast<unsigned long long>(hb.bytesPerSec), static_cast<unsigned>(hb.topEventId),
+        static_cast<unsigned long long>(hb.topEventCnt), static_cast<long long>(hb.invalidBadLen),
+        static_cast<long long>(hb.invalidSchemaDrift), static_cast<unsigned long long>(hb.seqGap),
+        static_cast<unsigned long long>(hb.seqReceived), static_cast<unsigned>(hb.seqLast));
 }
 
 // 心跳段（每 30 loop）：直读内核 overrun/total_records，
@@ -244,22 +235,19 @@ void LogHeartbeatWriter::write(const HeartbeatFields& hb)
 // R-03 方向 3：去 static 并入头声明（main_loop.h）——emitHeartbeat 成为
 // 可测边界，单测直调生产函数注入 FakeDeviceReader + FileWriter，断言字段
 // 真实透传到 writer（原单测只构造 HeartbeatFields 直写，不覆盖收集逻辑）。
-void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
-                   FileWriter& writer, int64_t& overrunAccum,
-                   uint64_t readErr,
-                   long long jsonlRecords, long long invalidRecords,
-                   ConserveBaseline& conserve, IHeartbeatWriter& out,
-                   const WindowStats& window)
+void emitHeartbeat(uint64_t loopCount, DeviceReader &reader, FileWriter &writer,
+                   int64_t &overrunAccum, uint64_t readErr, long long jsonlRecords,
+                   long long invalidRecords, ConserveBaseline &conserve, IHeartbeatWriter &out,
+                   const WindowStats &window)
 {
     uint32_t ov = reader.getOverrun();
     overrunAccum += ov;
     const FileWriter::DropCounters& dc = writer.dropCounters();
     // 方向 3：dropped 求和纳入 dropRotate/dropInvRotate/dropRollback——
     // 轮转/回滚失败也属丢记录（或半行残留风险），须进心跳求和与分项
-    uint64_t dropped = static_cast<uint64_t>(dc.openFailed)
-        + dc.formatEmpty + dc.formatOob + dc.reopenFailed
-        + dc.retryFailed + dc.invalidNotOpen + dc.invalidWriteFailed
-        + dc.dropRotate + dc.dropInvRotate + dc.dropRollback;
+    uint64_t dropped = static_cast<uint64_t>(dc.openFailed) + dc.formatEmpty + dc.formatOob +
+                       dc.reopenFailed + dc.retryFailed + dc.invalidNotOpen +
+                       dc.invalidWriteFailed + dc.dropRotate + dc.dropInvRotate + dc.dropRollback;
     // 重启适配 + 防回绕 + ioctl 失败跳过（方向 6）：基线移 runMainLoop
     // 局部（ConserveBaseline）并按心跳推进——daemon 重启后内核累计不归零
     // 而进程内计数归零，须增量比较；相邻心跳窗口比较使 uint32 total 永不
@@ -273,21 +261,21 @@ void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
     const uint64_t total = reader.getTotalRecords();
     const uint64_t kernDropped = reader.getDropped();
     const uint32_t ringSize = reader.getRingSizeBytes();
-    const FileWriter::PersistCounters& pc = writer.persistCounters();
+    const FileWriter::PersistCounters &pc = writer.persistCounters();
     // R-02 方向 3：守恒逻辑收口到 ConserveBaseline::updateAndCheck（纯函数，
     // 单测可注入 Sample 覆盖三态 + 正负向告警）；Result.broken 即守恒破坏，
     // 告警详情直接引用 Result 各项增量（不做外部反推，防推进后基线差失真）。
     ConserveBaseline::Sample sample = {
-        total, overrunAccum, kernDropped, dropped, reader.ioctlErr(),
-        pc.valid, pc.invalid, ringSize,
+        total,    overrunAccum, kernDropped, dropped, reader.ioctlErr(),
+        pc.valid, pc.invalid,   ringSize,
     };
     const ConserveBaseline::Result cr = conserve.updateAndCheck(sample);
-    if (cr.broken) {
+    if (cr.broken)
+    {
         ALOGE("lechao_lcview: CONSERVATION BROKEN: dev=%lld (tol=%lld), "
               "total_delta=%llu overrun_delta=%llu dropped_delta=%llu "
               "writer_drop_delta=%llu jsonl_delta=%llu invalid_delta=%llu",
-              static_cast<long long>(cr.dev),
-              static_cast<long long>(cr.tolerance),
+              static_cast<long long>(cr.dev), static_cast<long long>(cr.tolerance),
               static_cast<unsigned long long>(cr.totalDelta),
               static_cast<unsigned long long>(cr.overrunDelta),
               static_cast<unsigned long long>(cr.droppedDelta),
@@ -359,12 +347,11 @@ void emitHeartbeat(uint64_t loopCount, DeviceReader& reader,
 // 500ms 滞留窗到期——攒出的批次 = 4B 长度前缀 + 二进制记录序列
 // （判定抽入 batch_parser::shouldFlushBatch，原 hal_test readerLoop
 // flush 语义并入 daemon 单测覆盖）
-static void flushSegment(DeviceReader& reader, SchemaParser& schema,
-                         FileWriter& writer, const uint8_t* buf, size_t& offset,
-                         std::chrono::steady_clock::time_point& dataArrivedAt,
-                         uint64_t& flushCount, long long& jsonlRecords,
-                         long long& invalidRecords, ssize_t n,
-                         size_t bufSize, WindowStats& window)
+static void flushSegment(DeviceReader &reader, SchemaParser &schema, FileWriter &writer,
+                         const uint8_t *buf, size_t &offset,
+                         std::chrono::steady_clock::time_point &dataArrivedAt, uint64_t &flushCount,
+                         long long &jsonlRecords, long long &invalidRecords, ssize_t n,
+                         size_t bufSize, WindowStats &window)
 {
     static constexpr auto kMaxBufferAge = std::chrono::milliseconds(500);
     bool timedOut = (n == 0);
@@ -458,19 +445,19 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
         // 先强制落盘清空缓冲，令 read 的 cap-offset 恒 >= kMinReadSize，
         // 根治内核侧 -EINVAL 触发的主循环退出重启环
         if (shouldPreventiveFlush(offset, kBufSize, kMinReadSize)) {
-            flushSegment(reader, schema, writer, buf, offset, dataArrivedAt,
-                         flushCount, jsonlRecords, invalidRecords, 0, kBufSize, window);
+            flushSegment(reader, schema, writer, buf, offset, dataArrivedAt, flushCount,
+                         jsonlRecords, invalidRecords, 0, kBufSize, window);
         }
 
-        ssize_t n = readOnce(reader, buf, kBufSize, kEpollTimeoutMs, offset,
-                             readOk, readEmpty, readErr, msgTooBig,
-                             dataArrivedAt);
+        ssize_t n = readOnce(reader, buf, kBufSize, kEpollTimeoutMs, offset, readOk, readEmpty,
+                             readErr, msgTooBig, dataArrivedAt);
         loopCount++;
 
         // R-09 方向 1：窗口峰值字节与累计读字节（n>0 为本轮读到数据；
         // EMSGSIZE/负值不累计）。峰值反映单次读的最大包（读快慢/积压
         // 直观），累计字节为窗口速率分子
-        if (n > 0) {
+        if (n > 0)
+        {
             window.windowReadBytes += static_cast<uint64_t>(n);
             if (static_cast<uint64_t>(n) > window.peakReadBytes)
                 window.peakReadBytes = static_cast<uint64_t>(n);
@@ -483,11 +470,12 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
         // 消除。offset==0 时缓冲本已空，内核仍报 EMSGSIZE 属真超限（单条
         // 记录 > 缓冲上限，LCVIEW_BUILDER_MAX_SIZE 契约约束），flush 无
         // 意义，直接继续（下轮 epoll 仍可读则持续计数，现场可见）。
-        if (n == -EMSGSIZE) {
-            if (offset > 0) {
-                flushSegment(reader, schema, writer, buf, offset, dataArrivedAt,
-                             flushCount, jsonlRecords, invalidRecords, 0,
-                             kBufSize, window);
+        if (n == -EMSGSIZE)
+        {
+            if (offset > 0)
+            {
+                flushSegment(reader, schema, writer, buf, offset, dataArrivedAt, flushCount,
+                             jsonlRecords, invalidRecords, 0, kBufSize, window);
             }
             continue;
         }
@@ -495,8 +483,8 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
         if (n < 0) {
             // 方向 2：致命读错误退出前强制落盘缓冲残留，不丢已收数据
             if (shouldFlushOnExit(offset)) {
-                flushSegment(reader, schema, writer, buf, offset, dataArrivedAt,
-                             flushCount, jsonlRecords, invalidRecords, 0, kBufSize, window);
+                flushSegment(reader, schema, writer, buf, offset, dataArrivedAt, flushCount,
+                             jsonlRecords, invalidRecords, 0, kBufSize, window);
             }
             return 1;  // 致命读错误：readOnce 已打日志，退出交 init 重启
         }
@@ -506,9 +494,8 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
         // 负载解耦，静默期/高负载期都恒 30s 一发）
         auto now = std::chrono::steady_clock::now();
         if (now - lastBeatAt >= std::chrono::seconds(30)) {
-            emitHeartbeat(loopCount, reader, writer, overrunAccum, readErr,
-                          jsonlRecords, invalidRecords, conserve,
-                          heartbeatWriter, window);
+            emitHeartbeat(loopCount, reader, writer, overrunAccum, readErr, jsonlRecords,
+                          invalidRecords, conserve, heartbeatWriter, window);
             // R-09 方向 1/3/4：心跳窗口已消费（峰值/速率/分类进 hb），
             // 重置窗口累计供下个窗口独立统计
             window.reset();
@@ -525,8 +512,8 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
                   static_cast<unsigned long long>(flushCount));
         }
 
-        flushSegment(reader, schema, writer, buf, offset, dataArrivedAt,
-                     flushCount, jsonlRecords, invalidRecords, n, kBufSize, window);
+        flushSegment(reader, schema, writer, buf, offset, dataArrivedAt, flushCount, jsonlRecords,
+                     invalidRecords, n, kBufSize, window);
     }
 
     ALOGI("lechao_lcview: exiting, readOk=%llu readEmpty=%llu readErr=%llu "
@@ -537,8 +524,8 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
           static_cast<unsigned long long>(flushCount));
     // 方向 2：优雅退出前强制落盘缓冲残留，不丢已收数据
     if (shouldFlushOnExit(offset)) {
-        flushSegment(reader, schema, writer, buf, offset, dataArrivedAt,
-                     flushCount, jsonlRecords, invalidRecords, 0, kBufSize, window);
+        flushSegment(reader, schema, writer, buf, offset, dataArrivedAt, flushCount, jsonlRecords,
+                     invalidRecords, 0, kBufSize, window);
     }
     return 0;
 }

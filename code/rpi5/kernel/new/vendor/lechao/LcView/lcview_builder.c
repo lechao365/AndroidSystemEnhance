@@ -66,10 +66,7 @@ static struct lcview_builder *builder_pool_slot;
 static atomic_t producer_dropped_cnt = ATOMIC_INIT(0);
 
 /* 生产端丢弃计数 +1（builder kmalloc 失败与 level 过滤共用） */
-void lcview_builder_producer_dropped_inc(void)
-{
-    atomic_inc(&producer_dropped_cnt);
-}
+void lcview_builder_producer_dropped_inc(void) { atomic_inc(&producer_dropped_cnt); }
 
 /* 读取生产端丢弃累计（sysfs 导出用；只读不清零，与 total_records 同语义） */
 uint32_t lcview_builder_producer_dropped_get(void)
@@ -94,10 +91,7 @@ static uint32_t lcview_next_event_seq(void)
 }
 
 /* 读取当前事件序号游标（gap 判定/诊断用；只读递增不消费） */
-uint64_t lcview_event_seq_cur(void)
-{
-    return (uint64_t)atomic64_read(&event_seq_gen);
-}
+uint64_t lcview_event_seq_cur(void) { return (uint64_t)atomic64_read(&event_seq_gen); }
 
 static inline struct lcview_builder *builder_pool_get(void)
 {
@@ -160,15 +154,19 @@ struct lcview_builder *lcview_builder_new(uint16_t event_id, uint8_t level)
 
     /* KRN-006：先取空闲池，未命中再走 GFP_ATOMIC 分配 */
     b = builder_pool_get();
-    if (b) {
+    if (b)
+    {
         /* R-12 方向 1：池命中复用对象——buf 数据区由 add_* 从 data_offset
          * 起覆盖写入、commit 按 data_offset 截断（total_len），旧残留不会
          * 进入 ring；仅重置元数据与偏移，消原子上下文整块 ~4KB memset
          * （I/O 热路径每命令一次，清零开销不可忽略）。新分配（kmalloc）
          * 仍需整块清零初始化。 */
-    } else {
+    }
+    else
+    {
         b = kmalloc(sizeof(*b), GFP_ATOMIC);
-        if (!b) {
+        if (!b)
+        {
             /* KRN-014：GFP_ATOMIC 失败在内存压力下可高频出现，限频防日志风暴 */
             pr_err_ratelimited(PREFIX "kmalloc failed for event_id=%u\n", event_id);
             /* R-07 方向 1：builder kmalloc 失败计入 producer_dropped_cnt——
@@ -445,15 +443,13 @@ int lcview_builder_commit(struct lcview_builder *b, struct lcview_ring *ring)
      */
     ret = lcview_ring_write(ring, b->buf, total_len);
     if (ret == 0) {
-        LC_DBG("committed event_id=%u level=%u fields=%u len=%u ts=%llu seq=%u\n",
-                 b->event_id, b->level, b->field_count,
-                 total_len, hdr.timestamp_ns, hdr.seq_no);
+        LC_DBG("committed event_id=%u level=%u fields=%u len=%u ts=%llu seq=%u\n", b->event_id,
+               b->level, b->field_count, total_len, hdr.timestamp_ns, hdr.seq_no);
         b->committed = true;
         lcview_builder_free(b);
     } else {
         /* KRN-014：commit 失败在环满/I/O 洪水时可每条命令触发，限频防日志风暴 */
-        pr_warn_ratelimited(PREFIX "commit failed event_id=%u err=%d\n",
-                            b->event_id, ret);
+        pr_warn_ratelimited(PREFIX "commit failed event_id=%u err=%d\n", b->event_id, ret);
     }
 
     return ret;

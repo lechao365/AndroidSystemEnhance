@@ -88,9 +88,9 @@ public:
         uint64_t retryFailed = 0;    // 恢复后重试二次写失败
         uint64_t invalidNotOpen = 0; // invalid 事件流未打开
         uint64_t invalidWriteFailed = 0; // invalid 写失败恢复后仍失败（reopen/retry）
-        uint64_t dropRotate = 0;     // checkRotation 轮转后重开新文件失败（方向 3）
-        uint64_t dropInvRotate = 0;  // invalid 轮转失败（rename/reopen 任一失败，方向 3）
-        uint64_t dropRollback = 0;   // 写失败恢复回退截断失败（rollbackFileTo，方向 3）
+        uint64_t dropRotate = 0;    // checkRotation 轮转后重开新文件失败（方向 3）
+        uint64_t dropInvRotate = 0; // invalid 轮转失败（rename/reopen 任一失败，方向 3）
+        uint64_t dropRollback = 0; // 写失败恢复回退截断失败（rollbackFileTo，方向 3）
         uint64_t dropBatchFlush = 0; // R-08 方向 2：批次尾 flush 失败整批回滚（文件级计数）
     };
     // 返回当前累计的 DROP 计数（心跳输出用）
@@ -101,11 +101,12 @@ public:
     // writeRecord 内部 DROP（openFile 失败 / formatEmpty 等）时仍 +1，
     // 守恒右式用它会高估落盘，dev 恒向负偏（落盘超产生误报）。落盘计数
     // 只在 flush 成功后累计，与磁盘真实一致
-    struct PersistCounters {
-        uint64_t valid = 0;    // 合法记录成功落盘数
-        uint64_t invalid = 0;  // 非法记录成功落盘数（invalid_records.log）
+    struct PersistCounters
+    {
+        uint64_t valid = 0;   // 合法记录成功落盘数
+        uint64_t invalid = 0; // 非法记录成功落盘数（invalid_records.log）
     };
-    const PersistCounters& persistCounters() const { return mPersist; }
+    const PersistCounters &persistCounters() const { return mPersist; }
 
     // 刷活跃文件落盘（方向 5）：心跳 30s 同锚调用，对全部已打开的事件
     // 文件与 invalid 流按路径 fdatasync（flush 只到内核页缓存，崩溃/断电
@@ -121,8 +122,8 @@ public:
         uint64_t writeCount = 0;    // writeRecord 落盘次数（含恢复重试）
         uint64_t writeTotalUs = 0;  // writeRecord 累计耗时（微秒，不含 format）
         // R-09 方向 2：累计 max（自 daemon 启动起，尾延迟上界可见）
-        uint64_t formatMaxUs = 0;   // formatJsonLine 单条最大耗时（微秒）
-        uint64_t writeMaxUs = 0;    // writeRecord 单条最大耗时（微秒）
+        uint64_t formatMaxUs = 0; // formatJsonLine 单条最大耗时（微秒）
+        uint64_t writeMaxUs = 0;  // writeRecord 单条最大耗时（微秒）
     };
     const WriteTimings& writeTimings() const { return mTimings; }
 
@@ -130,24 +131,28 @@ public:
     // 固定数组，超过末桶并入末桶（饱和计数）。桶边界按典型写路径量级
     // 设定：format 单条 ~几~几十微秒，write 单条 ~几十~几百微秒（含
     // 恢复重试可到毫秒级）；用对数递增覆盖两个量级。
-    struct LatencyHistogram {
+    struct LatencyHistogram
+    {
         static constexpr size_t kBuckets = 6;
         // 桶边界（微秒）：<1, <5, <20, <100, <500, >=500（饱和末桶）
         static constexpr uint64_t kBoundsUs[kBuckets - 1] = {
             1, 5, 20, 100, 500,
         };
-        uint64_t formatBuckets[kBuckets] = {};  // formatJsonLine 耗时分布
-        uint64_t writeBuckets[kBuckets] = {};   // writeRecord 耗时分布
+        uint64_t formatBuckets[kBuckets] = {}; // formatJsonLine 耗时分布
+        uint64_t writeBuckets[kBuckets] = {};  // writeRecord 耗时分布
 
         // 按耗时（微秒）累加到对应桶（越界钳制到末桶）
-        static size_t bucketFor(uint64_t us) {
+        static size_t bucketFor(uint64_t us)
+        {
             for (size_t i = 0; i < kBuckets - 1; ++i)
-                if (us < kBoundsUs[i]) return i;
+                if (us < kBoundsUs[i])
+                    return i;
             return kBuckets - 1;
         }
         void recordFormat(uint64_t us) { formatBuckets[bucketFor(us)]++; }
         void recordWrite(uint64_t us) { writeBuckets[bucketFor(us)]++; }
-        void reset() {
+        void reset()
+        {
             for (size_t i = 0; i < kBuckets; ++i)
                 formatBuckets[i] = writeBuckets[i] = 0;
         }
@@ -156,7 +161,8 @@ public:
     // 写路径延迟窗口快照（R-09 方向 2）：取并重置窗口内 max 与直方图，
     // 供心跳按 30s 窗口输出。累计 max/计数无法从两次累计快照差还原
     // 窗口 max，须由本方法在窗口边界重置（对齐 ConserveBaseline 模式）。
-    struct WindowLatency {
+    struct WindowLatency
+    {
         uint64_t formatMaxUs = 0;   // 窗口内 formatJsonLine 单条最大耗时
         uint64_t writeMaxUs = 0;    // 窗口内 writeRecord 单条最大耗时
         LatencyHistogram histogram; // 窗口内延迟直方图
@@ -167,20 +173,31 @@ public:
     // R-09 方向 3：event_id 分布统计（容量规划有据）。writeRecord 成功
     // 落盘时按 schema.id 累计；心跳取并重置窗口分布。槽位上限 64（事件
     // id 合法范围上界，越界忽略——validate 已保证 event_id 合法）。
-    struct EventDist {
+    struct EventDist
+    {
         static constexpr size_t kSlots = 64;
         uint64_t counts[kSlots] = {};
-        void record(uint32_t eventId) {
-            if (eventId < kSlots) counts[eventId]++;
+        void record(uint32_t eventId)
+        {
+            if (eventId < kSlots)
+                counts[eventId]++;
         }
-        void reset() {
-            for (size_t i = 0; i < kSlots; ++i) counts[i] = 0;
+        void reset()
+        {
+            for (size_t i = 0; i < kSlots; ++i)
+                counts[i] = 0;
         }
         // 取窗口 top event（出现次数最多者；全 0 返 (0,0)）
-        void top(uint32_t& id, uint64_t& cnt) const {
-            id = 0; cnt = 0;
+        void top(uint32_t &id, uint64_t &cnt) const
+        {
+            id = 0;
+            cnt = 0;
             for (size_t i = 0; i < kSlots; ++i)
-                if (counts[i] > cnt) { id = static_cast<uint32_t>(i); cnt = counts[i]; }
+                if (counts[i] > cnt)
+                {
+                    id = static_cast<uint32_t>(i);
+                    cnt = counts[i];
+                }
         }
     };
     // 返回并重置窗口 event 分布（emitHeartbeat 每心跳调用）
@@ -193,31 +210,46 @@ public:
     // FileWriter DROP / 读端漏读），把"丢事件量"从守恒 dev 中独立成可观测
     // 指标（NTP 回拨时 ts 不可作排序基，seq 定序可靠）。
     // seq==0 视为旧内核记录（无 seq 语义）不计入，防新旧内核混跑误报。
-    struct SeqGapStats {
-        uint64_t count = 0;     // 窗口内收到（含 seq 语义）的记录条数
-        uint32_t firstSeq = 0;  // 窗口内最小 seq_no
-        uint32_t lastSeq = 0;   // 窗口内最大 seq_no
-        uint32_t seqWrap = 0;   // 窗口内检测到 u32 回绕次数（seq 减小）
-        void reset() {
-            count = 0; firstSeq = 0; lastSeq = 0; seqWrap = 0;
+    struct SeqGapStats
+    {
+        uint64_t count = 0;    // 窗口内收到（含 seq 语义）的记录条数
+        uint32_t firstSeq = 0; // 窗口内最小 seq_no
+        uint32_t lastSeq = 0;  // 窗口内最大 seq_no
+        uint32_t seqWrap = 0;  // 窗口内检测到 u32 回绕次数（seq 减小）
+        void reset()
+        {
+            count = 0;
+            firstSeq = 0;
+            lastSeq = 0;
+            seqWrap = 0;
         }
         // 记录一条 seq（0 忽略——无 seq 语义的旧内核记录不参与 gap 统计）
-        void record(uint32_t seq) {
-            if (seq == 0) return;
-            if (count == 0) {
+        void record(uint32_t seq)
+        {
+            if (seq == 0)
+                return;
+            if (count == 0)
+            {
                 firstSeq = lastSeq = seq;
-            } else if (seq >= lastSeq) {
+            }
+            else if (seq >= lastSeq)
+            {
                 lastSeq = seq;
-            } else {
-                seqWrap++;   // 回绕（内核重启或 u32 归零）
-                if (firstSeq == 0 || seq < firstSeq) firstSeq = seq;
+            }
+            else
+            {
+                seqWrap++; // 回绕（内核重启或 u32 归零）
+                if (firstSeq == 0 || seq < firstSeq)
+                    firstSeq = seq;
                 lastSeq = seq;
             }
             count++;
         }
         // 窗口内序列间隙（回绕时不精确，仅累计不判红；无记录返 0）
-        uint64_t gap() const {
-            if (count == 0) return 0;
+        uint64_t gap() const
+        {
+            if (count == 0)
+                return 0;
             uint64_t span = static_cast<uint64_t>(lastSeq) - firstSeq + 1;
             return (span > count) ? (span - count) : 0;
         }
@@ -244,7 +276,7 @@ public:
     // 本批次触碰的事件文件数（endBatch flush 判空用，0=空批直接返回）
     bool hasBatchTouched() const { return !mBatchStarts.empty(); }
 
-private:
+  private:
     // 根据 event schema、日期和轮转序号生成文件名
     std::string makeFilename(const EventSchema& schema, const std::string& date, int seq);
     // 获取当前日期的 YYYYMMDD 字符串
@@ -304,17 +336,17 @@ private:
     int nextInvalidSeqFor(const std::string& date);
     // 按路径 fdatasync（方向 5）：open + fdatasync + close，尽力而为，
     // 失败 ALOGE（心跳周期短，静默不刷即丢数据，须可见）
-    static void fsyncFileByPath(const std::string& path);
+    static void fsyncFileByPath(const std::string &path);
     // 打开文件后修复残留半行（方向 4）：末字节非换行说明上次异常退出
     // 留下半行，截断至最后一个换行，避免半行与后续行粘连成非法 JSONL。
     // 返回修复后文件字节数（供恢复 currentSize/mInvalidSize）
-    static size_t truncateToLastNewline(const std::string& path);
+    static size_t truncateToLastNewline(const std::string &path);
     // 回退文件到指定偏移（写失败恢复前截断残留半行）。返回回退后文件
     // 真实大小（fstat），供调用方校准 currentSize/mInvalidSize——内存计数
     // 与磁盘实际不一致会导致后续追加/轮转判定基于失真值而误截（方向 2）。
     // 失败返回 SIZE_MAX（调用方保持原计数）并累计 dropRollback（方向 3，
     // 回滚失败也须可见，进心跳 dropped 求和）
-    size_t rollbackFileTo(const std::string& path, size_t offset);
+    size_t rollbackFileTo(const std::string &path, size_t offset);
 
     // 日志目录扫描结果：路径 + mtime + size（enforceRetention 淘汰用）。
     // R-10 方向 4：dev/ino 为文件 inode 标识——evictOldFiles 以 inode 集合

@@ -100,13 +100,16 @@ class TestSelfcheckWorkflow(unittest.TestCase):
                           run_steps)
 
     def test_host_tests_job_static_check_diff_driven(self):
-        # P0-B：C/C++ 静态检查须 diff 驱动（相对 origin/main，无改动跳过）——
-        # 存量 code/ 文件不强制归一（避免 RECEIPT_MISSING 推送门禁）
+        # P0-B：C/C++ 静态检查须 diff 行级驱动（相对 origin/main，无改动跳过）——
+        # 存量 code/ 文件不强制归一（避免 RECEIPT_MISSING 推送门禁）。git-clang-format
+        # 仅校验 diff 触及的改动行（@@ 存在即判红），整文件 clang-format --Werror
+        # 会把存量格式问题一并判红，导致改过存量的文件永远无法推送。
         job = self.doc["jobs"]["host-tests"]
         run_steps = "\n".join(s.get("run", "") for s in job["steps"])
         self.assertIn("git fetch --quiet origin main", run_steps)
         self.assertIn("git diff --name-only", run_steps)
-        self.assertIn("clang-format --dry-run --Werror", run_steps)
+        self.assertIn("git clang-format --diff origin/main", run_steps)
+        self.assertIn("grep -q '^@@'", run_steps)
         self.assertIn("clang-tidy", run_steps)
 
     def test_host_tests_job_installs_clang_tools(self):

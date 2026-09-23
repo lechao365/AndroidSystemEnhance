@@ -83,12 +83,12 @@ struct lcview_ring {
      * 回绕风险真实存在；升 u64 后 daemon 侧无需再防 uint32 回绕（内核
      * 重载检测仍保留）。overrun_cnt 边读边清（增量语义）但同升 u64
      * 一劳永逸，dropped_cnt 不清零累计同 total 生命周期同风险。 */
-    atomic64_t    overrun_cnt; /* 溢出逐出累计计数（边读边清） */
-    atomic64_t    total_records; /* 累计写入记录数（仅统计，不清零） */
-    atomic64_t    dropped_cnt; /* ENOSPC 丢弃累计计数（方向 7：驱逐预算超限丢弃，
-                                * 与 total_records 同步递增——该记录同样被内核收到，
-                                * 守恒左式 totalΔ = overrunΔ + droppedΔ + jsonlΔ + invalidΔ
-                                * 由此闭合，避免丢弃时守恒负向误报） */
+    atomic64_t overrun_cnt;   /* 溢出逐出累计计数（边读边清） */
+    atomic64_t total_records; /* 累计写入记录数（仅统计，不清零） */
+    atomic64_t dropped_cnt;   /* ENOSPC 丢弃累计计数（方向 7：驱逐预算超限丢弃，
+                               * 与 total_records 同步递增——该记录同样被内核收到，
+                               * 守恒左式 totalΔ = overrunΔ + droppedΔ + jsonlΔ + invalidΔ
+                               * 由此闭合，避免丢弃时守恒负向误报） */
     /* 说明：R-07 方向 1 的 producer_dropped_cnt 不再放本结构——builder kmalloc
      * 失败点（lcview_builder.c）与 level 过滤点（lcview_main.c）计数，host 单测
      * 编 builder.c 不编 lcview_main.c（无全局 lcview_ring 实体），若挂在 ring 结构
@@ -96,10 +96,10 @@ struct lcview_ring {
      * getter/setter 导出（见 lcview_builder_producer_dropped_*），经 sysfs 导出
      * 供守恒右式吸收，不动 struct lcview_stats 防 ABI 断言破坏。 */
     spinlock_t    lock;        /* 保护 write_pos/read_pos 的自旋锁 */
-    struct mutex  read_mutex;  /* 串行化 read 调用（方向 3）：并发读者防 read_pos 撕裂 */
+    struct mutex read_mutex; /* 串行化 read 调用（方向 3）：并发读者防 read_pos 撕裂 */
     wait_queue_head_t waitq;   /* 读取等待队列，写完后 wake_up 唤醒 reader */
     bool          shutdown;    /* destroy 标记，通知等待中的 reader 退出 */
-    atomic_t      readers;     /* 在途读调用计数，destroy 等其归零再释放内存（防 UAF） */
+    atomic_t readers; /* 在途读调用计数，destroy 等其归零再释放内存（防 UAF） */
     wait_queue_head_t exit_wait; /* 读调用归零等待队列，destroy 睡眠等所有 reader 退出 */
 };
 
@@ -134,9 +134,9 @@ struct lcview_builder {
  * 通过 LCVIEW_GET_STATS ioctl 返回给用户态
  */
 struct lcview_stats {
-    uint64_t total_records;    /* 累计写入记录总数（含 ENOSPC 丢弃，见 lcview_ring_write） */
-    uint64_t overrun_cnt;      /* 溢出逐出记录数 */
-    uint64_t dropped_cnt;      /* ENOSPC 丢弃累计（方向 7：驱逐预算超限丢弃，只读不清零） */
+    uint64_t total_records; /* 累计写入记录总数（含 ENOSPC 丢弃，见 lcview_ring_write） */
+    uint64_t overrun_cnt; /* 溢出逐出记录数 */
+    uint64_t dropped_cnt; /* ENOSPC 丢弃累计（方向 7：驱逐预算超限丢弃，只读不清零） */
     uint32_t ring_usage_bytes; /* 当前已使用字节数 */
     uint32_t ring_size_bytes;  /* 环形缓冲区总大小 */
 };

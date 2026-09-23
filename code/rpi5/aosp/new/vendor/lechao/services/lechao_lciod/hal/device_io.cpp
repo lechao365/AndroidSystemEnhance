@@ -182,8 +182,8 @@ int clamp_read_timeout_ms(int timeout_ms) {
  *
  * 返回: 0 成功（至少读到 1 条），-1 超时或读取失败
  */
-int read_event(int fd, struct vendor_lechao_usbd_event *event, int timeout_ms,
-               uint32_t *dropped) {
+int read_event(int fd, struct vendor_lechao_usbd_event *event, int timeout_ms, uint32_t *dropped)
+{
     struct pollfd pfd = { .fd = fd, .events = POLLIN };
     /* LCD-016：poll EINTR 重试而非报错——信号打断是瞬时噪声，原实现
      * 直接 -1 会被上层白名单外判为真实错误层层上抛，monitor 50ms 轮询
@@ -244,13 +244,16 @@ int read_event(int fd, struct vendor_lechao_usbd_event *event, int timeout_ms,
         // 原实现落 EAGAIN 会把设备关闭伪装成"暂无事件"（上层白名单内判绿）
         saved_errno = EIO;
 
-    if (count > 1) {
+    if (count > 1)
+    {
         /* R-11 方向 4：丢弃条数透出（非空指针时），日志保留供现场追溯 */
         if (dropped)
             *dropped = (uint32_t)(count - 1);
         LC_LOGW("read_event: drained " << count << " events from kernel, "
                      << (count - 1) << " dropped");
-    } else if (dropped) {
+    }
+    else if (dropped)
+    {
         /* 单条/无丢弃路径也确定性置 0，调用方避免读到残留值 */
         *dropped = 0;
     }

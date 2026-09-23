@@ -49,8 +49,8 @@ uint64_t ComputeKbRate(uint64_t bytes, uint64_t ns);
  * 回退语义: 无快照（新接入，prev 为 0）或计数回绕（curr < prev，容器/环
  * 重置）时返回全程累计速率（等同旧行为，不产生假低谷）。
  */
-uint64_t ComputeWindowKbRate(uint64_t currBytes, uint64_t currNs,
-                             uint64_t prevBytes, uint64_t prevNs);
+uint64_t ComputeWindowKbRate(uint64_t currBytes, uint64_t currNs, uint64_t prevBytes,
+                             uint64_t prevNs);
 
 /*
  * ProjectSystemIoStats — vendor IoStats → system IoStats 字段投影（纯函数，供单测）

@@ -65,7 +65,7 @@ static void test_add_str_callsite_overflow(void)
      * 栈缓冲导致 strlen 越界读（UB），长度不可预期用例失效。 */
     char blob[4075];
     memset(blob, 'x', 4074);
-    blob[4074] = '\0';   /* strlen = 4074 → 4+3+4074 = 4097 > 4096 → -ENOSPC */
+    blob[4074] = '\0'; /* strlen = 4074 → 4+3+4074 = 4097 > 4096 → -ENOSPC */
     int rc = lcview_builder_add_str(b, blob);
     CHECK(rc == -ENOSPC);
 
@@ -108,7 +108,7 @@ static void test_add_str_callsite_boundary(void)
 
     char blob[4078];
     memset(blob, 'y', 4077);
-    blob[4077] = '\0';   /* strlen = 4077（补 NUL 防 strlen 越界 UB） */
+    blob[4077] = '\0'; /* strlen = 4077（补 NUL 防 strlen 越界 UB） */
     /* data_offset=32（R-13 方向 2 hdr 扩容）：4(前缀)+3(type/len)+4077 =
      * 4116 > 4096 → -ENOSPC */
     int rc = lcview_builder_add_str(b, blob);
@@ -118,7 +118,7 @@ static void test_add_str_callsite_boundary(void)
      * 从 4073 下调到 4057） */
     char small[4058];
     memset(small, 'z', 4057);
-    small[4057] = '\0';  /* strlen = 4057（补 NUL 防 strlen 越界 UB） */
+    small[4057] = '\0'; /* strlen = 4057（补 NUL 防 strlen 越界 UB） */
     struct lcview_builder *b2 = lcview_builder_new(LCVIEW_EVENT_USB_RATE_DEGRADED,
                                                    LCVIEW_LEVEL_INFO);
     CHECK(b2 != NULL);
@@ -160,10 +160,10 @@ static void test_ring_read_callsite_corrupt_skip(void)
     ring.buf = ringbuf;
     ring.read_buf = readbuf;
     ring.size = sizeof(ringbuf);
-    ring.write_pos = 4100 + 36;  /* 损坏记录 4100B + 合法记录 36B */
+    ring.write_pos = 4100 + 36; /* 损坏记录 4100B + 合法记录 36B */
     ring.read_pos = 0;
-    ring.shutdown = false;  /* UAF 修复新语义：shutdown=true 时 read 入口直返
-                             * 0，须走内部读路径才能判红跳过前移量 */
+    ring.shutdown = false; /* UAF 修复新语义：shutdown=true 时 read 入口直返
+                            * 0，须走内部读路径才能判红跳过前移量 */
     atomic64_set(&ring.overrun_cnt, 0);
     atomic64_set(&ring.total_records, 0);
     atomic_set(&ring.readers, 0);
@@ -259,7 +259,7 @@ static void test_ring_write_callsite_huge_len(void)
 static void test_builder_cancel_callsite_null(void)
 {
     lcview_builder_cancel(NULL);
-    CHECK(1);  /* 未崩溃即通过 */
+    CHECK(1); /* 未崩溃即通过 */
 }
 
 /*
@@ -289,7 +289,7 @@ static void test_ring_read_callsite_short_prefix(void)
     ring.buf = ringbuf;
     ring.read_buf = readbuf;
     ring.size = sizeof(ringbuf);
-    ring.write_pos = 72;   /* 损坏前缀 4B + 跳过空洞 32B + 合法记录 36B */
+    ring.write_pos = 72; /* 损坏前缀 4B + 跳过空洞 32B + 合法记录 36B */
     ring.read_pos = 0;
     ring.shutdown = false;
     atomic64_set(&ring.overrun_cnt, 0);
@@ -409,8 +409,8 @@ static void test_ring_read_readers_zero(void)
     CHECK(lcview_ring_write(&ring, payload, sizeof(payload)) == 0);
 
     int n = lcview_ring_read(&ring, user, sizeof(user));
-    CHECK(n == 68);   /* 4B 前缀 + 64B 数据 */
-    CHECK(atomic_read(&ring.readers) == 0);   /* 正常路径出口归零 */
+    CHECK(n == 68);                         /* 4B 前缀 + 64B 数据 */
+    CHECK(atomic_read(&ring.readers) == 0); /* 正常路径出口归零 */
     lcview_ring_destroy(&ring);
 }
 
@@ -432,7 +432,7 @@ static void test_ring_read_emsgsize_readers_zero(void)
 
     int n = lcview_ring_read(&ring, user, sizeof(user));
     CHECK(n == -EMSGSIZE);
-    CHECK(atomic_read(&ring.readers) == 0);   /* 错误路径出口归零 */
+    CHECK(atomic_read(&ring.readers) == 0); /* 错误路径出口归零 */
     lcview_ring_destroy(&ring);
 }
 
@@ -455,7 +455,7 @@ static void test_pool_put_get_reuse_first(void)
     CHECK(b1 != NULL && b2 != NULL);
     if (!b1 || !b2)
         return;
-    CHECK(b1 != b2);   /* 池空：两次 new 均走 kmalloc，指针不同 */
+    CHECK(b1 != b2); /* 池空：两次 new 均走 kmalloc，指针不同 */
 
     /* 连续 put：b1 入槽（先入槽者），b2 再入槽被释放（池容量 1） */
     lcview_builder_free(b1);
@@ -463,9 +463,10 @@ static void test_pool_put_get_reuse_first(void)
 
     /* get 复用先入槽者 b1（存活），而非已释放的 b2 */
     b3 = lcview_builder_new(LCVIEW_EVENT_USB_CONNECT, LCVIEW_LEVEL_INFO);
-    CHECK(b3 == b1);   /* 复用先入槽者（xchg 版本返回已释放的 b2，判红） */
-    CHECK(b3 != b2);   /* 未返已释放对象 */
-    if (b3) {
+    CHECK(b3 == b1); /* 复用先入槽者（xchg 版本返回已释放的 b2，判红） */
+    CHECK(b3 != b2); /* 未返已释放对象 */
+    if (b3)
+    {
         /* b1 内存存活可用：add_str 写入成功证明未被释放 */
         int rc = lcview_builder_add_str(b3, "reuse-ok");
         CHECK(rc == 0);
@@ -486,16 +487,16 @@ static void test_ring_read_callsite_max_record_delivery(void)
     uint8_t user[8192];
     uint8_t payload[4092];
 
-    CHECK(lcview_ring_init(&ring, 8) == 0);   /* 8KB 环，能容纳满长记录 */
+    CHECK(lcview_ring_init(&ring, 8) == 0); /* 8KB 环，能容纳满长记录 */
     memset(payload, 0x44, sizeof(payload));
     CHECK(lcview_ring_write(&ring, payload, sizeof(payload)) == 0);
 
     int n = lcview_ring_read(&ring, user, sizeof(user));
-    CHECK(n == 4096);                         /* 满长完整交付（修复前判损坏跳过返 0） */
+    CHECK(n == 4096); /* 满长完整交付（修复前判损坏跳过返 0） */
     CHECK(memcmp(user + 4, payload, sizeof(payload)) == 0);
     CHECK(ring.read_pos == 4096 % ring.size);
     CHECK(atomic_read(&ring.readers) == 0);
-    CHECK(ring.read_mutex.locked == 0);       /* 读后锁平衡 */
+    CHECK(ring.read_mutex.locked == 0); /* 读后锁平衡 */
     lcview_ring_destroy(&ring);
 }
 
@@ -517,7 +518,7 @@ static void test_ring_read_lock_balanced(void)
     memset(payload, 0x55, sizeof(payload));
     CHECK(lcview_ring_write(&ring, payload, sizeof(payload)) == 0);
     int n = lcview_ring_read(&ring, user, sizeof(user));
-    CHECK(n == 68);                           /* 4B 前缀 + 64B 数据 */
+    CHECK(n == 68); /* 4B 前缀 + 64B 数据 */
     CHECK(ring.read_mutex.locked == 0);
     CHECK(atomic_read(&ring.readers) == 0);
 
@@ -558,15 +559,16 @@ static void test_ring_read_lock_balanced(void)
 static void test_ring_write_enospc_counts_dropped(void)
 {
     struct lcview_ring ring;
-    uint8_t small[16];   /* 16B 数据 + 4B 前缀 = 20B/条 */
+    uint8_t small[16]; /* 16B 数据 + 4B 前缀 = 20B/条 */
     uint8_t big[8000];
 
-    CHECK(lcview_ring_init(&ring, 8) == 0);   /* 8KB 环 */
+    CHECK(lcview_ring_init(&ring, 8) == 0); /* 8KB 环 */
 
     /* 填满环：写 1000 条 20B 小记录（环满后每条驱逐 1 条腾空间，全成功） */
     memset(small, 0x77, sizeof(small));
     int written = 0;
-    for (int i = 0; i < 1000; i++) {
+    for (int i = 0; i < 1000; i++)
+    {
         if (lcview_ring_write(&ring, small, sizeof(small)) != 0)
             break;
         written++;
