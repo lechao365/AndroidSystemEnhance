@@ -603,7 +603,7 @@ baselines:
 - baseline_id: BL-20260923-01
   status: promoted
   source_branch: dev
-  source_commit: f7fe03568c1d
+  source_commit: ea238d9d50a6
   sync_manifest: data/verify-results/20260923-155641-manual-2609231556.md
   build_result: PASS
   package_result: PASS
