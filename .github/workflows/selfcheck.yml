@@ -115,12 +115,20 @@ jobs:
             exit 1
           fi
           echo "C/C++ 改动行 clang-format 校验通过（diff 行级）"
-          # clang-tidy 仅对 host 单测纯逻辑文件（独立可编译，带 -I 旗标）
+          # clang-tidy 仅对 host 单测纯逻辑文件（独立可编译，带 -I 旗标）。
+          # 修复（批次 260923 方向）：clang-tidy 独立编译内核 C 文件时缺系统
+          # 头路径（stddef.h file not found）且内核 C 合法使用 memcpy 触发
+          # 安全检查判红——补 gcc 内建 include 路径 + 抑制该 security checker。
+          # runner 无 compile_commands.json，-p . 仅做目录探测，编译参数走 -- 后。
+          GCC_INC="$(gcc -print-file-name=include)"
+          CT_CHECKS="-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling"
           for f in $CHANGED; do
             case "$f" in
               code/rpi5/kernel/new/vendor/lechao/LcView/lcview_ring_logic.c)
-                clang-tidy -p . "$f" -- -Icode/rpi5/kernel/new/vendor/lechao/LcView ;;
+                clang-tidy -checks="$CT_CHECKS" -p . "$f" -- \
+                  -Icode/rpi5/kernel/new/vendor/lechao/LcView -isystem "$GCC_INC" ;;
               code/rpi5/kernel/new/vendor/lechao/LcIod/lciod_read_logic.c)
-                clang-tidy -p . "$f" -- -Icode/rpi5/kernel/new/vendor/lechao/LcIod ;;
+                clang-tidy -checks="$CT_CHECKS" -p . "$f" -- \
+                  -Icode/rpi5/kernel/new/vendor/lechao/LcIod -isystem "$GCC_INC" ;;
             esac
           done
