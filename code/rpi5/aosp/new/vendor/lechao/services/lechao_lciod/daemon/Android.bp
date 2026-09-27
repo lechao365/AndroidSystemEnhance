@@ -39,6 +39,10 @@ cc_binary {
     header_libs: [
         "vendor_lechao_log_headers",
     ],
+    include_dirs: [
+        // R-14 方向 1：共享事件枚举头（vendor_lechao_usbd-ioctl.h）位于 hal/
+        "vendor/lechao/services/lechao_lciod/hal",
+    ],
     init_rc: ["lechao_lciod.rc"],  // init 启动配置文件
 }
 

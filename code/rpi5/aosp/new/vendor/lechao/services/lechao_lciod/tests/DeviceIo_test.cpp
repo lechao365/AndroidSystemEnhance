@@ -274,15 +274,18 @@ TEST_F(DeviceIoTest, ListDevices_AllEntriesHaveUsbdPrefix) {
 
 TEST(AbiContractTest, StructSizesFrozen) {
     // 字段增删/对齐变更未同步三方（内核/HAL/工具）时在此判红。
-    // stats=248：232 后 flags(u32) 至 236，event_drop_count(u64) 需 8 对齐
-    // → 4 字节尾部 padding → 248
-    EXPECT_EQ(sizeof(vendor_lechao_usbd_stats), static_cast<size_t>(248));
-    EXPECT_EQ(sizeof(vendor_lechao_usbd_event), static_cast<size_t>(24));
+    // stats=264（v3）：248 后追加 read_error_count/write_error_count(u64)
+    // → 264（8 对齐，无 padding）。
+    // event=56（v3）：24 后追加 wall_time_ns(u64 @24)/opcode(u32 @32)/
+    // lba(u64 @40 需 8 对齐 → 36-39 padding)/bytes(u32 @48)/retry(u8 @52)
+    // +reserved2[3] → 56（8 对齐）。
+    EXPECT_EQ(sizeof(vendor_lechao_usbd_stats), static_cast<size_t>(264));
+    EXPECT_EQ(sizeof(vendor_lechao_usbd_event), static_cast<size_t>(56));
     EXPECT_EQ(sizeof(vendor_lechao_usbd_config), static_cast<size_t>(8));
 }
 
 TEST(AbiContractTest, AbiVersionAndBufSizeFrozen) {
-    EXPECT_EQ(VENDOR_LECHAO_USBD_ABI_VERSION, 2u);  // v2: stats 追加 event_drop_count
+    EXPECT_EQ(VENDOR_LECHAO_USBD_ABI_VERSION, 3u);  // v3: event 追加 scsi ctx + wall 时间戳, stats 追加 r/w 错误分项
     EXPECT_EQ(VENDOR_LECHAO_USBD_EVENT_BUF_SIZE, 32);
 }
 

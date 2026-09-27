@@ -53,8 +53,18 @@ uint64_t ComputeWindowKbRate(uint64_t currBytes, uint64_t currNs, uint64_t prevB
                              uint64_t prevNs);
 
 /*
+ * ComputeErrorRate — IO 错误率核心（纯函数，供单测；R-14 方向 2）
+ * 公式: errorCount * 1000 / (ioCount + errorCount)，单位千分比（‰）。
+ * 语义: 以"该方向成功 IO 数 + 该方向错误数"为总 IO 数，错误占比×1000，
+ *       避免浮点，整数可精确比较。除零防护: 总 IO 为 0 时返回 0。
+ * 输入防御（CXX-002）: ioCount/errorCount 为无符号累计计数，运算在
+ *       64 位内不溢出（千分比分子需先乘再除，errorCount 用 128 位中间量）。
+ */
+uint64_t ComputeErrorRate(uint64_t errorCount, uint64_t ioCount);
+
+/*
  * ProjectSystemIoStats — vendor IoStats → system IoStats 字段投影（纯函数，供单测）
- * 直传 21 字段；省略管理字段 currentRate / enabled / flags
+ * 直传 23 字段；省略管理字段 currentRate / enabled / flags
  * （currentRate 经 getAverageRate 按需计算，enabled/flags 不暴露给上层）。
  * 回归防护：字段串位/漏投影在此判红。
  */

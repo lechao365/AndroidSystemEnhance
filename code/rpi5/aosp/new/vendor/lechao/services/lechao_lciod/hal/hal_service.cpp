@@ -189,6 +189,8 @@ ndk::ScopedAStatus IoHalImpl::getStats(int32_t in_deviceMinor, IoStats* _aidl_re
     _aidl_return->stallCount = raw.stall_count;
     _aidl_return->corruptCount = raw.corrupt_count;
     _aidl_return->timeoutCount = raw.timeout_count;
+    _aidl_return->readErrorCount = raw.read_error_count;   /* R-14 方向 2：读方向错误分项 */
+    _aidl_return->writeErrorCount = raw.write_error_count; /* R-14 方向 2：写方向错误分项 */
     _aidl_return->probeCount = raw.probe_count;
     _aidl_return->disconnectCount = raw.disconnect_count;
     _aidl_return->degradeCount = raw.degrade_count;
@@ -335,5 +337,11 @@ ndk::ScopedAStatus IoHalImpl::readEvent(int32_t in_deviceMinor, int32_t in_timeo
     _aidl_return->dataDirection = raw.data_direction;
     _aidl_return->status = raw.status;
     _aidl_return->valid = raw.valid;
+    /* R-14 方向 1/4：v3 追加字段透出（SCSI 命令上下文 + wall 双时间戳） */
+    _aidl_return->wallTimeNs = raw.wall_time_ns;
+    _aidl_return->opcode = raw.opcode;
+    _aidl_return->lba = raw.lba;
+    _aidl_return->bytes = raw.bytes;
+    _aidl_return->retry = raw.retry;
     return ndk::ScopedAStatus::ok();
 }

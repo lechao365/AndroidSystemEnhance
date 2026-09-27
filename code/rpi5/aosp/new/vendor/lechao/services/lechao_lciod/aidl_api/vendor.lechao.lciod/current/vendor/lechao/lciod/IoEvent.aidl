@@ -42,4 +42,9 @@ parcelable IoEvent {
   byte dataDirection;
   int status;
   boolean valid;
+  long wallTimeNs;
+  int opcode;
+  long lba;
+  int bytes;
+  int retry;
 }

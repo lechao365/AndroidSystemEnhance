@@ -26,6 +26,7 @@ cc_test {
     include_dirs: [
         "vendor/lechao/services/lechao_lciod/common",
         "vendor/lechao/services/lechao_lciod/daemon",
+        "vendor/lechao/services/lechao_lciod/hal",
         "vendor/lechao/services/include",
     ],
     static_libs: [

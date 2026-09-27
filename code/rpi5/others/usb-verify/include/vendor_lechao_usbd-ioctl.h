@@ -17,6 +17,9 @@
  *   本文件是 usb-verify 工具的镜像副本，必须与真相源 1:1 同步。
  *   - v1：初始版本
  *   - v2：stats 末尾追加 event_drop_count
+ *   - v3：event 末尾追加 wall_time_ns/opcode/lba/bytes/retry（RATE_DEGRADED
+ *         复用 lba/bytes 携带基线/阈值速率），stats 末尾追加 read/write
+ *         error_count 分项，新增共享事件名映射函数（R-14 方向 1/2/4）
  */
 
 #ifndef _VENDOR_LECHAO_USBD_IOCTL_H
@@ -25,7 +28,7 @@
 #include <linux/types.h>
 
 /* ABI 版本号：必须与内核真相源保持一致 */
-#define VENDOR_LECHAO_USBD_ABI_VERSION  2
+#define VENDOR_LECHAO_USBD_ABI_VERSION  3
 
 #ifdef __KERNEL__
 /* 内核态：u8/u16/u32/u64/s32/s64 由 linux/types.h 直接提供 */
@@ -91,6 +94,8 @@ struct vendor_lechao_usbd_stats {
 	u8  reserved[3];     /* 保留，保证 4 字节对齐 */
 	u32 flags;           /* 配置标志位，保留给内核扩展使用 */
 	u64 event_drop_count;/* 累计：环形缓冲区溢出丢弃的事件数 */
+	u64 read_error_count;/* 累计（v3）：读方向错误事件次数（TRANSPORT_ERROR/STALL/TIMEOUT/DATA_CORRUPT） */
+	u64 write_error_count;/* 累计（v3）：写方向错误事件次数 */
 };
 
 /*
@@ -155,11 +160,50 @@ struct vendor_lechao_usbd_event {
 	u64 timestamp_ns;  /* 事件发生时的内核单调时钟时间戳（纳秒） */
 	u32 event_type;    /* 事件类型，见 enum vendor_lechao_usbd_event_type */
 	u32 event_value;   /* 事件附加数值（语义取决于 event_type） */
-	s32 status;        /* 事件状态码：0=成功，负值=内核 errno */
+	s32 status;        /* 事件状态码：0=成功，负值=内核 errno；RATE_DEGRADED 为降级阈值速率 */
 	u8  data_direction; /* 数据传输方向：0=NONE, 1=READ, 2=WRITE */
 	u8  valid;         /* 事件有效标志：1=有效，0=无效/占位 */
 	u8  reserved[2];   /* 保留，保证结构体对齐 */
+	u64 wall_time_ns;  /* v3：事件发生时间（CLOCK_REALTIME 墙钟纳秒），与 timestamp_ns（mono）双时间戳供跨源关联 */
+	u32 opcode;        /* v3：SCSI 操作码（srb->cmnd[0]），无可得命令上下文时为 0 */
+	u64 lba;           /* v3：SCSI 起始逻辑块地址；RATE_DEGRADED 复用为降级基线速率 */
+	u32 bytes;         /* v3：本次传输有效字节数；RATE_DEGRADED 为 0 */
+	u8  retry;         /* v3：命令重试次数（srb->retries） */
+	u8  reserved2[3];  /* 保留，保证结构体对齐 */
 };
+
+/* ---- 传输方向编码（vendor_lechao_usbd_event.data_direction） ---- */
+#define VENDOR_LECHAO_USBD_DIR_NONE   0
+#define VENDOR_LECHAO_USBD_DIR_READ   1
+#define VENDOR_LECHAO_USBD_DIR_WRITE  2
+
+/*
+ * R-14 方向 1：事件类型/方向名映射的单一事实源。
+ * 三方（内核 / HAL / daemon / usb-verify）统一引用本函数，禁止在各自
+ * 模块内 switch 硬编码数值（消重复映射，避免名称与数值漂移）。
+ */
+static inline const char *vendor_lechao_usbd_event_type_name(u32 type)
+{
+	switch (type) {
+	case VENDOR_LECHAO_USBD_EVENT_NONE:            return "NONE";
+	case VENDOR_LECHAO_USBD_EVENT_TRANSPORT_ERROR: return "TRANSPORT_ERROR";
+	case VENDOR_LECHAO_USBD_EVENT_STALL:           return "STALL";
+	case VENDOR_LECHAO_USBD_EVENT_DATA_CORRUPT:    return "DATA_CORRUPT";
+	case VENDOR_LECHAO_USBD_EVENT_TIMEOUT:         return "TIMEOUT";
+	case VENDOR_LECHAO_USBD_EVENT_RESET:           return "RESET";
+	case VENDOR_LECHAO_USBD_EVENT_RATE_DEGRADED:   return "RATE_DEGRADED";
+	default:                                       return "UNKNOWN";
+	}
+}
+
+static inline const char *vendor_lechao_usbd_data_direction_name(u8 dir)
+{
+	switch (dir) {
+	case VENDOR_LECHAO_USBD_DIR_READ:  return "READ";
+	case VENDOR_LECHAO_USBD_DIR_WRITE: return "WRITE";
+	default:                           return "NONE";
+	}
+}
 
 /* --- IOCTL 命令定义 --- */
 /*

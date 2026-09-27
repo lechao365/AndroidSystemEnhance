@@ -34,6 +34,9 @@
 #include "hal_client.h"
 #include "minor_utils.h"
 #include "lechao_log.h"
+/* R-14 方向 1：共享事件枚举头（AOSP hal 镜像，与内核真相源 1:1 同步），
+ * 事件类型/方向名映射单一事实源，消模块内 switch 硬编码 */
+#include "vendor_lechao_usbd-ioctl.h"
 
 #define LOG_TAG "lechao_lciod"
 #include <log/log.h>
@@ -97,6 +100,15 @@ uint64_t ComputeWindowKbRate(uint64_t currBytes, uint64_t currNs, uint64_t prevB
     return ComputeKbRate(currBytes - prevBytes, currNs - prevNs);
 }
 
+uint64_t ComputeErrorRate(uint64_t errorCount, uint64_t ioCount) {
+    // R-14 方向 2：读/写方向 IO 错误率（‰）。总 IO = 成功 IO + 错误数，
+    // 错误占比×1000，128 位中间量防 errorCount*1000 溢出（CXX-002）。
+    __uint128_t total = static_cast<__uint128_t>(ioCount) + errorCount;
+    if (total == 0)
+        return 0;
+    return static_cast<uint64_t>(static_cast<__uint128_t>(errorCount) * 1000ULL / total);
+}
+
 /* --- 字段投影纯函数（声明见 service.h，独立于 binder 环境可单测） --- */
 
 void ProjectSystemIoStats(const aidl::vendor::lechao::lciod::IoStats& vstats,
@@ -115,6 +127,8 @@ void ProjectSystemIoStats(const aidl::vendor::lechao::lciod::IoStats& vstats,
     out->stallCount = vstats.stallCount;
     out->corruptCount = vstats.corruptCount;
     out->timeoutCount = vstats.timeoutCount;
+    out->readErrorCount = vstats.readErrorCount;   /* R-14 方向 2：读方向错误分项 */
+    out->writeErrorCount = vstats.writeErrorCount; /* R-14 方向 2：写方向错误分项 */
     out->probeCount = vstats.probeCount;
     out->disconnectCount = vstats.disconnectCount;
     out->degradeCount = vstats.degradeCount;
@@ -139,6 +153,12 @@ void ProjectSystemIoEvent(const aidl::vendor::lechao::lciod::IoEvent& vev,
     out->dataDirection = vev.dataDirection;
     out->status = vev.status;
     out->valid = vev.valid;
+    /* R-14 方向 1/4：v3 追加字段 1:1 直传 */
+    out->wallTimeNs = vev.wallTimeNs;
+    out->opcode = vev.opcode;
+    out->lba = vev.lba;
+    out->bytes = vev.bytes;
+    out->retry = vev.retry;
 }
 
 void IoServiceImpl::start() {
@@ -345,23 +365,27 @@ void IoServiceImpl::start_monitor() {
                 VendorIoEvent vev;
                 auto ev_status = hal->readEvent(minor, 50, &vev);
                 if (ev_status.isOk() && vev.valid) {
-                    const char *type_name = "UNKNOWN";
-                    switch (vev.eventType) {
-                        case 1: type_name = "TRANSPORT_ERROR"; break;
-                        case 2: type_name = "STALL"; break;
-                        case 3: type_name = "DATA_CORRUPT"; break;
-                        case 4: type_name = "TIMEOUT"; break;
-                        case 5: type_name = "RESET"; break;
-                        case 6: type_name = "RATE_DEGRADED"; break;
-                    }
-                    const char *dir = (vev.dataDirection == 1) ? "READ"
-                                      : (vev.dataDirection == 2) ? "WRITE" : "NONE";
+                    /* R-14 方向 1：事件类型/方向名取自共享事件枚举头
+                     * （vendor_lechao_usbd-ioctl.h），不再 switch 硬编码数值 */
+                    const char *type_name = vendor_lechao_usbd_event_type_name(
+                        static_cast<uint32_t>(vev.eventType));
+                    const char *dir = vendor_lechao_usbd_data_direction_name(
+                        static_cast<uint8_t>(vev.dataDirection));
 
                     /* R-12 方向 2：专属 tag 可配置级别（INFO 生产可见，
-                     * debug 时 DEBUG），事件不再静默 */
-                    EVENT_ALOG("event: minor=%d type=%s(%d) val=%d dir=%s ts=%llu", minor,
+                     * debug 时 DEBUG），事件不再静默。
+                     * R-14 方向 1/3/4：事件日志带 SCSI 上下文（opcode/lba/
+                     * bytes/retry）、wall 双时间戳与降级基线/阈值（RATE_DEGRADED
+                     * 时 eventValue=当前速率、status=阈值、lba=基线） */
+                    EVENT_ALOG("event: minor=%d type=%s(%d) val=%d dir=%s "
+                               "status=%d mono=%llu wall=%llu opcode=%d lba=%llu "
+                               "bytes=%d retry=%d", minor,
                                type_name, vev.eventType, vev.eventValue, dir,
-                               (unsigned long long)vev.timestampNs);
+                               vev.status,
+                               (unsigned long long)vev.timestampNs,
+                               (unsigned long long)vev.wallTimeNs,
+                               vev.opcode, (unsigned long long)vev.lba,
+                               vev.bytes, vev.retry);
                 } else if (!ev_status.isOk()) {
                     /* 单设备失败仅告警，继续下一个设备 */
                     LC_ALOGW("monitor: readEvent failed for minor=%d: %s", minor,
@@ -401,13 +425,21 @@ void IoServiceImpl::start_monitor() {
                     /* 计算 KB/s 速率（换算核心收敛到 ComputeKbRate/ComputeWindowKbRate） */
                     uint64_t read_rate = ComputeWindowKbRate(rb, rn, prevRb, prevRn);
                     uint64_t write_rate = ComputeWindowKbRate(wb, wn, prevWb, prevWn);
+                    /* R-14 方向 2：读/写方向 IO 错误率（‰）——错误数/该方向总 IO */
+                    uint64_t read_err_rate = ComputeErrorRate(stats.readErrorCount,
+                                                              stats.readCmds);
+                    uint64_t write_err_rate = ComputeErrorRate(stats.writeErrorCount,
+                                                               stats.writeCmds);
 
                     ALOGI("monitor: minor=%d read_rate=%llu KB/s, write_rate=%llu KB/s, "
-                          "rx_pkts=%lld, tx_pkts=%lld, event_drop=%lld",
+                          "rx_pkts=%lld, tx_pkts=%lld, event_drop=%lld, "
+                          "read_err_rate=%llu‰, write_err_rate=%llu‰",
                           minor,
                           (unsigned long long)read_rate, (unsigned long long)write_rate,
                           (long long)stats.readCmds, (long long)stats.writeCmds,
-                          (long long)stats.eventDropCount);
+                          (long long)stats.eventDropCount,
+                          (unsigned long long)read_err_rate,
+                          (unsigned long long)write_err_rate);
                 }
             }
         }

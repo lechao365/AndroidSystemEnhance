@@ -79,7 +79,8 @@ class TestEnsureConnected(unittest.TestCase):
             lc.ensure_connected()
         ex.assert_called_once_with(2)
 
-# 与 lciod_probe.c 输出同构的合法单行样本（vendor 含空格验证引号解析）
+# 与 lciod_probe.c 输出同构的合法单行样本（vendor 含空格验证引号解析；
+# 与 ioctl.h v3 ABI 对齐：read/write_error_count + abi_version=3）
 VALID_LINE = (
     'device minor=0 path=/dev/vendor_lechao_usbd0 vid=0x04e8 pid=0x6344 '
     'vendor="SanDisk Corp" product="Ultra USB 3.0" '
@@ -89,7 +90,8 @@ VALID_LINE = (
     'current_rate=0 peak_rate=8388608 last_transport_latency_ns=1200000 '
     'last_event_ts_ns=987654321 last_update=111222333 stall_count=0 '
     'corrupt_count=0 timeout_count=0 last_event_type=5 '
-    'enabled=1 flags=0 event_drop_count=0 abi_version=2'
+    'enabled=1 flags=0 event_drop_count=0 read_error_count=0 write_error_count=0 '
+    'abi_version=3'
 )
 
 
@@ -112,7 +114,9 @@ class ParseProbeOutputTest(unittest.TestCase):
         self.assertEqual(dev["vendor"], "SanDisk Corp")
         self.assertEqual(dev["product"], "Ultra USB 3.0")
         self.assertEqual(dev["read_bytes"], "4194304")
-        self.assertEqual(dev["abi_version"], "2")
+        self.assertEqual(dev["abi_version"], "3")
+        self.assertEqual(dev["read_error_count"], "0")
+        self.assertEqual(dev["write_error_count"], "0")
         self.assertEqual(dev["last_update"], "111222333")
 
     def test_blank_lines_skipped(self):
@@ -163,7 +167,7 @@ class ValidateDevicesTest(unittest.TestCase):
         self.assertTrue(any("vendor" in e for e in errors))
 
     def test_abi_drift_is_error(self):
-        line = VALID_LINE.replace("abi_version=2", "abi_version=3")
+        line = VALID_LINE.replace("abi_version=3", "abi_version=2")
         errors = lc.validate_devices(_devices(line))
         self.assertTrue(any("abi_version" in e for e in errors))
 
@@ -189,6 +193,17 @@ class ValidateDevicesTest(unittest.TestCase):
         line = VALID_LINE.replace("event_drop_count=0", "event_drop_count=3")
         errors = lc.validate_devices(_devices(line))
         self.assertTrue(any("event_drop_count" in e and "!= 0" in e for e in errors))
+
+    def test_read_error_count_nonzero_is_error(self):
+        # R-14 方向 2：读方向错误分项累计 >0 必须判红（防假绿）
+        line = VALID_LINE.replace("read_error_count=0", "read_error_count=2")
+        errors = lc.validate_devices(_devices(line))
+        self.assertTrue(any("read_error_count" in e and "!= 0" in e for e in errors))
+
+    def test_write_error_count_nonzero_is_error(self):
+        line = VALID_LINE.replace("write_error_count=0", "write_error_count=2")
+        errors = lc.validate_devices(_devices(line))
+        self.assertTrue(any("write_error_count" in e and "!= 0" in e for e in errors))
 
 
 class BaselineTest(unittest.TestCase):

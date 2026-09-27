@@ -27,6 +27,9 @@
  *   VENDOR_LECHAO_USBD_ABI_VERSION 并三方整体重编。
  *   - v1：初始版本
  *   - v2：stats 末尾追加 event_drop_count
+ *   - v3：event 末尾追加 wall_time_ns/opcode/lba/bytes/retry（RATE_DEGRADED
+ *         复用 lba/bytes 携带基线/阈值速率），stats 末尾追加 read/write
+ *         error_count 分项，新增共享事件名映射函数（R-14 方向 1/2/4）
  * ============================================================
  */
 
@@ -36,7 +39,7 @@
 #include <linux/types.h>
 
 /* ABI 版本号：与 AOSP HAL / usb-verify 镜像副本必须一致 */
-#define VENDOR_LECHAO_USBD_ABI_VERSION  2
+#define VENDOR_LECHAO_USBD_ABI_VERSION  3
 
 /*
  * struct vendor_lechao_usbd_stats — 单设备粒度的传输统计快照
@@ -82,6 +85,8 @@ struct vendor_lechao_usbd_stats {
 	u8 reserved[3];                  /* 预留：对齐填充，未来扩展用 */
 	u32 flags;                       /* 配置：运行时标志位，预留扩展 */
 	u64 event_drop_count;            /* 累计：环形缓冲区溢出丢弃的事件数（event_lock 保护） */
+	u64 read_error_count;            /* 累计（v3）：读方向错误事件次数（TRANSPORT_ERROR/STALL/TIMEOUT/DATA_CORRUPT） */
+	u64 write_error_count;           /* 累计（v3）：写方向错误事件次数 */
 };
 
 /*
@@ -130,6 +135,12 @@ enum vendor_lechao_usbd_event_type {
  *        （ARM64 LE）按主机序裸内存传输（read 直拷），事实小端契约；
  *        内核与用户态（hal/device_io、AOSP 拷贝头）双侧同步维护，
  *        禁止单侧改布局。下方编译守卫防大端环境隐性错误。
+ * 【v3 字段语义（R-14）】
+ *   wall_time_ns/opcode/lba/bytes/retry 为 v3 追加字段，仅在事件可取得
+ *   SCSI 命令上下文（srb 非空）时有效，否则为 0。
+ *   RATE_DEGRADED 事件复用：event_value=当前速率（bytes/s），status=降级
+ *   判定阈值速率（bytes/s），lba=降级基线速率（bytes/s），opcode/bytes/
+ *   retry=0。消费侧据此判定降级幅度 drop_pct=(baseline-current)*100/baseline。
  */
 #if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
     (__BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__)
@@ -138,12 +149,51 @@ enum vendor_lechao_usbd_event_type {
 struct vendor_lechao_usbd_event {
 	u64 timestamp_ns;                /* 事件发生时间（CLOCK_MONOTONIC 纳秒） */
 	u32 event_type;                  /* 事件类型（见 vendor_lechao_usbd_event_type 枚举） */
-	u32 event_value;                 /* 事件附加值：STALL/CORRUPT/TIMEOUT 为 0，TRANSPORT_ERROR 为 result 码 */
-	s32 status;                      /* 原始错误码：STALL 为 -EPIPE，TIMEOUT 为 URB status 等 */
+	u32 event_value;                 /* 事件附加值：STALL/CORRUPT/TIMEOUT 为 0，TRANSPORT_ERROR 为 result 码，RATE_DEGRADED 为当前速率 */
+	s32 status;                      /* 原始错误码：STALL 为 -EPIPE，TIMEOUT 为 URB status 等；RATE_DEGRADED 为降级阈值速率 */
 	u8 data_direction;               /* 传输方向：0=无, 1=读(DMA_FROM_DEVICE), 2=写(DMA_TO_DEVICE) */
 	u8 valid;                        /* 有效标志：1=该条目包含有效事件数据 */
 	u8 reserved[2];                  /* 预留：对齐填充 */
+	u64 wall_time_ns;                /* v3：事件发生时间（CLOCK_REALTIME 墙钟纳秒），与 timestamp_ns（mono）双时间戳供跨源关联 */
+	u32 opcode;                      /* v3：SCSI 操作码（srb->cmnd[0]），无可得命令上下文时为 0 */
+	u64 lba;                         /* v3：SCSI 起始逻辑块地址；RATE_DEGRADED 复用为降级基线速率 */
+	u32 bytes;                       /* v3：本次传输有效字节数；RATE_DEGRADED 为 0 */
+	u8 retry;                        /* v3：命令重试次数（srb->retries） */
+	u8 reserved2[3];                 /* 预留：对齐填充 */
 };
+
+/* ---- 传输方向编码（vendor_lechao_usbd_event.data_direction） ---- */
+#define VENDOR_LECHAO_USBD_DIR_NONE   0
+#define VENDOR_LECHAO_USBD_DIR_READ   1
+#define VENDOR_LECHAO_USBD_DIR_WRITE  2
+
+/*
+ * R-14 方向 1：事件类型/方向名映射的单一事实源。
+ * 三方（内核 / HAL / daemon / usb-verify）统一引用本函数，禁止在各自
+ * 模块内 switch 硬编码数值（消重复映射，避免名称与数值漂移）。
+ */
+static inline const char *vendor_lechao_usbd_event_type_name(u32 type)
+{
+	switch (type) {
+	case VENDOR_LECHAO_USBD_EVENT_NONE:            return "NONE";
+	case VENDOR_LECHAO_USBD_EVENT_TRANSPORT_ERROR: return "TRANSPORT_ERROR";
+	case VENDOR_LECHAO_USBD_EVENT_STALL:           return "STALL";
+	case VENDOR_LECHAO_USBD_EVENT_DATA_CORRUPT:    return "DATA_CORRUPT";
+	case VENDOR_LECHAO_USBD_EVENT_TIMEOUT:         return "TIMEOUT";
+	case VENDOR_LECHAO_USBD_EVENT_RESET:           return "RESET";
+	case VENDOR_LECHAO_USBD_EVENT_RATE_DEGRADED:   return "RATE_DEGRADED";
+	default:                                       return "UNKNOWN";
+	}
+}
+
+static inline const char *vendor_lechao_usbd_data_direction_name(u8 dir)
+{
+	switch (dir) {
+	case VENDOR_LECHAO_USBD_DIR_READ:  return "READ";
+	case VENDOR_LECHAO_USBD_DIR_WRITE: return "WRITE";
+	default:                           return "NONE";
+	}
+}
 
 /* ---- ioctl 命令码定义 ---- */
 

@@ -31,6 +31,8 @@ parcelable IoStats {
     long stallCount;    /* 端点停滞（STALL）次数 */
     long corruptCount;  /* 数据损坏检测次数 */
     long timeoutCount;  /* 传输超时次数 */
+    long readErrorCount;  /* v3：读方向错误事件次数（用于计算读错误率） */
+    long writeErrorCount; /* v3：写方向错误事件次数（用于计算写错误率） */
 
     /* --- 设备生命周期计数器 --- */
     long probeCount;       /* 设备探测（接入）次数 */

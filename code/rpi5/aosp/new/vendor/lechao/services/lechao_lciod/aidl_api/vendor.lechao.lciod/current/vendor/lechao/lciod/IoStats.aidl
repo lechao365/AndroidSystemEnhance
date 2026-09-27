@@ -42,6 +42,8 @@ parcelable IoStats {
   long stallCount;
   long corruptCount;
   long timeoutCount;
+  long readErrorCount;
+  long writeErrorCount;
   long probeCount;
   long disconnectCount;
   long degradeCount;
