@@ -14,6 +14,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <poll.h>
 
 #include "hal_service.h"
 #include "minor_utils.h"
@@ -155,4 +156,72 @@ TEST_F(IoHalImplTest, ReadEvent_TimeoutOrEvent_OkStatus) {
     // 超时语义：ok + valid=false（"暂无事件"）；有事件则 ok + valid=true。
     // 关键契约：任何情况下都是 isOk()，不伪装错误也不伪装数据
     ASSERT_TRUE(hal_->readEvent(minor, 100, &ev).isOk());
+}
+
+/* --- R-16 P4 方向 3：uevent 增量维护（handle_device_add/remove） --- */
+
+TEST_F(IoHalImplTest, DeviceAdd_CreatesEntry_LazyFd) {
+    hal_->handle_device_add(77);
+    DeviceEntry* entry = hal_->resolve_device(77);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->path, "/dev/vendor_lechao_usbd77");
+    EXPECT_EQ(entry->fd, -1);  // 懒打开，不主动 open
+}
+
+TEST_F(IoHalImplTest, DeviceAdd_AlreadyPresent_Idempotent) {
+    hal_->handle_device_add(78);
+    hal_->handle_device_add(78);  // 重复 add 幂等，不覆盖已有 entry
+    DeviceEntry* entry = hal_->resolve_device(78);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->path, "/dev/vendor_lechao_usbd78");
+}
+
+TEST_F(IoHalImplTest, DeviceRemove_ClearsEntry) {
+    hal_->handle_device_add(79);
+    ASSERT_NE(hal_->resolve_device(79), nullptr);
+    hal_->handle_device_remove(79);
+    EXPECT_EQ(hal_->resolve_device(79), nullptr);
+}
+
+TEST_F(IoHalImplTest, DeviceRemove_NotPresent_Idempotent) {
+    // remove 未感知的设备幂等跳过，不崩
+    hal_->handle_device_remove(8888);
+    SUCCEED();
+}
+
+TEST_F(IoHalImplTest, UeventFd_Constructed_OpenedOrFallback) {
+    // 构造时打开 uevent socket：>0 为正常；-1 为降级 glob-only（无 netlink
+    // 权限/环境），两种情况都不应视为致命——功能由 glob 兜底
+    int fd = hal_->uevent_fd();
+    EXPECT_GE(fd, -1);
+    if (fd >= 0) {
+        // fd 有效且可被 poll 监听（POLLIN 事件位正常）
+        struct pollfd pfd{fd, POLLIN, 0};
+        EXPECT_GE(::poll(&pfd, 1, 0), 0);
+    }
+}
+
+/* --- R-16 P4 方向 4：dupEventFd（epoll 多路复用 fd 透出） --- */
+
+TEST_F(IoHalImplTest, DupEventFd_UnknownMinor_ENODEV) {
+    ndk::ScopedFileDescriptor fd;
+    auto st = hal_->dupEventFd(9999, &fd);
+    EXPECT_FALSE(st.isOk());
+    EXPECT_EQ(st.getServiceSpecificError(), -ENODEV);
+}
+
+TEST_F(IoHalImplTest, DupEventFd_RealDevice_ReturnsPollableFd) {
+    int32_t minor = -1;
+    if (!FirstMinor(&minor))
+        GTEST_SKIP() << "no vendor_lechao_usbd device on board";
+
+    ndk::ScopedFileDescriptor fd;
+    ASSERT_TRUE(hal_->dupEventFd(minor, &fd).isOk());
+    ASSERT_GE(fd.get(), 0);
+
+    // 返回的 fd 可被 poll 监听（内核 .poll 支持，供 daemon epoll 注册）
+    struct pollfd pfd{fd.get(), POLLIN, 0};
+    EXPECT_GE(::poll(&pfd, 1, 0), 0);
+    // 无事件时不应阻塞且不报 POLLERR（EPOLLHUP 表示断开，正常空转无事件）
+    EXPECT_EQ((pfd.revents & POLLERR), 0);
 }

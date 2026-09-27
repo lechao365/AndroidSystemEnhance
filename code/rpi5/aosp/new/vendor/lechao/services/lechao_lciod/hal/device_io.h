@@ -101,7 +101,52 @@ int read_event(int fd, struct vendor_lechao_usbd_event *event, int timeout_ms,
  * list_devices — 枚举系统中所有匹配 /dev/vendor_lechao_usbd* 的设备节点
  * 返回: 设备路径列表，如 ["/dev/vendor_lechao_usbd0"]
  *       使用 glob(3) 模式匹配，无设备时返回空列表
+ *
+ * R-16 P4 方向 3：仅作冷启动 bootstrap / 兜底（HAL 设备感知主通道
+ * 已改为订阅内核 uevent，热路径不再依赖 glob）。
  */
 std::vector<std::string> list_devices();
+
+/*
+ * open_uevent_socket — 打开 NETLINK_KOBJECT_UEVENT 订阅 socket
+ * 返回: >= 0 为 uevent fd，-1 失败（errno 保留）
+ *
+ * 订阅内核 uevent（R-16 P4 方向 3）：HAL 设备上下线即时感知的增量
+ * 通道。绑定 nl_groups=1（KOBJECT_UEVENT），过滤子系统
+ * vendor_lechao_usbd 的设备 add/remove 事件，替代周期 glob 全量扫描。
+ */
+int open_uevent_socket();
+
+/*
+ * read_uevent — 读取一条 uevent 消息
+ * @fd:   uevent fd（open_uevent_socket 返回）
+ * @buf:  接收缓冲区
+ * @len:  缓冲区大小（建议 >= 8192，内核 uevent 最大 2048 + 边界余量）
+ * 返回: 读取字节数；-1 失败（errno 保留）
+ */
+ssize_t read_uevent(int fd, char* buf, size_t len);
+
+/*
+ * UeventInfo — 解析后的 uevent 事件载荷（方向 3）
+ * action:    add/remove 等动作
+ * subsystem: uevent 子系统名（过滤键）
+ * devname:   /dev/ 下的设备节点名（如 vendor_lechao_usbd0）
+ */
+struct UeventInfo {
+    std::string action;
+    std::string subsystem;
+    std::string devname;
+};
+
+/*
+ * parse_uevent — 解析 uevent 消息为结构化载荷（纯解析，无 netlink 依赖）
+ * @buf:   uevent 原始消息（NUL 分隔的环境变量序列）
+ * @len:   消息长度
+ * @out:   输出解析结果
+ * 返回: true 解析成功（含 action/subsystem/devname 三字段），false 解析失败
+ *
+ * 设计为纯函数供 host 单测（DeviceIo_test）覆盖，不依赖真实 netlink。
+ */
+bool parse_uevent(const char* buf, size_t len, UeventInfo* out);
 
 #endif

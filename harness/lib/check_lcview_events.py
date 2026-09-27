@@ -54,12 +54,11 @@ _ADD_RE = re.compile(r"lcview_builder_add_(\w+)\(")
 _COMMIT_RE = re.compile(r"lcview_builder_commit\(")
 
 # 停发事件登记（schema 保留定义供历史数据/用户态解析，内核不再发射）。
-# 登记原因：R-11 方向 3——TRANSPORT_START 是 per-SCSI-命令最高频事件，
-# 每次传输在 IO 路径逐命令分配 ~4KB GFP_ATOMIC builder 并写 ring，I/O
-# 洪水时开销可观且挤占环空间；传输时序已由 TRANSPORT_END（含 elapsed_ns）
-# 完整承载，START 事件降为调试诊断不再 commit（省 IO 路径 GFP_ATOMIC 分配）。
+# R-16 P4 方向 1：TRANSPORT_START（原 id=4）已从 schema 彻底删除（合并为
+# 单次带 duration_ns 的 END 事件），不再需要豁免登记——事件在 schema 中
+# 不存在即自然跳过比对。登记集合保留为空，供未来停发事件使用：
 # 登记后该事件跳过"内核无发射点"判红（schema 仍须在内核宏中定义 id）。
-DISABLED_EVENTS = {"LCVIEW_EVENT_USB_TRANSPORT_START"}
+DISABLED_EVENTS = set()
 
 
 def parse_schema(text: str) -> list[dict]:

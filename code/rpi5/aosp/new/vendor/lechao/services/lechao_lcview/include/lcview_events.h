@@ -45,8 +45,8 @@
 #define LCVIEW_EVENT_USB_CONNECT         1
 #define LCVIEW_EVENT_GPIO_IRQ            2
 #define LCVIEW_EVENT_SENSOR_DATA         3
-#define LCVIEW_EVENT_USB_TRANSPORT_START 4
 #define LCVIEW_EVENT_USB_TRANSPORT_END   5
+/* id=4 TRANSPORT_START 已于 R-16 P4 方向 1 删除（合并为单次带 duration_ns 的 END） */
 #define LCVIEW_EVENT_USB_TRANSPORT_ERROR 6
 #define LCVIEW_EVENT_USB_RESET           7
 #define LCVIEW_EVENT_USB_PROBE           8

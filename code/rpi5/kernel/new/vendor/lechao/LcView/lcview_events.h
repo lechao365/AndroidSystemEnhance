@@ -47,10 +47,11 @@
 #define LCVIEW_EVENT_USB_CONNECT         1  /* USB 设备连接（预留，当前由 PROBE 替代） */
 #define LCVIEW_EVENT_GPIO_IRQ            2  /* GPIO 中断触发（来源：lechao_gpio_irq 驱动） */
 #define LCVIEW_EVENT_SENSOR_DATA         3  /* 传感器数据上报（来源：lechao_sensor 驱动） */
-#define LCVIEW_EVENT_USB_TRANSPORT_START 4  /* USB 传输开始（来源：vendor_lechao_usbd-stats.c，
-                                             * 触发场景：usb_stor_invoke_transport 入口） */
 #define LCVIEW_EVENT_USB_TRANSPORT_END   5  /* USB 传输结束（来源：vendor_lechao_usbd-stats.c，
-                                             * 触发场景：成功/失败/abort/no_sense 的统一出口） */
+                                             * 触发场景：成功/失败/abort/no_sense 的统一出口。
+                                             * R-16 P4 方向 1：START/END 合并为单次 END——
+                                             * 耗时由 usb-storage 核心侧测得并经 nd->duration_ns
+                                             * 传入，原 id=4 TRANSPORT_START 已删除不再发射） */
 #define LCVIEW_EVENT_USB_TRANSPORT_ERROR 6  /* USB 传输层错误（来源：vendor_lechao_usbd-stats.c，
                                              * 触发场景：transport() 返回 TRANSPORT_ERROR） */
 #define LCVIEW_EVENT_USB_RESET           7  /* USB 设备重置（来源：vendor_lechao_usbd-stats.c，

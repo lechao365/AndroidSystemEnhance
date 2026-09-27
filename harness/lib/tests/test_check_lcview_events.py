@@ -140,14 +140,11 @@ class TestCompare(unittest.TestCase):
 
     def test_disabled_event_missing_emit_allowed(self):
         # R-11 方向 3：登记在 DISABLED_EVENTS 的停发事件，内核不再发射
-        # （TRANSPORT_START 降为调试诊断），schema 保留定义 → 跳过判红
-        self.assertIn("LCVIEW_EVENT_USB_TRANSPORT_START", DISABLED_EVENTS)
-        d = self._repo(emit="/* no lcview emits */\n")
-        try:
-            rc, msg = compare(d)
-        finally:
-            self._cleanup(d)
-        self.assertEqual(rc, 0, msg)
+        # （TRANSPORT_START 降为调试诊断），schema 保留定义 → 跳过判红。
+        # R-16 P4 方向 1：START 已从 schema 彻底删除（合并为单次 END），
+        # DISABLED_EVENTS 登记集合清空——空集合下任何事件都不豁免，未登记
+        # 事件缺发射点仍判红（语义收敛到 test_non_disabled_missing_emit_still_red）。
+        self.assertEqual(DISABLED_EVENTS, set())
 
     def test_non_disabled_missing_emit_still_red(self):
         # 非停发事件（schema 定义未登记）无发射点 → 仍判红，防登记被滥用

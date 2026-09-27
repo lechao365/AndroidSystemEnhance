@@ -2,16 +2,6 @@
   "version": 1,
   "events": [
     {
-      "id": 4,
-      "name": "usb_transport_start",
-      "desc": "USB bulk transport starts",
-      "fields": [
-        {"name": "device_index",    "type": "int64"},
-        {"name": "data_direction",  "type": "int64"},
-        {"name": "bytes_to_xfer",   "type": "int64"}
-      ]
-    },
-    {
       "id": 5,
       "name": "usb_transport_end",
       "desc": "USB bulk transport completes",

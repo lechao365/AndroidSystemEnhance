@@ -30,6 +30,8 @@
 #include "lciod_usbd.h"
 #include "lciod_read_logic.h"
 #include <linux/math64.h>
+#include <linux/percpu.h>
+#include <linux/sched_clock.h>
 #include <scsi/scsi_cmnd.h>
 #include "lcview_events.h"
 #include "lcview_internal.h"
@@ -40,6 +42,57 @@
 
 extern int usbd_debug;
 #define LC_DBG(fmt, ...) do { if (usbd_debug) pr_info(PREFIX "[D] " fmt, ##__VA_ARGS__); } while (0)
+
+/*
+ * per-CPU 时间戳槽（R-16 P4 方向 2）：降时钟开销
+ *
+ * 【背景】
+ *   原实现每命令多次调用 ktime_get()/ktime_get_ns()：每次走 timekeeping
+ *   seqcount 重试循环（含 smp_rmb），I/O 洪水时 per-SCSI-命令累计开销可观。
+ *   本模块（stats.c）是 per-命令热路径（END 的 last_update/degrade 窗口、
+ *   异常事件的 record/event_push），时钟读数密集。
+ *
+ * 【设计】
+ *   - 每个 CPU 独立缓存一个 mono 时间戳槽（last_mono_ns）+ 缓存时的
+ *     sched_clock() 原始值（last_raw）。
+ *   - 读取时仅做一次 sched_clock() 差值判断（latch 读 + 减法，免 seqcount
+ *     重试），刷新间隔（LCVIEW_TS_REFRESH_NS）内直接返回缓存值，不调
+ *     ktime_get_ns()；超阈值才刷新一次真实时钟。
+ *   - 每 CPU 独立缓存免 cacheline 争用；mono 语义（CLOCK_MONOTONIC 近似，
+ *     sched_clock 与 ktime_get_ns 同源单调）满足事件时间戳/窗口比较用途。
+ *   - wall 时间戳（wall_time_ns/timestamp_ns 的 REALTIME 分量）保留实时
+ *     ktime_get_real_ns()：受 NTP/adjtime 调整，per-CPU 缓存会放大各 CPU
+ *     对调整的感知偏差，破坏跨源（HAL/daemon 日志）时间对齐语义。
+ *
+ * 【调用上下文】
+ *   读取可安全用于 atomic notifier 上下文（无锁、不可睡眠）。
+ */
+#define LCVIEW_TS_REFRESH_NS (2ULL * NSEC_PER_MSEC)  /* 2ms 刷新阈值 */
+
+struct lcview_ts_slot {
+    u64 last_mono_ns;   /* 缓存的 ktime_get_ns() 值（CLOCK_MONOTONIC） */
+    u64 last_raw;       /* 缓存时刻的 sched_clock() 原始值 */
+};
+
+static DEFINE_PER_CPU(struct lcview_ts_slot, lcview_ts_slots);
+
+/*
+ * lcview_ts_mono_ns — 读取 per-CPU 缓存的 mono 时间戳（ns）
+ *
+ * 刷新间隔内返回缓存值（免 timekeeping seqcount）；间隔内本函数只读
+ * per-CPU 槽 + 一次 sched_clock() 差值判断。调用上下文：原子上下文安全。
+ */
+static inline u64 lcview_ts_mono_ns(void)
+{
+    struct lcview_ts_slot *slot = this_cpu_ptr(&lcview_ts_slots);
+    u64 now_raw = sched_clock();
+
+    if (unlikely(now_raw - slot->last_raw > LCVIEW_TS_REFRESH_NS)) {
+        slot->last_raw = now_raw;
+        slot->last_mono_ns = ktime_get_ns();
+    }
+    return slot->last_mono_ns;
+}
 
 /*
  * vendor_lechao_usbd_dir_to_u8 — 将 SCSI 数据方向枚举转换为 ABI 编码
@@ -86,7 +139,8 @@ static inline void vendor_lechao_usbd_record_last_event_locked(
     u64 degrade_baseline,
     u32 type, u32 value, s32 status, u8 dir)
 {
-    u64 now = ktime_get_ns();
+    /* R-16 P4 方向 2：mono 时间读 per-CPU 槽（wall 保留实时——NTP 对齐语义） */
+    u64 now = lcview_ts_mono_ns();
 
     rate_dev->last_event.timestamp_ns = now;
     rate_dev->last_event.wall_time_ns = ktime_get_real_ns();
@@ -215,7 +269,8 @@ static inline bool vendor_lechao_usbd_update_degrade_context_locked(
     u64 *baseline_rate_out,
     u64 *threshold_out)
 {
-    ktime_t now = ktime_get();
+    /* R-16 P4 方向 2：mono 时间读 per-CPU 槽（降时钟开销） */
+    u64 now = lcview_ts_mono_ns();
     u64 window_ns;
     u64 baseline_rate;
     u64 threshold;
@@ -230,7 +285,7 @@ static inline bool vendor_lechao_usbd_update_degrade_context_locked(
         return false;
     }
 
-    window_ns = ktime_to_ns(ktime_sub(now, rate_dev->last_degrade_window_start));
+    window_ns = now - rate_dev->last_degrade_window_start;
     if (window_ns < VENDOR_LECHAO_USBD_DEGRADE_WINDOW_NS) {
         rate_dev->last_degrade_window_bytes += bytes;
         if (baseline_rate_out)
@@ -264,29 +319,6 @@ static inline bool vendor_lechao_usbd_update_degrade_context_locked(
  * "可睡眠"错误，调用方不得在此路径使用 GFP_KERNEL 等可睡眠分配。
  * 如果 builder_start 失败（如内存不足），事件被静默丢弃（ratelimited 日志）。
  */
-
-/*
- * lcview_trace_transport_start — 传输开始事件（R-11 方向 3：不再 commit）
- * @rate_dev:     目标设备实例
- * @srb:          SCSI 命令（用于提取方向和数据长度）
- * @device_index: 次设备号（用于用户态关联设备）
- *
- * TRANSPORT_START 是每次 SCSI 命令都触发的最高频事件（per-END 都有一次），
- * 在 IO 路径上逐命令分配 ~4KB GFP_ATOMIC builder 并写 ring，I/O 洪水时
- * 开销可观且挤占环空间驱逐正常记录。R-11 方向 3：事件级别保持 DEBUG，
- * 但不再 commit——传输时序信息已由 TRANSPORT_END（含 elapsed_ns）完整
- * 承载，START 事件降为调试诊断（usbd_debug 开启时仅打印日志），省掉
- * IO 路径的 GFP_ATOMIC 分配。
- */
-static void lcview_trace_transport_start(struct vendor_lechao_usbd_device *rate_dev,
-                                         struct scsi_cmnd *srb, int device_index)
-{
-    if (!srb)
-        return;
-
-    LC_DBG("TRANSPORT_START(trace disabled): dev=%d dir=%d bytes=%u\n", device_index,
-           vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction), scsi_bufflen(srb));
-}
 
 /*
  * lcview_trace_transport_end — 发射传输结束事件
@@ -475,7 +507,8 @@ static inline void vendor_lechao_usbd_event_push(
     unsigned long flags;
 
     memset(&ev, 0, sizeof(ev));
-    ev.timestamp_ns = ktime_get_ns();
+    /* R-16 P4 方向 2：mono 时间读 per-CPU 槽（wall 保留实时——跨源对齐） */
+    ev.timestamp_ns = lcview_ts_mono_ns();
     ev.wall_time_ns = ktime_get_real_ns();
     ev.event_type = type;
     ev.event_value = value;
@@ -559,11 +592,9 @@ void vendor_lechao_usbd_do_reset(struct vendor_lechao_usbd_device *rate_dev)
     /* R-06 方向 3：atomic 清零（do_reset 持 dev->lock，与 event_lock 域自增跨锁域，须原子） */
     atomic64_set(&rate_dev->event_drop_cnt, 0);
     rate_dev->stats.event_drop_count = 0;
-    rate_dev->transport_start_time = ktime_set(0, 0);
-    rate_dev->transport_active = false;
     rate_dev->last_transport_latency_ns = 0;
     rate_dev->last_transport_error = false;
-    rate_dev->last_degrade_window_start = ktime_set(0, 0);
+    rate_dev->last_degrade_window_start = 0;
     rate_dev->last_degrade_window_bytes = 0;
     memset(&rate_dev->last_event, 0, sizeof(rate_dev->last_event));
     rate_dev->last_event.event_type = VENDOR_LECHAO_USBD_EVENT_NONE;
@@ -587,8 +618,6 @@ void vendor_lechao_usbd_do_reset(struct vendor_lechao_usbd_device *rate_dev)
  *   5. 在无锁状态下发射 LcView trace（因为 lcview_builder 可能睡眠）
  *
  * 【每种事件的处理逻辑】
- *   TRANSPORT_START：
- *     - 记录传输开始时间，设置 transport_active=true，清除上次错误标志
  *   TRANSPORT_ERROR：
  *     - error_count++，标记 last_transport_error，记录+推送事件
  *   STALL：
@@ -597,7 +626,8 @@ void vendor_lechao_usbd_do_reset(struct vendor_lechao_usbd_device *rate_dev)
  *     - timeout_count++，记录+推送事件
  *   DATA_CORRUPT：
  *     - corrupt_count++，记录+推送事件
- *   TRANSPORT_END：
+ *   TRANSPORT_END（R-16 P4 方向 1：START/END 合并为单次带 duration_ns 的
+ *     END——usb-storage 核心侧测得耗时填充 nd->duration_ns，直接消费）：
  *     - 计算传输延迟（elapsed_ns），更新 latency
  *     - 如果传输成功：累计 bytes/cmds/ns，计算瞬时速率
  *     - degrade 判定：如果速率下降或延迟上升，设置 degraded 标志
@@ -654,15 +684,6 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
     spin_lock_irqsave(&rate_dev->lock, flags);
 
     switch (event) {
-    case USB_STOR_NOTIFIER_TRANSPORT_START:
-        rate_dev->transport_start_time = ktime_get();
-        rate_dev->transport_active = true;
-        rate_dev->last_transport_error = false;
-        trace.dir = srb ? vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction) : 0;
-        LC_DBG("TRANSPORT_START: dir=%d bytes=%u\n", trace.dir,
-               srb ? scsi_bufflen(srb) : 0);
-        break;
-
     case USB_STOR_NOTIFIER_TRANSPORT_ERROR:
         rate_dev->stats.error_count++;
         rate_dev->last_transport_error = true;
@@ -735,15 +756,12 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
 
     case USB_STOR_NOTIFIER_TRANSPORT_END:
         trace.dir = srb ? vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction) : 0;
-        if (!rate_dev->transport_active) {
-            rate_dev->last_transport_error = false;
-            break;
-        }
 
-        /* 优先消费 usb-storage 核心侧已测得的传输耗时，仅在缺失时 fallback */
-        elapsed_ns = (nd && nd->duration_ns) ? nd->duration_ns
-                     : ktime_to_ns(ktime_sub(ktime_get(),
-                                             rate_dev->transport_start_time));
+        /* R-16 P4 方向 1：START/END 合并为单次带 duration_ns 的 END——
+         * usb-storage 核心侧已测得传输耗时并填充 nd->duration_ns，删除
+         * 原 transport_start_time fallback（START notifier 已停发，
+         * per-device 不再维护起始时间戳）。 */
+        elapsed_ns = nd ? nd->duration_ns : 0;
         trace.was_error = rate_dev->last_transport_error ? 1 : 0;
 
         if (srb && !rate_dev->last_transport_error) {
@@ -829,10 +847,8 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
         rate_dev->last_transport_latency_ns = elapsed_ns;
         rate_dev->stats.last_transport_latency_ns = elapsed_ns;
 
-        rate_dev->stats.last_update = ktime_get_ns();
+        rate_dev->stats.last_update = lcview_ts_mono_ns();
         rate_dev->last_transport_error = false;
-        rate_dev->transport_active = false;
-        rate_dev->transport_start_time = ktime_set(0, 0);
         break;
 
     case USB_STOR_NOTIFIER_RESET:
@@ -850,9 +866,6 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
     spin_unlock_irqrestore(&rate_dev->lock, flags);
 
     switch (event) {
-    case USB_STOR_NOTIFIER_TRANSPORT_START:
-        lcview_trace_transport_start(rate_dev, srb, trace.device_index);
-        break;
     case USB_STOR_NOTIFIER_TRANSPORT_ERROR:
         lcview_trace_transport_error(rate_dev, trace.device_index,
                                      trace.dir, trace.result);

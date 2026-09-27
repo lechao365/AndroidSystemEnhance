@@ -55,6 +55,9 @@ public:
      * refresh_devices — 刷新设备节点缓存
      * 保留仍在线且路径不变的 entry（含 fd），关闭已离线设备的 fd，
      * 新设备 fd 初始 -1 由 readEvent() 懒打开。
+     *
+     * R-16 P4 方向 3：降级为冷启动 bootstrap / 兜底——设备上下线主感知
+     * 通道改为订阅内核 uevent（uevent_fd + on_uevent_readable 增量维护）。
      */
     void refresh_devices();
 
@@ -63,6 +66,18 @@ public:
      * 返回: DeviceEntry* 指针，nullptr 表示设备不在线
      */
     DeviceEntry* resolve_device(int minor);
+
+    /*
+     * R-16 P4 方向 3：uevent 设备感知接口
+     *   uevent_fd()        — 订阅内核 uevent 的 netlink fd（主循环 poll 注册）
+     *   on_uevent_readable — uevent fd 可读时调用：读取并解析 uevent，增量
+     *                        维护 mDeviceMap（add → 建 entry，remove → 关 fd 剔除）
+     *   handle_device_add/remove — 供单测直接驱动增删（不依赖真实 netlink）
+     */
+    int uevent_fd() const { return mUeventFd; }
+    void on_uevent_readable();
+    void handle_device_add(int minor);
+    void handle_device_remove(int minor);
 
     ndk::ScopedAStatus listDevices(std::vector<std::string>* _aidl_return) override;
     ndk::ScopedAStatus getStats(int32_t in_deviceMinor,
@@ -75,10 +90,20 @@ public:
                                  bool* _aidl_return) override;
     ndk::ScopedAStatus readEvent(int32_t in_deviceMinor, int32_t in_timeoutMs,
                                  aidl::vendor::lechao::lciod::IoEvent* _aidl_return) override;
+    /*
+     * R-16 P4 方向 4：复制指定设备内核事件 fd 的 dup
+     * 返回 fd 供 daemon epoll 监听（内核 .poll 支持 EPOLLIN/EPOLLHUP）。
+     * 懒打开持久 fd 后 dup；设备离线返回错误。
+     */
+    ndk::ScopedAStatus dupEventFd(int32_t in_deviceMinor,
+                                  ndk::ScopedFileDescriptor* _aidl_return) override;
 
 private:
     /* 设备节点缓存: minor → {path, fd} */
     std::unordered_map<int, DeviceEntry> mDeviceMap;
+    /* R-16 P4 方向 3：内核 uevent 订阅 fd（-1 表示未打开/失败），
+     * 主循环 poll 注册该 fd，设备上下线即时感知 */
+    int mUeventFd = -1;
 };
 
 #endif  // _LECHAO_LCIOD_HAL_SERVICE_H

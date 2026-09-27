@@ -41,6 +41,17 @@ int main() {
     }
     ALOGI("Registered %s", name.c_str());
 
+    /* R-16 P4 方向 4 修复：服务注册后立即非阻塞启动 binder 线程池，
+     * 再启动后台监控线程。原实现仅靠末尾 joinThreadPool() 启动池，
+     * monitor 线程（service->start()）启动后立即在 hal_client 构造中
+     * 调 linkToDeath——此时池未启动，binder 报 "Thread Pool max thread
+     * count is 0"，linkToDeath 失败 → onHalDied 永不触发 → HAL 崩溃/
+     * 重启后 daemon 仍持有死 binder，后续 AIDL 事务永久悬挂（monitor
+     * 卡死在 binder_ioctl_write_read，热插拔后事件无人消费、event_drop
+     * 飙升）。startThreadPool() 为非阻塞（池线程就绪即返回），join 仅
+     * 供主线程挂入池服务 RPC。 */
+    ABinderProcess_startThreadPool();
+
     /* 服务注册成功后才启动后台监控线程 */
     service->start();
 

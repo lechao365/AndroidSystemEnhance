@@ -237,16 +237,17 @@ TEST(SchemaParserParseJsonTest, FindUnknownId_ReturnsNull) {
 // 方向 3：生产配置（/vendor/etc/lcview_events.json）加载校验——
 // 此前 UT 全用内联 kValidJson，真配置不被任何测试加载；
 // 上板跑时该路径即生产配置文件（host 环境跳过）
-TEST(SchemaParserParseJsonTest, ProductionConfig_LoadsAll10Events) {
+TEST(SchemaParserParseJsonTest, ProductionConfig_LoadsAll9Events) {
     if (access("/vendor/etc/lcview_events.json", R_OK) != 0) {
         GTEST_SKIP() << "生产配置不存在（host 环境）";
         return;
     }
     SchemaParser sp;
     ASSERT_TRUE(sp.loadFromFile("/vendor/etc/lcview_events.json"));
-    EXPECT_EQ(sp.eventCount(), 10u);
-    // id 4..13 全部定义（与内核 lcview_events.h 一致）
-    for (uint16_t id = 4; id <= 13; id++) {
+    // R-16 P4 方向 1：START(4) 已并入 END，schema 由 10 事件降为 9 事件
+    EXPECT_EQ(sp.eventCount(), 9u);
+    // id 5..13 全部定义（与内核 lcview_events.h 一致）
+    for (uint16_t id = 5; id <= 13; id++) {
         const EventSchema* s = sp.find(id);
         ASSERT_NE(s, nullptr) << "事件 " << id << " 缺失";
         EXPECT_FALSE(s->name.empty());

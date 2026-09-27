@@ -216,7 +216,8 @@ TEST(DaemonLoopHelperTest, SchemaLoadRetry_SuccessOnFirstTry) {
     if (access("/vendor/etc/lcview_events.json", R_OK) == 0) {
         EXPECT_TRUE(loadSchemaWithRetry(sp, "/vendor/etc/lcview_events.json", running, 0,
                                         std::chrono::milliseconds(1)));
-        EXPECT_EQ(sp.eventCount(), 10u);
+        // R-16 P4 方向 1：START(4) 已并入 END，schema 由 10 事件降为 9 事件
+        EXPECT_EQ(sp.eventCount(), 9u);
     } else {
         GTEST_SKIP() << "真配置不存在（host 环境）";
     }

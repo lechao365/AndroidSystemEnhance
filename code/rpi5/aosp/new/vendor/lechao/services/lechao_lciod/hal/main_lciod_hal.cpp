@@ -6,16 +6,23 @@
 //           与 lcview main_lcview_hal.cpp 模式对齐），负责：
 //   1) 初始化 Android logging
 //   2) 创建 IoHalImpl 实例并注册为 Binder 服务
-//   3) 进入 Binder 线程池等待 RPC 调用
+//   3) 进入单线程 poll 事件循环（binder fd + 内核 uevent fd）
 //
 // 服务名称: vendor.lechao.lciod.IIoHal/default
-// 线程数: 1（单线程处理，避免并发 ioctl 冲突）
+// 线程数: 1（单线程处理，避免并发 ioctl 冲突；LCD-010）
+//
+// R-16 P4 方向 3：由 ABinderProcess_joinThreadPool 改为
+//   ABinderProcess_setupPolling + poll 循环——同一线程同时服务
+//   binder RPC 与内核 uevent（设备上下线即时感知），保持单线程
+//   串行化设计意图（mDeviceMap 无需加锁）。
 // ============================================================
 
 #include "hal_service.h"
 #include <android/binder_manager.h>
 #include <android/binder_process.h>
 #include <android-base/logging.h>
+#include <cerrno>
+#include <poll.h>
 
 using namespace ndk;
 
@@ -38,7 +45,52 @@ int main() {
         return 1;
     }
     LOG(INFO) << "Registered " << name;
-    ABinderProcess_joinThreadPool();
-    LOG(ERROR) << "joinThreadPool returned unexpectedly";
-    return 1;
+
+    /* R-16 P4 方向 3：binder polling 单线程事件循环。
+     * binder fd 可读 → 处理 RPC；uevent fd 可读 → 增量维护设备表。
+     * setupPolling 失败（API 不可用）时降级 joinThreadPool（glob-only
+     * 兜底已由构造路径保证，uevent 感知丢失仅影响即时性不影响功能）。 */
+    int binder_fd = -1;
+    binder_status_t poll_status = ABinderProcess_setupPolling(&binder_fd);
+    if (poll_status != STATUS_OK) {
+        LOG(WARNING) << "setupPolling failed (" << poll_status
+                     << "), fallback to joinThreadPool (glob-only)";
+        ABinderProcess_joinThreadPool();
+        LOG(ERROR) << "joinThreadPool returned unexpectedly";
+        return 1;
+    }
+
+    int uevent_fd = service->uevent_fd();
+    while (true) {
+        struct pollfd fds[2];
+        int nfds = 0;
+        fds[nfds].fd = binder_fd;
+        fds[nfds].events = POLLIN;
+        nfds++;
+        if (uevent_fd >= 0) {
+            fds[nfds].fd = uevent_fd;
+            fds[nfds].events = POLLIN;
+            nfds++;
+        }
+        int pr = poll(fds, nfds, -1);
+        if (pr < 0) {
+            if (errno == EINTR)
+                continue;
+            int saved = errno;
+            LOG(ERROR) << "poll failed: " << strerror(saved)
+                       << " (fd=" << binder_fd << " uevent_fd=" << uevent_fd << ")";
+            /* CXX-004：长生命周期主循环致命错误 4 步退出——置死循环不可达
+             * 前以 ERROR 日志 + exit(1) 交 init 重启，不静默空转 */
+            return 1;
+        }
+        if (fds[0].revents & (POLLIN | POLLERR | POLLHUP)) {
+            ABinderProcess_handlePolledCommands();
+            /* uevent fd 可能在处理 RPC 期间被重新感知（fd 生命周期不变，
+             * 无需重取） */
+        }
+        if (uevent_fd >= 0 && fds[1].revents & (POLLIN | POLLERR | POLLHUP)) {
+            service->on_uevent_readable();
+            uevent_fd = service->uevent_fd();  /* 故障降级后 fd 可能置 -1 */
+        }
+    }
 }

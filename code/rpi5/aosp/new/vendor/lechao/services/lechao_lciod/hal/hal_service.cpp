@@ -35,6 +35,7 @@
 #include <cerrno>
 #include <cinttypes>
 #include <cstring>
+#include <fcntl.h>
 
 using namespace ndk;
 using aidl::vendor::lechao::lciod::IoStats;
@@ -43,13 +44,24 @@ using aidl::vendor::lechao::lciod::IoEvent;
 using lechao::lciod::ParseMinorFromPath;
 
 IoHalImpl::IoHalImpl() {
+    /* R-16 P4 方向 3：先 glob bootstrap 建立初始设备集，再订阅内核 uevent
+     * 做增量感知。bootstrap 期间（socket 绑定前）产生的 ADD uevent 由 glob
+     * 兜底覆盖；绑定后的 add/remove 由 on_uevent_readable 即时处理。 */
     refresh_devices();
+    mUeventFd = ::open_uevent_socket();
+    if (mUeventFd < 0)
+        LC_LOGW("IoHalImpl: uevent socket open failed, fallback to glob-only (errno="
+                << errno << ")");
 }
 
 IoHalImpl::~IoHalImpl() {
     /* 析构时关闭所有持久化 fd */
     for (auto& [minor, entry] : mDeviceMap)
         ::close_device(entry.fd);
+    if (mUeventFd >= 0) {
+        ::close_device(mUeventFd);
+        mUeventFd = -1;
+    }
 }
 
 /*
@@ -97,6 +109,93 @@ void IoHalImpl::refresh_devices() {
     }
 
     mDeviceMap = std::move(newMap);
+}
+
+/*
+ * handle_device_add — 增量处理设备上线（R-16 P4 方向 3）
+ * @minor: 设备次设备号
+ *
+ * 设备已存在时幂等跳过（uevent 可能重复）；新设备建 entry（fd=-1，
+ * 由 readEvent/getStats 懒打开），路径用 BuildDevicePath 构造。
+ * 单线程调用（HAL 1 binder 线程 + 主循环 poll），无并发风险。
+ */
+void IoHalImpl::handle_device_add(int minor) {
+    auto it = mDeviceMap.find(minor);
+    if (it != mDeviceMap.end()) {
+        LC_LOGD("handle_device_add: minor=" << minor << " already present (idempotent)");
+        return;
+    }
+    DeviceEntry entry;
+    entry.path = lechao::lciod::BuildDevicePath(minor);
+    entry.fd = -1;
+    mDeviceMap[minor] = entry;
+    LC_LOGI("handle_device_add: device online minor=" << minor
+            << " path=" << entry.path);
+}
+
+/*
+ * handle_device_remove — 增量处理设备下线（R-16 P4 方向 3）
+ * @minor: 设备次设备号
+ *
+ * 关闭持久 fd 并从 map 剔除；设备不在 map 时幂等跳过（REMOVE uevent
+ * 可能在设备从未被感知时到达）。
+ */
+void IoHalImpl::handle_device_remove(int minor) {
+    auto it = mDeviceMap.find(minor);
+    if (it == mDeviceMap.end()) {
+        LC_LOGD("handle_device_remove: minor=" << minor << " not present (idempotent)");
+        return;
+    }
+    ::close_device(it->second.fd);
+    mDeviceMap.erase(it);
+    LC_LOGI("handle_device_remove: device offline minor=" << minor);
+}
+
+/*
+ * on_uevent_readable — uevent fd 可读时的处理入口（R-16 P4 方向 3）
+ *
+ * 循环读取 uevent 消息直到 EAGAIN（非阻塞排空），解析并过滤
+ * SUBSYSTEM=vendor_lechao_usbd 的 add/remove 事件，增量维护 mDeviceMap。
+ * 忽略其他子系统噪声与解析失败消息（CXX-003：防御外部输入，解析失败
+ * 仅告警不崩溃）。
+ */
+void IoHalImpl::on_uevent_readable() {
+    if (mUeventFd < 0)
+        return;
+    char buf[8192];
+    while (true) {
+        ssize_t n = ::read_uevent(mUeventFd, buf, sizeof(buf));
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EINTR)
+                break;  /* 已排空 */
+            int saved = errno;
+            LC_LOGW("on_uevent_readable: read_uevent failed: " << strerror(saved));
+            /* 非 EAGAIN 故障：关闭 fd 降级 glob-only，避免死循环重读 */
+            ::close_device(mUeventFd);
+            mUeventFd = -1;
+            break;
+        }
+        UeventInfo info;
+        if (!parse_uevent(buf, static_cast<size_t>(n), &info)) {
+            LC_LOGD("on_uevent_readable: unparseable uevent, ignored");
+            continue;
+        }
+        /* 仅处理 vendor_lechao_usbd 子系统的设备节点事件 */
+        if (info.subsystem != "vendor_lechao_usbd")
+            continue;
+        int32_t minor32 = -1;
+        if (!lechao::lciod::ParseMinorFromPath(
+                std::string("/dev/") + info.devname, &minor32)) {
+            LC_LOGD("on_uevent_readable: non-device devname '" << info.devname
+                    << "', ignored");
+            continue;
+        }
+        int minor = static_cast<int>(minor32);
+        if (info.action == "add")
+            handle_device_add(minor);
+        else if (info.action == "remove")
+            handle_device_remove(minor);
+    }
 }
 
 /*
@@ -293,7 +392,14 @@ ndk::ScopedAStatus IoHalImpl::readEvent(int32_t in_deviceMinor, int32_t in_timeo
     /* 检查持久 fd 是否有效，无效时尝试重新打开 */
     if (entry->fd < 0) {
         LC_LOGD("readEvent: reopening persistent fd");
-        entry->fd = ::open_device(entry->path.c_str());
+        /* R-16 P4 方向 4 修复：reopen 单次尝试快速失败——原实现用
+         * open_device 默认 3 次 × 50ms 重试（最长 150ms）。HAL 为单线程
+         * setupPolling 模型，设备热插拔（authorized 切换）期间 daemon 每
+         * 50ms 兜底轮询调 readEvent，150ms 阻塞会令 binder 线程饥饿
+         * （starved）→ 事务丢失 → daemon 卡死（binder ioctl 永久等待）、
+         * HAL 服务从 servicemanager 注销。重连窗口由 daemon 兜底轮询
+         * 高频重试兜底，HAL 侧无需自阻塞等待设备就绪。 */
+        entry->fd = ::open_device(entry->path.c_str(), 1, 0);
     }
     if (entry->fd < 0) { LC_LOGE("readEvent: reopen failed: " << strerror(errno));
         /* reopen 失败可能因设备已移除：刷新一次 map（清掉离线设备），
@@ -343,5 +449,41 @@ ndk::ScopedAStatus IoHalImpl::readEvent(int32_t in_deviceMinor, int32_t in_timeo
     _aidl_return->lba = raw.lba;
     _aidl_return->bytes = raw.bytes;
     _aidl_return->retry = raw.retry;
+    return ndk::ScopedAStatus::ok();
+}
+
+/*
+ * dupEventFd — 复制指定设备内核事件 fd 的 dup（R-16 P4 方向 4）
+ *
+ * 供 daemon epoll 多路复用：daemon 无法直接持有设备 fd（fd 只在 HAL 进程），
+ * 经 binder 传 fd（ScopedFileDescriptor 自动 dup 传输）获取可 poll 的事件 fd。
+ * 内核 .poll 支持 epoll：EPOLLIN 有事件可读、EPOLLHUP 设备断开。
+ *
+ * 懒打开持久 fd（与 readEvent 同款复用逻辑）；打开失败返回错误。dup 出的
+ * fd 由 daemon 持有并负责 close，HAL 侧持久 fd 生命周期不受影响。
+ */
+ndk::ScopedAStatus IoHalImpl::dupEventFd(int32_t in_deviceMinor,
+                                         ndk::ScopedFileDescriptor* _aidl_return) {
+    auto* entry = resolve_device(in_deviceMinor);
+    if (!entry) { LC_LOGW("dupEventFd: device not found for minor"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
+
+    if (entry->fd < 0) {
+        LC_LOGD("dupEventFd: reopening persistent fd");
+        entry->fd = ::open_device(entry->path.c_str());
+    }
+    if (entry->fd < 0) {
+        int saved = errno;
+        LC_LOGE("dupEventFd: open device failed: " << strerror(saved));
+        return ndk::ScopedAStatus::fromServiceSpecificError(-saved);
+    }
+
+    int dup_fd = ::dup(entry->fd);
+    if (dup_fd < 0) {
+        int saved = errno;
+        LC_LOGE("dupEventFd: dup failed: " << strerror(saved));
+        return ndk::ScopedAStatus::fromServiceSpecificError(-saved);
+    }
+    LC_LOGD("dupEventFd: minor=" << in_deviceMinor << " dup fd=" << dup_fd);
+    *_aidl_return = ndk::ScopedFileDescriptor(dup_fd);
     return ndk::ScopedAStatus::ok();
 }

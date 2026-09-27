@@ -310,3 +310,94 @@ TEST(ClampReadTimeoutTest, InRange_PassesThrough) {
     EXPECT_EQ(clamp_read_timeout_ms(kMaxReadEventTimeoutMs),
               kMaxReadEventTimeoutMs);
 }
+
+/* --- R-16 P4 方向 3：parse_uevent 纯解析单测（无真实 netlink） --- */
+
+namespace {
+
+std::string MakeUevent(const std::string& action, const std::string& subsystem,
+                       const std::string& devname) {
+    std::string s;
+    s += action + "@/devices/platform/foo/bar";  // 首行 ACTION@DEVPATH
+    s += '\0';
+    s += "SUBSYSTEM=" + subsystem;
+    s += '\0';
+    s += "DEVPATH=/devices/platform/foo/bar";
+    s += '\0';
+    s += "DEVNAME=" + devname;
+    s += '\0';
+    s += '\0';  // 双 NUL 结尾
+    return s;
+}
+
+}  // namespace
+
+TEST(UeventParseTest, AddEvent_FullFieldsParsed) {
+    std::string msg = MakeUevent("add", "vendor_lechao_usbd", "vendor_lechao_usbd0");
+    UeventInfo out;
+    EXPECT_TRUE(parse_uevent(msg.data(), msg.size(), &out));
+    EXPECT_EQ(out.action, "add");
+    EXPECT_EQ(out.subsystem, "vendor_lechao_usbd");
+    EXPECT_EQ(out.devname, "vendor_lechao_usbd0");
+}
+
+TEST(UeventParseTest, RemoveEvent_FullFieldsParsed) {
+    std::string msg = MakeUevent("remove", "vendor_lechao_usbd", "vendor_lechao_usbd3");
+    UeventInfo out;
+    EXPECT_TRUE(parse_uevent(msg.data(), msg.size(), &out));
+    EXPECT_EQ(out.action, "remove");
+    EXPECT_EQ(out.subsystem, "vendor_lechao_usbd");
+    EXPECT_EQ(out.devname, "vendor_lechao_usbd3");
+}
+
+TEST(UeventParseTest, ForeignSubsystem_StillParsed) {
+    // 其他子系统（如 block）也要能解析，过滤由调用方按 subsystem 判断
+    std::string msg = MakeUevent("add", "block", "sda");
+    UeventInfo out;
+    EXPECT_TRUE(parse_uevent(msg.data(), msg.size(), &out));
+    EXPECT_EQ(out.subsystem, "block");
+}
+
+TEST(UeventParseTest, NullInput_ReturnsFalse) {
+    UeventInfo out;
+    EXPECT_FALSE(parse_uevent(nullptr, 0, &out));
+    EXPECT_FALSE(parse_uevent(nullptr, 16, &out));
+}
+
+TEST(UeventParseTest, MissingSubsystem_ReturnsFalse) {
+    std::string s = "add@/devices/x";
+    s += '\0';
+    s += "DEVNAME=vendor_lechao_usbd0";
+    s += '\0';
+    s += '\0';
+    UeventInfo out;
+    EXPECT_FALSE(parse_uevent(s.data(), s.size(), &out));
+}
+
+TEST(UeventParseTest, MissingDevname_ReturnsFalse) {
+    std::string s = "add@/devices/x";
+    s += '\0';
+    s += "SUBSYSTEM=vendor_lechao_usbd";
+    s += '\0';
+    s += '\0';
+    UeventInfo out;
+    EXPECT_FALSE(parse_uevent(s.data(), s.size(), &out));
+}
+
+TEST(UeventParseTest, EmptyAction_ReturnsFalse) {
+    std::string s = "@/devices/x";  // @ 前缀为空 → action 空
+    s += '\0';
+    s += "SUBSYSTEM=vendor_lechao_usbd";
+    s += '\0';
+    s += "DEVNAME=vendor_lechao_usbd0";
+    s += '\0';
+    s += '\0';
+    UeventInfo out;
+    EXPECT_FALSE(parse_uevent(s.data(), s.size(), &out));
+}
+
+TEST(UeventParseTest, GarbageNoNul_ReturnsFalse) {
+    std::string s = "this is not a uevent message without terminators";
+    UeventInfo out;
+    EXPECT_FALSE(parse_uevent(s.data(), s.size(), &out));
+}
