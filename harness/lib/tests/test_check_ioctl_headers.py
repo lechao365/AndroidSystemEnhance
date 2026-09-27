@@ -11,8 +11,10 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from check_ioctl_headers import (compare, compare_constants,  # noqa: E402
-                                 compare_offsetofs, derive_offsetofs)
+from check_ioctl_headers import (compare, compare_abi_versions,  # noqa: E402
+                                 compare_constants, compare_hdr_layouts,
+                                 compare_offsetofs, compare_stats_field_order,
+                                 derive_offsetofs)
 
 
 class TestCompare(unittest.TestCase):
@@ -320,6 +322,232 @@ class TestCompareOffsetofs(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
         self.assertEqual(rc, 1)
         self.assertIn("多出内核", msg)
+
+
+# ============================================================
+# R-15 P3 方向 1：ABI 版本宏 / hdr 32B 布局 / stats 字段序 四方入检
+# ============================================================
+
+class TestCompareAbiVersions(unittest.TestCase):
+    def _repo(self, kernel_lcview="2", aosp_lcview="2",
+              kernel_lciod="3", hal_lciod="3", usbv_lciod="3"):
+        """搭临时 code 仓根：lcview 双侧 + lciod 三方镜像头。"""
+        d = Path(tempfile.mkdtemp(prefix="ioctl_abi_"))
+        paths = {
+            "rpi5/kernel/new/vendor/lechao/LcView/lcview_ioctl.h":
+                f"#define LCVIEW_ABI_VERSION {kernel_lcview}\n",
+            "rpi5/aosp/new/vendor/lechao/services/lechao_lcview/include/"
+            "lcview_ioctl.h": f"#define LCVIEW_ABI_VERSION {aosp_lcview}\n",
+            "rpi5/kernel/new/vendor/lechao/LcIod/lciod_usbd-ioctl.h":
+                f"#define VENDOR_LECHAO_USBD_ABI_VERSION {kernel_lciod}\n",
+            "rpi5/aosp/new/vendor/lechao/services/lechao_lciod/hal/"
+            "vendor_lechao_usbd-ioctl.h":
+                f"#define VENDOR_LECHAO_USBD_ABI_VERSION {hal_lciod}\n",
+            "rpi5/others/usb-verify/include/vendor_lechao_usbd-ioctl.h":
+                f"#define VENDOR_LECHAO_USBD_ABI_VERSION {usbv_lciod}\n",
+        }
+        for rel, content in paths.items():
+            p = d / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        return d
+
+    def test_abi_versions_ok(self):
+        d = self._repo()
+        try:
+            rc, msg = compare_abi_versions(d)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("3 个", msg)
+        self.assertIn("一致", msg)
+
+    def test_abi_drift_lcview_returns_red(self):
+        # lcview 内核 2 vs AOSP 3 → 判红（ABI 版本号单侧漂移）
+        d = self._repo(aosp_lcview="3")
+        try:
+            rc, msg = compare_abi_versions(d)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("LCVIEW_ABI_VERSION", msg)
+        self.assertIn("漂移", msg)
+
+    def test_abi_drift_lciod_usbverify_returns_red(self):
+        # lciod 内核 3 vs usb-verify 4 → 判红（第三方镜像漂移）
+        d = self._repo(usbv_lciod="4")
+        try:
+            rc, msg = compare_abi_versions(d)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("VENDOR_LECHAO_USBD_ABI_VERSION", msg)
+        self.assertIn("漂移", msg)
+
+    def test_abi_missing_kernel_macro_returns_red(self):
+        # 内核缺 ABI 版本宏 → 判红（协商阈值无真相源）
+        d = self._repo(kernel_lcview="")
+        try:
+            rc, msg = compare_abi_versions(d)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("缺", msg)
+
+
+class TestCompareHdrLayouts(unittest.TestCase):
+    _KERNEL_HDR = (
+        "struct lcview_record_hdr {\n"
+        "    uint16_t magic;\n"
+        "    uint16_t event_id;\n"
+        "    uint8_t  level;\n"
+        "    uint8_t  field_count;\n"
+        "    uint16_t reserved;\n"
+        "    uint64_t timestamp_ns;\n"
+        "    uint32_t seq_no;\n"
+        "    uint32_t reserved2;\n"
+        "    uint64_t mono_ns;\n"
+        "} __attribute__((packed));\n"
+    )
+
+    def _repo(self, kernel=_KERNEL_HDR, aosp=None):
+        aosp = aosp if aosp is not None else self._KERNEL_HDR
+        d = Path(tempfile.mkdtemp(prefix="ioctl_hdr_"))
+        (d / "rpi5/kernel/new/vendor/lechao/LcView").mkdir(
+            parents=True, exist_ok=True)
+        (d / "rpi5/aosp/new/vendor/lechao/services/lechao_lcview/include").mkdir(
+            parents=True, exist_ok=True)
+        (d / "rpi5/kernel/new/vendor/lechao/LcView/lcview_events.h").write_text(
+            kernel, encoding="utf-8")
+        (d / "rpi5/aosp/new/vendor/lechao/services/lechao_lcview/include/"
+             "lcview_events.h").write_text(aosp, encoding="utf-8")
+        return d
+
+    def test_hdr_layout_ok(self):
+        d = self._repo()
+        try:
+            rc, msg = compare_hdr_layouts(d)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("32B", msg)
+        self.assertIn("一致", msg)
+
+    def test_hdr_size_drift_returns_red(self):
+        # AOSP 侧 hdr 少一个 u64 字段（28B）→ 判红（32B 布局契约破坏）
+        aosp = (
+            "struct lcview_record_hdr {\n"
+            "    uint16_t magic;\n"
+            "    uint16_t event_id;\n"
+            "    uint8_t  level;\n"
+            "    uint8_t  field_count;\n"
+            "    uint16_t reserved;\n"
+            "    uint64_t timestamp_ns;\n"
+            "    uint32_t seq_no;\n"
+            "    uint32_t reserved2;\n"
+            "};\n"
+        )
+        d = self._repo(aosp=aosp)
+        try:
+            rc, msg = compare_hdr_layouts(d)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("字段序漂移", msg)
+
+    def test_hdr_field_order_drift_returns_red(self):
+        # AOSP 侧 hdr 字段序互换（magic/event_id 对调）→ 判红
+        aosp = self._KERNEL_HDR.replace(
+            "    uint16_t magic;\n    uint16_t event_id;\n",
+            "    uint16_t event_id;\n    uint16_t magic;\n")
+        d = self._repo(aosp=aosp)
+        try:
+            rc, msg = compare_hdr_layouts(d)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("字段序漂移", msg)
+
+    def test_hdr_missing_kernel_returns_red(self):
+        # 内核侧无 hdr struct → 判红（提取不到即契约破坏）
+        d = self._repo(kernel="/* no hdr */\n")
+        try:
+            rc, msg = compare_hdr_layouts(d)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("无 struct", msg)
+
+
+class TestCompareStatsFieldOrder(unittest.TestCase):
+    _KERNEL_OK = (
+        "struct lcview_stats {\n"
+        "    uint64_t total_records;\n"
+        "    uint64_t overrun_cnt;\n"
+        "    uint64_t dropped_cnt;\n"
+        "    uint32_t ring_usage_bytes;\n"
+        "    uint32_t ring_size_bytes;\n"
+        "};\n"
+    )
+
+    def _repo(self, kernel=_KERNEL_OK, aosp=None):
+        aosp = aosp if aosp is not None else self._KERNEL_OK
+        d = Path(tempfile.mkdtemp(prefix="ioctl_sfo_"))
+        (d / "rpi5/kernel/new/vendor/lechao/LcView").mkdir(
+            parents=True, exist_ok=True)
+        (d / "rpi5/aosp/new/vendor/lechao/services/lechao_lcview/include").mkdir(
+            parents=True, exist_ok=True)
+        (d / "rpi5/kernel/new/vendor/lechao/LcView/lcview_internal.h").write_text(
+            kernel, encoding="utf-8")
+        (d / "rpi5/aosp/new/vendor/lechao/services/lechao_lcview/include/"
+             "lcview_ioctl.h").write_text(aosp, encoding="utf-8")
+        return d
+
+    def test_stats_field_order_ok(self):
+        d = self._repo()
+        try:
+            rc, msg = compare_stats_field_order(d)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("一致", msg)
+        self.assertIn("u64", msg)
+
+    def test_stats_u64_to_u32_returns_red(self):
+        # 内核前三字段从 uint64_t 降回 uint32_t → 判红（u64 字段序破坏）
+        kernel = self._KERNEL_OK.replace("uint64_t total_records",
+                                         "uint32_t total_records")
+        d = self._repo(kernel=kernel)
+        try:
+            rc, msg = compare_stats_field_order(d)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("字段序漂移", msg)
+
+    def test_stats_cross_side_order_drift_returns_red(self):
+        # 内核侧 u64 序正确、AOSP 镜像侧 ring_size_bytes 从 u32 升 u64 →
+        # 类型序跨侧不一致判红（同类型字段对调 offset 变化归 offsetof 门禁，
+        # 本门禁显式钉类型序）
+        aosp = self._KERNEL_OK.replace(
+            "    uint32_t ring_size_bytes;\n",
+            "    uint64_t ring_size_bytes;\n")
+        d = self._repo(aosp=aosp)
+        try:
+            rc, msg = compare_stats_field_order(d)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("跨侧漂移", msg)
+
+    def test_stats_missing_kernel_returns_red(self):
+        d = self._repo(kernel="/* no stats */\n")
+        try:
+            rc, msg = compare_stats_field_order(d)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("无 struct", msg)
 
 
 if __name__ == "__main__":

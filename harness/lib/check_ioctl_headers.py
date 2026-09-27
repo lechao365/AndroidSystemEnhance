@@ -6,6 +6,14 @@
 #   导致用户态解析错位（静态编译不报错）。本脚本对结构体/枚举的
 #   类型+字段签名做规范化对比（排除注释、空白与用户态 typedef 适配
 #   等合法差异），漂移时 rc=1 给出首个差异点。
+# 四方全量校验（R-15 P3 方向 1）：
+#   1) struct/enum 签名 + ioctl 命令号 guard 跨侧比对（HEADER_PAIRS）
+#   2) 跨侧契约常量（CONSTANT_PAIRS）+ struct offsetof 自动推导交叉
+#      验证（OFFSETOF_PAIRS，R-04 方向 2）
+#   3) ABI 版本协商宏跨侧相等（ABI_VERSION_PAIRS）：daemon 启动协商
+#      阈值漂移即新用户态+旧内核静默错配
+#   4) lcview 记录头 32B 布局（HDR_LAYOUT_PAIRS）+ stats u64 字段序
+#      入检（STATS_FIELD_ORDER）：线上格式解析错位与同尺寸类型互换
 # 对比对象：
 #   内核 LcIod/lciod_usbd-ioctl.h
 #   AOSP  hal/vendor_lechao_usbd-ioctl.h
@@ -62,6 +70,52 @@ OFFSETOF_PAIRS = [
      "lcview_stats"),
 ]
 
+# ABI 版本协商宏跨侧入检（R-15 P3 方向 1）：内核真相源 vs 各镜像副本的 ABI
+# 版本号必须相等。daemon 启动协商（LCVIEW_GET_ABI_VERSION /
+# VENDOR_LECHAO_USBD_ABI_VERSION）以此为准，单侧误改版本号即协商判红阈值
+# 漂移（新用户态+旧内核静默错配），仅比 struct/enum 签名覆盖不到（版本号
+# 宏不在结构块内）。结构 (内核相对路径, 内核宏名, [(镜像相对路径, 镜像宏名)]).
+ABI_VERSION_PAIRS = [
+    ("rpi5/kernel/new/vendor/lechao/LcView/lcview_ioctl.h", "LCVIEW_ABI_VERSION",
+     [("rpi5/aosp/new/vendor/lechao/services/lechao_lcview/include/lcview_ioctl.h",
+       "LCVIEW_ABI_VERSION")]),
+    ("rpi5/kernel/new/vendor/lechao/LcIod/lciod_usbd-ioctl.h",
+     "VENDOR_LECHAO_USBD_ABI_VERSION",
+     [("rpi5/aosp/new/vendor/lechao/services/lechao_lciod/hal/"
+       "vendor_lechao_usbd-ioctl.h", "VENDOR_LECHAO_USBD_ABI_VERSION"),
+      ("rpi5/others/usb-verify/include/vendor_lechao_usbd-ioctl.h",
+       "VENDOR_LECHAO_USBD_ABI_VERSION")]),
+]
+
+# lcview 记录头 32B 布局入检（R-15 P3 方向 1）：内核 lcview_events.h 与
+# AOSP lcview_events.h 的 lcview_record_hdr 字段序一致且 packed 总尺寸为
+# 期望字节数（R-13 方向 2 扩容为 32B）。用户态按此头解析线上格式，单侧改
+# 字段序/尺寸即解析错位，静态编译不报错。元组 (内核头路径, 内核 struct 名,
+# AOSP 头路径, AOSP struct 名, 期望字节数)。
+HDR_LAYOUT_PAIRS = [
+    ("rpi5/kernel/new/vendor/lechao/LcView/lcview_events.h", "lcview_record_hdr",
+     "rpi5/aosp/new/vendor/lechao/services/lechao_lcview/include/lcview_events.h",
+     "lcview_record_hdr", 32),
+]
+
+# struct lcview_stats 期望字段类型序（R-15 P3 方向 1：u64 字段序入检）：
+# 前三字段必须为 uint64_t（total_records/overrun_cnt/dropped_cnt，R-13 升位），
+# 后两字段 uint32_t（ring_usage_bytes/ring_size_bytes）。offsetof 断言钉偏移
+# 但挡不住同尺寸类型互换（如 u32↔u32 字段对调），字段类型序须显式入检。
+# 值为期望类型序列表（与 _field_types 提取口径一致）。
+STATS_FIELD_ORDER = {
+    "lcview_stats": ["uint64_t", "uint64_t", "uint64_t", "uint32_t", "uint32_t"],
+}
+
+# stats 字段序入检来源（内核真相源 vs AOSP 镜像 struct，两侧类型序须一致且
+# 符合 STATS_FIELD_ORDER 期望）。元组 (内核路径, 内核 struct 名, AOSP 路径,
+# AOSP struct 名)。
+STATS_FIELD_ORDER_PAIRS = [
+    ("rpi5/kernel/new/vendor/lechao/LcView/lcview_internal.h", "lcview_stats",
+     "rpi5/aosp/new/vendor/lechao/services/lechao_lcview/include/lcview_ioctl.h",
+     "lcview_stats"),
+]
+
 # C 标量/内建类型字节数（offsetof 推导用；struct lcview_stats 全 uint32_t 4B，
 # 顺序布局天然无 padding 间隙。此处映射覆盖常见标量，未知类型按最宽 8B 保守
 # 判红防假绿——不推导则无法发现手工断言漂移）
@@ -76,7 +130,11 @@ _CTYPE_SIZE = {
 # 约束（lib-09）：BLOCK_RE 的 [^}]* 不支持嵌套花括号（嵌套 struct/enum 块
 # 提取不到会静默漏检），extract_signatures 对块内出现嵌套 { 的情况判红
 # fail-closed（见 _nested_block_hits），本提取器只支持扁平成员布局。
-BLOCK_RE = re.compile(r"((?:struct|enum)\s+\w+\s*\{[^}]*\}\s*;)", re.S)
+# 结尾兼容 `__attribute__((packed))`（内核 lcview_events.h 的 lcview_record_hdr
+# 即 packed 形态，R-15 P3 方向 1：hdr 32B 布局入检须能提取内核侧定义）。
+BLOCK_RE = re.compile(
+    r"((?:struct|enum)\s+\w+\s*\{[^}]*\}"
+    r"\s*(?:__attribute__\s*\(\s*\([^)]*\)\s*\))?\s*;)", re.S)
 
 # 提取 ioctl 命令号宏：`#define NAME  _IOR(...)` / `_IOW(...)` / `_IO(...)`
 # 命令号 guard 比对（方向 2）：命令号漂移（魔数/序号/类型不同）会导致 ioctl
@@ -129,6 +187,10 @@ def normalize_block(block: str) -> list[str]:
         line = line.split("//")[0]                      # 行注释
         line = line.strip().rstrip(";").strip()
         if not line or line in ("struct {", "enum {", "{", "}", "};"):
+            continue
+        # 块闭合行（含 __attribute__((packed)) 后缀，R-15 P3 方向 1：packed
+        # struct 提取后属性行不得混入字段签名）
+        if line.startswith("}"):
             continue
         head = line.split("{")[0].strip()
         if head.startswith(("struct", "enum")):
@@ -203,6 +265,27 @@ def derive_offsetofs(sig_lines: list[str]) -> tuple[dict[str, int] | None, str]:
     if not offsets:
         return None, "struct 无字段（无法推导 offsetof）"
     return offsets, f"{len(offsets)} 字段推导完成"
+
+
+def _field_types(sig_lines: list[str]) -> list[str] | None:
+    """从 struct 规范化字段行提取字段类型序列（不含字段名，类型归一 __uN→uN）。
+
+    用于 stats u64 字段序入检（R-15 P3 方向 1）：与 STATS_FIELD_ORDER 期望
+    类型序比对，防同尺寸类型互换（如 u32↔u32 字段对调，offsetof 值不变）。
+    任一字段行无法解析返回 None（fail-closed，交人工复核）。
+    """
+    types = []
+    for line in sig_lines:
+        line = re.sub(r"/\*.*?\*/", "", line)
+        line = line.split("//")[0].strip().rstrip(";").strip()
+        if not line:
+            continue
+        m = _FIELD_RE.match(line)
+        if not m:
+            return None
+        ftype = re.sub(r"\b__u(\d+)\b", r"u\1", m.group(1).strip())
+        types.append(ftype)
+    return types or None
 
 
 def extract_offsetof_asserts(text: str) -> dict[str, dict[str, int]]:
@@ -392,6 +475,154 @@ def compare_offsetofs(repo: Path) -> tuple[int, str]:
     return 0, f"一致: {checked} 个 offsetof 值自动推导与断言一致"
 
 
+def compare_abi_versions(repo: Path) -> tuple[int, str]:
+    """ABI 版本协商宏跨侧入检（R-15 P3 方向 1）：内核真相源 vs 各镜像副本
+    ABI 版本号必须相等。daemon 启动协商（LCVIEW_GET_ABI_VERSION /
+    VENDOR_LECHAO_USBD_ABI_VERSION）以此为准，单侧误改版本号即协商判红
+    阈值漂移（新用户态+旧内核静默错配）。版本号宏不在 struct/enum 块内，
+    struct 签名比对覆盖不到，须单独提取比对。
+    """
+    problems = []
+    checked = 0
+    for k_rel, k_macro, mirrors in ABI_VERSION_PAIRS:
+        k_path = repo / k_rel
+        if not k_path.is_file():
+            return 2, f"ABI 文件缺失: {k_rel}"
+        kv = extract_define_values(k_path.read_text(encoding="utf-8",
+                                                    errors="replace"))
+        if k_macro not in kv:
+            problems.append(f"内核缺 ABI 版本宏 {k_macro}（{k_rel}）")
+            continue
+        for a_rel, a_macro in mirrors:
+            a_path = repo / a_rel
+            if not a_path.is_file():
+                return 2, f"ABI 文件缺失: {a_rel}"
+            av = extract_define_values(a_path.read_text(encoding="utf-8",
+                                                        errors="replace"))
+            if a_macro not in av:
+                problems.append(f"AOSP 缺镜像 ABI 版本宏 {a_macro}（{a_rel}）")
+                continue
+            checked += 1
+            if kv[k_macro] != av[a_macro]:
+                problems.append(f"ABI 版本宏漂移: {k_macro} 内核={kv[k_macro]} "
+                                f"AOSP({a_macro})={av[a_macro]}（{k_rel} vs {a_rel}）")
+    if problems:
+        return 1, "\n".join(problems)
+    if checked == 0 and ABI_VERSION_PAIRS:
+        return 1, "ABI 版本宏对全部未比对到（两侧宏缺失/解析异常）"
+    return 0, f"一致: {checked} 个 ABI 版本宏跨侧相等"
+
+
+def compare_hdr_layouts(repo: Path) -> tuple[int, str]:
+    """lcview 记录头 32B 布局入检（R-15 P3 方向 1）：内核 lcview_events.h 与
+    AOSP lcview_events.h 的 lcview_record_hdr 字段序一致且 packed 总尺寸为
+    期望字节数。用户态按此头解析线上格式，单侧改字段序/尺寸即解析错位，
+    静态编译不报错，须入检。
+    """
+    problems = []
+    checked = 0
+    for k_rel, k_struct, a_rel, a_struct, expect in HDR_LAYOUT_PAIRS:
+        k_path, a_path = repo / k_rel, repo / a_rel
+        if not k_path.is_file() or not a_path.is_file():
+            return 2, f"hdr 文件缺失: {k_rel if not k_path.is_file() else a_rel}"
+        ktext = k_path.read_text(encoding="utf-8", errors="replace")
+        atext = a_path.read_text(encoding="utf-8", errors="replace")
+        # 嵌套花括号块判红（lib-09 同 compare 口径）：hdr 提取器同样不支持嵌套
+        nested = sorted(set(_nested_block_hits(ktext) + _nested_block_hits(atext)))
+        if nested:
+            return 1, ("hdr 嵌套花括号块超出提取器支持范围（lib-09 fail-closed）: "
+                       + ", ".join(nested))
+        ksig = extract_signatures(ktext).get(k_struct)
+        asig = extract_signatures(atext).get(a_struct)
+        if ksig is None:
+            problems.append(f"内核无 struct {k_struct}（{k_rel}）")
+            continue
+        if asig is None:
+            problems.append(f"AOSP 无 struct {a_struct}（{a_rel}）")
+            continue
+        # 字段序跨侧一致（hdr 布局契约：双侧同名同序）
+        if ksig != asig:
+            problems.append(f"hdr 字段序漂移: {k_struct} 内核={ksig} AOSP={asig}")
+            continue
+        # 尺寸入检：packed 布局按字段类型尺寸累加推导总字节数
+        offsets, desc = derive_offsetofs(ksig)
+        if offsets is None:
+            problems.append(f"hdr {k_struct} 尺寸推导失败: {desc}")
+            continue
+        total = 0
+        for line in ksig:
+            m = _FIELD_RE.match(line)
+            if not m:
+                problems.append(f"hdr 字段行无法解析: {line!r}")
+                break
+            ftype = re.sub(r"\b__u(\d+)\b", r"u\1", m.group(1).strip())
+            size = _CTYPE_SIZE.get(ftype)
+            if size is None:
+                problems.append(f"hdr 未知字段类型 {ftype!r}（无法推导尺寸）")
+                break
+            total += size
+        else:
+            checked += 1
+            if total != expect:
+                problems.append(f"hdr 尺寸漂移: {k_struct} 实际 {total}B "
+                                f"期望 {expect}B（{k_rel} vs {a_rel}）")
+    if problems:
+        return 1, "\n".join(problems)
+    if checked == 0 and HDR_LAYOUT_PAIRS:
+        return 1, "hdr 布局对全部未比对到（推导/断言缺失）"
+    return 0, f"一致: {checked} 个 hdr {expect}B 布局双侧一致"
+
+
+def compare_stats_field_order(repo: Path) -> tuple[int, str]:
+    """struct stats 字段类型序入检（R-15 P3 方向 1）：内核真相源与 AOSP 镜像
+    的 stats 字段类型序必须一致且符合 STATS_FIELD_ORDER 期望（u64 字段序：
+    前三 uint64_t + 后二 uint32_t）。offsetof 断言钉偏移但挡不住同尺寸类型
+    互换（如 u32↔u32 字段对调，offset 不变），字段类型序须显式入检。
+    """
+    problems = []
+    checked = 0
+    for k_rel, k_struct, a_rel, a_struct in STATS_FIELD_ORDER_PAIRS:
+        k_path, a_path = repo / k_rel, repo / a_rel
+        if not k_path.is_file() or not a_path.is_file():
+            return 2, (f"stats 文件缺失: "
+                       f"{k_rel if not k_path.is_file() else a_rel}")
+        ktext = k_path.read_text(encoding="utf-8", errors="replace")
+        atext = a_path.read_text(encoding="utf-8", errors="replace")
+        ksig = extract_signatures(ktext).get(k_struct)
+        if ksig is None:
+            problems.append(f"内核无 struct {k_struct}（{k_rel}）")
+            continue
+        ktypes = _field_types(ksig)
+        if ktypes is None:
+            problems.append(f"内核 {k_struct} 字段类型序解析失败")
+            continue
+        # 内核侧字段类型序须符合期望（u64 字段序入检）
+        expected = STATS_FIELD_ORDER.get(k_struct)
+        if expected and ktypes != expected:
+            problems.append(f"stats 字段序漂移: {k_struct} 内核={ktypes} "
+                            f"期望={expected}（{k_rel}）")
+            continue
+        # AOSP 镜像侧字段类型序须与内核一致（镜像侧换序同判红）
+        asig = extract_signatures(atext).get(a_struct)
+        if asig is None:
+            problems.append(f"AOSP 无 struct {a_struct}（{a_rel}）")
+            continue
+        atypes = _field_types(asig)
+        if atypes is None:
+            problems.append(f"AOSP {a_struct} 字段类型序解析失败")
+            continue
+        if atypes != ktypes:
+            problems.append(f"stats 字段序跨侧漂移: {a_struct} 内核={ktypes} "
+                            f"AOSP={atypes}（{k_rel} vs {a_rel}）")
+            continue
+        checked += 1
+    if problems:
+        return 1, "\n".join(problems)
+    if checked == 0 and STATS_FIELD_ORDER_PAIRS:
+        return 1, "stats 字段序对全部未比对到（推导/断言缺失）"
+    return 0, f"一致: {checked} 个 stats u64 字段序入检通过"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default=str(Path(__file__).resolve().parents[2] / "code"),
@@ -407,8 +638,12 @@ def main() -> int:
             rc_total = max(rc_total, 1 if rc == 1 else 2)
             fail_msgs.append(msg)
     # R-04 方向 2：跨侧常量 + offsetof 契约（独立于 HEADER_PAIRS 的文件对）
+    # R-15 P3 方向 1：ABI 版本宏 / hdr 布局 / stats 字段序 四方全量校验
     for name, fn in (("跨侧常量", compare_constants),
-                     ("struct offsetof", compare_offsetofs)):
+                     ("struct offsetof", compare_offsetofs),
+                     ("ABI 版本宏", compare_abi_versions),
+                     ("hdr 32B 布局", compare_hdr_layouts),
+                     ("stats 字段序", compare_stats_field_order)):
         rc, msg = fn(repo)
         tag = {0: "OK", 1: "漂移", 2: "缺失"}[rc]
         print(f"[{tag}] {name}\n  {msg}")
