@@ -17,6 +17,8 @@
 /*
  * event_type_name — 将事件类型枚举转换为可读字符串
  * 用于事件输出中的 event_type 字段显示。
+ * 覆盖全部 7 种内核事件（含 RATE_DEGRADED，R-18 P5 方向 3 补齐——
+ * 此前缺该 case 会落入 default 显示 "unknown"，JSON 分支不可机读）。
  */
 static const char *event_type_name(uint32_t type)
 {
@@ -27,6 +29,7 @@ static const char *event_type_name(uint32_t type)
     case VENDOR_LECHAO_USBD_EVENT_DATA_CORRUPT:    return "data_corrupt";
     case VENDOR_LECHAO_USBD_EVENT_TIMEOUT:         return "timeout";
     case VENDOR_LECHAO_USBD_EVENT_RESET:           return "reset";
+    case VENDOR_LECHAO_USBD_EVENT_RATE_DEGRADED:   return "rate_degraded";
     default:                                        return "unknown";
     }
 }
@@ -181,15 +184,17 @@ int output_check_report(const struct fv_check_report *report, int json)
 }
 
 /*
- * output_degrade_check — 降级检查报告（内置计算逻辑）
+ * output_degrade_check — 降级检查报告（统一入口）
  *
- * 此函数与 fv_check_degrade() 功能重叠，但直接在 output 层完成计算。
+ * check degrade 的唯一实现入口（原 event_check.c 的 fv_check_degrade
+ * 为逻辑等价的死代码，R-18 P5 方向 3 已删除）。
  * 三项检查:
  *   1) rate_drop: peak_rate - current_rate
  *   2) latency_rise: last_transport_latency_ns
  *   3) stall_count: stall_count
  *
  * 检查结果填充到本地 report 后委托给 output_check_report 输出。
+ * 标题行仅在文本模式打印（json 模式下直接输出纯 JSON，保证可机读）。
  */
 int output_degrade_check(const struct vendor_lechao_usbd_stats *stats,
                          const struct fv_command *cmd, int json)
@@ -197,7 +202,8 @@ int output_degrade_check(const struct vendor_lechao_usbd_stats *stats,
     struct fv_check_report report;
     memset(&report, 0, sizeof(report));
 
-    printf("=== Degrade Check ===\n");
+    if (!json)
+        printf("=== Degrade Check ===\n");
     if (cmd->rate_drop_ge > 0) {
         uint64_t drop = 0;
         if (stats->peak_rate > stats->current_rate)

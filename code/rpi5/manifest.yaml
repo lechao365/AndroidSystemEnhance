@@ -326,3 +326,9 @@ others:
     source: null
   - patch: others/usb-verify/src/device/usbd_device.h
     source: null
+  - patch: others/usb-verify/tests/.gitignore
+    source: null
+  - patch: others/usb-verify/tests/Makefile
+    source: null
+  - patch: others/usb-verify/tests/fv_pure_host_test.c
+    source: null

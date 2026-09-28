@@ -88,6 +88,9 @@ int main(int argc, char *argv[])
 
     /* 特殊命令 */
     if (strcmp(cmd, "--list") == 0 || strcmp(cmd, "-l") == 0) {
+        /* R-18 P5 方向 5：列出前先过 schema gate，防故障语义漂移 */
+        if (expect_validate_schema() < 0)
+            return 1;
         expect_list_all();
         return 0;
     }
@@ -247,6 +250,15 @@ int main(int argc, char *argv[])
             usage(argv[0]);
             return 1;
         }
+    }
+
+    /* ===== R-18 P5 方向 5：注入前过 schema gate =====
+     * 防 expect_table 与内核 event 枚举/命名表漂移后继续注入，
+     * 导致 fault-verify 校验语义与内核实际事件不一致。
+     */
+    if (expect_validate_schema() < 0) {
+        fprintf(stderr, "[main] expect schema 校验失败，拒绝注入\n");
+        return 1;
     }
 
     /* ===== 打开 raw-gadget ===== */

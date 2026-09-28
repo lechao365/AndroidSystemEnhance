@@ -20,11 +20,13 @@ import check_host_tests as cht  # noqa: E402
 _MAKEFILE = "test:\n\t@true\nclean:\n\t@true\n"
 
 
-def _make_repo(root: Path, *modules):
-    """构造最小仓：<module_dir>/<module>/tests/Makefile。"""
+def _make_repo(root: Path, *labels):
+    """构造最小仓：为给定 label 集合创建 <spec.src>/tests/Makefile。"""
     repo = Path(root)
-    for module in modules:
-        d = cht._module_dir(repo) / module / "tests"
+    for spec in cht._HOST_TEST_SPECS:
+        if spec[0] not in labels:
+            continue
+        d = cht._module_src_dir(repo, spec) / "tests"
         d.mkdir(parents=True)
         (d / "Makefile").write_text(_MAKEFILE, encoding="utf-8")
     return repo
@@ -34,33 +36,37 @@ class TestCheckHostTests(unittest.TestCase):
     def setUp(self):
         td = tempfile.TemporaryDirectory()
         self.addCleanup(td.cleanup)
-        self.repo = _make_repo(td.name, "LcView", "LcIod")
-        self.src_tests = cht._module_dir(self.repo) / "LcView" / "tests"
+        self.repo = _make_repo(td.name, "LcView", "LcIod",
+                               "usb-verify", "usb-fault-inject")
+        self.spec = cht._HOST_TEST_SPECS[0]  # LcView
+        self.src_tests = cht._module_src_dir(self.repo, self.spec) / "tests"
 
     def test_run_one_make_test_success(self):
         with mock.patch.object(cht.subprocess, "run") as m:
             m.return_value.returncode = 0
-            rc, out = cht._run_make_test("LcView", self.repo)
+            rc, out = cht._run_make_test(self.spec, self.repo)
             self.assertEqual(rc, 0)
             self.assertIn("host_rc=0", out)
 
     def test_run_one_make_test_fail(self):
         with mock.patch.object(cht.subprocess, "run") as m:
             m.return_value.returncode = 2
-            rc, out = cht._run_make_test("LcView", self.repo)
+            rc, out = cht._run_make_test(self.spec, self.repo)
             self.assertEqual(rc, 1)
             self.assertIn("host_rc=1", out)
 
     def test_clean_always_runs_after_test(self):
         with mock.patch.object(cht.subprocess, "run") as m:
             m.side_effect = [mock.Mock(returncode=0), mock.Mock(returncode=0)]
-            cht._run_make_test("LcView", self.repo)
+            cht._run_make_test(self.spec, self.repo)
             # 先 make test 后 make clean（清掉副本产物）
             self.assertEqual(m.call_count, 2)
             self.assertIn("clean", str(m.call_args_list[1]))
 
     def test_make_dir_missing_returns_one(self):
-        rc, out = cht._run_make_test("__nonexistent_module__", self.repo)
+        bogus = ("__nonexistent_module__", "rpi5/kernel/new/vendor/lechao/X",
+                 "rpi5/kernel/new/vendor/lechao", "X")
+        rc, out = cht._run_make_test(bogus, self.repo)
         self.assertEqual(rc, 1)
         self.assertIn("host_rc=1", out)
 
@@ -77,7 +83,7 @@ class TestCheckHostTests(unittest.TestCase):
             return mock.Mock(returncode=0, stdout="ok\n")
 
         with mock.patch.object(cht.subprocess, "run", side_effect=_fake_run):
-            rc, out = cht._run_make_test("LcView", self.repo)
+            rc, out = cht._run_make_test(self.spec, self.repo)
         self.assertEqual(rc, 0)
         stage_tests = cht._host_stage_root(self.repo) / "LcView" / "tests"
         for cwd in cwds:
@@ -105,16 +111,19 @@ class TestCheckHostTests(unittest.TestCase):
         # make test 超时（内层 TimeoutExpired）→ 短路判红带归因（超时路径
         # 在 clean 前返回，每模块只消耗一次 subprocess 调用）
         te = cht.subprocess.TimeoutExpired("make test", cht._MAKE_TEST_TIMEOUT_S)
-        rc, out = self._run_main_capture([te, te])
+        rc, out = self._run_main_capture([te, te, te, te])
         self.assertEqual(rc, 1)
-        self.assertEqual(out.count("make test 超时"), 2)
+        self.assertEqual(out.count("make test 超时"), 4)
         self.assertIn("FAIL", out)
 
     def test_main_red_when_make_rc_nonzero(self):
         # make test 编译/运行失败返回非零 → 判红透出 host_rc=1
+        # 四模块（LcView/LcIod/usb-verify/usb-fault-inject）：前两模块
+        # make test 失败（host_rc=1），后两模块成功——clean 恒成功
         bad = mock.Mock(returncode=2)
         ok = mock.Mock(returncode=0)
-        rc, out = self._run_main_capture([bad, ok, bad, ok])
+        seq = [bad, ok, bad, ok, ok, ok, ok, ok]
+        rc, out = self._run_main_capture(seq)
         self.assertEqual(rc, 1)
         self.assertEqual(out.count("host_rc=1"), 2)
         self.assertIn("FAIL", out)
@@ -130,7 +139,7 @@ class TestCheckHostTests(unittest.TestCase):
     def test_stage_copy_failure_returns_host_rc(self):
         with mock.patch.object(cht.shutil, "copytree",
                                side_effect=OSError("boom")):
-            rc, out = cht._run_make_test("LcView", self.repo)
+            rc, out = cht._run_make_test(self.spec, self.repo)
         self.assertEqual(rc, 1)
         self.assertIn("host_rc=1", out)
         self.assertIn("副本复制失败", out)
@@ -146,11 +155,13 @@ class TestCheckHostTests(unittest.TestCase):
 
     # ── KI-20260912-002：整树拷贝，顶层头文件随副本存在 ──────────────────
     def test_stage_copy_includes_top_level_kernel_header(self):
-        header = cht._module_dir(self.repo) / "kernel_lechao_log.h"
+        header = (self.repo / "code" / "rpi5" / "kernel" / "new"
+                  / "vendor" / "lechao" / "kernel_lechao_log.h")
+        header.parent.mkdir(parents=True, exist_ok=True)
         header.write_text("/* test */\n", encoding="utf-8")
         root = cht._host_stage_root(self.repo)
         self.addCleanup(cht.shutil.rmtree, root, ignore_errors=True)
-        cht._stage_module_copy(self.repo, "LcView")
+        cht._stage_module_copy(self.repo, self.spec)
         self.assertTrue((root / "kernel_lechao_log.h").is_file())
         self.assertTrue((root / "LcView" / "tests" / "Makefile").is_file())
         self.assertTrue((root / "LcIod").is_dir())

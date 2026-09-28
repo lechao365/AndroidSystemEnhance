@@ -34,8 +34,12 @@ void scsi_exit(void);
  * cbwcb:       CBW.CBWCB[16] 字段
  * cbwcb_len:   CBW.bCBWCBLength（1..16）
  * data_len:    CBW.dCBWDataTransferLength
- * out_buf:     IN 方向时，函数填充此缓冲区并返回数据指针
+ * data_buf:    IN 方向时，函数填充此缓冲区并返回数据指针
  *              OUT 方向时，函数从此缓冲区读取 Host 发来的数据
+ *              == NULL 时仅解析方向/长度/状态，不执行任何数据读写
+ *              （用于 bot.c 收到 CBW 后的预解析，避免对未接收数据的
+ *              OUT 命令用未初始化缓冲区脏写内存盘——见 bot.c 注释）
+ * buf_size:    data_buf 容量
  * 返回:        SCSI 处理结果（方向、实际数据长度、CSW status）
  */
 struct scsi_result scsi_handle_command(const uint8_t *cbwcb, uint8_t cbwcb_len,

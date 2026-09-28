@@ -50,6 +50,8 @@ void usage(const char *prog)
         "  --corrupt-ge <n>             Assert corrupt_count >= n\n"
         "  --disconnect-ge <n>          Assert disconnect_count >= n\n"
         "  --probe-ge <n>               Assert probe_count >= n\n"
+        "  --error-ge <n>               Assert error_count >= n\n"
+        "  --reset-ge <n>               Assert reset_count >= n\n"
         "  --rate-drop-ge <n>           Assert rate drop >= n\n"
         "  --latency-rise-ge <n>        Assert latency rise >= n\n"
         "  --enable <0|1>               Config: enabled flag\n"
@@ -60,14 +62,17 @@ void usage(const char *prog)
 }
 
 /*
- * parse_event_type — 将字符串事件类型名转换为内核枚举值
+ * fv_parse_event_type — 将字符串事件类型名转换为内核枚举值
  * @s: 事件类型名称（如 "stall", "timeout" 等）
  * 返回: 对应的 enum vendor_lechao_usbd_event_type 值，未知类型返回 0xFFFFFFFF
+ *
+ * 导出为非 static（R-18 P5 方向 6）：host 单测直接校验事件名↔枚举
+ * 映射契约，防 usb-verify 与内核 event 枚举语义漂移。
  *
  * 注意: "disconnect" 映射到 RESET（内核没有独立的 DISCONNECT 事件类型），
  *       "probe" 映射到 NONE（probe 不是异步事件，而是统计计数器）。
  */
-static uint32_t parse_event_type(const char *s)
+uint32_t fv_parse_event_type(const char *s)
 {
     if (strcmp(s, "stall") == 0)           return VENDOR_LECHAO_USBD_EVENT_STALL;
     if (strcmp(s, "timeout") == 0)         return VENDOR_LECHAO_USBD_EVENT_TIMEOUT;
@@ -183,7 +188,7 @@ int fv_parse_args(int argc, char **argv, struct fv_command *cmd)
             i++;
         } else if (strcmp(argv[i], "--type") == 0) {
             if (++i >= argc) { usage(argv[0]); return -1; }
-            cmd->expect_event_type = parse_event_type(argv[i]);
+            cmd->expect_event_type = fv_parse_event_type(argv[i]);
             if (cmd->expect_event_type == 0xFFFFFFFF) {
                 fprintf(stderr, "Unknown event type: %s\n", argv[i]);
                 return -1;
@@ -208,6 +213,14 @@ int fv_parse_args(int argc, char **argv, struct fv_command *cmd)
         } else if (strcmp(argv[i], "--probe-ge") == 0) {
             if (++i >= argc) { usage(argv[0]); return -1; }
             { int ok = 0; cmd->probe_ge = parse_u64(argv[i], &ok);
+              if (!ok) { fprintf(stderr, "Invalid threshold value: %s\n", argv[i]); return -1; } i++; }
+        } else if (strcmp(argv[i], "--error-ge") == 0) {
+            if (++i >= argc) { usage(argv[0]); return -1; }
+            { int ok = 0; cmd->error_ge = parse_u64(argv[i], &ok);
+              if (!ok) { fprintf(stderr, "Invalid threshold value: %s\n", argv[i]); return -1; } i++; }
+        } else if (strcmp(argv[i], "--reset-ge") == 0) {
+            if (++i >= argc) { usage(argv[0]); return -1; }
+            { int ok = 0; cmd->reset_ge = parse_u64(argv[i], &ok);
               if (!ok) { fprintf(stderr, "Invalid threshold value: %s\n", argv[i]); return -1; } i++; }
         } else if (strcmp(argv[i], "--rate-drop-ge") == 0) {
             if (++i >= argc) { usage(argv[0]); return -1; }

@@ -93,8 +93,15 @@ int usbd_set_config(int fd, const struct vendor_lechao_usbd_config *config)
  *      - read 返回不足 sizeof: 数据不完整 → 返回 -EIO
  *   3) 返回 0 表示成功
  *
- * 注意: 此实现只读取一条事件，不排空缓冲区。
- * 与 AOSP 版（排空并保留最新）行为不同。
+ * 事件消费语义（显式文档化，R-18 P5 方向 2）:
+ *   本实现每次调用只读取一条事件，不排空内核环形缓冲区。
+ *   这是有意设计而非缺陷：usb-verify 是校验工具，event wait/check
+ *   依赖逐条读取来匹配指定类型（fv_wait_for_event 循环读取非匹配
+ *   事件直到命中 expect_event_type）。若排空只保留最新，中间被跳过
+ *   的非匹配事件会丢失，导致匹配失败。
+ *   与 AOSP HAL 版（device_io.cpp read_event 循环排空、只保留最新）
+ *   的差异是消费场景不同：HAL 为生产监控取最新状态，本工具为测试
+ *   校验逐条断言。两者语义差异为显式设计决策，勿贸然统一。
  */
 int usbd_read_event(int fd, struct vendor_lechao_usbd_event *event, int timeout_ms)
 {

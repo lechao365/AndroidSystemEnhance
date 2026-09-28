@@ -285,9 +285,11 @@ class TestSelfcheck(unittest.TestCase):
 
     def test_host_collect_timeout_above_module_timeout(self):
         # 方向 2：host 收口超时 = _HOST_TIMEOUT_S 透传 _collect_cmd，取内部
-        # 最坏值（2 模块 ×（make test 300s + make clean 60s）= 720s）加 60
-        # 缓冲 = 780s；仍须大于 check_host_tests 单模块 make 超时（300s）——
-        # 否则外层收口 rc=124 抢先截断内层 TimeoutExpired，丢失超时归因
+        # 最坏值（N 模块 ×（make test 300s + make clean 60s））加 60 缓冲；
+        # N=4（LcView/LcIod/usb-verify/usb-fault-inject，R-18 P5 方向 6/7）
+        # → 1440s+60s=1500s。仍须大于 check_host_tests 单模块 make 超时
+        # （300s）——否则外层收口 rc=124 抢先截断内层 TimeoutExpired，
+        # 丢失超时归因
         fake = _fake_run([
             _FakeProc(0, "531 passed in 27.9s\n"),
         ])
@@ -303,8 +305,10 @@ class TestSelfcheck(unittest.TestCase):
                                   side_effect=_collect):
             with redirect_stdout(buf):
                 selfcheck.main()
-        self.assertEqual(selfcheck._HOST_TIMEOUT_S, 780)
-        self.assertEqual(seen.get("host"), 780)
+        self.assertEqual(selfcheck._HOST_TIMEOUT_S,
+                         cht._HOST_TEST_WORST_S + 60)
+        self.assertEqual(seen.get("host"),
+                         cht._HOST_TEST_WORST_S + 60)
         self.assertGreater(selfcheck._HOST_TIMEOUT_S,
                            cht._HOST_TEST_WORST_S)
         self.assertGreater(seen.get("host"), 300)
