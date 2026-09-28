@@ -425,8 +425,28 @@ static void jsonEscapeString(std::string &out, const std::string &s)
 // INT32/INT64/FLOAT 数值直出、STRING 转义、BINARY hex 输出、未知类型 null
 // R-08 方向 3：std::string 直接 append（std::to_string / append），消逐字段
 // oss << 流插入与中间 str 拷贝（STRING 不再构造临时 string 再逐字符流出）
-static void appendFieldValue(std::string &out, const DecodedField &df)
+// R-20 P5 方向 1：sensitive=true 时统一掩码——STRING/BINARY 输出 "***"，
+// 数值（INT32/INT64/FLOAT）输出 null（与 NaN/Inf/未知类型既有 null 约定
+// 一致，消费端以 null 判读被掩码，不伪造误导性数值）。非敏感路径零改动
+static void appendFieldValue(std::string &out, const DecodedField &df,
+                             bool sensitive = false)
 {
+    if (sensitive) {
+        switch (df.type) {
+        case LCVIEW_TYPE_INT32:
+        case LCVIEW_TYPE_INT64:
+        case LCVIEW_TYPE_FLOAT:
+            // 数值掩码用 null：与既有 NaN/Inf/未知类型 null 约定统一，
+            // 避免 0/-1 与合法值域冲突（如 device_index 可为 0）
+            out += "null";
+            break;
+        default:
+            // STRING/BINARY/未知类型统一输出固定掩码串
+            out += "\"***\"";
+            break;
+        }
+        return;
+    }
     switch (df.type) {
     case LCVIEW_TYPE_INT32: {
         int32_t val;
@@ -557,8 +577,9 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
             return std::string();
         }
         // kUnknown：未知类型输出 null 继续（与历史 default 语义一致，
-        // 解码器已推进 1 字节 type）；kOk 正常解码，两者 df.type 均已填充
-        appendFieldValue(out, df);
+        // 解码器已推进 1 字节 type）；kOk 正常解码，两者 df.type 均已填充。
+        // R-20 P5 方向 1：schema 字段敏感标记驱动输出层统一掩码
+        appendFieldValue(out, df, schema.fields[i].sensitive);
     }
     // R-13 方向 2：收到记录即记 seq（0 忽略——无 seq 语义的旧内核记录不
     // 参与 gap 统计），供心跳窗口 gap 判定（see takeSeqGapWindow）

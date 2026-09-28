@@ -28,10 +28,14 @@ enum class FieldType {
     UNKNOWN = 0xFF
 };
 
-// 字段定义：包含字段名和类型
+// 字段定义：包含字段名、类型与敏感标记
 struct FieldDef {
     std::string name;
     FieldType type;
+    // 敏感标记（R-20 P5 方向 1）：schema 字段级可选 key "sensitive" 置位，
+    // 输出层（FileWriter::appendFieldValue）据此统一掩码，敏感数据不落明文。
+    // 缺省 false 兼容旧 schema（无该 key 行为完全不变）。
+    bool sensitive = false;
 };
 
 // 事件 schema：描述一种事件的所有元信息

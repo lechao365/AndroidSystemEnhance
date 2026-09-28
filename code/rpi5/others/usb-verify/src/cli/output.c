@@ -19,6 +19,9 @@
  * 用于事件输出中的 event_type 字段显示。
  * 覆盖全部 7 种内核事件（含 RATE_DEGRADED，R-18 P5 方向 3 补齐——
  * 此前缺该 case 会落入 default 显示 "unknown"，JSON 分支不可机读）。
+ * 注意：此处输出小写（JSON 可机读契约，消费方按小写匹配），与内核
+ * vendor_lechao_usbd_event_type_name 的大写枚举名（"RATE_DEGRADED"）
+ * 为刻意区分（输出 vs 枚举名），非漂移——改输出值须同步消费方。
  */
 static const char *event_type_name(uint32_t type)
 {

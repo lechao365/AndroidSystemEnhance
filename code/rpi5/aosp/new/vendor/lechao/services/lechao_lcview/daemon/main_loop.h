@@ -24,8 +24,9 @@ namespace vendor {
 namespace lechao {
 namespace lcview {
 
-// 构建标识：每次上板验证批次唯一，启动/心跳日志携带，
-// 供板端 grep 精确确认"新二进制已在运行"（防假验证）
+// 构建标识：每次上板验证批次建议更新（批次唯一），启动/心跳日志携带，
+// 供板端 grep 精确确认"新二进制已在运行"（防假验证）。非每批强制——某批
+// 未更新时以心跳日志时间戳辅助判读即可
 #define LCVIEW_BUILD_TAG "LCVIEW-VERIFY-20260912-01"
 
 // 全局运行标志，被信号处理器置 false 以触发优雅退出

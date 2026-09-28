@@ -13,7 +13,9 @@
  *   - 后台监控线程：定期读取事件和统计，打印到 logcat
  *
  * 服务名称: system.lechao.lciod.IIoService/default
- * 线程模型: 主线程处理 Binder RPC + 1 个 detach 后台监控线程
+ * 线程模型: 主线程进入 Binder 线程池（R-17 后 4 线程）处理 RPC +
+ *           per-minor 分片监控线程池（R-17 后固定 4 分片 worker，见
+ *           start_monitor）定期读取事件和统计，打印到 logcat
  *
  * 注: IoServiceImpl 类声明与纯计算函数在 service.h（供单测/filegroup
  *     复用），进程 main 入口在 main_lciod.cpp（与 lcview 模式对齐）。
@@ -263,7 +265,7 @@ ndk::ScopedAStatus IoServiceImpl::setIoConfig(int32_t in_deviceMinor, const IoCo
 /* readIoEvent — 代理转发到 HAL readEvent()，1:1 字段直传。
  * LCD-002：timeout 首层钳位（HAL 侧 clamp_read_timeout_ms 为最终防线）——
  * 公开 binder 接口的负值/超大超时不得透传（-1 永久阻塞、INT_MAX 阻塞
- * 约天级，daemon 单线程 binder 池即被占死） */
+ * 约天级，未经钳位可占死 daemon binder 池；R-17 后池 4 线程仍须防御） */
 ndk::ScopedAStatus IoServiceImpl::readIoEvent(int32_t in_deviceMinor, int32_t in_timeoutMs, IoEvent* _aidl_return) {
     *_aidl_return = {};
     auto hal = hal_client_.get();

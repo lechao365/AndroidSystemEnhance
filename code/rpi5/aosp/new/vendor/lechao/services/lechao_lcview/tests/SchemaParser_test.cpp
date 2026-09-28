@@ -99,6 +99,38 @@ TEST(SchemaParserParseJsonTest, AllFieldTypes_ParsedCorrectly) {
     EXPECT_EQ(s->fields[2].type, FieldType::FLOAT);
     EXPECT_EQ(s->fields[3].type, FieldType::STRING);
     EXPECT_EQ(s->fields[4].type, FieldType::BINARY);
+    // R-20 P5 方向 1：kAllFieldTypesJson 未标 sensitive → 全部缺省 false
+    for (const auto& fd : s->fields)
+        EXPECT_FALSE(fd.sensitive) << "缺省 sensitive 须为 false";
+}
+
+// R-20 P5 方向 1：sensitive 标记解析（含向后兼容与严格校验）
+TEST(SchemaParserParseJsonTest, SensitiveFlag_ParsedCorrectly) {
+    constexpr const char* json = R"({"events": [
+        {"id": 1, "name": "x", "fields": [
+            {"name": "a", "type": "int64", "sensitive": true},
+            {"name": "b", "type": "string"},
+            {"name": "c", "type": "string", "sensitive": false}
+        ]}
+    ]})";
+    SchemaParser sp;
+    ASSERT_TRUE(sp.parseJson(json));
+    const EventSchema* s = sp.find(1);
+    ASSERT_NE(s, nullptr);
+    EXPECT_EQ(s->fields.size(), 3u);
+    EXPECT_TRUE(s->fields[0].sensitive);
+    EXPECT_FALSE(s->fields[1].sensitive) << "缺 key 缺省 false";
+    EXPECT_FALSE(s->fields[2].sensitive) << "显式 false 亦为不敏感";
+}
+
+TEST(SchemaParserParseJsonTest, SensitiveKeyWrongType_ReturnsFalse) {
+    constexpr const char* json = R"({"events": [
+        {"id": 1, "name": "x", "fields": [
+            {"name": "a", "type": "int64", "sensitive": "yes"}
+        ]}
+    ]})";
+    SchemaParser sp;
+    EXPECT_FALSE(sp.parseJson(json)) << "sensitive 非 bool 须严格拒绝";
 }
 
 TEST(SchemaParserParseJsonTest, MissingVersion_DefaultsToZero) {
@@ -262,6 +294,16 @@ TEST(SchemaParserParseJsonTest, ProductionConfig_LoadsAll9Events) {
         ASSERT_NE(s, nullptr) << "事件 " << id << " 缺失";
         EXPECT_FALSE(s->fields.empty()) << "事件 " << id << " 无字段";
     }
+    // R-20 P5 方向 1：生产配置 usb_probe(id=8) 设备身份字段须已标记敏感
+    // （vid/pid/vendor/product），输出层据此掩码；device_index 保持明文
+    const EventSchema* probe = sp.find(8);
+    ASSERT_NE(probe, nullptr);
+    ASSERT_EQ(probe->fields.size(), 5u);
+    EXPECT_FALSE(probe->fields[0].sensitive) << "device_index 不得掩码";
+    EXPECT_TRUE(probe->fields[1].sensitive) << "vid 须敏感";
+    EXPECT_TRUE(probe->fields[2].sensitive) << "pid 须敏感";
+    EXPECT_TRUE(probe->fields[3].sensitive) << "vendor 须敏感";
+    EXPECT_TRUE(probe->fields[4].sensitive) << "product 须敏感";
 }
 
 // 方向 1 对齐：生产配置 id=10/11/12 字段为 device_index/status、

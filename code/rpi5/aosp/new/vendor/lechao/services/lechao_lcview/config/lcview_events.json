@@ -55,10 +55,10 @@
       "desc": "USB device probed",
       "fields": [
         {"name": "device_index",    "type": "int64"},
-        {"name": "vid",             "type": "int64"},
-        {"name": "pid",             "type": "int64"},
-        {"name": "vendor",          "type": "string"},
-        {"name": "product",         "type": "string"}
+        {"name": "vid",             "type": "int64", "sensitive": true},
+        {"name": "pid",             "type": "int64", "sensitive": true},
+        {"name": "vendor",          "type": "string", "sensitive": true},
+        {"name": "product",         "type": "string", "sensitive": true}
       ]
     },
     {

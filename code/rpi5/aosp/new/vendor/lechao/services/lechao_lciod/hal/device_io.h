@@ -73,9 +73,10 @@ int set_config(int fd, const struct vendor_lechao_usbd_config *config);
  * 返回: <0 钳为 0（非阻塞）；> kMax 裁到 kMax。
  *
  * 背景：timeoutMs 从 IIoService/IIoHal 公开 binder 接口一路透传到
- * poll()，-1 即永久阻塞、INT_MAX 阻塞约 24.8 天；HAL/daemon 两侧
- * binder 线程池各仅 1 线程，单次恶意/失误调用即瘫痪整条监控链路
- * （"活着但不工作"）。HAL 侧为最终防线，daemon 侧首层防御。
+ * poll()，-1 即永久阻塞、INT_MAX 阻塞约 24.8 天；HAL 侧 binder 线程池
+ * 仍为 1 线程，单次恶意/失误调用即瘫痪整条监控链路（"活着但不工作"）。
+ * HAL 侧为最终防线，daemon 侧为首层防御（R-17 后 daemon binder 池扩至
+ * 4 线程，读阻塞不再占死全部 RPC，但长阻塞仍拖累监控分片）。
  */
 static const int kMaxReadEventTimeoutMs = 1000;
 int clamp_read_timeout_ms(int timeout_ms);

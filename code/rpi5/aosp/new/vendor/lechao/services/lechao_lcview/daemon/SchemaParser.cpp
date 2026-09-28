@@ -122,6 +122,18 @@ bool SchemaParser::parseEventDef(const Json::Value& ev, EventSchema* out)
                        << "' in event " << out->id;
             return false;
         }
+        // R-20 P5 方向 1：敏感标记（可选 key）。isMember + isBool 双重前置
+        // 校验（CXX-003），key 存在但非 bool 严格拒绝——schema 为受控配置，
+        // 误配应早期可见；缺 key 缺省 false，旧 schema 兼容
+        if (f.isMember("sensitive")) {
+            if (!f["sensitive"].isBool()) {
+                LOG(ERROR) << "SchemaParser: event " << out->id
+                           << " field '" << fd.name
+                           << "' sensitive must be a bool if present";
+                return false;
+            }
+            fd.sensitive = f["sensitive"].asBool();
+        }
         out->fields.push_back(fd);
     }
     return true;

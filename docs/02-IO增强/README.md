@@ -298,13 +298,12 @@ LcIod 内核驱动 `select LCVIEW`（Kconfig），调用 LcView `EXPORT_SYMBOL` 
 |---------------|------|------|---------|
 | `LCVIEW_EVENT_USB_PROBE` | device_index, vid, pid, vendor, product | INFO | 设备插入 |
 | `LCVIEW_EVENT_USB_DISCONNECT` | device_index | INFO | 设备拔出 |
-| `LCVIEW_EVENT_USB_TRANSPORT_START` | device_index, direction, data_len | DEBUG | 传输开始 |
 | `LCVIEW_EVENT_USB_TRANSPORT_END` | device_index, direction, bytes, elapsed_ns, was_error | INFO | 传输结束 |
 | `LCVIEW_EVENT_USB_TRANSPORT_ERROR` | device_index, direction, result | WARN | 传输出错 |
 | `LCVIEW_EVENT_USB_STALL/TIMEOUT/CORRUPT/RESET` | device_index, status | WARN | 异常事件 |
 | `LCVIEW_EVENT_USB_RATE_DEGRADED` | device_index, latency_ns | WARN | 性能降级 |
 
-LcView 提供 9 个 USB 事件 ID，LcIod 在 notifier 回调中调用 `lcview_builder_start/commit` 上送。
+LcView 提供 12 个事件 ID（1~3 预留占位 + 5~13 USB 事件；id=4 已删），LcIod 在 notifier 回调中调用 `lcview_builder_start/commit` 上送。
 
 ## 与 LcView 的架构对比
 

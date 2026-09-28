@@ -75,12 +75,19 @@ std::string readFile(const std::string& path) {
 }
 
 EventSchema makeSchema(uint16_t id, const std::string& name,
-                       std::vector<FieldType> types) {
+                       std::vector<FieldType> types,
+                       const std::vector<bool>& sensitive = {}) {
     EventSchema s;
     s.id = id;
     s.name = name;
-    for (size_t i = 0; i < types.size(); i++)
-        s.fields.push_back({"f" + std::to_string(i), types[i]});
+    for (size_t i = 0; i < types.size(); i++) {
+        FieldDef fd;
+        fd.name = "f" + std::to_string(i);
+        fd.type = types[i];
+        if (i < sensitive.size())
+            fd.sensitive = sensitive[i];
+        s.fields.push_back(fd);
+    }
     return s;
 }
 
@@ -263,6 +270,49 @@ TEST_F(FormatJsonLineTest, UnknownType_ProducesNull) {
     std::vector<uint8_t> fields = {99};
     auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
     EXPECT_NE(line.find("null"), std::string::npos);
+}
+
+// ============================================================
+// R-20 P5 方向 1：敏感字段输出层统一掩码
+// ============================================================
+
+TEST_F(FormatJsonLineTest, SensitiveStringField_MaskedAsAsterisks) {
+    // STRING 敏感 → 输出 "***"，原值不得落盘
+    auto schema = makeSchema(4, "e", {FieldType::STRING}, {true});
+    auto hdr = makeHdr(4, 1);
+    auto fields = buildFields({FieldType::STRING}, {"secret-vendor-name"});
+    auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+    EXPECT_NE(line.find("\"f\":[\"***\"]"), std::string::npos) << "敏感 STRING 须掩码";
+    EXPECT_EQ(line.find("secret-vendor-name"), std::string::npos) << "原值不得落盘";
+}
+
+TEST_F(FormatJsonLineTest, SensitiveInt64Field_MaskedAsNull) {
+    // INT64 敏感 → null（与 NaN/Inf/未知类型既有 null 约定统一）
+    auto schema = makeSchema(4, "e", {FieldType::INT64}, {true});
+    auto hdr = makeHdr(4, 1);
+    auto fields = buildFields({FieldType::INT64});
+    auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+    EXPECT_NE(line.find("\"f\":[null]"), std::string::npos) << "敏感 INT64 须输出 null";
+}
+
+TEST_F(FormatJsonLineTest, SensitiveBinaryField_MaskedAsAsterisks) {
+    // BINARY 敏感 → 掩码，hex 明文不得落盘
+    auto schema = makeSchema(4, "e", {FieldType::BINARY}, {true});
+    auto hdr = makeHdr(4, 1);
+    auto fields = buildFields({FieldType::BINARY}, {}, {{0xDE, 0xAD, 0xBE, 0xEF}});
+    auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+    EXPECT_NE(line.find("\"f\":[\"***\"]"), std::string::npos) << "敏感 BINARY 须掩码";
+    EXPECT_EQ(line.find("deadbeef"), std::string::npos) << "BINARY hex 明文不得落盘";
+}
+
+TEST_F(FormatJsonLineTest, SensitiveField_NonSensitiveNeighbor_Unaffected) {
+    // 逐字段粒度：非敏感 STRING 直传 + 敏感 INT64 掩码，逗号分隔结构保持
+    auto schema = makeSchema(4, "e", {FieldType::STRING, FieldType::INT64}, {false, true});
+    auto hdr = makeHdr(4, 2);
+    auto fields = buildFields({FieldType::STRING, FieldType::INT64}, {"plain-string"});
+    auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+    EXPECT_NE(line.find("plain-string"), std::string::npos) << "非敏感字段不得掩码";
+    EXPECT_NE(line.find("[\"plain-string\",null]"), std::string::npos) << "结构须保持逐字段";
 }
 
 // ============================================================

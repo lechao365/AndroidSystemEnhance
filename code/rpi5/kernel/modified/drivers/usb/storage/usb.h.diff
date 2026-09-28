@@ -43,7 +43,7 @@ index fd3f32670873..1ef7bb36f998 100644
 + * ============================================================
 + */
 +enum usb_stor_notifier_event {
-+	USB_STOR_NOTIFIER_TRANSPORT_START,   /* 传输开始：在调用 transport() 前发射 */
++	USB_STOR_NOTIFIER_TRANSPORT_START,   /* 传输开始：R-16 P4 方向 1 起停发（枚举保留兼容，见上方发射位置说明） */
 +	USB_STOR_NOTIFIER_TRANSPORT_END,     /* 传输结束：在所有正常出口发射（含 error/abort） */
 +	USB_STOR_NOTIFIER_TRANSPORT_ERROR,   /* 传输层错误：transport() 返回 ERROR 时 */
 +	USB_STOR_NOTIFIER_RESET,             /* 设备重置：Handle_Errors 路径执行 reset 后 */
