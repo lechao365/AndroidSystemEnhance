@@ -403,9 +403,10 @@ static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 /*
  * lcview_fops — 字符设备文件操作表
  *
- * compat_ioctl 与 unlocked_ioctl 指向同一函数，因为我们的数据结构
- * (uint32_t, uint8_t, struct lcview_stats) 在 32/64 位下布局一致——
- * lcview_stats 的四个字段均为 uint32_t，不存在指针或 long 类型对齐差异。
+ * compat_ioctl 与 unlocked_ioctl 指向同一函数，因为 ioctl 载荷（uint32_t、uint64_t、uint8_t、
+ * struct lcview_stats）在 32/64 位下布局一致——stats 共 5 个字段：
+ * total_records/overrun_cnt/dropped_cnt 为 uint64_t，ring_usage_bytes/ring_size_bytes 为
+ * uint32_t，均为定长标量，无指针或 long 类型对齐差异。
  * 如果未来引入含指针的 struct，则需要实现 compat_ioctl 做结构体转换。
  */
 static const struct file_operations lcview_fops = {

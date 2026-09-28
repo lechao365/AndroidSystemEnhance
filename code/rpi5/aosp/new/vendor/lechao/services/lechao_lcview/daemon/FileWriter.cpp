@@ -167,7 +167,7 @@ std::string FileWriter::makeDateStr()
 
 // 生成规范化的日志文件路径
 // 格式：{logDir}/{event_id}_{event_name}_{YYYYMMDD}_p{seq}.jsonl
-// 示例：/data/vendor/lechao_lcview/logs/4_usb_transport_start_20260606_p0.jsonl
+// 示例：/data/vendor/lechao_lcview/logs/5_usb_transport_end_20260606_p0.jsonl
 // seq 由调用方显式传入（openFile/checkRotation 各自维护），
 // 避免"文件名用旧 seq、FileState 却存 0"的不一致（CXX-002）
 std::string FileWriter::makeFilename(const EventSchema& schema,
@@ -564,6 +564,18 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
     // 参与 gap 统计），供心跳窗口 gap 判定（see takeSeqGapWindow）
     mSeqGap.record(hdr->seq_no);
     out += "]}\n";
+    // R-19 P5 方向 2：返回前终检非空换行与结构——JSONL 每行必须是完整 JSON
+    // 对象 + 换行结尾（{\"ts\":... 开头、f 数组 ]} 闭合），任一不满足即判定
+    // 为非法行返回空串交 writeRecord formatEmpty 丢弃计数，禁止非法 JSONL
+    // 落盘（防御性检查：正常路径 JSON 转义已保证结构，此处兜底防未来回归）
+    if (out.size() < 4 || out[0] != '{' ||
+        out[out.size() - 3] != ']' || out[out.size() - 2] != '}' ||
+        out[out.size() - 1] != '\n')
+    {
+        ALOGE("FileWriter: formatJsonLine: malformed line rejected "
+              "(len=%zu, must end with ']}\\n')", out.size());
+        return std::string();
+    }
     return out;
 }
 

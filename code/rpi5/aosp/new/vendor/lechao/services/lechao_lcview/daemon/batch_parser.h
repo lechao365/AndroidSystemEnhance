@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -44,7 +45,39 @@ struct BatchParseResult {
 //   - 其余（含 unknown event_id 边界、schema vanished 防御分支）归其他。
 int classifyInvalidReason(const std::string &reason);
 
+// R-19 P5 方向 1：单条批次记录的纯解析结果（结构级判定，不含 schema 语义）
+//   kValid    — 结构完整（长度/边界/魔数通过），可继续做 schema 语义校验
+//   kTooSmall — 净长不足固定头（record too small）
+//   kBadLen   — 长度前缀非法/越界，本批剩余字节全部不可信，批次在此终止
+//   kBadMagic — 魔数与 LCVIEW_MAGIC 不符
+//   kTrailing — 批次尾部 <4B 残留（读不出长度前缀）
+// 字段级/schema 语义校验（event_id/field_count/字段类型/总长度）由调用方在
+// kValid 回调内自行完成（生产走 schema.validate，测试走 decodeRecordField），
+// 本层不耦合 SchemaParser，保证纯解析可独立测试。
+struct ParsedBatchRecord
+{
+    enum class Kind { kValid, kTooSmall, kBadLen, kBadMagic, kTrailing };
+    Kind kind = Kind::kValid;
+    const uint8_t* data = nullptr; // kValid/kTooSmall/kBadMagic: 记录数据区（不含
+                                   // 4B 前缀）；kBadLen/kTrailing: 批尾剩余起点
+    size_t len = 0;                // 对应数据区长度
+    std::string reason;            // 结构级错误描述（kValid 为空串）
+};
+
+// 批次解析回调：每收到一条记录判定调用一次；返回 false 终止遍历
+// （生产 parseBatch 在 kBadLen 时返回 false，其后记录不再处理）。
+using ParsedBatchCallback = std::function<bool(const ParsedBatchRecord&)>;
+
+// R-19 P5 方向 1：纯解析层——批次框架切分（4B 长度前缀 + 记录边界 + 结构级
+// 校验），无任何写入副作用（可独立测试，record_codec_test 批次框架层据此
+// 改调生产函数，消测试副本假覆盖）。LCV-06：data/len 指针对零拷贝透传。
+void parseBatchRecords(const uint8_t* data, size_t len,
+                       const ParsedBatchCallback& cb);
+
 // 解析一个批次（4B 长度前缀 + 二进制记录序列），写盘并返回统计。
+// R-19 P5 方向 1：解析（parseBatchRecords）与写入动作分离——本函数仅消费
+// 纯解析结果做 schema 语义校验与 writeRecord/writeInvalid 落盘，框架层逻辑
+// 不再内联重复。
 // LCV-06：接口收为 data/len 指针对——调用方（主循环 flushSegment）
 // 不再构造 std::vector 中转（最大 64KB 拷贝/批），零拷贝透传读缓冲。
 // 覆盖：坏长度/过小记录/validate 失败写 invalid、合法记录写盘、
@@ -53,7 +86,9 @@ BatchParseResult parseBatch(SchemaParser& schema, FileWriter& writer,
                             const uint8_t* data, size_t len);
 
 // schema 加载重试（vendor 分区可能晚于 daemon 就绪）：
-// 最多 maxRetries 次、每次间隔 interval，eventCount>0 即成功。
+// maxRetries 为"总尝试上限"（含首次，R-19 P5 方向 4 修 off-by-one；
+// do-while 保证至少尝试 1 次，maxRetries=0 时仅首次尝试），
+// 每次失败间隔 interval，eventCount>0 即成功。
 // running 为可中断开关（生产传全局 gRunning）：重试期间收到停止信号
 // （SIGTERM 置 gRunning=false）立即退出，不再等满 maxRetries×interval
 // （原实现最长 15s 无法及时响应 init stop，方向 4）

@@ -307,7 +307,7 @@ static void test_builder_str_fits(void)
  * 方向 4/7：上界 >= ring_size，等长零推进消除。 */
 static void test_corrupt_skip(void)
 {
-    const uint32_t def = 20; /* 前缀 4 + 记录头 16 */
+    const uint32_t def = 20; /* 前缀 4 + 记录头 32 = 36（测试自选下界，真实内核传 36） */
     /* 可信前缀（含超 MAX 但 < ring->size，如 4100）→ 按 record_len 前移 */
     CHECK(ring_corrupt_skip_len(4100, 8192, def) == 4100);
     CHECK(ring_corrupt_skip_len(4096, 8192, def) == 4096);

@@ -260,7 +260,7 @@ bool SchemaParser::validateFields(const EventSchema& schema,
 }
 
 // 校验二进制日志记录是否合法：
-//   Step 1: 检查是否至少包含固定头（16 字节）
+//   Step 1: 检查是否至少包含固定头（32 字节）
 //   Step 2: 检查魔数是否为 0x4C56（'LV'）
 //   Step 3: 检查 event_id 是否在 schema 中定义
 //   Step 4: 检查 field_count 是否与 schema 定义一致

@@ -202,7 +202,8 @@ TEST_F(MainLoopTest, ReaderBatchThenFatal_WriterGetsBatch) {
 
 namespace
 {
-// 默认 ring 256KB 推导容差：(262144+65536)/20 = 16384（与原固定容差一致）
+// 默认 ring 256KB 推导容差：(262144+65536)/36 ≈ 9102（R-19 P5 方向 5：
+// 估算基准 20B→36B 后与原固定容差 16384 不再一致，kDefaultTol 随之更新）
 constexpr int64_t kDefaultTol = computeConserveTolerance(256 * 1024);
 } // namespace
 
@@ -261,14 +262,15 @@ TEST(MainLoopConservationTest, NegativeDeviationBeyondTolerance_Alarms)
 
 TEST(MainLoopConservationTest, ToleranceDerivedFromRingSize)
 {
-    // 方向 6：默认 ring 256KB → (262144+65536)/20 = 16384（与原固定容差一致）
-    EXPECT_EQ(computeConserveTolerance(256 * 1024), 16384);
+    // 方向 6：默认 ring 256KB → (262144+65536)/36 ≈ 9102
+    //（R-19 P5 方向 5：最小记录估算 20B→36B，容差从 16384 收紧到 9102）
+    EXPECT_EQ(computeConserveTolerance(256 * 1024), (262144u + 65536u) / 36u);
     // 更大 ring → 更大容差（容忍更大在途积压）
     EXPECT_GT(computeConserveTolerance(4096 * 1024), computeConserveTolerance(256 * 1024));
     // 更小 ring → 更小容差（更灵敏）
     EXPECT_LT(computeConserveTolerance(64 * 1024), computeConserveTolerance(256 * 1024));
     // ring 为 0（ioctl 失败兜底值）→ 仅用户缓冲档位
-    EXPECT_EQ(computeConserveTolerance(0), 65536 / 20);
+    EXPECT_EQ(computeConserveTolerance(0), 65536u / 36u);
 }
 
 // ============================================================

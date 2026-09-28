@@ -2,6 +2,24 @@
   "version": 1,
   "events": [
     {
+      "id": 1,
+      "name": "usb_connect",
+      "desc": "reserved: USB connect event (预留占位，字段未定义)",
+      "fields": []
+    },
+    {
+      "id": 2,
+      "name": "gpio_irq",
+      "desc": "reserved: GPIO IRQ event (预留占位，字段未定义)",
+      "fields": []
+    },
+    {
+      "id": 3,
+      "name": "sensor_data",
+      "desc": "reserved: sensor data event (预留占位，字段未定义)",
+      "fields": []
+    },
+    {
       "id": 5,
       "name": "usb_transport_end",
       "desc": "USB bulk transport completes",

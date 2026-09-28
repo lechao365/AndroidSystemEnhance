@@ -8,7 +8,7 @@
  * 设计原则：
  * - 类型编码 (LCVIEW_TYPE_*) 采用固定长度或长度前缀自描述格式，
  *   解析器无需预知 schema 即可遍历字段。
- * - 记录头固定 16 字节，packed 对齐，确保内核与用户态布局一致。
+ * - 记录头固定 32 字节（R-13 方向 2 扩容），packed 对齐，确保内核与用户态布局一致。
  * - __KERNEL__ 宏区分内核态和用户态编译路径，仅 pack 属性语法不同。
  */
 
@@ -40,7 +40,7 @@
  * 用户态解析器通过 event_id 匹配 schema 来解码字段列表。
  *
  * 事件来源分布：
- *   - USB 1, 4-13：vendor_lechao_usbd-stats.c（USB 存储监控）
+ *   - USB 1, 5-13：vendor_lechao_usbd-stats.c（USB 存储监控）
  *   - GPIO 2：lechao_gpio_irq 驱动（GPIO 中断监控）
  *   - SENSOR 3：lechao_sensor 驱动（传感器数据采集）
  */

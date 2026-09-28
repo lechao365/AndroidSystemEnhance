@@ -145,8 +145,8 @@ static uint16_t compute_str_len(const char *str)
  * - 但 4KB 的分配在嵌入式系统上通常不是问题
  * - 失败时调用者只需跳过这条日志，不会造成功能性故障
  *
- * data_offset 初始设为 sizeof(lcview_record_hdr) (16)，
- * 预留头部空间给 commit 时填充。add_* 写字段从偏移 16 开始。
+ * data_offset 初始设为 sizeof(lcview_record_hdr) (32)，
+ * 预留头部空间给 commit 时填充。add_* 写字段从偏移 32 开始。
  */
 struct lcview_builder *lcview_builder_new(uint16_t event_id, uint8_t level)
 {

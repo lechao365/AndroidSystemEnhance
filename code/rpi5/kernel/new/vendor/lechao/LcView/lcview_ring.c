@@ -104,8 +104,8 @@ static void ring_memcpy_in(struct lcview_ring *ring, uint32_t pos,
  * 2. vmalloc 分配虚拟地址连续的内存，物理页可不连续
  * 3. 读写频率不高，TLB 压力可接受——我们的场景是事件日志，非高速数据流
  *
- * read_buf 大小固定为 LCVIEW_BUILDER_MAX_SIZE (4KB)，
- * 这是单条事件的最大长度，用于中转拷贝。
+ * read_buf 大小固定为 LCVIEW_READ_BUF_SIZE (64KB)，
+ * 用于锁内连续 run 批拷多条记录后一次 copy_to_user 交付（R-17 方向 3）。
  */
 int lcview_ring_init(struct lcview_ring *ring, uint32_t size_kb)
 {
@@ -283,19 +283,19 @@ int lcview_ring_write(struct lcview_ring *ring,
      *
      * 注意潜在问题：如果所有记录都只有 1 字节数据，驱逐一条只能释放
      * (LCVIEW_LEN_PREFIX_SIZE + 1) 字节空间，可能需要多次迭代。
-     * 但单条记录至少 ~20B（前缀 + 头），256KB 环最大迭代 ~13000 次，
+     * 但单条记录至少 ~36B（前缀 4 + 头 32），256KB 环最大迭代 ~7280 次，
      * 每次都是简单的指针运算 + memcpy，耗时可控。
      */
     /*
      * v3.4 优化 (L2): 批量驱逐以降低 spinlock 持有时间。
      * 当需要腾出大量空间但环中都是小记录时，单条逐出可能
      * 迭代数千次。批量驱逐每次最多 64 条再重新检查空间，
-     * 将最坏情况下的迭代次数从 ~13000 降至 ~200。
+     * 将最坏情况下的迭代次数从 ~7280 降至 ~200。
      */
     /*
-     * KRN-008：单次 write 驱逐预算。极端场景（256KB 环 + 全 20B 小记录）
-     * 需要驱逐 ~13000 条腾空间，持锁 ~1.3ms，阻塞同锁读者与并发写者。
-     * 预算 256 条（≈26µs 持锁上限）：256×20B=5KB 覆盖常规腾空间需求；
+     * KRN-008：单次 write 驱逐预算。极端场景（256KB 环 + 全 36B 小记录）
+     * 需要驱逐 ~7280 条腾空间，持锁 ~1.3ms，阻塞同锁读者与并发写者。
+     * 预算 256 条（≈26µs 持锁上限）：256×36B≈9KB 覆盖常规腾空间需求；
      * 超限返回 -ENOSPC 丢弃本次写入——该场景本就是 overrun（驱逐仍在
      * 预算内进行，overrun 计数继续递增），方向 7 起丢弃的记录计入
      * dropped_cnt 并同步递增 total_records（守恒左式闭合），牺牲单条
@@ -525,7 +525,7 @@ static int lcview_ring_read_internal(struct lcview_ring *ring, uint8_t __user *b
 
             /*
              * 校验记录长度：
-             * - 最小合法值: LCVIEW_LEN_PREFIX_SIZE (4) + 记录头 (16) = 20
+             * - 最小合法值: LCVIEW_LEN_PREFIX_SIZE (4) + 记录头 (32) = 36
              * - 上界：> LCVIEW_BUILDER_MAX_SIZE 或 >= ring->size 判损坏
              * 损坏记录用 ring_corrupt_skip_len 保守跳过（见 logic 层）。
              */
@@ -641,7 +641,8 @@ uint32_t lcview_ring_avail_bytes(struct lcview_ring *ring)
  * 非原子读取 ring->size（初始化后不变），
  * 调用 lcview_ring_avail_bytes 获取当前使用量。
  *
- * 所有字段均为 uint32_t，用户态和内核态布局相同，无需 compat 转换。
+ * total_records/overrun_cnt/dropped_cnt 为 uint64_t，ring_usage_bytes/ring_size_bytes 为
+ * uint32_t，均为定长标量，用户态和内核态布局一致，无需 compat 转换。
  */
 void lcview_ring_get_stats(struct lcview_ring *ring, struct lcview_stats *stats)
 {

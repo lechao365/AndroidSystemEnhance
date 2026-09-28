@@ -56,9 +56,16 @@ _COMMIT_RE = re.compile(r"lcview_builder_commit\(")
 # 停发事件登记（schema 保留定义供历史数据/用户态解析，内核不再发射）。
 # R-16 P4 方向 1：TRANSPORT_START（原 id=4）已从 schema 彻底删除（合并为
 # 单次带 duration_ns 的 END 事件），不再需要豁免登记——事件在 schema 中
-# 不存在即自然跳过比对。登记集合保留为空，供未来停发事件使用：
-# 登记后该事件跳过"内核无发射点"判红（schema 仍须在内核宏中定义 id）。
-DISABLED_EVENTS = set()
+# 不存在即自然跳过比对。登记后该事件跳过"内核无发射点"判红（schema 仍须
+# 在内核宏中定义 id）。
+# R-19 P5 方向 3：id=1~3（USB_CONNECT/GPIO_IRQ/SENSOR_DATA）为预留占位事件
+# ——schema 登记 reserved 条目（空字段）消外部模块发射时的 unknown event_id
+# 接入噪音，内核当前无发射点（预留/未启用），按停发语义豁免判红。
+DISABLED_EVENTS = {
+    "LCVIEW_EVENT_USB_CONNECT",
+    "LCVIEW_EVENT_GPIO_IRQ",
+    "LCVIEW_EVENT_SENSOR_DATA",
+}
 
 
 def parse_schema(text: str) -> list[dict]:

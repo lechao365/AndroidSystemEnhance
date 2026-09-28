@@ -21,12 +21,15 @@
 #include <vector>
 #include "lcview_events.h"
 #include "record_codec.h"
+#include "batch_parser.h"
 
 // 生产解码器符号（decodeRecordField 定义于 vendor::lechao::lcview，
 // 逐符号引入避免全量 using 的歧义风险）
 using vendor::lechao::lcview::DecodedField;
 using vendor::lechao::lcview::FieldDecodeResult;
 using vendor::lechao::lcview::decodeRecordField;
+using vendor::lechao::lcview::ParsedBatchRecord;
+using vendor::lechao::lcview::parseBatchRecords;
 
 namespace {
 
@@ -97,63 +100,62 @@ std::vector<uint8_t> wrapAsBatch(const std::vector<uint8_t>& record) {
 
 // 模拟 daemon 解析循环（与 lechao_lcview.cpp 批次解析同语义）
 // 返回解析出的 record 数量；失败时返回 -1 并设置 errMsg。
-// 解码器真化（2026-09-01）：字段遍历改调生产 record_codec.h 的
-// decodeRecordField（与 FileWriter::formatJsonLine 同一入口）——
-// 原本地 parseBatch 是测试文件副本，23 例全测副本，生产解码器
-// 坏了仍全绿。生产语义（kTruncated 丢弃 / kUnknown 输出 null 继续）
-// 在本测试中按协议校验语义映射为拒绝（与既有断言关键字兼容）。
+// R-19 P5 方向 1：批次框架层（4B 前缀切分/bad length/too small/magic/trailing）
+// 改调生产纯解析函数 parseBatchRecords——此前本函数是生产 parseBatch 的测试
+// 副本，23 例全测副本，生产框架层坏了仍全绿。字段级解码走生产
+// decodeRecordField（与 FileWriter::formatJsonLine 同一入口）。生产语义
+// （kTruncated 丢弃 / kUnknown 输出 null 继续）在本测试中按协议校验语义
+// 映射为拒绝（与既有断言关键字兼容）。
 int parseBatch(const std::vector<uint8_t>& batch, std::string& errMsg) {
-    size_t offset = 0;
     int recordsParsed = 0;
-    while (offset + 4 <= batch.size()) {
-        uint32_t total_len;
-        memcpy(&total_len, batch.data() + offset, 4);
-        total_len = le32toh(total_len);
-
-        // 分支：bad length（total_len < 4 或越界）
-        if (total_len < 4 || offset + total_len > batch.size()) {
-            errMsg = "bad length at offset=" + std::to_string(offset) +
-                     " total_len=" + std::to_string(total_len);
-            return -1;
-        }
-
-        const uint8_t* recordStart = batch.data() + offset + 4;
-        size_t recordLen = total_len - 4;
-
-        // 分支：record too small（不足以容纳 hdr）
-        if (recordLen < sizeof(lcview_record_hdr)) {
-            errMsg = "record too small";
-            return -1;
-        }
-
-        auto* hdr = reinterpret_cast<const lcview_record_hdr*>(recordStart);
-        if (hdr->magic != LCVIEW_MAGIC) {
-            errMsg = "bad magic";
-            return -1;
-        }
-
-        // 逐字段推进（与 FileWriter::formatJsonLine 同一解码器）
-        const uint8_t* p = recordStart + sizeof(lcview_record_hdr);
-        const uint8_t* end = recordStart + recordLen;
-        for (uint8_t i = 0; i < hdr->field_count; i++) {
-            if (p >= end) { errMsg = "EOF at field"; return -1; }
-            DecodedField df;
-            FieldDecodeResult r = decodeRecordField(&p, end, &df);
-            if (r == FieldDecodeResult::kTruncated) {
-                // 变长值区越界（valueLen>0 已读到长度）与其余不足
-                // 统一按越界拒绝（保留原测试断言关键字）
-                errMsg = (df.valueLen > 0) ? "field exceeds" : "EOF at field";
-                return -1;
+    parseBatchRecords(batch.data(), batch.size(),
+                      [&](const ParsedBatchRecord& r) -> bool {
+        switch (r.kind) {
+        case ParsedBatchRecord::Kind::kBadLen:
+            errMsg = r.reason;  // "bad length at offset=... total_len=..."
+            recordsParsed = -1;
+            return false;
+        case ParsedBatchRecord::Kind::kTooSmall:
+            errMsg = r.reason;  // "record too small"
+            recordsParsed = -1;
+            return false;
+        case ParsedBatchRecord::Kind::kBadMagic:
+            errMsg = r.reason;  // "bad magic"
+            recordsParsed = -1;
+            return false;
+        case ParsedBatchRecord::Kind::kTrailing:
+            // 不足 4B 前缀的残留字节不进入解析循环（与 daemon 原循环同语义），
+            // 不计数不报错——既有 EmptyBatch/BatchLessThan4Bytes 断言契约
+            return true;
+        case ParsedBatchRecord::Kind::kValid: {
+            auto* hdr = reinterpret_cast<const lcview_record_hdr*>(r.data);
+            const uint8_t* p = r.data + sizeof(lcview_record_hdr);
+            const uint8_t* end = r.data + r.len;
+            // 逐字段推进（与 FileWriter::formatJsonLine 同一解码器）
+            for (uint8_t i = 0; i < hdr->field_count; i++) {
+                if (p >= end) { errMsg = "EOF at field"; recordsParsed = -1; return false; }
+                DecodedField df;
+                FieldDecodeResult rr = decodeRecordField(&p, end, &df);
+                if (rr == FieldDecodeResult::kTruncated) {
+                    // 变长值区越界（valueLen>0 已读到长度）与其余不足
+                    // 统一按越界拒绝（保留原测试断言关键字）
+                    errMsg = (df.valueLen > 0) ? "field exceeds" : "EOF at field";
+                    recordsParsed = -1;
+                    return false;
+                }
+                if (rr == FieldDecodeResult::kUnknown) {
+                    errMsg = "unknown type";
+                    recordsParsed = -1;
+                    return false;
+                }
             }
-            if (r == FieldDecodeResult::kUnknown) {
-                errMsg = "unknown type";
-                return -1;
-            }
+            if (p != end) { errMsg = "length mismatch"; recordsParsed = -1; return false; }
+            recordsParsed++;
+            return true;
         }
-        if (p != end) { errMsg = "length mismatch"; return -1; }
-        recordsParsed++;
-        offset += total_len;
-    }
+        }
+        return true;
+    });
     return recordsParsed;
 }
 

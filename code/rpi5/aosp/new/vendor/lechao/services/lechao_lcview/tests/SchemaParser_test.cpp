@@ -245,12 +245,21 @@ TEST(SchemaParserParseJsonTest, ProductionConfig_LoadsAll9Events) {
     SchemaParser sp;
     ASSERT_TRUE(sp.loadFromFile("/vendor/etc/lcview_events.json"));
     // R-16 P4 方向 1：START(4) 已并入 END，schema 由 10 事件降为 9 事件
-    EXPECT_EQ(sp.eventCount(), 9u);
-    // id 5..13 全部定义（与内核 lcview_events.h 一致）
-    for (uint16_t id = 5; id <= 13; id++) {
+    // R-19 P5 方向 3：新增 id=1~3 预留占位条目，schema 由 9 事件升为 12 事件
+    // （消外部模块发射 id 1~3 时的 unknown event_id 接入噪音）
+    EXPECT_EQ(sp.eventCount(), 12u);
+    // id 1..13 全部定义（含 1~3 预留占位 + 5~13 USB 事件，与内核
+    // lcview_events.h 的 LCVIEW_EVENT_* 宏一致）
+    for (uint16_t id = 1; id <= 13; id++) {
+        if (id == 4) continue;  // id=4 TRANSPORT_START 已删除
         const EventSchema* s = sp.find(id);
         ASSERT_NE(s, nullptr) << "事件 " << id << " 缺失";
         EXPECT_FALSE(s->name.empty());
+    }
+    // 1~3 为预留占位（字段未定义，允许空 fields）；5~13 为实际 USB 事件
+    for (uint16_t id = 5; id <= 13; id++) {
+        const EventSchema* s = sp.find(id);
+        ASSERT_NE(s, nullptr) << "事件 " << id << " 缺失";
         EXPECT_FALSE(s->fields.empty()) << "事件 " << id << " 无字段";
     }
 }

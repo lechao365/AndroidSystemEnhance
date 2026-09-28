@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cstdint>
 
+#include "../include/lcview_events.h"
 #include "DeviceReader.h"
 #include "SchemaParser.h"
 #include "FileWriter.h"
@@ -43,10 +44,13 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer);
 // = "在途积压上限"（内核 ring 未读 + 用户态 64KB 攒包缓冲未落盘的记录数
 // 上界），与 ring 配置成正比；固定 16384 恰是默认 256KB ring 的推导值，
 // ring 配置变化时固定值失配（过大漏报持续漂移 / 过小误报瞬时积压）。
-// 推导式：(ring_size_bytes + 用户缓冲 64KB) / 最小记录 ~20B（前缀 4 + 头 16），
-// 默认 ring 256KB → (262144+65536)/20 = 16384，与原固定容差一致。
+// 推导式：(ring_size_bytes + 用户缓冲 64KB) / 最小记录 ~36B（前缀 4 + 头 32），
+// 默认 ring 256KB → (262144+65536)/36 ≈ 9102。R-19 P5 方向 5 修正估算基准：
+// 原 20B 为 16B 记录头时代的旧值（容差偏大 16384，欠灵敏），常量同步改为
+// sizeof(lcview_record_hdr)+4 自描述，防未来头部再扩容时二次漂移。
 constexpr uint32_t kConserveUserBufBytes = 64 * 1024;
-constexpr uint32_t kConserveMinRecordEstimate = 20;
+constexpr uint32_t kConserveMinRecordEstimate =
+    sizeof(struct lcview_record_hdr) + 4;  // 最小记录：32B 头 + 4B 长度前缀
 
 // 按 ring 大小推导守恒容差（纯函数，方向 6）：ring 越小容差越小，越灵敏；
 // ring 越大容差越大，容忍更大在途积压。数据源 reader.getRingSizeBytes()
