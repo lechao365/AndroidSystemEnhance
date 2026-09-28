@@ -120,7 +120,7 @@ int lcview_ring_init(struct lcview_ring *ring, uint32_t size_kb)
     if (!ring->buf)
         return -ENOMEM;
 
-    ring->read_buf = vmalloc(LCVIEW_BUILDER_MAX_SIZE);
+    ring->read_buf = vmalloc(LCVIEW_READ_BUF_SIZE);
     if (!ring->read_buf) {
         vfree(ring->buf);
         ring->buf = NULL;
@@ -135,6 +135,8 @@ int lcview_ring_init(struct lcview_ring *ring, uint32_t size_kb)
     atomic64_set(&ring->overrun_cnt, 0);
     atomic64_set(&ring->total_records, 0);
     atomic64_set(&ring->dropped_cnt, 0);
+    atomic64_set(&ring->read_calls, 0);
+    ring->read_buf_size = LCVIEW_READ_BUF_SIZE;
     atomic_set(&ring->readers, 0);
     spin_lock_init(&ring->lock);
     mutex_init(&ring->read_mutex);
@@ -142,7 +144,7 @@ int lcview_ring_init(struct lcview_ring *ring, uint32_t size_kb)
     init_waitqueue_head(&ring->exit_wait);
 
     pr_info(PREFIX "initialized ring=%uKB read_buf=%uB\n",
-            size / 1024, LCVIEW_BUILDER_MAX_SIZE);
+            size / 1024, ring->read_buf_size);
 
     return 0;
 }
@@ -408,17 +410,20 @@ out:
  * 退出（方向 3：shutdown 即 break，已拷贝数据照常返回），配合包装出口
  * 的 readers 归零让 destroy 得以安全释放内存。
  *
- * 读取策略：
+ * 读取策略（R-17 方向 3：锁内连续 run 批拷）：
  *   1. 在循环中尽可能多地读取记录，直到填满用户缓冲区 (len) 或数据读完
  *   2. 当环形缓冲区为空且未 shutdown 时，阻塞等待：
  *      - wait_event_interruptible 使进程进入可中断睡眠
  *      - 写者通过 wake_up_interruptible 唤醒 reader
  *      - 收到信号时返回 -ERESTARTSYS（让 VFS 层决定是重试还是交付）
- *   3. 读取单条记录时的关键步骤：
- *      a) 锁内读取 4 字节长度前缀 → 算出整条记录长度
- *      b) 校验记录长度合法性（防御损坏数据）
- *      c) 锁内 memcpy 到 read_buf → 推进 read_pos → 解锁
- *      d) 锁外 copy_to_user（不可在持锁时执行）
+ *   3. 锁内连续可读 run 批拷：
+ *      a) 单次持锁期间循环读取长度前缀、校验、fit 检查，把多条连续
+ *         记录依次拷入 read_buf（批拷上限 ring->read_buf_size，默认
+ *         64KB），一次交付多记录——替代原"每条记录单独 4KB 中转 +
+ *         逐条 copy_to_user"的锁外循环拷贝。
+ *      b) 批拷结束后统一解锁，锁外一次 copy_to_user 交付整批。
+ *      c) 保持红线：copy_to_user 绝不在 spin_lock 内执行（read_mutex
+ *         串行化仍由外层 lcview_ring_read 保证）。
  *   4. 数据损坏处理：如果长度前缀异常，跳过该记录继续
  *
  * 为什么返回多条记录而不是单条？
@@ -434,8 +439,10 @@ static int lcview_ring_read_internal(struct lcview_ring *ring, uint8_t __user *b
     int ret;
 
     while (copied_total < len) {
-        uint32_t rpos, record_len;
         unsigned long flags;
+        uint32_t batch_off = 0;      /* 本批已拷入 read_buf 的字节数 */
+        uint32_t batch_start;        /* 本批批拷起点 read_pos（KRN-003 回滚用） */
+        bool emsgsize = false;       /* 首条放不下用户缓冲标记（KRN-001） */
 
         spin_lock_irqsave(&ring->lock, flags);
 
@@ -481,108 +488,121 @@ static int lcview_ring_read_internal(struct lcview_ring *ring, uint8_t __user *b
             break;
         }
 
-        rpos = ring->read_pos;
-
-        /* 读取长度前缀（4 字节），处理跨尾部 wrap */
-        if (rpos + LCVIEW_LEN_PREFIX_SIZE <= ring->size) {
-            memcpy(&record_len, ring->buf + rpos, LCVIEW_LEN_PREFIX_SIZE);
-        } else {
-            uint32_t part1 = ring->size - rpos;
-            memcpy(&record_len, ring->buf + rpos, part1);
-            memcpy(((uint8_t *)&record_len) + part1, ring->buf,
-                   LCVIEW_LEN_PREFIX_SIZE - part1);
-        }
+        batch_start = ring->read_pos;
 
         /*
-         * 校验记录长度：
-         * - 最小合法值: LCVIEW_LEN_PREFIX_SIZE (4) + 记录头 (16) = 20
-         *   方向 5：下限由 4 改 20（前缀+记录头）。[4,20) 的记录连
-         *   记录头都放不下，判损坏跳过——防伪造/损坏前缀导致的撕裂。
-         * - 上界（两档，语义不同）：
-         *   · record_len > LCVIEW_BUILDER_MAX_SIZE 判损坏：写侧可达的
-         *     最大记录总长恰为 4096（4 前缀 + 16 头 + 4076 数据），
-         *     方向 2 恢复严格大于——满长 4096 记录合法交付，>= 会
-         *     误伤满长记录判损坏跳过（丢记录）。
-         *   · record_len >= ring->size 判损坏：等长时按 record_len
-         *     前移会 (rpos + size) % size == rpos 零推进死循环，保留 >=。
-         *
-         * 如果记录损坏，使用保守的默认大小跳过这条记录。
-         * 跳过策略：推进到前缀 + 记录头大小的位置，尝试从下一条继续。
-         * 这样可以最大程度地从数据损坏中恢复，而不是永久阻塞 reader。
+         * R-17 方向 3：锁内连续可读 run 批拷。
+         * 单次持锁把环中连续多条合法记录拷入 read_buf，直到以下任一
+         * 条件停止：
+         *   - shutdown（销毁）
+         *   - 环空（write_pos == read_pos，本批读完）
+         *   - 用户缓冲放不下下一条（fit > 0）
+         *   - read_buf 容量满（batch_off + record_len > read_buf_size）
+         * 循环内部对损坏记录跳过（read_pos 前移）后继续批拷下一条。
+         * 批拷上限 ring->read_buf_size：init 时为 LCVIEW_READ_BUF_SIZE
+         * （64KB）；host 单测手工构造 ring 用栈数组时必须同步设置，
+         * 否则批拷越界写 read_buf。
          */
-        if (record_len < LCVIEW_LEN_PREFIX_SIZE + sizeof(struct lcview_record_hdr) ||
-            record_len > LCVIEW_BUILDER_MAX_SIZE || record_len >= ring->size)
-        {
-            pr_warn_ratelimited(PREFIX "corrupted record at pos=%u, len=%u, skipping\n",
-                                rpos, record_len);
-            /*
-             * 损坏记录跳过量须按 record_len（写侧写入的长度前缀）前移：
-             * 记录在环中实际占用 record_len 字节，只前移前缀+头（20B）
-             * 会让 read_pos 落进记录体中间，把后续记录当损坏撕裂整个流。
-             * record_len 可信（[default_skip, ring->size)）时按 record_len
-             * 前移；不可信（<default_skip 或 >= ring->size，伪造/垃圾
-             * 前缀，方向 4/5）才用保守默认跳过量（前缀 + 记录头），
-             * 防止跳过头。判定内聚于 logic 层 ring_corrupt_skip_len 供
-             * 单测判红。
-             */
-            ring->read_pos = (rpos + ring_corrupt_skip_len(
-                record_len, ring->size,
-                LCVIEW_LEN_PREFIX_SIZE + sizeof(struct lcview_record_hdr)))
-                % ring->size;
-            spin_unlock_irqrestore(&ring->lock, flags);
-            continue;
-        }
+        while (batch_off < ring->read_buf_size) {
+            uint32_t rpos, record_len;
 
-        /*
-         * 如果这条记录太长以至于用户缓冲区放不下：
-         * - 已有部分数据 → 保持 read_pos 不变（下次可继续读），返回已读部分
-         * - 无任何数据（首条就放不下）→ KRN-001：返回 -EMSGSIZE 提示缓冲
-         *   不足，禁止返回 0（POSIX 0=EOF 而 poll 恒报 POLLIN，消费者
-         *   忙轮询或误判设备关闭，记录永久滞留卡死 reader）
-         * 这确保了"大记录"不会被丢弃，只是拆到下次 read 调用。
-         */
-        {
-            int fit = ring_read_fit_check(copied_total, record_len, len);
-            if (fit != 0) {
-                spin_unlock_irqrestore(&ring->lock, flags);
-                if (fit < 0)
-                    return ring_read_fit_errno(fit);
+            if (ring->shutdown)
                 break;
-            }
-        }
+            if (ring->write_pos == ring->read_pos)
+                break;
 
-        /*
-         * 锁内拷贝到 read_buf：
-         * 在持锁期间将记录从环形缓冲区拷贝到线性 read_buf，
-         * 这样写者不会在我们读一半时驱逐这条记录。
-         * 之后推进 read_pos，解锁，最后在锁外 safely copy_to_user。
-         */
-        ring_memcpy_out(ring, ring->read_buf, rpos, record_len);
-        ring->read_pos = (rpos + record_len) % ring->size;
+            rpos = ring->read_pos;
+
+            /* 读取长度前缀（4 字节），处理跨尾部 wrap */
+            if (rpos + LCVIEW_LEN_PREFIX_SIZE <= ring->size) {
+                memcpy(&record_len, ring->buf + rpos, LCVIEW_LEN_PREFIX_SIZE);
+            } else {
+                uint32_t part1 = ring->size - rpos;
+                memcpy(&record_len, ring->buf + rpos, part1);
+                memcpy(((uint8_t *)&record_len) + part1, ring->buf,
+                       LCVIEW_LEN_PREFIX_SIZE - part1);
+            }
+
+            /*
+             * 校验记录长度：
+             * - 最小合法值: LCVIEW_LEN_PREFIX_SIZE (4) + 记录头 (16) = 20
+             * - 上界：> LCVIEW_BUILDER_MAX_SIZE 或 >= ring->size 判损坏
+             * 损坏记录用 ring_corrupt_skip_len 保守跳过（见 logic 层）。
+             */
+            if (record_len < LCVIEW_LEN_PREFIX_SIZE + sizeof(struct lcview_record_hdr) ||
+                record_len > LCVIEW_BUILDER_MAX_SIZE || record_len >= ring->size)
+            {
+                pr_warn_ratelimited(PREFIX "corrupted record at pos=%u, len=%u, skipping\n",
+                                    rpos, record_len);
+                ring->read_pos = (rpos + ring_corrupt_skip_len(
+                    record_len, ring->size,
+                    LCVIEW_LEN_PREFIX_SIZE + sizeof(struct lcview_record_hdr)))
+                    % ring->size;
+                continue;
+            }
+
+            /*
+             * 如果这条记录太长以至于用户缓冲区放不下：
+             * - 已有部分数据（copied_total + batch_off > 0）→ 保持
+             *   read_pos 不变（下次可继续读），返回已读部分
+             * - 无任何数据（首条就放不下）→ KRN-001：返回 -EMSGSIZE
+             */
+            {
+                int fit = ring_read_fit_check(copied_total + batch_off,
+                                              record_len, len);
+                if (fit != 0) {
+                    if (fit < 0)
+                        emsgsize = true;
+                    break;
+                }
+            }
+
+            /* read_buf 容量不足：停止批拷，交付已批拷部分 */
+            if (batch_off + record_len > ring->read_buf_size)
+                break;
+
+            /* 锁内批拷到下一条（累积偏移），推进 read_pos */
+            ring_memcpy_out(ring, ring->read_buf + batch_off, rpos, record_len);
+            ring->read_pos = (rpos + record_len) % ring->size;
+            batch_off += record_len;
+        }
 
         spin_unlock_irqrestore(&ring->lock, flags);
 
-        /* 锁外 copy_to_user（可能触发 page fault，必须不在持锁状态） */
-        if (copy_to_user(buf + copied_total, ring->read_buf, record_len)) {
+        /* 本批无任何数据可交付 */
+        if (batch_off == 0) {
+            if (emsgsize)
+                return ring_read_fit_errno(-1);  /* 首条放不下 → -EMSGSIZE */
+            if (ring->shutdown)
+                break;                           /* 销毁：EOF */
+            if (copied_total > 0)
+                break;                           /* 已有已读数据：交付部分 */
+            /* 环空且无数据（如环内全是损坏记录被跳过）：回到外层循环
+             * 重新等待新数据，禁止返回 0 伪装 EOF（poll 仍报 POLLIN，
+             * 消费者会误判关闭）。 */
+            continue;
+        }
+
+        /* 锁外一次 copy_to_user 交付整批（红线：不在 spin_lock 内） */
+        if (copy_to_user(buf + copied_total, ring->read_buf, batch_off)) {
             /*
-             * KRN-003：copy_to_user 失败时尽力回滚 read_pos，让记录留在
-             * 环中供下次重试（原实现记录已被消费但用户未收到——数据丢失）。
-             * 仅当期间 read_pos 未被写者驱逐推进时回滚安全；否则该记录
-             * 已被覆盖，回滚会导致重复消费，放弃（此时数据本已丢失）。
-             * 理论误判：ring->size ≤ record_len 的极端配置下整圈回绕
-             * 可使条件恒真，重试读到坏数据会被 corrupted 检查兜住。
+             * KRN-003：copy_to_user 失败时尽力回滚 read_pos，让整批记录
+             * 留在环中供下次重试。仅当期间 read_pos 未被写者驱逐推进时
+             * 回滚安全（回滚到 batch_start，含损坏跳过前移的量一并还原）；
+             * 否则该批已被覆盖，放弃（此时数据本已丢失）。
              */
             unsigned long flags2;
             spin_lock_irqsave(&ring->lock, flags2);
-            if (ring->read_pos == (rpos + record_len) % ring->size)
-                ring->read_pos = rpos;
+            if (ring->read_pos == (batch_start + batch_off) % ring->size)
+                ring->read_pos = batch_start;
             spin_unlock_irqrestore(&ring->lock, flags2);
             pr_err_ratelimited(PREFIX "read copy_to_user failed\n");
             return copied_total > 0 ? (int)copied_total : -EFAULT;
         }
 
-        LC_DBG("read: returning %u bytes\n", record_len);
-        copied_total += record_len;
+        LC_DBG("read: returning batch %u bytes\n", batch_off);
+        copied_total += batch_off;
+        atomic64_inc(&ring->read_calls);
     }
 
     return (int)copied_total;

@@ -31,7 +31,7 @@
 #include "lciod_read_logic.h"
 #include <linux/math64.h>
 #include <linux/percpu.h>
-#include <linux/sched_clock.h>
+#include <linux/sched/clock.h>
 #include <scsi/scsi_cmnd.h>
 #include "lcview_events.h"
 #include "lcview_internal.h"

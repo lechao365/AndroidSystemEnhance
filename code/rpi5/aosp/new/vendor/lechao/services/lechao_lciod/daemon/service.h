@@ -119,8 +119,11 @@ private:
     IoHalClient hal_client_; /* HAL Binder 客户端封装 */
 
     /*
-     * start_monitor — 启动后台监控线程
-     * 每 50ms 轮询事件、每 10s（200 tick）刷新设备列表并打印统计；
+     * start_monitor — 启动 per-minor 分片监控线程池
+     * R-17 方向 1：固定 kShardCount（4）个分片 worker 线程，按
+     * minor % kShardCount 分片各自独立 epoll 消费——消 daemon 事件
+     * 消费单线程单点（单设备 readEvent 慢不再阻塞其他分片）。
+     * 每 50ms 节拍、每 10s（200 tick）刷新设备列表并打印统计；
      * 单设备失败不中断本轮；线程 detach 随进程生命周期终止。
      */
     void start_monitor();

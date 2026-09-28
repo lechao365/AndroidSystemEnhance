@@ -32,7 +32,14 @@ int main() {
 
     /* LCD-010：线程池 = 1 为设计意图——HAL 内部 device fd 表与
      * read_event 状态未做并发审计，串行化所有 AIDL 调用规避竞态；
-     * 扩容前须先为 per-device 访问加互斥。 */
+     * 扩容前须先为 per-device 访问加互斥。
+     *
+     * R-17 方向 1 决策固化：HAL 保持单线程"异步事件循环"而非
+     * "阻塞单点"——(1) readEvent 已非阻塞化（daemon 传 timeout=0，
+     * HAL clamp 上限 1000ms），不存在长时间占住 binder 线程的调用；
+     * (2) 本线程同轮 poll binder fd + uevent fd 非阻塞轮转；
+     * (3) daemon 侧已按 minor 分片线程池消费，单设备慢/故障只阻塞
+     * 其所在分片，不再拖垮全局——HAL 单线程不再构成可用性单点。 */
     ABinderProcess_setThreadPoolMaxThreadCount(1);
     auto service = ndk::SharedRefBase::make<IoHalImpl>();
     const std::string instance = "default";
