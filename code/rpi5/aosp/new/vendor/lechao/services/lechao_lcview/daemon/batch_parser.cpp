@@ -48,42 +48,34 @@ int vendor::lechao::lcview::classifyInvalidReason(const std::string &reason)
     return 0;
 }
 
-BatchParseResult vendor::lechao::lcview::parseBatch(
-    SchemaParser& schema, FileWriter& writer,
-    const uint8_t* data, size_t len)
+// R-19 P5 方向 1：纯解析层实现——批次框架切分（4B 长度前缀 + 记录边界 +
+// 结构级校验），无任何写入副作用。回调逐条收记录判定；回调返回 false 或
+// 遇到 kBadLen（坏长度终止整批）即停止遍历。结构级校验与 schema 无关：
+//   - 坏长度（total_len<4 或越界）：本批剩余字节全部不可信，批次终止
+//   - record too small（净长不足固定头）
+//   - bad magic（魔数不符）
+// 字段级/schema 语义校验留在 kValid 回调（生产走 schema.validate，测试走
+// decodeRecordField），本层不耦合 SchemaParser。
+void vendor::lechao::lcview::parseBatchRecords(
+    const uint8_t* data, size_t len, const ParsedBatchCallback& cb)
 {
-    BatchParseResult result;
     size_t offset = 0;
-
-    // R-08 方向 2：批次级 flush 事务起点——本批所有 writeRecord/writeInvalid
-    // 只写 ofstream 缓冲不 flush，批次尾 endBatch 统一 flush + 失败整批回滚
-    // （消每记录一次 write syscall）
-    writer.beginBatch();
-
     while (offset + 4 <= len) {
-        // 读取本条记录的总长度（含自身 4 字节）
+        // 读取本条记录的总长度（含自身 4 字节）。LCV-02：主机序裸 memcpy
+        //（事实小端契约，与内核写入端 lcview_builder 同机同序，禁单侧改转换）
         uint32_t total_len;
         memcpy(&total_len, data + offset, 4);
 
         // 长度校验：最小长度和边界检查
         if (total_len < 4 || offset + total_len > len) {
-            // LCV-03：坏长度截断后续解析，本批剩余字节全部不可信——
-            // invalidCnt 必须计数（心跳 invalid_records 可见），否则坏数据
-            // 风暴下 parseBatch 静默丢数据。writeInvalid 已覆盖 offset 到
-            // 批尾的全部字节，直接 return 终止（不走循环后 trailing 分支，
-            // 避免同段数据重复落盘/重复计数）
-            result.invalidCnt++;
-            // R-09 方向 4：reason 分类计数（坏长度→badLenCnt，心跳可见）
-            const char *badReason = "bad length";
-            result.badLenCnt++;
-            writer.writeInvalid(data + offset, len - offset, badReason);
-            ALOGE("lechao_lcview: parse: bad length at offset=%zu, total_len=%u, "
-                  "drop %zu bytes to batch tail",
-                  offset, total_len, len - offset);
-            // R-08 方向 2：提前出口同样须批次尾统一 flush（坏长度已把剩余
-            // 全部写 invalid，flush 后才落盘）
-            writer.endBatch();
-            return result;
+            ParsedBatchRecord rec;
+            rec.kind = ParsedBatchRecord::Kind::kBadLen;
+            rec.data = data + offset;   // 批尾剩余起点（offset 起全部不可信）
+            rec.len = len - offset;
+            rec.reason = "bad length at offset=" + std::to_string(offset) +
+                         " total_len=" + std::to_string(total_len);
+            cb(rec);
+            return;  // kBadLen 语义上终止整批（后续记录不再解析）
         }
 
         const uint8_t* recordStart = data + offset + 4;
@@ -91,63 +83,144 @@ BatchParseResult vendor::lechao::lcview::parseBatch(
 
         // 记录必须至少包含固定头的大小
         if (recordDataLen < sizeof(struct lcview_record_hdr)) {
-            ALOGE("lechao_lcview: parse: record too small (%zu < %zu)",
-                  recordDataLen, sizeof(struct lcview_record_hdr));
-            writer.writeInvalid(recordStart, recordDataLen, "record too small");
-            result.invalidCnt++;
-            result.badLenCnt++; // R-09 方向 4：坏长度类（净长不足固定头）
+            ParsedBatchRecord rec;
+            rec.kind = ParsedBatchRecord::Kind::kTooSmall;
+            rec.data = recordStart;
+            rec.len = recordDataLen;
+            rec.reason = "record too small";
+            if (!cb(rec))
+                return;
             offset += total_len;
             continue;
         }
 
-        // 使用 SchemaParser 校验记录的魔法数字、event_id、字段数、
-        // 字段类型和总长度是否完整合法
-        std::string errMsg;
-        if (schema.validate(recordStart, recordDataLen, errMsg)) {
-            const struct lcview_record_hdr* hdr =
-                reinterpret_cast<const struct lcview_record_hdr*>(recordStart);
-            const uint8_t* fields =
-                recordStart + sizeof(struct lcview_record_hdr);
-            const EventSchema* es = schema.find(hdr->event_id);
-            if (es) {
-                size_t fieldsLen = recordDataLen - sizeof(struct lcview_record_hdr);
-                writer.writeRecord(*es, hdr, fields, fieldsLen);
-                result.validCnt++;
-            } else {
-                // validate 通过但 find 失败（理论不可达）：防御分支，
-                // 禁止静默丢数据（CXX-004 故障可见性）
-                ALOGE("lechao_lcview: parse: schema for event %u vanished",
-                      hdr->event_id);
-                writer.writeInvalid(recordStart, recordDataLen, "schema vanished");
-                result.invalidCnt++;
-                result.miscInvalidCnt++; // R-09 方向 4：防御分支归其他
-            }
-        } else {
-            writer.writeInvalid(recordStart, recordDataLen, errMsg);
-            ALOGE("lechao_lcview: parse: validate failed: %s", errMsg.c_str());
-            result.invalidCnt++;
-            // R-09 方向 4：动态 errMsg 按 classifyInvalidReason 归类
-            const int cls = classifyInvalidReason(errMsg);
-            if (cls == 1)
-                result.badLenCnt++;
-            else if (cls == 2)
-                result.schemaDriftCnt++;
-            else
-                result.miscInvalidCnt++;
+        // 魔数校验：快速识别数据损坏（与 schema 无关的结构级检查）
+        const struct lcview_record_hdr* hdr =
+            reinterpret_cast<const struct lcview_record_hdr*>(recordStart);
+        if (hdr->magic != LCVIEW_MAGIC) {
+            ParsedBatchRecord rec;
+            rec.kind = ParsedBatchRecord::Kind::kBadMagic;
+            rec.data = recordStart;
+            rec.len = recordDataLen;
+            rec.reason = "bad magic";
+            if (!cb(rec))
+                return;
+            offset += total_len;
+            continue;
         }
 
+        ParsedBatchRecord rec;
+        rec.kind = ParsedBatchRecord::Kind::kValid;
+        rec.data = recordStart;
+        rec.len = recordDataLen;
+        if (!cb(rec))
+            return;
         offset += total_len;
     }
 
-    // 批次尾部残留（<4B 读不出长度前缀）：直读路径拼包 bug 现场必须
-    // 落盘 invalid，禁止静默丢弃（CXX-004 故障可见性）
+    // 批次尾部残留（<4B 读不出长度前缀）：不进入主循环，单独送出
     if (offset != len) {
-        writer.writeInvalid(data + offset, len - offset, "trailing bytes");
-        ALOGE("lechao_lcview: parse: %zu trailing bytes at batch tail",
-              len - offset);
-        result.invalidCnt++;
-        result.badLenCnt++; // R-09 方向 4：坏长度类（尾部残留读不出长度前缀）
+        ParsedBatchRecord rec;
+        rec.kind = ParsedBatchRecord::Kind::kTrailing;
+        rec.data = data + offset;
+        rec.len = len - offset;
+        rec.reason = "trailing bytes";
+        cb(rec);
     }
+}
+
+BatchParseResult vendor::lechao::lcview::parseBatch(
+    SchemaParser& schema, FileWriter& writer,
+    const uint8_t* data, size_t len)
+{
+    BatchParseResult result;
+
+    // R-08 方向 2：批次级 flush 事务起点——本批所有 writeRecord/writeInvalid
+    // 只写 ofstream 缓冲不 flush，批次尾 endBatch 统一 flush + 失败整批回滚
+    // （消每记录一次 write syscall）
+    writer.beginBatch();
+
+    // R-19 P5 方向 1：解析与写入动作分离——批次框架层（4B 前缀切分/结构级
+    // 校验）收敛到纯解析函数 parseBatchRecords，本函数只消费解析结果做
+    // schema 语义校验与落盘，不再内联框架循环（逻辑等价，行为不变）
+    parseBatchRecords(data, len, [&](const ParsedBatchRecord& rec) -> bool {
+        switch (rec.kind) {
+        case ParsedBatchRecord::Kind::kBadLen:
+            // LCV-03：坏长度截断后续解析，本批剩余字节全部不可信——
+            // invalidCnt 必须计数（心跳 invalid_records 可见），否则坏数据
+            // 风暴下 parseBatch 静默丢数据。writeInvalid 已覆盖 offset 到
+            // 批尾的全部字节；返回 false 终止遍历（后续记录不再处理）
+            result.invalidCnt++;
+            // R-09 方向 4：reason 分类计数（坏长度→badLenCnt，心跳可见）
+            result.badLenCnt++;
+            writer.writeInvalid(rec.data, rec.len, rec.reason);
+            ALOGE("lechao_lcview: parse: %s, drop %zu bytes to batch tail",
+                  rec.reason.c_str(), rec.len);
+            return false;
+        case ParsedBatchRecord::Kind::kTooSmall:
+            ALOGE("lechao_lcview: parse: record too small (%zu < %zu)",
+                  rec.len, sizeof(struct lcview_record_hdr));
+            writer.writeInvalid(rec.data, rec.len, rec.reason);
+            result.invalidCnt++;
+            result.badLenCnt++; // R-09 方向 4：坏长度类（净长不足固定头）
+            return true;
+        case ParsedBatchRecord::Kind::kBadMagic:
+            ALOGE("lechao_lcview: parse: bad magic");
+            writer.writeInvalid(rec.data, rec.len, rec.reason);
+            result.invalidCnt++;
+            result.badLenCnt++; // R-09 方向 4：坏长度类（魔数不符归坏前缀）
+            return true;
+        case ParsedBatchRecord::Kind::kTrailing:
+            // 批次尾部残留（<4B 读不出长度前缀）：直读路径拼包 bug 现场必须
+            // 落盘 invalid，禁止静默丢弃（CXX-004 故障可见性）
+            writer.writeInvalid(rec.data, rec.len, rec.reason);
+            ALOGE("lechao_lcview: parse: %zu trailing bytes at batch tail",
+                  rec.len);
+            result.invalidCnt++;
+            result.badLenCnt++; // R-09 方向 4：坏长度类（尾部残留读不出长度前缀）
+            return true;
+        case ParsedBatchRecord::Kind::kValid: {
+            const struct lcview_record_hdr* hdr =
+                reinterpret_cast<const struct lcview_record_hdr*>(rec.data);
+            const uint8_t* fields = rec.data + sizeof(struct lcview_record_hdr);
+            size_t fieldsLen = rec.len - sizeof(struct lcview_record_hdr);
+
+            // 使用 SchemaParser 校验记录的魔法数字、event_id、字段数、
+            // 字段类型和总长度是否完整合法
+            std::string errMsg;
+            if (schema.validate(rec.data, rec.len, errMsg)) {
+                const EventSchema* es = schema.find(hdr->event_id);
+                if (es) {
+                    writer.writeRecord(*es, hdr, fields, fieldsLen);
+                    result.validCnt++;
+                } else {
+                    // validate 通过但 find 失败（理论不可达）：防御分支，
+                    // 禁止静默丢数据（CXX-004 故障可见性）
+                    ALOGE("lechao_lcview: parse: schema for event %u vanished",
+                          hdr->event_id);
+                    writer.writeInvalid(rec.data, rec.len, "schema vanished");
+                    result.invalidCnt++;
+                    result.miscInvalidCnt++; // R-09 方向 4：防御分支归其他
+                }
+            } else {
+                writer.writeInvalid(rec.data, rec.len, errMsg);
+                ALOGE("lechao_lcview: parse: validate failed: %s", errMsg.c_str());
+                result.invalidCnt++;
+                // R-09 方向 4：动态 errMsg 按 classifyInvalidReason 归类
+                const int cls = classifyInvalidReason(errMsg);
+                if (cls == 1)
+                    result.badLenCnt++;
+                else if (cls == 2)
+                    result.schemaDriftCnt++;
+                else
+                    result.miscInvalidCnt++;
+            }
+            return true;
+        }
+        }
+        return true;
+    });
+
     // R-08 方向 2：批次尾统一 flush（含全部 writeRecord/writeInvalid 缓冲），
     // 失败整批回滚在 endBatch 内部处理（dropBatchFlush 计数）
     writer.endBatch();
@@ -158,20 +231,27 @@ bool vendor::lechao::lcview::loadSchemaWithRetry(SchemaParser &schema, const std
                                                  const std::atomic<bool> &running, int maxRetries,
                                                  std::chrono::milliseconds interval)
 {
-    // 方向 4：可中断 + 尝试次数语义。
-    //   running：循环条件显式查 running，schema 重试期间收到停止信号
-    //   （gRunning=false）立即退出，不再等满 maxRetries×interval——
-    //   否则 init stop 被最长 15s 的重试窗口卡住（无法及时响应）。
-    //   日志从"第 N 次重试 (N/30)"改为"第 N 次尝试失败（attempt N/30）"：
-    //   attempt 即本轮已尝试加载的次数，语义与 maxRetries（尝试上限）
-    //   同尺度，弱 LLM/排查时直接可读，不再混淆"重试次数 vs 尝试次数"。
+    // 方向 4：可中断 + 总尝试上限语义。
+    //   running：重试期间收到停止信号（gRunning=false）立即退出，不再等满
+    //   maxRetries×interval——否则 init stop 被最长 15s 的重试窗口卡住。
+    //   maxRetries 为"总尝试上限"（含首次）：do-while 保证至少尝试 1 次
+    //   （maxRetries=0 时仅首次尝试，成功即返回、失败即退出）。
+    //   R-19 P5 方向 4 修正 off-by-one——原实现首次尝试在 while 条件内不
+    //   计入 attempt，循环体又执行 maxRetries 次，实际总尝试 maxRetries+1
+    //   次（如 maxRetries=30 实际尝试 31 次），与"总尝试上限"语义不符。
+    //   日志语义（attempt N/maxRetries）不变。
     int attempt = 0;
-    while (!schema.loadFromFile(path) && running.load() && attempt < maxRetries)
-    {
+    do {
         attempt++;
-        ALOGW("lechao_lcview: schema load attempt %d/%d failed, retrying", attempt, maxRetries);
+        if (schema.loadFromFile(path))
+            break;
+        ALOGW("lechao_lcview: schema load attempt %d/%d failed", attempt, maxRetries);
+        if (attempt >= maxRetries)
+            break;  // 总尝试已达上限，不再重试
+        if (!running.load())
+            break;  // 停止信号：立即退出，不等满重试窗口
         std::this_thread::sleep_for(interval);
-    }
+    } while (true);
     return schema.eventCount() > 0;
 }
 

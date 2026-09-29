@@ -47,6 +47,8 @@ struct fv_command {
     uint64_t corrupt_ge;       /* 断言: corrupt_count >= 此值 */
     uint64_t disconnect_ge;    /* 断言: disconnect_count >= 此值 */
     uint64_t probe_ge;         /* 断言: probe_count >= 此值 */
+    uint64_t error_ge;         /* 断言: error_count >= 此值 */
+    uint64_t reset_ge;         /* 断言: reset_count >= 此值 */
     uint64_t rate_drop_ge;     /* 断言: peak_rate - current_rate >= 此值 */
     uint64_t latency_rise_ge;  /* 断言: last_transport_latency_ns >= 此值 */
     int json_output;           /* 是否使用 JSON 格式输出：0=文本表格，1=JSON */
@@ -56,6 +58,15 @@ struct fv_command {
 
 /* 打印使用帮助信息到 stderr */
 void usage(const char *prog);
+
+/*
+ * fv_parse_event_type — 事件类型名 → 内核枚举值（R-18 P5 方向 6 导出）
+ * @s: 事件类型名（"stall"/"timeout"/"corrupt"/"reset"/"transport_error"/
+ *     "disconnect"/"probe"/"degrade"）
+ * 返回: 对应内核 event 枚举值；未知类型返回 0xFFFFFFFF。
+ * 供 CLI 解析与 host 单测共用，防事件名↔枚举映射语义漂移。
+ */
+uint32_t fv_parse_event_type(const char *s);
 
 /*
  * fv_parse_args — 解析命令行参数

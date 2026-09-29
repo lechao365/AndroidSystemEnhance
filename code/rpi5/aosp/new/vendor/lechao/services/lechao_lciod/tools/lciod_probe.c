@@ -2,7 +2,7 @@
 // lciod_probe.c — LcIod 设备统计取数工具（上板验证用）
 // 所属模块：lechao_lciod — 工具
 // 设计目的：枚举 /dev/vendor_lechao_usbd* 节点，逐设备执行
-//   GET_STATS ioctl 并按固定 key=value 格式单行打印（全 26 字段
+//   GET_STATS ioctl 并按固定 key=value 格式单行打印（全 28 字段
 //   + abi_version），供 host 侧 lciod_check.py 做字段齐全性/增量
 //   校验（设备侧最小操作 + host 复杂解析，防假绿原则同 lcview）。
 //
@@ -72,7 +72,8 @@ static int probe_device(const char* path, int do_reset)
            "current_rate=%llu peak_rate=%llu last_transport_latency_ns=%llu "
            "last_event_ts_ns=%llu last_update=%lld stall_count=%llu "
            "corrupt_count=%llu timeout_count=%llu last_event_type=%u "
-           "enabled=%u flags=%u event_drop_count=%llu abi_version=%u\n",
+           "enabled=%u flags=%u event_drop_count=%llu "
+           "read_error_count=%llu write_error_count=%llu abi_version=%u\n",
            tail_minor(path), path, st.vid, st.pid, st.vendor, st.product,
            (unsigned long long)st.read_bytes, (unsigned long long)st.write_bytes,
            (unsigned long long)st.read_ns, (unsigned long long)st.write_ns,
@@ -87,6 +88,8 @@ static int probe_device(const char* path, int do_reset)
            (unsigned long long)st.timeout_count, st.last_event_type,
            st.enabled, st.flags,
            (unsigned long long)st.event_drop_count,
+           (unsigned long long)st.read_error_count,
+           (unsigned long long)st.write_error_count,
            VENDOR_LECHAO_USBD_ABI_VERSION);
     fflush(stdout);
     return 0;

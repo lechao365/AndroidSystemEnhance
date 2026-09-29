@@ -9,7 +9,7 @@
  *   output_config        — 输出配置
  *   output_event         — 输出事件（带错误处理）
  *   output_check_report  — 输出断言报告
- *   output_degrade_check — 输出降级检查报告（含计算逻辑）
+ *   output_degrade_check — 输出降级检查报告（check degrade 统一入口）
  *
  * 格式选择: 通过 json 参数控制（0=文本表格，1=JSON）
  * ============================================================
@@ -36,8 +36,8 @@ int output_event(const struct vendor_lechao_usbd_event *event, int json, int rc)
 int output_check_report(const struct fv_check_report *report, int json);
 
 /*
- * 输出降级检查报告（内置降级计算逻辑）
- * 此函数会重新计算降级指标并填充报告，再调用 output_check_report 输出。
+ * 输出降级检查报告（check degrade 统一入口）
+ * 此函数完成降级指标计算并填充报告，再调用 output_check_report 输出。
  */
 int output_degrade_check(const struct vendor_lechao_usbd_stats *stats,
                          const struct fv_command *cmd, int json);

@@ -65,9 +65,8 @@ struct vendor_lechao_usbd_device {
     struct kref kref;                /* 引用计数：open() 增加，close() 减少，归零时释放内存 */
     int minor;                       /* 次设备号（0~15），由 IDA 分配，对应设备节点后缀 */
     spinlock_t lock;                 /* 保护 stats、config、last_event、transport_* 等状态字段 */
-    ktime_t transport_start_time;    /* 当前传输的开始时间戳（TRANSPORT_START 时设置） */
-    bool transport_active;           /* 是否有传输正在进行（TRANSPORT_START→TRANSPORT_END 之间为 true） */
-    ktime_t last_degrade_window_start; /* degrade 检测窗口的起始时间（用于滑动窗口速率对比） */
+    u64 last_degrade_window_start;   /* degrade 检测窗口的起始时间戳（mono ns，
+                                      * R-16 P4 方向 2：per-CPU 槽读取，原 ktime_t 改 u64 ns） */
     u64 last_degrade_window_bytes;     /* 上一个 degrade 检测窗口内传输的字节数 */
     u64 last_transport_latency_ns;     /* 最近一次传输延迟（纳秒），用于 degrade 判定 */
     bool last_transport_error;         /* 当前传输周期内是否发生过错误（TRANSPORT_END 时检查） */

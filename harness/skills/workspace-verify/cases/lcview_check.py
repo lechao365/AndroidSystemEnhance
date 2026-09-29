@@ -480,14 +480,17 @@ def mode_delta(tmp, args):
         # 校验字段匹配（usb_probe f=[device_index, vid, pid, vendor, product]）；
         # 仅校验已提供字段（只传 --vid/--pid 之一时另一项 None 不参与比对，
         # None 恒不等会让单字段校验必然判红）
+        # R-20 P5 方向 1 适配：vid/pid/vendor/product 已被 schema sensitive
+        # 标记在输出层统一掩码为 null——掩码字段跳过值匹配（值已不可得，
+        # 以"事件 id + 结构命中"作为 usb_probe 判定，不再强校验具体设备标识）
         if args.vid is not None or args.pid is not None:
             for r in hit:
                 f = r["fields"]
                 if not (isinstance(f, list) and len(f) >= 3):
                     continue
-                if args.vid is not None and int(f[1]) != args.vid:
+                if args.vid is not None and f[1] is not None and int(f[1]) != args.vid:
                     continue
-                if args.pid is not None and int(f[2]) != args.pid:
+                if args.pid is not None and f[2] is not None and int(f[2]) != args.pid:
                     continue
                 print(f"  字段匹配: f={f}")
                 return 0

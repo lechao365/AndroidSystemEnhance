@@ -54,7 +54,7 @@ struct FileWriterConfig {
 
 // FileWriter 类：将事件日志写入结构化 JSONL 文件
 // 文件命名规则：{event_id}_{event_name}_{YYYYMMDD}_p{seq}.jsonl
-// 例如：4_usb_transport_start_20260606_p0.jsonl
+// 例如：5_usb_transport_end_20260606_p0.jsonl
 // seq 是当日文件的轮转序号，从 0 开始递增
 // 为什么用 JSONL 而非纯文本或 protobuf：
 //   JSONL 每行一条独立 JSON 对象，兼容通用日志分析工具，

@@ -2,7 +2,7 @@
 // 拦截：S8（currentSize 恢复）+ S5（formatJsonLine 2B 前缀小端序）
 //
 // 分支覆盖目标：
-//   formatJsonLine 全部 6 个 switch case（INT32/INT64/FLOAT/STRING/BINARY/default）+ LCVIEW_NEED 越界
+//   decodeRecordField 全部 6 个 case（INT32/FLOAT/INT64/STRING/BINARY/default）+ kTruncated 越界
 //   writeRecord 全分支（文件未打开→自动 openFile / openFile 失败丢弃 / formatJsonLine 空丢弃 / 正常写入）
 //   openFile 全分支（已存在文件恢复 currentSize / 新文件）
 //   writeInvalid 分支（stream 未打开丢弃 / 正常写入）
@@ -75,12 +75,19 @@ std::string readFile(const std::string& path) {
 }
 
 EventSchema makeSchema(uint16_t id, const std::string& name,
-                       std::vector<FieldType> types) {
+                       std::vector<FieldType> types,
+                       const std::vector<bool>& sensitive = {}) {
     EventSchema s;
     s.id = id;
     s.name = name;
-    for (size_t i = 0; i < types.size(); i++)
-        s.fields.push_back({"f" + std::to_string(i), types[i]});
+    for (size_t i = 0; i < types.size(); i++) {
+        FieldDef fd;
+        fd.name = "f" + std::to_string(i);
+        fd.type = types[i];
+        if (i < sensitive.size())
+            fd.sensitive = sensitive[i];
+        s.fields.push_back(fd);
+    }
     return s;
 }
 
@@ -259,10 +266,53 @@ TEST_F(FormatJsonLineTest, BinaryField_Le16_ProducesHex) {
 TEST_F(FormatJsonLineTest, UnknownType_ProducesNull) {
     auto schema = makeSchema(4, "e", {FieldType::INT32});
     auto hdr = makeHdr(4, 1);
-    // wire type = 99（未知），LCVIEW_NEED(1) 通过但 switch 走 default
+    // wire type = 99（未知），decodeRecordField 返回 kUnknown 后输出 null 继续
     std::vector<uint8_t> fields = {99};
     auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
     EXPECT_NE(line.find("null"), std::string::npos);
+}
+
+// ============================================================
+// R-20 P5 方向 1：敏感字段输出层统一掩码
+// ============================================================
+
+TEST_F(FormatJsonLineTest, SensitiveStringField_MaskedAsAsterisks) {
+    // STRING 敏感 → 输出 "***"，原值不得落盘
+    auto schema = makeSchema(4, "e", {FieldType::STRING}, {true});
+    auto hdr = makeHdr(4, 1);
+    auto fields = buildFields({FieldType::STRING}, {"secret-vendor-name"});
+    auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+    EXPECT_NE(line.find("\"f\":[\"***\"]"), std::string::npos) << "敏感 STRING 须掩码";
+    EXPECT_EQ(line.find("secret-vendor-name"), std::string::npos) << "原值不得落盘";
+}
+
+TEST_F(FormatJsonLineTest, SensitiveInt64Field_MaskedAsNull) {
+    // INT64 敏感 → null（与 NaN/Inf/未知类型既有 null 约定统一）
+    auto schema = makeSchema(4, "e", {FieldType::INT64}, {true});
+    auto hdr = makeHdr(4, 1);
+    auto fields = buildFields({FieldType::INT64});
+    auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+    EXPECT_NE(line.find("\"f\":[null]"), std::string::npos) << "敏感 INT64 须输出 null";
+}
+
+TEST_F(FormatJsonLineTest, SensitiveBinaryField_MaskedAsAsterisks) {
+    // BINARY 敏感 → 掩码，hex 明文不得落盘
+    auto schema = makeSchema(4, "e", {FieldType::BINARY}, {true});
+    auto hdr = makeHdr(4, 1);
+    auto fields = buildFields({FieldType::BINARY}, {}, {{0xDE, 0xAD, 0xBE, 0xEF}});
+    auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+    EXPECT_NE(line.find("\"f\":[\"***\"]"), std::string::npos) << "敏感 BINARY 须掩码";
+    EXPECT_EQ(line.find("deadbeef"), std::string::npos) << "BINARY hex 明文不得落盘";
+}
+
+TEST_F(FormatJsonLineTest, SensitiveField_NonSensitiveNeighbor_Unaffected) {
+    // 逐字段粒度：非敏感 STRING 直传 + 敏感 INT64 掩码，逗号分隔结构保持
+    auto schema = makeSchema(4, "e", {FieldType::STRING, FieldType::INT64}, {false, true});
+    auto hdr = makeHdr(4, 2);
+    auto fields = buildFields({FieldType::STRING, FieldType::INT64}, {"plain-string"});
+    auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
+    EXPECT_NE(line.find("plain-string"), std::string::npos) << "非敏感字段不得掩码";
+    EXPECT_NE(line.find("[\"plain-string\",null]"), std::string::npos) << "结构须保持逐字段";
 }
 
 // ============================================================
@@ -335,7 +385,7 @@ TEST_F(FormatJsonLineTest, StringField_InvalidUtf8_Escaped) {
 TEST_F(FormatJsonLineTest, Int32Field_Truncated_ReturnsEmpty) {
     auto schema = makeSchema(4, "e", {FieldType::INT32});
     auto hdr = makeHdr(4, 1);
-    // 只给 type 字节，缺 4B value → LCVIEW_NEED(4) 失败
+    // 只给 type 字节，缺 4B value → decodeRecordField 返回 kTruncated
     std::vector<uint8_t> fields = {LCVIEW_TYPE_INT32};
     auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
     EXPECT_TRUE(line.empty());
@@ -344,7 +394,7 @@ TEST_F(FormatJsonLineTest, Int32Field_Truncated_ReturnsEmpty) {
 TEST_F(FormatJsonLineTest, StringField_LenPrefixTruncated_ReturnsEmpty) {
     auto schema = makeSchema(4, "e", {FieldType::STRING});
     auto hdr = makeHdr(4, 1);
-    // 只有 type + 1B（缺第 2B 长度）→ LCVIEW_NEED(2) 失败
+    // 只有 type + 1B（缺第 2B 长度）→ decodeRecordField 返回 kTruncated
     std::vector<uint8_t> fields = {LCVIEW_TYPE_STRING, 0x05};
     auto line = writer_->formatJsonLine(schema, &hdr, fields.data(), fields.size());
     EXPECT_TRUE(line.empty());
@@ -1013,7 +1063,7 @@ TEST(FileWriterDropCountTest, FormatOob_ReturnsEmpty_NoCount) {
     FileWriter writer(cfg);
     auto schema = makeSchema(4, "e", {FieldType::INT64, FieldType::INT64});
     auto hdr = makeHdr(4, 1);
-    // 字段数据只有 1 字节（schema 需 8+8），触发 LCVIEW_NEED 越界
+    // 字段数据只有 1 字节（schema 需 8+8），触发 decodeRecordField 越界（kTruncated）
     std::vector<uint8_t> fields = {LCVIEW_TYPE_INT64};
 
     auto line = writer.formatJsonLine(schema, &hdr, fields.data(), fields.size());

@@ -97,16 +97,28 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
             continue;
         }
 
-        /* ===== Step 2: SCSI 命令分发 ===== */
+        /* ===== Step 2: SCSI 命令解析（仅解析方向/长度，不执行数据 IO） =====
+         * data_buf 传 NULL：对 OUT 命令（如 WRITE_10），若此处传入 data_buf，
+         * scsi_handle_command 会用尚未接收数据的未初始化缓冲区立即写盘
+         * （内存破坏级脏写），随后 OUT 分支接收真实数据后再派发一次——
+         * 同一命令被双重派发。故此处仅解析，IN 数据在 Data IN 分支生成，
+         * OUT 数据在接收真实数据后单次写盘。
+         */
         struct scsi_result sr = scsi_handle_command(
             cbw.CBWCB, cbw.bCBWCBLength,
             cbw.dCBWDataTransferLength,
-            data_buf, DATA_BUF_MAX);
+            NULL, DATA_BUF_MAX);
 
         /* ===== Step 3: Data 阶段 ===== */
         uint32_t actually_transferred = 0;
 
         if (sr.dir == SCSI_DIR_IN && sr.data_len > 0) {
+            /* 生成 IN 方向真实响应数据（Step 2 仅解析未填充缓冲区） */
+            sr = scsi_handle_command(
+                cbw.CBWCB, cbw.bCBWCBLength,
+                cbw.dCBWDataTransferLength,
+                data_buf, DATA_BUF_MAX);
+
             uint32_t to_send = sr.data_len;
             if (to_send > cbw.dCBWDataTransferLength)
                 to_send = cbw.dCBWDataTransferLength;

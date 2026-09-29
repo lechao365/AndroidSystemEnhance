@@ -146,7 +146,7 @@ int builder_str_field_fits(uint32_t data_offset, uint32_t data_len,
 uint32_t ring_corrupt_skip_len(uint32_t record_len, uint32_t ring_size,
                                uint32_t default_skip)
 {
-    /* 方向 5：下界由前缀 4 改 default_skip 20——[4,20) 的记录连记录头
+    /* 方向 5：下界由前缀 4 改 default_skip 36（4+记录头 32）——[4,36) 的记录连记录头
      * 都放不下，伪造长度不可信，一律回落保守默认。
      * 方向 4：上界由 > 改 >=——record_len == ring_size 时按 record_len
      * 前移会 (rpos + ring_size) % ring_size == rpos 零推进死循环，

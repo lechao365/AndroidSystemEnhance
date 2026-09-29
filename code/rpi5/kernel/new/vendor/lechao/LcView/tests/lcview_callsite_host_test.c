@@ -159,6 +159,7 @@ static void test_ring_read_callsite_corrupt_skip(void)
 
     ring.buf = ringbuf;
     ring.read_buf = readbuf;
+    ring.read_buf_size = sizeof(readbuf);
     ring.size = sizeof(ringbuf);
     ring.write_pos = 4100 + 36; /* 损坏记录 4100B + 合法记录 36B */
     ring.read_pos = 0;
@@ -201,6 +202,7 @@ static void test_ring_read_callsite_corrupt_garbage(void)
 
     ring.buf = ringbuf;
     ring.read_buf = readbuf;
+    ring.read_buf_size = sizeof(readbuf);
     ring.size = sizeof(ringbuf);
     ring.write_pos = 72;
     ring.read_pos = 0;
@@ -235,6 +237,7 @@ static void test_ring_write_callsite_huge_len(void)
 
     ring.buf = ringbuf;
     ring.read_buf = readbuf;
+    ring.read_buf_size = sizeof(readbuf);
     ring.size = sizeof(ringbuf);
     ring.write_pos = 0;
     ring.read_pos = 0;
@@ -288,6 +291,7 @@ static void test_ring_read_callsite_short_prefix(void)
 
     ring.buf = ringbuf;
     ring.read_buf = readbuf;
+    ring.read_buf_size = sizeof(readbuf);
     ring.size = sizeof(ringbuf);
     ring.write_pos = 72; /* 损坏前缀 4B + 跳过空洞 32B + 合法记录 36B */
     ring.read_pos = 0;
@@ -330,6 +334,7 @@ static void test_ring_read_callsite_equal_size(void)
 
     ring.buf = ringbuf;
     ring.read_buf = readbuf;
+    ring.read_buf_size = sizeof(readbuf);
     ring.size = sizeof(ringbuf);
     ring.write_pos = 72;
     ring.read_pos = 0;
@@ -501,6 +506,42 @@ static void test_ring_read_callsite_max_record_delivery(void)
 }
 
 /*
+ * R-17 方向 3 判红（锁内连续 run 批拷）：一次 read 交付多记录。
+ * 3 条合法记录（4B 前缀 + 各自 payload ≥ 32B 满足最小记录长校验）写入后，
+ * 单次 read 应在锁内批拷进 read_buf 并一次性交付全部（替代逐条 copy）。
+ * 断言：返回字节数 = 3 条记录总长、payload 顺序拼接正确、read_pos
+ * 推进到末尾、read_calls 计数 == 1（一次 read 调用一次交付）。
+ */
+static void test_ring_read_callsite_batch_multi(void)
+{
+    struct lcview_ring ring;
+    uint8_t user[1024];
+    uint8_t p1[40], p2[40], p3[40];
+
+    CHECK(lcview_ring_init(&ring, 1) == 0); /* 1KB 环 */
+    memset(p1, 0xA1, sizeof(p1));
+    memset(p2, 0xB2, sizeof(p2));
+    memset(p3, 0xC3, sizeof(p3));
+    CHECK(lcview_ring_write(&ring, p1, sizeof(p1)) == 0);
+    CHECK(lcview_ring_write(&ring, p2, sizeof(p2)) == 0);
+    CHECK(lcview_ring_write(&ring, p3, sizeof(p3)) == 0);
+
+    /* 总长 = 3×(4B 前缀 + 40B) = 132 */
+    int n = lcview_ring_read(&ring, user, sizeof(user));
+    CHECK(n == 132);
+    CHECK(ring.read_pos == 132 % ring.size);
+    /* 三条 payload 顺序拼接（跳过各自 4B 前缀） */
+    CHECK(memcmp(user + 4, p1, sizeof(p1)) == 0);
+    CHECK(memcmp(user + 4 + 44, p2, sizeof(p2)) == 0);
+    CHECK(memcmp(user + 4 + 44 + 44, p3, sizeof(p3)) == 0);
+    /* R-17 方向 4：read_calls 计数 = 1（一次 read 交付整批） */
+    CHECK(atomic64_read(&ring.read_calls) == 1);
+    CHECK(atomic_read(&ring.readers) == 0);
+    CHECK(ring.read_mutex.locked == 0);
+    lcview_ring_destroy(&ring);
+}
+
+/*
  * 方向 7 判红（读后锁平衡）：host_shim mutex 带锁态断言后，read 任何出口
  * 漏 unlock 都会判红。覆盖正常交付、EMSGSIZE 错误、shutdown 停交付、
  * destroy 后 EOF 四类出口，断言返回后 read_mutex 回到解锁态（locked == 0）。
@@ -611,6 +652,7 @@ int main(void)
     test_ring_read_emsgsize_readers_zero();
     test_pool_put_get_reuse_first();
     test_ring_read_callsite_max_record_delivery();
+    test_ring_read_callsite_batch_multi();
     test_ring_read_lock_balanced();
     test_ring_write_enospc_counts_dropped();
     if (g_fails) {

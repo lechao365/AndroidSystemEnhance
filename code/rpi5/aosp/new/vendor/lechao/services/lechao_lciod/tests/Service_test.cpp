@@ -102,9 +102,9 @@ TEST(ComputeWindowKbRateTest, CounterWrap_FallsBackToCumulative)
               ComputeKbRate(1048576, 1000000000ULL));
 }
 
-/* --- 字段投影：vendor → system（21 字段直传 + 管理字段省略） --- */
+/* --- 字段投影：vendor → system（23 字段直传 + 管理字段省略） --- */
 
-TEST(ProjectionTest, IoStats_All21FieldsPassedThrough) {
+TEST(ProjectionTest, IoStats_All23FieldsPassedThrough) {
     aidl::vendor::lechao::lciod::IoStats v;
     v.vid = 0x04e8;
     v.pid = 0x6300;
@@ -121,6 +121,8 @@ TEST(ProjectionTest, IoStats_All21FieldsPassedThrough) {
     v.stallCount = 9;
     v.corruptCount = 10;
     v.timeoutCount = 11;
+    v.readErrorCount = 25;          // R-14 方向 2：读方向错误分项（v3）
+    v.writeErrorCount = 26;         // R-14 方向 2：写方向错误分项（v3）
     v.probeCount = 12;
     v.disconnectCount = 13;
     v.degradeCount = 14;
@@ -134,7 +136,7 @@ TEST(ProjectionTest, IoStats_All21FieldsPassedThrough) {
     aidl::system::lechao::lciod::IoStats s;
     ProjectSystemIoStats(v, &s);
 
-    // 21 字段逐一直传（字段串位/漏传在此判红）
+    // 23 字段逐一直传（字段串位/漏传在此判红）
     EXPECT_EQ(s.vid, 0x04e8);
     EXPECT_EQ(s.pid, 0x6300);
     EXPECT_EQ(s.vendor, "Samsung");
@@ -150,6 +152,8 @@ TEST(ProjectionTest, IoStats_All21FieldsPassedThrough) {
     EXPECT_EQ(s.stallCount, 9);
     EXPECT_EQ(s.corruptCount, 10);
     EXPECT_EQ(s.timeoutCount, 11);
+    EXPECT_EQ(s.readErrorCount, 25);
+    EXPECT_EQ(s.writeErrorCount, 26);
     EXPECT_EQ(s.probeCount, 12);
     EXPECT_EQ(s.disconnectCount, 13);
     EXPECT_EQ(s.degradeCount, 14);
@@ -181,7 +185,7 @@ TEST(ProjectionTest, IoConfig_PassedThrough) {
     EXPECT_EQ(s.flags, 0x8);
 }
 
-TEST(ProjectionTest, IoEvent_All6FieldsPassedThrough) {
+TEST(ProjectionTest, IoEvent_All11FieldsPassedThrough) {
     aidl::vendor::lechao::lciod::IoEvent v;
     v.timestampNs = 100;
     v.eventType = 5;
@@ -189,6 +193,11 @@ TEST(ProjectionTest, IoEvent_All6FieldsPassedThrough) {
     v.dataDirection = 1;
     v.status = 0;
     v.valid = true;
+    v.wallTimeNs = 200;   // R-14 方向 4：wall 双时间戳
+    v.opcode = 0x28;      // R-14 方向 1：SCSI READ(10)
+    v.lba = 0x1000;       // R-14 方向 1：起始 LBA
+    v.bytes = 4096;       // R-14 方向 1：有效传输字节数
+    v.retry = 2;          // R-14 方向 1：重试次数
     aidl::system::lechao::lciod::IoEvent s;
     ProjectSystemIoEvent(v, &s);
     EXPECT_EQ(s.timestampNs, 100);
@@ -197,4 +206,39 @@ TEST(ProjectionTest, IoEvent_All6FieldsPassedThrough) {
     EXPECT_EQ(s.dataDirection, 1);
     EXPECT_EQ(s.status, 0);
     EXPECT_TRUE(s.valid);
+    EXPECT_EQ(s.wallTimeNs, 200);
+    EXPECT_EQ(s.opcode, 0x28);
+    EXPECT_EQ(s.lba, 0x1000);
+    EXPECT_EQ(s.bytes, 4096);
+    EXPECT_EQ(s.retry, 2);
+}
+
+/* --- ComputeErrorRate：读写方向 IO 错误率（R-14 方向 2） --- */
+
+TEST(ComputeErrorRateTest, ZeroTotalIO_ReturnsZero) {
+    // 无成功 IO 且无错误 → 总 IO=0，除零防护返回 0
+    EXPECT_EQ(ComputeErrorRate(0, 0), 0u);
+}
+
+TEST(ComputeErrorRateTest, NoError_ReturnsZero) {
+    EXPECT_EQ(ComputeErrorRate(0, 1000), 0u);
+}
+
+TEST(ComputeErrorRateTest, OneErrorPerTenIO_Returns909PerMille) {
+    // 10 次成功 + 1 次错误 = 总 IO 11，错误占比 1/11 → 90.9‰ → 截断 90
+    EXPECT_EQ(ComputeErrorRate(1, 10), 90u);
+}
+
+TEST(ComputeErrorRateTest, HalfErrors_Returns500PerMille) {
+    EXPECT_EQ(ComputeErrorRate(5, 5), 500u);
+}
+
+TEST(ComputeErrorRateTest, AllErrors_Returns1000PerMille) {
+    EXPECT_EQ(ComputeErrorRate(8, 0), 1000u);
+}
+
+TEST(ComputeErrorRateTest, LargeCounters_NoOverflow) {
+    // 累计计数接近 uint64 上限时 errorCount*1000 不溢出（128 位中间量）
+    uint64_t big = 9000000000000000000ULL;
+    EXPECT_EQ(ComputeErrorRate(big, big), 500u);
 }

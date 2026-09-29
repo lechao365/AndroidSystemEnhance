@@ -111,7 +111,7 @@ index 7449e379077a..a9472dd0129f 100644
  		return USB_STOR_XFER_LONG;
  
  	/* the transfer was cancelled by abort, disconnect, or timeout */
-@@ -605,32 +670,83 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
+@@ -605,32 +670,84 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
  {
  	int need_auto_sense;
  	int result;
@@ -122,14 +122,14 @@ index 7449e379077a..a9472dd0129f 100644
 +	ts_start = ktime_get();
 +
 +	/*
-+	 * 通知：传输开始
++	 * 通知：传输开始（R-16 P4 方向 1 停发 TRANSPORT_START notifier）
 +	 *
-+	 * 为什么在此处发射 TRANSPORT_START notifier：
-+	 *   这是 usb_stor_invoke_transport 的入口，在调用 transport() 之前。
-+	 *   vendor_lechao_usbd 监控驱动需要知道每次传输的开始时间来计算延迟。
-+	 *   ts_start 同时用于 duration_ns 计算，与 notifier 的时间戳独立。
++	 * 原实现在此发射 TRANSPORT_START notifier，配合出口的 TRANSPORT_END，
++	 * 每次传输两次 notifier + vendor 侧两次 per-device lock 获取。R-16
++	 * 合并为单次 TRANSPORT_END：ts_start 仅用于下方 duration_ns 计算
++	 * （END 载荷携带），vendor_lechao_usbd 不再需要 START 事件计算延迟，
++	 * 每命令 notifier 与锁获取均减半。
 +	 */
-+	usb_stor_notifier_call(us, USB_STOR_NOTIFIER_TRANSPORT_START, &notif_data);
  
  	/* send the command to the transport layer */
  	scsi_set_resid(srb, 0);
@@ -151,8 +151,9 @@ index 7449e379077a..a9472dd0129f 100644
 +	 *
 +	 * 为什么在此处发射 TRANSPORT_END（aborted）：
 +	 *   - US_FLIDX_TIMED_OUT 表示 SCSI midlayer 已超时并触发 abort
-+	 *   - 即使传输被中断，也必须发射 END 来配对 START，确保监控驱动的
-+	 *     transport_active 标志被正确清除
++	 *   - 即使传输被中断，也必须发射 END（R-16 P4 方向 1：START/END
++	 *     合并为单次 END，duration_ns 已在上方填充），确保监控驱动的
++	 *     传输状态机正确收敛
 +	 *   - was_error 由监控驱动根据 last_transport_error 自行判定
  	 */
  	if (test_bit(US_FLIDX_TIMED_OUT, &us->dflags)) {
@@ -199,7 +200,7 @@ index 7449e379077a..a9472dd0129f 100644
  		return;
  	}
  
-@@ -893,6 +1009,16 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
+@@ -893,6 +1010,16 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
  		srb->result = DID_ERROR << 16;
  
  	last_sector_hacks(us, srb);
@@ -216,7 +217,7 @@ index 7449e379077a..a9472dd0129f 100644
  	return;
  
  	/*
-@@ -927,6 +1053,16 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
+@@ -927,6 +1054,16 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
  	}
  	clear_bit(US_FLIDX_RESETTING, &us->dflags);
  	last_sector_hacks(us, srb);

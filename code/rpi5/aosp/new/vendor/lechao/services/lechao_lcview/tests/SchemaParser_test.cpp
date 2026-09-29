@@ -99,6 +99,38 @@ TEST(SchemaParserParseJsonTest, AllFieldTypes_ParsedCorrectly) {
     EXPECT_EQ(s->fields[2].type, FieldType::FLOAT);
     EXPECT_EQ(s->fields[3].type, FieldType::STRING);
     EXPECT_EQ(s->fields[4].type, FieldType::BINARY);
+    // R-20 P5 方向 1：kAllFieldTypesJson 未标 sensitive → 全部缺省 false
+    for (const auto& fd : s->fields)
+        EXPECT_FALSE(fd.sensitive) << "缺省 sensitive 须为 false";
+}
+
+// R-20 P5 方向 1：sensitive 标记解析（含向后兼容与严格校验）
+TEST(SchemaParserParseJsonTest, SensitiveFlag_ParsedCorrectly) {
+    constexpr const char* json = R"({"events": [
+        {"id": 1, "name": "x", "fields": [
+            {"name": "a", "type": "int64", "sensitive": true},
+            {"name": "b", "type": "string"},
+            {"name": "c", "type": "string", "sensitive": false}
+        ]}
+    ]})";
+    SchemaParser sp;
+    ASSERT_TRUE(sp.parseJson(json));
+    const EventSchema* s = sp.find(1);
+    ASSERT_NE(s, nullptr);
+    EXPECT_EQ(s->fields.size(), 3u);
+    EXPECT_TRUE(s->fields[0].sensitive);
+    EXPECT_FALSE(s->fields[1].sensitive) << "缺 key 缺省 false";
+    EXPECT_FALSE(s->fields[2].sensitive) << "显式 false 亦为不敏感";
+}
+
+TEST(SchemaParserParseJsonTest, SensitiveKeyWrongType_ReturnsFalse) {
+    constexpr const char* json = R"({"events": [
+        {"id": 1, "name": "x", "fields": [
+            {"name": "a", "type": "int64", "sensitive": "yes"}
+        ]}
+    ]})";
+    SchemaParser sp;
+    EXPECT_FALSE(sp.parseJson(json)) << "sensitive 非 bool 须严格拒绝";
 }
 
 TEST(SchemaParserParseJsonTest, MissingVersion_DefaultsToZero) {
@@ -237,21 +269,41 @@ TEST(SchemaParserParseJsonTest, FindUnknownId_ReturnsNull) {
 // 方向 3：生产配置（/vendor/etc/lcview_events.json）加载校验——
 // 此前 UT 全用内联 kValidJson，真配置不被任何测试加载；
 // 上板跑时该路径即生产配置文件（host 环境跳过）
-TEST(SchemaParserParseJsonTest, ProductionConfig_LoadsAll10Events) {
+TEST(SchemaParserParseJsonTest, ProductionConfig_LoadsAll9Events) {
     if (access("/vendor/etc/lcview_events.json", R_OK) != 0) {
         GTEST_SKIP() << "生产配置不存在（host 环境）";
         return;
     }
     SchemaParser sp;
     ASSERT_TRUE(sp.loadFromFile("/vendor/etc/lcview_events.json"));
-    EXPECT_EQ(sp.eventCount(), 10u);
-    // id 4..13 全部定义（与内核 lcview_events.h 一致）
-    for (uint16_t id = 4; id <= 13; id++) {
+    // R-16 P4 方向 1：START(4) 已并入 END，schema 由 10 事件降为 9 事件
+    // R-19 P5 方向 3：新增 id=1~3 预留占位条目，schema 由 9 事件升为 12 事件
+    // （消外部模块发射 id 1~3 时的 unknown event_id 接入噪音）
+    EXPECT_EQ(sp.eventCount(), 12u);
+    // id 1..13 全部定义（含 1~3 预留占位 + 5~13 USB 事件，与内核
+    // lcview_events.h 的 LCVIEW_EVENT_* 宏一致）
+    for (uint16_t id = 1; id <= 13; id++) {
+        if (id == 4) continue;  // id=4 TRANSPORT_START 已删除
         const EventSchema* s = sp.find(id);
         ASSERT_NE(s, nullptr) << "事件 " << id << " 缺失";
         EXPECT_FALSE(s->name.empty());
+    }
+    // 1~3 为预留占位（字段未定义，允许空 fields）；5~13 为实际 USB 事件
+    for (uint16_t id = 5; id <= 13; id++) {
+        const EventSchema* s = sp.find(id);
+        ASSERT_NE(s, nullptr) << "事件 " << id << " 缺失";
         EXPECT_FALSE(s->fields.empty()) << "事件 " << id << " 无字段";
     }
+    // R-20 P5 方向 1：生产配置 usb_probe(id=8) 设备身份字段须已标记敏感
+    // （vid/pid/vendor/product），输出层据此掩码；device_index 保持明文
+    const EventSchema* probe = sp.find(8);
+    ASSERT_NE(probe, nullptr);
+    ASSERT_EQ(probe->fields.size(), 5u);
+    EXPECT_FALSE(probe->fields[0].sensitive) << "device_index 不得掩码";
+    EXPECT_TRUE(probe->fields[1].sensitive) << "vid 须敏感";
+    EXPECT_TRUE(probe->fields[2].sensitive) << "pid 须敏感";
+    EXPECT_TRUE(probe->fields[3].sensitive) << "vendor 须敏感";
+    EXPECT_TRUE(probe->fields[4].sensitive) << "product 须敏感";
 }
 
 // 方向 1 对齐：生产配置 id=10/11/12 字段为 device_index/status、

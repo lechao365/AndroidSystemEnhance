@@ -378,28 +378,16 @@ static void vendor_lechao_usbd_apply_config_locked(
     rate_dev->stats.flags = rate_dev->config.flags;
 
     /*
-     * R-05 方向 3：disable 路径清理 transport_active（消 notifier 早退后
-     * END 残留）。
+     * R-05 方向 3 / R-16 P4 方向 1：disable 路径清理传输状态机。
      *
-     * 背景：transport_active 在 TRANSPORT_START 置位（lciod_usbd-stats.c
-     * handle_event）、TRANSPORT_END 消费后清零。当配置 enabled=false 时，
-     * handle_event 在锁外早退（`if (!rate_dev->enabled) return NOTIFY_DONE;`），
-     * 中间的传输不会收到 END —— transport_active 残留 true。
-     *
-     * 后果：disable 期间传输中断 → 重新 enable 后，若无新 START 先到，
-     * 残留的 transport_active 会把不配对的 END（或下一轮首个 END）误当
-     * 正常传输处理：错误累计延迟/字节、发射无 START 配对的 END trace，
-     * 污染统计与事件流（check_lcview_events 双向契约认为 END 必有 START）。
-     *
-     * 修复：enabled 由 1→0（disable）时重置传输状态机（transport_active/
-     * 起始时间/错误标志），与 vendor_lechao_usbd_do_reset 的 transport 段
-     * 一致——disable 语义即"停止追踪传输"，残留状态须随 disable 清空。
+     * 背景：TRANSPORT_START notifier 已停发（R-16 合并为单次 END），
+     * handle_event 不再维护 transport_active/transport_start_time。
+     * disable 语义即"停止追踪传输"，残留的 last_transport_error/latency
+     * 随 disable 清空（与 vendor_lechao_usbd_do_reset 的 transport 段一致）。
      * 保持持锁（本函数调用方已持 rate_dev->lock）与 do_reset 同锁域。
      */
     if (!rate_dev->config.enabled)
     {
-        rate_dev->transport_active = false;
-        rate_dev->transport_start_time = ktime_set(0, 0);
         rate_dev->last_transport_error = false;
         rate_dev->last_transport_latency_ns = 0;
         rate_dev->stats.last_transport_latency_ns = 0;
@@ -598,9 +586,7 @@ struct vendor_lechao_usbd_device *vendor_lechao_usbd_device_alloc(struct us_data
     rate_dev->stats.flags = rate_dev->config.flags;
     rate_dev->stats.probe_count = 1;
     atomic64_set(&rate_dev->event_drop_cnt, 0);
-    rate_dev->transport_start_time = ktime_set(0, 0);
-    rate_dev->transport_active = false;
-    rate_dev->last_degrade_window_start = ktime_set(0, 0);
+    rate_dev->last_degrade_window_start = 0;
     rate_dev->stats.last_event_type = VENDOR_LECHAO_USBD_EVENT_NONE;
 
     if (!us->pusb_dev) {

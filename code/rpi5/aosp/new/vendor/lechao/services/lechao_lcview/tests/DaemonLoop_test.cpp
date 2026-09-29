@@ -154,7 +154,7 @@ TEST_F(DaemonLoopTest, BadLength_BreaksAndWritesInvalid) {
 TEST_F(DaemonLoopTest, RecordTooSmall_WritesInvalid) {
     SchemaParser sp = makeSchema();
     FileWriter writer(mCfg);
-    // record 不足 hdr（16B）
+    // record 不足 hdr（32B）
     std::vector<uint8_t> rec(8, 0xAA);
     auto batch = makeBatch(rec);
     BatchParseResult r = parseBatch(sp, writer, batch.data(), batch.size());
@@ -216,7 +216,9 @@ TEST(DaemonLoopHelperTest, SchemaLoadRetry_SuccessOnFirstTry) {
     if (access("/vendor/etc/lcview_events.json", R_OK) == 0) {
         EXPECT_TRUE(loadSchemaWithRetry(sp, "/vendor/etc/lcview_events.json", running, 0,
                                         std::chrono::milliseconds(1)));
-        EXPECT_EQ(sp.eventCount(), 10u);
+        // R-16 P4 方向 1：START(4) 已并入 END，schema 由 10 事件降为 9 事件
+        // R-19 P5 方向 3：新增 id=1~3 预留占位条目，schema 升为 12 事件
+        EXPECT_EQ(sp.eventCount(), 12u);
     } else {
         GTEST_SKIP() << "真配置不存在（host 环境）";
     }

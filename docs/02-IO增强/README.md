@@ -53,7 +53,7 @@ package "system 域" {
         component "IoHalClient\nBinder 客户端" as HALC
         component "Field Projection\nvendor → system" as PROJ
         component "AIDL Server\nIIoService [Pull]" as AIDL_S
-        component "monitor_thread\ndetach 后台监控" as MONITOR
+        component "monitor_threads\n4 × detach 分片监控" as MONITOR
     }
 }
 
@@ -64,7 +64,7 @@ LCIOD --> DEV : **cdev_add + device_create**
 DEV --> HAL : **open/read/poll/ioctl**
 HAL --> DAEMON : **vndbinder IIoHal/default**
 DAEMON --> AIDL_S : **注册 system 服务**
-MONITOR --> HALC : **周期轮询事件/统计**
+MONITOR --> HALC : **分片 epoll 消费事件/统计**
 @enduml
 ```
 
@@ -108,6 +108,7 @@ ioctl 命令码（魔数 `'R'`）：`GET_STATS`、`RESET_STATE`、`GET_CONFIG`�
 | notifier chain 注入 | 零侵入 usb-storage 核心逻辑，仅添加事件发射点 |
 | per-device 多实例 | 每个 USB 存储设备独立监控实例（最多 16 个），IDA 分配次设备号 |
 | 双层 AIDL 代理 | system daemon 抽象 vendor HAL，字段投影屏蔽底层细节 |
+| 分片监控线程池 | daemon 按 minor % 4 分片独立 epoll 消费，消单线程单点（R-17 方向 1） |
 | 端到端实时监控 | 内核事件 → notifier → HAL → Daemon → logcat，毫秒级延迟 |
 
 ## 过程视图
@@ -285,9 +286,9 @@ deactivate H
 |------|---------|---------|
 | **notifier chain 注入** | 零侵入核心代码，升级无 merge conflict | [02.01](./02.01-内核态增强-lciod-kernel.md) § usb-storage notifier chain |
 | **per-device 多实例** | 每个 USB 设备独立监控，避免统计混淆 | [02.01](./02.01-内核态增强-lciod-kernel.md) § IDA 分配 + kref |
-| **双层 AIDL 代理** | system daemon 抽象 vendor HAL，屏蔽 ioctl 细节 | daemon/service.cpp § IoServiceImpl |
+| **双层 AIDL 代理** | system daemon 抽象 vendor HAL，字段投影屏蔽底层细节 | 保持双层决策 + 消费方清单见 [02.03 § 双层消费方状态](./02.03-Daemon增强-lciod-daemon.md)（R-17 方向 2 固化） |
 | **字段投影** | 管理字段（enabled/flags）不暴露给上层 | daemon/service.cpp § getIoStats |
-| **detach 监控线程** | 后台轮询事件/统计，实时 logcat 输出 | daemon/service.cpp § start_monitor |
+| **分片监控线程池** | daemon 按 minor % 4 分片独立 epoll 消费，单设备慢不阻塞其他分片，消单线程单点 | [02.03 § 并发模型](./02.03-Daemon增强-lciod-daemon.md)（R-17 方向 1） |
 
 ## 与 LcView 的关系
 
@@ -297,13 +298,12 @@ LcIod 内核驱动 `select LCVIEW`（Kconfig），调用 LcView `EXPORT_SYMBOL` 
 |---------------|------|------|---------|
 | `LCVIEW_EVENT_USB_PROBE` | device_index, vid, pid, vendor, product | INFO | 设备插入 |
 | `LCVIEW_EVENT_USB_DISCONNECT` | device_index | INFO | 设备拔出 |
-| `LCVIEW_EVENT_USB_TRANSPORT_START` | device_index, direction, data_len | DEBUG | 传输开始 |
 | `LCVIEW_EVENT_USB_TRANSPORT_END` | device_index, direction, bytes, elapsed_ns, was_error | INFO | 传输结束 |
 | `LCVIEW_EVENT_USB_TRANSPORT_ERROR` | device_index, direction, result | WARN | 传输出错 |
 | `LCVIEW_EVENT_USB_STALL/TIMEOUT/CORRUPT/RESET` | device_index, status | WARN | 异常事件 |
 | `LCVIEW_EVENT_USB_RATE_DEGRADED` | device_index, latency_ns | WARN | 性能降级 |
 
-LcView 提供 9 个 USB 事件 ID，LcIod 在 notifier 回调中调用 `lcview_builder_start/commit` 上送。
+LcView 提供 12 个事件 ID（1~3 预留占位 + 5~13 USB 事件；id=4 已删），LcIod 在 notifier 回调中调用 `lcview_builder_start/commit` 上送。
 
 ## 与 LcView 的架构对比
 

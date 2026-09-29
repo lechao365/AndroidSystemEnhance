@@ -33,6 +33,7 @@
 // later when a module using the interface is updated, e.g., Mainline modules.
 
 package vendor.lechao.lciod;
+import android.os.ParcelFileDescriptor;
 @VintfStability
 interface IIoHal {
   String[] listDevices();
@@ -41,4 +42,5 @@ interface IIoHal {
   vendor.lechao.lciod.IoConfig getConfig(int deviceMinor);
   boolean setConfig(int deviceMinor, in vendor.lechao.lciod.IoConfig config);
   vendor.lechao.lciod.IoEvent readEvent(int deviceMinor, int timeoutMs);
+  ParcelFileDescriptor dupEventFd(int deviceMinor);
 }

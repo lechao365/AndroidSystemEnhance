@@ -14,6 +14,14 @@
  *   4 — TIMEOUT（传输超时）
  *   5 — RESET（设备复位）
  *   6 — RATE_DEGRADED（速率降级）
+ *
+ * v3 新增字段语义（R-14）:
+ *   wallTimeNs — 事件发生时的墙钟时间戳（CLOCK_REALTIME，纳秒），与
+ *     timestampNs（mono）构成双时间戳，供跨源时序关联。
+ *   opcode/lba/bytes/retry — SCSI 命令上下文（内核 srb 可取得时有效，
+ *     否则为 0）。RATE_DEGRADED 事件复用：eventValue=当前速率(bytes/s)，
+ *     status=降级判定阈值速率(bytes/s)，lba=降级基线速率(bytes/s)，opcode/
+ *     bytes/retry=0；据此可判定降级幅度 drop_pct=(baseline-current)*100/baseline。
  * ============================================================ */
 package vendor.lechao.lciod;
 @VintfStability
@@ -22,6 +30,11 @@ parcelable IoEvent {
     int eventType;       /* 事件类型枚举值，见上方说明 */
     int eventValue;      /* 事件附加数值（如错误码、速率值等），语义取决于 eventType */
     byte dataDirection;  /* 数据传输方向：0=NONE, 1=READ, 2=WRITE */
-    int status;          /* 事件状态码：0=成功，负值=内核错误码 */
+    int status;          /* 事件状态码：0=成功，负值=内核错误码；RATE_DEGRADED 为降级阈值速率 */
     boolean valid;       /* 事件是否有效；false 表示读取超时或缓冲区为空 */
+    long wallTimeNs;     /* v3：墙钟时间戳（CLOCK_REALTIME 纳秒），与 timestampNs 双时间戳 */
+    int opcode;          /* v3：SCSI 操作码，无可得命令上下文时为 0 */
+    long lba;            /* v3：SCSI 起始逻辑块地址；RATE_DEGRADED 复用为降级基线速率 */
+    int bytes;           /* v3：本次传输有效字节数 */
+    int retry;           /* v3：命令重试次数 */
 }

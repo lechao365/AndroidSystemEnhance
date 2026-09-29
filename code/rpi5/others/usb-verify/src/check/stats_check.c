@@ -53,6 +53,10 @@ int fv_check_stats(const struct vendor_lechao_usbd_stats *stats,
         add_entry(report, "disconnect_count", stats->disconnect_count, cmd->disconnect_ge);
     if (cmd->probe_ge > 0)
         add_entry(report, "probe_count", stats->probe_count, cmd->probe_ge);
+    if (cmd->error_ge > 0)
+        add_entry(report, "error_count", stats->error_count, cmd->error_ge);
+    if (cmd->reset_ge > 0)
+        add_entry(report, "reset_count", stats->reset_count, cmd->reset_ge);
 
     return report->failed > 0 ? -1 : 0;
 }

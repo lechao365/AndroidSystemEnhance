@@ -13,7 +13,9 @@
  *   - 后台监控线程：定期读取事件和统计，打印到 logcat
  *
  * 服务名称: system.lechao.lciod.IIoService/default
- * 线程模型: 主线程处理 Binder RPC + 1 个 detach 后台监控线程
+ * 线程模型: 主线程进入 Binder 线程池（R-17 后 4 线程）处理 RPC +
+ *           per-minor 分片监控线程池（R-17 后固定 4 分片 worker，见
+ *           start_monitor）定期读取事件和统计，打印到 logcat
  *
  * 注: IoServiceImpl 类声明与纯计算函数在 service.h（供单测/filegroup
  *     复用），进程 main 入口在 main_lciod.cpp（与 lcview 模式对齐）。
@@ -26,7 +28,13 @@
 #include <thread>
 #include <chrono>
 #include <cerrno>
+#include <cstring>
+#include <algorithm>
 #include <unordered_map>
+#include <vector>
+#include <cstdlib>
+#include <sys/epoll.h>
+#include <unistd.h>
 #include <aidl/system/lechao/lciod/BnIoService.h>
 #include <aidl/system/lechao/lciod/IIoService.h>
 #include <aidl/vendor/lechao/lciod/IIoHal.h>
@@ -34,6 +42,9 @@
 #include "hal_client.h"
 #include "minor_utils.h"
 #include "lechao_log.h"
+/* R-14 方向 1：共享事件枚举头（AOSP hal 镜像，与内核真相源 1:1 同步），
+ * 事件类型/方向名映射单一事实源，消模块内 switch 硬编码 */
+#include "vendor_lechao_usbd-ioctl.h"
 
 #define LOG_TAG "lechao_lciod"
 #include <log/log.h>
@@ -97,6 +108,15 @@ uint64_t ComputeWindowKbRate(uint64_t currBytes, uint64_t currNs, uint64_t prevB
     return ComputeKbRate(currBytes - prevBytes, currNs - prevNs);
 }
 
+uint64_t ComputeErrorRate(uint64_t errorCount, uint64_t ioCount) {
+    // R-14 方向 2：读/写方向 IO 错误率（‰）。总 IO = 成功 IO + 错误数，
+    // 错误占比×1000，128 位中间量防 errorCount*1000 溢出（CXX-002）。
+    __uint128_t total = static_cast<__uint128_t>(ioCount) + errorCount;
+    if (total == 0)
+        return 0;
+    return static_cast<uint64_t>(static_cast<__uint128_t>(errorCount) * 1000ULL / total);
+}
+
 /* --- 字段投影纯函数（声明见 service.h，独立于 binder 环境可单测） --- */
 
 void ProjectSystemIoStats(const aidl::vendor::lechao::lciod::IoStats& vstats,
@@ -115,6 +135,8 @@ void ProjectSystemIoStats(const aidl::vendor::lechao::lciod::IoStats& vstats,
     out->stallCount = vstats.stallCount;
     out->corruptCount = vstats.corruptCount;
     out->timeoutCount = vstats.timeoutCount;
+    out->readErrorCount = vstats.readErrorCount;   /* R-14 方向 2：读方向错误分项 */
+    out->writeErrorCount = vstats.writeErrorCount; /* R-14 方向 2：写方向错误分项 */
     out->probeCount = vstats.probeCount;
     out->disconnectCount = vstats.disconnectCount;
     out->degradeCount = vstats.degradeCount;
@@ -139,6 +161,12 @@ void ProjectSystemIoEvent(const aidl::vendor::lechao::lciod::IoEvent& vev,
     out->dataDirection = vev.dataDirection;
     out->status = vev.status;
     out->valid = vev.valid;
+    /* R-14 方向 1/4：v3 追加字段 1:1 直传 */
+    out->wallTimeNs = vev.wallTimeNs;
+    out->opcode = vev.opcode;
+    out->lba = vev.lba;
+    out->bytes = vev.bytes;
+    out->retry = vev.retry;
 }
 
 void IoServiceImpl::start() {
@@ -237,7 +265,7 @@ ndk::ScopedAStatus IoServiceImpl::setIoConfig(int32_t in_deviceMinor, const IoCo
 /* readIoEvent — 代理转发到 HAL readEvent()，1:1 字段直传。
  * LCD-002：timeout 首层钳位（HAL 侧 clamp_read_timeout_ms 为最终防线）——
  * 公开 binder 接口的负值/超大超时不得透传（-1 永久阻塞、INT_MAX 阻塞
- * 约天级，daemon 单线程 binder 池即被占死） */
+ * 约天级，未经钳位可占死 daemon binder 池；R-17 后池 4 线程仍须防御） */
 ndk::ScopedAStatus IoServiceImpl::readIoEvent(int32_t in_deviceMinor, int32_t in_timeoutMs, IoEvent* _aidl_return) {
     *_aidl_return = {};
     auto hal = hal_client_.get();
@@ -252,164 +280,365 @@ ndk::ScopedAStatus IoServiceImpl::readIoEvent(int32_t in_deviceMinor, int32_t in
 }
 
 /*
- * start_monitor — 启动后台监控线程
+ * start_monitor — 启动 per-minor 分片监控线程池
  *
- * 线程行为:
- *   - 每 50ms 轮询一次事件（readEvent, 50ms timeout）
- *   - 每 10s（200 个 tick）刷新设备列表和打印统计信息
- *   - 遍历所有活跃设备，不再只监控 devices[0]
- *   - 单设备调用失败仅跳过该设备，不中断本轮其他设备
- *   - 收到有效事件时打印事件详情到 logcat
- *   - 线程 detach，随进程生命周期自动终止
+ * R-17 方向 1：per-minor 分片 + 线程池异步化——消 daemon 单线程单点。
+ * 原实现 1 个监控线程单线程串行消费全部 minor（epoll 就绪后逐设备
+ * readEvent + 全设备兜底轮询 + 全设备统计），任一设备 readEvent 慢
+ * （binder 跨进程调用被 HAL 侧卡住）会阻塞整轮其他设备消费，daemon
+ * 事件消费呈单线程单点。
  *
- * NOTE: detach 线程无独立退出条件，但本进程为 oneshot 服务，
- * 进程退出时线程自动终止，不存在生命周期风险。若将来改为
- * 常驻服务，需改为 std::thread 成员 + join 析构。
+ * 改造为固定 kShardCount 个分片 worker 线程（与 daemon Binder 池 4 对齐）：
+ *   - 按 minor % kShardCount 分片，每 worker 独立 epoll/注册表/统计快照/
+ *     pendingRedup，单设备慢只阻塞其所在分片，其他分片不受影响；
+ *   - 每 worker 各自维护 lastHal 检测 HAL 重启即时重建（保留 R-16 修复）；
+ *   - 200 tick 重建/统计/pendingRedup/兜底轮询语义在分片内原样保留；
+ *   - 线程 detach，随进程生命周期自动终止。
+ *
+ * 线程行为（R-16 P4 方向 4：epoll 多路复用，分片内）：
+ *   - 每 10s（200 tick）刷新设备列表（过滤本分片）：经 dupEventFd 获取
+ *     各设备内核事件 fd 并 EPOLL_CTL_ADD 注册到本分片 epoll
+ *   - 主循环 epoll_wait(50ms) 统一等待本分片设备事件就绪
+ *   - 就绪 fd 反查 minor，调 hal->readEvent(minor, 0) 非阻塞拉取；
+ *     EPOLLHUP（设备断开）DEL + close fd + 入 pendingRedup 待重连
+ *   - 每 10s（200 tick）打印统计信息（monitor: minor= 日志格式保留，
+ *     lciod-liveness 验收判据依赖）；差分时间桶吞吐逻辑原样保留
+ *   - 单设备失败仅跳过，不中断本轮其他设备
+ *
+ * NOTE: detach 线程无独立退出条件，但本进程为**非 oneshot** 服务
+ * （LCD-005，init 自动重启），进程退出时线程自动终止，不存在生命周期风险。
  */
 void IoServiceImpl::start_monitor() {
-    std::thread([this]() {
-        int tick = 0;
-        std::vector<int32_t> deviceMinors;  /* 当前活跃设备 minor 列表（按 HAL 返回顺序，已排序） */
+    /* R-17 方向 1：分片数固定为 4（与 daemon Binder 池 4 对齐）。USB 设备
+     * minor 通常 0..n，按 minor % 4 均匀散列到 4 个独立消费线程。 */
+    constexpr int kShardCount = 4;
+    for (int shard = 0; shard < kShardCount; shard++) {
+        std::thread([this, shard]() {
+            /* 本分片归属判定：minor % kShardCount == shard */
+            auto belongs = [&](int32_t m) { return (m % kShardCount) == shard; };
 
-        /*
-         * R-12 方向 3：10 秒 tick 差分时间桶吞吐。原统计用 ComputeKbRate
-         * (累计 bytes / 累计 ns) 算的是接入以来全程平均速率——某个 10s 窗口
-         * 变慢会被长期均值稀释，无法定位变慢时刻。改差分桶：每 200 tick
-         * 保存本 tick 的累计字节/耗时快照，下个统计 tick 用差值算窗口吞吐
-         * （近 10s 即时速率），变慢时刻直接反映在窗口速率跌落上。首 tick
-         * 无快照时回退累计值（等同原行为，不产生假低谷）。
-         */
-        struct TickSnapshot
-        {
-            uint64_t readBytes = 0, readNs = 0, writeBytes = 0, writeNs = 0;
-        };
-        std::unordered_map<int32_t, TickSnapshot> tickSnap;
+            int tick = 0;
+            std::vector<int32_t> deviceMinors;  /* 本分片活跃设备 minor 列表 */
+            /* R-16 P4 方向 4：记录上一次成功的 HAL 实例——实例变化（重启/重连）
+             * 时立即重建 epoll，避免 200 tick 重建前的 fd 失效窗口事件溢出 */
+            std::shared_ptr<aidl::vendor::lechao::lciod::IIoHal> lastHal = nullptr;
+            /* R-16 P4 方向 4 修复：设备热插拔待重连队列（分片内独立）。 */
+            std::vector<int32_t> pendingRedup;
+            /* R-16 P4 方向 4：minor → epoll 注册的事件 fd 映射（分片内独立） */
+            std::unordered_map<int32_t, int> minorToFd;
 
-        /*
-         * LCD-018：绝对时间对齐调度。原 sleep_for(50ms) 的实际周期 =
-         * 50ms + 本轮处理耗时（多设备 readEvent 各至多 50ms timeout），
-         * "每 200 tick = 10s" 的刷新/统计节拍持续漂移放大（4 设备
-         * 全 timeout 时周期可 >250ms，10s 节拍实际 >50s）。
-         * 改为 steady_clock 固定节拍：处理耗时从睡眠中扣除；单轮
-         * 超时则立即追平，不放大漂移。
-         */
-        using clock = std::chrono::steady_clock;
-        const auto kTickPeriod = std::chrono::milliseconds(50);
-        auto next_tick = clock::now() + kTickPeriod;
+            /*
+             * R-12 方向 3：10 秒 tick 差分时间桶吞吐（分片内独立快照）。
+             */
+            struct TickSnapshot
+            {
+                uint64_t readBytes = 0, readNs = 0, writeBytes = 0, writeNs = 0;
+            };
+            std::unordered_map<int32_t, TickSnapshot> tickSnap;
 
-        /* 启动前立即 refresh 一次，避免首轮空转或误读 minor=0 */
-        auto hal = hal_client_.get();
-        if (hal) {
-            std::vector<std::string> devices;
-            if (hal->listDevices(&devices).isOk()) {
-                for (auto& path : devices) {
-                    int32_t minor = -1;
-                    if (ParseMinorFromPath(path, &minor))
-                        deviceMinors.push_back(minor);
-                }
-            }
-        }
-
-        while (true) {
-            std::this_thread::sleep_until(next_tick);   /* LCD-018：固定节拍 */
-            next_tick += kTickPeriod;
-            tick++;
-            hal = hal_client_.get();
-            if (!hal) {
-                /* LCD-007：日志节流（200 tick 一次 = 10s 一条）——HAL 故障
-                 * 期间每 50ms 一条 WARNING 会以 1200 条/分钟淹没 logcat，
-                 * 掩盖其他关键日志（与 hal_client 重连失败节流同策略） */
-                if (tick % 200 == 0)
-                    LC_ALOGW("monitor: HAL not connected, skipping cycle (tick=%d)", tick);
-                continue;
+            /* R-16 P4 方向 4：epoll 多路复用——单次 epoll_wait(50ms) 统一等待
+             * 本分片设备事件。 */
+            int epfd = epoll_create1(EPOLL_CLOEXEC);
+            if (epfd < 0) {
+                LC_ALOGE("monitor[%d]: epoll_create1 failed: %s", shard, strerror(errno));
+                return;
             }
 
-            /* 每 200 tick（10s）刷新设备列表 */
-            if (tick % 200 == 0) {
+            /* LCD-018：绝对时间对齐调度。epoll_wait 超时 50ms 作为固定节拍。 */
+            using clock = std::chrono::steady_clock;
+            const auto kTickPeriod = std::chrono::milliseconds(50);
+            auto next_tick = clock::now() + kTickPeriod;
+
+            /* 启动前立即 refresh 一次，避免首轮空转或误读 minor=0 */
+            auto hal = hal_client_.get();
+            if (hal) {
                 std::vector<std::string> devices;
-                auto dev_status = hal->listDevices(&devices);
-                deviceMinors.clear();
-                if (dev_status.isOk()) {
+                if (hal->listDevices(&devices).isOk()) {
                     for (auto& path : devices) {
                         int32_t minor = -1;
-                        if (ParseMinorFromPath(path, &minor))
+                        if (ParseMinorFromPath(path, &minor) && belongs(minor))
                             deviceMinors.push_back(minor);
                     }
                 }
             }
 
-            if (deviceMinors.empty()) continue;
-
-            /* 遍历所有活跃设备，单设备失败不中断本轮 */
-            for (int32_t minor : deviceMinors) {
-                VendorIoEvent vev;
-                auto ev_status = hal->readEvent(minor, 50, &vev);
-                if (ev_status.isOk() && vev.valid) {
-                    const char *type_name = "UNKNOWN";
-                    switch (vev.eventType) {
-                        case 1: type_name = "TRANSPORT_ERROR"; break;
-                        case 2: type_name = "STALL"; break;
-                        case 3: type_name = "DATA_CORRUPT"; break;
-                        case 4: type_name = "TIMEOUT"; break;
-                        case 5: type_name = "RESET"; break;
-                        case 6: type_name = "RATE_DEGRADED"; break;
+            /* R-16 P4 方向 4：每 200 tick 重建 epoll 注册表（分片内）。
+             * force_redup=true 时强制重新 dupEventFd（HAL 实例变化场景）。 */
+            auto rebuild_epoll = [&](const std::shared_ptr<aidl::vendor::lechao::lciod::IIoHal>& h,
+                                     bool force_redup = false) {
+                std::vector<std::string> devices;
+                auto dev_status = h->listDevices(&devices);
+                std::vector<int32_t> newMinors;
+                if (dev_status.isOk()) {
+                    for (auto& path : devices) {
+                        int32_t minor = -1;
+                        if (ParseMinorFromPath(path, &minor) && belongs(minor))
+                            newMinors.push_back(minor);
                     }
-                    const char *dir = (vev.dataDirection == 1) ? "READ"
-                                      : (vev.dataDirection == 2) ? "WRITE" : "NONE";
+                }
+                /* 移除已离线 minor 的 fd */
+                for (auto& [minor, fd] : minorToFd) {
+                    if (std::find(newMinors.begin(), newMinors.end(), minor) ==
+                        newMinors.end()) {
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
+                        ::close(fd);
+                    }
+                }
+                std::unordered_map<int32_t, int> newMap;
+                for (int32_t minor : newMinors) {
+                    auto it = minorToFd.find(minor);
+                    if (!force_redup && it != minorToFd.end() && it->second >= 0) {
+                        newMap[minor] = it->second;  /* 保留仍在线设备的 fd */
+                        continue;
+                    }
+                    /* force_redup 时旧 fd 须先移出 epoll 并关闭，防残留监听 */
+                    if (it != minorToFd.end() && it->second >= 0) {
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, it->second, nullptr);
+                        ::close(it->second);
+                    }
+                    ndk::ScopedFileDescriptor sfd;
+                    auto st = h->dupEventFd(minor, &sfd);
+                    if (!st.isOk() || sfd.get() < 0) {
+                        LC_ALOGW("monitor[%d]: dupEventFd failed for minor=%d: %s", shard,
+                                 minor, st.getDescription().c_str());
+                        continue;
+                    }
+                    int fd = sfd.get();
+                    struct epoll_event ev{};
+                    ev.events = EPOLLIN;
+                    ev.data.fd = fd;
+                    if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+                        LC_ALOGW("monitor[%d]: epoll_ctl ADD failed for minor=%d fd=%d: %s",
+                                 shard, minor, fd, strerror(errno));
+                        ::close(fd);
+                        continue;
+                    }
+                    sfd.set(-1);  /* 所有权移交 epoll 表 */
+                    newMap[minor] = fd;
+                }
+                minorToFd = std::move(newMap);
+                deviceMinors = std::move(newMinors);
+            };
 
-                    /* R-12 方向 2：专属 tag 可配置级别（INFO 生产可见，
-                     * debug 时 DEBUG），事件不再静默 */
-                    EVENT_ALOG("event: minor=%d type=%s(%d) val=%d dir=%s ts=%llu", minor,
-                               type_name, vev.eventType, vev.eventValue, dir,
-                               (unsigned long long)vev.timestampNs);
-                } else if (!ev_status.isOk()) {
-                    /* 单设备失败仅告警，继续下一个设备 */
-                    LC_ALOGW("monitor: readEvent failed for minor=%d: %s", minor,
-                          ev_status.getDescription().c_str());
+            while (true) {
+                std::this_thread::sleep_until(next_tick);   /* LCD-018：固定节拍 */
+                next_tick += kTickPeriod;
+                tick++;
+                hal = hal_client_.get();
+                if (!hal) {
+                    /* LCD-007：日志节流（200 tick 一次 = 10s 一条） */
+                    if (tick % 200 == 0)
+                        LC_ALOGW("monitor[%d]: HAL not connected, skipping cycle (tick=%d)",
+                                 shard, tick);
+                    continue;
                 }
 
-                /* 每 200 tick（10s）打印统计信息 */
+                /* R-16 P4 方向 4 修复：HAL 实例变化时立即重建本分片 epoll */
+                if (hal != lastHal) {
+                    lastHal = hal;
+                    rebuild_epoll(hal, /*force_redup=*/true);
+                }
+
+                /* 每 200 tick（10s）刷新设备列表 + 重建 epoll 注册表 */
+                if (tick % 200 == 0)
+                    rebuild_epoll(hal);
+
+                /* R-16 P4 方向 4 修复：处理待重连队列（分片内独立） */
+                if (!pendingRedup.empty()) {
+                    auto it = pendingRedup.begin();
+                    while (it != pendingRedup.end()) {
+                        int32_t pminor = *it;
+                        /* 先消费事件（HAL 内部自动 reopen，防重连窗口溢出） */
+                        VendorIoEvent vev;
+                        auto rst = hal->readEvent(pminor, 0, &vev);
+                        if (!rst.isOk()) {
+                            ++it;  /* 设备未恢复（-ENODEV），下轮再试 */
+                            continue;
+                        }
+                        /* 设备已恢复：重新 dupEventFd 注册 epoll（恢复及时性） */
+                        ndk::ScopedFileDescriptor sfd;
+                        auto st = hal->dupEventFd(pminor, &sfd);
+                        if (!st.isOk() || sfd.get() < 0) {
+                            ++it;  /* dup 失败，下轮再试（事件仍经 readEvent 消费） */
+                            continue;
+                        }
+                        int nfd = sfd.get();
+                        struct epoll_event nev{};
+                        nev.events = EPOLLIN;
+                        nev.data.fd = nfd;
+                        if (epoll_ctl(epfd, EPOLL_CTL_ADD, nfd, &nev) < 0) {
+                            /* 设备断开时 DEL 可能未真正移除旧 fd（EPOLLHUP 后
+                             * fd 状态异常），fd 号复用后 ADD 报 EEXIST——先幂等
+                             * DEL 再重试 ADD，消除残留注册 */
+                            if (errno == EEXIST) {
+                                epoll_ctl(epfd, EPOLL_CTL_DEL, nfd, nullptr);
+                                if (epoll_ctl(epfd, EPOLL_CTL_ADD, nfd, &nev) == 0) {
+                                    sfd.set(-1);
+                                    minorToFd[pminor] = nfd;
+                                    if (std::find(deviceMinors.begin(), deviceMinors.end(),
+                                                  pminor) == deviceMinors.end())
+                                        deviceMinors.push_back(pminor);
+                                    LC_ALOGI("monitor[%d]: device minor=%d reconnected via pendingRedup (after DEL)",
+                                             shard, pminor);
+                                    it = pendingRedup.erase(it);
+                                    continue;
+                                }
+                            }
+                            LC_ALOGW("monitor[%d]: epoll_ctl ADD failed for minor=%d nfd=%d: %s",
+                                     shard, pminor, nfd, strerror(errno));
+                            ::close(nfd);
+                            ++it;
+                            continue;
+                        }
+                        sfd.set(-1);  /* 所有权移交 epoll 表 */
+                        minorToFd[pminor] = nfd;
+                        if (std::find(deviceMinors.begin(), deviceMinors.end(),
+                                      pminor) == deviceMinors.end())
+                            deviceMinors.push_back(pminor);
+                        LC_ALOGI("monitor[%d]: device minor=%d reconnected via pendingRedup",
+                                 shard, pminor);
+                        it = pendingRedup.erase(it);
+                    }
+                }
+
+                /* R-16 P4 方向 4：epoll 统一等待（50ms 超时 = 节拍） */
+                constexpr int kMaxEvents = 16;
+                struct epoll_event ready[kMaxEvents];
+                int nready = epoll_wait(epfd, ready, kMaxEvents, 50);
+                if (nready < 0) {
+                    if (errno == EINTR)
+                        continue;
+                    int saved = errno;
+                    LC_ALOGE("monitor[%d]: epoll_wait failed: %s (epfd=%d)",
+                             shard, strerror(saved), epfd);
+                    /* CXX-004：epoll 致命错误（EBADF 等）4 步退出——置线程不可
+                     * 达前以 ERROR 日志 + exit(1) 交 init 重启（进程为 oneshot，
+                     * 无 alive 标志/等待者需通知，ERROR+exit 即完整退出协议） */
+                    std::exit(1);
+                }
+
+                /* 就绪 fd → minor 反查 → 非阻塞拉取（timeout=0） */
+                for (int i = 0; i < nready; i++) {
+                    int fd = ready[i].data.fd;
+                    int32_t minor = -1;
+                    for (auto& [m, f] : minorToFd) {
+                        if (f == fd) { minor = m; break; }
+                    }
+                    if (minor < 0)
+                        continue;  /* fd 已过期（重建竞态），跳过 */
+
+                    if (ready[i].events & (EPOLLHUP | EPOLLERR)) {
+                        LC_ALOGW("monitor[%d]: device minor=%d fd=%d disconnected",
+                                 shard, minor, fd);
+                        epoll_ctl(epfd, EPOLL_CTL_DEL, fd, nullptr);
+                        ::close(fd);
+                        minorToFd.erase(minor);
+                        /* 加入待重连队列：设备重连后立即重新注册 */
+                        if (std::find(pendingRedup.begin(), pendingRedup.end(), minor) ==
+                            pendingRedup.end())
+                            pendingRedup.push_back(minor);
+                        continue;
+                    }
+                    if (!(ready[i].events & EPOLLIN))
+                        continue;
+
+                    VendorIoEvent vev;
+                    auto ev_status = hal->readEvent(minor, 0, &vev);
+                    if (ev_status.isOk() && vev.valid) {
+                        /* R-14 方向 1：事件类型/方向名取自共享事件枚举头 */
+                        const char *type_name = vendor_lechao_usbd_event_type_name(
+                            static_cast<uint32_t>(vev.eventType));
+                        const char *dir = vendor_lechao_usbd_data_direction_name(
+                            static_cast<uint8_t>(vev.dataDirection));
+                        EVENT_ALOG("event: minor=%d type=%s(%d) val=%d dir=%s "
+                                   "status=%d mono=%llu wall=%llu opcode=%d lba=%llu "
+                                   "bytes=%d retry=%d", minor,
+                                   type_name, vev.eventType, vev.eventValue, dir,
+                                   vev.status,
+                                   (unsigned long long)vev.timestampNs,
+                                   (unsigned long long)vev.wallTimeNs,
+                                   vev.opcode, (unsigned long long)vev.lba,
+                                   vev.bytes, vev.retry);
+                    } else if (!ev_status.isOk()) {
+                        /* 单设备失败仅告警，继续下一个设备 */
+                        LC_ALOGW("monitor[%d]: readEvent failed for minor=%d: %s", shard,
+                                 minor, ev_status.getDescription().c_str());
+                    }
+                }
+
+                /* R-16 P4 方向 4 修复：本分片全设备兜底轮询——epoll 依赖 fd 就绪
+                 * 信号，设备断开/重连（authorized 切换）时 fd 失效后 epoll 不再
+                 * 触发，重连后的初始化事件无人消费致 ring 溢出。 */
+                for (int32_t minor : deviceMinors) {
+                    VendorIoEvent vev;
+                    auto ev_status = hal->readEvent(minor, 0, &vev);
+                    if (ev_status.isOk() && vev.valid) {
+                        const char *type_name = vendor_lechao_usbd_event_type_name(
+                            static_cast<uint32_t>(vev.eventType));
+                        const char *dir = vendor_lechao_usbd_data_direction_name(
+                            static_cast<uint8_t>(vev.dataDirection));
+                        EVENT_ALOG("event: minor=%d type=%s(%d) val=%d dir=%s "
+                                   "status=%d mono=%llu wall=%llu opcode=%d lba=%llu "
+                                   "bytes=%d retry=%d", minor,
+                                   type_name, vev.eventType, vev.eventValue, dir,
+                                   vev.status,
+                                   (unsigned long long)vev.timestampNs,
+                                   (unsigned long long)vev.wallTimeNs,
+                                   vev.opcode, (unsigned long long)vev.lba,
+                                   vev.bytes, vev.retry);
+                    }
+                    /* 热插拔期间 readEvent 返回 -ENODEV 属正常（设备未恢复），
+                     * 静默跳过，不刷告警 */
+                }
+
+                /* 每 200 tick（10s）打印本分片统计信息 */
                 if (tick % 200 == 0) {
-                    aidl::vendor::lechao::lciod::IoStats stats;
-                    auto st_status = hal->getStats(minor, &stats);
-                    if (!st_status.isOk()) {
-                        ALOGW("monitor: getStats failed for minor=%d", minor);
-                        /* 统计失败不清快照——下 tick 差分仍基于本 tick，
-                         * 避免失败窗口被误计为 0 速率假低谷 */
-                        continue;  /* 跳过该设备统计，继续下一个 */
+                    for (int32_t minor : deviceMinors) {
+                        aidl::vendor::lechao::lciod::IoStats stats;
+                        auto st_status = hal->getStats(minor, &stats);
+                        if (!st_status.isOk()) {
+                            ALOGW("monitor[%d]: getStats failed for minor=%d", shard, minor);
+                            /* 统计失败不清快照——下 tick 差分仍基于本 tick，
+                             * 避免失败窗口被误计为 0 速率假低谷 */
+                            continue;  /* 跳过该设备统计，继续下一个 */
+                        }
+
+                        /*
+                         * R-12 方向 3：差分时间桶吞吐（分片内快照）。
+                         */
+                        auto it = tickSnap.find(minor);
+                        uint64_t rb = stats.readBytes, rn = stats.readNs;
+                        uint64_t wb = stats.writeBytes, wn = stats.writeNs;
+                        uint64_t prevRb = 0, prevRn = 0, prevWb = 0, prevWn = 0;
+                        if (it != tickSnap.end())
+                        {
+                            prevRb = it->second.readBytes;
+                            prevRn = it->second.readNs;
+                            prevWb = it->second.writeBytes;
+                            prevWn = it->second.writeNs;
+                        }
+                        tickSnap[minor] = {rb, rn, wb, wn};
+
+                        uint64_t read_rate = ComputeWindowKbRate(rb, rn, prevRb, prevRn);
+                        uint64_t write_rate = ComputeWindowKbRate(wb, wn, prevWb, prevWn);
+                        /* R-14 方向 2：读/写方向 IO 错误率（‰） */
+                        uint64_t read_err_rate = ComputeErrorRate(stats.readErrorCount,
+                                                                  stats.readCmds);
+                        uint64_t write_err_rate = ComputeErrorRate(stats.writeErrorCount,
+                                                                   stats.writeCmds);
+
+                        ALOGI("monitor: minor=%d read_rate=%llu KB/s, write_rate=%llu KB/s, "
+                              "rx_pkts=%lld, tx_pkts=%lld, event_drop=%lld, "
+                              "read_err_rate=%llu‰, write_err_rate=%llu‰",
+                              minor,
+                              (unsigned long long)read_rate, (unsigned long long)write_rate,
+                              (long long)stats.readCmds, (long long)stats.writeCmds,
+                              (long long)stats.eventDropCount,
+                              (unsigned long long)read_err_rate,
+                              (unsigned long long)write_err_rate);
                     }
-
-                    /*
-                     * R-12 方向 3：差分时间桶吞吐。取本 tick 累计与上一
-                     * 统计 tick 快照之差为窗口增量，算近 10s 即时速率；
-                     * 新接入/回绕回退全程累计（ComputeWindowKbRate 内敛）。
-                     * 旧实现累计平均会把变慢窗口摊平，无法定位跌落时刻。
-                     */
-                    auto it = tickSnap.find(minor);
-                    uint64_t rb = stats.readBytes, rn = stats.readNs;
-                    uint64_t wb = stats.writeBytes, wn = stats.writeNs;
-                    uint64_t prevRb = 0, prevRn = 0, prevWb = 0, prevWn = 0;
-                    if (it != tickSnap.end())
-                    {
-                        prevRb = it->second.readBytes;
-                        prevRn = it->second.readNs;
-                        prevWb = it->second.writeBytes;
-                        prevWn = it->second.writeNs;
-                    }
-                    tickSnap[minor] = {rb, rn, wb, wn};
-
-                    /* 计算 KB/s 速率（换算核心收敛到 ComputeKbRate/ComputeWindowKbRate） */
-                    uint64_t read_rate = ComputeWindowKbRate(rb, rn, prevRb, prevRn);
-                    uint64_t write_rate = ComputeWindowKbRate(wb, wn, prevWb, prevWn);
-
-                    ALOGI("monitor: minor=%d read_rate=%llu KB/s, write_rate=%llu KB/s, "
-                          "rx_pkts=%lld, tx_pkts=%lld, event_drop=%lld",
-                          minor,
-                          (unsigned long long)read_rate, (unsigned long long)write_rate,
-                          (long long)stats.readCmds, (long long)stats.writeCmds,
-                          (long long)stats.eventDropCount);
                 }
             }
-        }
-    }).detach();
+        }).detach();
+    }
 }

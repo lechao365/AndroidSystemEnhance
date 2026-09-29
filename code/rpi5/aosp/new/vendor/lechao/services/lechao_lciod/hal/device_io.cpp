@@ -16,6 +16,8 @@
 #include <glob.h>
 #include <ctime>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <linux/netlink.h>
 #include <android-base/logging.h>
 #include "lechao_log.h"
 #include "minor_utils.h"
@@ -28,6 +30,9 @@
  * list_devices — 使用 glob(3) 枚举所有匹配的设备节点
  * 匹配模式: /dev/vendor_lechao_usbd*
  * 返回路径列表（如 ["/dev/vendor_lechao_usbd0"]），无设备时为空
+ *
+ * R-16 P4 方向 3：仅作冷启动 bootstrap / 兜底（主通道已改为订阅内核
+ * uevent，热路径不再 glob）。
  */
 std::vector<std::string> list_devices() {
     glob_t gl;
@@ -40,6 +45,133 @@ std::vector<std::string> list_devices() {
         globfree(&gl);
     }
     return result;
+}
+
+/*
+ * open_uevent_socket — 打开 NETLINK_KOBJECT_UEVENT 订阅 socket
+ *
+ * R-16 P4 方向 3：HAL 设备上下线即时感知的增量通道。绑定 nl_groups=1
+ * 接收内核广播的 kobject uevent，过滤 SUBSYSTEM=vendor_lechao_usbd 的
+ * add/remove 事件，替代周期 glob 全量扫描（热路径去 glob、插入感知延迟
+ * 从 ~10s 降至事件到达即感知）。SOCK_CLOEXEC 防 fd 泄漏到子进程。
+ */
+int open_uevent_socket() {
+    int fd = socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC,
+                    NETLINK_KOBJECT_UEVENT);
+    if (fd < 0) {
+        int saved = errno;
+        LC_LOGE("open_uevent_socket: socket() failed: " << strerror(saved));
+        errno = saved;
+        return -1;
+    }
+
+    struct sockaddr_nl addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.nl_family = AF_NETLINK;
+    addr.nl_pid = static_cast<uint32_t>(getpid());  /* 本进程专属端口 */
+    addr.nl_groups = 1;                             /* KOBJECT_UEVENT 多播组 */
+    if (bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+        int saved = errno;
+        LC_LOGE("open_uevent_socket: bind() failed: " << strerror(saved));
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+
+    /* R-16 P4 方向 4 修复：netlink socket 必须设 O_NONBLOCK——on_uevent_readable
+     * 循环 recv 读至 EAGAIN 作为排空终止条件，若 fd 阻塞则首条 uevent 读走后
+     * 再循环 recv 会阻塞等待下一条，HAL 主线程卡在 recv，binder fd 饿死
+     * （事务无人处理 → 服务从 servicemanager 注销 → daemon 卡死在 binder
+     * ioctl，热插拔后 event_drop 飙升）。设备热插拔触发 uevent 风暴时该
+     * 路径必然命中。 */
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        int saved = errno;
+        LC_LOGE("open_uevent_socket: fcntl O_NONBLOCK failed: " << strerror(saved));
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    return fd;
+}
+
+/*
+ * read_uevent — 读取一条 uevent 消息
+ * 返回: 读取字节数；-1 失败（errno 保留）
+ */
+ssize_t read_uevent(int fd, char* buf, size_t len) {
+    ssize_t n = recv(fd, buf, len, 0);
+    if (n < 0) {
+        int saved = errno;
+        /* EAGAIN/EINTR 是"暂无消息"的正常语义，不视为故障 */
+        if (saved != EAGAIN && saved != EINTR)
+            LC_LOGW("read_uevent: recv failed: " << strerror(saved));
+        errno = saved;
+        return -1;
+    }
+    return n;
+}
+
+/*
+ * parse_uevent — 解析 uevent 消息为结构化载荷（纯解析，供 host 单测）
+ *
+ * uevent 线材格式：首行 "ACTION@DEVPATH"（如 add@/devices/...），随后
+ * 为 "KEY=VALUE" 形式的环境变量序列，行间 NUL 分隔，末尾双 NUL 结束。
+ * 本函数提取 ACTION（首行 @ 前缀）与 SUBSYSTEM/DEVNAME 环境变量。
+ * 防御：非 NUL 分隔/缺字段/越界一律返回 false（CXX-003）。
+ */
+bool parse_uevent(const char* buf, size_t len, UeventInfo* out) {
+    if (!buf || !out || len == 0)
+        return false;
+
+    std::string action;
+    std::string subsystem;
+    std::string devname;
+
+    /* 首行：ACTION@DEVPATH（@ 前缀即动作，如 "add"） */
+    size_t i = 0;
+    size_t at = std::string::npos;
+    for (; i < len; i++) {
+        if (buf[i] == '\0')
+            break;
+        if (buf[i] == '@' && at == std::string::npos)
+            at = i;
+    }
+    if (i == 0 || i >= len || at == std::string::npos || at == 0)
+        return false;
+    action.assign(buf, at);
+
+    /* 环境变量序列：KEY=VALUE，NUL 分隔，遇空串结束 */
+    while (i < len) {
+        /* 跳过行首（首行已消费）；后续行从 i+1 开始 */
+        i++;
+        if (i >= len)
+            break;
+        size_t j = i;
+        while (j < len && buf[j] != '\0')
+            j++;
+        if (j == i)  /* 双 NUL：消息结束 */
+            break;
+        std::string kv(buf + i, j - i);
+        i = j;
+        size_t eq = kv.find('=');
+        if (eq == std::string::npos)
+            continue;
+        std::string key = kv.substr(0, eq);
+        std::string val = kv.substr(eq + 1);
+        if (key == "SUBSYSTEM")
+            subsystem = val;
+        else if (key == "DEVNAME")
+            devname = val;
+    }
+
+    if (action.empty() || subsystem.empty() || devname.empty())
+        return false;
+
+    out->action = action;
+    out->subsystem = subsystem;
+    out->devname = devname;
+    return true;
 }
 
 /*

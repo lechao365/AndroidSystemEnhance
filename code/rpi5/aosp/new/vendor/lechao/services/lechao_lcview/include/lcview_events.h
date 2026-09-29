@@ -40,13 +40,14 @@
 /* --- 事件 ID --- */
 /* 每种 USB/GPIO/传感器事件的唯一标识。
  * 从 1 开始递增，预留前 3 个给通用事件。
- * 注意：id=1~3 暂未使用，id=4~9 为 USB 子系统事件，
- * 未来可扩展 GPIO/SENSOR 事件 ID 到 10+ */
+ * 事件 ID：1~3 为 USB_CONNECT/GPIO_IRQ/SENSOR_DATA（预留/早期事件，schema
+ * 已登记 reserved 占位条目，R-19 P5 方向 3），5~13 为 USB 子系统事件
+ * （id=4 TRANSPORT_START 已并入 END 删除），GPIO/SENSOR 如需新事件从 14+ 起扩展 */
 #define LCVIEW_EVENT_USB_CONNECT         1
 #define LCVIEW_EVENT_GPIO_IRQ            2
 #define LCVIEW_EVENT_SENSOR_DATA         3
-#define LCVIEW_EVENT_USB_TRANSPORT_START 4
 #define LCVIEW_EVENT_USB_TRANSPORT_END   5
+/* id=4 TRANSPORT_START 已于 R-16 P4 方向 1 删除（合并为单次带 duration_ns 的 END） */
 #define LCVIEW_EVENT_USB_TRANSPORT_ERROR 6
 #define LCVIEW_EVENT_USB_RESET           7
 #define LCVIEW_EVENT_USB_PROBE           8

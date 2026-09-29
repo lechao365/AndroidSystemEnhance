@@ -1,0 +1,2 @@
+# host 单测构建产物（make test 生成，不入库；见 Makefile clean 目标）
+expect_schema_host_test

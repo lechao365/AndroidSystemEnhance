@@ -9,6 +9,7 @@
  *   readBytes/NS/Cmds          — 读方向统计（直传）
  *   writeBytes/NS/Cmds         — 写方向统计（直传）
  *   errorCount~degradeCount    — 错误/异常/生命周期计数器（直传）
+ *   readErrorCount/writeErrorCount — v3 读/写方向错误分项计数（直传）
  *   eventDropCount             — 内核事件环溢出丢弃总数（直传，LCD-012）
  *   lastTransportLatencyNs     — 最近传输延迟（直传）
  *   lastEventTsNs              — 最近事件时间戳（直传）
@@ -44,6 +45,8 @@ parcelable IoStats {
     long stallCount;    /* 端点停滞次数 */
     long corruptCount;  /* 数据损坏次数 */
     long timeoutCount;  /* 传输超时次数 */
+    long readErrorCount;  /* v3：读方向错误事件次数（直传） */
+    long writeErrorCount; /* v3：写方向错误事件次数（直传） */
 
     /* --- 设备生命周期计数器 --- */
     long probeCount;       /* 设备探测次数 */

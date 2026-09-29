@@ -2,7 +2,7 @@ diff --git a/drivers/usb/storage/usb.h b/drivers/usb/storage/usb.h
 index fd3f32670873..1ef7bb36f998 100644
 --- a/drivers/usb/storage/usb.h
 +++ b/drivers/usb/storage/usb.h
-@@ -38,6 +38,78 @@
+@@ -38,6 +38,80 @@
  struct us_data;
  struct scsi_cmnd;
  
@@ -27,7 +27,9 @@ index fd3f32670873..1ef7bb36f998 100644
 + *   notifier 回调必须不可睡眠。
 + *
 + * 【发射位置】（见 transport.c）
-+ *   TRANSPORT_START：usb_stor_invoke_transport 入口（每次传输前）
++ *   TRANSPORT_START：R-16 P4 方向 1 起停发——START/END 合并为单次
++ *     TRANSPORT_END，耗时由核心侧测得并经 duration_ns 传入（枚举保留
++ *     兼容，不再发射）
 + *   TRANSPORT_END：所有正常出口点（成功/失败/no_sense/aborted）
 + *   TRANSPORT_ERROR：transport() 返回 USB_STOR_TRANSPORT_ERROR 时
 + *   RESET：Handle_Errors 错误恢复路径执行 reset 后
@@ -41,7 +43,7 @@ index fd3f32670873..1ef7bb36f998 100644
 + * ============================================================
 + */
 +enum usb_stor_notifier_event {
-+	USB_STOR_NOTIFIER_TRANSPORT_START,   /* 传输开始：在调用 transport() 前发射 */
++	USB_STOR_NOTIFIER_TRANSPORT_START,   /* 传输开始：R-16 P4 方向 1 起停发（枚举保留兼容，见上方发射位置说明） */
 +	USB_STOR_NOTIFIER_TRANSPORT_END,     /* 传输结束：在所有正常出口发射（含 error/abort） */
 +	USB_STOR_NOTIFIER_TRANSPORT_ERROR,   /* 传输层错误：transport() 返回 ERROR 时 */
 +	USB_STOR_NOTIFIER_RESET,             /* 设备重置：Handle_Errors 路径执行 reset 后 */
@@ -81,7 +83,7 @@ index fd3f32670873..1ef7bb36f998 100644
  /*
   * Unusual device list definitions 
   */
-@@ -148,6 +220,21 @@ struct us_data {
+@@ -148,6 +222,21 @@ struct us_data {
  	/* hacks for READ CAPACITY bug handling */
  	int			use_last_sector_hacks;
  	int			last_sector_retries;
@@ -103,7 +105,7 @@ index fd3f32670873..1ef7bb36f998 100644
  };
  
  /* Convert between us_data and the corresponding Scsi_Host */
-@@ -207,4 +294,45 @@ static void __exit __driver##_exit(void) \
+@@ -207,4 +296,45 @@ static void __exit __driver##_exit(void) \
  } \
  module_exit(__driver##_exit)
  

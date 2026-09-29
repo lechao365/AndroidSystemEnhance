@@ -29,6 +29,7 @@
 #include <linux/poll.h>
 #include <linux/uaccess.h>
 #include <linux/capability.h>
+#include <linux/debugfs.h>
 #include "lcview_internal.h"
 #include "lcview_ioctl.h"
 #include "lcview_ring_logic.h"
@@ -86,6 +87,88 @@ static ssize_t lcview_stats_show(struct device *dev,
                      st.ring_size_bytes);
 }
 static DEVICE_ATTR_RO(lcview_stats);
+
+/*
+ * R-17 方向 4：debugfs 计数导出（/sys/kernel/debug/lcview/）
+ * 内核 ring write/evict/read 四类计数直读，配合 ftrace/perf 周期采样
+ * 定位热点（perf stat -e 或周期 cat 增量观测读写/驱逐/丢弃比例）：
+ *   - write_records : ring->total_records（累计写入记录数，含 ENOSPC 丢弃）
+ *   - evict_records : ring->overrun_cnt（溢出逐出累计，边读边清增量语义）
+ *   - drop_records  : ring->dropped_cnt（ENOSPC 丢弃累计）
+ *   - read_calls    : ring->read_calls（成功交付数据的 read 调用次数）
+ *   - ring_usage    : ring 当前已用字节数 / 总字节数
+ * 与 sysfs lcview_stats 的区别：sysfs 聚合一行、devattr 读走单打开语义
+ * 外的全局计数；debugfs 逐项原子直读，方便脚本按项做增量差分定位
+ * 某段时间内的写/驱逐/读热点。host 单测不编 lcview_main.c，此表仅内核
+ * 侧生效，不影响 host 链。
+ */
+static struct dentry *lcview_debugfs_dir;
+
+static int debugfs_write_show(void *data, u64 *val)
+{
+    *val = atomic64_read(&lcview_ring.total_records);
+    return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(debugfs_write_fops, debugfs_write_show, NULL, "%llu\n");
+
+static int debugfs_evict_show(void *data, u64 *val)
+{
+    *val = atomic64_read(&lcview_ring.overrun_cnt);
+    return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(debugfs_evict_fops, debugfs_evict_show, NULL, "%llu\n");
+
+static int debugfs_drop_show(void *data, u64 *val)
+{
+    *val = atomic64_read(&lcview_ring.dropped_cnt);
+    return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(debugfs_drop_fops, debugfs_drop_show, NULL, "%llu\n");
+
+static int debugfs_readcalls_show(void *data, u64 *val)
+{
+    *val = atomic64_read(&lcview_ring.read_calls);
+    return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(debugfs_readcalls_fops, debugfs_readcalls_show, NULL, "%llu\n");
+
+static int debugfs_usage_show(struct seq_file *m, void *v)
+{
+    uint32_t used = lcview_ring_avail_bytes(&lcview_ring);
+    seq_printf(m, "%u %u\n", used, lcview_ring.size);
+    return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(debugfs_usage);
+
+static void lcview_debugfs_create(void)
+{
+    lcview_debugfs_dir = debugfs_create_dir("lcview", NULL);
+    if (IS_ERR(lcview_debugfs_dir)) {
+        pr_warn(PREFIX "debugfs dir create failed (%ld), skip counters\n",
+                PTR_ERR(lcview_debugfs_dir));
+        lcview_debugfs_dir = NULL;
+        return;
+    }
+    debugfs_create_file("write_records", 0444, lcview_debugfs_dir, NULL,
+                        &debugfs_write_fops);
+    debugfs_create_file("evict_records", 0444, lcview_debugfs_dir, NULL,
+                        &debugfs_evict_fops);
+    debugfs_create_file("drop_records", 0444, lcview_debugfs_dir, NULL,
+                        &debugfs_drop_fops);
+    debugfs_create_file("read_calls", 0444, lcview_debugfs_dir, NULL,
+                        &debugfs_readcalls_fops);
+    debugfs_create_file("ring_usage", 0444, lcview_debugfs_dir, NULL,
+                        &debugfs_usage_fops);
+    pr_info(PREFIX "debugfs counters created under lcview/\n");
+}
+
+static void lcview_debugfs_remove(void)
+{
+    if (lcview_debugfs_dir) {
+        debugfs_remove_recursive(lcview_debugfs_dir);
+        lcview_debugfs_dir = NULL;
+    }
+}
 
 /*
  * 全局环形缓冲区实例
@@ -320,9 +403,10 @@ static long lcview_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 /*
  * lcview_fops — 字符设备文件操作表
  *
- * compat_ioctl 与 unlocked_ioctl 指向同一函数，因为我们的数据结构
- * (uint32_t, uint8_t, struct lcview_stats) 在 32/64 位下布局一致——
- * lcview_stats 的四个字段均为 uint32_t，不存在指针或 long 类型对齐差异。
+ * compat_ioctl 与 unlocked_ioctl 指向同一函数，因为 ioctl 载荷（uint32_t、uint64_t、uint8_t、
+ * struct lcview_stats）在 32/64 位下布局一致——stats 共 5 个字段：
+ * total_records/overrun_cnt/dropped_cnt 为 uint64_t，ring_usage_bytes/ring_size_bytes 为
+ * uint32_t，均为定长标量，无指针或 long 类型对齐差异。
  * 如果未来引入含指针的 struct，则需要实现 compat_ioctl 做结构体转换。
  */
 static const struct file_operations lcview_fops = {
@@ -448,6 +532,9 @@ static int __init lcview_init(void)
         goto err_device_file;
     }
 
+    /* R-17 方向 4：debugfs 计数导出（失败不阻断主流程，仅告警） */
+    lcview_debugfs_create();
+
     pr_info(PREFIX "initialized (ring=%uKB, major=%d)\n",
             ring_size_kb, major_number);
     return 0;
@@ -465,6 +552,7 @@ err_ring:
 
 static void __exit lcview_exit(void)
 {
+    lcview_debugfs_remove();
     device_remove_file(lcview_device, &dev_attr_lcview_stats);
     device_destroy(lcview_class, MKDEV(major_number, 0));
     class_destroy(lcview_class);

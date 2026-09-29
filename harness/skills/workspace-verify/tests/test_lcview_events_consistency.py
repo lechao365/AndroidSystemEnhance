@@ -59,10 +59,12 @@ class TestLcviewEventsConsistency(unittest.TestCase):
         self.assertEqual(k["LCVIEW_TYPE_BINARY"], "5")
 
     def test_event_ids_consistent(self):
-        # 事件 id 1..13 两份一致（trigger 用例依赖 id 8=probe 9=disconnect）
+        # 事件 id 两份一致（trigger 用例依赖 id 8=probe 9=disconnect）。
+        # R-16 P4 方向 1：id=4 TRANSPORT_START 已删除（START/END 合并为单次
+        # 带 duration_ns 的 END），事件总数从 13 降至 12（id 2,3,5..13）
         k, u = _macros(self.kernel), _macros(self.user)
         events = [n for n in k if n.startswith("LCVIEW_EVENT_")]
-        self.assertGreaterEqual(len(events), 13)
+        self.assertGreaterEqual(len(events), 12)
         for name in events:
             self.assertIn(name, u, f"用户态缺 {name}")
             self.assertEqual(k[name], u[name], name)

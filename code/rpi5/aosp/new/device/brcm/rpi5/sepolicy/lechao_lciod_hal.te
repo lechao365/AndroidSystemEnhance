@@ -47,6 +47,13 @@ allow lechao_lciod_hal device:dir { search read open };
 # 允许 HAL 写入 logd —— vendor 域默认无 logd 权限，不添加则 logcat 看不到 HAL 日志
 allow lechao_lciod_hal logd:unix_dgram_socket write;
 
+# R-16 P4 方向 3：订阅内核 uevent（NETLINK_KOBJECT_UEVENT）做设备上下线
+# 即时感知（热路径去 glob）。enforcing 下 socket()/bind()/recv() 均受
+# SELinux 管控，无此规则则 open_uevent_socket 直接 EPERM、HAL 降级 glob-only。
+# create_socket_perms_no_ioctl = create bind listen accept getattr setopt read write
+# shutdown（不含 ioctl，uevent socket 不需要）。
+allow lechao_lciod_hal self:netlink_kobject_uevent_socket create_socket_perms_no_ioctl;
+
 # R-08 方向 1：shell 域监控取数特批——devnode 收紧 0600 且 setenforce 1
 # enforcing 后，harness 经 adb root 取数（lciod_probe ioctl GET_STATS、
 # lechao_lciod_hal_test 真实分支 open devnode）运行在 shell 域（adb shell

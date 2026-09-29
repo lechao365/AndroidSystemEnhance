@@ -122,6 +122,18 @@ bool SchemaParser::parseEventDef(const Json::Value& ev, EventSchema* out)
                        << "' in event " << out->id;
             return false;
         }
+        // R-20 P5 方向 1：敏感标记（可选 key）。isMember + isBool 双重前置
+        // 校验（CXX-003），key 存在但非 bool 严格拒绝——schema 为受控配置，
+        // 误配应早期可见；缺 key 缺省 false，旧 schema 兼容
+        if (f.isMember("sensitive")) {
+            if (!f["sensitive"].isBool()) {
+                LOG(ERROR) << "SchemaParser: event " << out->id
+                           << " field '" << fd.name
+                           << "' sensitive must be a bool if present";
+                return false;
+            }
+            fd.sensitive = f["sensitive"].asBool();
+        }
         out->fields.push_back(fd);
     }
     return true;
@@ -260,7 +272,7 @@ bool SchemaParser::validateFields(const EventSchema& schema,
 }
 
 // 校验二进制日志记录是否合法：
-//   Step 1: 检查是否至少包含固定头（16 字节）
+//   Step 1: 检查是否至少包含固定头（32 字节）
 //   Step 2: 检查魔数是否为 0x4C56（'LV'）
 //   Step 3: 检查 event_id 是否在 schema 中定义
 //   Step 4: 检查 field_count 是否与 schema 定义一致

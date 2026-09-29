@@ -9,7 +9,7 @@
  *   对 cmd 中每个非零的 *_ge 参数，检查 stats 中对应字段
  *   是否 >= 阈值。支持的字段:
  *     stall_count, timeout_count, corrupt_count,
- *     disconnect_count, probe_count
+ *     disconnect_count, probe_count, error_count, reset_count
  * ============================================================
  */
 #ifndef STATS_CHECK_H

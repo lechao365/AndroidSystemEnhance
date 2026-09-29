@@ -8,7 +8,7 @@
  * 设计原则：
  * - 类型编码 (LCVIEW_TYPE_*) 采用固定长度或长度前缀自描述格式，
  *   解析器无需预知 schema 即可遍历字段。
- * - 记录头固定 16 字节，packed 对齐，确保内核与用户态布局一致。
+ * - 记录头固定 32 字节（R-13 方向 2 扩容），packed 对齐，确保内核与用户态布局一致。
  * - __KERNEL__ 宏区分内核态和用户态编译路径，仅 pack 属性语法不同。
  */
 
@@ -40,17 +40,18 @@
  * 用户态解析器通过 event_id 匹配 schema 来解码字段列表。
  *
  * 事件来源分布：
- *   - USB 1, 4-13：vendor_lechao_usbd-stats.c（USB 存储监控）
+ *   - USB 1, 5-13：vendor_lechao_usbd-stats.c（USB 存储监控）
  *   - GPIO 2：lechao_gpio_irq 驱动（GPIO 中断监控）
  *   - SENSOR 3：lechao_sensor 驱动（传感器数据采集）
  */
 #define LCVIEW_EVENT_USB_CONNECT         1  /* USB 设备连接（预留，当前由 PROBE 替代） */
 #define LCVIEW_EVENT_GPIO_IRQ            2  /* GPIO 中断触发（来源：lechao_gpio_irq 驱动） */
 #define LCVIEW_EVENT_SENSOR_DATA         3  /* 传感器数据上报（来源：lechao_sensor 驱动） */
-#define LCVIEW_EVENT_USB_TRANSPORT_START 4  /* USB 传输开始（来源：vendor_lechao_usbd-stats.c，
-                                             * 触发场景：usb_stor_invoke_transport 入口） */
 #define LCVIEW_EVENT_USB_TRANSPORT_END   5  /* USB 传输结束（来源：vendor_lechao_usbd-stats.c，
-                                             * 触发场景：成功/失败/abort/no_sense 的统一出口） */
+                                             * 触发场景：成功/失败/abort/no_sense 的统一出口。
+                                             * R-16 P4 方向 1：START/END 合并为单次 END——
+                                             * 耗时由 usb-storage 核心侧测得并经 nd->duration_ns
+                                             * 传入，原 id=4 TRANSPORT_START 已删除不再发射） */
 #define LCVIEW_EVENT_USB_TRANSPORT_ERROR 6  /* USB 传输层错误（来源：vendor_lechao_usbd-stats.c，
                                              * 触发场景：transport() 返回 TRANSPORT_ERROR） */
 #define LCVIEW_EVENT_USB_RESET           7  /* USB 设备重置（来源：vendor_lechao_usbd-stats.c，

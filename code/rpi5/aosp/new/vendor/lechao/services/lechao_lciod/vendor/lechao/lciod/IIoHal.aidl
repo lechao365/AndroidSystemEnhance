@@ -19,6 +19,7 @@ package vendor.lechao.lciod;
 import vendor.lechao.lciod.IoStats;
 import vendor.lechao.lciod.IoConfig;
 import vendor.lechao.lciod.IoEvent;
+import android.os.ParcelFileDescriptor;
 
 @VintfStability
 interface IIoHal {
@@ -44,4 +45,13 @@ interface IIoHal {
      * 返回 IoEvent，valid=false 表示超时或无事件
      */
     IoEvent readEvent(int deviceMinor, int timeoutMs);
+
+    /*
+     * R-16 P4 方向 4：复制指定设备内核事件 fd 的副本（duplicate）
+     * deviceMinor — 设备节点编号
+     * 返回设备节点 fd 的 dup，供 daemon epoll 多路复用监听
+     *   （内核 .poll 支持 epoll：EPOLLIN 有事件可读、EPOLLHUP 设备断开）。
+     * 调用方负责关闭返回的 fd；设备离线/未打开返回错误。
+     */
+    ParcelFileDescriptor dupEventFd(int deviceMinor);
 }

@@ -86,7 +86,7 @@ struct lcview_stats
 /* struct 尺寸守卫：与内核镜像（lcview_internal.h）漂移即编译期报错
  * 逐字段 offsetof 断言（方向 3）：不仅守总尺寸，还逐字段校验偏移与内核
  * lcview_internal.h 的 struct lcview_stats 一致——仅 sizeof 相等挡不住
- * 字段顺序/类型互换（同 20B 不同布局），offsetof 逐字段钉死对齐。
+ * 字段顺序/类型互换（同 32B 不同布局），offsetof 逐字段钉死对齐。
  * R-13 方向 3：前三字段升 u64 后偏移 0/8/16，后两字段 24/28。 */
 static_assert(offsetof(struct lcview_stats, total_records) == 0,
               "lcview_stats.total_records offset drift");

@@ -125,7 +125,7 @@ uint64_t ring_overrun_restore_amt(uint64_t read_val, bool copy_ok);
  * 前缀 4B（= LCVIEW_RING_LEN_PREFIX，与 LCVIEW_LEN_PREFIX_SIZE 同步）
  * 一并计入上限。
  *
- * @data_offset builder 当前数据偏移（含 16B 记录头）
+ * @data_offset builder 当前数据偏移（含 32B 记录头）
  * @add_len     待写入字段字节数（type + value）
  * @max_size    LCVIEW_BUILDER_MAX_SIZE（单条事件硬上限）
  * @return 0 装得下 / -ENOSPC 超限
@@ -143,7 +143,7 @@ int builder_write_fits(uint32_t data_offset, uint32_t add_len,
  * 只按 data_offset + total 对比上限漏扣前缀，记录总长 4100 被读侧
  * 误判损坏丢弃，且 tests Makefile 只链 logic.c 调用点零覆盖）。
  *
- * @data_offset builder 当前数据偏移（含 16B 记录头）
+ * @data_offset builder 当前数据偏移（含 32B 记录头）
  * @data_len    变长字段数据字节数（不含 type/len 前缀）
  * @max_size    LCVIEW_BUILDER_MAX_SIZE（单条事件硬上限）
  * @return 0 装得下 / -ENOSPC 超限

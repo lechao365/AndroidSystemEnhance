@@ -2,14 +2,22 @@
   "version": 1,
   "events": [
     {
-      "id": 4,
-      "name": "usb_transport_start",
-      "desc": "USB bulk transport starts",
-      "fields": [
-        {"name": "device_index",    "type": "int64"},
-        {"name": "data_direction",  "type": "int64"},
-        {"name": "bytes_to_xfer",   "type": "int64"}
-      ]
+      "id": 1,
+      "name": "usb_connect",
+      "desc": "reserved: USB connect event (预留占位，字段未定义)",
+      "fields": []
+    },
+    {
+      "id": 2,
+      "name": "gpio_irq",
+      "desc": "reserved: GPIO IRQ event (预留占位，字段未定义)",
+      "fields": []
+    },
+    {
+      "id": 3,
+      "name": "sensor_data",
+      "desc": "reserved: sensor data event (预留占位，字段未定义)",
+      "fields": []
     },
     {
       "id": 5,
@@ -47,10 +55,10 @@
       "desc": "USB device probed",
       "fields": [
         {"name": "device_index",    "type": "int64"},
-        {"name": "vid",             "type": "int64"},
-        {"name": "pid",             "type": "int64"},
-        {"name": "vendor",          "type": "string"},
-        {"name": "product",         "type": "string"}
+        {"name": "vid",             "type": "int64", "sensitive": true},
+        {"name": "pid",             "type": "int64", "sensitive": true},
+        {"name": "vendor",          "type": "string", "sensitive": true},
+        {"name": "product",         "type": "string", "sensitive": true}
       ]
     },
     {

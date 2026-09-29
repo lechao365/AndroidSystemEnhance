@@ -8,7 +8,7 @@
 #   在 host 完成；设备侧只做单二进制最小操作。
 #
 # 模式：
-#   stats    — 校验 probe 快照：≥1 设备、abi_version==2、字段齐全、
+#   stats    — 校验 probe 快照：≥1 设备、abi_version==3、字段齐全、
 #              数值非负、vendor/product 非空（字段映射完整性回归点）
 #   baseline — [--reset] 取快照存 --baseline（供 delta；
 #              --reset 传给设备工具归零计数，delta 断言简化为绝对值）
@@ -49,7 +49,7 @@ def _default_baseline(env_name="LCIOD_BASELINE_FILE"):
 
 BASELINE_DEFAULT = _default_baseline()
 
-# probe 输出必须齐全的字段（与 lciod_probe.c 输出、ioctl.h v2 ABI 对齐；
+# probe 输出必须齐全的字段（与 lciod_probe.c 输出、ioctl.h v3 ABI 对齐；
 # 缺任一字段即字段映射回归，stats 模式判红）
 REQUIRED_FIELDS = [
     "minor", "path", "vid", "pid", "vendor", "product",
@@ -61,11 +61,12 @@ REQUIRED_FIELDS = [
     "last_event_ts_ns", "last_update",
     "stall_count", "corrupt_count", "timeout_count",
     "last_event_type", "enabled", "flags", "event_drop_count",
+    "read_error_count", "write_error_count",
     "abi_version",
 ]
 # 非数值字段（vendor/product 可含空格引号包裹；path 为字符串）
 _TEXT_FIELDS = {"path", "vendor", "product"}
-_EXPECTED_ABI = "2"
+_EXPECTED_ABI = "3"
 
 # key=value 解析：vendor="SanDisk Corp" 等引号包裹值支持空格
 _TOKEN_RE = re.compile(r'(\w+)=(?:"([^"]*)"|(\S+))')
@@ -137,7 +138,7 @@ def validate_devices(devices):
     """stats 模式校验 → 错误列表（空 = 通过）。
 
     判红项：零设备 / 字段缺失 / 数值字段非数字或负值 /
-    vendor·product 为空 / abi_version != 2（镜像副本与内核真相源漂移）。
+    vendor·product 为空 / abi_version != 3（镜像副本与内核真相源漂移）。
     """
     errors = []
     if not devices:
@@ -156,9 +157,9 @@ def validate_devices(devices):
                     errors.append(f"{tag}: {f} 为负值: {dev[f]}")
             except ValueError:
                 errors.append(f"{tag}: {f} 非数字: {dev[f]}")
-        # 累计错误/丢事件必须为 0：error_count/event_drop_count 为无符号计数，
-        # 仅校验非负恒真，错误或丢事件累计再多仍判绿；加等于 0 断言（防假绿）
-        for f in ("error_count", "event_drop_count"):
+        # 累计错误/丢事件必须为 0：error_count/event_drop_count/read(write)_error_count
+        # 为无符号计数，仅校验非负恒真，错误或丢事件累计再多仍判绿；加等于 0 断言（防假绿）
+        for f in ("error_count", "event_drop_count", "read_error_count", "write_error_count"):
             if f in missing:
                 continue
             try:

@@ -36,6 +36,15 @@
 #define LCVIEW_BUILDER_MAX_SIZE  4096
 
 /*
+ * R-17 方向 3：读取中转缓冲 read_buf 容量（64KB，与 daemon 单次 read
+ * 缓冲 kConserveUserBufBytes 对齐）。锁内把连续可读 run 的多条记录批拷
+ * 到 read_buf 后一次 copy_to_user 交付，替代原"每条记录单独 4KB 中转 +
+ * 逐条 copy"。read_buf 实际分配容量记录于 ring->read_buf_size（host 单测
+ * 手工构造 ring 用栈数组时必须同步设置，否则批拷上限失配）。
+ */
+#define LCVIEW_READ_BUF_SIZE  (64 * 1024)
+
+/*
  * 环形缓冲区记录前缀长度 (4 字节)
  * 每条记录开头存 uint32_t 总长度（含前缀自身），用于读/写指针推进
  */
@@ -101,6 +110,13 @@ struct lcview_ring {
     bool          shutdown;    /* destroy 标记，通知等待中的 reader 退出 */
     atomic_t readers; /* 在途读调用计数，destroy 等其归零再释放内存（防 UAF） */
     wait_queue_head_t exit_wait; /* 读调用归零等待队列，destroy 睡眠等所有 reader 退出 */
+    /* R-17 方向 4：可观测计数（debugfs 直读，ftrace/perf 定位热点）。
+     * read_calls 记录成功完成 read 调用的次数（不含返回 -EAGAIN/损坏跳过
+     * 的空转），配合现有 total_records/overrun_cnt/dropped_cnt 可刻画
+     * 读写/驱逐/丢弃四类热点比例。host 单测手工构造 ring 不初始化该
+     * 字段不影响既有断言（read 路径仅在计数语义上新增，不参与判红）。 */
+    atomic64_t read_calls;    /* 成功交付数据的 read 调用次数 */
+    uint32_t   read_buf_size; /* read_buf 实际容量（init 时 = LCVIEW_READ_BUF_SIZE） */
 };
 
 /* 全局环形缓冲区实例，在 lcview_main.c 中定义 */

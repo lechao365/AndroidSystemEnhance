@@ -630,3 +630,33 @@ baselines:
       archived_in: ''
   approved_by: lechao
   approved_at: '2026-09-24T00:04:09+08:00'
+- baseline_id: BL-20260928-01
+  status: promoted
+  source_branch: dev
+  source_commit: 433fe844074b
+  sync_manifest: data/verify-results/20260929-105552-3e2e2634fbb2.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lciod-liveness,lciod-perf,lciod-pipeline,lciod-recover-hal,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20260929-105552-3e2e2634fbb2.md
+    ki_gate: pass
+    evidence_scope: lciod-liveness,lciod-perf,lciod-pipeline,lciod-recover-hal,lciod-trigger,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+    known_issues_carried: KI-FLAKE-20d380d0f753-e1789e,KI-FLAKE-cefa39e1699f-1bac08
+    package_evidence: data/verify-results/20260929-105552-3e2e2634fbb2.md
+    package_rc: 0
+    cases_coverage:
+      result: full
+      missing: []
+      run_count: 13
+    known_issues_closed:
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+  approved_by: lechao
+  approved_at: '2026-09-29T11:02:39+08:00'
