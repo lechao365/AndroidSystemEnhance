@@ -275,6 +275,7 @@ ndk::ScopedAStatus IoHalImpl::getStats(int32_t in_deviceMinor, IoStats* _aidl_re
     /* --- 字段映射: raw → _aidl_return --- */
     _aidl_return->vid = raw.vid;
     _aidl_return->pid = raw.pid;
+    _aidl_return->protocol = raw.protocol;   /* R1 UAS 维测：传输协议（VENDOR_LECHAO_USBD_PROTO_BOT/UAS）直传 */
     _aidl_return->vendor.assign(raw.vendor, strnlen(raw.vendor, sizeof(raw.vendor)));
     _aidl_return->product.assign(raw.product, strnlen(raw.product, sizeof(raw.product)));
     _aidl_return->readBytes = raw.read_bytes;

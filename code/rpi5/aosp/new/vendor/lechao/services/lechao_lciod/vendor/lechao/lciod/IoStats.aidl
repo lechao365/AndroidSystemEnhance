@@ -3,6 +3,8 @@
  * 所属模块: vendor.lechao.lciod
  * 设计目的: 定义 HAL 层传递设备统计数据的 parcelable 格式，
  *           与内核驱动 struct vendor_lechao_usbd_stats 字段一一对应。
+ *           protocol 字段（传输协议）直传内核 stats.protocol（BOT=0/UAS=1，
+ *           零 ABI bump 由 stats 承载）。
  *           由 HAL 进程在 getStats() 中填充后通过 Binder 传递。
  * VINTF: 标记 @VintfStability 以保证 OTA 兼容性
  * ============================================================ */
@@ -12,6 +14,7 @@ parcelable IoStats {
     /* --- 设备标识 --- */
     int vid;            /* USB 厂商 ID（Vendor ID） */
     int pid;            /* USB 产品 ID（Product ID） */
+    int protocol;       /* 传输协议（VENDOR_LECHAO_USBD_PROTO_BOT/UAS，零 ABI bump 由 stats 承载） */
     String vendor;      /* 厂商名称字符串，最长 32 字节 */
     String product;     /* 产品名称字符串，最长 32 字节 */
 

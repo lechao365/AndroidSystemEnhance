@@ -2,7 +2,7 @@
 // lciod_probe.c — LcIod 设备统计取数工具（上板验证用）
 // 所属模块：lechao_lciod — 工具
 // 设计目的：枚举 /dev/vendor_lechao_usbd* 节点，逐设备执行
-//   GET_STATS ioctl 并按固定 key=value 格式单行打印（全 28 字段
+//   GET_STATS ioctl 并按固定 key=value 格式单行打印（全 33 字段
 //   + abi_version），供 host 侧 lciod_check.py 做字段齐全性/增量
 //   校验（设备侧最小操作 + host 复杂解析，防假绿原则同 lcview）。
 //
@@ -65,7 +65,7 @@ static int probe_device(const char* path, int do_reset)
     close(fd);
 
     /* 单行 key=value：vendor/product 引号包裹防空格破坏 host 解析 */
-    printf("device minor=%d path=%s vid=0x%04x pid=0x%04x vendor=\"%s\" product=\"%s\" "
+    printf("device minor=%d path=%s vid=0x%04x pid=0x%04x protocol=%u vendor=\"%s\" product=\"%s\" "
            "read_bytes=%llu write_bytes=%llu read_ns=%llu write_ns=%llu "
            "read_cmds=%llu write_cmds=%llu error_count=%llu reset_count=%llu "
            "probe_count=%llu disconnect_count=%llu degrade_count=%llu "
@@ -74,7 +74,7 @@ static int probe_device(const char* path, int do_reset)
            "corrupt_count=%llu timeout_count=%llu last_event_type=%u "
            "enabled=%u flags=%u event_drop_count=%llu "
            "read_error_count=%llu write_error_count=%llu abi_version=%u\n",
-           tail_minor(path), path, st.vid, st.pid, st.vendor, st.product,
+           tail_minor(path), path, st.vid, st.pid, st.protocol, st.vendor, st.product,
            (unsigned long long)st.read_bytes, (unsigned long long)st.write_bytes,
            (unsigned long long)st.read_ns, (unsigned long long)st.write_ns,
            (unsigned long long)st.read_cmds, (unsigned long long)st.write_cmds,

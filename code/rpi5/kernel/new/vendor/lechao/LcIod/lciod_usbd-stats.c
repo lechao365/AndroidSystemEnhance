@@ -29,6 +29,7 @@
 
 #include "lciod_usbd.h"
 #include "lciod_read_logic.h"
+#include "uas-notifier.h"
 #include <linux/math64.h>
 #include <linux/percpu.h>
 #include <linux/sched/clock.h>
@@ -605,6 +606,149 @@ void vendor_lechao_usbd_do_reset(struct vendor_lechao_usbd_device *rate_dev)
 }
 
 /*
+ * vendor_lechao_usbd_transport_end_locked — TRANSPORT_END 共用处理（BOT/UAS）
+ * @rate_dev:  目标设备实例（调用方必须已持有 rate_dev->lock）
+ * @srb:       SCSI 命令上下文（可能为 NULL）
+ * @elapsed_ns: 本次传输耗时（纳秒）；BOT 来自 nd->duration_ns（usb 核心侧测得），
+ *              UAS 由 handler 用 last_uas_start_ns 自行差值
+ * @was_error: 当前传输周期内是否发生过错误（handler 在锁内由
+ *              rate_dev->last_transport_error 计算后传入）
+ * @degraded_out:         出参：本次是否判定降级（0/1）
+ * @degrade_baseline_out: 出参：判定降级时的窗口基线速率（bytes/s），未降级为 0
+ * @degrade_threshold_out:出参：判定降级时的窗口阈值速率（bytes/s），未降级为 0
+ * @trace_dir_out:        出参：trace 所需数据方向（VENDOR_LECHAO_USBD_DIR_*）
+ * @trace_bytes_out:      出参：trace 所需本次有效字节数
+ * @trace_elapsed_out:    出参：trace 所需本次耗时（纳秒）
+ *
+ * 语义覆盖原 BOT handle_event TRANSPORT_END 分支全部副作用（单一出口，
+ * 避免 BOT/UAS 双 handler 双计数）：
+ *   - 字节累计：read/write bytes/ns/cmds
+ *   - 速率更新：update_current_rate_locked（含 peak_rate）
+ *   - degrade 判定：瞬时（10% 阈值，KRN-005）+ 滑动窗口（1s 窗口 + 2 倍阈值）
+ *   - degraded 副作用：degrade_count++ / record_last_event / event_push
+ *   - last_transport_latency_ns 更新（rate_dev + stats 双份）
+ *   - stats.last_update 更新、last_transport_error 复位
+ * 调用方在锁外根据出参复用发射 lcview trace（lcview_trace_transport_end /
+ * lcview_trace_rate_degraded）。
+ * 调用上下文：必须持有 rate_dev->lock 自旋锁，不可睡眠。
+ */
+void vendor_lechao_usbd_transport_end_locked(
+    struct vendor_lechao_usbd_device *rate_dev,
+    struct scsi_cmnd *srb, u64 elapsed_ns, int was_error,
+    bool *degraded_out, u64 *degrade_baseline_out,
+    u64 *degrade_threshold_out, int *trace_dir_out,
+    u64 *trace_bytes_out, u64 *trace_elapsed_out)
+{
+    u64 bytes = 0;
+    bool degraded = false;
+    u64 degrade_baseline = 0;
+    u64 degrade_threshold = 0;
+
+    if (trace_dir_out)
+        *trace_dir_out = srb ?
+            vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction) : 0;
+    if (trace_bytes_out)
+        *trace_bytes_out = 0;
+    if (trace_elapsed_out)
+        *trace_elapsed_out = 0;
+
+    if (srb && !was_error) {
+        bytes = scsi_bufflen(srb) - scsi_get_resid(srb);
+
+        if (srb->sc_data_direction == DMA_FROM_DEVICE) {
+            rate_dev->stats.read_bytes += bytes;
+            rate_dev->stats.read_ns += elapsed_ns;
+            rate_dev->stats.read_cmds++;
+        } else if (srb->sc_data_direction == DMA_TO_DEVICE) {
+            rate_dev->stats.write_bytes += bytes;
+            rate_dev->stats.write_ns += elapsed_ns;
+            rate_dev->stats.write_cmds++;
+        }
+
+        {
+            u64 prev_rate = rate_dev->stats.current_rate;
+            u64 prev_latency = rate_dev->last_transport_latency_ns;
+
+            vendor_lechao_usbd_update_current_rate_locked(rate_dev, bytes, elapsed_ns);
+
+            /*
+             * KRN-005：瞬时判定加 10% 幅度阈值。原实现任意幅度下降/
+             * 上升即 degraded，而 USB 命令速率逐条波动（±30% 正常），
+             * 条件几乎恒真——每命令都推送 RATE_DEGRADED 事件 + trace，
+             * I/O 洪水时 WARN 级事件挤占 ring 驱逐正常记录。
+             * 真实降级由滑动窗口判定（1s 窗口 + 2 倍阈值）兜底，
+             * 瞬时判定仅作快速告警，10% 阈值过滤正常抖动。
+             */
+            if (prev_rate > 0 &&
+                rate_dev->stats.current_rate < prev_rate - prev_rate / 10) {
+                degraded = true;
+                degrade_baseline = prev_rate;
+                degrade_threshold = prev_rate - prev_rate / 10;
+            }
+            if (prev_latency > 0 &&
+                elapsed_ns > prev_latency + prev_latency / 10) {
+                degraded = true;
+                /* 延迟降级无速率基线，回退用上一瞬时速率作参考 */
+                if (!degrade_baseline)
+                    degrade_baseline = prev_rate;
+                if (!degrade_threshold)
+                    degrade_threshold = prev_rate > 0 ?
+                                        prev_rate - prev_rate / 10 : 0;
+            }
+        }
+
+        /* 滑动窗口判定结果合并入 degraded，统计/事件/trace 统一在下方单点执行 */
+        {
+            u64 w_baseline = 0;
+            u64 w_threshold = 0;
+
+            degraded = degraded ||
+                       vendor_lechao_usbd_update_degrade_context_locked(
+                           rate_dev, bytes, &w_baseline, &w_threshold);
+            if (degraded && w_baseline) {
+                degrade_baseline = w_baseline;
+                degrade_threshold = w_threshold;
+            }
+        }
+        if (trace_bytes_out)
+            *trace_bytes_out = bytes;
+        if (trace_elapsed_out)
+            *trace_elapsed_out = elapsed_ns;
+    }
+
+    /* degrade 统计/事件/trace 的唯一出口，避免双计数 */
+    if (degraded) {
+        rate_dev->stats.degrade_count++;
+        /* R-14 方向 3：event_value=当前速率(bytes/s)，status=降级判定
+         * 阈值速率，lba 复用承载降级基线速率——消费侧据此判定降级幅度
+         * drop_pct=(baseline-current)*100/baseline。降级事件无 SCSI
+         * 命令上下文（srb=NULL），opcode/bytes/retry 置 0。 */
+        vendor_lechao_usbd_record_last_event_locked(rate_dev, NULL,
+            degrade_baseline,
+            VENDOR_LECHAO_USBD_EVENT_RATE_DEGRADED,
+            (u32)rate_dev->stats.current_rate, (s32)degrade_threshold,
+            VENDOR_LECHAO_USBD_DIR_NONE);
+        vendor_lechao_usbd_event_push(rate_dev, NULL, degrade_baseline,
+            VENDOR_LECHAO_USBD_EVENT_RATE_DEGRADED,
+            (u32)rate_dev->stats.current_rate, (s32)degrade_threshold,
+            VENDOR_LECHAO_USBD_DIR_NONE);
+    }
+
+    rate_dev->last_transport_latency_ns = elapsed_ns;
+    rate_dev->stats.last_transport_latency_ns = elapsed_ns;
+
+    rate_dev->stats.last_update = lcview_ts_mono_ns();
+    rate_dev->last_transport_error = false;
+
+    if (degraded_out)
+        *degraded_out = degraded;
+    if (degrade_baseline_out)
+        *degrade_baseline_out = degrade_baseline;
+    if (degrade_threshold_out)
+        *degrade_threshold_out = degrade_threshold;
+}
+
+/*
  * vendor_lechao_usbd_handle_event — 核心 notifier 回调，处理所有传输事件
  * @nb:    通知块（container_of 获取 rate_dev）
  * @event: 事件类型（见 usb_stor_notifier_event 枚举）
@@ -651,11 +795,12 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
     struct usb_stor_notifier_data *nd = data;
     struct scsi_cmnd *srb = nd ? nd->srb : NULL;
     unsigned long flags;
-    u64 bytes = 0;
     u64 elapsed_ns = 0;
     bool degraded = false;
-    /* R-14 方向 3：RATE_DEGRADED 携带的降级基线/阈值速率（bytes/s），
-     * 由瞬时判定或滑动窗口判定回填，供事件语义使用 */
+    /* R-14 方向 3：RATE_DEGRADED 携带的降级基线/阈值速率（bytes/s）。
+     * 由 vendor_lechao_usbd_transport_end_locked 经出参回填（原 TRANSPORT_END
+     * 分支的瞬时/滑动窗口判定移入共用函数后，record/event_push 已在锁内完成，
+     * 本处仅经出参透传，供后续 trace 扩展使用）。 */
     u64 degrade_baseline = 0;
     u64 degrade_threshold = 0;
     struct {
@@ -755,8 +900,6 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
         break;
 
     case USB_STOR_NOTIFIER_TRANSPORT_END:
-        trace.dir = srb ? vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction) : 0;
-
         /* R-16 P4 方向 1：START/END 合并为单次带 duration_ns 的 END——
          * usb-storage 核心侧已测得传输耗时并填充 nd->duration_ns，删除
          * 原 transport_start_time fallback（START notifier 已停发，
@@ -764,91 +907,15 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
         elapsed_ns = nd ? nd->duration_ns : 0;
         trace.was_error = rate_dev->last_transport_error ? 1 : 0;
 
-        if (srb && !rate_dev->last_transport_error) {
-            bytes = scsi_bufflen(srb) - scsi_get_resid(srb);
-
-            if (srb->sc_data_direction == DMA_FROM_DEVICE) {
-                rate_dev->stats.read_bytes += bytes;
-                rate_dev->stats.read_ns += elapsed_ns;
-                rate_dev->stats.read_cmds++;
-            } else if (srb->sc_data_direction == DMA_TO_DEVICE) {
-                rate_dev->stats.write_bytes += bytes;
-                rate_dev->stats.write_ns += elapsed_ns;
-                rate_dev->stats.write_cmds++;
-            }
-
-            {
-                u64 prev_rate = rate_dev->stats.current_rate;
-                u64 prev_latency = rate_dev->last_transport_latency_ns;
-
-                vendor_lechao_usbd_update_current_rate_locked(rate_dev, bytes, elapsed_ns);
-
-                /*
-                 * KRN-005：瞬时判定加 10% 幅度阈值。原实现任意幅度下降/
-                 * 上升即 degraded，而 USB 命令速率逐条波动（±30% 正常），
-                 * 条件几乎恒真——每命令都推送 RATE_DEGRADED 事件 + trace，
-                 * I/O 洪水时 WARN 级事件挤占 ring 驱逐正常记录。
-                 * 真实降级由滑动窗口判定（1s 窗口 + 2 倍阈值）兜底，
-                 * 瞬时判定仅作快速告警，10% 阈值过滤正常抖动。
-                 */
-                if (prev_rate > 0 &&
-                    rate_dev->stats.current_rate < prev_rate - prev_rate / 10) {
-                    degraded = true;
-                    degrade_baseline = prev_rate;
-                    degrade_threshold = prev_rate - prev_rate / 10;
-                }
-                if (prev_latency > 0 &&
-                    elapsed_ns > prev_latency + prev_latency / 10) {
-                    degraded = true;
-                    /* 延迟降级无速率基线，回退用上一瞬时速率作参考 */
-                    if (!degrade_baseline)
-                        degrade_baseline = prev_rate;
-                    if (!degrade_threshold)
-                        degrade_threshold = prev_rate > 0 ?
-                                            prev_rate - prev_rate / 10 : 0;
-                }
-            }
-
-            /* 滑动窗口判定结果合并入 degraded，统计/事件/trace 统一在下方单点执行 */
-            {
-                u64 w_baseline = 0;
-                u64 w_threshold = 0;
-
-                degraded = degraded ||
-                           vendor_lechao_usbd_update_degrade_context_locked(
-                               rate_dev, bytes, &w_baseline, &w_threshold);
-                if (degraded && w_baseline) {
-                    degrade_baseline = w_baseline;
-                    degrade_threshold = w_threshold;
-                }
-            }
-            trace.ev_bytes = bytes;
-            trace.ev_elapsed_ns = elapsed_ns;
-        }
-
-        /* degrade 统计/事件/trace 的唯一出口，避免双计数 */
-        if (degraded) {
-            rate_dev->stats.degrade_count++;
-            /* R-14 方向 3：event_value=当前速率(bytes/s)，status=降级判定
-             * 阈值速率，lba 复用承载降级基线速率——消费侧据此判定降级幅度
-             * drop_pct=(baseline-current)*100/baseline。降级事件无 SCSI
-             * 命令上下文（srb=NULL），opcode/bytes/retry 置 0。 */
-            vendor_lechao_usbd_record_last_event_locked(rate_dev, NULL,
-                degrade_baseline,
-                VENDOR_LECHAO_USBD_EVENT_RATE_DEGRADED,
-                (u32)rate_dev->stats.current_rate, (s32)degrade_threshold,
-                VENDOR_LECHAO_USBD_DIR_NONE);
-            vendor_lechao_usbd_event_push(rate_dev, NULL, degrade_baseline,
-                VENDOR_LECHAO_USBD_EVENT_RATE_DEGRADED,
-                (u32)rate_dev->stats.current_rate, (s32)degrade_threshold,
-                VENDOR_LECHAO_USBD_DIR_NONE);
-        }
-
-        rate_dev->last_transport_latency_ns = elapsed_ns;
-        rate_dev->stats.last_transport_latency_ns = elapsed_ns;
-
-        rate_dev->stats.last_update = lcview_ts_mono_ns();
-        rate_dev->last_transport_error = false;
+        /* 传输结束共用处理（字节累计/速率/degrade/事件推送）抽至
+         * vendor_lechao_usbd_transport_end_locked，与 UAS handler 共用；
+         * 出参供下方锁外发射 lcview trace。 */
+        vendor_lechao_usbd_transport_end_locked(rate_dev, srb, elapsed_ns,
+                                                trace.was_error, &degraded,
+                                                &degrade_baseline,
+                                                &degrade_threshold,
+                                                &trace.dir, &trace.ev_bytes,
+                                                &trace.ev_elapsed_ns);
         break;
 
     case USB_STOR_NOTIFIER_RESET:
@@ -883,6 +950,197 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
         lcview_trace_transport_end(rate_dev, srb, trace.device_index,
                                    trace.ev_bytes, trace.ev_elapsed_ns,
                                    trace.was_error);
+        if (degraded)
+            lcview_trace_rate_degraded(rate_dev, trace.device_index,
+                                       elapsed_ns);
+        break;
+    case USB_STOR_NOTIFIER_RESET:
+        lcview_trace_reset(rate_dev, trace.device_index);
+        break;
+    default:
+        break;
+    }
+
+    return NOTIFY_OK;
+}
+
+/*
+ * vendor_lechao_usbd_uas_handle_event — UAS 设备 notifier 回调入口
+ * @nb:    通知块（container_of 获取 rate_dev）
+ * @event: 事件类型（复用 usb_stor_notifier_event 枚举，见 usb.h）
+ * @data:  事件载荷（struct uas_notifier_data *）
+ *
+ * 与 BOT 的 vendor_lechao_usbd_handle_event 平行，处理 uas.c 经
+ * uas_notifier_call 发射的传输事件。与 BOT 的关键差异：
+ *   - UAS 核心侧未填 nd->duration_ns（uas_notifier_data.duration_ns 仅
+ *     TRANSPORT_END 填充的约定，本实现改由 handler 差值），TRANSPORT_END
+ *     的耗时 = lcview_ts_mono_ns() - last_uas_start_ns（TRANSPORT_START
+ *     记录的命令起始时间戳）
+ *   - TRANSPORT_END 的字节累计/速率/degrade 语义复用
+ *     vendor_lechao_usbd_transport_end_locked（与 BOT 共用，单点副作用）
+ *   - 错误类事件 data_direction 优先取 uas 侧填充的 nd->data_direction
+ *     （uas-notifier.h 已定义该字段），srb 缺失或方向为 NONE 时回退 srb 推导
+ *
+ * 【锁协议】与 BOT 一致：rate_dev->lock 保护 stats/状态位，lock 外发射
+ * lcview trace。调用上下文：atomic notifier chain（uas_notifier_call），
+ * 不可睡眠；lcview builder 用现有封装（GFP_ATOMIC 路径由现有代码保证）。
+ * 返回值：NOTIFY_OK（始终处理完成，不阻止后续 notifier）。
+ */
+int vendor_lechao_usbd_uas_handle_event(struct notifier_block *nb,
+                                unsigned long event, void *data)
+{
+    struct vendor_lechao_usbd_device *rate_dev;
+    struct uas_notifier_data *nd = data;
+    struct scsi_cmnd *srb = nd ? nd->srb : NULL;
+    unsigned long flags;
+    u64 elapsed_ns = 0;
+    int was_error = 0;
+    bool degraded = false;
+    /* degrade 基线/阈值经 transport_end_locked 出参回填（与 BOT 一致，
+     * 供后续 trace 扩展使用） */
+    u64 degrade_baseline = 0;
+    u64 degrade_threshold = 0;
+    struct {
+        int device_index;
+        int dir;
+        int result;
+        int status;
+        u64 ev_bytes;
+        u64 ev_elapsed_ns;
+    } trace = { 0 };
+
+    rate_dev = container_of(nb, struct vendor_lechao_usbd_device, nb);
+
+    if (!READ_ONCE(rate_dev->enabled))
+        return NOTIFY_DONE;
+
+    trace.device_index = rate_dev->minor;
+
+    spin_lock_irqsave(&rate_dev->lock, flags);
+
+    switch (event) {
+    case USB_STOR_NOTIFIER_TRANSPORT_START:
+        /* UAS 差值测时长：记录命令起始时间戳（mono ns），TRANSPORT_END 差值 */
+        rate_dev->last_uas_start_ns = lcview_ts_mono_ns();
+        break;
+
+    case USB_STOR_NOTIFIER_TRANSPORT_END:
+        /* UAS 核心侧未填 nd->duration_ns，由 handler 自行差值测时长
+         * （BOT 的 duration_ns 由 usb-storage 核心侧填充） */
+        if (rate_dev->last_uas_start_ns)
+            elapsed_ns = lcview_ts_mono_ns() - rate_dev->last_uas_start_ns;
+        was_error = rate_dev->last_transport_error ? 1 : 0;
+
+        /* 与 BOT 共用的传输结束处理（锁内副作用单点完成） */
+        vendor_lechao_usbd_transport_end_locked(rate_dev, srb, elapsed_ns,
+                                                was_error, &degraded,
+                                                &degrade_baseline,
+                                                &degrade_threshold,
+                                                &trace.dir, &trace.ev_bytes,
+                                                &trace.ev_elapsed_ns);
+        break;
+
+    case USB_STOR_NOTIFIER_TRANSPORT_ERROR:
+        rate_dev->stats.error_count++;
+        rate_dev->last_transport_error = true;
+        trace.dir = (nd && nd->data_direction) ? (int)nd->data_direction
+                    : (srb ? (int)vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction) : 0);
+        trace.result = nd ? nd->result : 0;
+        if (trace.dir == VENDOR_LECHAO_USBD_DIR_READ)
+            rate_dev->stats.read_error_count++;
+        else if (trace.dir == VENDOR_LECHAO_USBD_DIR_WRITE)
+            rate_dev->stats.write_error_count++;
+        vendor_lechao_usbd_record_last_event_locked(rate_dev, srb, 0,
+            VENDOR_LECHAO_USBD_EVENT_TRANSPORT_ERROR,
+            (u32)trace.result, trace.result, (u8)trace.dir);
+        vendor_lechao_usbd_event_push(rate_dev, srb, 0,
+            VENDOR_LECHAO_USBD_EVENT_TRANSPORT_ERROR,
+            (u32)trace.result, trace.result, (u8)trace.dir);
+        break;
+
+    case USB_STOR_NOTIFIER_STALL:
+        rate_dev->stats.stall_count++;
+        trace.dir = (nd && nd->data_direction) ? (int)nd->data_direction
+                    : (srb ? (int)vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction) : 0);
+        trace.status = nd ? nd->status : 0;
+        if (trace.dir == VENDOR_LECHAO_USBD_DIR_READ)
+            rate_dev->stats.read_error_count++;
+        else if (trace.dir == VENDOR_LECHAO_USBD_DIR_WRITE)
+            rate_dev->stats.write_error_count++;
+        vendor_lechao_usbd_record_last_event_locked(rate_dev, srb, 0,
+            VENDOR_LECHAO_USBD_EVENT_STALL,
+            0, trace.status, (u8)trace.dir);
+        vendor_lechao_usbd_event_push(rate_dev, srb, 0,
+            VENDOR_LECHAO_USBD_EVENT_STALL,
+            0, trace.status, (u8)trace.dir);
+        break;
+
+    case USB_STOR_NOTIFIER_TIMEOUT:
+        rate_dev->stats.timeout_count++;
+        trace.dir = (nd && nd->data_direction) ? (int)nd->data_direction
+                    : (srb ? (int)vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction) : 0);
+        trace.status = nd ? nd->status : 0;
+        if (trace.dir == VENDOR_LECHAO_USBD_DIR_READ)
+            rate_dev->stats.read_error_count++;
+        else if (trace.dir == VENDOR_LECHAO_USBD_DIR_WRITE)
+            rate_dev->stats.write_error_count++;
+        vendor_lechao_usbd_record_last_event_locked(rate_dev, srb, 0,
+            VENDOR_LECHAO_USBD_EVENT_TIMEOUT,
+            0, trace.status, (u8)trace.dir);
+        vendor_lechao_usbd_event_push(rate_dev, srb, 0,
+            VENDOR_LECHAO_USBD_EVENT_TIMEOUT,
+            0, trace.status, (u8)trace.dir);
+        break;
+
+    case USB_STOR_NOTIFIER_DATA_CORRUPT:
+        rate_dev->stats.corrupt_count++;
+        trace.dir = (nd && nd->data_direction) ? (int)nd->data_direction
+                    : (srb ? (int)vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction) : 0);
+        trace.status = nd ? nd->status : 0;
+        if (trace.dir == VENDOR_LECHAO_USBD_DIR_READ)
+            rate_dev->stats.read_error_count++;
+        else if (trace.dir == VENDOR_LECHAO_USBD_DIR_WRITE)
+            rate_dev->stats.write_error_count++;
+        vendor_lechao_usbd_record_last_event_locked(rate_dev, srb, 0,
+            VENDOR_LECHAO_USBD_EVENT_DATA_CORRUPT,
+            0, trace.status, (u8)trace.dir);
+        vendor_lechao_usbd_event_push(rate_dev, srb, 0,
+            VENDOR_LECHAO_USBD_EVENT_DATA_CORRUPT,
+            0, trace.status, (u8)trace.dir);
+        break;
+
+    case USB_STOR_NOTIFIER_RESET:
+        rate_dev->stats.reset_count++;
+        vendor_lechao_usbd_record_last_event_locked(rate_dev, NULL, 0,
+            VENDOR_LECHAO_USBD_EVENT_RESET, 0, 0, VENDOR_LECHAO_USBD_DIR_NONE);
+        vendor_lechao_usbd_event_push(rate_dev, NULL, 0,
+            VENDOR_LECHAO_USBD_EVENT_RESET, 0, 0, VENDOR_LECHAO_USBD_DIR_NONE);
+        break;
+
+    default:
+        break;
+    }
+
+    spin_unlock_irqrestore(&rate_dev->lock, flags);
+
+    switch (event) {
+    case USB_STOR_NOTIFIER_TRANSPORT_ERROR:
+        lcview_trace_transport_error(rate_dev, trace.device_index,
+                                     trace.dir, trace.result);
+        break;
+    case USB_STOR_NOTIFIER_STALL:
+        lcview_trace_stall(rate_dev, trace.device_index, trace.status);
+        break;
+    case USB_STOR_NOTIFIER_TIMEOUT:
+        lcview_trace_timeout(rate_dev, trace.device_index, trace.status);
+        break;
+    case USB_STOR_NOTIFIER_DATA_CORRUPT:
+        lcview_trace_data_corrupt(rate_dev, trace.device_index, trace.status);
+        break;
+    case USB_STOR_NOTIFIER_TRANSPORT_END:
+        lcview_trace_transport_end(rate_dev, srb, trace.device_index,
+                                   trace.ev_bytes, trace.ev_elapsed_ns,
+                                   was_error);
         if (degraded)
             lcview_trace_rate_degraded(rate_dev, trace.device_index,
                                        elapsed_ns);

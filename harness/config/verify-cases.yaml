@@ -12,6 +12,9 @@
 #   （见各 case 注释），发布前必须全量跑一轮
 # 批次方向涉及其它 case 的专项修复时按需追加（如 sepolicy 改动加
 #   lcview-sepolicy-label）
+# lciod-uas 为 UAS 打点链路专项用例（R1 维测）：板端须接入 UAS 设备
+#   （protocol==1，USB 3.x 移动硬盘/U 盘）方可判绿，无 UAS 设备判红提示
+#   重跑；仅随 UAS 专项批次/方向触发，不入常态快速回归组
 cases:
   # sepolicy 类型改名回归点（去 hal 残留）：设备节点标签须命中新类型
   # lechao_lcview_device（file_contexts 重打标，reboot 后生效），且近窗
@@ -183,8 +186,8 @@ cases:
   # L1 数据管道主用例：lciod_probe（GET_STATS ioctl 取数工具，
   # /system/bin）→ host 侧字段齐全性/数值合法性/abi_version 校验。
   # 防假绿：零设备判红（probe 空输出 exit 0，host 判红）、缺字段判红
-  # （28 字段齐全 = getStats 字段映射完整性回归点）、vendor/product
-  # 为空判红、abi_version != 3 判红（镜像副本与内核真相源漂移）。
+  # （33 字段齐全 = getStats 字段映射完整性回归点，含 R1 新增 protocol）、
+  # vendor/product 为空判红、abi_version != 3 判红（镜像副本与内核真相源漂移）。
   lciod-pipeline: 'hostcmd:"cases/lciod_check.sh --mode stats"'
 
   # L2 传输触发全链路：baseline --reset（probe --reset 归零内核计数后
@@ -202,6 +205,12 @@ cases:
     teardown:
       - 'adb shell "echo ${SNAPSHOT_0} > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
     timeout_s: 300
+
+  # R1 UAS 维测：lciod 侧 UAS 打点链路验证——板端接入 UAS 设备（USB 3.x
+  # 移动硬盘/U 盘）时，lciod_probe 能识别协议=UAS(1) 且传输统计字段齐全。
+  # 依赖 lciod_probe 输出 protocol 字段（方向6 AIDL/工具透传）。
+  # 无 UAS 设备时判红（提示接入后重跑），UAS 打点链路未验证不得假绿。
+  lciod-uas: 'hostcmd:"cases/lciod_check.sh --mode uas"'
 
   # lciod 存活综合用例：HAL/Daemon 服务 + 监控线程持续日志 + boot 完成。
   # 注意：log 判据选监控线程统计日志（"monitor: minor="，每 10s 打印），

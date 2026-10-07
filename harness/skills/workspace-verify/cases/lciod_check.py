@@ -9,7 +9,10 @@
 #
 # 模式：
 #   stats    — 校验 probe 快照：≥1 设备、abi_version==3、字段齐全、
-#              数值非负、vendor/product 非空（字段映射完整性回归点）
+#              数值非负、vendor/product 非空、protocol∈{0,1}（字段映射
+#              完整性回归点）
+#   uas      — UAS 专项（R1 维测）：要求 ≥1 设备 protocol==1（UAS 设备）
+#              且该设备传输统计字段齐全；无 UAS 设备判红提示重跑
 #   baseline — [--reset] 取快照存 --baseline（供 delta；
 #              --reset 传给设备工具归零计数，delta 断言简化为绝对值）
 #   delta    — 对比基线，--expect 字段必须严格增加（防假绿：
@@ -52,7 +55,7 @@ BASELINE_DEFAULT = _default_baseline()
 # probe 输出必须齐全的字段（与 lciod_probe.c 输出、ioctl.h v3 ABI 对齐；
 # 缺任一字段即字段映射回归，stats 模式判红）
 REQUIRED_FIELDS = [
-    "minor", "path", "vid", "pid", "vendor", "product",
+    "minor", "path", "vid", "pid", "protocol", "vendor", "product",
     "read_bytes", "write_bytes", "read_ns", "write_ns",
     "read_cmds", "write_cmds",
     "error_count", "reset_count", "probe_count",
@@ -177,6 +180,39 @@ def validate_devices(devices):
             # 监控功能禁用（enabled=0）时统计仍存在但不再更新，
             # 不断言会导致"监控被禁用仍全绿"假绿（对齐 lcview logfield 故障可见性）
             errors.append(f"{tag}: enabled={dev.get('enabled')} != 1（设备监控被禁用）")
+        # 传输协议：须为 VENDOR_LECHAO_USBD_PROTO_BOT(0)/UAS(1) 之一（ioctl.h 宏）。
+        # protocol==1 表示 UAS 设备（usb-storage uas 驱动），仅标注不强制——UAS
+        # 存在性由 uas 模式单独断言。
+        if dev.get("protocol") not in ("0", "1"):
+            errors.append(f"{tag}: protocol={dev.get('protocol')} 非法"
+                          "（须 VENDOR_LECHAO_USBD_PROTO_BOT(0)/UAS(1)）")
+    return errors
+
+
+def validate_uas_devices(devices):
+    """uas 模式校验 → 错误列表（空 = 通过）。
+
+    UAS 用例语义（R1 维测）：验证 UAS 打点链路——板端须接入 UAS 设备
+    （protocol==1，VENDOR_LECHAO_USBD_PROTO_UAS），且该设备的传输统计
+    字段（read/write/current_rate/last_transport_latency_ns 等）齐全。
+    无任何 UAS 设备即判红（提示接入 UAS 设备后重跑），防无 UAS 假绿。
+    """
+    errors = []
+    uas_devs = [d for d in devices if d.get("protocol") == "1"]
+    if not uas_devs:
+        errors.append("板上无 UAS 设备，请接入 UAS 设备后重跑")
+        return errors
+    # UAS 设备传输统计字段齐全性（read_bytes/current_rate/延迟等为打点链路
+    # 关键观测量，validate_devices 已保证 REQUIRED_FIELDS 存在，此处按 UAS
+    # 语义显式复核 + 防字段集漂移）
+    uas_fields = ("read_bytes", "read_cmds", "read_ns",
+                  "write_bytes", "write_cmds", "write_ns",
+                  "current_rate", "peak_rate", "last_transport_latency_ns")
+    for i, dev in enumerate(uas_devs):
+        tag = f"UAS device#{i}(minor={dev.get('minor', '?')})"
+        for f in uas_fields:
+            if f not in dev:
+                errors.append(f"{tag}: 缺传输统计字段 {f}（UAS 打点链路不完整）")
     return errors
 
 
@@ -379,7 +415,7 @@ def mode_perf(args):
 def main():
     ap = argparse.ArgumentParser(description="lciod 板端数据校验器（host 侧）")
     ap.add_argument("--mode", required=True,
-                    choices=["stats", "baseline", "delta", "perf"])
+                    choices=["stats", "baseline", "delta", "perf", "uas"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
@@ -407,6 +443,12 @@ def main():
     if args.mode == "stats":
         devices = parse_probe_output(run_probe())
         errors = validate_devices(devices)
+    elif args.mode == "uas":
+        # UAS 专项：先按 stats 全字段校验（复用 validate_devices，协议范围
+        # 已在其中校验），再断言 ≥1 UAS 设备且其传输统计字段齐全
+        devices = parse_probe_output(run_probe())
+        errors = validate_devices(devices)
+        errors += validate_uas_devices(devices)
     elif args.mode == "baseline":
         probe_args = ["--reset"] if args.reset else []
         devices = parse_probe_output(run_probe(probe_args))

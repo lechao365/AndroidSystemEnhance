@@ -37,6 +37,7 @@
 
 #include "lciod_usbd.h"
 #include "lciod_read_logic.h"
+#include "uas-notifier.h"
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/usb.h>
@@ -572,6 +573,8 @@ struct vendor_lechao_usbd_device *vendor_lechao_usbd_device_alloc(struct us_data
 
     rate_dev->minor = minor;
     rate_dev->us = us;
+    rate_dev->devinfo = NULL;
+    rate_dev->protocol = VENDOR_LECHAO_USBD_PROTO_BOT;
     rate_dev->nb.notifier_call = vendor_lechao_usbd_handle_event;
     rate_dev->removing = false;
     rate_dev->enabled = true;
@@ -584,6 +587,7 @@ struct vendor_lechao_usbd_device *vendor_lechao_usbd_device_alloc(struct us_data
     kref_init(&rate_dev->kref);
     rate_dev->stats.enabled = rate_dev->config.enabled;
     rate_dev->stats.flags = rate_dev->config.flags;
+    rate_dev->stats.protocol = VENDOR_LECHAO_USBD_PROTO_BOT;
     rate_dev->stats.probe_count = 1;
     atomic64_set(&rate_dev->event_drop_cnt, 0);
     rate_dev->last_degrade_window_start = 0;
@@ -636,6 +640,126 @@ struct vendor_lechao_usbd_device *vendor_lechao_usbd_device_alloc(struct us_data
 }
 
 /*
+ * vendor_lechao_usbd_uas_device_alloc — 分配并初始化 UAS per-device 结构体
+ *
+ * 与 vendor_lechao_usbd_device_alloc 平行：
+ *   1. kzalloc 分配零初始化结构体
+ *   2. ida_alloc_max 分配次设备号（0~15）
+ *   3. 初始化字段：devinfo 指针、notifier 回调（uas_handle_event）、
+ *      自旋锁、wq、kref
+ *   4. protocol 恒为 VENDOR_LECHAO_USBD_PROTO_UAS
+ *
+ * 【VID/PID/vendor/product 占位方案（关键决策）】
+ *   devinfo 是不透明类型（struct uas_dev_info 只在 uas.c 定义），本驱动
+ *   无法解引用取得 USB 描述符，且 uas-notifier.h 未承载设备标识字段。
+ *   故 UAS alloc 时 stats.vid/pid 填 0、vendor/product 填 "UAS" 占位。
+ *   后续如需真实标识，可由 uas.c 扩展 uas_notifier_data（或厂商通知链
+ *   data）承载 vid/pid/vendor/product 后在本函数填充。
+ *
+ * 【无存活复查的原因】
+ *   BOT alloc 末尾有 NOTATTACHED 存活复查（us_data 公开、可查状态）；UAS
+ *   devinfo 不透明无法查状态。调用方（scan / PROBE notifier）均依赖"接口
+ *   已绑定 uas 驱动"即 uas_probe 已完成的事实，生命周期由 usb 层保证，
+ *   与 BOT 的 us_data 同理（见 vendor_lechao_usbd_usb_dev_scan 注释）。
+ */
+struct vendor_lechao_usbd_device *vendor_lechao_usbd_uas_device_alloc(struct uas_dev_info *devinfo)
+{
+    struct vendor_lechao_usbd_device *rate_dev;
+    int minor;
+
+    rate_dev = kzalloc(sizeof(*rate_dev), GFP_KERNEL);
+    if (!rate_dev)
+        return ERR_PTR(-ENOMEM);
+
+    minor = ida_alloc_max(&vendor_lechao_usbd_ida, VENDOR_LECHAO_USBD_MAX_DEVICES - 1,
+                          GFP_KERNEL);
+    if (minor < 0) {
+        kfree(rate_dev);
+        return ERR_PTR(minor);
+    }
+
+    rate_dev->minor = minor;
+    rate_dev->us = NULL;
+    rate_dev->devinfo = devinfo;
+    rate_dev->protocol = VENDOR_LECHAO_USBD_PROTO_UAS;
+    rate_dev->nb.notifier_call = vendor_lechao_usbd_uas_handle_event;
+    rate_dev->removing = false;
+    rate_dev->enabled = true;
+    rate_dev->config.enabled = 1;
+    memset(rate_dev->config.reserved, 0, sizeof(rate_dev->config.reserved));
+    rate_dev->config.flags = 0;
+    spin_lock_init(&rate_dev->lock);
+    spin_lock_init(&rate_dev->event_lock);
+    init_waitqueue_head(&rate_dev->event_wq);
+    kref_init(&rate_dev->kref);
+    rate_dev->stats.enabled = rate_dev->config.enabled;
+    rate_dev->stats.flags = rate_dev->config.flags;
+    rate_dev->stats.protocol = VENDOR_LECHAO_USBD_PROTO_UAS;
+    rate_dev->stats.probe_count = 1;
+    atomic64_set(&rate_dev->event_drop_cnt, 0);
+    rate_dev->last_degrade_window_start = 0;
+    rate_dev->stats.last_event_type = VENDOR_LECHAO_USBD_EVENT_NONE;
+
+    /* UAS 设备标识暂缺：vid/pid 填 0，vendor/product 填 "UAS" 占位
+     * （devinfo 不透明无法读取 USB 描述符，见上方占位方案说明） */
+    rate_dev->stats.vid = 0;
+    rate_dev->stats.pid = 0;
+    strscpy(rate_dev->stats.vendor, "UAS", sizeof(rate_dev->stats.vendor));
+    strscpy(rate_dev->stats.product, "UAS", sizeof(rate_dev->stats.product));
+
+    return rate_dev;
+}
+
+/*
+ * vendor_lechao_usbd_device_match — 按 protocol 分流比较设备句柄
+ * @d:      设备链表中的实例
+ * @handle: 待匹配句柄（BOT 为 struct us_data *，UAS 为 struct uas_dev_info *）
+ *
+ * BOT 设备比较 d->us == handle，UAS 设备比较 d->devinfo == handle。
+ * 供 usb_dev_scan 与 vendor notifier（BOT/UAS）PROBE/DISCONNECT 查重复用。
+ * 调用上下文：不限（纯比较，无副作用）。
+ */
+static bool vendor_lechao_usbd_device_match(
+    struct vendor_lechao_usbd_device *d, const void *handle)
+{
+    if (d->protocol == VENDOR_LECHAO_USBD_PROTO_UAS)
+        return d->devinfo == handle;
+    return d->us == handle;
+}
+
+/*
+ * vendor_lechao_usbd_notifier_register — 按 protocol 分流注册传输 notifier
+ * @rate_dev: 已分配的设备实例
+ *
+ * BOT 注册到 us_data->notifier（us_data 公开，直接 atomic_notifier_chain_register）；
+ * UAS 走 uas-notifier API（uas_dev_info 不透明，必须经 uas_notifier_register
+ * 委托到 devinfo 内嵌链）。
+ * 调用上下文：进程上下文。
+ * 返回值：0 成功；负 errno（与 BOT 的 atomic_notifier_chain_register 一致）。
+ */
+static int vendor_lechao_usbd_notifier_register(struct vendor_lechao_usbd_device *rate_dev)
+{
+    if (rate_dev->protocol == VENDOR_LECHAO_USBD_PROTO_UAS)
+        return uas_notifier_register(rate_dev->devinfo, &rate_dev->nb);
+    return atomic_notifier_chain_register(&rate_dev->us->notifier, &rate_dev->nb);
+}
+
+/*
+ * vendor_lechao_usbd_notifier_unregister — 按 protocol 分流注销传输 notifier
+ * @rate_dev: 目标设备实例
+ *
+ * 与 vendor_lechao_usbd_notifier_register 对称（BOT 直连 us_data->notifier，
+ * UAS 走 uas_notifier_unregister）。
+ */
+static void vendor_lechao_usbd_notifier_unregister(struct vendor_lechao_usbd_device *rate_dev)
+{
+    if (rate_dev->protocol == VENDOR_LECHAO_USBD_PROTO_UAS)
+        uas_notifier_unregister(rate_dev->devinfo, &rate_dev->nb);
+    else
+        atomic_notifier_chain_unregister(&rate_dev->us->notifier, &rate_dev->nb);
+}
+
+/*
  * vendor_lechao_usbd_device_add_to_list — 注册设备到全局列表
  *
  * 执行以下有序步骤（任何一步失败都回滚前序操作）：
@@ -660,12 +784,14 @@ int vendor_lechao_usbd_device_add_to_list(struct vendor_lechao_usbd_device *rate
 {
     int ret;
 
-    ret = atomic_notifier_chain_register(&rate_dev->us->notifier, &rate_dev->nb);
+    /* 按 protocol 分流注册传输 notifier：BOT 直连 us_data->notifier，
+     * UAS 走 uas_notifier_register（devinfo 不透明） */
+    ret = vendor_lechao_usbd_notifier_register(rate_dev);
     if (ret)
     {
         /*
-         * 返回值检查：-EEXIST 表示 us_data 上已注册同名 notifier（重复 PROBE
-         * 或 us_data 异常复用），本设备未注册成功，无资源可回滚，直接上报。
+         * 返回值检查：-EEXIST 表示 us_data/devinfo 上已注册同名 notifier（重复 PROBE
+         * 或 us_data/devinfo 异常复用），本设备未注册成功，无资源可回滚，直接上报。
          */
         pr_err(PREFIX "notifier_chain_register failed: %d\n", ret);
         kref_put(&rate_dev->kref, vendor_lechao_usbd_device_release);
@@ -677,7 +803,7 @@ int vendor_lechao_usbd_device_add_to_list(struct vendor_lechao_usbd_device *rate
     ret = cdev_add(&rate_dev->cdev, MKDEV(vendor_lechao_usbd_major, rate_dev->minor), 1);
     if (ret) {
         pr_err(PREFIX "cdev_add failed: %d\n", ret);
-        atomic_notifier_chain_unregister(&rate_dev->us->notifier, &rate_dev->nb);
+        vendor_lechao_usbd_notifier_unregister(rate_dev);
         kref_put(&rate_dev->kref, vendor_lechao_usbd_device_release);
         return ret;
     }
@@ -689,7 +815,7 @@ int vendor_lechao_usbd_device_add_to_list(struct vendor_lechao_usbd_device *rate
         ret = PTR_ERR(rate_dev->dev);
         pr_err(PREFIX "device_create failed: %d\n", ret);
         cdev_del(&rate_dev->cdev);
-        atomic_notifier_chain_unregister(&rate_dev->us->notifier, &rate_dev->nb);
+        vendor_lechao_usbd_notifier_unregister(rate_dev);
         kref_put(&rate_dev->kref, vendor_lechao_usbd_device_release);
         return ret;
     }
@@ -728,7 +854,7 @@ static void __maybe_unused vendor_lechao_usbd_device_remove(struct vendor_lechao
     WRITE_ONCE(rate_dev->removing, true);
     mutex_unlock(&vendor_lechao_usbd_mutex);
 
-    atomic_notifier_chain_unregister(&rate_dev->us->notifier, &rate_dev->nb);
+    vendor_lechao_usbd_notifier_unregister(rate_dev);
     device_destroy(vendor_lechao_usbd_class, MKDEV(vendor_lechao_usbd_major, rate_dev->minor));
     cdev_del(&rate_dev->cdev);
     kref_put(&rate_dev->kref, vendor_lechao_usbd_device_release);
@@ -774,7 +900,7 @@ static int vendor_lechao_usbd_vendor_notifier(struct notifier_block *nb,
 
         mutex_lock(&vendor_lechao_usbd_mutex);
         list_for_each_entry(pos, &vendor_lechao_usbd_devices, list) {
-            if (pos->us == us) {
+            if (vendor_lechao_usbd_device_match(pos, us)) {
                 found = true;
                 break;
             }
@@ -798,7 +924,7 @@ static int vendor_lechao_usbd_vendor_notifier(struct notifier_block *nb,
         mutex_lock(&vendor_lechao_usbd_mutex);
         found = false;
         list_for_each_entry(pos, &vendor_lechao_usbd_devices, list) {
-            if (pos->us == us) {
+            if (vendor_lechao_usbd_device_match(pos, us)) {
                 found = true;
                 break;
             }
@@ -827,7 +953,7 @@ static int vendor_lechao_usbd_vendor_notifier(struct notifier_block *nb,
 
         mutex_lock(&vendor_lechao_usbd_mutex);
         list_for_each_entry(pos, &vendor_lechao_usbd_devices, list) {
-            if (pos->us == us) {
+            if (vendor_lechao_usbd_device_match(pos, us)) {
                 unsigned long flags;
 
                 spin_lock_irqsave(&pos->lock, flags);
@@ -845,8 +971,7 @@ static int vendor_lechao_usbd_vendor_notifier(struct notifier_block *nb,
         if (rate_dev) {
             WRITE_ONCE(rate_dev->event_shutdown, true);
             wake_up_interruptible(&rate_dev->event_wq);
-            atomic_notifier_chain_unregister(&rate_dev->us->notifier,
-                                              &rate_dev->nb);
+            vendor_lechao_usbd_notifier_unregister(rate_dev);
             device_destroy(vendor_lechao_usbd_class, MKDEV(vendor_lechao_usbd_major,
                                                    rate_dev->minor));
             cdev_del(&rate_dev->cdev);
@@ -873,27 +998,158 @@ static struct notifier_block vendor_lechao_usbd_vendor_nb = {
 };
 
 /*
+ * vendor_lechao_usbd_uas_vendor_notifier — UAS 厂商通知链回调
+ *
+ * 由 uas.c 在 UAS 设备探测/断开时经 uas_register_vendor_notifier 调用
+ * （blocking notifier chain，进程上下文），data 为 struct uas_dev_info *。
+ * 与 BOT 的 vendor_lechao_usbd_vendor_notifier 平行：
+ *   PROBE：查重（device_match）→ uas_device_alloc → add_to_list
+ *   DISCONNECT：按 devinfo 匹配移除，unregister 走 uas_notifier_unregister
+ *
+ * 双重检查（double-check）模式与 BOT 一致：mutex 外先无锁遍历快速路径，
+ * mutex 内再查重，避免 alloc/add 与 scan/notifier 并发竞态。
+ */
+static int vendor_lechao_usbd_uas_vendor_notifier(struct notifier_block *nb,
+                                         unsigned long action, void *data)
+{
+    struct uas_dev_info *devinfo = data;
+
+    LC_DBG("uas vendor notifier called, action=%lu\n", action);
+
+    switch (action) {
+    case USB_STOR_NOTIFIER_DEVICE_PROBE:
+    {
+        struct vendor_lechao_usbd_device *new_dev, *pos;
+        bool found = false;
+
+        if (!devinfo)
+            break;
+
+        mutex_lock(&vendor_lechao_usbd_mutex);
+        list_for_each_entry(pos, &vendor_lechao_usbd_devices, list) {
+            if (vendor_lechao_usbd_device_match(pos, devinfo)) {
+                found = true;
+                break;
+            }
+        }
+        mutex_unlock(&vendor_lechao_usbd_mutex);
+
+        if (found)
+            break;
+
+        /*
+         * 与 BOT 同构：alloc + add_to_list 全程持全局 mutex（add_to_list 内
+         * device_create 可睡眠，进程上下文 OK）。UAS 的 uas_disconnect 同样
+         * 经 blocking 厂商链同步调用 DISCONNECT 且在此 mutex 上等待——若
+         * PROBE 持锁期间设备拔出，devinfo 在 PROBE 释放锁前不会被
+         * uas_disconnect 释放，锁内访问安全（UAS alloc 无可复查的存活状态，
+         * devinfo 不透明，见 vendor_lechao_usbd_uas_device_alloc 注释）。
+         */
+        mutex_lock(&vendor_lechao_usbd_mutex);
+        found = false;
+        list_for_each_entry(pos, &vendor_lechao_usbd_devices, list) {
+            if (vendor_lechao_usbd_device_match(pos, devinfo)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+        {
+            new_dev = vendor_lechao_usbd_uas_device_alloc(devinfo);
+            if (IS_ERR(new_dev))
+            {
+                pr_warn(PREFIX "failed to alloc uas device: %ld\n", PTR_ERR(new_dev));
+            }
+            else
+            {
+                /* R-06 方向 2：add_to_list 失败已自释放 new_dev，仅记录告警 */
+                if (vendor_lechao_usbd_device_add_to_list(new_dev))
+                    pr_warn(PREFIX "failed to add uas device to list\n");
+            }
+        }
+        mutex_unlock(&vendor_lechao_usbd_mutex);
+        break;
+    }
+
+    case USB_STOR_NOTIFIER_DEVICE_DISCONNECT:
+    {
+        struct vendor_lechao_usbd_device *pos, *rate_dev = NULL;
+
+        mutex_lock(&vendor_lechao_usbd_mutex);
+        list_for_each_entry(pos, &vendor_lechao_usbd_devices, list) {
+            if (vendor_lechao_usbd_device_match(pos, devinfo)) {
+                unsigned long flags;
+
+                spin_lock_irqsave(&pos->lock, flags);
+                pos->stats.disconnect_count++;
+                spin_unlock_irqrestore(&pos->lock, flags);
+                wake_up_interruptible(&pos->event_wq);
+                list_del(&pos->list);
+                WRITE_ONCE(pos->removing, true);
+                rate_dev = pos;
+                break;
+            }
+        }
+        mutex_unlock(&vendor_lechao_usbd_mutex);
+
+        if (rate_dev) {
+            WRITE_ONCE(rate_dev->event_shutdown, true);
+            wake_up_interruptible(&rate_dev->event_wq);
+            vendor_lechao_usbd_notifier_unregister(rate_dev);
+            device_destroy(vendor_lechao_usbd_class, MKDEV(vendor_lechao_usbd_major,
+                                                   rate_dev->minor));
+            cdev_del(&rate_dev->cdev);
+            /* LcView: trace USB device DISCONNECT */
+            lcview_trace_disconnect(rate_dev->minor);
+            kref_put(&rate_dev->kref, vendor_lechao_usbd_device_release);
+        }
+        break;
+    }
+    }
+
+    return NOTIFY_DONE;
+}
+
+/*
+ * vendor_lechao_usbd_uas_vendor_nb — UAS 厂商通知链 notifier_block
+ *
+ * 通过 uas_register_vendor_notifier() 注册到 uas 驱动核心模块。
+ * 当 uas 探测到新的 UAS 设备或设备断开时，回调
+ * vendor_lechao_usbd_uas_vendor_notifier 处理 PROBE/DISCONNECT 事件。
+ */
+static struct notifier_block vendor_lechao_usbd_uas_vendor_nb = {
+    .notifier_call = vendor_lechao_usbd_uas_vendor_notifier,
+};
+
+/*
  * vendor_lechao_usbd_usb_dev_scan — 扫描已有 USB 存储设备
  *
  * 在模块初始化时通过 usb_for_each_dev() 遍历所有已连接的 USB 设备，
- * 为每个设备上的 usb-storage 接口创建对应的监控设备实例。
+ * 为每个设备上的 usb-storage / uas 接口创建对应的监控设备实例。
  *
  * 为什么既要有这个扫描函数，又要有 vendor notifier：
  *   vendor notifier 只处理热插拔事件（模块加载后的插入/移除）。
  *   模块加载时已经存在的 USB 存储设备不会触发 PROBE notifier，
  *   因此需要主动扫描。两者结合实现"全覆盖"：已有的 + 后续热插的。
  *
- * 为什么遍历 USB 接口而非直接匹配 us_data：
+ * 为什么遍历 USB 接口而非直接匹配句柄：
  *   usb_for_each_dev 遍历的是 struct usb_device，需要通过
- *   USB 接口的驱动名匹配 "usb-storage"。usb-storage 在 probe 时经
- *   usb_set_intfdata(intf, us) 把接口私有数据设为 us_data*，因此
- *   dev_get_drvdata(&intf->dev) 返回的就是 struct us_data*，
- *   无需再经 Scsi_Host 中转（方向 2：删除 scsi_host_get/host_to_us
- *   误用——drvdata 不是 Scsi_Host，强制转换既类型错又无谓持引用）。
+ *   USB 接口的驱动名匹配 "usb-storage" 或 "uas"：
+ *   - "usb-storage"：probe 时 usb_set_intfdata(intf, us)，drvdata 即
+ *     struct us_data*，直接取用（方向 2：删除 scsi_host_get/host_to_us
+ *     误用——BOT 的 drvdata 不是 Scsi_Host）。
+ *   - "uas"：uas.c 中 usb_set_intfdata(intf, shost)，drvdata 为
+ *     struct Scsi_Host*，devinfo 嵌于 shost->hostdata（不透明类型，
+ *     仅持指针调用 uas-notifier API）。shost 生命周期用
+ *     scsi_host_get/scsi_host_put 保护：devinfo 经 scsi_host_alloc
+ *     （sizeof(*devinfo)）与 scsi_host 同分配，持 shost 引用期间
+ *     devinfo 存活，覆盖 dedup/alloc/add_to_list 全程，防并发
+ *     disconnect 释放后 UAF。
  *
  * 为什么 check us->notifier.head：
  *   确保 us_data 的 notifier 链已经初始化，防止在关键路径上
- *   注册到未初始化的通知链。
+ *   注册到未初始化的通知链。UAS 侧无法直接看 devinfo 内嵌链头
+ *   （不透明），依赖"接口已绑定 uas 驱动"即 uas_probe 已完成初始化。
  */
 static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
 {
@@ -905,7 +1161,10 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
 
     for (i = 0; i < udev->actconfig->desc.bNumInterfaces; i++)
     {
-        struct us_data *us;
+        struct us_data *us = NULL;
+        struct uas_dev_info *devinfo = NULL;
+        struct Scsi_Host *shost = NULL;
+        const void *handle = NULL;
         struct vendor_lechao_usbd_device *pos;
         struct vendor_lechao_usbd_device *new_dev = NULL;
         bool found = false;
@@ -914,36 +1173,63 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
         if (!intf || !intf->dev.driver)
             continue;
 
-        if (strcmp(intf->dev.driver->name, "usb-storage") != 0)
+        if (strcmp(intf->dev.driver->name, "usb-storage") == 0) {
+            /* usb-storage 的 intfdata 即 us_data（probe 时 usb_set_intfdata），
+             * 直接取用，删 scsi_host_get 与 host_to_us 的类型误用（方向 2）。 */
+            us = dev_get_drvdata(&intf->dev);
+            if (!us || !us->notifier.head)
+                continue;
+            handle = us;
+        } else if (strcmp(intf->dev.driver->name, "uas") == 0) {
+            /* uas.c 中 usb_set_intfdata(intf, shost)，devinfo 在 shost->hostdata */
+            shost = dev_get_drvdata(&intf->dev);
+            if (!shost)
+                continue;
+            /* 持 shost 引用保护 devinfo（同分配，见函数头注释）；
+             * shost->hostdata 为 flexible array（unsigned long hostdata[]），
+             * 显式类型转换取首元素地址，与 uas.c 取用口径一致。 */
+            shost = scsi_host_get(shost);
+            if (!shost)
+                continue;
+            devinfo = (struct uas_dev_info *)shost->hostdata;
+            if (!devinfo) {
+                scsi_host_put(shost);
+                continue;
+            }
+            handle = devinfo;
+        } else {
             continue;
-
-        /* usb-storage 的 intfdata 即 us_data（probe 时 usb_set_intfdata），
-         * 直接取用，删 scsi_host_get 与 host_to_us 的类型误用（方向 2）。 */
-        us = dev_get_drvdata(&intf->dev);
-        if (!us || !us->notifier.head)
-            continue;
+        }
 
         mutex_lock(&vendor_lechao_usbd_mutex);
         list_for_each_entry(pos, &vendor_lechao_usbd_devices, list) {
-            if (pos->us == us) {
+            if (vendor_lechao_usbd_device_match(pos, handle)) {
                 found = true;
                 break;
             }
         }
         mutex_unlock(&vendor_lechao_usbd_mutex);
 
-        if (found)
+        if (found) {
+            if (shost)
+                scsi_host_put(shost);
             continue;
+        }
 
-        new_dev = vendor_lechao_usbd_device_alloc(us);
+        if (us)
+            new_dev = vendor_lechao_usbd_device_alloc(us);
+        else
+            new_dev = vendor_lechao_usbd_uas_device_alloc(devinfo);
         if (IS_ERR(new_dev)) {
             pr_warn(PREFIX "failed to alloc device: %ld\n", PTR_ERR(new_dev));
+            if (shost)
+                scsi_host_put(shost);
             continue;
         }
 
         mutex_lock(&vendor_lechao_usbd_mutex);
         list_for_each_entry(pos, &vendor_lechao_usbd_devices, list) {
-            if (pos->us == us) {
+            if (vendor_lechao_usbd_device_match(pos, handle)) {
                 found = true;
                 break;
             }
@@ -956,6 +1242,9 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
             kref_put(&new_dev->kref, vendor_lechao_usbd_device_release);
         }
         mutex_unlock(&vendor_lechao_usbd_mutex);
+
+        if (shost)
+            scsi_host_put(shost);
     }
     return 0;
 }
@@ -966,11 +1255,12 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
  * 执行以下初始化序列：
  *   1. alloc_chrdev_region：动态分配 16 个字符设备号（主设备号自动分配）
  *   2. class_create：创建 sysfs class，配合 devtmpfs 自动创建设备节点
- *   3. 设置 devnode 权限为 0666
- *   4. usb_stor_register_vendor_notifier：注册厂商通知链
- *   5. usb_for_each_dev：扫描所有已存在的 USB 存储设备
+ *   3. 设置 devnode 权限为 0600（R-08 方向 1，见 vendor_lechao_usbd_devnode）
+ *   4. usb_stor_register_vendor_notifier：注册 BOT 厂商通知链
+ *   5. uas_register_vendor_notifier：注册 UAS 厂商通知链
+ *   6. usb_for_each_dev：扫描所有已存在的 USB 存储设备（usb-storage + uas）
  *
- * 为什么步骤 4 和 5 的先后顺序如此重要：
+ * 为什么步骤 4~6 的先后顺序如此重要：
  *   先注册 notifier，再扫描已有设备。这样当扫描过程中有新的
  *   设备插入，notifier 可以捕获到。如果反过来，notifier 注册前
  *   插入的设备会丢失。扫描时的双重检查机制防止了重复注册。
@@ -1008,6 +1298,16 @@ static int __init vendor_lechao_usbd_monitor_init(void)
         return ret;
     }
 
+    ret = uas_register_vendor_notifier(&vendor_lechao_usbd_uas_vendor_nb);
+    if (ret) {
+        usb_stor_unregister_vendor_notifier(&vendor_lechao_usbd_vendor_nb);
+        class_destroy(vendor_lechao_usbd_class);
+        unregister_chrdev_region(MKDEV(vendor_lechao_usbd_major, 0),
+                                  VENDOR_LECHAO_USBD_MAX_DEVICES);
+        pr_err(PREFIX "failed to register uas vendor notifier\n");
+        return ret;
+    }
+
     usb_for_each_dev(NULL, vendor_lechao_usbd_usb_dev_scan);
 
     pr_info(PREFIX "vendor patch v1.3 loaded, major=%d\n", vendor_lechao_usbd_major);
@@ -1039,6 +1339,7 @@ static void __exit vendor_lechao_usbd_monitor_exit(void)
     struct vendor_lechao_usbd_device *pos;
 
     usb_stor_unregister_vendor_notifier(&vendor_lechao_usbd_vendor_nb);
+    uas_unregister_vendor_notifier(&vendor_lechao_usbd_uas_vendor_nb);
 
     mutex_lock(&vendor_lechao_usbd_mutex);
     while (!list_empty(&vendor_lechao_usbd_devices)) {
@@ -1055,7 +1356,9 @@ static void __exit vendor_lechao_usbd_monitor_exit(void)
 
     while (count > 0) {
         struct vendor_lechao_usbd_device *rate_dev = devs[--count];
-        atomic_notifier_chain_unregister(&rate_dev->us->notifier, &rate_dev->nb);
+        /* 按 protocol 分流注销传输 notifier（BOT 直连 us_data->notifier，
+         * UAS 走 uas_notifier_unregister） */
+        vendor_lechao_usbd_notifier_unregister(rate_dev);
         device_destroy(vendor_lechao_usbd_class, MKDEV(vendor_lechao_usbd_major, rate_dev->minor));
         cdev_del(&rate_dev->cdev);
         kref_put(&rate_dev->kref, vendor_lechao_usbd_device_release);

@@ -122,6 +122,7 @@ uint64_t ComputeErrorRate(uint64_t errorCount, uint64_t ioCount) {
 void ProjectSystemIoStats(const aidl::vendor::lechao::lciod::IoStats& vstats,
                           aidl::system::lechao::lciod::IoStats* out) {    out->vid = vstats.vid;
     out->pid = vstats.pid;
+    out->protocol = vstats.protocol;   /* R1 UAS 维测：传输协议直传（BOT=0/UAS=1） */
     out->vendor = vstats.vendor;
     out->product = vstats.product;
     out->readBytes = vstats.readBytes;

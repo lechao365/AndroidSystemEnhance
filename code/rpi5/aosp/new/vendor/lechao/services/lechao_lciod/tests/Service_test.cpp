@@ -4,7 +4,7 @@
 // 拦截：CXX-002（除零/边界）——getAverageRate 与监控线程速率换算
 // 的公式收敛到 ComputeAverageRate/ComputeKbRate 纯函数（service.h），
 // 在无 binder 环境依赖下验证除零防护与数值正确性。
-// 注：字段投影完整性（getIoStats 21 字段直传/4 字段省略）依赖真实
+// 注：字段投影完整性（getIoStats 24 字段直传/管理字段省略）依赖真实
 // HAL，由上板 lciod-pipeline 用例兜底，此处不重复。
 // ============================================================
 
@@ -102,12 +102,13 @@ TEST(ComputeWindowKbRateTest, CounterWrap_FallsBackToCumulative)
               ComputeKbRate(1048576, 1000000000ULL));
 }
 
-/* --- 字段投影：vendor → system（23 字段直传 + 管理字段省略） --- */
+/* --- 字段投影：vendor → system（24 字段直传 + 管理字段省略） --- */
 
-TEST(ProjectionTest, IoStats_All23FieldsPassedThrough) {
+TEST(ProjectionTest, IoStats_All24FieldsPassedThrough) {
     aidl::vendor::lechao::lciod::IoStats v;
     v.vid = 0x04e8;
     v.pid = 0x6300;
+    v.protocol = 1;          // R1 UAS 维测：传输协议直传（BOT=0/UAS=1）
     v.vendor = "Samsung";
     v.product = "Flash Drive";
     v.readBytes = 1;
@@ -136,9 +137,10 @@ TEST(ProjectionTest, IoStats_All23FieldsPassedThrough) {
     aidl::system::lechao::lciod::IoStats s;
     ProjectSystemIoStats(v, &s);
 
-    // 23 字段逐一直传（字段串位/漏传在此判红）
+    // 24 字段逐一直传（字段串位/漏传在此判红）
     EXPECT_EQ(s.vid, 0x04e8);
     EXPECT_EQ(s.pid, 0x6300);
+    EXPECT_EQ(s.protocol, 1);
     EXPECT_EQ(s.vendor, "Samsung");
     EXPECT_EQ(s.product, "Flash Drive");
     EXPECT_EQ(s.readBytes, 1);
@@ -172,6 +174,7 @@ TEST(ProjectionTest, IoStats_SourceZeroFields_DefaultOut) {
     ProjectSystemIoStats(v, &s);
     EXPECT_EQ(s.readBytes, 0);
     EXPECT_EQ(s.vid, 0);
+    EXPECT_EQ(s.protocol, 0);
     EXPECT_TRUE(s.vendor.empty());
 }
 

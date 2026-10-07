@@ -11,11 +11,15 @@ kernel:
       source: rpi5-kernel-build/common/arch/arm64/configs/android_rpi5_defconfig
     - patch: kernel/modified/drivers/usb/storage/transport.c.diff
       source: rpi5-kernel-build/common/drivers/usb/storage/transport.c
+    - patch: kernel/modified/drivers/usb/storage/uas.c.diff
+      source: rpi5-kernel-build/common/drivers/usb/storage/uas.c
     - patch: kernel/modified/drivers/usb/storage/usb.c.diff
       source: rpi5-kernel-build/common/drivers/usb/storage/usb.c
     - patch: kernel/modified/drivers/usb/storage/usb.h.diff
       source: rpi5-kernel-build/common/drivers/usb/storage/usb.h
   new:
+    - patch: kernel/new/drivers/usb/storage/uas-notifier.h
+      source: rpi5-kernel-build/common/drivers/usb/storage/uas-notifier.h
     - patch: kernel/new/vendor/Kconfig
       source: rpi5-kernel-build/common/vendor/Kconfig
     - patch: kernel/new/vendor/Makefile

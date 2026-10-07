@@ -82,7 +82,7 @@ class TestEnsureConnected(unittest.TestCase):
 # 与 lciod_probe.c 输出同构的合法单行样本（vendor 含空格验证引号解析；
 # 与 ioctl.h v3 ABI 对齐：read/write_error_count + abi_version=3）
 VALID_LINE = (
-    'device minor=0 path=/dev/vendor_lechao_usbd0 vid=0x04e8 pid=0x6344 '
+    'device minor=0 path=/dev/vendor_lechao_usbd0 vid=0x04e8 pid=0x6344 protocol=0 '
     'vendor="SanDisk Corp" product="Ultra USB 3.0" '
     'read_bytes=4194304 write_bytes=1048576 read_ns=500000000 write_ns=200000000 '
     'read_cmds=64 write_cmds=16 error_count=0 reset_count=0 '
@@ -204,6 +204,52 @@ class ValidateDevicesTest(unittest.TestCase):
         line = VALID_LINE.replace("write_error_count=0", "write_error_count=2")
         errors = lc.validate_devices(_devices(line))
         self.assertTrue(any("write_error_count" in e and "!= 0" in e for e in errors))
+
+    def test_protocol_missing_is_error(self):
+        # R1 UAS：protocol 已入 REQUIRED_FIELDS，缺失判红（字段映射回归点）
+        line = VALID_LINE.replace("protocol=0 ", "")
+        errors = lc.validate_devices(_devices(line))
+        self.assertTrue(any("protocol" in e for e in errors))
+
+    def test_protocol_invalid_is_error(self):
+        # R1 UAS：protocol 仅允许 0(BOT)/1(UAS)，非法值判红
+        line = VALID_LINE.replace("protocol=0", "protocol=5")
+        errors = lc.validate_devices(_devices(line))
+        self.assertTrue(any("protocol" in e and "非法" in e for e in errors))
+
+    def test_protocol_uas_valid(self):
+        # R1 UAS：protocol=1（UAS 设备）合法，不判红（存在性由 uas 模式断言）
+        line = VALID_LINE.replace("protocol=0", "protocol=1")
+        self.assertEqual(lc.validate_devices(_devices(line)), [])
+
+
+class ValidateUasDevicesTest(unittest.TestCase):
+    """R1 UAS 维测：uas 模式（lciod-uas 用例）校验逻辑。
+
+    validate_uas_devices 要求板端存在 protocol==1 的 UAS 设备且其传输统计
+    字段齐全；无 UAS 设备判红（UAS 打点链路验证须真实接入 UAS 设备）。
+    """
+
+    def _uas_line(self):
+        return VALID_LINE.replace("protocol=0", "protocol=1")
+
+    def test_uas_present_passes(self):
+        self.assertEqual(lc.validate_uas_devices(_devices(self._uas_line())), [])
+
+    def test_no_uas_is_error(self):
+        # 仅 BOT 设备（protocol=0）→ 无 UAS 设备 → 判红
+        errors = lc.validate_uas_devices(_devices(VALID_LINE))
+        self.assertTrue(any("无 UAS 设备" in e for e in errors))
+
+    def test_empty_is_error(self):
+        errors = lc.validate_uas_devices([])
+        self.assertTrue(any("无 UAS 设备" in e for e in errors))
+
+    def test_uas_missing_transport_fields_is_error(self):
+        # UAS 设备缺传输统计字段（read_bytes 等）→ 判红
+        line = self._uas_line().replace("read_bytes=4194304 ", "")
+        errors = lc.validate_uas_devices(_devices(line))
+        self.assertTrue(any("read_bytes" in e for e in errors))
 
 
 class BaselineTest(unittest.TestCase):

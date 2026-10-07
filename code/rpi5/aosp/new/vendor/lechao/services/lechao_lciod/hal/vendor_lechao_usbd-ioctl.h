@@ -31,6 +31,16 @@
 /* ABI 版本号：必须与内核真相源保持一致 */
 #define VENDOR_LECHAO_USBD_ABI_VERSION  3
 
+/*
+ * 传输协议类型（R1 UAS 维测：零 ABI bump 扩展）
+ *
+ * 复用 stats.protocol 字节（原 reserved[0]）承载设备传输协议，结构体
+ * 大小/偏移/ABI_VERSION 均不变。BOT 为 usb-storage 驱动，UAS 为
+ * drivers/usb/storage/uas 驱动。用户态据此区分统计来源的协议栈。
+ */
+#define VENDOR_LECHAO_USBD_PROTO_BOT    0  /* Bulk-Only Transport（usb-storage 驱动） */
+#define VENDOR_LECHAO_USBD_PROTO_UAS    1  /* USB Attached SCSI（uas 驱动） */
+
 #ifdef __KERNEL__
 /* 内核态：u8/u16/u32/u64/s32/s64 由 linux/types.h 直接提供 */
 #elif !defined(U8_ALREADY_TYPEDEF)
@@ -92,7 +102,8 @@ struct vendor_lechao_usbd_stats {
 	/* --- 状态字段 --- */
 	u32 last_event_type; /* 最近一次事件类型，见 enum vendor_lechao_usbd_event_type */
 	u8  enabled;         /* 设备监控/统计功能启用标志：0=禁用，1=启用 */
-	u8  reserved[3];     /* 保留，保证 4 字节对齐 */
+	u8  protocol;        /* 标识（零 ABI bump 扩展）：传输协议，见 VENDOR_LECHAO_USBD_PROTO_*；原 reserved[0] 字节语义化 */
+	u8  reserved[2];     /* 保留，保证 4 字节对齐 */
 	u32 flags;           /* 配置标志位，保留给内核扩展使用 */
 	u64 event_drop_count;/* 累计：环形缓冲区溢出丢弃的事件数 */
 	u64 read_error_count;/* 累计（v3）：读方向错误事件次数（TRANSPORT_ERROR/STALL/TIMEOUT/DATA_CORRUPT） */
