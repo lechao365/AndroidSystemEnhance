@@ -26,6 +26,8 @@
 #include <string>
 #include <vector>
 #include "hal_client.h"
+/* R4 方向 1/2/3/5：SD 卡写 QoS 限速管理器（io_qos.h 提供纯函数 + IoQosManager） */
+#include "io_qos.h"
 
 /*
  * ComputeAverageRate — getAverageRate 的核心公式（纯函数，供单测）
@@ -163,8 +165,18 @@ public:
     ndk::ScopedAStatus readIoEvent(int32_t in_deviceMinor, int32_t in_timeoutMs,
                                    aidl::system::lechao::lciod::IoEvent* _aidl_return) override;
 
+    /*
+     * movePidToIoQosGroup — 迁移指定 pid 到 SD 卡写 QoS 限速组（lechao_bg）
+     * R4 方向 3：转发到 io_qos_.MovePidToGroup()；pid<=0 返回 false +
+     * ServiceSpecificError(-EINVAL)，迁移失败返回 false + -ENODEV。
+     */
+    ndk::ScopedAStatus movePidToIoQosGroup(int32_t in_pid, bool* _aidl_return) override;
+
 private:
     IoHalClient hal_client_; /* HAL Binder 客户端封装 */
+
+    /* R4 方向 1：SD 卡写 QoS 限速管理器（周期线程由 start() detach 启动） */
+    lechao::lciod::IoQosManager io_qos_;
 
     /*
      * start_monitor — 启动 per-minor 分片监控线程池

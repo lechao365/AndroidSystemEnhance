@@ -55,4 +55,13 @@ interface IIoService {
      *   errno 相反，调用方判等时注意符号
      */
     IoEvent readIoEvent(int deviceMinor, int timeoutMs);
+
+    /*
+     * 迁移指定 pid 到 QoS 限速组（lechao_bg cgroup，R4 方向 3）
+     * 将进程加入 SD 卡写 QoS 限速组后，其块设备写带宽受 lechao_bg 档位
+     * （8MiB/s）限制。pid 非法（<=0，如负 pid / 0）或迁移失败返回 false；
+     * 错误码约定（LCD-017）：ServiceSpecificError 携带负值 errno
+     * （-EINVAL 非法 pid / -ENODEV 迁移失败）。
+     */
+    boolean movePidToIoQosGroup(int pid);
 }

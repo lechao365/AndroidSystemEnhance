@@ -13,8 +13,9 @@
 # 批次方向涉及其它 case 的专项修复时按需追加（如 sepolicy 改动加
 #   lcview-sepolicy-label）
 # lciod-uas 为 UAS 打点链路专项用例（R1 维测）：板端须接入 UAS 设备
-#   （protocol==1，USB 3.x 移动硬盘/U 盘）方可判绿，无 UAS 设备判红提示
-#   重跑；仅随 UAS 专项批次/方向触发，不入常态快速回归组
+#   （protocol==1，USB 3.x 移动硬盘/U 盘）方可判绿，无 UAS 设备记 skip
+#   （R4 方向 7：验收层 status=skip 不判红）；仅随 UAS 专项批次/方向触发，
+#   不入常态快速回归组
 cases:
   # sepolicy 类型改名回归点（去 hal 残留）：设备节点标签须命中新类型
   # lechao_lcview_device（file_contexts 重打标，reboot 后生效），且近窗
@@ -209,8 +210,30 @@ cases:
   # R1 UAS 维测：lciod 侧 UAS 打点链路验证——板端接入 UAS 设备（USB 3.x
   # 移动硬盘/U 盘）时，lciod_probe 能识别协议=UAS(1) 且传输统计字段齐全。
   # 依赖 lciod_probe 输出 protocol 字段（方向6 AIDL/工具透传）。
-  # 无 UAS 设备时判红（提示接入后重跑），UAS 打点链路未验证不得假绿。
+  # 无 UAS 设备时记 skip（R4 方向 7：lciod_check 打印 "SKIP:" 标记 exit 0，
+  # 验收层 status=skip 不判红），UAS 打点链路未验证不得假绿。
   lciod-uas: 'hostcmd:"cases/lciod_check.sh --mode uas"'
+
+  # R4 方向 6：SD 卡写 QoS 限速校验（本批新增验收 case，入 batch 验收列表）。
+  # 语义：组内 dd 写压制断言 + 组外不受限——lciod_check.py --mode qos 内部
+  # 完成 adb root / setprop sys.lechao.lciod.ioqos_level bg / 测速 / 断言：
+  #   前置 lechao_bg cgroup 组存在且限速文件非空（daemon IoQosManager 建组）；
+  #   setprop bg 后 sleep 等 daemon 1s 周期应用，cat io.max/blkio 断言 8388608；
+  #   组内：设备 shell 自迁 pid 入组（adb root 直写 cgroup.procs），dd 写
+  #     /data/local/tmp 临时文件 16MB → 速率 ≤ 12MiB/s（bg 8MiB/s 留容差）；
+  #   组外：默认 cgroup 的 dd 写同大小临时文件 → 速率 ≥ 1.5x 组内 或 ≥ 20MiB/s；
+  #   teardown（脚本 finally 兜底）：删临时文件 + setprop 清空 ioqos_level。
+  # 依赖 daemon IoQosManager 建 lechao_bg cgroup + ioqos_level sysprop 驱动。
+  # 无破坏性写守卫依赖：临时文件写 /data/local/tmp 安全路径，非裸块写。
+  # 副作用字段登记 ioqos_level sysprop（快照/恢复），timeout_s 300（含 dd
+  # 两拍测速与 daemon 周期等待）
+  lciod-qos:
+    acceptance: 'hostcmd:"cases/lciod_check.sh --mode qos"'
+    setup_snapshot:
+      - 'adb shell "getprop sys.lechao.lciod.ioqos_level"'
+    teardown:
+      - 'adb shell "setprop sys.lechao.lciod.ioqos_level ${SNAPSHOT_0}"'
+    timeout_s: 300
 
   # R3 方向 6：lcview 块设备观测用例（BlockCollector 零内核）：dd + 校验和
   # 一致性 + block stat 差分 + daemon block 日志断言（用户已确认适配：
@@ -373,6 +396,12 @@ modules:
       - lechao_lciod_hal
       - vendor.lechao.lciod.IIoHal-vintf
       - lciod_probe
+      # R4 方向 1/3/4：AIDL 新增 movePidToIoQosGroup（system.lechao.lciod-ndk
+      # 桩须重编推送新桩）。sepolicy cgroup 建组授权（vendor_file_contexts/
+      # precompiled_sepolicy）不在本模块 targets 重复登记——build 步编译 targets
+      # 并集已含 lcview 的这两个（跨模块重复 config 检查判红），仅在本模块
+      # push 段登记推送（同 lcview 先例）
+      - system.lechao.lciod-ndk
     # 测试 target（AGENTS.md 强制四个 test target 含 lcview 两个，
     # tests/Android.bp 定义）
     test_targets:
@@ -411,3 +440,12 @@ modules:
       - module: system.lechao.lciod-ndk
         dst:
           - /system/lib64/system.lechao.lciod-ndk.so
+      # R4 方向 4：sepolicy cgroup 建组写授权（lechao_lciod.te 新增 allow），
+      # vendor_file_contexts/precompiled_sepolicy 手工推送——同 lcview 先例
+      # （2026-09-15），清刷不推必炸，须登记
+      - module: vendor_file_contexts
+        dst:
+          - /vendor/etc/selinux/vendor_file_contexts
+      - module: precompiled_sepolicy
+        dst:
+          - /vendor/etc/selinux/precompiled_sepolicy

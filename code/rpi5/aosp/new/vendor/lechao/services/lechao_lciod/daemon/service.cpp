@@ -234,6 +234,11 @@ void IoServiceImpl::start() {
      * 全局节点 /dev/vendor_lechao_usbd_link（lciod_link），非 per-device
      * 通道；线程随进程生命周期终止（进程非 oneshot，init 自动重启）。 */
     std::thread(::lechao::lciod::LinkMonitorRun).detach();
+    /* R4 方向 1：启动 SD 卡写 QoS 周期限速线程（IoQosManager::RunLoop，detach）。
+     * 每 1s 绝对时间对齐轮询 ioqos_level/ioqos_dev sysprop 并幂等应用限速
+     * （仿 LinkMonitorRun 单调时钟范式）；stop_ 退出标志仅供单测/析构使用，
+     * 生产线程随进程生命周期终止（进程非 oneshot，init 自动重启）。 */
+    std::thread(&lechao::lciod::IoQosManager::RunLoop, &io_qos_).detach();
 }
 
 /*
@@ -339,6 +344,27 @@ ndk::ScopedAStatus IoServiceImpl::readIoEvent(int32_t in_deviceMinor, int32_t in
     auto status = hal->readEvent(in_deviceMinor, timeoutMs, &vev);
     if (!status.isOk()) { LC_ALOGW("readIoEvent: readEvent failed"); return status; }
     ProjectSystemIoEvent(vev, _aidl_return);
+    return ndk::ScopedAStatus::ok();
+}
+
+/*
+ * movePidToIoQosGroup — 迁移指定 pid 到 SD 卡写 QoS 限速组（lechao_bg）
+ * R4 方向 3：转发到 io_qos_.MovePidToGroup()。
+ * 错误码约定（LCD-017）：ServiceSpecificError 携带负值 errno；
+ * 返回值 false 表示迁移未发生（非法 pid 或迁移失败）。
+ */
+ndk::ScopedAStatus IoServiceImpl::movePidToIoQosGroup(int32_t in_pid, bool* _aidl_return) {
+    *_aidl_return = false;
+    /* CXX-003：外部 pid 输入防御——pid<=0（负 pid / 0）直接拒绝 */
+    if (in_pid <= 0) {
+        LC_ALOGW("movePidToIoQosGroup: 非法 pid %d", in_pid);
+        return ndk::ScopedAStatus::fromServiceSpecificError(-EINVAL);
+    }
+    if (!io_qos_.MovePidToGroup(in_pid)) {
+        LC_ALOGW("movePidToIoQosGroup: pid=%d 迁移 lechao_bg 失败", in_pid);
+        return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV);
+    }
+    *_aidl_return = true;
     return ndk::ScopedAStatus::ok();
 }
 

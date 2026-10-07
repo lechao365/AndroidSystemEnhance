@@ -181,6 +181,10 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lciod/daemon/hal_client.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/hal_client.h
       source: aosp/vendor/lechao/services/lechao_lciod/daemon/hal_client.h
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/io_qos.cpp
+      source: aosp/vendor/lechao/services/lechao_lciod/daemon/io_qos.cpp
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/io_qos.h
+      source: aosp/vendor/lechao/services/lechao_lciod/daemon/io_qos.h
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/lechao_lciod.rc
       source: aosp/vendor/lechao/services/lechao_lciod/daemon/lechao_lciod.rc
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/link_monitor.cpp
@@ -227,6 +231,8 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lciod/tests/HalClient_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/tests/HalService_test.cpp
       source: aosp/vendor/lechao/services/lechao_lciod/tests/HalService_test.cpp
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/tests/IoQos_test.cpp
+      source: aosp/vendor/lechao/services/lechao_lciod/tests/IoQos_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/tests/MinorUtils_test.cpp
       source: aosp/vendor/lechao/services/lechao_lciod/tests/MinorUtils_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/tests/Service_test.cpp

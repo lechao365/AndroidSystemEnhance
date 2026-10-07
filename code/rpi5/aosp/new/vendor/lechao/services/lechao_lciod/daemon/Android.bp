@@ -17,6 +17,7 @@ filegroup {
         "service.cpp",
         "hal_client.cpp",
         "link_monitor.cpp",   // R2 方向 5+6：全局链路事件监控（LinkMonitor）
+        "io_qos.cpp",         // R4 方向 1/2/3/5：SD 卡写 QoS 限速（IoQosManager）
     ],
 }
 

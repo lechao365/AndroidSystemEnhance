@@ -49,3 +49,18 @@ type lciod_service, service_manager_type;
 allow lechao_lciod device:chr_file { open read write ioctl getattr };
 # 允许 daemon 搜索 /dev 目录 —— 按绝对路径打开链路节点前需遍历 /dev
 allow lechao_lciod device:dir { search read };
+
+# R4 方向 4：cgroup 建组写授权（SD 卡写 QoS 限速）
+# 允许 daemon 创建/管理 lechao_bg cgroup（v2 下 /sys/fs/cgroup/lechao_bg，
+# v1 下 /dev/blkio/lechao_bg——真机 Android v1 blkio 挂载点，标签 cgroup；
+# 单测/标准 v1 布局 <root>/blkio 同类型）：建目录、写 io.max/blkio 限速、迁 pid
+allow lechao_lciod cgroup:dir { create search rmdir add_name write setattr };
+allow lechao_lciod cgroup:file { create open read write getattr setattr };
+# v2 真实层级探测读 /sys/fs/cgroup/cgroup.controllers（标签 cgroup_v2），
+# 缺授权会 avc denied（permissive 下仅留痕，未到 enforce 不阻断——但须补齐，
+# 防后续 enforce 化）。v2 io 控制器启用时组在 /sys/fs/cgroup/lechao_bg
+allow lechao_lciod cgroup_v2:dir { create search rmdir add_name write setattr };
+allow lechao_lciod cgroup_v2:file { create open read write getattr setattr };
+# 允许读取 /sys/block/mmcblk0/dev（SD 卡 major:minor 探测，写 QoS 目标设备）
+allow lechao_lciod sysfs:dir { search open read getattr };
+allow lechao_lciod sysfs:file { open read getattr };

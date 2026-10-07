@@ -21,6 +21,7 @@ cc_test {
         "MinorUtils_test.cpp",
         "Service_test.cpp",
         "HalClient_test.cpp",
+        "IoQos_test.cpp",      // R4 方向 5：SD 卡写 QoS 限速（纯函数 + IoQosManager）
         ":lechao_lciod_daemon_sources",
     ],
     include_dirs: [

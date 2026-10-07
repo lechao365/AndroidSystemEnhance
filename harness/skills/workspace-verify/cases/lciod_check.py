@@ -12,7 +12,13 @@
 #              数值非负、vendor/product 非空、protocol∈{0,1}（字段映射
 #              完整性回归点）
 #   uas      — UAS 专项（R1 维测）：要求 ≥1 设备 protocol==1（UAS 设备）
-#              且该设备传输统计字段齐全；无 UAS 设备判红提示重跑
+#              且该设备传输统计字段齐全；无 UAS 设备记 skip（exit 0 并打印
+#              "SKIP:" 标记，由验收层转为 skip 态不判红）
+#   qos      — SD 卡写 QoS 限速校验（R4 方向 4/6）：依赖 daemon IoQosManager
+#              建 lechao_bg cgroup + ioqos_level sysprop 驱动——adb root 直写
+#              cgroup.procs 把测试进程迁入组，dd 写 /data/local/tmp 临时文件
+#              测速，断言组内 ≤ bg 上限容差、组外显著高于（≥ 1.5x 组内或
+#              ≥ 20MiB/s）；无破坏性写守卫依赖（临时文件走安全路径）
 #   link     — 全局链路节点（R2 方向 7）：/dev/vendor_lechao_usbd_link
 #              GET_LINK_STATS ioctl 快照校验——节点可打开、字段齐全、
 #              值合法、abi_version==4（连接/断开/枚举失败/过流计数）
@@ -207,17 +213,18 @@ def validate_devices(devices):
 
 
 def validate_uas_devices(devices):
-    """uas 模式校验 → 错误列表（空 = 通过）。
+    """uas 模式校验（UAS 存在性已由调用方判定）→ 错误列表（空 = 通过）。
 
-    UAS 用例语义（R1 维测）：验证 UAS 打点链路——板端须接入 UAS 设备
-    （protocol==1，VENDOR_LECHAO_USBD_PROTO_UAS），且该设备的传输统计
-    字段（read/write/current_rate/last_transport_latency_ns 等）齐全。
-    无任何 UAS 设备即判红（提示接入 UAS 设备后重跑），防无 UAS 假绿。
+    UAS 用例语义（R1 维测）：验证 UAS 打点链路——板端接入 UAS 设备
+    （protocol==1，VENDOR_LECHAO_USBD_PROTO_UAS）时，该设备的传输统计
+    字段（read/write/current_rate/last_transport_latency_ns 等）须齐全。
+    R4 方向 7：无 UAS 设备不再判红（由 --mode uas 分支记 skip），本函数
+    只在 UAS 设备存在时校验其字段完整性与打点链路（有 UAS 但字段不齐
+    仍判红，防无 UAS 假绿放宽为假绿）。
     """
     errors = []
     uas_devs = [d for d in devices if d.get("protocol") == "1"]
     if not uas_devs:
-        errors.append("板上无 UAS 设备，请接入 UAS 设备后重跑")
         return errors
     # UAS 设备传输统计字段齐全性（read_bytes/current_rate/延迟等为打点链路
     # 关键观测量，validate_devices 已保证 REQUIRED_FIELDS 存在，此处按 UAS
@@ -581,11 +588,204 @@ def mode_storm(args):
     return 0
 
 
+# ============================================================
+# R4 方向 6：SD 卡写 QoS 限速校验（--mode qos）
+# ============================================================
+
+# daemon IoQosManager 读写的 sysprop（与 io_qos.cpp 对齐）：
+#   ioqos_level 档位值 "top"/"fg"/"bg"/"off"（空视为 off）；ioqos_dev 覆盖
+#   QoS 目标设备（如 "179:0"），缺省 daemon 探测 /sys/block/mmcblk0/dev
+_QOS_LEVEL_PROP = "sys.lechao.lciod.ioqos_level"
+_QOS_DEV_PROP = "sys.lechao.lciod.ioqos_dev"
+# lechao_bg 组名 + cgroup 挂载根：v2 组在 <root>/lechao_bg（io.max 限速），
+# v1 组在 <root>/blkio/lechao_bg（blkio.throttle.write_bps_device 限速）
+_QOS_GROUP_NAME = "lechao_bg"
+_QOS_CGROUP_ROOT = "/sys/fs/cgroup"
+# bg 档限速值（IoQosManager LevelToBytesPerSec：kBg=8MiB/s=8388608），
+# setprop bg 后 cat 限速文件须含该值（v2 "wbps=8388608" / v1 "179:0 8388608"）
+_QOS_BG_BYTES = "8388608"
+# 组内 dd 写速率上限容差（bg 8MiB/s 留 1.5x 余量，允许限速引擎启动瞬态）
+_QOS_IN_GROUP_MAX_MIB = 12.0
+# 组外速率须显著高于：≥ 1.5x 组内 或 ≥ 20MiB/s（SD 卡写不受限的合理下限）
+_QOS_OUT_MIN_MIB = 20.0
+_QOS_OUT_MIN_RATIO = 1.5
+
+
+def _parse_dd_speed_mib(out):
+    """解析 dd 输出速率 → MiB/s 浮点；解析失败返回 None。
+
+    dd（toybox）stderr 格式："N bytes (N MB) copied, T s, S MB/s"。
+    以 bytes/T 复算（对 MB/s/MiB/s/GB/s 单位差异鲁棒，不依赖末尾单位）。
+    """
+    m = re.search(r"(\d+)\s+bytes.*copied,\s+([\d.]+)\s+s", out)
+    if not m:
+        return None
+    try:
+        return int(m.group(1)) / 1048576.0 / float(m.group(2))
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def _qos_cgroup_paths():
+    """探测 cgroup 版本并返回组限速文件/迁移路径字典；均不命中返回 None。
+
+    v2 判据：<root>/cgroup.controllers 存在且含 io（io.max 可用）；
+    v1 判据：<root>/blkio 目录存在 或 真机 /dev/blkio（Android v1 blkio
+            挂载点，RPi5 实测；root=/sys/fs/cgroup 时无 <root>/blkio）。
+    返回 {"version", "limit_file", "group_dir", "group_procs", "root_procs"}；
+    None 表示设备 cgroup 未启用 io 管控，调用方判红（防假绿）。
+    """
+    out, rc = adb(["shell", "cat", f"{_QOS_CGROUP_ROOT}/cgroup.controllers"])
+    if rc == 0 and "io" in out.split():
+        return {
+            "version": "v2",
+            "limit_file": f"{_QOS_CGROUP_ROOT}/{_QOS_GROUP_NAME}/io.max",
+            "group_dir": f"{_QOS_CGROUP_ROOT}/{_QOS_GROUP_NAME}",
+            "group_procs": f"{_QOS_CGROUP_ROOT}/{_QOS_GROUP_NAME}/cgroup.procs",
+            "root_procs": f"{_QOS_CGROUP_ROOT}/cgroup.procs",
+        }
+    blkio_root = None
+    out, rc = adb(["shell", "ls", "-d", f"{_QOS_CGROUP_ROOT}/blkio"])
+    if rc == 0 and out.strip():
+        blkio_root = f"{_QOS_CGROUP_ROOT}/blkio"
+    else:
+        out, rc = adb(["shell", "ls", "-d", "/dev/blkio"])
+        if rc == 0 and out.strip():
+            blkio_root = "/dev/blkio"
+    if blkio_root:
+        return {
+            "version": "v1",
+            "limit_file": f"{blkio_root}/{_QOS_GROUP_NAME}/"
+                          "blkio.throttle.write_bps_device",
+            "group_dir": f"{blkio_root}/{_QOS_GROUP_NAME}",
+            "group_procs": f"{blkio_root}/{_QOS_GROUP_NAME}/tasks",
+            "root_procs": f"{blkio_root}/tasks",
+        }
+    return None
+
+
+def _run_qos_dd(path, mb, group_procs, root_procs, timeout):
+    """设备侧 dd 写 --qos-dd-mb 到临时文件并返回速率 MiB/s。
+
+    group_procs/root_procs 非 None（组内）时：设备 shell 自迁 pid（$$）入
+    lechao_bg 组（adb root 直写 cgroup.procs/tasks）→ dd 写临时文件 →
+    自迁回根组（进程随退出离组，组不留持久态）；None（组外）时在默认
+    cgroup 跑（不受限基准）。dd 输出（2>&1 合并 stderr）经 _parse_dd_speed_mib
+    复算速率。返回：float 速率 / -1（adb 超时透传）/ None（dd 失败或速率
+    解析失败，判红防假绿）。
+    """
+    dd_cmd = f"dd if=/dev/zero of={path} bs=1M count={mb} 2>&1"
+    if group_procs:
+        # 自迁入组须先成功（写 cgroup.procs 失败即整段判红，防假压制）；
+        # dd 结束后自迁回根组，shell 退出后进程即离组
+        shell_cmd = (f'echo $$ > {group_procs} || {{ echo "MIGRATE_FAIL"; '
+                     f'exit 1; }}; {dd_cmd}; rc=$?; echo $$ > {root_procs}; '
+                     f"exit $rc")
+    else:
+        shell_cmd = dd_cmd
+    out, rc = adb(["shell", "sh", "-c", shell_cmd], timeout=timeout)
+    if rc == -1:
+        return -1  # adb 超时透传
+    if rc != 0:
+        print(f"ERROR: dd 写 {path} 失败 rc={rc}: {out.strip()[:200]}")
+        return None
+    speed = _parse_dd_speed_mib(out)
+    if speed is None:
+        print(f"ERROR: dd 速率解析失败（输出无 bytes/copied 段）: "
+              f"{out.strip()[:200]!r}")
+        return None
+    return speed
+
+
+def mode_qos(args):
+    """SD 卡写 QoS 限速校验（R4 方向 4/6，依赖 daemon IoQosManager 建组）。
+
+    前置（adb root 由 main ensure_connected 承担）：lechao_bg 组存在且
+    限速文件非空；setprop ioqos_level=bg → sleep 2（等 daemon 1s 周期应用）
+    → cat 限速文件断言含 8388608（v2 io.max / v1 blkio 限速值）。
+    组内压制：设备 shell 自迁 pid（$$）入组，dd 写 /data/local/tmp 临时
+    文件 --qos-dd-mb MB → 复算速率断言 ≤ --qos-in-max-mib（默认 12，
+    bg 8MiB/s 留 1.5x 容差）。
+    组外不受限：默认 cgroup 的 dd 写同大小临时文件 → 断言速率 ≥
+    max(--qos-out-min-mib 20, 1.5x 组内)。
+    teardown（finally 兜底）：删临时文件 + setprop ioqos_level 清空。
+    无破坏性写守卫依赖（临时文件在 /data/local/tmp 安全路径，非裸块写）。
+    判红项（防假绿）：组不存在 / 限速文件空 / setprop 失败 / 限速值未
+    生效 / dd 失败或速率解析失败 / 组内未压制 / 组外未显著高于。
+    """
+    paths = _qos_cgroup_paths()
+    if paths is None:
+        print("ERROR: 无法探测 cgroup（v2 cgroup.controllers 无 io 且 "
+              "v1 blkio 目录缺失），QoS 校验无法进行")
+        return 1
+    out, rc = adb(["shell", "ls", "-d", paths["group_dir"]])
+    if rc != 0 or not out.strip():
+        print(f"ERROR: cgroup 组 {paths['group_dir']} 不存在"
+              "（daemon IoQosManager 未建组？）")
+        return 1
+    out, rc = adb(["shell", "cat", paths["limit_file"]])
+    if rc != 0 or not out.strip():
+        print(f"ERROR: 限速文件 {paths['limit_file']} 为空或不可读"
+              "（cgroup 未配置限速？）")
+        return 1
+    print(f"cgroup 版本 {paths['version']}，限速文件当前值: {out.strip()}")
+
+    out, rc = adb(["shell", "setprop", _QOS_LEVEL_PROP, "bg"])
+    if rc == -1:
+        return -1  # adb 超时透传
+    if rc != 0:
+        print(f"ERROR: setprop {_QOS_LEVEL_PROP}=bg 失败 rc={rc}")
+        return 1
+    time.sleep(args.qos_sleep or 2)
+    out, rc = adb(["shell", "cat", paths["limit_file"]])
+    if rc != 0 or _QOS_BG_BYTES not in out:
+        print(f"ERROR: setprop bg 后限速文件无 {_QOS_BG_BYTES}"
+              f"（daemon 1s 周期未应用？当前: {out.strip()!r}）")
+        return 1
+    print(f"OK: bg 限速生效（限速文件含 {_QOS_BG_BYTES}）")
+
+    in_file = f"/data/local/tmp/lciod_qos_in_{os.getpid()}"
+    out_file = f"/data/local/tmp/lciod_qos_out_{os.getpid()}"
+    try:
+        timeout = args.dd_timeout or 300
+        in_speed = _run_qos_dd(in_file, args.qos_dd_mb, paths["group_procs"],
+                               paths["root_procs"], timeout)
+        if in_speed == -1:
+            return -1  # adb 超时透传
+        if in_speed is None:
+            return 1
+        if in_speed > args.qos_in_max_mib:
+            print(f"FAIL: 组内 dd 写速率 {in_speed:.2f} MiB/s > 上限容差 "
+                  f"{args.qos_in_max_mib:.0f} MiB/s（bg 8MiB/s 未压制）")
+            return 1
+        print(f"OK: 组内 dd 写被压制 {in_speed:.2f} MiB/s"
+              f"（≤ {args.qos_in_max_mib:.0f}）")
+
+        out_speed = _run_qos_dd(out_file, args.qos_dd_mb, None, None, timeout)
+        if out_speed == -1:
+            return -1  # adb 超时透传
+        if out_speed is None:
+            return 1
+        threshold = max(args.qos_out_min_mib, in_speed * _QOS_OUT_MIN_RATIO)
+        if out_speed < threshold:
+            print(f"FAIL: 组外 dd 写速率 {out_speed:.2f} MiB/s < "
+                  f"{threshold:.2f} MiB/s（组外未显著高于组内 {in_speed:.2f}）")
+            return 1
+        print(f"OK: 组外不受限 {out_speed:.2f} MiB/s（≥ {threshold:.2f}）")
+        print(f"OK: SD 卡写 QoS 限速校验通过（组内 {in_speed:.2f} / "
+              f"组外 {out_speed:.2f} MiB/s，{paths['version']}）")
+        return 0
+    finally:
+        # teardown：删临时文件（安全路径）+ setprop 清空 ioqos_level
+        adb(["shell", f"rm -f {in_file} {out_file}"])
+        adb(["shell", "setprop", _QOS_LEVEL_PROP, ""])
+
+
 def main():
     ap = argparse.ArgumentParser(description="lciod 板端数据校验器（host 侧）")
     ap.add_argument("--mode", required=True,
                     choices=["stats", "baseline", "delta", "perf", "uas",
-                             "link", "storm"])
+                             "link", "storm", "qos"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
@@ -597,13 +797,24 @@ def main():
     ap.add_argument("--block-dev", default="/dev/block/sda",
                     help="perf 模式 dd 读块设备路径")
     ap.add_argument("--dd-timeout", type=int, default=300,
-                    help="perf 模式 dd 执行 adb 超时（秒）")
+                    help="perf/qos 模式 dd 执行 adb 超时（秒）")
     ap.add_argument("--storm-wait", type=int, default=15,
                     help="storm 模式注入后等待秒数（等 daemon 10s tick + "
                          "规则三评估窗口）")
     ap.add_argument("--log-since", type=int, default=None,
                     help="storm 模式 logcat 抓取锚点（设备 epoch，只判锚点后 "
                          "缓冲；未给时注入前自动取设备时钟）")
+    ap.add_argument("--qos-dd-mb", type=int, default=16,
+                    help="qos 模式 dd 写临时文件大小（MB），默认 16")
+    ap.add_argument("--qos-in-max-mib", type=float, default=_QOS_IN_GROUP_MAX_MIB,
+                    help="qos 模式组内 dd 写速率上限容差（MiB/s），默认 12"
+                         "（bg 8MiB/s 留 1.5x 余量）")
+    ap.add_argument("--qos-out-min-mib", type=float, default=_QOS_OUT_MIN_MIB,
+                    help="qos 模式组外 dd 写速率下限（MiB/s），默认 20"
+                         "（另须 ≥ 1.5x 组内）")
+    ap.add_argument("--qos-sleep", type=float, default=2.0,
+                    help="qos 模式 setprop 后等待秒数（等 daemon 1s 周期应用），"
+                         "默认 2")
     args = ap.parse_args()
 
     ensure_connected()
@@ -619,6 +830,14 @@ def main():
     if args.mode == "storm":
         # R3 方向 7：风暴规则校验（用户态合成注入，不入 batch 验收列表）
         rc = mode_storm(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "qos":
+        # R4 方向 6：SD 卡写 QoS 限速校验（依赖 daemon IoQosManager cgroup）
+        rc = mode_qos(args)
         if rc == -1:
             print("ERROR: adb 执行超时")
             return 1
@@ -648,10 +867,17 @@ def main():
         devices = parse_probe_output(run_probe())
         errors = validate_devices(devices)
     elif args.mode == "uas":
-        # UAS 专项：先按 stats 全字段校验（复用 validate_devices，协议范围
-        # 已在其中校验），再断言 ≥1 UAS 设备且其传输统计字段齐全
+        # UAS 专项（R1 维测）：先按 stats 全字段校验（复用 validate_devices，
+        # 协议范围已在其中校验）——真实故障（probe 空/字段缺失/enabled=0）
+        # 保持判红 exit 1 不变；通过后单独判定 UAS 存在性（R4 方向 7）：
+        # 无 protocol==1 设备记 skip（打印 "SKIP:" 标记 exit 0，验收层转
+        # skip 态不判红）；有 UAS 设备但 validate_uas_devices 字段不齐仍
+        # exit 1（UAS 打点链路未验证不得假绿）
         devices = parse_probe_output(run_probe())
         errors = validate_devices(devices)
+        if not errors and not [d for d in devices if d.get("protocol") == "1"]:
+            print("SKIP: 板上无 UAS 设备（protocol==1）")
+            sys.exit(0)
         errors += validate_uas_devices(devices)
     elif args.mode == "baseline":
         probe_args = ["--reset"] if args.reset else []
