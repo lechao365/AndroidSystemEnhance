@@ -62,9 +62,9 @@ _DOC_SYNC_KEYS = {"match", "docs", "mode", "priority", "note"}
 
 # 契约豁免清单（方向 3）：
 #   opencode-server —— opencode 内建服务入口，不对应 harness skill；
-#   cross-device-apply / cross-device-emit —— SKILL 发布态在 opencode 侧
-#     （lc-skills-cross-device-*），harness 侧对应 cross-device/ 共享库
-#     目录（无独立 SKILL.md 属合法形态），不按"同名 skill 直配"核对；
+#   cross-device-apply / cross-device-emit —— SKILL 发布态在 opencode 侧，
+#     harness 侧对应 cross-device/ 共享库目录（无独立 SKILL.md 属合法形态），
+#     不按"同名 skill 直配"核对；
 # 新增非 skill 类 command 须在此登记并注明形态
 _EXEMPT_COMMANDS = {"opencode-server", "cross-device-apply", "cross-device-emit"}
 # skill 目录豁免（共享库目录，非 skill 契约面）

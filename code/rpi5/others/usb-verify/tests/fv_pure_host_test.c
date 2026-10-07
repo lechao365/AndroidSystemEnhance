@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <stddef.h>
 
 /* 简易断言宏：失败打印行号并置全局失败标记 */
 static int g_fail = 0;
@@ -54,6 +55,21 @@ static void test_parse_event_type(void)
     /* 未知类型 → 0xFFFFFFFF */
     CHECK(fv_parse_event_type("bogus") == 0xFFFFFFFF);
     CHECK(fv_parse_event_type("") == 0xFFFFFFFF);
+}
+
+/*
+ * test_proto_macros — 传输协议宏契约 + stats 布局守卫（R1 UAS 维测）
+ * 断言 VENDOR_LECHAO_USBD_PROTO_BOT==0 / PROTO_UAS==1，且 stats.protocol
+ * 字节紧跟 enabled（原 reserved[0] 语义化，零 ABI bump）——偏移相邻性
+ * 防未来在 enabled/protocol 间插入字段致布局漂移。
+ */
+static void test_proto_macros(void)
+{
+    CHECK(VENDOR_LECHAO_USBD_PROTO_BOT == 0);
+    CHECK(VENDOR_LECHAO_USBD_PROTO_UAS == 1);
+    /* 零 ABI bump 守卫：protocol 复用原 reserved[0]，须与 enabled 相邻 */
+    CHECK(offsetof(struct vendor_lechao_usbd_stats, protocol) ==
+          offsetof(struct vendor_lechao_usbd_stats, enabled) + 1);
 }
 
 /*
@@ -120,6 +136,14 @@ static void test_check_stats(void)
     stats.stall_count = 1;
     CHECK(fv_check_stats(&stats, &cmd, &report) == -1);
     CHECK(report.failed == 1);
+
+    /* R1 UAS：protocol 为纯标识字段，不参与阈值断言（fv_check_stats 按
+     * *_ge 字段逐个断言，非整结构 memcmp）——置 UAS 值不应改变判定 */
+    memset(&cmd, 0, sizeof(cmd));
+    memset(&stats, 0, sizeof(stats));
+    stats.protocol = VENDOR_LECHAO_USBD_PROTO_UAS;
+    CHECK(fv_check_stats(&stats, &cmd, &report) == 0);
+    CHECK(report.count == 0 && report.failed == 0);
 }
 
 /*
@@ -211,6 +235,7 @@ static void test_output_event_degrade(void)
 
 int main(void)
 {
+    test_proto_macros();
     test_parse_event_type();
     test_check_stats();
     test_check_event();

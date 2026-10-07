@@ -30,6 +30,8 @@ cc_test {
         "DaemonLoop_test.cpp",
         "DeviceReader_test.cpp",
         "MainLoop_test.cpp",
+        // R3 方向1/2/3：块设备/zram 观测纯函数单测
+        "block_collector_test.cpp",
         ":lechao_lcview_daemon_sources",
         ":lechao_lcview_device_sources",
     ],

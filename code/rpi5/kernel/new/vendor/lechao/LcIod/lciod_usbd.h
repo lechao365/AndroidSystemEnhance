@@ -16,6 +16,7 @@
  *   - vendor_lechao_usbd-stats.c：统计引擎，实现 notifier 回调和事件处理
  *   - vendor_lechao_usbd-ioctl.h：用户态共享的 ABI 定义
  *   - usb.h：usb-storage 核心头文件，定义 notifier 事件枚举和 us_data
+ *   - uas-notifier.h：UAS 驱动 notifier 接口（事件复用 usb.h 枚举）
  * ============================================================
  */
 
@@ -29,6 +30,7 @@
 #include <linux/ktime.h>
 #include <linux/wait.h>
 #include "usb.h"
+#include "uas-notifier.h"
 #include "lciod_usbd-ioctl.h"
 
 struct us_data;
@@ -55,7 +57,10 @@ struct scsi_cmnd;
  */
 struct vendor_lechao_usbd_device {
     struct list_head list;           /* 全局设备链表节点（vendor_lechao_usbd_devices） */
-    struct us_data *us;              /* 指向 usb-storage 核心的 us_data 实例，用于 notifier 注册/注销 */
+    struct us_data *us;              /* BOT 设备的 us_data 指针（UAS 设备为 NULL），用于 BOT notifier 注册/注销 */
+    struct uas_dev_info *devinfo;    /* UAS 设备的 uas_dev_info 指针（BOT 设备为 NULL），与 us 二选一；
+                                      * 不透明类型，仅持指针 + 调用 uas-notifier.h API，不解引用内部字段 */
+    u8 protocol;                     /* 传输协议标识：VENDOR_LECHAO_USBD_PROTO_BOT / _UAS（alloc 时设定后不变） */
     struct vendor_lechao_usbd_stats stats;       /* 传输统计快照（通过 lock 自旋锁保护） */
     struct vendor_lechao_usbd_config config;     /* 运行时配置（enabled/flags，通过 lock 自旋锁保护） */
     struct vendor_lechao_usbd_event last_event;  /* 最近一条异常事件记录（通过 lock 自旋锁保护） */
@@ -69,6 +74,8 @@ struct vendor_lechao_usbd_device {
                                       * R-16 P4 方向 2：per-CPU 槽读取，原 ktime_t 改 u64 ns） */
     u64 last_degrade_window_bytes;     /* 上一个 degrade 检测窗口内传输的字节数 */
     u64 last_transport_latency_ns;     /* 最近一次传输延迟（纳秒），用于 degrade 判定 */
+    u64 last_uas_start_ns;             /* UAS 差值测时长的命令起始时间戳（mono ns，TRANSPORT_START 记录，
+                                        * TRANSPORT_END 时差值得到本次耗时；BOT 设备未使用） */
     bool last_transport_error;         /* 当前传输周期内是否发生过错误（TRANSPORT_END 时检查） */
     bool removing;                     /* 设备正在被移除（READ_ONCE/WRITE_ONCE 访问，防止 open 竞态） */
     bool enabled;                      /* 监控是否启用（与 config.enabled 同步） */
@@ -108,6 +115,50 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
                                unsigned long event, void *data);
 
 /*
+ * vendor_lechao_usbd_uas_handle_event — UAS 设备 notifier 回调入口
+ * @nb:  通知块（通过 container_of 获取 rate_dev）
+ * @event: 事件类型（复用 usb_stor_notifier_event 枚举）
+ * @data:  事件载荷（struct uas_notifier_data）
+ *
+ * 与 vendor_lechao_usbd_handle_event 平行，处理 uas.c 经 uas_notifier_call
+ * 发射的传输事件。UAS 无 duration_ns 由核心侧填充，TRANSPORT_END 用
+ * last_uas_start_ns（TRANSPORT_START 记录）自行差值测时长；统计/degrade
+ * 语义复用 vendor_lechao_usbd_transport_end_locked（与 BOT 共用）。
+ * 调用上下文：原子上下文（atomic notifier chain），不可睡眠。
+ * 返回值：NOTIFY_OK 表示事件已处理。
+ */
+int vendor_lechao_usbd_uas_handle_event(struct notifier_block *nb,
+                                   unsigned long event, void *data);
+
+/*
+ * vendor_lechao_usbd_transport_end_locked — TRANSPORT_END 共用处理（BOT/UAS）
+ * @rate_dev:         目标设备实例（必须已持有 rate_dev->lock）
+ * @srb:              SCSI 命令上下文（可能为 NULL）
+ * @elapsed_ns:       本次传输耗时（纳秒）；BOT 来自 nd->duration_ns，
+ *                    UAS 由 handler 用 last_uas_start_ns 自行差值
+ * @was_error:        当前传输周期内是否发生过错误（handler 锁内由
+ *                    rate_dev->last_transport_error 计算后传入）
+ * @degraded_out:         出参：本次是否判定降级（0/1）
+ * @degrade_baseline_out: 出参：判定降级时的窗口基线速率（bytes/s），未降级为 0
+ * @degrade_threshold_out:出参：判定降级时的窗口阈值速率（bytes/s），未降级为 0
+ * @trace_dir_out:        出参：trace 所需数据方向（VENDOR_LECHAO_USBD_DIR_*）
+ * @trace_bytes_out:      出参：trace 所需本次有效字节数
+ * @trace_elapsed_out:    出参：trace 所需本次耗时（纳秒）
+ *
+ * 语义覆盖原 BOT TRANSPORT_END 分支全部副作用：字节累计、速率更新、
+ * degrade 判定（瞬时 + 滑动窗口）、degraded 的 degrade_count++/record/
+ * event_push、last_transport_latency_ns 更新、stats.last_update 更新、
+ * last_transport_error 复位。调用方在锁外根据出参复用发射 lcview trace。
+ * 调用上下文：必须持有 rate_dev->lock 自旋锁，不可睡眠。
+ */
+void vendor_lechao_usbd_transport_end_locked(
+    struct vendor_lechao_usbd_device *rate_dev,
+    struct scsi_cmnd *srb, u64 elapsed_ns, int was_error,
+    bool *degraded_out, u64 *degrade_baseline_out,
+    u64 *degrade_threshold_out, int *trace_dir_out,
+    u64 *trace_bytes_out, u64 *trace_elapsed_out);
+
+/*
  * vendor_lechao_usbd_device_release — kref 归零回调
  * @kref: 内嵌在 vendor_lechao_usbd_device 中的引用计数
  *
@@ -124,6 +175,17 @@ void vendor_lechao_usbd_device_release(struct kref *kref);
  * 调用上下文：进程上下文（可睡眠，使用 GFP_KERNEL）。
  */
 struct vendor_lechao_usbd_device *vendor_lechao_usbd_device_alloc(struct us_data *us);
+
+/*
+ * vendor_lechao_usbd_uas_device_alloc — 分配并初始化 UAS per-device 结构体
+ * @devinfo: UAS 设备实例（uas.c 的 struct uas_dev_info，不透明类型）
+ *
+ * 与 vendor_lechao_usbd_device_alloc 平行（kzalloc/ida_alloc_max/notifier
+ * 回调/锁/wq/kref 初始化）。差异点：protocol 恒为 VENDOR_LECHAO_USBD_PROTO_UAS、
+ * devinfo 不透明（VID/PID/vendor/product 暂缺，占位 "UAS"）。
+ * 调用上下文：进程上下文（可睡眠，使用 GFP_KERNEL）。
+ */
+struct vendor_lechao_usbd_device *vendor_lechao_usbd_uas_device_alloc(struct uas_dev_info *devinfo);
 
 /*
  * vendor_lechao_usbd_device_add_to_list — 注册设备到全局列表

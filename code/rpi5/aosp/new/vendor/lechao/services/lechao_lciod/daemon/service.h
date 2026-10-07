@@ -23,8 +23,11 @@
 #include <aidl/vendor/lechao/lciod/IoEvent.h>
 #include <aidl/vendor/lechao/lciod/IoStats.h>
 #include <cstdint>
+#include <string>
 #include <vector>
 #include "hal_client.h"
+/* R4 方向 1/2/3/5：SD 卡写 QoS 限速管理器（io_qos.h 提供纯函数 + IoQosManager） */
+#include "io_qos.h"
 
 /*
  * ComputeAverageRate — getAverageRate 的核心公式（纯函数，供单测）
@@ -61,6 +64,53 @@ uint64_t ComputeWindowKbRate(uint64_t currBytes, uint64_t currNs, uint64_t prevB
  *       64 位内不溢出（千分比分子需先乘再除，errorCount 用 128 位中间量）。
  */
 uint64_t ComputeErrorRate(uint64_t errorCount, uint64_t ioCount);
+
+/*
+ * StormWindow — 60s 滑动窗口累计（stall + timeout 事件计数，R3 方向4）
+ */
+struct StormWindow {
+    uint64_t stall = 0;    /* 窗口内 STALL 事件数 */
+    uint64_t timeout = 0;  /* 窗口内 timeout 事件数 */
+};
+
+/*
+ * kStormThreshold — 规则三（慢盘风暴）触发阈值（供 daemon 与单测共用）
+ * 语义: 60s 窗口内 stall+timeout 累计达该值即判定风暴，daemon 发
+ *       lechao_lciod_event 事件行。值为 10 级小常量。
+ */
+constexpr uint64_t kStormThreshold = 10;
+/* 环形桶窗口参数：每 10s 一格，6 格 = 60s 滑动窗口 */
+constexpr int kStormWindowSlots = 6;
+constexpr int kStormSlotSeconds = 10;
+constexpr int kStormWindowSeconds = kStormWindowSlots * kStormSlotSeconds;  /* 60 */
+
+/*
+ * ShouldEmitStorm — 规则三触发判定（纯函数，供单测）
+ * 语义: 60s 窗口累计 (stall+timeout) >= threshold 即触发风暴事件。
+ * 输入防御（CXX-002）: 窗口计数为 60s 内事件数（阈值 10 级），正常累计
+ *       远小于 UINT64_MAX，stall+timeout 相加不会回绕；仍先判单边达阈
+ *       短路，再求两数之和，防御式避免无符号加法回绕。
+ */
+bool ShouldEmitStorm(const StormWindow& w, uint64_t threshold);
+
+/*
+ * FaultInjectValue — 用户态合成注入解析结果（R3 方向7）
+ * @is_stall: true=注入 stall 事件；false=注入 timeout 事件
+ * @count:    注入计数 n
+ */
+struct FaultInjectValue {
+    bool is_stall = true;
+    uint64_t count = 0;
+};
+
+/*
+ * ParseFaultInjectValue — 解析注入 sysprop 值（纯函数，供单测）
+ * 格式: "stall:<n>" 或 "timeout:<n>"，n 为十进制数字（无符号）。
+ * 输入防御（CXX-003）: 前缀精确匹配 + 数字段逐字符校验（禁符号/空白/空值），
+ *       非该格式返回 false 且 out 不写入。
+ * 溢出防御（CXX-002）: n 超 uint64 上限返回 false。
+ */
+bool ParseFaultInjectValue(const std::string& val, FaultInjectValue* out);
 
 /*
  * ProjectSystemIoStats — vendor IoStats → system IoStats 字段投影（纯函数，供单测）
@@ -115,8 +165,18 @@ public:
     ndk::ScopedAStatus readIoEvent(int32_t in_deviceMinor, int32_t in_timeoutMs,
                                    aidl::system::lechao::lciod::IoEvent* _aidl_return) override;
 
+    /*
+     * movePidToIoQosGroup — 迁移指定 pid 到 SD 卡写 QoS 限速组（lechao_bg）
+     * R4 方向 3：转发到 io_qos_.MovePidToGroup()；pid<=0 返回 false +
+     * ServiceSpecificError(-EINVAL)，迁移失败返回 false + -ENODEV。
+     */
+    ndk::ScopedAStatus movePidToIoQosGroup(int32_t in_pid, bool* _aidl_return) override;
+
 private:
     IoHalClient hal_client_; /* HAL Binder 客户端封装 */
+
+    /* R4 方向 1：SD 卡写 QoS 限速管理器（周期线程由 start() detach 启动） */
+    lechao::lciod::IoQosManager io_qos_;
 
     /*
      * start_monitor — 启动 per-minor 分片监控线程池

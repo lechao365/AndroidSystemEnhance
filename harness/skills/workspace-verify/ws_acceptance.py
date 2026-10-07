@@ -9,6 +9,9 @@ daemon 卡死而进程存活时旧心跳不再判绿）；其余内容视为
 自由文本（status='ai'，由 verify AI 现场判定）。
 overall 语义（三态）：任一自动项 fail 即 fail；无 fail 但含未判定项（ai）则 ai；
 全 pass 且无 ai 才 pass（未判定不算成功）。
+R4 方向 7：hostcmd 输出含行首 "SKIP:" 标记时该项 status='skip'（如 uas
+无 UAS 设备记 skip）——skip 不在 auto 列表，天然不触发 fail/ai 分支，
+视为通过路径不判红；overall 仍三态（pass/fail/ai）。
 
 CLI:
   ws_acceptance.py run <--acceptance "<验收文本>" | --case <标签> | --batch-file <cdp>> \
@@ -243,7 +246,8 @@ def _clip_body(body, code):
 def execute_tag(tag, adb_exec, adb_logcat, host_env=None, endpoint=None):
     """adb_exec(cmd)->(body, exit_code)；adb_logcat()->str。返回 (status, detail)。
 
-    status: pass | fail | ai（自由文本由 AI 判定）；exit_code=-1 表示 adb 超时。
+    status: pass | fail | ai（自由文本由 AI 判定）| skip（hostcmd 输出含行首
+    "SKIP:" 标记，R4 方向 7——如 uas 无设备记 skip）；exit_code=-1 表示 adb 超时。
     host_env: hostcmd 分支子进程环境（方向 2 按 run_id 导出基线文件路径，
     实现轮次隔离；为 None 时沿用调用进程环境，行为不变）。
     endpoint（wsv2-02）：非空时 logfresh 的 logcat 定向 -s <endpoint>（多
@@ -427,6 +431,13 @@ def execute_tag(tag, adb_exec, adb_logcat, host_env=None, endpoint=None):
         try:
             r = subprocess.run(payload, **host_kwargs)
             body = (r.stdout + r.stderr).strip()
+            # R4 方向 7：rc==0 且输出含行首 "SKIP:" 标记 → 记 skip 态（如
+            # uas 无设备），验收层转 skip 不判红；否则保持 pass/fail 逻辑
+            if r.returncode == 0:
+                skip = next((ln for ln in body.splitlines()
+                             if ln.startswith("SKIP:")), None)
+                if skip is not None:
+                    return "skip", f"SKIP: {skip[len('SKIP:'):].strip()}"
             return ("pass" if r.returncode == 0 else "fail",
                     _exec_annotate(_clip_body(body, r.returncode), r.returncode))
         except subprocess.TimeoutExpired:
@@ -480,6 +491,9 @@ def run_acceptance(acceptance_text, adb_exec, adb_logcat, ensure_boot=False,
                       "elapsed_s": round(time.monotonic() - start, 3)})
         if on_item:
             on_item(len(items))
+    # R4 方向 7：skip 项（hostcmd 检出 "SKIP:" 标记，如 uas 无设备）不在
+    # auto 列表（pass/fail），天然不触发 fail 与 ai 分支——overall 三态
+    # （pass/fail/ai）语义不变，skip 视为通过路径（仅 skip 项时整体 pass）
     auto = [i for i in items if i["status"] in ("pass", "fail")]
     if any(i["status"] == "fail" for i in auto):
         return "fail", items

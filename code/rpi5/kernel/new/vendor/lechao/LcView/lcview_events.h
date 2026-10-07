@@ -67,7 +67,10 @@
 #define LCVIEW_EVENT_USB_DATA_CORRUPT    12 /* USB 数据损坏（来源：vendor_lechao_usbd-stats.c，
                                              * 触发场景：URB 返回 -EOVERFLOW 即 babble） */
 #define LCVIEW_EVENT_USB_RATE_DEGRADED   13 /* USB 性能降级（来源：vendor_lechao_usbd-stats.c，
-                                             * 触发场景：瞬时速率下降或延迟上升超过阈值） */
+                                              * 触发场景：瞬时速率下降或延迟上升超过阈值） */
+#define LCVIEW_EVENT_SLOW_DISK           14 /* 慢盘事件（R3 用户态 daemon 规则二合成，无内核
+                                              * 发射点——BlockCollector 写延迟持续超阈落盘，
+                                              * 见 DISABLED_EVENTS 豁免） */
 
 /* --- 记录魔数 --- */
 #define LCVIEW_MAGIC  0x4C56

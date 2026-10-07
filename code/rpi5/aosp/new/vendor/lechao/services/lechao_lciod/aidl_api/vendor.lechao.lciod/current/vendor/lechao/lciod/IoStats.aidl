@@ -29,6 +29,7 @@ package vendor.lechao.lciod;
 parcelable IoStats {
   int vid;
   int pid;
+  int protocol;
   String vendor;
   String product;
   long readBytes;

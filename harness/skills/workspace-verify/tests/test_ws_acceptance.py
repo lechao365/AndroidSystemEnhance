@@ -359,6 +359,45 @@ class TestParseAcceptance(unittest.TestCase):
         self.assertEqual(status, "fail")
         self.assertIn("ERROR: 无任何非空 jsonl", detail)
 
+    def test_hostcmd_skip_marker_returns_skip(self):
+        # R4 方向 7：hostcmd rc==0 且输出含行首 "SKIP:" 标记 → status=skip
+        #（如 uas 无 UAS 设备记 skip，验收层不判红）；detail 保留 SKIP 说明
+        fake = mock.Mock()
+        fake.returncode = 0
+        fake.stdout = "SKIP: 板上无 UAS 设备（protocol==1）\n"
+        fake.stderr = ""
+        with mock.patch.object(wa.subprocess, "run", return_value=fake):
+            status, detail = wa.execute_tag(
+                'hostcmd:"cases/lciod_check.sh --mode uas"',
+                adb_exec=None, adb_logcat=None)
+        self.assertEqual(status, "skip")
+        self.assertIn("SKIP: 板上无 UAS 设备", detail)
+
+    def test_hostcmd_skip_mid_line_not_skip(self):
+        # 行首限定：SKIP: 出现在行中部（非行首）不得当 skip 标记（防误判）
+        fake = mock.Mock()
+        fake.returncode = 0
+        fake.stdout = "record: SKIP: 字段未记录\n"
+        fake.stderr = ""
+        with mock.patch.object(wa.subprocess, "run", return_value=fake):
+            status, detail = wa.execute_tag(
+                'hostcmd:"cases/lcview_check.sh --mode files"',
+                adb_exec=None, adb_logcat=None)
+        self.assertEqual(status, "pass")
+        self.assertNotEqual(status, "skip")
+
+    def test_hostcmd_skip_requires_rc_zero(self):
+        # rc!=0 时即使输出含 "SKIP:" 也不得记 skip（命令失败仍判红）
+        fake = mock.Mock()
+        fake.returncode = 1
+        fake.stdout = "SKIP: 无设备\n"
+        fake.stderr = "ERROR: 崩溃\n"
+        with mock.patch.object(wa.subprocess, "run", return_value=fake):
+            status, detail = wa.execute_tag(
+                'hostcmd:"cases/lciod_check.sh --mode uas"',
+                adb_exec=None, adb_logcat=None)
+        self.assertEqual(status, "fail")
+
     def test_hostcmd_timeout_fails(self):
         # hostcmd 超时 → fail（detail 标注超时，与命令失败区分）
         with mock.patch.object(wa.subprocess, "run",
@@ -449,6 +488,44 @@ class TestParseAcceptance(unittest.TestCase):
                 "ignored", adb_exec=lambda c: ("1", 0), adb_logcat=lambda: "")
         self.assertEqual(overall, "ai")
         self.assertEqual([i["status"] for i in items], ["pass", "ai"])
+
+    def test_overall_skip_only_passes(self):
+        # R4 方向 7：hostcmd 检出 "SKIP:" 标记 → status=skip；只有 skip 项时
+        # overall=pass（skip 视为通过路径，overall 三态语义不变不判红）
+        fake = mock.Mock()
+        fake.returncode = 0
+        fake.stdout = "SKIP: 板上无 UAS 设备（protocol==1）\n"
+        fake.stderr = ""
+        with mock.patch.object(wa.subprocess, "run", return_value=fake):
+            overall, items = wa.run_acceptance(
+                'hostcmd:"cases/lciod_check.sh --mode uas"',
+                adb_exec=None, adb_logcat=lambda: "")
+        self.assertEqual(overall, "pass")
+        self.assertEqual([i["status"] for i in items], ["skip"])
+
+    def test_overall_skip_with_fail_fails(self):
+        # skip 项不掩盖真实 fail：skip + fail → overall=fail（fail 优先）
+        with mock.patch.object(wa, "parse_acceptance",
+                               return_value=["hostcmd:skip", "svc:nope"]), \
+                mock.patch.object(wa, "execute_tag",
+                                  side_effect=[("skip", "SKIP: 无设备"),
+                                               ("fail", "svc 不在运行")]):
+            overall, items = wa.run_acceptance(
+                "ignored", adb_exec=None, adb_logcat=None)
+        self.assertEqual(overall, "fail")
+        self.assertEqual([i["status"] for i in items], ["skip", "fail"])
+
+    def test_overall_skip_with_ai_returns_ai(self):
+        # skip + ai → ai（未判定不算成功，skip 不使 ai 降级为 pass）
+        with mock.patch.object(wa, "parse_acceptance",
+                               return_value=["hostcmd:skip", "自由文本"]), \
+                mock.patch.object(wa, "execute_tag",
+                                  side_effect=[("skip", "SKIP: 无设备"),
+                                               ("ai", "自由文本")]):
+            overall, items = wa.run_acceptance(
+                "ignored", adb_exec=None, adb_logcat=None)
+        self.assertEqual(overall, "ai")
+        self.assertEqual([i["status"] for i in items], ["skip", "ai"])
 
     def test_shlex_quote_svc_prop_file(self):
         # svc/prop/file 分支 payload 经 shlex.quote 包裹（注入防护），cmd 分支不包裹

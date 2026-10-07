@@ -26,8 +26,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-# 复用仓内共享库（同 ws_report.py 路径注入方式；依赖全部内聚于本仓 harness/，
-# 禁止引用 LcSkills/loop_core 等外部仓文件）：
+# 复用仓内共享库（同 ws_report.py 路径注入方式；依赖全部内聚于本仓 harness/）：
 # cross-device/lib/python: cdp_receipt（收据读取）/ cdp_parse（批次验收解析）/ cdp_paths（项目根）
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "lib" / "python"))
 from cdp_paths import project_root  # noqa: E402

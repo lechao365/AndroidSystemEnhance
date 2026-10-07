@@ -4,13 +4,19 @@
 // 拦截：CXX-002（除零/边界）——getAverageRate 与监控线程速率换算
 // 的公式收敛到 ComputeAverageRate/ComputeKbRate 纯函数（service.h），
 // 在无 binder 环境依赖下验证除零防护与数值正确性。
-// 注：字段投影完整性（getIoStats 21 字段直传/4 字段省略）依赖真实
+// 注：字段投影完整性（getIoStats 24 字段直传/管理字段省略）依赖真实
 // HAL，由上板 lciod-pipeline 用例兜底，此处不重复。
 // ============================================================
 
 #include <gtest/gtest.h>
 
 #include "service.h"
+/* R2 方向 5+6：规则一纯函数（供电不足归因）单测 */
+#include "link_monitor.h"
+/* 链路事件类型枚举名（单一事实源） */
+#include "vendor_lechao_usbd-ioctl.h"
+/* R2 方向 5+6：规则一纯函数位于 lechao::lciod 命名空间 */
+using lechao::lciod::ApplyPowerSuspectRule;
 
 /* --- ComputeAverageRate：getAverageRate 核心公式 --- */
 
@@ -102,12 +108,13 @@ TEST(ComputeWindowKbRateTest, CounterWrap_FallsBackToCumulative)
               ComputeKbRate(1048576, 1000000000ULL));
 }
 
-/* --- 字段投影：vendor → system（23 字段直传 + 管理字段省略） --- */
+/* --- 字段投影：vendor → system（24 字段直传 + 管理字段省略） --- */
 
-TEST(ProjectionTest, IoStats_All23FieldsPassedThrough) {
+TEST(ProjectionTest, IoStats_All24FieldsPassedThrough) {
     aidl::vendor::lechao::lciod::IoStats v;
     v.vid = 0x04e8;
     v.pid = 0x6300;
+    v.protocol = 1;          // R1 UAS 维测：传输协议直传（BOT=0/UAS=1）
     v.vendor = "Samsung";
     v.product = "Flash Drive";
     v.readBytes = 1;
@@ -136,9 +143,10 @@ TEST(ProjectionTest, IoStats_All23FieldsPassedThrough) {
     aidl::system::lechao::lciod::IoStats s;
     ProjectSystemIoStats(v, &s);
 
-    // 23 字段逐一直传（字段串位/漏传在此判红）
+    // 24 字段逐一直传（字段串位/漏传在此判红）
     EXPECT_EQ(s.vid, 0x04e8);
     EXPECT_EQ(s.pid, 0x6300);
+    EXPECT_EQ(s.protocol, 1);
     EXPECT_EQ(s.vendor, "Samsung");
     EXPECT_EQ(s.product, "Flash Drive");
     EXPECT_EQ(s.readBytes, 1);
@@ -172,6 +180,7 @@ TEST(ProjectionTest, IoStats_SourceZeroFields_DefaultOut) {
     ProjectSystemIoStats(v, &s);
     EXPECT_EQ(s.readBytes, 0);
     EXPECT_EQ(s.vid, 0);
+    EXPECT_EQ(s.protocol, 0);
     EXPECT_TRUE(s.vendor.empty());
 }
 
@@ -241,4 +250,148 @@ TEST(ComputeErrorRateTest, LargeCounters_NoOverflow) {
     // 累计计数接近 uint64 上限时 errorCount*1000 不溢出（128 位中间量）
     uint64_t big = 9000000000000000000ULL;
     EXPECT_EQ(ComputeErrorRate(big, big), 500u);
+}
+
+/* --- ShouldEmitStorm：规则三风暴触发判定（R3 方向4） --- */
+
+TEST(ShouldEmitStormTest, WindowSum_ExactlyAtThreshold_ReturnsTrue) {
+    // 窗口累计恰达阈：stall 6 + timeout 4 = 10
+    StormWindow w{6, 4};
+    EXPECT_TRUE(ShouldEmitStorm(w, 10));
+}
+
+TEST(ShouldEmitStormTest, WindowSum_AboveThreshold_ReturnsTrue) {
+    // 超阈：stall 7 + timeout 4 = 11 > 10
+    StormWindow w{7, 4};
+    EXPECT_TRUE(ShouldEmitStorm(w, 10));
+}
+
+TEST(ShouldEmitStormTest, WindowSum_BelowThreshold_ReturnsFalse) {
+    // 未达阈：stall 6 + timeout 3 = 9 < 10
+    StormWindow w{6, 3};
+    EXPECT_FALSE(ShouldEmitStorm(w, 10));
+}
+
+TEST(ShouldEmitStormTest, ZeroWindow_ReturnsFalse) {
+    // stall 0 timeout 0：无事件不触发
+    StormWindow w{0, 0};
+    EXPECT_FALSE(ShouldEmitStorm(w, 10));
+}
+
+TEST(ShouldEmitStormTest, StallOnly_AtThreshold_ReturnsTrue) {
+    // stall 大、timeout 0，stall 单边达阈 → 触发
+    StormWindow w{10, 0};
+    EXPECT_TRUE(ShouldEmitStorm(w, 10));
+}
+
+TEST(ShouldEmitStormTest, StallOnly_BelowThreshold_ReturnsFalse) {
+    // stall 9、timeout 0 → 9 < 10 不触发
+    StormWindow w{9, 0};
+    EXPECT_FALSE(ShouldEmitStorm(w, 10));
+}
+
+TEST(ShouldEmitStormTest, TimeoutOnly_AboveThreshold_ReturnsTrue) {
+    // timeout 大、stall 0，timeout 单边超阈 → 触发
+    StormWindow w{0, 20};
+    EXPECT_TRUE(ShouldEmitStorm(w, 10));
+}
+
+/* --- ParseFaultInjectValue：用户态合成注入解析（R3 方向7） --- */
+
+TEST(ParseFaultInjectValueTest, StallFormat_ReturnsCount) {
+    // "stall:20" → {is_stall=true, count=20}
+    FaultInjectValue fv;
+    EXPECT_TRUE(ParseFaultInjectValue("stall:20", &fv));
+    EXPECT_TRUE(fv.is_stall);
+    EXPECT_EQ(fv.count, 20u);
+}
+
+TEST(ParseFaultInjectValueTest, TimeoutFormat_ReturnsCount) {
+    // "timeout:7" → {is_stall=false, count=7}
+    FaultInjectValue fv;
+    EXPECT_TRUE(ParseFaultInjectValue("timeout:7", &fv));
+    EXPECT_FALSE(fv.is_stall);
+    EXPECT_EQ(fv.count, 7u);
+}
+
+TEST(ParseFaultInjectValueTest, ZeroCount_ParsesOk) {
+    FaultInjectValue fv;
+    EXPECT_TRUE(ParseFaultInjectValue("stall:0", &fv));
+    EXPECT_EQ(fv.count, 0u);
+}
+
+TEST(ParseFaultInjectValueTest, MaxUint64_ParsesOk) {
+    // uint64 上限边界值可解析
+    FaultInjectValue fv;
+    EXPECT_TRUE(ParseFaultInjectValue("stall:18446744073709551615", &fv));
+    EXPECT_EQ(fv.count, UINT64_MAX);
+}
+
+TEST(ParseFaultInjectValueTest, OverflowCount_ReturnsFalse) {
+    // 超 uint64 上限（UINT64_MAX+1）→ 溢出防御拒绝
+    FaultInjectValue fv;
+    EXPECT_FALSE(ParseFaultInjectValue("stall:18446744073709551616", &fv));
+}
+
+TEST(ParseFaultInjectValueTest, InvalidFormat_ReturnsFalse) {
+    // 非该格式一律拒绝（CXX-003 外部输入防御）
+    FaultInjectValue fv;
+    EXPECT_FALSE(ParseFaultInjectValue("foo:20", &fv));   // 未知前缀
+    EXPECT_FALSE(ParseFaultInjectValue("stall", &fv));     // 缺冒号
+    EXPECT_FALSE(ParseFaultInjectValue("stall:", &fv));    // 缺数字
+    EXPECT_FALSE(ParseFaultInjectValue("stall:1a", &fv));  // 数字后跟字母
+    EXPECT_FALSE(ParseFaultInjectValue("stall:+20", &fv)); // 符号
+    EXPECT_FALSE(ParseFaultInjectValue("stall: 20", &fv)); // 空白
+    EXPECT_FALSE(ParseFaultInjectValue("", &fv));          // 空串
+}
+
+/* --- ApplyPowerSuspectRule：供电不足归因规则一（R2 方向 5+6） --- */
+
+TEST(ApplyPowerSuspectRuleTest, Disconnect_InWindow_ThrottledNonZero_IsSuspect) {
+    // 掉线事件发生在 1s 前（5s 窗口内），throttled 非零 → 标 power_suspect
+    const uint64_t now = 2000000000000ULL;
+    EXPECT_TRUE(ApplyPowerSuspectRule(now - 1000000000ULL, now, 0x10000,
+                                      VENDOR_LECHAO_USBD_EVENT_LINK_DISCONNECT));
+}
+
+TEST(ApplyPowerSuspectRuleTest, Disconnect_OutOfWindow_NotSuspect) {
+    // 掉线事件发生在 10s 前（超 5s 窗口），即使 throttled 非零也不标
+    const uint64_t now = 2000000000000ULL;
+    EXPECT_FALSE(ApplyPowerSuspectRule(now - 10000000000ULL, now, 0x10000,
+                                       VENDOR_LECHAO_USBD_EVENT_LINK_DISCONNECT));
+}
+
+TEST(ApplyPowerSuspectRuleTest, Overcurrent_InWindow_ThrottledNonZero_IsSuspect) {
+    // 过流事件窗口内 + throttled 非零 → 标 power_suspect
+    const uint64_t now = 2000000000000ULL;
+    EXPECT_TRUE(ApplyPowerSuspectRule(now - 1000000000ULL, now, 0x1,
+                                      VENDOR_LECHAO_USBD_EVENT_LINK_OVERCURRENT));
+}
+
+TEST(ApplyPowerSuspectRuleTest, NonLinkEvent_NotSuspect) {
+    // 非链路事件（STALL）不参与供电归因，即使窗口内 throttled 非零
+    const uint64_t now = 2000000000000ULL;
+    EXPECT_FALSE(ApplyPowerSuspectRule(now - 1000000000ULL, now, 0x10000,
+                                       VENDOR_LECHAO_USBD_EVENT_STALL));
+}
+
+TEST(ApplyPowerSuspectRuleTest, ThrottledZero_NotSuspect) {
+    // throttled 采样为 0（供电正常）→ 掉线事件不标
+    const uint64_t now = 2000000000000ULL;
+    EXPECT_FALSE(ApplyPowerSuspectRule(now - 1000000000ULL, now, 0,
+                                       VENDOR_LECHAO_USBD_EVENT_LINK_DISCONNECT));
+}
+
+TEST(ApplyPowerSuspectRuleTest, WindowBoundary_Exactly5s_IsSuspect) {
+    // 契约 now-event<=5s：正好 5s 边界在窗口内 → 标
+    const uint64_t now = 2000000000000ULL;
+    EXPECT_TRUE(ApplyPowerSuspectRule(now - 5000000000ULL, now, 0x10000,
+                                      VENDOR_LECHAO_USBD_EVENT_LINK_DISCONNECT));
+}
+
+TEST(ApplyPowerSuspectRuleTest, EventInFuture_NotSuspect) {
+    // 防御：事件时间戳晚于当前（时钟异常）→ 按窗口外处理，防无符号回绕
+    const uint64_t now = 2000000000000ULL;
+    EXPECT_FALSE(ApplyPowerSuspectRule(now + 1000000000ULL, now, 0x10000,
+                                       VENDOR_LECHAO_USBD_EVENT_LINK_DISCONNECT));
 }

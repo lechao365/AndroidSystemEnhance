@@ -56,6 +56,7 @@
 #define LCVIEW_EVENT_USB_TIMEOUT         11
 #define LCVIEW_EVENT_USB_DATA_CORRUPT    12
 #define LCVIEW_EVENT_USB_RATE_DEGRADED   13
+#define LCVIEW_EVENT_SLOW_DISK           14
 
 /* --- 记录魔数 --- */
 /* 每条日志记录的起始固定标志，用于校验数据完整性。

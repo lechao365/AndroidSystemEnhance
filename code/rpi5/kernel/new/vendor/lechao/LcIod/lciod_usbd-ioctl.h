@@ -30,6 +30,11 @@
  *   - v3：event 末尾追加 wall_time_ns/opcode/lba/bytes/retry（RATE_DEGRADED
  *         复用 lba/bytes 携带基线/阈值速率），stats 末尾追加 read/write
  *         error_count 分项，新增共享事件名映射函数（R-14 方向 1/2/4）
+ *   - v4：新增 LINK_CONNECT/LINK_DISCONNECT/LINK_OVERCURRENT 链路事件类型
+ *         （event_value 为掉线原因/枚举失败阶段分类，bytes 为过流计数）、
+ *         新增 struct vendor_lechao_usbd_link_stats 与 GET_LINK_STATS ioctl
+ *         （R2 链路事件维测与供电归因：全局链路节点 lciod_link 订阅 hub
+ *         notifier 转事件流）
  * ============================================================
  */
 
@@ -39,7 +44,17 @@
 #include <linux/types.h>
 
 /* ABI 版本号：与 AOSP HAL / usb-verify 镜像副本必须一致 */
-#define VENDOR_LECHAO_USBD_ABI_VERSION  3
+#define VENDOR_LECHAO_USBD_ABI_VERSION  4
+
+/*
+ * 传输协议类型（R1 UAS 维测：零 ABI bump 扩展）
+ *
+ * 复用 stats.protocol 字节（原 reserved[0]）承载设备传输协议，结构体
+ * 大小/偏移/ABI_VERSION 均不变。BOT 为 usb-storage 驱动，UAS 为
+ * drivers/usb/storage/uas 驱动。用户态据此区分统计来源的协议栈。
+ */
+#define VENDOR_LECHAO_USBD_PROTO_BOT    0  /* Bulk-Only Transport（usb-storage 驱动） */
+#define VENDOR_LECHAO_USBD_PROTO_UAS    1  /* USB Attached SCSI（uas 驱动） */
 
 /*
  * struct vendor_lechao_usbd_stats — 单设备粒度的传输统计快照
@@ -82,11 +97,41 @@ struct vendor_lechao_usbd_stats {
 	u64 timeout_count;               /* 累计：USB 传输超时次数 */
 	u32 last_event_type;             /* 快照：最近一次异常事件的类型（见 event_type 枚举） */
 	u8 enabled;                      /* 配置：监控是否启用（1=启用, 0=禁用） */
-	u8 reserved[3];                  /* 预留：对齐填充，未来扩展用 */
+	u8 protocol;                     /* 标识（零 ABI bump 扩展）：传输协议，见 VENDOR_LECHAO_USBD_PROTO_*；原 reserved[0] 字节语义化 */
+	u8 reserved[2];                  /* 预留：对齐填充，未来扩展用 */
 	u32 flags;                       /* 配置：运行时标志位，预留扩展 */
 	u64 event_drop_count;            /* 累计：环形缓冲区溢出丢弃的事件数（event_lock 保护） */
 	u64 read_error_count;            /* 累计（v3）：读方向错误事件次数（TRANSPORT_ERROR/STALL/TIMEOUT/DATA_CORRUPT） */
 	u64 write_error_count;           /* 累计（v3）：写方向错误事件次数 */
+};
+
+/*
+ * struct vendor_lechao_usbd_link_stats — 全局链路事件统计快照（v4）
+ *
+ * 【用途】通过 VENDOR_LECHAO_USBD_IOC_GET_LINK_STATS ioctl 返回给用户态，
+ *        描述全局 USB hub 链路（连接/掉线/枚举失败/过流）的累计计数与最近
+ *        一次事件详情。对应 lciod_link 全局链路节点的 GET_LINK_STATS 接口。
+ * 【生命周期】每次 ioctl 调用时从内核 lciod_link 结构体原子快照，是调用
+ *        时刻的瞬时拷贝（spin_lock_irqsave 保护）。
+ * 【计数语义】
+ *   - 累计计数器：connect_count ~ overcurrent_count（单调递增，模块加载起计）
+ *   - 最近事件快照：last_event_ts_ns ~ last_duration_ns（反映最近一次链路事件）
+ */
+struct vendor_lechao_usbd_link_stats {
+	u64 connect_count;               /* 累计：链路连接/枚举成功次数 */
+	u64 disconnect_count;            /* 累计：链路断开/掉线次数 */
+	u64 enum_fail_count;             /* 累计：枚举失败次数 */
+	u64 overcurrent_count;           /* 累计：端口过流次数 */
+	u64 last_event_ts_ns;            /* 最近一次链路事件 mono 时间戳 */
+	u32 last_event_type;             /* 最近一次事件类型 */
+	u16 last_busnum;                 /* 最近一次事件 busnum */
+	u16 last_port;                   /* 最近一次事件 port（1 起） */
+	u16 last_vid;                    /* 最近一次事件 VID */
+	u16 last_pid;                    /* 最近一次事件 PID */
+	s32 last_err;                    /* 最近一次事件错误码 */
+	u32 last_count;                  /* 最近一次事件计数（过流计数/枚举耗尽重试次数） */
+	u64 last_duration_ns;            /* 最近一次事件时长 */
+	u8  reserved[8];                 /* 预留：对齐填充 */
 };
 
 /*
@@ -123,6 +168,9 @@ enum vendor_lechao_usbd_event_type {
 	VENDOR_LECHAO_USBD_EVENT_TIMEOUT         = 4, /* 传输超时：URB 等待超时或被信号中断后 kill */
 	VENDOR_LECHAO_USBD_EVENT_RESET           = 5, /* 设备重置：usb_stor_invoke_transport 错误恢复路径触发 */
 	VENDOR_LECHAO_USBD_EVENT_RATE_DEGRADED   = 6, /* 性能降级：瞬时速率下降或延迟上升时触发 */
+	VENDOR_LECHAO_USBD_EVENT_LINK_CONNECT     = 7, /* 链路连接/枚举成功（lciod_link 全局链路节点事件） */
+	VENDOR_LECHAO_USBD_EVENT_LINK_DISCONNECT  = 8, /* 链路断开/掉线（event_value 为掉线原因分类） */
+	VENDOR_LECHAO_USBD_EVENT_LINK_OVERCURRENT = 9, /* 端口过流（bytes 字段为过流计数，与计数并排） */
 };
 
 /*
@@ -182,6 +230,9 @@ static inline const char *vendor_lechao_usbd_event_type_name(u32 type)
 	case VENDOR_LECHAO_USBD_EVENT_TIMEOUT:         return "TIMEOUT";
 	case VENDOR_LECHAO_USBD_EVENT_RESET:           return "RESET";
 	case VENDOR_LECHAO_USBD_EVENT_RATE_DEGRADED:   return "RATE_DEGRADED";
+	case VENDOR_LECHAO_USBD_EVENT_LINK_CONNECT:     return "LINK_CONNECT";
+	case VENDOR_LECHAO_USBD_EVENT_LINK_DISCONNECT:  return "LINK_DISCONNECT";
+	case VENDOR_LECHAO_USBD_EVENT_LINK_OVERCURRENT: return "LINK_OVERCURRENT";
 	default:                                       return "UNKNOWN";
 	}
 }
@@ -231,5 +282,13 @@ static inline const char *vendor_lechao_usbd_data_direction_name(u8 dir)
  *   用途：动态启用/禁用监控，或修改标志位
  */
 #define VENDOR_LECHAO_USBD_IOC_SET_CONFIG   _IOW(VENDOR_LECHAO_USBD_IOC_MAGIC, 3, struct vendor_lechao_usbd_config)
+
+/*
+ * IOC_GET_LINK_STATS (cmd 4) — 读取全局链路事件统计快照
+ *   参数：struct vendor_lechao_usbd_link_stats（内核→用户态）
+ *   用途：读取 lciod_link 全局链路节点的连接/掉线/枚举失败/过流计数与
+ *         最近一次事件详情（R2 链路事件维测与供电归因）
+ */
+#define VENDOR_LECHAO_USBD_IOC_GET_LINK_STATS _IOR(VENDOR_LECHAO_USBD_IOC_MAGIC, 4, struct vendor_lechao_usbd_link_stats)
 
 #endif /* _VENDOR_LECHAO_USBD_IOCTL_H */

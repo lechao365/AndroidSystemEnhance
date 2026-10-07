@@ -33,3 +33,6 @@ KI-FLAKE-c3869bdc645e-377de5 pre-existing false auto-flake fixed
 KI-FLAKE-26cacb40dfd6-c1860c pre-existing false auto-flake wontfix
 KI-FLAKE-20d380d0f753-e1789e pre-existing false auto-flake open
 KI-FLAKE-cefa39e1699f-1bac08 pre-existing false auto-flake open
+KI-FLAKE-d9ec6877f6c1-0714c7 pre-existing false auto-flake open
+KI-FLAKE-d9ec6877f6c1-d84e34 pre-existing false auto-flake open
+KI-FLAKE-d9ec6877f6c1-24bc54 pre-existing false auto-flake open

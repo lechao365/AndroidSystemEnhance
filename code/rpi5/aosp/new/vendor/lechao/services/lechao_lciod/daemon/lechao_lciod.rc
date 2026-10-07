@@ -27,3 +27,16 @@ service lechao_lciod /system/bin/lechao_lciod
 #   2. 内核驱动设备节点可能还未创建完成
 on property:sys.boot_completed=1
     start lechao_lciod
+
+# R4 方向 4：预建 cgroup v1 blkio QoS 组并授权 system 用户
+# daemon 以 system 用户运行，无法在 root 拥有的 cgroup 挂载点（真机 v1
+# blkio 挂载于 /dev/blkio，目录 0555）下建组/写限速文件；由 init 预建
+# lechao_bg 组目录并将限速/迁移控制文件 owner 移交 system，配合 sepolicy
+# cgroup 类型授权使 daemon 可写 blkio.throttle.* 与 tasks（IoQosManager
+# EnsureGroup 对已存在组幂等成功，不重复建）。
+on post-fs-data
+    mkdir /dev/blkio/lechao_bg 0770 system system
+    chown system system /dev/blkio/lechao_bg/tasks
+    chown system system /dev/blkio/lechao_bg/cgroup.procs
+    chown system system /dev/blkio/lechao_bg/blkio.throttle.read_bps_device
+    chown system system /dev/blkio/lechao_bg/blkio.throttle.write_bps_device

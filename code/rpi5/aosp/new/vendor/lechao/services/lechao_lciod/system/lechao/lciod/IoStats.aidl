@@ -6,6 +6,7 @@
  *
  * 字段映射关系（system ← vendor）:
  *   vid, pid, vendor, product  — 设备标识（直传）
+ *   protocol                  — 传输协议（直传，与 vid/pid 并列；BOT=0/UAS=1）
  *   readBytes/NS/Cmds          — 读方向统计（直传）
  *   writeBytes/NS/Cmds         — 写方向统计（直传）
  *   errorCount~degradeCount    — 错误/异常/生命周期计数器（直传）
@@ -26,6 +27,7 @@ parcelable IoStats {
     /* --- 设备标识 --- */
     int vid;            /* USB 厂商 ID */
     int pid;            /* USB 产品 ID */
+    int protocol;       /* 传输协议（VENDOR_LECHAO_USBD_PROTO_BOT/UAS，直传） */
     String vendor;      /* 厂商名称 */
     String product;     /* 产品名称 */
 

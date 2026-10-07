@@ -6,6 +6,7 @@
 #       不依赖设备（adb 主流程由板上用例实测兜底）。
 # ============================================================
 
+import argparse
 import json
 import os
 import sys
@@ -80,9 +81,9 @@ class TestEnsureConnected(unittest.TestCase):
         ex.assert_called_once_with(2)
 
 # 与 lciod_probe.c 输出同构的合法单行样本（vendor 含空格验证引号解析；
-# 与 ioctl.h v3 ABI 对齐：read/write_error_count + abi_version=3）
+# 与 ioctl.h v4 ABI 对齐：read/write_error_count + abi_version=4）
 VALID_LINE = (
-    'device minor=0 path=/dev/vendor_lechao_usbd0 vid=0x04e8 pid=0x6344 '
+    'device minor=0 path=/dev/vendor_lechao_usbd0 vid=0x04e8 pid=0x6344 protocol=0 '
     'vendor="SanDisk Corp" product="Ultra USB 3.0" '
     'read_bytes=4194304 write_bytes=1048576 read_ns=500000000 write_ns=200000000 '
     'read_cmds=64 write_cmds=16 error_count=0 reset_count=0 '
@@ -91,7 +92,7 @@ VALID_LINE = (
     'last_event_ts_ns=987654321 last_update=111222333 stall_count=0 '
     'corrupt_count=0 timeout_count=0 last_event_type=5 '
     'enabled=1 flags=0 event_drop_count=0 read_error_count=0 write_error_count=0 '
-    'abi_version=3'
+    'abi_version=4'
 )
 
 
@@ -114,7 +115,7 @@ class ParseProbeOutputTest(unittest.TestCase):
         self.assertEqual(dev["vendor"], "SanDisk Corp")
         self.assertEqual(dev["product"], "Ultra USB 3.0")
         self.assertEqual(dev["read_bytes"], "4194304")
-        self.assertEqual(dev["abi_version"], "3")
+        self.assertEqual(dev["abi_version"], "4")
         self.assertEqual(dev["read_error_count"], "0")
         self.assertEqual(dev["write_error_count"], "0")
         self.assertEqual(dev["last_update"], "111222333")
@@ -167,7 +168,8 @@ class ValidateDevicesTest(unittest.TestCase):
         self.assertTrue(any("vendor" in e for e in errors))
 
     def test_abi_drift_is_error(self):
-        line = VALID_LINE.replace("abi_version=3", "abi_version=2")
+        # 旧版 ABI（abi_version=2）判红：镜像副本与内核真相源漂移不得静默
+        line = VALID_LINE.replace("abi_version=4", "abi_version=2")
         errors = lc.validate_devices(_devices(line))
         self.assertTrue(any("abi_version" in e for e in errors))
 
@@ -204,6 +206,164 @@ class ValidateDevicesTest(unittest.TestCase):
         line = VALID_LINE.replace("write_error_count=0", "write_error_count=2")
         errors = lc.validate_devices(_devices(line))
         self.assertTrue(any("write_error_count" in e and "!= 0" in e for e in errors))
+
+    def test_protocol_missing_is_error(self):
+        # R1 UAS：protocol 已入 REQUIRED_FIELDS，缺失判红（字段映射回归点）
+        line = VALID_LINE.replace("protocol=0 ", "")
+        errors = lc.validate_devices(_devices(line))
+        self.assertTrue(any("protocol" in e for e in errors))
+
+    def test_protocol_invalid_is_error(self):
+        # R1 UAS：protocol 仅允许 0(BOT)/1(UAS)，非法值判红
+        line = VALID_LINE.replace("protocol=0", "protocol=5")
+        errors = lc.validate_devices(_devices(line))
+        self.assertTrue(any("protocol" in e and "非法" in e for e in errors))
+
+    def test_protocol_uas_valid(self):
+        # R1 UAS：protocol=1（UAS 设备）合法，不判红（存在性由 uas 模式断言）
+        line = VALID_LINE.replace("protocol=0", "protocol=1")
+        self.assertEqual(lc.validate_devices(_devices(line)), [])
+
+
+class ValidateUasDevicesTest(unittest.TestCase):
+    """R1 UAS 维测：uas 模式（lciod-uas 用例）校验逻辑。
+
+    R4 方向 7：无 UAS 设备不再判红（存在性由 --mode uas 分支单独判定记
+    skip），validate_uas_devices 只在 UAS 设备存在时校验其传输统计字段
+    齐全（有 UAS 但字段不齐仍判红，防无 UAS 假绿放宽为假绿）。
+    """
+
+    def _uas_line(self):
+        return VALID_LINE.replace("protocol=0", "protocol=1")
+
+    def test_uas_present_passes(self):
+        self.assertEqual(lc.validate_uas_devices(_devices(self._uas_line())), [])
+
+    def test_no_uas_passes_for_skip(self):
+        # R4 方向 7：仅 BOT 设备（protocol=0）→ 无 UAS 设备 → 不判红
+        #（存在性由 --mode uas 分支单独判定，记 skip 不判红）
+        self.assertEqual(lc.validate_uas_devices(_devices(VALID_LINE)), [])
+
+    def test_empty_passes_for_skip(self):
+        # R4 方向 7：probe 空（无任何设备）→ validate_uas_devices 不判红
+        #（validate_devices 已判红"输出为空"，UAS 存在性判定走 skip）
+        self.assertEqual(lc.validate_uas_devices([]), [])
+
+    def test_uas_missing_transport_fields_is_error(self):
+        # UAS 设备缺传输统计字段（read_bytes 等）→ 判红（打点链路不完整）
+        line = self._uas_line().replace("read_bytes=4194304 ", "")
+        errors = lc.validate_uas_devices(_devices(line))
+        self.assertTrue(any("read_bytes" in e for e in errors))
+
+    def test_uas_branch_no_device_skips_exit_zero(self):
+        # R4 方向 7 端到端：--mode uas 且板上无 UAS 设备（仅 BOT protocol=0）
+        # → uas 分支记 skip——打印 "SKIP:" 标记行并 exit 0（验收层 hostcmd
+        # 检出行首 SKIP: 转 skip 态不判红）；validate_devices 通过（probe
+        # 空/字段缺失仍判红 exit 1 不变）
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with mock.patch.object(lc, "ensure_connected"), \
+                mock.patch.object(lc, "run_probe", return_value=VALID_LINE + "\n"), \
+                mock.patch.object(lc.sys, "exit", side_effect=SystemExit) as ex, \
+                mock.patch.object(lc.sys, "argv",
+                                  ["lciod_check.py", "--mode", "uas"]), \
+                contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit):
+                lc.main()
+        ex.assert_called_once_with(0)
+        self.assertIn("SKIP: 板上无 UAS 设备（protocol==1）", buf.getvalue())
+
+
+# 方向 7：--mode link 样例（与 lciod_probe --link 输出同构：GET_LINK_STATS
+# ioctl 快照单行 key=value，含 v4 链路事件计数与最近事件字段）
+VALID_LINK_LINE = (
+    'link connect_count=3 disconnect_count=1 enum_fail_count=0 overcurrent_count=1 '
+    'last_event_ts_ns=123456789 last_event_type=9 '
+    'last_busnum=1 last_port=2 last_vid=0x0781 last_pid=0x5583 '
+    'last_err=0 last_count=1 last_duration_ns=500000 abi_version=4'
+)
+
+
+def _link_fields(line=VALID_LINK_LINE):
+    return lc.parse_link_output(line)
+
+
+class LinkModeTest(unittest.TestCase):
+    """方向 7：--mode link（全局链路节点 GET_LINK_STATS 校验）纯函数级测试。
+
+    覆盖解析（含残缺行）、字段齐全性/数值合法性/abi 漂移判红、节点缺失
+    判红与 ioctl 失败判红。adb 主流程由板上用例实测兜底。
+    """
+
+    def test_parse_valid_link_line(self):
+        fields = _link_fields()
+        self.assertEqual(fields["connect_count"], "3")
+        self.assertEqual(fields["overcurrent_count"], "1")
+        self.assertEqual(fields["last_event_type"], "9")
+        self.assertEqual(fields["last_vid"], "0x0781")
+        self.assertEqual(fields["abi_version"], "4")
+
+    def test_parse_missing_connect_count_raises(self):
+        with self.assertRaises(ValueError):
+            _link_fields(VALID_LINK_LINE.replace("connect_count=3 ", ""))
+
+    def test_valid_link_passes(self):
+        self.assertEqual(lc.validate_link_stats(_link_fields()), [])
+
+    def test_missing_field_is_error(self):
+        line = VALID_LINK_LINE.replace("disconnect_count=1 ", "")
+        errors = lc.validate_link_stats(_link_fields(line))
+        self.assertTrue(any("disconnect_count" in e for e in errors))
+
+    def test_bad_abi_is_error(self):
+        # ABI 漂移（3 != 4）判红
+        line = VALID_LINK_LINE.replace("abi_version=4", "abi_version=3")
+        errors = lc.validate_link_stats(_link_fields(line))
+        self.assertTrue(any("abi_version" in e for e in errors))
+
+    def test_negative_count_is_error(self):
+        line = VALID_LINK_LINE.replace("connect_count=3", "connect_count=-1")
+        errors = lc.validate_link_stats(_link_fields(line))
+        self.assertTrue(any("connect_count" in e and "负值" in e for e in errors))
+
+    def test_non_numeric_count_is_error(self):
+        line = VALID_LINK_LINE.replace("connect_count=3", "connect_count=3x")
+        errors = lc.validate_link_stats(_link_fields(line))
+        self.assertTrue(any("connect_count" in e and "非数字" in e for e in errors))
+
+    def test_event_type_out_of_range_is_error(self):
+        # 事件枚举 0..9（v4 含链路事件 7/8/9），10 越界判红
+        line = VALID_LINK_LINE.replace("last_event_type=9", "last_event_type=10")
+        errors = lc.validate_link_stats(_link_fields(line))
+        self.assertTrue(any("last_event_type" in e and "超出枚举" in e for e in errors))
+
+    def test_negative_last_err_allowed(self):
+        # s32 errno 可为负（-EPIPE 等），不得判红
+        line = VALID_LINK_LINE.replace("last_err=0", "last_err=-71")
+        self.assertEqual(lc.validate_link_stats(_link_fields(line)), [])
+
+    def test_link_node_missing_is_red(self):
+        # 节点缺失：ls 失败 → check_link_node False → 判红（防假绿）
+        with mock.patch.object(lc, "adb", return_value=("", 1)):
+            self.assertFalse(lc.check_link_node())
+
+    def test_link_node_present(self):
+        with mock.patch.object(
+                lc, "adb",
+                return_value=("drwxr-xr-x root root vendor_lechao_usbd_link", 0)):
+            self.assertTrue(lc.check_link_node())
+
+    def test_link_ioctl_failure_exits(self):
+        # GET_LINK_STATS ioctl 失败（lciod_probe --link rc!=0）→ 判红退出（防假绿）
+        with mock.patch.object(lc, "run_adb", return_value=("error", 1)), \
+                mock.patch.object(lc.sys, "exit") as ex:
+            lc.run_link_probe()
+        ex.assert_called_once_with(1)
+
+    def test_link_stats_size_frozen(self):
+        # struct vendor_lechao_usbd_link_stats 尺寸契约（与内核真相源布局一致）
+        self.assertEqual(lc.link_stats_struct_size(), 80)
 
 
 class BaselineTest(unittest.TestCase):
@@ -283,6 +443,231 @@ class DiffDevicesTest(unittest.TestCase):
     def test_non_dict_baseline_is_error(self):
         errors, _ = lc.diff_devices("corrupt", self._current(), ["read_bytes"])
         self.assertTrue(any("基线无设备" in e for e in errors))
+
+
+# ============================================================
+# R3 方向 7：--mode storm 风暴规则校验（TestModeStorm）
+# 覆盖：注入后 logcat 命中 "rule":"storm" 判绿 / 未命中判红 / setprop 失败
+# 判红 / 设备时钟不可读判红 / 显式 --log-since 时跳过时钟锚定。CDP-DOD-001：
+# 每个判红逻辑配套破坏场景红灯用例。
+# ============================================================
+
+# storm 事件日志行（仿 link_monitor EmitLinkEventJson 手拼 JSON，tag
+# lechao_lciod_event）
+_STORM_HIT = ('07-01 12:00:00.000  1234  1234 I lechao_lciod_event: '
+              '{"rule":"storm","device":0,"count":22,"window_s":60,'
+              '"threshold":10}\n')
+_STORM_MISS = ('07-01 12:00:00.000  1234  1234 I lechao_lciod_event: '
+               '{"rule":"other","device":0}\n')
+
+
+def _args(**kw):
+    a = argparse.Namespace()
+    a.storm_wait = kw.get("storm_wait", 15)
+    a.log_since = kw.get("log_since", None)
+    return a
+
+
+class FakeAdb:
+    """伪 adb（storm 模式专用）：支持 shell setprop / shell date / logcat
+    抓取，各子命令可注入 rc 模拟失败/超时。"""
+
+    def __init__(self, setprop_rc=0, setprop_out="",
+                 date_out="", date_rc=0, logcat_out="", logcat_rc=0):
+        self.setprop_rc = setprop_rc
+        self.setprop_out = setprop_out
+        self.date_out = date_out
+        self.date_rc = date_rc
+        self.logcat_out = logcat_out
+        self.logcat_rc = logcat_rc
+        self.calls = []
+
+    def __call__(self, args, timeout=60):
+        self.calls.append(args)
+        if args[0] == "shell":
+            cmd = args[1]
+            if cmd.startswith("setprop"):
+                return (self.setprop_out, self.setprop_rc)
+            if cmd.startswith("date "):
+                return (self.date_out, self.date_rc)
+            return ("", 0)
+        if args[0] == "logcat":
+            return (self.logcat_out, self.logcat_rc)
+        return ("", 0)
+
+
+class TestModeStorm(unittest.TestCase):
+    def _run(self, fake, **kw):
+        with mock.patch.object(lc, "adb", fake):
+            with mock.patch.object(lc.time, "sleep"):
+                return lc.mode_storm(_args(**kw))
+
+    def test_storm_rule_hit_passes(self):
+        # 注入后 logcat 命中 "rule":"storm" → 通过
+        fake = FakeAdb(date_out="1000\n", date_rc=0,
+                       logcat_out=_STORM_HIT, logcat_rc=0)
+        self.assertEqual(self._run(fake), 0)
+
+    def test_storm_no_rule_red(self):
+        # logcat 无 "rule":"storm" 行（规则三未触发/注入未生效）→ 判红
+        fake = FakeAdb(date_out="1000\n", date_rc=0,
+                       logcat_out=_STORM_MISS, logcat_rc=0)
+        self.assertEqual(self._run(fake), 1)
+
+    def test_storm_setprop_fail_red(self):
+        # setprop 注入失败（rc!=0）→ 判红（注入不可用不得当"未触发"蒙混）
+        fake = FakeAdb(date_out="1000\n", date_rc=0,
+                       setprop_rc=1, logcat_out=_STORM_HIT, logcat_rc=0)
+        self.assertEqual(self._run(fake), 1)
+
+    def test_storm_clock_unreadable_red(self):
+        # 未显式 --log-since 且设备时钟不可读 → 判红（logcat 窗口无法锚定）
+        fake = FakeAdb(date_out="bad", date_rc=1)
+        self.assertEqual(self._run(fake), 1)
+
+    def test_storm_explicit_log_since_skips_clock(self):
+        # 显式 --log-since 时不得取设备时钟（注入前时钟锚定被跳过）
+        fake = FakeAdb(logcat_out=_STORM_HIT, logcat_rc=0)
+        rc = self._run(fake, log_since=999)
+        self.assertEqual(rc, 0)
+        self.assertFalse(any(c[0] == "shell" and str(c[1]).startswith("date ")
+                             for c in fake.calls))
+
+
+# ============================================================
+# R4 方向 6：--mode qos SD 卡写 QoS 限速校验（TestModeQos）
+# 覆盖：cgroup 探测（v2/v1）/限速文件断言 8388608/组内压制 ≤12 MiB/s/
+# 组外 ≥ max(20, 1.5x 组内)/无 cgroup 判红/组缺失判红/限速未生效判红。
+# CDP-DOD-001：每个判红逻辑配套破坏场景红灯用例。
+# ============================================================
+
+# dd 速率样本：组内压制 ~8 MiB/s（16777216B/2.0s），组外不受限 ~40 MiB/s
+_QOS_IN_DD = "16777216 bytes (17 MB) copied, 2.0 s, 8.4 MB/s\n"
+_QOS_OUT_DD = "16777216 bytes (17 MB) copied, 0.4 s, 42 MB/s\n"
+# 组内未压制（~53 MiB/s）与组外不足（~8 MiB/s）的破坏场景样本
+_QOS_IN_FAST_DD = "16777216 bytes (17 MB) copied, 0.3 s, 55 MB/s\n"
+
+
+def _qos_args(**kw):
+    a = argparse.Namespace()
+    a.qos_dd_mb = kw.get("qos_dd_mb", 16)
+    a.qos_in_max_mib = kw.get("qos_in_max_mib", lc._QOS_IN_GROUP_MAX_MIB)
+    a.qos_out_min_mib = kw.get("qos_out_min_mib", lc._QOS_OUT_MIN_MIB)
+    a.qos_sleep = kw.get("qos_sleep", 2.0)
+    a.dd_timeout = kw.get("dd_timeout", 300)
+    return a
+
+
+class FakeAdbQos:
+    """伪 adb（qos 模式专用）：模拟 cgroup 版本探测/组与限速文件/两次 dd 测速。
+
+    各命令结果可注入 rc 模拟失败；dd 测速按临时文件 in/out 区分（组内含
+    cgroup.procs 迁移，组外为裸 dd）。"""
+
+    def __init__(self, controllers="cpu io cpuset", group_rc=0,
+                 limit="8:0 rbps=8388608 wbps=8388608\n", limit_rc=0,
+                 in_dd=_QOS_IN_DD, out_dd=_QOS_OUT_DD, dd_rc=0,
+                 std_blkio=False, dev_blkio=False):
+        self.controllers = controllers
+        self.group_rc = group_rc
+        self.limit = limit
+        self.limit_rc = limit_rc
+        self.in_dd = in_dd
+        self.out_dd = out_dd
+        self.dd_rc = dd_rc
+        self.std_blkio = std_blkio   # <root>/blkio 存在（标准 v1 布局）
+        self.dev_blkio = dev_blkio   # /dev/blkio 存在（真机 Android v1 布局）
+        self.calls = []
+
+    def __call__(self, args, timeout=60):
+        self.calls.append(args)
+        if args[0] == "shell":
+            if args[1] == "cat":
+                if "cgroup.controllers" in args[2]:
+                    return (self.controllers, 0)
+                return (self.limit, self.limit_rc)  # io.max / blkio 限速文件
+            if args[1] == "ls":
+                if "/lechao_bg" in args[-1]:
+                    return (args[-1] + "\n", self.group_rc)
+                if "/sys/fs/cgroup/blkio" in args[-1]:
+                    return (args[-1] + "\n", 0) if self.std_blkio else ("", 1)
+                if "/dev/blkio" in args[-1]:
+                    return (args[-1] + "\n", 0) if self.dev_blkio else ("", 1)
+                return (args[-1] + "\n", self.group_rc)
+            if args[1] == "setprop":
+                return ("", 0)
+            if args[1] == "rm":
+                return ("", 0)
+            if args[1] == "sh":
+                shell_cmd = args[3]
+                return (self.in_dd if "lciod_qos_in_" in shell_cmd
+                        else self.out_dd, self.dd_rc)
+            return ("", 0)
+        return ("", 0)
+
+
+class TestModeQos(unittest.TestCase):
+    def _run(self, fake, **kw):
+        with mock.patch.object(lc, "adb", fake), \
+                mock.patch.object(lc.time, "sleep"):
+            return lc.mode_qos(_qos_args(**kw))
+
+    def test_qos_pass_ok(self):
+        # v2 cgroup + 组存在 + 限速含 8388608 + 组内压制 + 组外不受限 → 通过
+        fake = FakeAdbQos()
+        self.assertEqual(self._run(fake), 0)
+
+    def test_qos_no_cgroup_red(self):
+        # v2 无 io 且 v1 blkio 目录缺失（标准与 /dev/blkio 均无）→ 判红（防假绿）
+        fake = FakeAdbQos(controllers="cpu cpuset")
+        self.assertEqual(self._run(fake), 1)
+
+    def test_qos_v1_std_blkio_pass(self):
+        # 标准 v1 布局：<root>/blkio 存在（无 io controller）→ 限速路径走 blkio
+        fake = FakeAdbQos(controllers="cpu cpuset", std_blkio=True,
+                          group_rc=0)
+        self.assertEqual(self._run(fake), 0)
+
+    def test_qos_v1_dev_blkio_pass(self):
+        # 真机 Android v1 布局：<root>/blkio 缺失但 /dev/blkio 存在（RPi5 实测）
+        fake = FakeAdbQos(controllers="cpu cpuset", dev_blkio=True,
+                          group_rc=0)
+        self.assertEqual(self._run(fake), 0)
+
+    def test_qos_v1_dev_blkio_group_missing_red(self):
+        # /dev/blkio 探测成功但 lechao_bg 组不存在 → 判红
+        fake = FakeAdbQos(controllers="cpu cpuset", dev_blkio=True, group_rc=1)
+        self.assertEqual(self._run(fake), 1)
+
+    def test_qos_group_missing_red(self):
+        # v2 可探测但 lechao_bg 组不存在（daemon 未建组）→ 判红
+        fake = FakeAdbQos(group_rc=1)
+        self.assertEqual(self._run(fake), 1)
+
+    def test_qos_limit_file_empty_red(self):
+        # 限速文件为空/不可读（cgroup 未配置限速）→ 判红
+        fake = FakeAdbQos(limit="", limit_rc=1)
+        self.assertEqual(self._run(fake), 1)
+
+    def test_qos_bg_limit_not_applied_red(self):
+        # setprop bg 后限速文件无 8388608（daemon 周期未应用）→ 判红
+        fake = FakeAdbQos(limit="8:0 rbps=max wbps=max\n")
+        self.assertEqual(self._run(fake), 1)
+
+    def test_qos_in_group_not_throttled_red(self):
+        # 组内 dd 速率 ~53 MiB/s > 12 MiB/s 容差（bg 8MiB/s 未压制）→ 判红
+        fake = FakeAdbQos(in_dd=_QOS_IN_FAST_DD)
+        self.assertEqual(self._run(fake), 1)
+
+    def test_qos_out_group_not_fast_enough_red(self):
+        # 组外 dd 速率 ~8 MiB/s < max(20, 1.5x 组内)（未显著高于组内）→ 判红
+        fake = FakeAdbQos(out_dd=_QOS_IN_DD)
+        self.assertEqual(self._run(fake), 1)
+
+    def test_qos_dd_failure_red(self):
+        # dd 执行失败（rc!=0）→ 判红（测速不可得不得当压制/不受限蒙混）
+        fake = FakeAdbQos(dd_rc=1)
+        self.assertEqual(self._run(fake), 1)
 
 
 if __name__ == "__main__":

@@ -57,7 +57,7 @@ unset _arg
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ============================================================================
-# 内嵌最小运行时（脱离 LcSkills core，语义对齐 harness/lib/harness_lib.py）
+# 内嵌最小运行时（语义对齐 harness/lib/harness_lib.py，仓内自包含）
 # 提供: 工程根定位 / 日志 / 步骤追踪 / 错误处理 / 退出汇总；
 # 日志落 harness/log/opencode-server/（gitignore 工作态，不入库）
 # ============================================================================

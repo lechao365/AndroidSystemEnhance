@@ -104,6 +104,17 @@
         {"name": "device_index",    "type": "int64"},
         {"name": "latency_ns",      "type": "int64"}
       ]
+    },
+    {
+      "id": 14,
+      "name": "slow_disk",
+      "desc": "block write latency sustained above threshold (daemon rule-2)",
+      "fields": [
+        {"name": "device",                "type": "string"},
+        {"name": "write_avg_latency_ms",  "type": "int64"},
+        {"name": "threshold_ms",          "type": "int64"},
+        {"name": "consecutive",           "type": "int32"}
+      ]
     }
   ]
 }
