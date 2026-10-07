@@ -37,6 +37,7 @@
 
 #include "lciod_usbd.h"
 #include "lciod_read_logic.h"
+#include "lciod_link.h"
 #include "uas-notifier.h"
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -1273,9 +1274,21 @@ static int __init vendor_lechao_usbd_monitor_init(void)
     dev_t devt;
     int ret;
 
+    /*
+     * R2 方向 3：先初始化全局链路节点（lciod_link，订阅 hub 链路事件
+     * notifier）。放在最前确保后续 usb_for_each_dev 扫描触发的事件也能
+     * 被捕获；失败时 lciod_link_init 已内部回滚，直接返回。
+     */
+    ret = lciod_link_init();
+    if (ret) {
+        pr_err(PREFIX "failed to init link node (%d)\n", ret);
+        return ret;
+    }
+
     ret = alloc_chrdev_region(&devt, 0, VENDOR_LECHAO_USBD_MAX_DEVICES, VENDOR_LECHAO_USBD_NAME);
     if (ret < 0) {
         pr_err(PREFIX "failed to allocate chrdev region\n");
+        lciod_link_exit();
         return ret;
     }
     vendor_lechao_usbd_major = MAJOR(devt);
@@ -1283,6 +1296,7 @@ static int __init vendor_lechao_usbd_monitor_init(void)
     vendor_lechao_usbd_class = class_create(VENDOR_LECHAO_USBD_NAME);
     if (IS_ERR(vendor_lechao_usbd_class)) {
         pr_err(PREFIX "class_create failed\n");
+        lciod_link_exit();
         unregister_chrdev_region(MKDEV(vendor_lechao_usbd_major, 0), 
                                   VENDOR_LECHAO_USBD_MAX_DEVICES);
         return PTR_ERR(vendor_lechao_usbd_class);
@@ -1291,6 +1305,7 @@ static int __init vendor_lechao_usbd_monitor_init(void)
 
     ret = usb_stor_register_vendor_notifier(&vendor_lechao_usbd_vendor_nb);
     if (ret) {
+        lciod_link_exit();
         class_destroy(vendor_lechao_usbd_class);
         unregister_chrdev_region(MKDEV(vendor_lechao_usbd_major, 0),
                                   VENDOR_LECHAO_USBD_MAX_DEVICES);
@@ -1300,6 +1315,7 @@ static int __init vendor_lechao_usbd_monitor_init(void)
 
     ret = uas_register_vendor_notifier(&vendor_lechao_usbd_uas_vendor_nb);
     if (ret) {
+        lciod_link_exit();
         usb_stor_unregister_vendor_notifier(&vendor_lechao_usbd_vendor_nb);
         class_destroy(vendor_lechao_usbd_class);
         unregister_chrdev_region(MKDEV(vendor_lechao_usbd_major, 0),
@@ -1363,6 +1379,9 @@ static void __exit vendor_lechao_usbd_monitor_exit(void)
         cdev_del(&rate_dev->cdev);
         kref_put(&rate_dev->kref, vendor_lechao_usbd_device_release);
     }
+
+    /* R2 方向 3：销毁全局链路节点（注销 hub notifier + 置 shutdown 唤醒） */
+    lciod_link_exit();
 
     class_destroy(vendor_lechao_usbd_class);
     unregister_chrdev_region(MKDEV(vendor_lechao_usbd_major, 0), 

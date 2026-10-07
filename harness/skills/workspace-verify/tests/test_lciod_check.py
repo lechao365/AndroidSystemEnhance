@@ -80,7 +80,7 @@ class TestEnsureConnected(unittest.TestCase):
         ex.assert_called_once_with(2)
 
 # 与 lciod_probe.c 输出同构的合法单行样本（vendor 含空格验证引号解析；
-# 与 ioctl.h v3 ABI 对齐：read/write_error_count + abi_version=3）
+# 与 ioctl.h v4 ABI 对齐：read/write_error_count + abi_version=4）
 VALID_LINE = (
     'device minor=0 path=/dev/vendor_lechao_usbd0 vid=0x04e8 pid=0x6344 protocol=0 '
     'vendor="SanDisk Corp" product="Ultra USB 3.0" '
@@ -91,7 +91,7 @@ VALID_LINE = (
     'last_event_ts_ns=987654321 last_update=111222333 stall_count=0 '
     'corrupt_count=0 timeout_count=0 last_event_type=5 '
     'enabled=1 flags=0 event_drop_count=0 read_error_count=0 write_error_count=0 '
-    'abi_version=3'
+    'abi_version=4'
 )
 
 
@@ -114,7 +114,7 @@ class ParseProbeOutputTest(unittest.TestCase):
         self.assertEqual(dev["vendor"], "SanDisk Corp")
         self.assertEqual(dev["product"], "Ultra USB 3.0")
         self.assertEqual(dev["read_bytes"], "4194304")
-        self.assertEqual(dev["abi_version"], "3")
+        self.assertEqual(dev["abi_version"], "4")
         self.assertEqual(dev["read_error_count"], "0")
         self.assertEqual(dev["write_error_count"], "0")
         self.assertEqual(dev["last_update"], "111222333")
@@ -167,7 +167,8 @@ class ValidateDevicesTest(unittest.TestCase):
         self.assertTrue(any("vendor" in e for e in errors))
 
     def test_abi_drift_is_error(self):
-        line = VALID_LINE.replace("abi_version=3", "abi_version=2")
+        # 旧版 ABI（abi_version=2）判红：镜像副本与内核真相源漂移不得静默
+        line = VALID_LINE.replace("abi_version=4", "abi_version=2")
         errors = lc.validate_devices(_devices(line))
         self.assertTrue(any("abi_version" in e for e in errors))
 
@@ -250,6 +251,97 @@ class ValidateUasDevicesTest(unittest.TestCase):
         line = self._uas_line().replace("read_bytes=4194304 ", "")
         errors = lc.validate_uas_devices(_devices(line))
         self.assertTrue(any("read_bytes" in e for e in errors))
+
+
+# 方向 7：--mode link 样例（与 lciod_probe --link 输出同构：GET_LINK_STATS
+# ioctl 快照单行 key=value，含 v4 链路事件计数与最近事件字段）
+VALID_LINK_LINE = (
+    'link connect_count=3 disconnect_count=1 enum_fail_count=0 overcurrent_count=1 '
+    'last_event_ts_ns=123456789 last_event_type=9 '
+    'last_busnum=1 last_port=2 last_vid=0x0781 last_pid=0x5583 '
+    'last_err=0 last_count=1 last_duration_ns=500000 abi_version=4'
+)
+
+
+def _link_fields(line=VALID_LINK_LINE):
+    return lc.parse_link_output(line)
+
+
+class LinkModeTest(unittest.TestCase):
+    """方向 7：--mode link（全局链路节点 GET_LINK_STATS 校验）纯函数级测试。
+
+    覆盖解析（含残缺行）、字段齐全性/数值合法性/abi 漂移判红、节点缺失
+    判红与 ioctl 失败判红。adb 主流程由板上用例实测兜底。
+    """
+
+    def test_parse_valid_link_line(self):
+        fields = _link_fields()
+        self.assertEqual(fields["connect_count"], "3")
+        self.assertEqual(fields["overcurrent_count"], "1")
+        self.assertEqual(fields["last_event_type"], "9")
+        self.assertEqual(fields["last_vid"], "0x0781")
+        self.assertEqual(fields["abi_version"], "4")
+
+    def test_parse_missing_connect_count_raises(self):
+        with self.assertRaises(ValueError):
+            _link_fields(VALID_LINK_LINE.replace("connect_count=3 ", ""))
+
+    def test_valid_link_passes(self):
+        self.assertEqual(lc.validate_link_stats(_link_fields()), [])
+
+    def test_missing_field_is_error(self):
+        line = VALID_LINK_LINE.replace("disconnect_count=1 ", "")
+        errors = lc.validate_link_stats(_link_fields(line))
+        self.assertTrue(any("disconnect_count" in e for e in errors))
+
+    def test_bad_abi_is_error(self):
+        # ABI 漂移（3 != 4）判红
+        line = VALID_LINK_LINE.replace("abi_version=4", "abi_version=3")
+        errors = lc.validate_link_stats(_link_fields(line))
+        self.assertTrue(any("abi_version" in e for e in errors))
+
+    def test_negative_count_is_error(self):
+        line = VALID_LINK_LINE.replace("connect_count=3", "connect_count=-1")
+        errors = lc.validate_link_stats(_link_fields(line))
+        self.assertTrue(any("connect_count" in e and "负值" in e for e in errors))
+
+    def test_non_numeric_count_is_error(self):
+        line = VALID_LINK_LINE.replace("connect_count=3", "connect_count=3x")
+        errors = lc.validate_link_stats(_link_fields(line))
+        self.assertTrue(any("connect_count" in e and "非数字" in e for e in errors))
+
+    def test_event_type_out_of_range_is_error(self):
+        # 事件枚举 0..9（v4 含链路事件 7/8/9），10 越界判红
+        line = VALID_LINK_LINE.replace("last_event_type=9", "last_event_type=10")
+        errors = lc.validate_link_stats(_link_fields(line))
+        self.assertTrue(any("last_event_type" in e and "超出枚举" in e for e in errors))
+
+    def test_negative_last_err_allowed(self):
+        # s32 errno 可为负（-EPIPE 等），不得判红
+        line = VALID_LINK_LINE.replace("last_err=0", "last_err=-71")
+        self.assertEqual(lc.validate_link_stats(_link_fields(line)), [])
+
+    def test_link_node_missing_is_red(self):
+        # 节点缺失：ls 失败 → check_link_node False → 判红（防假绿）
+        with mock.patch.object(lc, "adb", return_value=("", 1)):
+            self.assertFalse(lc.check_link_node())
+
+    def test_link_node_present(self):
+        with mock.patch.object(
+                lc, "adb",
+                return_value=("drwxr-xr-x root root vendor_lechao_usbd_link", 0)):
+            self.assertTrue(lc.check_link_node())
+
+    def test_link_ioctl_failure_exits(self):
+        # GET_LINK_STATS ioctl 失败（lciod_probe --link rc!=0）→ 判红退出（防假绿）
+        with mock.patch.object(lc, "run_adb", return_value=("error", 1)), \
+                mock.patch.object(lc.sys, "exit") as ex:
+            lc.run_link_probe()
+        ex.assert_called_once_with(1)
+
+    def test_link_stats_size_frozen(self):
+        # struct vendor_lechao_usbd_link_stats 尺寸契约（与内核真相源布局一致）
+        self.assertEqual(lc.link_stats_struct_size(), 80)
 
 
 class BaselineTest(unittest.TestCase):

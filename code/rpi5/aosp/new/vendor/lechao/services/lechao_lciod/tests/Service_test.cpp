@@ -11,6 +11,12 @@
 #include <gtest/gtest.h>
 
 #include "service.h"
+/* R2 方向 5+6：规则一纯函数（供电不足归因）单测 */
+#include "link_monitor.h"
+/* 链路事件类型枚举名（单一事实源） */
+#include "vendor_lechao_usbd-ioctl.h"
+/* R2 方向 5+6：规则一纯函数位于 lechao::lciod 命名空间 */
+using lechao::lciod::ApplyPowerSuspectRule;
 
 /* --- ComputeAverageRate：getAverageRate 核心公式 --- */
 
@@ -244,4 +250,55 @@ TEST(ComputeErrorRateTest, LargeCounters_NoOverflow) {
     // 累计计数接近 uint64 上限时 errorCount*1000 不溢出（128 位中间量）
     uint64_t big = 9000000000000000000ULL;
     EXPECT_EQ(ComputeErrorRate(big, big), 500u);
+}
+
+/* --- ApplyPowerSuspectRule：供电不足归因规则一（R2 方向 5+6） --- */
+
+TEST(ApplyPowerSuspectRuleTest, Disconnect_InWindow_ThrottledNonZero_IsSuspect) {
+    // 掉线事件发生在 1s 前（5s 窗口内），throttled 非零 → 标 power_suspect
+    const uint64_t now = 2000000000000ULL;
+    EXPECT_TRUE(ApplyPowerSuspectRule(now - 1000000000ULL, now, 0x10000,
+                                      VENDOR_LECHAO_USBD_EVENT_LINK_DISCONNECT));
+}
+
+TEST(ApplyPowerSuspectRuleTest, Disconnect_OutOfWindow_NotSuspect) {
+    // 掉线事件发生在 10s 前（超 5s 窗口），即使 throttled 非零也不标
+    const uint64_t now = 2000000000000ULL;
+    EXPECT_FALSE(ApplyPowerSuspectRule(now - 10000000000ULL, now, 0x10000,
+                                       VENDOR_LECHAO_USBD_EVENT_LINK_DISCONNECT));
+}
+
+TEST(ApplyPowerSuspectRuleTest, Overcurrent_InWindow_ThrottledNonZero_IsSuspect) {
+    // 过流事件窗口内 + throttled 非零 → 标 power_suspect
+    const uint64_t now = 2000000000000ULL;
+    EXPECT_TRUE(ApplyPowerSuspectRule(now - 1000000000ULL, now, 0x1,
+                                      VENDOR_LECHAO_USBD_EVENT_LINK_OVERCURRENT));
+}
+
+TEST(ApplyPowerSuspectRuleTest, NonLinkEvent_NotSuspect) {
+    // 非链路事件（STALL）不参与供电归因，即使窗口内 throttled 非零
+    const uint64_t now = 2000000000000ULL;
+    EXPECT_FALSE(ApplyPowerSuspectRule(now - 1000000000ULL, now, 0x10000,
+                                       VENDOR_LECHAO_USBD_EVENT_STALL));
+}
+
+TEST(ApplyPowerSuspectRuleTest, ThrottledZero_NotSuspect) {
+    // throttled 采样为 0（供电正常）→ 掉线事件不标
+    const uint64_t now = 2000000000000ULL;
+    EXPECT_FALSE(ApplyPowerSuspectRule(now - 1000000000ULL, now, 0,
+                                       VENDOR_LECHAO_USBD_EVENT_LINK_DISCONNECT));
+}
+
+TEST(ApplyPowerSuspectRuleTest, WindowBoundary_Exactly5s_IsSuspect) {
+    // 契约 now-event<=5s：正好 5s 边界在窗口内 → 标
+    const uint64_t now = 2000000000000ULL;
+    EXPECT_TRUE(ApplyPowerSuspectRule(now - 5000000000ULL, now, 0x10000,
+                                      VENDOR_LECHAO_USBD_EVENT_LINK_DISCONNECT));
+}
+
+TEST(ApplyPowerSuspectRuleTest, EventInFuture_NotSuspect) {
+    // 防御：事件时间戳晚于当前（时钟异常）→ 按窗口外处理，防无符号回绕
+    const uint64_t now = 2000000000000ULL;
+    EXPECT_FALSE(ApplyPowerSuspectRule(now + 1000000000ULL, now, 0x10000,
+                                       VENDOR_LECHAO_USBD_EVENT_LINK_DISCONNECT));
 }

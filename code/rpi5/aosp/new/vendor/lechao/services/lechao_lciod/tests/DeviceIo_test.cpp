@@ -285,7 +285,9 @@ TEST(AbiContractTest, StructSizesFrozen) {
 }
 
 TEST(AbiContractTest, AbiVersionAndBufSizeFrozen) {
-    EXPECT_EQ(VENDOR_LECHAO_USBD_ABI_VERSION, 3u);  // v3: event 追加 scsi ctx + wall 时间戳, stats 追加 r/w 错误分项
+    // v4: 追加链路事件 7/8/9（LINK_CONNECT/DISCONNECT/OVERCURRENT）+ 全局链路节点
+    // link_stats 与 GET_LINK_STATS（R2 链路事件维测与供电归因）
+    EXPECT_EQ(VENDOR_LECHAO_USBD_ABI_VERSION, 4u);
     EXPECT_EQ(VENDOR_LECHAO_USBD_EVENT_BUF_SIZE, 32);
 }
 

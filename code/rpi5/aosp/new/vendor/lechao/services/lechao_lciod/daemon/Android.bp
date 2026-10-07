@@ -16,6 +16,7 @@ filegroup {
     srcs: [
         "service.cpp",
         "hal_client.cpp",
+        "link_monitor.cpp",   // R2 方向 5+6：全局链路事件监控（LinkMonitor）
     ],
 }
 

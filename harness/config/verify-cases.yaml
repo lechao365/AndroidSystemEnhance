@@ -187,7 +187,7 @@ cases:
   # /system/bin）→ host 侧字段齐全性/数值合法性/abi_version 校验。
   # 防假绿：零设备判红（probe 空输出 exit 0，host 判红）、缺字段判红
   # （33 字段齐全 = getStats 字段映射完整性回归点，含 R1 新增 protocol）、
-  # vendor/product 为空判红、abi_version != 3 判红（镜像副本与内核真相源漂移）。
+  # vendor/product 为空判红、abi_version != 4 判红（镜像副本与内核真相源漂移）。
   lciod-pipeline: 'hostcmd:"cases/lciod_check.sh --mode stats"'
 
   # L2 传输触发全链路：baseline --reset（probe --reset 归零内核计数后
@@ -211,6 +211,16 @@ cases:
   # 依赖 lciod_probe 输出 protocol 字段（方向6 AIDL/工具透传）。
   # 无 UAS 设备时判红（提示接入后重跑），UAS 打点链路未验证不得假绿。
   lciod-uas: 'hostcmd:"cases/lciod_check.sh --mode uas"'
+
+  # L0 链路事件维测（R2 方向 7）：全局链路节点 /dev/vendor_lechao_usbd_link
+  # GET_LINK_STATS ioctl 快照校验（lciod_link 内核模块导出，单节点独立于
+  # per-device 节点，无需接入 USB 设备即可验证）。lciod_probe --link 取数
+  # （open/ioctl 失败判红）→ host 侧字段齐全性（connect/disconnect/
+  # enum_fail/overcurrent 计数 + 最近事件字段）/数值合法性/abi_version==4
+  # 校验。防假绿：节点缺失判红、ioctl 失败判红、字段缺失判红。
+  # 被动读取无 IO 副作用，但依赖内核 lciod_link 模块（方向 3）随批上板，
+  # 仅随 R2 批次/方向触发，不入常态快速回归组（保持快速组 5 case 契约）。
+  lciod-link: 'hostcmd:"cases/lciod_check.sh --mode link"'
 
   # lciod 存活综合用例：HAL/Daemon 服务 + 监控线程持续日志 + boot 完成。
   # 注意：log 判据选监控线程统计日志（"monitor: minor="，每 10s 打印），

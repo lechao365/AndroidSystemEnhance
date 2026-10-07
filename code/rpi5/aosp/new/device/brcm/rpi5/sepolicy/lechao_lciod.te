@@ -36,3 +36,16 @@ allow lechao_lciod lciod_service:service_manager add;
 
 # lciod_service 作为服务类型（service_manager_type），供其他域查找/使用
 type lciod_service, service_manager_type;
+
+# R2 方向 5+6：daemon 经 epoll 直读全局链路节点 /dev/vendor_lechao_usbd_link
+#   （内核 lciod_link.c misc_register 创建，devnode 0600，订阅 hub notifier
+#   转链路事件流）。LinkMonitor 以 O_RDWR 打开 + epoll/read 消费链路事件 +
+#   GET_LINK_STATS ioctl 取最近事件 vid/pid。
+#   注意：该节点名带 "link" 后缀，未命中 file_contexts 的
+#   /dev/vendor_lechao_usbd[0-9]+ 通配（[0-9]+ 仅匹配数字），ueventd 按
+#   /dev 默认标签 device 型打标，故对 device 类型放行 chr_file 访问。
+#   若后续在 file_contexts 为链路节点补专属类型（如 lechao_lciod_device），
+#   须同步收窄本规则到该类型。
+allow lechao_lciod device:chr_file { open read write ioctl getattr };
+# 允许 daemon 搜索 /dev 目录 —— 按绝对路径打开链路节点前需遍历 /dev
+allow lechao_lciod device:dir { search read };

@@ -9,6 +9,8 @@ kernel:
       source: rpi5-kernel-build/common/Kconfig
     - patch: kernel/modified/arch/arm64/configs/android_rpi5_defconfig.diff
       source: rpi5-kernel-build/common/arch/arm64/configs/android_rpi5_defconfig
+    - patch: kernel/modified/drivers/usb/core/hub.c.diff
+      source: rpi5-kernel-build/common/drivers/usb/core/hub.c
     - patch: kernel/modified/drivers/usb/storage/transport.c.diff
       source: rpi5-kernel-build/common/drivers/usb/storage/transport.c
     - patch: kernel/modified/drivers/usb/storage/uas.c.diff
@@ -18,6 +20,8 @@ kernel:
     - patch: kernel/modified/drivers/usb/storage/usb.h.diff
       source: rpi5-kernel-build/common/drivers/usb/storage/usb.h
   new:
+    - patch: kernel/new/drivers/usb/core/lechao_hub_notifier.h
+      source: rpi5-kernel-build/common/drivers/usb/core/lechao_hub_notifier.h
     - patch: kernel/new/drivers/usb/storage/uas-notifier.h
       source: rpi5-kernel-build/common/drivers/usb/storage/uas-notifier.h
     - patch: kernel/new/vendor/Kconfig
@@ -30,6 +34,10 @@ kernel:
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/Kconfig
     - patch: kernel/new/vendor/lechao/LcIod/Makefile
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/Makefile
+    - patch: kernel/new/vendor/lechao/LcIod/lciod_link.c
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_link.c
+    - patch: kernel/new/vendor/lechao/LcIod/lciod_link.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_link.h
     - patch: kernel/new/vendor/lechao/LcIod/lciod_read_logic.c
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_read_logic.c
     - patch: kernel/new/vendor/lechao/LcIod/lciod_read_logic.h
@@ -175,6 +183,10 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lciod/daemon/hal_client.h
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/lechao_lciod.rc
       source: aosp/vendor/lechao/services/lechao_lciod/daemon/lechao_lciod.rc
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/link_monitor.cpp
+      source: aosp/vendor/lechao/services/lechao_lciod/daemon/link_monitor.cpp
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/link_monitor.h
+      source: aosp/vendor/lechao/services/lechao_lciod/daemon/link_monitor.h
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/main_lciod.cpp
       source: aosp/vendor/lechao/services/lechao_lciod/daemon/main_lciod.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/service.cpp

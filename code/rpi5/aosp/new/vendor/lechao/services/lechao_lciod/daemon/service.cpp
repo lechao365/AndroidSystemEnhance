@@ -42,6 +42,8 @@
 #include "hal_client.h"
 #include "minor_utils.h"
 #include "lechao_log.h"
+/* R2 方向 5+6：全局链路事件监控（独立于 per-device 分片） */
+#include "link_monitor.h"
 /* R-14 方向 1：共享事件枚举头（AOSP hal 镜像，与内核真相源 1:1 同步），
  * 事件类型/方向名映射单一事实源，消模块内 switch 硬编码 */
 #include "vendor_lechao_usbd-ioctl.h"
@@ -172,6 +174,11 @@ void ProjectSystemIoEvent(const aidl::vendor::lechao::lciod::IoEvent& vev,
 
 void IoServiceImpl::start() {
     start_monitor();
+    /* R2 方向 5+6：启动独立全局链路监控线程（LinkMonitorRun，detach）。
+     * 与 start_monitor 的 per-device 4 分片并行，互不影响——链路事件来自
+     * 全局节点 /dev/vendor_lechao_usbd_link（lciod_link），非 per-device
+     * 通道；线程随进程生命周期终止（进程非 oneshot，init 自动重启）。 */
+    std::thread(::lechao::lciod::LinkMonitorRun).detach();
 }
 
 /*

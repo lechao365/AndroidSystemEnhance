@@ -8,11 +8,14 @@
 #   在 host 完成；设备侧只做单二进制最小操作。
 #
 # 模式：
-#   stats    — 校验 probe 快照：≥1 设备、abi_version==3、字段齐全、
+#   stats    — 校验 probe 快照：≥1 设备、abi_version==4、字段齐全、
 #              数值非负、vendor/product 非空、protocol∈{0,1}（字段映射
 #              完整性回归点）
 #   uas      — UAS 专项（R1 维测）：要求 ≥1 设备 protocol==1（UAS 设备）
 #              且该设备传输统计字段齐全；无 UAS 设备判红提示重跑
+#   link     — 全局链路节点（R2 方向 7）：/dev/vendor_lechao_usbd_link
+#              GET_LINK_STATS ioctl 快照校验——节点可打开、字段齐全、
+#              值合法、abi_version==4（连接/断开/枚举失败/过流计数）
 #   baseline — [--reset] 取快照存 --baseline（供 delta；
 #              --reset 传给设备工具归零计数，delta 断言简化为绝对值）
 #   delta    — 对比基线，--expect 字段必须严格增加（防假绿：
@@ -29,6 +32,7 @@ import argparse
 import json
 import os
 import re
+import struct
 import sys
 import time
 from pathlib import Path
@@ -52,7 +56,7 @@ def _default_baseline(env_name="LCIOD_BASELINE_FILE"):
 
 BASELINE_DEFAULT = _default_baseline()
 
-# probe 输出必须齐全的字段（与 lciod_probe.c 输出、ioctl.h v3 ABI 对齐；
+# probe 输出必须齐全的字段（与 lciod_probe.c 输出、ioctl.h v4 ABI 对齐；
 # 缺任一字段即字段映射回归，stats 模式判红）
 REQUIRED_FIELDS = [
     "minor", "path", "vid", "pid", "protocol", "vendor", "product",
@@ -69,7 +73,7 @@ REQUIRED_FIELDS = [
 ]
 # 非数值字段（vendor/product 可含空格引号包裹；path 为字符串）
 _TEXT_FIELDS = {"path", "vendor", "product"}
-_EXPECTED_ABI = "3"
+_EXPECTED_ABI = "4"
 
 # key=value 解析：vendor="SanDisk Corp" 等引号包裹值支持空格
 _TOKEN_RE = re.compile(r'(\w+)=(?:"([^"]*)"|(\S+))')
@@ -141,7 +145,7 @@ def validate_devices(devices):
     """stats 模式校验 → 错误列表（空 = 通过）。
 
     判红项：零设备 / 字段缺失 / 数值字段非数字或负值 /
-    vendor·product 为空 / abi_version != 3（镜像副本与内核真相源漂移）。
+    vendor·product 为空 / abi_version != 4（镜像副本与内核真相源漂移）。
     """
     errors = []
     if not devices:
@@ -213,6 +217,109 @@ def validate_uas_devices(devices):
         for f in uas_fields:
             if f not in dev:
                 errors.append(f"{tag}: 缺传输统计字段 {f}（UAS 打点链路不完整）")
+    return errors
+
+
+# ---- 方向 7：全局链路节点 GET_LINK_STATS 校验（--mode link） ----
+
+_LINK_DEV = "/dev/vendor_lechao_usbd_link"
+
+# lciod_probe --link（GET_LINK_STATS ioctl 取数）输出必须齐全的字段（与
+# lciod_link.c 的 struct vendor_lechao_usbd_link_stats 一一对应；缺任一
+# 字段即字段映射回归，link 模式判红）
+REQUIRED_LINK_FIELDS = [
+    "connect_count", "disconnect_count", "enum_fail_count", "overcurrent_count",
+    "last_event_ts_ns", "last_event_type",
+    "last_busnum", "last_port", "last_vid", "last_pid",
+    "last_err", "last_count", "last_duration_ns",
+    "abi_version",
+]
+
+# 链路事件类型合法范围：复用事件枚举 0..9（含 v4 链路事件 7/8/9）
+_LINK_EVENT_TYPE_MAX = 9
+
+
+def link_stats_struct_size():
+    """复算 struct vendor_lechao_usbd_link_stats 尺寸（ARM64 LE 自然对齐）。
+
+    方向 7：与 C 侧 _IOR('R', 4, struct ...) 联动的 Python 侧契约复核点——
+    GET_LINK_STATS 命令号含结构尺寸位段（size<<16），字段增删未三方同步时
+    尺寸漂移在此判红（对齐 DeviceIo_test.cpp 的 sizeof 断言精神）。
+    """
+    return struct.Struct("@QQQQQIHHHHiIQ8s").size
+
+
+def check_link_node():
+    """设备侧断言全局链路节点存在（缺失判红，防假绿）。"""
+    out, rc = adb(["shell", "ls", "-ld", _LINK_DEV])
+    return rc == 0 and "vendor_lechao_usbd_link" in out
+
+
+def run_link_probe():
+    """设备侧执行 lciod_probe --link（GET_LINK_STATS ioctl 取数），返回 stdout。
+
+    失败/超时按语义退出——节点打不开或 ioctl 失败不得当"无输出"假绿
+    （对齐 run_probe 的 adb 超时透传与退出码语义）。
+    """
+    out, rc = adb(["shell", "lciod_probe", "--link"])
+    if rc == -1:
+        print("ERROR: adb 执行 lciod_probe --link 超时")
+        sys.exit(2)
+    if rc != 0:
+        print(f"ERROR: lciod_probe --link 退出码 {rc}（open/ioctl 失败）")
+        sys.exit(1)
+    return out
+
+
+def parse_link_output(text):
+    """解析 lciod_probe --link 输出（单行 key=value）→ dict。
+
+    缺关键字段（connect_count）抛 ValueError——残缺数据不得静默当有效
+    快照（防假绿），由调用方转 exit 1。
+    """
+    line = text.strip()
+    fields = {}
+    for m in _TOKEN_RE.finditer(line):
+        fields[m.group(1)] = m.group(2) if m.group(2) is not None else m.group(3)
+    if "connect_count" not in fields:
+        raise ValueError(f"link 输出缺 connect_count: {line[:100]}")
+    return fields
+
+
+def validate_link_stats(fields):
+    """link 模式校验 → 错误列表（空 = 通过）。
+
+    判红项：字段缺失 / 无符号计数非数字或负值 / last_err 非数字（s32
+    errno 允许负值，只查数字）/ last_event_type 超出枚举范围 /
+    abi_version != 4（镜像副本与内核真相源漂移）。
+    """
+    errors = []
+    missing = [f for f in REQUIRED_LINK_FIELDS if f not in fields]
+    for f in missing:
+        errors.append(f"link: 缺字段 {f}")
+    non_neg = [f for f in REQUIRED_LINK_FIELDS
+               if f not in missing and f not in ("last_err", "abi_version")]
+    for f in non_neg:
+        try:
+            if int(fields[f], 0) < 0:
+                errors.append(f"link: {f} 为负值: {fields[f]}")
+        except ValueError:
+            errors.append(f"link: {f} 非数字: {fields[f]}")
+    if "last_err" not in missing:
+        try:
+            int(fields["last_err"], 0)
+        except ValueError:
+            errors.append(f"link: last_err 非数字: {fields['last_err']}")
+    if "last_event_type" not in missing:
+        try:
+            et = int(fields["last_event_type"], 0)
+            if et < 0 or et > _LINK_EVENT_TYPE_MAX:
+                errors.append(f"link: last_event_type={fields['last_event_type']} "
+                              f"超出枚举范围 0..{_LINK_EVENT_TYPE_MAX}")
+        except ValueError:
+            pass  # 非数字已由 non_neg 检查判红
+    if fields.get("abi_version") != _EXPECTED_ABI:
+        errors.append(f"link: abi_version={fields.get('abi_version')} != {_EXPECTED_ABI}")
     return errors
 
 
@@ -415,7 +522,7 @@ def mode_perf(args):
 def main():
     ap = argparse.ArgumentParser(description="lciod 板端数据校验器（host 侧）")
     ap.add_argument("--mode", required=True,
-                    choices=["stats", "baseline", "delta", "perf", "uas"])
+                    choices=["stats", "baseline", "delta", "perf", "uas", "link"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
@@ -439,6 +546,26 @@ def main():
             print("ERROR: adb 执行超时")
             return 1
         return 0 if rc == 0 else 1
+
+    if args.mode == "link":
+        # 方向 7：全局链路节点 GET_LINK_STATS 快照校验（被动读取，无 IO 副作用）
+        if not check_link_node():
+            print(f"ERROR: 全局链路节点 {_LINK_DEV} 不存在（lciod_link 内核模块未加载？）")
+            sys.exit(1)
+        try:
+            fields = parse_link_output(run_link_probe())
+        except ValueError as ex:
+            print(f"FAIL: {ex}")
+            print("ERROR: lciod link 校验失败")
+            sys.exit(1)
+        errors = validate_link_stats(fields)
+        if errors:
+            for e in errors:
+                print(f"FAIL: {e}")
+            print("ERROR: lciod link 校验失败")
+            sys.exit(1)
+        print("OK: lciod link 校验通过（全局链路节点 GET_LINK_STATS 正常）")
+        sys.exit(0)
 
     if args.mode == "stats":
         devices = parse_probe_output(run_probe())

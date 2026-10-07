@@ -1,0 +1,233 @@
+diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
+index 046dd06..9dd6291 100644
+--- a/drivers/usb/core/hub.c
++++ b/drivers/usb/core/hub.c
+@@ -39,6 +39,13 @@
+ 
+ #include "hub.h"
+ #include "otg_productlist.h"
++#include "lechao_hub_notifier.h"
++
++/* Lechao: 全局 USB hub 链路事件原子 notifier 链头——hub.c 定义并导出，
++ * lciod_link 模块经 lechao_hub_notifier_register 订阅链路事件（发射点均在
++ * hub_event 工作队列进程上下文，atomic 链回调不可睡眠，仅做赋值）。 */
++ATOMIC_NOTIFIER_HEAD(lechao_hub_nh);
++EXPORT_SYMBOL_GPL(lechao_hub_nh);
+ 
+ #define USB_VENDOR_GENESYS_LOGIC		0x05e3
+ #define USB_VENDOR_SMSC				0x0424
+@@ -2291,6 +2298,8 @@ void usb_disconnect(struct usb_device **pdev)
+ 	struct usb_device *udev = *pdev;
+ 	struct usb_hub *hub = NULL;
+ 	int port1 = 1;
++	/* Lechao: 掉线打点——函数入口保存枚举状态（随后 usb_set_device_state 会改为 NOTATTACHED） */
++	enum usb_device_state prev_state = udev->state;
+ 
+ 	/* mark the device as inactive, so any further urb submissions for
+ 	 * this device (and any of its children) will fail immediately.
+@@ -2334,6 +2343,28 @@ void usb_disconnect(struct usb_device **pdev)
+ 			pm_runtime_get_sync(&port_dev->dev);
+ 	}
+ 
++	/* Lechao: 掉线链路打点——在 port1/hub 求值块后、ep 清理前发射 DISCONNECT。
++	 * 为什么在此打点：prev_state 于函数入口保存（此时 usb_set_device_state 已将
++	 * state 改为 NOTATTACHED，须用保存值判断枚举是否完成）；parent 为空（root hub）
++	 * 无端口语义，不上报。reason：prev_state<=USB_STATE_ADDRESS 表示枚举未完成即
++	 * 掉线（归 ENUM_FAIL），否则按正常拔出（NORMAL）。usb_disconnect 为进程上下文
++	 * （usb 锁保护），atomic 链回调仅赋值，不可睡眠。 */
++	if (udev->parent) {
++		struct lechao_hub_notifier_data nd = {0};
++
++		nd.busnum = udev->bus->busnum;
++		nd.port = port1;
++		nd.category = LECHAO_HUB_EVENT_DISCONNECT;
++		nd.reason = (prev_state <= USB_STATE_ADDRESS) ?
++			LECHAO_HUB_DISC_ENUM_FAIL : LECHAO_HUB_DISC_NORMAL;
++		nd.err = 0;
++		nd.vid = le16_to_cpu(udev->descriptor.idVendor);
++		nd.pid = le16_to_cpu(udev->descriptor.idProduct);
++		nd.duration_ns = 0;
++		nd.count = 0;
++		lechao_hub_notify(&nd);
++	}
++
+ 	usb_remove_ep_devs(&udev->ep0);
+ 	usb_unlock_device(udev);
+ 
+@@ -4885,6 +4916,10 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
+ 	const bool		initial = !dev_descr;
+ 	int			maxp0;
+ 	struct usb_device_descriptor	*buf, *descr;
++	/* Lechao: 枚举链路打点——记录枚举开始 mono 时刻与失败阶段，fail 统一出口上报 */
++	u64 t0 = ktime_get_ns();
++	int enum_stage = LECHAO_HUB_ENUM_STAGE_RESET;
++	u32 enum_retries = 0;	/* 描述符重试轮次（fail 汇总用，防 retries 未初始化 UB） */
+ 
+ 	buf = kmalloc(GET_DESCRIPTOR_BUFSIZE, GFP_NOIO);
+ 	if (!buf)
+@@ -4904,6 +4939,8 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
+ 	if (oldspeed == USB_SPEED_LOW)
+ 		delay = HUB_LONG_RESET_TIME;
+ 
++	/* Lechao: 失败阶段标记——端口复位（首轮） */
++	enum_stage = LECHAO_HUB_ENUM_STAGE_RESET;
+ 	/* Reset the device; full speed may morph to high speed */
+ 	/* FIXME a USB 2.0 device may morph into SuperSpeed on reset. */
+ 	retval = hub_port_reset(hub, port1, udev, delay, false);
+@@ -4917,6 +4954,7 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
+ 	if (oldspeed != USB_SPEED_UNKNOWN && oldspeed != udev->speed &&
+ 	    !(oldspeed == USB_SPEED_SUPER && udev->speed > oldspeed)) {
+ 		dev_dbg(&udev->dev, "device reset changed speed!\n");
++		enum_stage = LECHAO_HUB_ENUM_STAGE_SPEED;	/* 失败阶段：复位后速度异常 */
+ 		goto fail;
+ 	}
+ 	oldspeed = udev->speed;
+@@ -5000,12 +5038,15 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
+ 	do_new_scheme = use_new_scheme(udev, retry_counter, port_dev);
+ 
+ 	for (retries = 0; retries < GET_DESCRIPTOR_TRIES; (++retries, msleep(100))) {
++		enum_retries = retries + 1;	/* 描述符读取已尝试轮次（耗尽汇总时 == GET_DESCRIPTOR_TRIES） */
+ 		if (hub_port_stop_enumerate(hub, port1, retries)) {
+ 			retval = -ENODEV;
+ 			break;
+ 		}
+ 
+ 		if (do_new_scheme) {
++			/* Lechao: 失败阶段标记——使能设备 */
++			enum_stage = LECHAO_HUB_ENUM_STAGE_ENABLE;
+ 			retval = hub_enable_device(udev);
+ 			if (retval < 0) {
+ 				dev_err(&udev->dev,
+@@ -5014,6 +5055,8 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
+ 				goto fail;
+ 			}
+ 
++			/* Lechao: 失败阶段标记——读设备描述符（new scheme） */
++			enum_stage = LECHAO_HUB_ENUM_STAGE_GET_DESCR;
+ 			maxp0 = get_bMaxPacketSize0(udev, buf,
+ 					GET_DESCRIPTOR_BUFSIZE, retries == 0);
+ 			if (maxp0 > 0 && !initial &&
+@@ -5023,12 +5066,15 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
+ 				goto fail;
+ 			}
+ 
++			/* Lechao: 失败阶段标记——二次复位（new scheme） */
++			enum_stage = LECHAO_HUB_ENUM_STAGE_RESET;
+ 			retval = hub_port_reset(hub, port1, udev, delay, false);
+ 			if (retval < 0)		/* error or disconnect */
+ 				goto fail;
+ 			if (oldspeed != udev->speed) {
+ 				dev_dbg(&udev->dev,
+ 					"device reset changed speed!\n");
++				enum_stage = LECHAO_HUB_ENUM_STAGE_SPEED;	/* 失败阶段：复位后速度异常 */
+ 				retval = -ENODEV;
+ 				goto fail;
+ 			}
+@@ -5041,6 +5087,8 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
+ 			}
+ 		}
+ 
++		/* Lechao: 失败阶段标记——SET_ADDRESS 设址 */
++		enum_stage = LECHAO_HUB_ENUM_STAGE_SET_ADDR;
+ 		for (operations = 0; operations < SET_ADDRESS_TRIES; ++operations) {
+ 			retval = hub_set_address(udev, devnum);
+ 			if (retval >= 0)
+@@ -5079,6 +5127,8 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
+ 		if (do_new_scheme)
+ 			break;
+ 
++		/* Lechao: 失败阶段标记——读设备描述符（old scheme） */
++		enum_stage = LECHAO_HUB_ENUM_STAGE_GET_DESCR;
+ 		maxp0 = get_bMaxPacketSize0(udev, buf, 8, retries == 0);
+ 		if (maxp0 < 0) {
+ 			retval = maxp0;
+@@ -5116,6 +5166,8 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
+ 	 * maxp0 is the value stored in the device descriptor;
+ 	 * i is the value it encodes (logarithmic for SuperSpeed or greater).
+ 	 */
++	/* Lechao: 失败阶段标记——ep0 maxpacket 校验（源自描述符读取） */
++	enum_stage = LECHAO_HUB_ENUM_STAGE_GET_DESCR;
+ 	i = maxp0;
+ 	if (udev->speed >= USB_SPEED_SUPER) {
+ 		if (maxp0 <= 16)
+@@ -5143,6 +5195,8 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
+ 		goto fail;
+ 	}
+ 
++	/* Lechao: 失败阶段标记——读完整设备描述符 */
++	enum_stage = LECHAO_HUB_ENUM_STAGE_GET_DESCR;
+ 	descr = usb_get_device_descriptor(udev);
+ 	if (IS_ERR(descr)) {
+ 		retval = PTR_ERR(descr);
+@@ -5163,6 +5217,8 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
+ 	 * got from those devices show they aren't superspeed devices. Warm
+ 	 * reset the port attached by the devices can fix them.
+ 	 */
++	/* Lechao: 失败阶段标记——描述符异常触发 warm reset */
++	enum_stage = LECHAO_HUB_ENUM_STAGE_GET_DESCR;
+ 	if ((udev->speed >= USB_SPEED_SUPER) &&
+ 			(le16_to_cpu(udev->descriptor.bcdUSB) < 0x0300)) {
+ 		dev_err(&udev->dev, "got a wrong device descriptor, warm reset device\n");
+@@ -5189,6 +5245,33 @@ hub_port_init(struct usb_hub *hub, struct usb_device *udev, int port1,
+ 		hcd->driver->update_device(hcd, udev);
+ 	hub_set_initial_usb2_lpm_policy(udev);
+ fail:
++	/* Lechao: 枚举结果链路打点——仅在 initial（首次发现设备）枚举时上报。
++	 * 为什么在此打点：fail 是 hub_port_init 统一出口，可同时覆盖成功（retval==0，
++	 * 发射 CONNECT）与失败路径；-ENODEV 表示设备在枚举中拔出/被停止，属正常
++	 * 断开流程，不上报 ENUM_FAIL 以免误报。duration_ns 为枚举全程耗时
++	 * （ktime_get_ns()-t0），count 汇总描述符读取耗尽的重试轮次（enum_retries，
++	 * 循环体内随轮次更新，杜绝引用未初始化 retries 的 UB）。vid/pid 取设备
++	 * descriptor（le16_to_cpu）。hub_port_init 运行于 hub_event 工作队列
++	 * （进程上下文），atomic 链回调仅做赋值，不可睡眠。 */
++	if (initial) {
++		struct lechao_hub_notifier_data nd = {0};
++
++		nd.busnum = hdev->bus->busnum;
++		nd.port = port1;
++		nd.vid = le16_to_cpu(udev->descriptor.idVendor);
++		nd.pid = le16_to_cpu(udev->descriptor.idProduct);
++		nd.duration_ns = ktime_get_ns() - t0;
++
++		if (retval == 0) {
++			nd.category = LECHAO_HUB_EVENT_CONNECT;
++		} else if (retval < 0 && retval != -ENODEV) {
++			nd.category = LECHAO_HUB_EVENT_ENUM_FAIL;
++			nd.reason = enum_stage;
++			nd.err = retval;
++			nd.count = enum_retries;
++		}
++		lechao_hub_notify(&nd);
++	}
+ 	if (retval) {
+ 		hub_port_disable(hub, port1, 0);
+ 		update_devnum(udev, devnum);	/* for disconnect processing */
+@@ -5763,6 +5846,28 @@ static void port_event(struct usb_hub *hub, int port1)
+ 	if (portchange & USB_PORT_STAT_C_OVERCURRENT) {
+ 		u16 status = 0, unused;
+ 		port_dev->over_current_count++;
++		/* Lechao: 过流链路打点——过流事件与计数并排上报（count=over_current_count，
++		 * 供上层供电归因：掉线/过流事件 5s 窗口内 throttled 非零则标 power_suspect）。
++		 * 为什么在此打点：port_event 收到 C_OVERCURRENT 即表示端口过流，计数器已自增，
++		 * 此刻上报携带最新计数值；vid/pid 取端口当前挂载设备（port_dev->child，
++		 * 可能为空则填 0）。port_event 运行于 hub_event 工作队列（进程上下文），
++		 * atomic 链回调仅赋值，不可睡眠。 */
++		{
++			struct lechao_hub_notifier_data nd = {0};
++
++			nd.busnum = hdev->bus->busnum;
++			nd.port = port1;
++			nd.category = LECHAO_HUB_EVENT_OVERCURRENT;
++			nd.reason = 0;
++			nd.err = 0;
++			if (udev) {
++				nd.vid = le16_to_cpu(udev->descriptor.idVendor);
++				nd.pid = le16_to_cpu(udev->descriptor.idProduct);
++			}
++			nd.duration_ns = 0;
++			nd.count = port_dev->over_current_count;
++			lechao_hub_notify(&nd);
++		}
+ 		port_over_current_notify(port_dev);
+ 
+ 		dev_notice(&port_dev->dev, "over-current change #%u\n",
