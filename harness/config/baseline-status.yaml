@@ -660,3 +660,34 @@ baselines:
       archived_in: ''
   approved_by: lechao
   approved_at: '2026-09-29T11:02:39+08:00'
+- baseline_id: BL-20261007-01
+  status: candidate
+  source_branch: dev
+  source_commit: 8996c39761d2
+  sync_manifest: data/verify-results/20261007-190842-d9ec6877f6c1.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lciod-link,lciod-liveness,lciod-qos,lciod-storm,lciod-trigger,lciod-uas,lcview-blk,lcview-liveness,lcview-pipeline,lcview-trigger
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20261007-190842-d9ec6877f6c1.md
+    ki_gate: pass
+    evidence_scope: lciod-link,lciod-liveness,lciod-qos,lciod-storm,lciod-trigger,lciod-uas,lcview-blk,lcview-liveness,lcview-pipeline,lcview-trigger
+    known_issues_carried: KI-FLAKE-20d380d0f753-e1789e,KI-FLAKE-cefa39e1699f-1bac08,KI-FLAKE-d9ec6877f6c1-0714c7,KI-FLAKE-d9ec6877f6c1-d84e34,KI-FLAKE-d9ec6877f6c1-24bc54
+    package_evidence: data/verify-results/20261007-190842-d9ec6877f6c1.md
+    package_rc: 0
+    cases_coverage:
+      result: partial
+      missing:
+      - lcview-sepolicy-label
+      - lcview-perf
+      - lcview-recover-daemon
+      - lcview-transfer
+      - lcview-pipeline-warn
+      - lciod-pipeline
+      - lciod-perf
+      - lciod-recover-hal
+      run_count: 10
