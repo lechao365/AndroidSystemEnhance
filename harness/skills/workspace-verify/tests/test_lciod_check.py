@@ -6,6 +6,7 @@
 #       不依赖设备（adb 主流程由板上用例实测兜底）。
 # ============================================================
 
+import argparse
 import json
 import os
 import sys
@@ -421,6 +422,95 @@ class DiffDevicesTest(unittest.TestCase):
     def test_non_dict_baseline_is_error(self):
         errors, _ = lc.diff_devices("corrupt", self._current(), ["read_bytes"])
         self.assertTrue(any("基线无设备" in e for e in errors))
+
+
+# ============================================================
+# R3 方向 7：--mode storm 风暴规则校验（TestModeStorm）
+# 覆盖：注入后 logcat 命中 "rule":"storm" 判绿 / 未命中判红 / setprop 失败
+# 判红 / 设备时钟不可读判红 / 显式 --log-since 时跳过时钟锚定。CDP-DOD-001：
+# 每个判红逻辑配套破坏场景红灯用例。
+# ============================================================
+
+# storm 事件日志行（仿 link_monitor EmitLinkEventJson 手拼 JSON，tag
+# lechao_lciod_event）
+_STORM_HIT = ('07-01 12:00:00.000  1234  1234 I lechao_lciod_event: '
+              '{"rule":"storm","device":0,"count":22,"window_s":60,'
+              '"threshold":10}\n')
+_STORM_MISS = ('07-01 12:00:00.000  1234  1234 I lechao_lciod_event: '
+               '{"rule":"other","device":0}\n')
+
+
+def _args(**kw):
+    a = argparse.Namespace()
+    a.storm_wait = kw.get("storm_wait", 15)
+    a.log_since = kw.get("log_since", None)
+    return a
+
+
+class FakeAdb:
+    """伪 adb（storm 模式专用）：支持 shell setprop / shell date / logcat
+    抓取，各子命令可注入 rc 模拟失败/超时。"""
+
+    def __init__(self, setprop_rc=0, setprop_out="",
+                 date_out="", date_rc=0, logcat_out="", logcat_rc=0):
+        self.setprop_rc = setprop_rc
+        self.setprop_out = setprop_out
+        self.date_out = date_out
+        self.date_rc = date_rc
+        self.logcat_out = logcat_out
+        self.logcat_rc = logcat_rc
+        self.calls = []
+
+    def __call__(self, args, timeout=60):
+        self.calls.append(args)
+        if args[0] == "shell":
+            cmd = args[1]
+            if cmd.startswith("setprop"):
+                return (self.setprop_out, self.setprop_rc)
+            if cmd.startswith("date "):
+                return (self.date_out, self.date_rc)
+            return ("", 0)
+        if args[0] == "logcat":
+            return (self.logcat_out, self.logcat_rc)
+        return ("", 0)
+
+
+class TestModeStorm(unittest.TestCase):
+    def _run(self, fake, **kw):
+        with mock.patch.object(lc, "adb", fake):
+            with mock.patch.object(lc.time, "sleep"):
+                return lc.mode_storm(_args(**kw))
+
+    def test_storm_rule_hit_passes(self):
+        # 注入后 logcat 命中 "rule":"storm" → 通过
+        fake = FakeAdb(date_out="1000\n", date_rc=0,
+                       logcat_out=_STORM_HIT, logcat_rc=0)
+        self.assertEqual(self._run(fake), 0)
+
+    def test_storm_no_rule_red(self):
+        # logcat 无 "rule":"storm" 行（规则三未触发/注入未生效）→ 判红
+        fake = FakeAdb(date_out="1000\n", date_rc=0,
+                       logcat_out=_STORM_MISS, logcat_rc=0)
+        self.assertEqual(self._run(fake), 1)
+
+    def test_storm_setprop_fail_red(self):
+        # setprop 注入失败（rc!=0）→ 判红（注入不可用不得当"未触发"蒙混）
+        fake = FakeAdb(date_out="1000\n", date_rc=0,
+                       setprop_rc=1, logcat_out=_STORM_HIT, logcat_rc=0)
+        self.assertEqual(self._run(fake), 1)
+
+    def test_storm_clock_unreadable_red(self):
+        # 未显式 --log-since 且设备时钟不可读 → 判红（logcat 窗口无法锚定）
+        fake = FakeAdb(date_out="bad", date_rc=1)
+        self.assertEqual(self._run(fake), 1)
+
+    def test_storm_explicit_log_since_skips_clock(self):
+        # 显式 --log-since 时不得取设备时钟（注入前时钟锚定被跳过）
+        fake = FakeAdb(logcat_out=_STORM_HIT, logcat_rc=0)
+        rc = self._run(fake, log_since=999)
+        self.assertEqual(rc, 0)
+        self.assertFalse(any(c[0] == "shell" and str(c[1]).startswith("date ")
+                             for c in fake.calls))
 
 
 if __name__ == "__main__":

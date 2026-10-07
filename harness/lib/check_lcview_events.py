@@ -65,6 +65,10 @@ DISABLED_EVENTS = {
     "LCVIEW_EVENT_USB_CONNECT",
     "LCVIEW_EVENT_GPIO_IRQ",
     "LCVIEW_EVENT_SENSOR_DATA",
+    # R3 方向 1/3：SLOW_DISK 为 daemon（BlockCollector 规则二）合成事件，
+    # 无内核发射点（lcview_builder_start 不在内核），schema 保留定义供
+    # 用户态解析落盘，按停发语义豁免"内核无发射点"判红。
+    "LCVIEW_EVENT_SLOW_DISK",
 }
 
 

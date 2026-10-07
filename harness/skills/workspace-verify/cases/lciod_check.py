@@ -24,6 +24,11 @@
 #              --load-mb MB（默认 64）驱动真实 USB 传输 → probe 前后
 #              快照差分算 per-IO ns（Δread_ns/Δread_cmds）、吞吐
 #              （Δread_bytes/dd 秒）、最近传输延迟（last_transport_latency_ns）
+#   storm    — 风暴规则校验（R3 方向 7）：用户态合成注入——adb root setprop
+#              sys.lechao.lciod.fault_inject stall:20（daemon 每 tick 读该
+#              sysprop，值变化时把 n 加进当前桶，幂等一次性）→ sleep 等
+#              daemon 10s tick + 规则三评估窗口 → logcat 断言 tag
+#              lechao_lciod_event 出现 "rule":"storm"（判红否则）
 #
 # 退出码：0 校验通过 / 1 校验失败 / 2 设备不可达或参数错误
 # ============================================================
@@ -106,6 +111,14 @@ def ensure_connected():
         print(f"ERROR: 设备 {ADB_TARGET} root 后重连失败")
         sys.exit(2)
     _EP = ep
+
+
+def device_now():
+    """设备侧当前 epoch 秒；失败返回 None（storm 模式 logcat 锚点用）。"""
+    out, rc = adb(["shell", "date +%s"])
+    if rc == 0 and out.strip().isdigit():
+        return int(out.strip())
+    return None
 
 
 def parse_probe_output(text):
@@ -519,10 +532,60 @@ def mode_perf(args):
     return 0
 
 
+# ============================================================
+# R3 方向 7：风暴规则校验（--mode storm，用户态合成注入）
+# ============================================================
+
+# daemon 每 tick 读的用户态合成注入 sysprop（值 "stall:<n>" 或 "timeout:<n>"，
+# 值变化时把 n 加进当前环形桶，幂等一次性，不落内核计数）
+_FAULT_INJECT_PROP = "sys.lechao.lciod.fault_inject"
+# storm 事件日志 tag（仿 link_monitor.cpp EmitLinkEventJson 手拼 JSON 行）
+_STORM_LOG_TAG = "lechao_lciod_event"
+
+
+def mode_storm(args):
+    """风暴规则校验：setprop 合成注入 → sleep 等 daemon 10s tick + 规则三
+    评估窗口 → logcat 断言 tag lechao_lciod_event 出现 "rule":"storm"。
+
+    抓取窗口覆盖注入后：--log-since 显式给出时以它为锚；未给时注入前先取
+    设备 epoch 作锚（logcat -T <epoch> 只抓锚点后缓冲，避免注入前历史行
+    当新命中）。判红项（防假绿）：时钟不可读 / setprop 失败 / logcat 抓取
+    失败 / 无 "rule":"storm" 行（规则三未触发）。
+    """
+    since = args.log_since
+    if since is None:
+        now = device_now()
+        if now is None:
+            print("ERROR: 无法读取设备时钟（logcat 抓取窗口无法锚定）")
+            return 1
+        since = now
+    out, rc = adb(["shell", "setprop", _FAULT_INJECT_PROP, "stall:20"])
+    if rc == -1:
+        return -1  # adb 超时透传
+    if rc != 0:
+        print(f"ERROR: setprop {_FAULT_INJECT_PROP} 失败 rc={rc}")
+        return 1
+    print(f"已注入 {_FAULT_INJECT_PROP}=stall:20（用户态合成注入）")
+    time.sleep(args.storm_wait or 15)
+    out, rc = adb(["logcat", "-d", "-T", str(int(since)),
+                   "-s", _STORM_LOG_TAG])
+    if rc == -1:
+        return -1  # adb 超时透传
+    if rc != 0:
+        print(f"ERROR: logcat 抓取失败 rc={rc}（tag {_STORM_LOG_TAG}）")
+        return 1
+    if '"rule":"storm"' not in out:
+        print('ERROR: logcat 无 "rule":"storm" 行（规则三未触发，注入未生效？）')
+        return 1
+    print('OK: 风暴规则触发确认（logcat 命中 "rule":"storm"）')
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="lciod 板端数据校验器（host 侧）")
     ap.add_argument("--mode", required=True,
-                    choices=["stats", "baseline", "delta", "perf", "uas", "link"])
+                    choices=["stats", "baseline", "delta", "perf", "uas",
+                             "link", "storm"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
@@ -535,6 +598,12 @@ def main():
                     help="perf 模式 dd 读块设备路径")
     ap.add_argument("--dd-timeout", type=int, default=300,
                     help="perf 模式 dd 执行 adb 超时（秒）")
+    ap.add_argument("--storm-wait", type=int, default=15,
+                    help="storm 模式注入后等待秒数（等 daemon 10s tick + "
+                         "规则三评估窗口）")
+    ap.add_argument("--log-since", type=int, default=None,
+                    help="storm 模式 logcat 抓取锚点（设备 epoch，只判锚点后 "
+                         "缓冲；未给时注入前自动取设备时钟）")
     args = ap.parse_args()
 
     ensure_connected()
@@ -542,6 +611,14 @@ def main():
 
     if args.mode == "perf":
         rc = mode_perf(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "storm":
+        # R3 方向 7：风暴规则校验（用户态合成注入，不入 batch 验收列表）
+        rc = mode_storm(args)
         if rc == -1:
             print("ERROR: adb 执行超时")
             return 1

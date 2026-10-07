@@ -212,6 +212,44 @@ cases:
   # 无 UAS 设备时判红（提示接入后重跑），UAS 打点链路未验证不得假绿。
   lciod-uas: 'hostcmd:"cases/lciod_check.sh --mode uas"'
 
+  # R3 方向 6：lcview 块设备观测用例（BlockCollector 零内核）：dd + 校验和
+  # 一致性 + block stat 差分 + daemon block 日志断言（用户已确认适配：
+  # fio → dd + sha1sum 校验和）。语义：
+  # - blk baseline：读 /sys/block/sda/stat 基线（before，--mode blk
+  #   --phase baseline，基线文件按轮次隔离 ${LCVIEW_BLK_BASELINE_FILE:-...}）
+  # - dd 读负载 4MB（/dev/block/sda → /dev/null，无破坏面）触发读 IO
+  # - 数据一致性：写 dd 到 LCVIEW_BLOCK_DEV_WRITE（写守卫同 lcview-transfer：
+  #   LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES 且显式给出写目标，缺一即判红——
+  #   dd 会覆盖目标分区数据），写固定已知内容（/dev/zero 4KB）触发写 IO
+  # - blk delta：读 after stat，断言 read_ios/read_sectors/write_ios 均增
+  #   （差分非增判红）+ --check-write 数据一致性（dd 写固定内容→读回→
+  #   sha1sum 比对，不匹配判红）+ logcat 断言 lechao_lcview "block: sda"
+  #   行出现（daemon BlockCollector 每 10s 输出；抓取锚点取基线 captured_at）
+  # 副作用字段同 lcview-trigger（authorized 切换 + dd 读/临时文件写读）：一致性
+  # 校验走 /data/local/tmp 安全路径（dd 写→读回→sha1sum，不触碰块设备分区，
+  # 无破坏性写守卫依赖）
+  lcview-blk:
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lcview_check.sh --mode blk --phase baseline --block-dev ${LCVIEW_BLOCK_DEV:-/dev/block/sda} --blk-baseline ${LCVIEW_BLK_BASELINE_FILE:-/tmp/lcview_blk_baseline.json}" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode blk --phase delta --block-dev ${LCVIEW_BLOCK_DEV:-/dev/block/sda} --blk-baseline ${LCVIEW_BLK_BASELINE_FILE:-/tmp/lcview_blk_baseline.json} --check-write"'
+    setup_snapshot:
+      - 'adb shell "cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
+    teardown:
+      - 'adb shell "echo ${SNAPSHOT_0} > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
+    timeout_s: 300
+
+  # R3 方向 7：lciod 风暴规则（附加 case，不入 batch 验收列表，方向 7 单独
+  # 验证）：用户态合成注入（用户已确认适配：STALL 注入 → 用户态合成注入）——
+  # lciod_check.py --mode storm 内部完成 adb root setprop
+  # sys.lechao.lciod.fault_inject stall:20（daemon 每 tick 读该 sysprop，值
+  # 变化时把 n 加进当前环形桶，幂等一次性，不落内核计数）→ sleep 15（等
+  # daemon 10s tick + 规则三评估窗口）→ logcat 断言 tag lechao_lciod_event
+  # 出现 "rule":"storm"（判红否则）。logcat 抓取窗口覆盖注入后（--log-since
+  # 显式给锚，未给时注入前自动取设备时钟锚定）。注入幂等一次性，无持久
+  # 副作用，仅登记 timeout_s（生命周期字段可单用，setup_snapshot/teardown
+  # 缺省即无快照/无恢复）
+  lciod-storm:
+    acceptance: 'hostcmd:"cases/lciod_check.sh --mode storm"'
+    timeout_s: 120
+
   # L0 链路事件维测（R2 方向 7）：全局链路节点 /dev/vendor_lechao_usbd_link
   # GET_LINK_STATS ioctl 快照校验（lciod_link 内核模块导出，单节点独立于
   # per-device 节点，无需接入 USB 设备即可验证）。lciod_probe --link 取数

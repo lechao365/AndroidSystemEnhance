@@ -252,6 +252,99 @@ TEST(ComputeErrorRateTest, LargeCounters_NoOverflow) {
     EXPECT_EQ(ComputeErrorRate(big, big), 500u);
 }
 
+/* --- ShouldEmitStorm：规则三风暴触发判定（R3 方向4） --- */
+
+TEST(ShouldEmitStormTest, WindowSum_ExactlyAtThreshold_ReturnsTrue) {
+    // 窗口累计恰达阈：stall 6 + timeout 4 = 10
+    StormWindow w{6, 4};
+    EXPECT_TRUE(ShouldEmitStorm(w, 10));
+}
+
+TEST(ShouldEmitStormTest, WindowSum_AboveThreshold_ReturnsTrue) {
+    // 超阈：stall 7 + timeout 4 = 11 > 10
+    StormWindow w{7, 4};
+    EXPECT_TRUE(ShouldEmitStorm(w, 10));
+}
+
+TEST(ShouldEmitStormTest, WindowSum_BelowThreshold_ReturnsFalse) {
+    // 未达阈：stall 6 + timeout 3 = 9 < 10
+    StormWindow w{6, 3};
+    EXPECT_FALSE(ShouldEmitStorm(w, 10));
+}
+
+TEST(ShouldEmitStormTest, ZeroWindow_ReturnsFalse) {
+    // stall 0 timeout 0：无事件不触发
+    StormWindow w{0, 0};
+    EXPECT_FALSE(ShouldEmitStorm(w, 10));
+}
+
+TEST(ShouldEmitStormTest, StallOnly_AtThreshold_ReturnsTrue) {
+    // stall 大、timeout 0，stall 单边达阈 → 触发
+    StormWindow w{10, 0};
+    EXPECT_TRUE(ShouldEmitStorm(w, 10));
+}
+
+TEST(ShouldEmitStormTest, StallOnly_BelowThreshold_ReturnsFalse) {
+    // stall 9、timeout 0 → 9 < 10 不触发
+    StormWindow w{9, 0};
+    EXPECT_FALSE(ShouldEmitStorm(w, 10));
+}
+
+TEST(ShouldEmitStormTest, TimeoutOnly_AboveThreshold_ReturnsTrue) {
+    // timeout 大、stall 0，timeout 单边超阈 → 触发
+    StormWindow w{0, 20};
+    EXPECT_TRUE(ShouldEmitStorm(w, 10));
+}
+
+/* --- ParseFaultInjectValue：用户态合成注入解析（R3 方向7） --- */
+
+TEST(ParseFaultInjectValueTest, StallFormat_ReturnsCount) {
+    // "stall:20" → {is_stall=true, count=20}
+    FaultInjectValue fv;
+    EXPECT_TRUE(ParseFaultInjectValue("stall:20", &fv));
+    EXPECT_TRUE(fv.is_stall);
+    EXPECT_EQ(fv.count, 20u);
+}
+
+TEST(ParseFaultInjectValueTest, TimeoutFormat_ReturnsCount) {
+    // "timeout:7" → {is_stall=false, count=7}
+    FaultInjectValue fv;
+    EXPECT_TRUE(ParseFaultInjectValue("timeout:7", &fv));
+    EXPECT_FALSE(fv.is_stall);
+    EXPECT_EQ(fv.count, 7u);
+}
+
+TEST(ParseFaultInjectValueTest, ZeroCount_ParsesOk) {
+    FaultInjectValue fv;
+    EXPECT_TRUE(ParseFaultInjectValue("stall:0", &fv));
+    EXPECT_EQ(fv.count, 0u);
+}
+
+TEST(ParseFaultInjectValueTest, MaxUint64_ParsesOk) {
+    // uint64 上限边界值可解析
+    FaultInjectValue fv;
+    EXPECT_TRUE(ParseFaultInjectValue("stall:18446744073709551615", &fv));
+    EXPECT_EQ(fv.count, UINT64_MAX);
+}
+
+TEST(ParseFaultInjectValueTest, OverflowCount_ReturnsFalse) {
+    // 超 uint64 上限（UINT64_MAX+1）→ 溢出防御拒绝
+    FaultInjectValue fv;
+    EXPECT_FALSE(ParseFaultInjectValue("stall:18446744073709551616", &fv));
+}
+
+TEST(ParseFaultInjectValueTest, InvalidFormat_ReturnsFalse) {
+    // 非该格式一律拒绝（CXX-003 外部输入防御）
+    FaultInjectValue fv;
+    EXPECT_FALSE(ParseFaultInjectValue("foo:20", &fv));   // 未知前缀
+    EXPECT_FALSE(ParseFaultInjectValue("stall", &fv));     // 缺冒号
+    EXPECT_FALSE(ParseFaultInjectValue("stall:", &fv));    // 缺数字
+    EXPECT_FALSE(ParseFaultInjectValue("stall:1a", &fv));  // 数字后跟字母
+    EXPECT_FALSE(ParseFaultInjectValue("stall:+20", &fv)); // 符号
+    EXPECT_FALSE(ParseFaultInjectValue("stall: 20", &fv)); // 空白
+    EXPECT_FALSE(ParseFaultInjectValue("", &fv));          // 空串
+}
+
 /* --- ApplyPowerSuspectRule：供电不足归因规则一（R2 方向 5+6） --- */
 
 TEST(ApplyPowerSuspectRuleTest, Disconnect_InWindow_ThrottledNonZero_IsSuspect) {

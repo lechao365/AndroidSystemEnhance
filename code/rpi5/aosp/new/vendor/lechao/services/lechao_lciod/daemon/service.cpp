@@ -33,7 +33,9 @@
 #include <unordered_map>
 #include <vector>
 #include <cstdlib>
+#include <string>
 #include <sys/epoll.h>
+#include <sys/system_properties.h>
 #include <unistd.h>
 #include <aidl/system/lechao/lciod/BnIoService.h>
 #include <aidl/system/lechao/lciod/IIoService.h>
@@ -117,6 +119,59 @@ uint64_t ComputeErrorRate(uint64_t errorCount, uint64_t ioCount) {
     if (total == 0)
         return 0;
     return static_cast<uint64_t>(static_cast<__uint128_t>(errorCount) * 1000ULL / total);
+}
+
+/*
+ * ShouldEmitStorm — 规则三触发判定（60s 窗口累计达阈，R3 方向4）
+ * 契约: (stall+timeout) >= threshold。
+ * 输入防御（CXX-002）: 窗口计数为 60s 内事件数（阈值 10 级），正常累计
+ *       远小于 UINT64_MAX，stall+timeout 相加不会回绕；仍先判单边达阈
+ *       短路，再求两数之和，防御式避免无符号加法回绕。
+ */
+bool ShouldEmitStorm(const StormWindow& w, uint64_t threshold) {
+    if (w.stall >= threshold || w.timeout >= threshold)
+        return true;
+    return w.stall + w.timeout >= threshold;
+}
+
+/*
+ * ParseFaultInjectValue — 解析用户态合成注入 sysprop 值（R3 方向7）
+ * 格式: "stall:<n>" 或 "timeout:<n>"；n 为十进制数字（无符号）。
+ * 输入防御（CXX-003）: 前缀精确匹配 + 数字段逐字符校验（禁符号/空白/空值），
+ *       非该格式返回 false 且 out 不写入。
+ * 溢出防御（CXX-002）: n 超 uint64 上限返回 false。
+ */
+bool ParseFaultInjectValue(const std::string& val, FaultInjectValue* out) {
+    if (out == nullptr)
+        return false;
+    static const std::string kStallPrefix = "stall:";
+    static const std::string kTimeoutPrefix = "timeout:";
+    bool is_stall = false;
+    std::string::size_type prefixLen = 0;
+    if (val.compare(0, kStallPrefix.size(), kStallPrefix) == 0) {
+        is_stall = true;
+        prefixLen = kStallPrefix.size();
+    } else if (val.compare(0, kTimeoutPrefix.size(), kTimeoutPrefix) == 0) {
+        is_stall = false;
+        prefixLen = kTimeoutPrefix.size();
+    } else {
+        return false;
+    }
+    const char* num = val.c_str() + prefixLen;
+    if (*num == '\0')
+        return false;  /* 缺数字段 */
+    uint64_t n = 0;
+    for (const char* p = num; *p != '\0'; ++p) {
+        if (*p < '0' || *p > '9')
+            return false;  /* 非数字字符（符号/空白/字母）一律拒绝 */
+        uint64_t d = static_cast<uint64_t>(*p - '0');
+        if (n > (UINT64_MAX - d) / 10)
+            return false;  /* 超 uint64 上限（CXX-002 溢出防御） */
+        n = n * 10 + d;
+    }
+    out->is_stall = is_stall;
+    out->count = n;
+    return true;
 }
 
 /* --- 字段投影纯函数（声明见 service.h，独立于 binder 环境可单测） --- */
@@ -344,6 +399,32 @@ void IoServiceImpl::start_monitor() {
             };
             std::unordered_map<int32_t, TickSnapshot> tickSnap;
 
+            /*
+             * R3 方向4：per-minor 60s 滑动窗口风暴计数（规则三）。
+             * 6 槽环形桶（每槽 10s）：每 200 tick（10s）推进槽位并计算
+             * Δstall/Δtimeout 加入当前槽；窗口累计 = 6 槽之和，达阈值
+             * kStormThreshold 触发风暴事件（EVENT_ALOG JSON 行）。
+             * 用户态合成注入（方向7）每 50ms tick 读 sysprop
+             * sys.lechao.lciod.fault_inject，值变化时把 n 加入当前槽
+             * （幂等一次性，不落内核计数）。
+             * NOTE: 仅本分片 worker 线程访问，无锁。
+             */
+            struct StormBucket {
+                uint64_t stall = 0;    /* 槽内 STALL 事件数 */
+                uint64_t timeout = 0;  /* 槽内 timeout 事件数 */
+            };
+            struct StormState {
+                StormBucket buckets[kStormWindowSlots];  /* 环形槽位 */
+                int slot = 0;            /* 当前槽下标（10s 推进一次） */
+                uint64_t prevStall = 0;  /* 上一统计 tick 的 stallCount */
+                uint64_t prevTimeout = 0;/* 上一统计 tick 的 timeoutCount */
+                bool firstSample = true; /* 首次采样只存 prev 不产生 Δ */
+                bool stormArmed = true;  /* 窗口累计回落阈值后重新武装 */
+            };
+            std::unordered_map<int32_t, StormState> stormStates;
+            /* 最近一次已处理的注入值（值变化才处理，幂等去重） */
+            std::string lastInjectValue;
+
             /* R-16 P4 方向 4：epoll 多路复用——单次 epoll_wait(50ms) 统一等待
              * 本分片设备事件。 */
             int epfd = epoll_create1(EPOLL_CLOEXEC);
@@ -426,6 +507,16 @@ void IoServiceImpl::start_monitor() {
                 }
                 minorToFd = std::move(newMap);
                 deviceMinors = std::move(newMinors);
+
+                /* R3 方向4：设备离线时清理其风暴窗口状态，防 per-minor
+                 * 状态无限增长（CXX-002 生命周期管理） */
+                for (auto it = stormStates.begin(); it != stormStates.end();) {
+                    if (std::find(deviceMinors.begin(), deviceMinors.end(), it->first) ==
+                        deviceMinors.end())
+                        it = stormStates.erase(it);
+                    else
+                        ++it;
+                }
             };
 
             while (true) {
@@ -450,6 +541,44 @@ void IoServiceImpl::start_monitor() {
                 /* 每 200 tick（10s）刷新设备列表 + 重建 epoll 注册表 */
                 if (tick % 200 == 0)
                     rebuild_epoll(hal);
+
+                /* R3 方向7：用户态合成注入——每 50ms tick 读 sysprop
+                 * sys.lechao.lciod.fault_inject（"stall:<n>"/"timeout:<n>"），
+                 * 值变化时把 n 直接加进本分片各设备当前风暴桶（幂等一次性，
+                 * lastInjectValue 更新；不落内核计数，__system_property_get
+                 * 读无需 sepolicy）。 */
+                {
+                    /* PROP_VALUE_MAX 为属性值上限（92），缓冲区必须按上限开
+                     * 防止 __system_property_get 溢出（CXX-002 边界防御） */
+                    char injectBuf[PROP_VALUE_MAX] = {0};
+                    __system_property_get("sys.lechao.lciod.fault_inject", injectBuf);
+                    std::string injectVal(injectBuf);
+                    if (injectVal != lastInjectValue) {
+                        lastInjectValue = injectVal;
+                        if (!injectVal.empty()) {
+                            FaultInjectValue fv;
+                            if (!ParseFaultInjectValue(injectVal, &fv)) {
+                                /* 解析失败：非该格式，忽略并告警一次（值变化才
+                                 * 走到这里，天然去重不刷屏；CXX-003 外部输入防御） */
+                                LC_ALOGE("storm: invalid fault_inject value '%s' "
+                                         "(expect stall:<n> or timeout:<n>)",
+                                         injectVal.c_str());
+                            } else {
+                                for (int32_t minor : deviceMinors) {
+                                    StormState& ss =
+                                        stormStates.emplace(minor, StormState{}).first->second;
+                                    if (fv.is_stall)
+                                        ss.buckets[ss.slot].stall += fv.count;
+                                    else
+                                        ss.buckets[ss.slot].timeout += fv.count;
+                                }
+                                LC_ALOGI("storm: fault_inject applied %s:%llu to %zu device(s)",
+                                         fv.is_stall ? "stall" : "timeout",
+                                         (unsigned long long)fv.count, deviceMinors.size());
+                            }
+                        }
+                    }
+                }
 
                 /* R-16 P4 方向 4 修复：处理待重连队列（分片内独立） */
                 if (!pendingRedup.empty()) {
@@ -626,6 +755,59 @@ void IoServiceImpl::start_monitor() {
                             prevWn = it->second.writeNs;
                         }
                         tickSnap[minor] = {rb, rn, wb, wn};
+
+                        /*
+                         * R3 方向4：规则三风暴判定——per-minor 60s 滑动窗口。
+                         */
+                        StormState& ss =
+                            stormStates.emplace(minor, StormState{}).first->second;
+                        /* 推进槽位（环形，10s 一格），清空即将覆盖的旧槽 */
+                        ss.slot = (ss.slot + 1) % kStormWindowSlots;
+                        ss.buckets[ss.slot] = StormBucket{};
+                        if (!ss.firstSample) {
+                            /* Δ 差分（CXX-002：counter reset——curr<prev 时 Δ=curr） */
+                            uint64_t dStall = stats.stallCount >= ss.prevStall
+                                ? stats.stallCount - ss.prevStall : stats.stallCount;
+                            uint64_t dTimeout = stats.timeoutCount >= ss.prevTimeout
+                                ? stats.timeoutCount - ss.prevTimeout : stats.timeoutCount;
+                            ss.buckets[ss.slot].stall += dStall;
+                            ss.buckets[ss.slot].timeout += dTimeout;
+                        }
+                        ss.prevStall = stats.stallCount;
+                        ss.prevTimeout = stats.timeoutCount;
+                        ss.firstSample = false;
+                        /* 窗口累计 = 6 槽 stall+timeout 之和（60s 内事件数，
+                         * 相加不会回绕，CXX-002） */
+                        StormWindow win{0, 0};
+                        for (int i = 0; i < kStormWindowSlots; i++) {
+                            win.stall += ss.buckets[i].stall;
+                            win.timeout += ss.buckets[i].timeout;
+                        }
+                        if (ShouldEmitStorm(win, kStormThreshold)) {
+                            /* 防重复刷：窗口累计回落阈值前只发一次 */
+                            if (ss.stormArmed) {
+                                ss.stormArmed = false;
+                                uint64_t stormCount = win.stall + win.timeout;
+                                char line[160];
+                                int n = snprintf(line, sizeof(line),
+                                    "{\"rule\":\"storm\",\"device\":%d,\"count\":%llu,"
+                                    "\"window_s\":%d,\"threshold\":%llu}",
+                                    minor, (unsigned long long)stormCount,
+                                    kStormWindowSeconds, (unsigned long long)kStormThreshold);
+                                if (n < 0 || n >= static_cast<int>(sizeof(line))) {
+                                    /* CXX-002：snprintf 截断则丢弃整行，不打半截 JSON */
+                                    LC_ALOGE("storm: JSON line truncated, drop (minor=%d)", minor);
+                                } else {
+                                    EVENT_ALOG("%s", line);
+                                    LC_ALOGI("storm: rule triggered minor=%d window60s_count=%llu "
+                                             "threshold=%llu", minor,
+                                             (unsigned long long)stormCount,
+                                             (unsigned long long)kStormThreshold);
+                                }
+                            }
+                        } else {
+                            ss.stormArmed = true;  /* 窗口累计回落阈值，允许再次触发 */
+                        }
 
                         uint64_t read_rate = ComputeWindowKbRate(rb, rn, prevRb, prevRn);
                         uint64_t write_rate = ComputeWindowKbRate(wb, wn, prevWb, prevWn);

@@ -29,6 +29,17 @@
 #                jsonl 行数增量，100ms 直读采样，不含任何人工 sleep 且不受心跳
 #                周期绑架）、daemon RSS（/proc VmHWM 峰值）。
 #                只报数不设门禁，供跨批基线对照。
+#   blk        — 块设备 IO 观测（R3 方向 6，BlockCollector 零内核）：
+#                --phase baseline 读 /sys/block/<dev>/stat（before）写
+#                --blk-baseline 基线（轮次隔离）；--phase delta 读 after
+#                stat 与基线差分断言 read_ios/read_sectors/write_ios 均增
+#                （差分非增判红）+ --check-write 数据一致性（dd 写固定内容到
+#                LCVIEW_BLOCK_DEV_WRITE → 读回 → sha1sum 比对，走
+#                LCVIEW_ALLOW_DESTRUCTIVE_WRITE 写守卫，不匹配判红）+
+#                logcat 断言 lechao_lcview "block: <dev>" 行（抓取锚点取
+#                基线 captured_at，--log-since 可显式覆盖）。
+#                防假绿：stat 读失败 / 差分非增 / 守卫缺失 / sha1sum 不匹配 /
+#                logcat 无 block 行均判红。
 #
 # 退出码：0 校验通过 / 1 校验失败 / 2 设备不可达或参数错误
 # ============================================================
@@ -70,6 +81,10 @@ def _default_perf_baseline():
 
 BASELINE_DEFAULT = _default_baseline()
 PERF_BASELINE_DEFAULT = _default_perf_baseline()
+
+# 方向 6：块设备观测基线文件按轮次隔离（同 baseline/perf 语义，
+# 编排层经 LCVIEW_BLK_BASELINE_FILE 注入；未设置回退固定默认）
+BLK_BASELINE_DEFAULT = _default_baseline("LCVIEW_BLK_BASELINE_FILE")
 
 # 性能回归容差（R-04 方向 1）：±30% 起步——吞吐/延迟/p99/RSS 与基线偏差超此
 # 阈值即判红（性能回归门禁）。30% 为起步档：覆盖板卡/负载抖动（dd 读块设备
@@ -1129,6 +1144,218 @@ def perf_regression_gate(metrics, baseline_path, save=False):
     return 0
 
 
+# ============================================================
+# 方向 6：块设备 IO 观测校验（--mode blk）
+#   baseline 相：读 /sys/block/<dev>/stat（before）写 --blk-baseline 基线
+#   delta 相  ：读 after stat 与基线差分断言 IO 发生 + 数据一致性
+#               （--check-write，dd 写固定内容→读回→sha1sum 比对，走写守卫）
+#               + logcat 断言 daemon BlockCollector "block: <dev>" 行
+# ============================================================
+
+# /sys/block/<dev>/stat 标准 15 字段（兼容 11 字段）。差分断言只取前 8 个
+# 字段中的 4 个关键计数：field1=read_ios, field3=read_sectors,
+# field5=write_ios, field7=write_sectors（sector=512B）。
+_BLK_STAT_SYSFS_TMPL = "/sys/block/{dev}/stat"
+_BLK_LOG_TAG = "lechao_lcview"
+
+
+def _blk_dev_name(block_dev):
+    """块设备参数归一为 sysfs 目录名：/dev/block/sda → sda。
+
+    sysfs 路径与 logcat "block: <dev>" 行断言共用同一 dev 名（daemon
+    BlockCollector 枚举 /sys/block/* 后按子目录名打日志）。
+    """
+    dev = block_dev or "/dev/block/sda"
+    if dev.startswith("/dev/block/"):
+        return dev[len("/dev/block/"):]
+    return dev.rstrip("/").rsplit("/", 1)[-1]
+
+
+def _parse_block_stat(line):
+    """解析 /sys/block/<dev>/stat 一行 → {read_ios, read_sectors, write_ios,
+    write_sectors}；字段不足 8 或非数字返回 None（调用方判红防假绿）。"""
+    parts = line.split()
+    if len(parts) < 8:
+        return None
+    try:
+        return {
+            "read_ios": int(parts[0]),
+            "read_sectors": int(parts[2]),
+            "write_ios": int(parts[4]),
+            "write_sectors": int(parts[6]),
+        }
+    except ValueError:
+        return None
+
+
+def read_block_stat(dev, timeout=30):
+    """直读 /sys/block/<dev>/stat → 计数 dict；读取失败（含 adb 超时）返回 None。
+
+    返回 None 由调用方判红（不静默通过）：读不到 stat 无从差分，防假绿。
+    """
+    out, rc = adb(["shell", f"cat {_BLK_STAT_SYSFS_TMPL.format(dev=dev)}"],
+                  timeout=timeout)
+    if rc != 0:
+        return None
+    return _parse_block_stat(out)
+
+
+def _parse_sha1(out):
+    """解析 sha1sum 输出首行哈希（40 位 hex）；失败返回 None。"""
+    for line in out.splitlines():
+        parts = line.split()
+        if parts and len(parts[0]) == 40:
+            return parts[0]
+    return None
+
+
+def block_write_check(args):
+    """数据一致性（--check-write）：dd 写固定已知内容到设备临时文件
+    → dd 读回 → sha1sum 前后比对（写内容固定已知 = /dev/zero 4KB，比对读回值）。
+
+    安全路径：写/读回均在 /data/local/tmp（shell 可写临时域），不触碰块设备
+    分区，无需 LCVIEW_ALLOW_DESTRUCTIVE_WRITE 破坏性写守卫——一致性断言验证
+    存储写→读回路径，与 R3 lcview-blk 的 block stat 差分观测互补。
+    """
+    src = f"/data/local/tmp/lcview_blk_cons_{os.getpid()}"
+    back = f"/data/local/tmp/lcview_blk_cons_back_{os.getpid()}"
+    try:
+        # 写固定已知内容（/dev/zero 4KB）→ 记期望 sha1sum
+        out, rc = adb(["shell",
+                       f"dd if=/dev/zero of={src} bs=1024 count=4 2>/dev/null"
+                       f" && sha1sum {src}"],
+                      timeout=args.dd_timeout or 120)
+        if rc != 0:
+            print(f"ERROR: 数据一致性前置 dd 写临时文件失败 rc={rc}")
+            return 1
+        src_sha = _parse_sha1(out)
+        if src_sha is None:
+            print(f"ERROR: 临时文件 sha1sum 解析失败: {out.strip()[:80]!r}")
+            return 1
+        # 读回（经存储路径 copy 到第二个文件）→ sha1sum
+        out, rc = adb(["shell",
+                       f"dd if={src} of={back} bs=1024 count=4 2>/dev/null"
+                       f" && sha1sum {back}"],
+                      timeout=args.dd_timeout or 120)
+        if rc != 0:
+            print(f"ERROR: dd 读回失败 rc={rc}（{src} 不可读？）")
+            return 1
+        back_sha = _parse_sha1(out)
+        if back_sha is None:
+            print(f"ERROR: 读回文件 sha1sum 解析失败: {out.strip()[:80]!r}")
+            return 1
+        if src_sha != back_sha:
+            print(f"ERROR: 数据一致性失败——写内容 {src_sha} 与读回 {back_sha}"
+                  " 不一致（存储写/读路径损坏？）")
+            return 1
+        print(f"OK: 数据一致性通过（写 {src_sha} == 读回 {back_sha}，"
+              "4KB 回读一致）")
+        return 0
+    finally:
+        adb(["shell", f"rm -f {src} {back}"])
+
+
+def logcat_has_block(dev, log_since):
+    """logcat 断言 daemon BlockCollector 输出行 "block: <dev>"（tag lechao_lcview）。
+
+    抓取窗口：log_since 非 None 时以该设备 epoch 为锚（-T <epoch>，只覆盖
+    锚点后的缓冲，避免把注入前历史行当新命中）；未提供时全缓冲 grep（daemon
+    每 10s 打一行，近期必有）。读取失败返回 False（判红防假绿）。
+    """
+    if log_since:
+        out, rc = adb(["logcat", "-d", "-T", str(int(log_since)),
+                       "-s", _BLK_LOG_TAG])
+    else:
+        out, rc = adb(["logcat", "-d", "-s", _BLK_LOG_TAG])
+    if rc != 0:
+        return False
+    return any(f"block: {dev}" in line for line in out.splitlines())
+
+
+def mode_blk_baseline(tmp, args):
+    """blk baseline 相：读 before stat 写 --blk-baseline（含设备 epoch 锚点
+    captured_at，供 delta 相 logcat --log-since）。stat 读失败判红（防假绿：
+    读不到基线无从差分）。"""
+    dev = _blk_dev_name(args.block_dev)
+    stat = read_block_stat(dev)
+    if stat is None:
+        print(f"ERROR: 无法读取 {_BLK_STAT_SYSFS_TMPL.format(dev=dev)}"
+              "（cat 失败，块设备未就绪？）")
+        return 1
+    payload = {"dev": dev, "captured_at": device_now(), "stat": stat}
+    with open(args.blk_baseline, "w", encoding="utf-8") as fp:
+        json.dump(payload, fp, ensure_ascii=False, indent=2)
+    print(f"blk 基线已写入 {args.blk_baseline}: "
+          f"read_ios={stat['read_ios']} read_sectors={stat['read_sectors']} "
+          f"write_ios={stat['write_ios']} write_sectors={stat['write_sectors']}")
+    return 0
+
+
+def mode_blk_delta(tmp, args):
+    """blk delta 相：读 after stat 与基线差分断言 IO 发生 + 数据一致性
+    （--check-write）+ logcat "block: <dev>" 行断言。
+
+    判红项（防假绿）：stat 读失败 / 基线缺失 / 差分非增（read_ios、
+    read_sectors、write_ios 任一未增）/ 写守卫缺失 / sha1sum 不匹配 /
+    logcat 无 block 行。
+    """
+    dev = _blk_dev_name(args.block_dev)
+    after = read_block_stat(dev)
+    if after is None:
+        print(f"ERROR: 无法读取 {_BLK_STAT_SYSFS_TMPL.format(dev=dev)}"
+              "（after，cat 失败）")
+        return 1
+    if not os.path.exists(args.blk_baseline):
+        print(f"ERROR: blk 基线缺失 {args.blk_baseline}（须先跑 --phase baseline）")
+        return 1
+    with open(args.blk_baseline, encoding="utf-8") as fp:
+        base = json.load(fp)
+    before = base.get("stat")
+    if not before or base.get("dev") != dev:
+        print(f"ERROR: blk 基线数据异常（无 stat 或 dev 与当前 {dev} 不符）")
+        return 1
+
+    errors = []
+    print(f"块设备 {dev} stat 差分:")
+    # 仅断言读增量（acceptance 负载为 dd 读；写一致性走 --check-write 的
+    # /data/local/tmp 文件写→读回 sha1sum，不依赖 sda 写统计）
+    for key, label in (("read_ios", "读次数 read_ios"),
+                       ("read_sectors", "读扇区 read_sectors")):
+        d = after[key] - before[key]
+        print(f"  {label}: {before[key]} -> {after[key]} (delta={d})")
+        if d <= 0:
+            errors.append(f"{label} 未增（delta={d}），IO 未发生（dd 负载未生效？）")
+
+    if args.check_write:
+        wrc = block_write_check(args)
+        if wrc != 0:
+            return wrc
+
+    # logcat 抓取锚点：--log-since 显式给出优先，否则用基线 captured_at
+    # （baseline 时刻起抓，覆盖本次 dd 负载窗口，避免注入前历史行当新命中）
+    log_since = args.log_since
+    if log_since is None and isinstance(base.get("captured_at"), int):
+        log_since = base["captured_at"]
+    if not logcat_has_block(dev, log_since):
+        errors.append(f"logcat 无 \"block: {dev}\" 行"
+                      "（daemon BlockCollector 未输出？）")
+
+    if errors:
+        for e in errors:
+            print(f"ERROR: {e}")
+        return 1
+    print(f"OK: 块设备 {dev} IO 观测校验通过（差分增 + block 日志命中）")
+    return 0
+
+
+def mode_blk(tmp, args):
+    """blk 模式分相分发：baseline 读 before stat 存基线 / delta 读 after
+    差分 + 数据一致性 + logcat block 断言（两拍读取，参考 conserve 两拍模式）。"""
+    if args.phase == "baseline":
+        return mode_blk_baseline(tmp, args)
+    return mode_blk_delta(tmp, args)
+
+
 MODES = {
     "files": mode_files,
     "valid_json": mode_valid_json,
@@ -1140,6 +1367,7 @@ MODES = {
     "delta": mode_delta,
     "conserve": mode_conserve,
     "perf": mode_perf,
+    "blk": mode_blk,
 }
 
 
@@ -1192,6 +1420,18 @@ def main(argv=None):
     ap.add_argument("--perf-save-baseline", action="store_true",
                     help="perf 模式把本次 METRICS 关键指标存档为性能基线"
                          "（R-04 方向 1，首次建档/重置；不设时对已有基线做容差比对）")
+    ap.add_argument("--phase", choices=["baseline", "delta"], default="delta",
+                    help="blk 模式相位：baseline 读 before stat 存基线 / "
+                         "delta 读 after stat 差分 + logcat block 断言")
+    ap.add_argument("--blk-baseline", default=BLK_BASELINE_DEFAULT,
+                    help="blk 模式基线文件路径（方向 6，轮次隔离）")
+    ap.add_argument("--check-write", action="store_true",
+                    help="blk 模式 delta 相：数据一致性（dd 写固定内容到 "
+                         "LCVIEW_BLOCK_DEV_WRITE → 读回 → sha1sum 比对，"
+                         "走 LCVIEW_ALLOW_DESTRUCTIVE_WRITE 写守卫）")
+    ap.add_argument("--log-since", type=int, default=None,
+                    help="blk 模式 logcat 抓取锚点（设备 epoch，只判锚点后 "
+                         "缓冲，避免注入前历史行当新命中）")
     args = ap.parse_args(argv)
     # 记录 --baseline 是否显式传（ts 模式只在显式时做基线限定）
     args.baseline_explicit = _baseline_explicit(argv)

@@ -122,6 +122,11 @@ def _args(**kw):
     a.dd_timeout = kw.get("dd_timeout", 300)
     a.perf_baseline = kw.get("perf_baseline", lc.PERF_BASELINE_DEFAULT)
     a.perf_save_baseline = kw.get("perf_save_baseline", False)
+    a.phase = kw.get("phase", "delta")
+    a.blk_baseline = kw.get("blk_baseline",
+                            str(Path(tempfile.gettempdir()) / "lcview_blk_baseline_test.json"))
+    a.check_write = kw.get("check_write", False)
+    a.log_since = kw.get("log_since", None)
     return a
 
 
@@ -138,7 +143,9 @@ class FakeAdb:
                  proc_rc=0, proc_out="", stats_rc=0, stats_out="",
                  sysfs_rc=0, sysfs_out="", sysfs_seq=None,
                  wc_rc=0, wc_out="", wc_seq=None,
-                 stat_seq=None, io_out="", io_rc=0, io_seq=None):
+                 stat_seq=None, io_out="", io_rc=0, io_seq=None,
+                 blk_stat_rc=0, blk_stat_out="", blk_stat_seq=None,
+                 sha1_rc=0, sha1_out="", sha1_seq=None):
         self.files = dict(files or {})
         self.ls_rc = ls_rc
         self.pull_rc = pull_rc
@@ -169,6 +176,14 @@ class FakeAdb:
         self.io_out = io_out
         self.io_rc = io_rc
         self.io_seq = list(io_seq or [])
+        # 方向 6：blk stat（cat /sys/block/）支持双拍（baseline/delta 各一帧，
+        # blk_stat_seq 依次弹出）与 sha1sum 响应（数据一致性，src/back 两帧）
+        self.blk_stat_rc = blk_stat_rc
+        self.blk_stat_out = blk_stat_out
+        self.blk_stat_seq = list(blk_stat_seq or [])
+        self.sha1_rc = sha1_rc
+        self.sha1_out = sha1_out
+        self.sha1_seq = list(sha1_seq or [])
         self.calls = []
 
     def __call__(self, args, timeout=60):
@@ -183,8 +198,18 @@ class FakeAdb:
                 return (self.stat_out, self.stat_rc)
             if cmd.startswith("date "):
                 return (self.date_out, self.date_rc)
+            if "sha1sum" in cmd:
+                # 方向 6：dd ... && sha1sum <path> 复合命令须优先回 sha1sum
+                # 响应（命令以 "dd if=" 开头会先命中 dd 分支，故前置判断）
+                if self.sha1_seq:
+                    return self.sha1_seq.pop(0)
+                return (self.sha1_out, self.sha1_rc)
             if cmd.startswith("dd if="):
                 return (self.dd_out, self.dd_rc)
+            if cmd.startswith("cat /sys/block/"):
+                if self.blk_stat_seq:
+                    return self.blk_stat_seq.pop(0)
+                return (self.blk_stat_out, self.blk_stat_rc)
             if cmd.startswith("pidof "):
                 return (self.pidof_out, self.pidof_rc)
             if cmd.startswith("cat /proc/") and "/stat" in cmd:
@@ -1285,6 +1310,180 @@ class TestPerfRegressionGate(unittest.TestCase):
         finally:
             if os.path.exists(path):
                 os.unlink(path)
+
+
+# ============================================================
+# R3 方向 6：--mode blk 块设备 IO 观测校验（TestModeBlk）
+# 覆盖：baseline 相写基线 / delta 相差分增 / 各判红项（stat 读失败、差分
+# 非增、logcat 无 block 行、写守卫缺失、sha1sum 不匹配）。CDP-DOD-001：
+# 每个判红逻辑配套制造破坏场景的红灯用例。
+# ============================================================
+
+# /sys/block/sda/stat 15 字段样本：read_ios=10 read_sectors=100
+# write_ios=5 write_sectors=50（before）→ read_ios=20 read_sectors=300
+# write_ios=15 write_sectors=150（after，差分均增）
+_BLK_BEFORE = "10 0 100 0 5 0 50 0 0 0 0 0 0 0 0"
+_BLK_AFTER = "20 0 300 0 15 0 150 0 0 0 0 0 0 0 0"
+# daemon BlockCollector 输出行（tag lechao_lcview，含 "block: sda"）
+_BLK_LOG_OK = ("07-01 12:00:00.000  1234  1234 I lechao_lcview: "
+               "block: sda read_iops=2.0 read_bytes_per_s=102400 "
+               "read_avg_ms=1.00 write_iops=1.0 write_bytes_per_s=51200 "
+               "write_avg_ms=1.00 inflight=0 busy=5.00\n")
+# 无 block 行的 logcat（心跳行，block 断言应判红）
+_BLK_LOG_NO = ("07-01 12:00:00.000  1234  1234 I lechao_lcview: "
+               "heartbeat, loop=1\n")
+_SHA_A = "a" * 40
+_SHA_B = "b" * 40
+
+
+def _blk_base(path, **over):
+    """写一个合法 blk 基线文件（sda），供 delta 相读取。"""
+    data = {"dev": "sda", "captured_at": 1000,
+            "stat": {"read_ios": 10, "read_sectors": 100,
+                     "write_ios": 5, "write_sectors": 50}}
+    data.update(over)
+    Path(path).write_text(json.dumps(data), encoding="utf-8")
+
+
+class TestModeBlk(unittest.TestCase):
+    def _blk_base(self, tmp, **over):
+        base = Path(tmp) / "blk.json"
+        _blk_base(str(base), **over)
+        return base
+
+    def test_blk_baseline_writes_baseline(self):
+        # baseline 相：读 before stat 写基线（含 dev + captured_at 锚点）
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "blk.json"
+            fake = FakeAdb(blk_stat_out=_BLK_BEFORE, blk_stat_rc=0,
+                           date_out="1000\n", date_rc=0)
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_blk_baseline(tmp, _args(blk_baseline=str(base)))
+            self.assertEqual(rc, 0)
+            data = json.loads(base.read_text(encoding="utf-8"))
+        self.assertEqual(data["dev"], "sda")
+        self.assertEqual(data["captured_at"], 1000)
+        self.assertEqual(data["stat"]["read_ios"], 10)
+
+    def test_blk_baseline_stat_read_fail_red(self):
+        # stat 读失败（cat rc!=0）→ 判红（读不到基线无从差分，防假绿）
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "blk.json"
+            fake = FakeAdb(blk_stat_out="", blk_stat_rc=1)
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_blk_baseline(tmp, _args(blk_baseline=str(base)))
+            self.assertEqual(rc, 1)
+            self.assertFalse(base.exists())
+
+    def test_blk_delta_io_increased_passes(self):
+        # 差分均增 + logcat 命中 block 行 → 通过
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._blk_base(tmp)
+            fake = FakeAdb(blk_stat_out=_BLK_AFTER, blk_stat_rc=0,
+                           logcat_out=_BLK_LOG_OK, logcat_rc=0)
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_blk_delta(tmp, _args(blk_baseline=str(base)))
+        self.assertEqual(rc, 0)
+
+    def test_blk_delta_missing_baseline_red(self):
+        # 基线缺失 → 判红（先跑 baseline 相）
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = FakeAdb(blk_stat_out=_BLK_AFTER, blk_stat_rc=0,
+                           logcat_out=_BLK_LOG_OK, logcat_rc=0)
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_blk_delta(
+                    tmp, _args(blk_baseline=str(Path(tmp) / "nope.json")))
+        self.assertEqual(rc, 1)
+
+    def test_blk_delta_stat_read_fail_red(self):
+        # after stat 读失败 → 判红
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._blk_base(tmp)
+            fake = FakeAdb(blk_stat_out="", blk_stat_rc=1)
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_blk_delta(tmp, _args(blk_baseline=str(base)))
+        self.assertEqual(rc, 1)
+
+    def test_blk_delta_io_not_increased_red(self):
+        # after == before（差分非增）→ 判红（dd 负载未生效，不得假绿）
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._blk_base(tmp)
+            fake = FakeAdb(blk_stat_out=_BLK_BEFORE, blk_stat_rc=0,
+                           logcat_out=_BLK_LOG_OK, logcat_rc=0)
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_blk_delta(tmp, _args(blk_baseline=str(base)))
+        self.assertEqual(rc, 1)
+
+    def test_blk_delta_logcat_no_block_red(self):
+        # logcat 无 "block: sda" 行（daemon BlockCollector 未输出）→ 判红
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._blk_base(tmp)
+            fake = FakeAdb(blk_stat_out=_BLK_AFTER, blk_stat_rc=0,
+                           logcat_out=_BLK_LOG_NO, logcat_rc=0)
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_blk_delta(tmp, _args(blk_baseline=str(base)))
+        self.assertEqual(rc, 1)
+
+    def test_blk_delta_dev_mismatch_red(self):
+        # 基线 dev 与当前 block-dev 不符 → 判红（跨设备复用基线防假绿）
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._blk_base(tmp, dev="mmcblk0")
+            fake = FakeAdb(blk_stat_out=_BLK_AFTER, blk_stat_rc=0,
+                           logcat_out=_BLK_LOG_OK, logcat_rc=0)
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_blk_delta(tmp, _args(blk_baseline=str(base)))
+        self.assertEqual(rc, 1)
+
+    # ── 数据一致性（--check-write，/data/local/tmp 安全路径）判红/判绿 ──
+    def test_blk_check_write_readback_fail_red(self):
+        # 前置 dd 写临时文件失败 → 判红（存储写路径异常）
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._blk_base(tmp)
+            fake = FakeAdb(blk_stat_out=_BLK_AFTER, blk_stat_rc=0,
+                           logcat_out=_BLK_LOG_OK, logcat_rc=0,
+                           dd_rc=1)
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_blk_delta(tmp, _args(blk_baseline=str(base),
+                                                  check_write=True))
+        self.assertEqual(rc, 1)
+
+    def test_blk_check_write_sha1_mismatch_red(self):
+        # 写内容 sha1 与读回 sha1 不一致 → 数据一致性判红（写/读路径损坏）
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._blk_base(tmp)
+            fake = FakeAdb(blk_stat_out=_BLK_AFTER, blk_stat_rc=0,
+                           logcat_out=_BLK_LOG_OK, logcat_rc=0,
+                           sha1_seq=[(f"{_SHA_A}  /data/local/tmp/x\n", 0),
+                                     (f"{_SHA_B}  /data/local/tmp/x\n", 0)])
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_blk_delta(tmp, _args(blk_baseline=str(base),
+                                                  check_write=True))
+        self.assertEqual(rc, 1)
+
+    def test_blk_check_write_sha1_match_ok(self):
+        # 写内容 sha1 == 读回 sha1（固定已知内容回读一致）→ 数据一致性通过
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._blk_base(tmp)
+            fake = FakeAdb(blk_stat_out=_BLK_AFTER, blk_stat_rc=0,
+                           logcat_out=_BLK_LOG_OK, logcat_rc=0,
+                           sha1_seq=[(f"{_SHA_A}  /data/local/tmp/x\n", 0),
+                                     (f"{_SHA_A}  /data/local/tmp/x\n", 0)])
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_blk_delta(tmp, _args(blk_baseline=str(base),
+                                                  check_write=True))
+        self.assertEqual(rc, 0)
+
+    def test_blk_check_write_sha1_parse_fail_red(self):
+        # sha1sum 输出不可解析（设备侧 sha1sum 缺失/输出异常）→ 判红
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._blk_base(tmp)
+            fake = FakeAdb(blk_stat_out=_BLK_AFTER, blk_stat_rc=0,
+                           logcat_out=_BLK_LOG_OK, logcat_rc=0,
+                           sha1_out="sha1sum: not found\n", sha1_rc=0)
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_blk_delta(tmp, _args(blk_baseline=str(base),
+                                                  check_write=True))
+        self.assertEqual(rc, 1)
 
 
 if __name__ == "__main__":

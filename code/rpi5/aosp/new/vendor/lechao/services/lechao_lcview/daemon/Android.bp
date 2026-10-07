@@ -51,6 +51,9 @@ filegroup {
         "batch_parser.cpp",
         "record_codec.cpp",
         "main_loop.cpp",
+        // R3 方向1/2/3：块设备/zram 用户态观测采集器（纯函数 + 采集器类，
+        // 供单测直接链接覆盖纯函数）
+        "block_collector.cpp",
     ],
 }
 

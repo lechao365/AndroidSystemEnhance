@@ -143,12 +143,15 @@ class TestCompare(unittest.TestCase):
         # （TRANSPORT_START 降为调试诊断），schema 保留定义 → 跳过判红。
         # R-19 P5 方向 3：id=1~3（USB_CONNECT/GPIO_IRQ/SENSOR_DATA）预留占位
         # 事件登记为豁免——schema 有 reserved 条目但内核无发射点不判红；
+        # R3 方向 1/3：SLOW_DISK（id=14）为 daemon BlockCollector 合成事件，
+        # 无内核发射点同样豁免。
         # 集合非空（含预留事件宏），未登记事件缺发射点仍判红（语义收敛到
         # test_non_disabled_missing_emit_still_red）。
         self.assertEqual(DISABLED_EVENTS, {
             "LCVIEW_EVENT_USB_CONNECT",
             "LCVIEW_EVENT_GPIO_IRQ",
             "LCVIEW_EVENT_SENSOR_DATA",
+            "LCVIEW_EVENT_SLOW_DISK",
         })
 
     def test_non_disabled_missing_emit_still_red(self):
