@@ -80,6 +80,26 @@ def commit_prefix_warns(root=None):
             f"重构/文档/构建/杂项）: {subject[:40]}"]
 
 
+def untracked_warns(root=None):
+    """工作树 untracked 文件告警（方向 3）：仅 tracked 脏判红。
+
+    产批前工作树判定只拦 tracked 改动；untracked（git status --porcelain
+    ?? 行）属未入库新产物，不应阻断产批——收集其路径入 warns 提示，
+    由 apply/git-works-push 侧决定是否入库。git 失败或干净返空不崩。
+    """
+    root = Path(root) if root else project_root()
+    r = _git(root, "status", "--porcelain")
+    if r.returncode != 0:
+        return []
+    untracked = [ln[3:] for ln in r.stdout.splitlines() if ln.startswith("?? ")]
+    if not untracked:
+        return []
+    shown = untracked[:5]
+    suffix = "…" if len(untracked) > 5 else ""
+    return [f"工作树存在 {len(untracked)} 个 untracked 文件（仅提示不阻断）: "
+            + ", ".join(shown) + suffix]
+
+
 def _git(root, *args):
     # -c core.quotepath=false（KI 2026-09-11）：非 ASCII 路径输出默认带引号
     # 八进制转义致前缀匹配失效；包装器统一带，覆盖全部调用点
@@ -129,8 +149,12 @@ def precheck(root=None, do_pull=True):
     if r.returncode != 0:
         return False, "git status 失败（工作树状态不可判，拒绝产批）", \
             (r.stderr or "").strip()[:200]
-    if r.stdout.strip():
-        return False, "工作树不干净", ""
+    # 仅 tracked 脏判红（方向 3）：?? 行属 untracked（未入库新产物），
+    # 不阻断产批，由 untracked_warns() 合入 warns 提示；其余（ M/A/D/R 等）
+    # 属 tracked 改动，判红拒绝产批（fail-closed）
+    tracked_dirty = [ln for ln in r.stdout.splitlines() if not ln.startswith("?? ")]
+    if tracked_dirty:
+        return False, "工作树不干净（tracked 文件有改动）", ""
     head_r = _git(root, "rev-parse", "HEAD")
     if head_r.returncode != 0:
         return False, "git rev-parse HEAD 失败（HEAD 不可判，拒绝产批）", \
@@ -184,9 +208,11 @@ def main(argv=None):
         base = origin_base()
         if base:
             out["base"] = base
-    # warns 合入三类：KIR-005 存量告警（issue_id 列表）+ 领先告警（文字串）
+    # warns 合入四类：KIR-005 存量告警（issue_id 列表）+ 领先告警（文字串）
     # + 提交前缀告警（方向 4，origin/dev 最新提交标题风格漂移提示）
-    warns = known_issues_warns() + lead_warns() + commit_prefix_warns()
+    # + untracked 告警（方向 3，仅 tracked 脏判红，untracked 提示不阻断）
+    warns = known_issues_warns() + lead_warns() + commit_prefix_warns() \
+        + untracked_warns()
     if warns:
         out["warns"] = warns
     print(json.dumps(out, ensure_ascii=False))

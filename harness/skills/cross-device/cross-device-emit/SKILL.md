@@ -27,6 +27,10 @@ stages:
 ## Outputs / artifacts（输出/产物）
 - 纯文本 CDP 批次（stdout，用户拷贝）；临时文件 harness/log/cross-device-emit/（gitignore），
   批次临时文件命名与 apply 侧统一：batch-YYYYMMDD-HHMMSS.cdp
+- 产批自评落盘：同目录写 batch-YYYYMMDD-HHMMSS.review.md（gitignore），
+  记录本批自评（规格自检两问）与核对清单（四项交付物逐条），复盘时对照闭环
+  （见「复盘对照」）；harness/log/ 引用属运行期描述（CDP-DOD-002 豁免：
+  该前缀为运行期产物域，check_skill_refs 已整前缀豁免，不判红）
 ## Failure / recovery（失败/恢复）
 - precheck 不过：按 reason 处理（pull 失败网络/树脏/上批未推拒产）
 - selfcheck 不过：AI 修批次后重跑
@@ -60,7 +64,16 @@ stages:
     --gen-checksum <批次临时文件>——插入/刷新批次头部 checksum 行（sha256
     前 16 位）后整批输出，交付该带 checksum 版本；apply 侧对存在 checksum
     行的批次强校验（CHECKSUM_MISMATCH 拒），防人工拷贝传输静默截断/损坏
- 6. 输出：纯文本批次，无包裹标记；产一批等一批，不并行产下一条
+  6. 输出：纯文本批次，无包裹标记；产一批等一批，不并行产下一条
+## 复盘对照（产批自评落盘闭环）
+- 产批时（步骤 3 后）落盘自评：`harness/log/cross-device-emit/batch-YYYYMMDD-HHMMSS.review.md`，
+  内容含本批自评与核对清单——规格自检两问逐条作答（一问依赖证据、
+  二问调用方与执行路径）、四项交付物核对（上批复盘取证/漂移点回收/
+  必要性论证/进度估算逐条落格）；落盘即本批的「产批期自评」留痕
+- 复盘时（apply 结果落地后）打开该 review.md 对照：逐条核对上批每方向
+  取证、漂移点回收是否如自评所述，未落盘/与落地结果不符即复盘判红
+- harness/log/ 引用属运行期描述（CDP-DOD-002 豁免：该前缀为运行期产物域，
+  check_skill_refs 已整前缀豁免，干净克隆下文档引用不判红）
 ## 约束（禁止）
 - emit 侧禁止 git commit/push、禁止修改 code/（流程纪律，无技术强制，违者评审回退）
 - 批次正文禁用单双引号字符（' 与 "）：apply 侧写临时文件的方式不受 emit 控制，
