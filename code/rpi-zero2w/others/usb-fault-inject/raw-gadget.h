@@ -32,6 +32,11 @@ void raw_gadget_close(struct raw_gadget *rg);
  * 返回 0 成功，-1 失败 */
 int raw_gadget_enumerate(struct raw_gadget *rg);
 
+/* 启动 EP0 服务线程：枚举完成后由 BOT 主循环调用，持续应答
+ * EP0 控制请求（ClearHalt/BOMSR/重枚举等），与 BULK 循环并行。
+ * 返回 0 成功，-1 失败（或已启动）。 */
+int raw_gadget_start_ep0_thread(struct raw_gadget *rg);
+
 /* ===== BULK 端点操作（使用 EP_ENABLE 返回的 handle） ===== */
 
 /* 向 BULK IN 端点写数据（Device → Host） */

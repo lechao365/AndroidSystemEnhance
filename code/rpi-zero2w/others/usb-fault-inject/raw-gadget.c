@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <poll.h>
+#include <pthread.h>
 
 /* MSD class request 常量 */
 #define USB_REQ_GET_MAX_LUN   0xFE
@@ -78,6 +79,11 @@ void raw_gadget_close(struct raw_gadget *rg)
 {
     if (!rg)
         return;
+    if (rg->ep0_thread_started) {
+        pthread_cancel(rg->ep0_thread);
+        pthread_join(rg->ep0_thread, NULL);
+        rg->ep0_thread_started = false;
+    }
     if (rg->fd >= 0)
         close(rg->fd);
     free(rg);
@@ -390,6 +396,82 @@ int rg_handle_ep0_request(struct raw_gadget *rg, const struct usb_ctrlrequest *c
 }
 
 /* ============================================================
+ * Layer 1: EP0 事件处理（枚举循环与 EP0 服务线程共用）
+ * ============================================================ */
+
+/* 阻塞等待并处理一个 raw-gadget 事件（EVENT_FETCH + CONTROL 分发）。
+ * EINTR 自动重试。返回 0 正常处理；-1 致命错误（fetch 失败 / EP0 处理失败）。 */
+static int rg_process_one_event(struct raw_gadget *rg)
+{
+    char ev_buf[1024] __attribute__((aligned(8)));
+    struct usb_raw_event *ev = (struct usb_raw_event *)ev_buf;
+    ev->type = 0;
+    ev->length = sizeof(ev_buf) - sizeof(*ev);
+
+    for (;;) {
+        if (ioctl(rg->fd, USB_RAW_IOCTL_EVENT_FETCH, ev) < 0) {
+            if (errno == EINTR)
+                continue;
+            perror("[rg] EVENT_FETCH");
+            return -1;
+        }
+        break;
+    }
+
+    switch (ev->type) {
+    case USB_RAW_EVENT_CONNECT:
+        fprintf(stderr, "[rg] CONNECT event\n");
+        break;
+
+    case USB_RAW_EVENT_CONTROL: {
+        if (ev->length < sizeof(struct usb_ctrlrequest)) {
+            fprintf(stderr, "[rg] CONTROL event too short (%u)\n", ev->length);
+            rg_ep0_stall(rg);
+            break;
+        }
+        const struct usb_ctrlrequest *ctrl =
+            (const struct usb_ctrlrequest *)ev->data;
+        if (rg_handle_ep0_request(rg, ctrl) < 0) {
+            fprintf(stderr, "[rg] EP0 handler failed\n");
+            return -1;
+        }
+        break;
+    }
+
+    default:
+        fprintf(stderr, "[rg] unknown event type %u\n", ev->type);
+        break;
+    }
+    return 0;
+}
+
+/* EP0 服务线程：持续应答 EP0 控制请求（ClearHalt/BOMSR/重枚举等），
+ * 与 BOT 主循环并行；fetch/处理失败即退出。 */
+static void *rg_ep0_thread_fn(void *arg)
+{
+    struct raw_gadget *rg = arg;
+    while (rg_process_one_event(rg) == 0)
+        ; /* 持续处理直到失败或被取消 */
+    return NULL;
+}
+
+/* 启动 EP0 服务线程（枚举完成后由 BOT 主循环调用） */
+int raw_gadget_start_ep0_thread(struct raw_gadget *rg)
+{
+    if (!rg)
+        return -1;
+    if (rg->ep0_thread_started)
+        return 0; /* 已启动 */
+    if (pthread_create(&rg->ep0_thread, NULL, rg_ep0_thread_fn, rg) != 0) {
+        perror("[rg] pthread_create (EP0 thread)");
+        return -1;
+    }
+    rg->ep0_thread_started = true;
+    fprintf(stderr, "[rg] EP0 service thread started\n");
+    return 0;
+}
+
+/* ============================================================
  * Layer 1: 枚举主循环
  * ============================================================ */
 
@@ -403,42 +485,8 @@ int raw_gadget_enumerate(struct raw_gadget *rg)
     fprintf(stderr, "[rg] entering enumeration loop...\n");
 
     while (!rg->enumerated) {
-        /* EVENT_FETCH — 阻塞等待事件 */
-        char ev_buf[1024] __attribute__((aligned(8)));
-        struct usb_raw_event *ev = (struct usb_raw_event *)ev_buf;
-        ev->type = 0;
-        ev->length = sizeof(ev_buf) - sizeof(*ev);
-
-        if (ioctl(rg->fd, USB_RAW_IOCTL_EVENT_FETCH, ev) < 0) {
-            if (errno == EINTR) continue;
-            perror("[rg] EVENT_FETCH");
+        if (rg_process_one_event(rg) < 0)
             return -1;
-        }
-
-        switch (ev->type) {
-        case USB_RAW_EVENT_CONNECT:
-            fprintf(stderr, "[rg] CONNECT event\n");
-            break;
-
-        case USB_RAW_EVENT_CONTROL: {
-            if (ev->length < sizeof(struct usb_ctrlrequest)) {
-                fprintf(stderr, "[rg] CONTROL event too short (%u)\n", ev->length);
-                rg_ep0_stall(rg);
-                break;
-            }
-            const struct usb_ctrlrequest *ctrl =
-                (const struct usb_ctrlrequest *)ev->data;
-            if (rg_handle_ep0_request(rg, ctrl) < 0) {
-                fprintf(stderr, "[rg] EP0 handler failed\n");
-                return -1;
-            }
-            break;
-        }
-
-        default:
-            fprintf(stderr, "[rg] unknown event type %u\n", ev->type);
-            break;
-        }
     }
 
     fprintf(stderr, "[rg] enumeration complete!\n");

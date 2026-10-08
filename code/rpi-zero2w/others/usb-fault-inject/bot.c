@@ -12,6 +12,9 @@
 /* Data 阶段最大缓冲区大小（限制单次传输上限，避免过度分配） */
 #define DATA_BUF_MAX   (512 * 1024)  /* 512KB */
 
+/* usleep 参数上限：duration_ms × 1000 不溢出 32 位（2147483ms ≈ 35.8min） */
+#define MAX_USLEEP_MS  2147483
+
 /*
  * BOT 主循环 — CBW → Data → CSW 状态机
  *
@@ -35,8 +38,16 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
 
     int ret = 0;
 
+    /* 启动 EP0 服务线程，持续应答控制请求（ClearHalt/BOMSR/重枚举） */
+    if (raw_gadget_start_ep0_thread(rg) < 0) {
+        fprintf(stderr, "[bot] failed to start EP0 service thread\n");
+        free(data_buf);
+        return -1;
+    }
+
     while (1) {
-        /* 读取 fault 配置快照（可能在此期间被 main.c 修改） */
+        /* 读取 fault 配置快照（每轮 CBW 读取一次，事务内不变；
+         * 配置由 faults.c 启动前设定，单次注入后由本函数清除 active） */
         enum fault_hook current_hook = fi->active ? fi->hook : HOOK_NONE;
 
         /* ===== 钩子 A: STALL OUT (在 CBW 接收前) ===== */
@@ -54,18 +65,24 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
 
         int n = raw_gadget_ep_read(rg, &cbw, sizeof(cbw));
         if (n < 0) {
-            if (errno == ESHUTDOWN || errno == ECONNRESET) {
+            if (errno == ESHUTDOWN || errno == ECONNRESET ||
+                errno == ENODEV || errno == EBADF) {
                 fprintf(stderr, "[bot] device disconnected (read)\n");
                 break;
             }
-            /* EPIPE = 端点被 STALL（可能是我们注入的），继续 */
-            if (errno != EPIPE)
-                fprintf(stderr, "[bot] CBW read error: %s (n=%d)\n", strerror(errno), n);
+            /* EPIPE = 端点被 STALL（可能是我们注入的）：10ms 退避后重试 */
+            if (errno == EPIPE) {
+                usleep(10 * 1000);
+                continue;
+            }
+            fprintf(stderr, "[bot] CBW read error: %s (n=%d)\n", strerror(errno), n);
             continue;
         }
 
         if (n != (int)sizeof(cbw)) {
             fprintf(stderr, "[bot] short CBW read: %d/%zu\n", n, sizeof(cbw));
+            /* 短 CBW 属协议异常：STALL OUT 端点触发 Host reset recovery */
+            raw_gadget_stall_ep(rg, 0x02);
             continue;
         }
 
@@ -83,7 +100,10 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
         if (current_hook == HOOK_TIMEOUT) {
             fprintf(stderr, "[bot] F3: TIMEOUT — holding %d ms after CBW\n", fi->duration_ms);
             fi->active = false;
-            usleep(fi->duration_ms * 1000);
+            int hold_ms = fi->duration_ms;
+            if (hold_ms > MAX_USLEEP_MS)
+                hold_ms = MAX_USLEEP_MS;
+            usleep((useconds_t)hold_ms * 1000);
             /* 不发送 Data/CSW，Host 超时后触发 reset recovery */
             continue;
         }
@@ -93,7 +113,10 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
             fprintf(stderr, "[bot] F9: ABORT — STALL IN + hold %d ms\n", fi->duration_ms);
             fi->active = false;
             raw_gadget_stall_ep(rg, 0x81);
-            usleep(fi->duration_ms * 1000);
+            int hold_ms = fi->duration_ms;
+            if (hold_ms > MAX_USLEEP_MS)
+                hold_ms = MAX_USLEEP_MS;
+            usleep((useconds_t)hold_ms * 1000);
             continue;
         }
 
@@ -160,7 +183,7 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
             }
             actually_transferred = offset;
 
-            /* 如果发送量 < 请求量且非 512 整数倍，需要发短包终止 */
+            /* 发送量是 512 整数倍且小于请求量时，需发零长度包终止（标记传输结束） */
             if (to_send > 0 && (to_send % 512 == 0) &&
                 to_send < cbw.dCBWDataTransferLength) {
                 /* 发送零长度包标记结束 */

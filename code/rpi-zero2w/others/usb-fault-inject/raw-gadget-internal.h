@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <pthread.h>
 #include <linux/usb/raw_gadget.h>
 #include <linux/usb/ch9.h>
 
@@ -13,6 +14,8 @@ struct raw_gadget {
     int      ep_out_handle;  /* EP_ENABLE 返回的 BULK OUT 端点 handle */
     bool     enumerated;     /* Host 是否已完成 SET_CONFIGURATION */
     bool     running;        /* gadget 是否已 RUN */
+    pthread_t ep0_thread;    /* EP0 服务线程（枚举后启动，持续应答控制请求） */
+    bool     ep0_thread_started; /* EP0 线程是否已启动待回收 */
 };
 
 /* ===== 内部辅助函数（raw-gadget.c 内使用） ===== */
