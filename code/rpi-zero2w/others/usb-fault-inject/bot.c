@@ -8,12 +8,21 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <time.h>
 
 /* Data 阶段最大缓冲区大小（限制单次传输上限，避免过度分配） */
 #define DATA_BUF_MAX   (512 * 1024)  /* 512KB */
 
 /* usleep 参数上限：duration_ms × 1000 不溢出 32 位（2147483ms ≈ 35.8min） */
 #define MAX_USLEEP_MS  2147483
+
+/* CLOCK_MONOTONIC 毫秒（持续注入计时） */
+static uint64_t bot_mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
 
 /*
  * BOT 主循环 — CBW → Data → CSW 状态机
@@ -52,11 +61,25 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
 
         /* ===== 钩子 A: STALL OUT (在 CBW 接收前) ===== */
         if (current_hook == HOOK_STALL_OUT) {
-            fprintf(stderr, "[bot] F2: STALL OUT endpoint before CBW\n");
-            raw_gadget_stall_ep(rg, EP_BULK_OUT);
-            fi->active = false;
-            /* STALL 后 Host 会 ClearHalt 重试，继续循环 */
-            continue;
+            if (fi->duration_ms > 0) {
+                /* 持续注入：期内每轮 STALL OUT，到期放行 */
+                if (fi->start_ms == 0)
+                    fi->start_ms = bot_mono_ms();
+                if (bot_mono_ms() - fi->start_ms >= (uint64_t)fi->duration_ms) {
+                    fprintf(stderr, "[bot] F2: STALL OUT expired, release\n");
+                    fi->active = false;
+                } else {
+                    fprintf(stderr, "[bot] F2: STALL OUT endpoint before CBW\n");
+                    raw_gadget_stall_ep(rg, EP_BULK_OUT);
+                    continue;
+                }
+            } else {
+                /* 单次注入：STALL 一次后清除 */
+                fprintf(stderr, "[bot] F2: STALL OUT endpoint before CBW (single)\n");
+                raw_gadget_stall_ep(rg, EP_BULK_OUT);
+                fi->active = false;
+                continue;
+            }
         }
 
         /* ===== Step 1: 接收 CBW (31 字节) ===== */
@@ -90,6 +113,9 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
         if (msd_le32_get((const uint8_t *)&cbw.dCBWSignature) != USB_MS_CBW_SIGNATURE) {
             fprintf(stderr, "[bot] bad CBW signature: 0x%08x\n",
                     msd_le32_get((const uint8_t *)&cbw.dCBWSignature));
+            /* 坏签名属协议异常：STALL 双端点触发 Host reset recovery */
+            raw_gadget_stall_ep(rg, EP_BULK_IN);
+            raw_gadget_stall_ep(rg, EP_BULK_OUT);
             continue;
         }
 
@@ -186,12 +212,29 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
 
             /* ===== 钩子 D: STALL IN (Data 发送前) ===== */
             if (current_hook == HOOK_STALL_IN) {
-                fprintf(stderr, "[bot] F1: STALL IN before Data\n");
-                raw_gadget_stall_ep(rg, EP_BULK_IN);
-                fi->active = false;
-                /* Host 收到 STALL，触发 ClearHalt + reset recovery */
-                /* 跳过 Data/CSW 发送 */
-                continue;
+                if (fi->duration_ms > 0) {
+                    /* 持续注入：期内每轮 STALL IN，到期放行 */
+                    if (fi->start_ms == 0)
+                        fi->start_ms = bot_mono_ms();
+                    if (bot_mono_ms() - fi->start_ms >= (uint64_t)fi->duration_ms) {
+                        fprintf(stderr, "[bot] F1: STALL IN expired, release\n");
+                        fi->active = false;
+                    } else {
+                        fprintf(stderr, "[bot] F1: STALL IN before Data\n");
+                        raw_gadget_stall_ep(rg, EP_BULK_IN);
+                        /* Host 收到 STALL，触发 ClearHalt + reset recovery */
+                        /* 跳过 Data/CSW 发送 */
+                        continue;
+                    }
+                } else {
+                    /* 单次注入：STALL 一次后清除 */
+                    fprintf(stderr, "[bot] F1: STALL IN before Data (single)\n");
+                    raw_gadget_stall_ep(rg, EP_BULK_IN);
+                    fi->active = false;
+                    /* Host 收到 STALL，触发 ClearHalt + reset recovery */
+                    /* 跳过 Data/CSW 发送 */
+                    continue;
+                }
             }
 
             /* 分块发送（每次最多 512B bulk 包） */

@@ -3,6 +3,7 @@
 #include <string.h>
 #include <getopt.h>
 #include <errno.h>
+#include <limits.h>
 #include "raw-gadget.h"
 #include "faults.h"
 #include "expect.h"
@@ -142,7 +143,7 @@ int main(int argc, char *argv[])
             char *endp;
             errno = 0;
             long val = strtol(optarg, &endp, 10);
-            if (errno != 0 || *endp != '\0' || val < 0) {
+            if (errno != 0 || *endp != '\0' || val < 0 || val > INT_MAX) {
                 fprintf(stderr, "Error: invalid --duration '%s'\n", optarg);
                 return 1;
             }
@@ -160,7 +161,7 @@ int main(int argc, char *argv[])
             char *endp;
             errno = 0;
             long val = strtol(optarg, &endp, 10);
-            if (errno != 0 || *endp != '\0' || val < 0) {
+            if (errno != 0 || *endp != '\0' || val < 0 || val > INT_MAX) {
                 fprintf(stderr, "Error: invalid --bytes '%s'\n", optarg);
                 return 1;
             }
@@ -171,7 +172,7 @@ int main(int argc, char *argv[])
             char *endp;
             errno = 0;
             long val = strtol(optarg, &endp, 10);
-            if (errno != 0 || *endp != '\0' || val < 0) {
+            if (errno != 0 || *endp != '\0' || val < 0 || val > INT_MAX) {
                 fprintf(stderr, "Error: invalid --cycles '%s'\n", optarg);
                 return 1;
             }
@@ -182,7 +183,7 @@ int main(int argc, char *argv[])
             char *endp;
             errno = 0;
             long val = strtol(optarg, &endp, 10);
-            if (errno != 0 || *endp != '\0' || val < 0) {
+            if (errno != 0 || *endp != '\0' || val < 0 || val > INT_MAX) {
                 fprintf(stderr, "Error: invalid --offline '%s'\n", optarg);
                 return 1;
             }
@@ -193,7 +194,7 @@ int main(int argc, char *argv[])
             char *endp;
             errno = 0;
             long val = strtol(optarg, &endp, 10);
-            if (errno != 0 || *endp != '\0' || val < 0) {
+            if (errno != 0 || *endp != '\0' || val < 0 || val > INT_MAX) {
                 fprintf(stderr, "Error: invalid --delay '%s'\n", optarg);
                 return 1;
             }

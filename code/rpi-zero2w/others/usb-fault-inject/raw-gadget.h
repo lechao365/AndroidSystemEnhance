@@ -27,6 +27,14 @@ struct raw_gadget *raw_gadget_open(const char *udc_name);
 /* 关闭并释放 */
 void raw_gadget_close(struct raw_gadget *rg);
 
+/* 断开 gadget：停 EP0 线程 + 关 fd + 复位状态（可重开，幂等）
+ * 返回 0 成功，-1 参数非法。 */
+int raw_gadget_disconnect(struct raw_gadget *rg);
+
+/* 重开 gadget：disconnect + INIT/RUN + 重枚举（HOTPLUG 循环用）
+ * 返回 0 成功，-1 失败（perror 已打点）。 */
+int raw_gadget_reopen(struct raw_gadget *rg);
+
 /* 枚举循环：处理 EP0 控制请求直到 SET_CONFIGURATION
  * 内部完成 EP_ENABLE 并保存端点 handle
  * 返回 0 成功，-1 失败 */

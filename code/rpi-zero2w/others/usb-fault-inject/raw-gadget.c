@@ -35,6 +35,7 @@ struct raw_gadget *raw_gadget_open(const char *udc_name)
     rg->ep_out_handle = -1;
     rg->enumerated = false;
     rg->running = false;
+    snprintf(rg->udc, sizeof(rg->udc), "%s", udc_name);
 
     /* Step 1: open /dev/raw-gadget */
     rg->fd = open("/dev/raw-gadget", O_RDWR);
@@ -75,18 +76,81 @@ struct raw_gadget *raw_gadget_open(const char *udc_name)
     return rg;
 }
 
-void raw_gadget_close(struct raw_gadget *rg)
+/* 断开 gadget：停 EP0 线程 + 关 fd + 复位状态（可重开，幂等）
+ * 返回 0 成功，-1 参数非法。 */
+int raw_gadget_disconnect(struct raw_gadget *rg)
 {
     if (!rg)
-        return;
+        return -1;
     if (rg->ep0_thread_started) {
         pthread_cancel(rg->ep0_thread);
         pthread_join(rg->ep0_thread, NULL);
         rg->ep0_thread_started = false;
     }
-    if (rg->fd >= 0)
+    if (rg->fd >= 0) {
         close(rg->fd);
+        rg->fd = -1;
+    }
+    rg->ep_in_handle = -1;
+    rg->ep_out_handle = -1;
+    rg->enumerated = false;
+    rg->running = false;
+    return 0;
+}
+
+void raw_gadget_close(struct raw_gadget *rg)
+{
+    if (!rg)
+        return;
+    raw_gadget_disconnect(rg);
     free(rg);
+}
+
+/* 重开 gadget：disconnect + INIT/RUN + 重枚举（用于 HOTPLUG 等） */
+int raw_gadget_reopen(struct raw_gadget *rg)
+{
+    if (!rg || !rg->udc[0]) {
+        fprintf(stderr, "[rg] reopen: udc not recorded\n");
+        return -1;
+    }
+
+    raw_gadget_disconnect(rg);
+
+    rg->fd = open("/dev/raw-gadget", O_RDWR);
+    if (rg->fd < 0) {
+        perror("[rg] reopen: open /dev/raw-gadget");
+        return -1;
+    }
+
+    struct usb_raw_init init;
+    memset(&init, 0, sizeof(init));
+    snprintf((char *)init.driver_name, sizeof(init.driver_name), "%s", rg->udc);
+    snprintf((char *)init.device_name, sizeof(init.device_name), "%s", rg->udc);
+    init.speed = USB_SPEED_HIGH;
+
+    if (ioctl(rg->fd, USB_RAW_IOCTL_INIT, &init) < 0) {
+        perror("[rg] reopen: USB_RAW_IOCTL_INIT");
+        close(rg->fd);
+        rg->fd = -1;
+        return -1;
+    }
+    fprintf(stderr, "[rg] reopen: INIT ok (udc=%s)\n", rg->udc);
+
+    if (ioctl(rg->fd, USB_RAW_IOCTL_RUN) < 0) {
+        perror("[rg] reopen: USB_RAW_IOCTL_RUN");
+        close(rg->fd);
+        rg->fd = -1;
+        return -1;
+    }
+    rg->running = true;
+    fprintf(stderr, "[rg] reopen: RUN ok, re-enumerating\n");
+
+    /* 重枚举：阻塞直到 SET_CONFIGURATION */
+    if (raw_gadget_enumerate(rg) < 0) {
+        fprintf(stderr, "[rg] reopen: re-enumerate failed\n");
+        return -1;
+    }
+    return 0;
 }
 
 /* ============================================================
@@ -432,8 +496,8 @@ static int rg_process_one_event(struct raw_gadget *rg)
         const struct usb_ctrlrequest *ctrl =
             (const struct usb_ctrlrequest *)ev->data;
         if (rg_handle_ep0_request(rg, ctrl) < 0) {
-            fprintf(stderr, "[rg] EP0 handler failed\n");
-            return -1;
+            /* handler 失败仅记日志，不退出事件循环；fetch 失败才退出 */
+            fprintf(stderr, "[rg] EP0 handler failed, continue\n");
         }
         break;
     }

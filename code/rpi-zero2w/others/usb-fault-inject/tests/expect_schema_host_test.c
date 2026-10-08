@@ -45,6 +45,18 @@ __attribute__((weak)) int raw_gadget_stall_ep(struct raw_gadget *rg,
     return -1;
 }
 
+__attribute__((weak)) int raw_gadget_disconnect(struct raw_gadget *rg)
+{
+    (void)rg;
+    return -1;
+}
+
+__attribute__((weak)) int raw_gadget_reopen(struct raw_gadget *rg)
+{
+    (void)rg;
+    return -1;
+}
+
 static int g_fail = 0;
 #define CHECK(cond)                                                     \
     do {                                                                \

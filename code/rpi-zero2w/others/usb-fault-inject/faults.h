@@ -29,8 +29,7 @@ enum fault_id {
 
 /* 故障参数 */
 struct fault_args {
-    int ep;                  /* STALL 用：0x81=IN / 0x02=OUT */
-    int duration_ms;         /* TIMEOUT/ABORT 用 */
+    int duration_ms;         /* STALL/TIMEOUT/ABORT 持续时间（0=单次） */
     int short_bytes;         /* SHORT 用：少发的字节数 */
     int cycles;              /* HOTPLUG 用：循环次数 */
     int offline_ms;          /* HOTPLUG 用：单次离线时长 */
