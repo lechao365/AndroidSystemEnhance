@@ -44,13 +44,20 @@ struct fault_expect {
 };
 
 /*
+ * expect_validate_table — 对指定 fault_expect 表做 schema gate 校验
+ *
+ * 表指针传入，供内置 expect_table 校验（expect_validate_schema 包装）
+ * 与测试注入坏表验证判红逻辑。NULL 表直接判失败。
+ * 检查项与 expect_validate_schema 一致（kernel_event 范围 / 计数取值 /
+ * name 与 fault_id_to_name 一致）。返回 0 全部通过，-1 校验失败。
+ */
+int expect_validate_table(const struct fault_expect *table);
+
+/*
  * expect_validate_schema — schema gate 校验（R-18 P5 方向 5）
  *
- * 在启动/列出时校验 expect_table 与内核 event 枚举语义一致：
- *   1) 每个 fault 的 kernel_event 落在合法镜像枚举范围内
- *   2) 每个 fault 的期望字段取值合法（-1 或 >=0）
- *   3) 每个 fault 的 name 与 fault_id_to_name() 一致（防重命名漂移）
- * 返回 0 全部通过，-1 校验失败（调用方应拒绝继续执行）。
+ * 对内置 expect_table 执行 expect_validate_table 的包装，供启动/列出时
+ * 校验 expect_table 与内核 event 枚举语义一致。返回 0 通过，-1 失败。
  */
 int expect_validate_schema(void);
 

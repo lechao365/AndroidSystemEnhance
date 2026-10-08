@@ -89,9 +89,10 @@ static const struct fault_expect expect_table[FAULT__MAX] = {
 };
 
 /*
- * expect_validate_schema — schema gate 校验
+ * expect_validate_table — 对指定期望表做 schema gate 校验
  *
- * 三项一致性检查（防故障语义漂移）：
+ * 表以指针传入，可对任意 fault_expect 表校验（含测试注入坏表验证
+ * 判红逻辑），NULL 直接判失败。三项一致性检查（防故障语义漂移）：
  *   1) 每个 fault 的 kernel_event 必须落在合法镜像枚举范围
  *      [FDI_EVENT_NONE .. FDI_EVENT_RATE_DEGRADED]（防枚举改坏/越界）
  *   2) 每个 fault 的期望计数字段取值合法：-1（不校验）或 >=0（期望值）
@@ -99,10 +100,14 @@ static const struct fault_expect expect_table[FAULT__MAX] = {
  *      （防 expect_table 与 faults.c 命名表重命名后漂移）
  * 返回 0 全部通过，-1 校验失败。
  */
-int expect_validate_schema(void)
+int expect_validate_table(const struct fault_expect *table)
 {
+    if (table == NULL) {
+        fprintf(stderr, "[expect] schema FAIL: table 为空指针\n");
+        return -1;
+    }
     for (int i = 0; i < FAULT__MAX; i++) {
-        const struct fault_expect *e = &expect_table[i];
+        const struct fault_expect *e = &table[i];
         if (!e->name || e->name[0] == '\0' ||
             !e->human_desc || e->human_desc[0] == '\0') {
             fprintf(stderr, "[expect] schema FAIL: fault %d name/human_desc 为空\n", i);
@@ -131,6 +136,12 @@ int expect_validate_schema(void)
     return 0;
 }
 
+/* expect_validate_schema — 对内置 expect_table 的包装（R-18 P5 方向 5） */
+int expect_validate_schema(void)
+{
+    return expect_validate_table(expect_table);
+}
+
 void expect_output_by_id(enum fault_id id)
 {
     if (id < 0 || id >= FAULT__MAX) {
@@ -138,10 +149,10 @@ void expect_output_by_id(enum fault_id id)
         return;
     }
     const struct fault_expect *e = &expect_table[id];
-    printf("{\"fault\":\"%s\"", e->name);
+    printf("{\"fault\":\"%s\",\"expect\":{\"kernel_event\":%d",
+           e->name, e->kernel_event);
 
-    printf(",\"expect\":{");
-    int comma = 0;
+    int comma = 1;
     if (e->error_count >= 0) {
         printf("%s\"error_count\":%d", comma ? "," : "", e->error_count);
         comma = 1;
