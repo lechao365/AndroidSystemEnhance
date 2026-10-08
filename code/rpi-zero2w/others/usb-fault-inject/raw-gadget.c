@@ -129,7 +129,7 @@ int rg_ep0_read(struct raw_gadget *rg, void *buf, size_t len)
         return -1;
     }
 
-    __u32 actual = io->length;
+    __u32 actual = (__u32)ret; /* 传输长度以 ioctl 返回值为准 */
     if (actual > len) actual = (__u32)len;
     if (actual > 0 && buf)
         memcpy(buf, io->data, actual);
@@ -208,9 +208,9 @@ int rg_handle_ep0_request(struct raw_gadget *rg, const struct usb_ctrlrequest *c
 {
     uint8_t  req_type = ctrl->bRequestType;
     uint8_t  req      = ctrl->bRequest;
-    uint16_t val      = ctrl->wValue;
-    uint16_t len      = ctrl->wLength;
-    (void)ctrl->wIndex;  /* wIndex 当前未直接使用，由 class request 内部处理 */
+    uint16_t val      = __le16_to_cpu(ctrl->wValue);
+    uint16_t len      = __le16_to_cpu(ctrl->wLength);
+    uint16_t wIndex   = __le16_to_cpu(ctrl->wIndex);
 
     uint8_t req_dir   = req_type & USB_DIR_IN;   /* 0x80 = IN, 0 = OUT */
     uint8_t req_type_mask = req_type & USB_TYPE_MASK; /* 0x00=Std, 0x20=Class, 0x40=Vendor */
@@ -272,11 +272,15 @@ int rg_handle_ep0_request(struct raw_gadget *rg, const struct usb_ctrlrequest *c
             fprintf(stderr, "[rg] SET_CONFIGURATION(%d)\n", val);
 
             /* 回复零长度 ACK */
-            rg_ep0_write(rg, NULL, 0);
+            if (rg_ep0_write(rg, NULL, 0) < 0)
+                return -1;
 
             if (val > 0) {
                 /* 进入 Configured 状态 */
-                ioctl(rg->fd, USB_RAW_IOCTL_CONFIGURE);
+                if (ioctl(rg->fd, USB_RAW_IOCTL_CONFIGURE) < 0) {
+                    perror("[rg] USB_RAW_IOCTL_CONFIGURE");
+                    return -1;
+                }
 
                 /* 使能 Bulk 端点 */
                 if (rg->ep_in_handle < 0 || rg->ep_out_handle < 0) {
@@ -286,9 +290,12 @@ int rg_handle_ep0_request(struct raw_gadget *rg, const struct usb_ctrlrequest *c
                     }
                 }
 
-                /* 上报 VBUS 电流 */
-                __u32 vbus = 250; /* 500mA (单位 2mA) */
-                ioctl(rg->fd, USB_RAW_IOCTL_VBUS_DRAW, &vbus);
+                /* 上报 VBUS 电流（单位 2mA；50 = 100mA，对齐 bMaxPower） */
+                __u32 vbus = 50;
+                if (ioctl(rg->fd, USB_RAW_IOCTL_VBUS_DRAW, &vbus) < 0) {
+                    perror("[rg] USB_RAW_IOCTL_VBUS_DRAW");
+                    return -1;
+                }
 
                 rg->enumerated = true;
                 fprintf(stderr, "[rg] Device configured and enumerated!\n");
@@ -296,16 +303,58 @@ int rg_handle_ep0_request(struct raw_gadget *rg, const struct usb_ctrlrequest *c
             return 0;
         }
 
-        /* SET_INTERFACE, CLEAR_FEATURE, SET_FEATURE 等 — 回复 ACK */
+        /* SET_INTERFACE, CLEAR_FEATURE, SET_FEATURE 等 — OUT 方向 */
         if (req_dir == USB_DIR_OUT) {
-            rg_ep0_write(rg, NULL, 0);
-            return 0;
+            /* CLEAR/SET_FEATURE：val=0 (ENDPOINT_HALT) 按 wIndex 低字节控制端点 */
+            if (req == USB_REQ_CLEAR_FEATURE || req == USB_REQ_SET_FEATURE) {
+                if (val == USB_ENDPOINT_HALT) {
+                    uint8_t ep_addr = (uint8_t)(wIndex & 0xFF);
+                    if (req == USB_REQ_CLEAR_FEATURE) {
+                        if (raw_gadget_clear_halt_ep(rg, ep_addr) < 0)
+                            return -1;
+                    } else {
+                        if (raw_gadget_stall_ep(rg, ep_addr) < 0)
+                            return -1;
+                    }
+                }
+                /* ACK */
+                return rg_ep0_write(rg, NULL, 0);
+            }
+
+            /* 其余 OUT 请求：len>0 先 ep0_read 消费数据再 ACK */
+            if (len > 0) {
+                uint8_t tmp[64];
+                uint32_t remaining = len;
+                while (remaining > 0) {
+                    size_t chunk = remaining > sizeof(tmp) ? sizeof(tmp) : remaining;
+                    int n = rg_ep0_read(rg, tmp, chunk);
+                    if (n < 0)
+                        return -1;
+                    if (n == 0)
+                        break;
+                    remaining -= (uint32_t)n;
+                }
+            }
+            return rg_ep0_write(rg, NULL, 0);
         }
 
-        /* GET_INTERFACE, SYNCH_FRAME 等 — 返回 1 字节 0 */
+        /* GET_STATUS/GET_CONFIGURATION/GET_INTERFACE 等 — IN 方向 */
         if (req_dir == USB_DIR_IN && len > 0) {
-            uint8_t zero = 0;
-            return rg_ep0_write(rg, &zero, 1);
+            if (req == USB_REQ_GET_STATUS) {
+                uint8_t zeros[2] = {0, 0};
+                return rg_ep0_write(rg, zeros, 2);
+            }
+            if (req == USB_REQ_GET_CONFIGURATION) {
+                uint8_t cfg = 1; /* 当前配置号 */
+                return rg_ep0_write(rg, &cfg, 1);
+            }
+            if (req == USB_REQ_GET_INTERFACE) {
+                uint8_t iface = 0; /* 接口号 */
+                return rg_ep0_write(rg, &iface, 1);
+            }
+            /* 其余 IN 请求：回 2 字节零 */
+            uint8_t zeros[2] = {0, 0};
+            return rg_ep0_write(rg, zeros, 2);
         }
 
         /* 未处理的标准请求 */
@@ -326,7 +375,8 @@ int rg_handle_ep0_request(struct raw_gadget *rg, const struct usb_ctrlrequest *c
         /* Bulk-Only Mass Storage Reset (0x21 0xFF) — OUT 方向，无数据 */
         if (req == USB_REQ_BULK_RESET && req_dir == USB_DIR_OUT) {
             fprintf(stderr, "[rg] Bulk-Only Reset received\n");
-            rg_ep0_write(rg, NULL, 0); /* ACK */
+            if (rg_ep0_write(rg, NULL, 0) < 0) /* ACK */
+                return -1;
             return 0;
         }
 
@@ -428,7 +478,7 @@ int raw_gadget_ep_write(struct raw_gadget *rg, const void *buf, size_t len)
         return -errno;
     }
 
-    __u32 actual = io->length;
+    __u32 actual = (__u32)ret; /* 传输长度以 ioctl 返回值为准 */
     free(io);
     return (int)actual;
 }
@@ -459,7 +509,7 @@ int raw_gadget_ep_read(struct raw_gadget *rg, void *buf, size_t len)
         return -errno;
     }
 
-    __u32 actual = io->length;
+    __u32 actual = (__u32)ret; /* 传输长度以 ioctl 返回值为准 */
     if (actual > len) actual = (__u32)len;
     if (actual > 0 && buf)
         memcpy(buf, io->data, actual);
