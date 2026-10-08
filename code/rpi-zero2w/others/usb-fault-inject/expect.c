@@ -103,6 +103,11 @@ int expect_validate_schema(void)
 {
     for (int i = 0; i < FAULT__MAX; i++) {
         const struct fault_expect *e = &expect_table[i];
+        if (!e->name || e->name[0] == '\0' ||
+            !e->human_desc || e->human_desc[0] == '\0') {
+            fprintf(stderr, "[expect] schema FAIL: fault %d name/human_desc 为空\n", i);
+            return -1;
+        }
         if (e->kernel_event < FDI_EVENT_NONE ||
             e->kernel_event > FDI_EVENT_RATE_DEGRADED) {
             fprintf(stderr, "[expect] schema FAIL: fault %d kernel_event=%d "
@@ -163,7 +168,7 @@ void expect_output_by_id(enum fault_id id)
 
 void expect_list_all(void)
 {
-    printf("Available fault injections (11 types):\n");
+    printf("Available fault injections (%d types):\n", FAULT__MAX);
     for (int i = 0; i < FAULT__MAX; i++) {
         printf("  %2d. %-20s  %s\n", i, expect_table[i].name,
                expect_table[i].human_desc);

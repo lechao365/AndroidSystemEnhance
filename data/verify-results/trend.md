@@ -238,3 +238,4 @@
 2026-10-07 20:56:03 manual-2610072055 pass build=pass board=pass acc={"run_id":"0310c7b7b1ac40188905af95b85cc 
 2026-10-07 21:30:35 manual-2610072130 pass build=pass board=pass acc={"run_id":"0310c7b7b1ac40188905af95b85cc 
 2026-10-08 05:33:06 manual-2610080532 pass build=pass board=pass acc={"run_id":"uasc_62cc00bf66bd4e75b566690f 
+2026-10-08 15:55:51 52e8c1ee2ec2 skip build=skip board=skip acc=- usb-fault-inject 检视修复 P0 内存安全（-s 无需上板） | {"elapsed_s":510,"segs":{"precheck":14.997,"edit_plan":61.724,"edit_item":46.72,"edit_item#2":21.769,"edit_item#3":114.904,"edit_item#4":0.213,"edit":35.977,"apply_selfcheck":54.276,"apply_selfcheck_dur_exceed":0.128,"edit#2":9.188,"apply_selfcheck#2":46.219,"apply_selfcheck#2_dur_exceed":0.129,"edit#3":46.678,"apply_selfcheck#3":50.043,"apply_selfcheck#3_dur_exceed":0.129,"report":0.367,"report_post":7.011,"finish":0.014}}

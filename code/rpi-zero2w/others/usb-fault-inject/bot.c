@@ -120,6 +120,8 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
                 data_buf, DATA_BUF_MAX);
 
             uint32_t to_send = sr.data_len;
+            if (to_send > DATA_BUF_MAX)
+                to_send = DATA_BUF_MAX;
             if (to_send > cbw.dCBWDataTransferLength)
                 to_send = cbw.dCBWDataTransferLength;
 

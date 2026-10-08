@@ -2,7 +2,6 @@
 #include "usb-msd-proto.h"
 #include <stdlib.h>
 #include <string.h>
-#include <arpa/inet.h>  /* htonl/ntohl */
 #include <stdio.h>
 
 /* 64MB 内存盘后端 */
@@ -158,24 +157,22 @@ struct scsi_result scsi_handle_command(const uint8_t *cbwcb, uint8_t cbwcb_len,
         uint32_t lba = ((uint32_t)cbwcb[2] << 24) | ((uint32_t)cbwcb[3] << 16) |
                        ((uint32_t)cbwcb[4] << 8)  | (uint32_t)cbwcb[5];
         uint16_t blocks = ((uint16_t)cbwcb[7] << 8) | (uint16_t)cbwcb[8];
+        /* 先判后算：lba 或 lba+blocks 越出 MSD_BLOCK_COUNT 即判失败（防 LBA 回绕越界） */
+        if (lba >= MSD_BLOCK_COUNT || blocks > MSD_BLOCK_COUNT - lba) {
+            r.csw_status = 1;
+            r.data_len = 0;
+            break;
+        }
         uint32_t total = (uint32_t)blocks * MSD_BLOCK_SIZE;
 
         r.dir = SCSI_DIR_IN;
         r.data_len = data_len < total ? data_len : total;
+        /* data_len 与 buf_size 取小，防越界读 */
+        if (r.data_len > buf_size)
+            r.data_len = (uint32_t)buf_size;
 
-        if (g_disk && data_buf && r.data_len > 0) {
-            size_t disk_off = (size_t)lba * MSD_BLOCK_SIZE;
-            size_t disk_size = (size_t)MSD_BLOCK_COUNT * MSD_BLOCK_SIZE;
-            if (disk_off + r.data_len > disk_size) {
-                /* LBA 越界，截断 */
-                if (disk_off < disk_size)
-                    r.data_len = disk_size - disk_off;
-                else
-                    r.data_len = 0;
-            }
-            if (r.data_len > 0 && r.data_len <= buf_size)
-                memcpy(data_buf, g_disk + disk_off, r.data_len);
-        }
+        if (g_disk && data_buf && r.data_len > 0)
+            memcpy(data_buf, g_disk + (size_t)lba * MSD_BLOCK_SIZE, r.data_len);
         break;
     }
 
@@ -187,23 +184,22 @@ struct scsi_result scsi_handle_command(const uint8_t *cbwcb, uint8_t cbwcb_len,
         uint32_t lba = ((uint32_t)cbwcb[2] << 24) | ((uint32_t)cbwcb[3] << 16) |
                        ((uint32_t)cbwcb[4] << 8)  | (uint32_t)cbwcb[5];
         uint16_t blocks = ((uint16_t)cbwcb[7] << 8) | (uint16_t)cbwcb[8];
+        /* 先判后算：lba 或 lba+blocks 越出 MSD_BLOCK_COUNT 即判失败（防 LBA 回绕越界） */
+        if (lba >= MSD_BLOCK_COUNT || blocks > MSD_BLOCK_COUNT - lba) {
+            r.csw_status = 1;
+            r.data_len = 0;
+            break;
+        }
         uint32_t total = (uint32_t)blocks * MSD_BLOCK_SIZE;
 
         r.dir = SCSI_DIR_OUT;
         r.data_len = data_len < total ? data_len : total;
+        /* data_len 与 buf_size 取小，防越界读 */
+        if (r.data_len > buf_size)
+            r.data_len = (uint32_t)buf_size;
 
-        if (g_disk && data_buf && r.data_len > 0) {
-            size_t disk_off = (size_t)lba * MSD_BLOCK_SIZE;
-            size_t disk_size = (size_t)MSD_BLOCK_COUNT * MSD_BLOCK_SIZE;
-            if (disk_off + r.data_len > disk_size) {
-                if (disk_off < disk_size)
-                    r.data_len = disk_size - disk_off;
-                else
-                    r.data_len = 0;
-            }
-            if (r.data_len > 0 && r.data_len <= buf_size)
-                memcpy(g_disk + disk_off, data_buf, r.data_len);
-        }
+        if (g_disk && data_buf && r.data_len > 0)
+            memcpy(g_disk + (size_t)lba * MSD_BLOCK_SIZE, data_buf, r.data_len);
         break;
     }
 
@@ -211,12 +207,8 @@ struct scsi_result scsi_handle_command(const uint8_t *cbwcb, uint8_t cbwcb_len,
         /* 与 MODE SENSE(6) 类似，但响应头是 8 字节而非 4 字节 */
         r.dir = SCSI_DIR_IN;
         r.data_len = data_len < 8 ? data_len : 8;
-        if (data_buf) {
+        if (data_buf)
             memset(data_buf, 0, r.data_len);
-            if (r.data_len >= 2)
-                data_buf[0] = 0x00; /* Mode Data Length (filled later or 0) */
-            data_buf[1] = 0x00; /* Medium Type */
-        }
         break;
 
     default:
