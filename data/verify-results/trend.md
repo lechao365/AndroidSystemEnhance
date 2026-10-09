@@ -249,3 +249,4 @@
 2026-10-09 10:32:05 manual-2610091031 pass build=pass board=pass acc={"run_id":"da204fefe6324394880abdf4d1998 publish-main-base 阶段2 上板验证：18 case 全量 PA
 2026-10-09 11:34:46 manual-2610091134 pass build=pass board=pass acc={"run_id":"da204fefe6324394880abdf4d1998 publish-main-base 阶段2 上板验证：18 case 全量 PA
 2026-10-09 11:35:44 manual-2610091135 pass build=pass board=pass acc={"run_id":"da204fefe6324394880abdf4d1998 publish-main-base 阶段2 上板验证：18 case 全量 PA
+2026-10-09 22:42:47 manual-2610092242 skip build=skip board=skip acc=- 批次1 harness 深度检视修复：tst-02 守卫修复、CDP-DOD-0
