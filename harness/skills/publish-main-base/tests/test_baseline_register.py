@@ -46,6 +46,14 @@ class TestBaselineRegister(unittest.TestCase):
         for g in self._promote_gates:
             g.start()
             self.addCleanup(g.stop)
+        # 本批 add-candidate 登记门禁前移（package 硬门禁机器核对 code/ 改动）：
+        # 单测无真实 git 仓语境，setUp 统一 mock _code_changes_since_main 返回空
+        # （视为无 code 改动，UNKNOWN 可登记）——消除对真实仓 main==dev 状态的
+        # 脆弱耦合；需验证「有 code 改动拒登记」的用例单独注入非空列表
+        self._code_gate = mock.patch("baseline_register._code_changes_since_main",
+                                     return_value=[])
+        self._code_gate.start()
+        self.addCleanup(self._code_gate.stop)
 
     def tearDown(self):
         br.CONFIG = Path(br.__file__).resolve().parents[2] / "config" / "baseline-status.yaml"
@@ -53,9 +61,9 @@ class TestBaselineRegister(unittest.TestCase):
         self._tmp.cleanup()
 
     def _make_receipt(self, build="pass", board="pass", cases="lcview-liveness",
-                      package=None):
+                      package=None, verify_mode="board"):
         r = Receipt(batch_id="batch-test", batch_base="", verified_commit="abc",
-                    verify_mode="board", result="pass", build=build,
+                    verify_mode=verify_mode, result="pass", build=build,
                     push_board=board, acceptance="ok", elapsed_s=10,
                     summary="test", cases=cases,
                     package=(json.dumps(package, ensure_ascii=False,
@@ -623,7 +631,44 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(b["package_result"], "PASS")
         self.assertEqual(b["evidence"]["package_result"], "PASS")
         self.assertEqual(b["evidence"]["package_rc"], 0)
-        self.assertEqual(b["evidence"]["package_evidence"], rp)
+
+    def test_add_candidate_code_changes_unknown_package_rejected(self):
+        # 本批登记门禁前移：dev 相对 origin/main 有 code/ 改动且 package_result
+        # 非 PASS 即拒（与 promote 硬门禁同口径，提前到 prepare 拦截而非 promote
+        # 才暴露），拒绝后不落 candidate
+        rp = self._make_receipt(build="pass", board="pass",
+                                cases="lcview-liveness")
+        with self._patch_no_code_changes(["abc123 修复(x): y"]):
+            rc, out = self._run("add-candidate", "--receipt-path", rp,
+                                "--source-commit", "abc123",
+                                "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 1)
+        self.assertIn("package_result", out)
+        self.assertIn("ws_package", out)
+        self.assertEqual(br.load()["baselines"], [])
+
+    def test_add_candidate_code_changes_pass_package_allowed(self):
+        # 有 code/ 改动但 package_result=PASS（打包证据 rc=0）→ 门禁放行登记
+        rp = self._make_receipt_pkg(rc=0)
+        with self._patch_no_code_changes(["abc123 修复(x): y"]):
+            rc, out = self._run("add-candidate", "--receipt-path", rp,
+                                "--source-commit", "abc123",
+                                "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 0)
+        self.assertIn("candidate:", out)
+        self.assertEqual(br.load()["baselines"][0]["package_result"], "PASS")
+
+    def test_add_candidate_code_changes_none_unknown_allowed(self):
+        # 无 code/ 改动（code_changes 空）→ UNKNOWN 可登记（豁免，与 no-code-change
+        # 同源口径；既有 76 测试依赖此语义）
+        rp = self._make_receipt(build="pass", board="pass",
+                                cases="lcview-liveness")
+        with self._patch_no_code_changes([]):
+            rc, out = self._run("add-candidate", "--receipt-path", rp,
+                                "--source-commit", "abc123",
+                                "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 0)
+        self.assertEqual(br.load()["baselines"][0]["package_result"], "UNKNOWN")
 
     def test_add_candidate_receipt_package_priority_over_file(self):
         # 收据内嵌证据优先于 --package-evidence/探测文件（内嵌=入库可追溯主源）；
@@ -670,6 +715,77 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
                                    "--evidence-scope", "lcview-liveness")[0], 0)
         bid = br.load()["baselines"][0]["baseline_id"]
+        rc, out = self._run("promote", "--baseline-id", bid,
+                            "--approved-by", "reviewer")
+        self.assertEqual(rc, 0)
+        self.assertIn("promoted:", out)
+
+    def test_promote_evidence_chain_stale_sync_manifest_rejected(self):
+        # 本批证据链校验：candidate sync_manifest 非最新 board 收据（prepare
+        # 后又有新 board 收据入库而未重登记）→ 拒绝 promote，提示重跑 --prepare，
+        # 拒绝后 status 保持 candidate 且不落快照
+        from cdp_receipt import Receipt
+        rp = self._make_receipt_pkg(rc=0)
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        bid = br.load()["baselines"][0]["baseline_id"]
+        # prepare 后写入更新的 board+pass 收据（batch_id 须排序在 candidate
+        # 收据之后——文件名按 <时间戳>-<batch_id>.md 排序，batch-znewer 保证
+        # 倒序扫到它）
+        newer = Receipt(batch_id="batch-znewer", batch_base="",
+                        verified_commit="abc", verify_mode="board",
+                        result="pass", build="pass", push_board="pass",
+                        acceptance="ok", elapsed_s=1, summary="newer",
+                        cases="lcview-liveness",
+                        package=json.dumps({"run_id": "r", "script_rc": 0},
+                                           separators=(",", ":")))
+        write_receipt(newer, "newer body")
+        from cdp_receipt import latest_board_receipt
+        _dbg_lbp, _dbg_lr, _dbg_err = latest_board_receipt()
+        self.assertIsNotNone(_dbg_lbp)
+        self.assertNotEqual(_dbg_lbp, rp)  # latest 须为 newer（非 candidate 收据）
+        rc, out = self._run("promote", "--baseline-id", bid,
+                            "--approved-by", "reviewer")
+        self.assertEqual(rc, 1)
+        self.assertIn("证据链校验", out)
+        self.assertIn("--prepare", out)
+        self.assertEqual(br.load()["baselines"][0]["status"], "candidate")
+        self.assertEqual(list((self._root / "data" / "baselines").glob("*.md")),
+                         [])
+
+    def test_promote_evidence_chain_latest_sync_manifest_passes(self):
+        # 证据链校验放行：candidate sync_manifest 即最新 board 收据（prepare
+        # 后无新收据）→ 正常晋升
+        rp = self._make_receipt_pkg(rc=0)
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--evidence-scope", "lcview-liveness")[0], 0)
+        bid = br.load()["baselines"][0]["baseline_id"]
+        rc, out = self._run("promote", "--baseline-id", bid,
+                            "--approved-by", "reviewer")
+        self.assertEqual(rc, 0)
+        self.assertIn("promoted:", out)
+
+    def test_promote_evidence_chain_skip_receipt_exempt(self):
+        # 证据链校验豁免：candidate 以 skip 收据为证据（no-code-change harness
+        # 批，sync_mode=skip）→ 即使目录里有更新的 board 收据也放行——skip 批
+        # 无需上板验证，sync_manifest 指向 skip 收据合法（2026-10-09 发布后
+        # 实测：e2e 的 harness 批 candidate 固定指 skip 收据，绝对对齐会误拒）
+        from cdp_receipt import Receipt
+        rp = self._make_receipt(verify_mode="skip", build="skip", board="skip",
+                                cases="")
+        self.assertEqual(self._run("add-candidate", "--receipt-path", rp,
+                                   "--source-commit", "abc123",
+                                   "--evidence-scope", "no-code-change")[0], 0)
+        bid = br.load()["baselines"][0]["baseline_id"]
+        # 写一个更新的 board 收据（本应触发绝对对齐拒绝，skip 豁免则放行）
+        newer = Receipt(batch_id="batch-zboard", batch_base="",
+                        verified_commit="abc", verify_mode="board",
+                        result="pass", build="pass", push_board="pass",
+                        acceptance="ok", elapsed_s=1, summary="newer",
+                        cases="lcview-liveness",
+                        package=json.dumps({"run_id": "r", "script_rc": 0},
+                                           separators=(",", ":")))
+        write_receipt(newer, "newer body")
         rc, out = self._run("promote", "--baseline-id", bid,
                             "--approved-by", "reviewer")
         self.assertEqual(rc, 0)

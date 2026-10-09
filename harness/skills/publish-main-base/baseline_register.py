@@ -24,7 +24,7 @@ VERIFY_CASES_PATH = (Path(__file__).resolve().parents[2] / "config"
 
 # 仿 ws_report.py：引入 cross-device 共享收据模块，candidate 实读真实 verify 收据
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "lib" / "python"))
-from cdp_receipt import read_receipt  # noqa: E402
+from cdp_receipt import latest_board_receipt, read_receipt  # noqa: E402
 from cdp_issue import (closed_issue_details, closed_issue_paths,
                        issue_files, read_index, read_issue, set_archived_in,
                        validate_issue)  # noqa: E402
@@ -308,9 +308,12 @@ def check_issues_gate(task=None, issues_dir=None):
             print("error: known-issues 畸形登记，拒绝（先修复登记再发布基线）",
                   file=sys.stderr)
             return 1
-    # task 推断：缺省从 status 非 fixed 条目的 task 集合推断（自动，无需人工申报）
+    # task 推断：缺省从 status 非终态条目的 task 集合推断（自动，无需人工申报）。
+    # 终态 = fixed / wontfix（wonfix 与 fixed 同等视为已闭环，不再参与活跃任务
+    # 集合——否则仅测试夹具引用的 wontfix 条目会干扰活跃集合多值推断）
+    _TERMINAL_STATUS = ("fixed", "wontfix")
     active_tasks = {i.task for _p, i in issues
-                    if i is not None and i.status != "fixed" and i.task}
+                    if i is not None and i.status not in _TERMINAL_STATUS and i.task}
     if task:
         # 白名单：显式传 --task 不在活跃集合内即 exit 3（防拼错静默通过；
         # 空集合时放行——无活跃任务则无冲突对象）
@@ -328,12 +331,13 @@ def check_issues_gate(task=None, issues_dir=None):
             return 1
         else:
             task = "empty-registry"
-    # 再判目标任务未解决阻塞：origin=introduced 或 blocking 且 status!=fixed 即拒
+    # 再判目标任务未解决阻塞：origin=introduced 或 blocking 且 status 非终态即拒
     bad = []
     for p, i in issues:
         if i is None or i.task != task:
             continue
-        if (i.origin == "introduced" or i.blocking) and i.status != "fixed":
+        if (i.origin == "introduced" or i.blocking) \
+                and i.status not in _TERMINAL_STATUS:
             bad.append(f"{p.name}: origin={i.origin} blocking={i.blocking} "
                        f"status={i.status}")
     if bad:
@@ -587,6 +591,21 @@ def main(argv=None):
                   f"（build={build_result} board_verify={board_verify}），"
                   "拒绝登记（UNKNOWN 视同 FAIL，须人工复核）", file=sys.stderr)
             return 1
+        # 方向 3（本批意图 1）登记门禁前移：package_result 非 PASS/SKIP 拒绝
+        # 登记（与 promote 硬门禁同口径，提前到 prepare 阶段拦截而非 promote
+        # 才暴露）。机器核对动过 code 与否：dev 相对 origin/main 有 code/ 改动
+        # 且 package 证据非 PASS 即拒；核对失败（None）与无改动（空）均放行——
+        # 登记非晋升，promote 阶段仍有 package/coverage 硬门禁兜底，此处只拦截
+        # 明确有 code 改动却无打包证据的登记，不放宽 promote。
+        code_changes = _code_changes_since_main()
+        if code_changes and package_result not in ("PASS", "SKIP"):
+            print(f"error: 登记门禁：dev 相对 origin/main 有 code/ 改动"
+                  f"（{len(code_changes)} 提交）且 package_result={package_result}"
+                  f" 非 PASS（须 ws_package 打包证据；no-code-change 豁免不受限）。"
+                  "打包在 opencode 会话内被 BLD-013 禁止，可用 systemd-run --user "
+                  "豁免或会话外终端执行 ws_package.py 后重登记（见 "
+                  "harness/reference/build-reference.md）", file=sys.stderr)
+            return 1
         # ki_gate：known-issues 门禁结论（拒批已在脚本层 exit，缺参视为 not-run）
         ki_gate = (args.ki_gate or "").strip() or "not-run"
         # known_issues_carried：带病项记账（缺参记空；只记录不阻断，硬阻断会死锁）
@@ -668,6 +687,30 @@ def main(argv=None):
                     print(f"error: 收据文件不存在，无法生成证据快照: {receipt}",
                           file=sys.stderr)
                     return 1
+                # 方向 3（本批意图 2）promote 前置证据链校验：candidate 若以
+                # board 收据为证据（动过 code 的上板验证），其 sync_manifest
+                # 须为最新 board 收据——prepare 后又有新 board 收据入库而
+                # candidate 未重登记时，promote 会拿旧收据算 cases_coverage/
+                # package，误背书新证据场景。校验不一致即拒并提示重 prepare
+                #（add-candidate 去重复用会同步对齐最新收据）。
+                # 豁免：candidate 以 skip/非 board 收据为证据（no-code-change
+                # harness 批无需上板验证，sync_manifest 指向 skip 收据合法）——
+                # 仅 board 收据场景强制对齐最新。latest_board_receipt 与
+                # prepare 的 EVIDENCE_RECEIPT 同源（publish_main_base.sh:322-335）。
+                sync_mode = (read_receipt(receipt)[0].verify_mode
+                             if receipt.is_file() else "")
+                if sync_mode == "board":
+                    lbp, _lr, lb_errs = latest_board_receipt()
+                    if lb_errs:
+                        print(f"error: promote 证据链校验：最新 board 收据解析有错"
+                              f"（{'; '.join(lb_errs)}），拒绝 promote", file=sys.stderr)
+                        return 1
+                    if lbp is not None and Path(lbp).resolve() != receipt.resolve():
+                        print(f"error: promote 证据链校验：candidate sync_manifest "
+                              f"({receipt.name}) 非最新 board 收据"
+                              f"（{Path(lbp).name}）——prepare 后证据链已更新，须重跑 "
+                              "--prepare 重新登记 candidate 后再 promote", file=sys.stderr)
+                        return 1
                 # 方向 6 + P1-B：审批凭据外部化——promote 审批人不得为执行人、
                 # token 须与 promote-approval.env 预设一致（在写快照前校验，
                 # 防快照污染），不再回落默认常量（防审批可自证，闭环

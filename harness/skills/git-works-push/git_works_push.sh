@@ -155,6 +155,13 @@ import check_commit_coverage as c; print(c.recent_promoted_baseline_commit('.'))
     echo "warn: 提交面不含 code/ 业务文件，跳过与收据 commit_scope 比对（非业务改动无需上板收据）" >&2
     return 0
   fi
+  # 未上板告警（check_unverified.py）：code/ 改动未被最新 board 收据覆盖时
+  # warn 提醒（非硬拒——提交面一致性已由下方 commit_scope 把关；本告警是把
+  # 「未上板验证」提前到推送阶段，避免六批 code 改动全 -s skip 累积到发布才
+  # 被 RECEIPT_FAIL 卡点）。rc=1 仅告警，不阻断推送。
+  if ! python3 harness/lib/check_unverified.py 2>/dev/null; then
+    echo "warn: 检测到 code/ 改动尚未被 board 收据覆盖（详见上方 check_unverified 输出）——建议推送后尽快 /workspace-verify 上板验证" >&2
+  fi
   diffs=$(printf '%s\n' "$status_out" | python3 harness/lib/commit_scope.py --check "$latest_scope") || true
   if [ -n "$diffs" ]; then
     err "error: 实际提交面与最新收据 commit_scope 不一致（发布内容与验证内容绑定），请核对或重写收据："
