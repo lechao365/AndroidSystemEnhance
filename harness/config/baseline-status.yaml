@@ -721,3 +721,27 @@ baselines:
       archived_in: ''
   approved_by: admin
   approved_at: '2026-10-07T22:14:06+08:00'
+- baseline_id: BL-20261009-01
+  status: candidate
+  source_branch: dev
+  source_commit: f08e7d3b904a
+  sync_manifest: data/verify-results/20261009-094611-manual-2610090946.md
+  build_result: PASS
+  package_result: UNKNOWN
+  board_verify: PASS
+  evidence_scope: lciod-link,lciod-liveness,lciod-perf,lciod-pipeline,lciod-qos,lciod-recover-hal,lciod-storm,lciod-uas,lcview-blk,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+  evidence:
+    build_result: PASS
+    package_result: UNKNOWN
+    board_verify: PASS
+    sync_manifest: data/verify-results/20261009-094611-manual-2610090946.md
+    ki_gate: pass
+    evidence_scope: lciod-link,lciod-liveness,lciod-perf,lciod-pipeline,lciod-qos,lciod-recover-hal,lciod-storm,lciod-uas,lcview-blk,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+    known_issues_carried: KI-20261008-001,KI-20261008-002
+    package_evidence: ''
+    package_rc: null
+    cases_coverage:
+      result: partial
+      missing:
+      - lciod-trigger
+      run_count: 17
