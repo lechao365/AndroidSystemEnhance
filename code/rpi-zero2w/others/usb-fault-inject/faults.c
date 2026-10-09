@@ -55,15 +55,17 @@ int fault_execute(struct raw_gadget *rg, enum fault_id fid,
     /* ===== F1: STALL IN ===== */
     case FAULT_STALL_IN:
         fi->hook = HOOK_STALL_IN;
+        fi->duration_ms = a->duration_ms; /* 0 = 单次注入 */
         fi->active = true;
-        fprintf(stderr, "[faults] F1: STALL IN — entering BOT loop\n");
+        fprintf(stderr, "[faults] F1: STALL IN %d ms — entering BOT loop\n", fi->duration_ms);
         return bot_main_loop(rg, fi);
 
     /* ===== F2: STALL OUT ===== */
     case FAULT_STALL_OUT:
         fi->hook = HOOK_STALL_OUT;
+        fi->duration_ms = a->duration_ms; /* 0 = 单次注入 */
         fi->active = true;
-        fprintf(stderr, "[faults] F2: STALL OUT — entering BOT loop\n");
+        fprintf(stderr, "[faults] F2: STALL OUT %d ms — entering BOT loop\n", fi->duration_ms);
         return bot_main_loop(rg, fi);
 
     /* ===== F3: TIMEOUT ===== */
@@ -112,23 +114,35 @@ int fault_execute(struct raw_gadget *rg, enum fault_id fid,
                 fi->duration_ms);
         return bot_main_loop(rg, fi);
 
-    /* ===== F10: HOTPLUG (VBUS 周期性插拔) ===== */
+    /* ===== F10: HOTPLUG (disconnect + reopen 周期循环) ===== */
     case FAULT_HOTPLUG:
         for (int i = 0; i < a->cycles; i++) {
             fprintf(stderr, "[faults] F10: HOTPLUG cycle %d/%d: OFF\n", i + 1, a->cycles);
-            raw_gadget_vbus_draw(rg, 0);
-            usleep(a->offline_ms * 1000);
+            if (raw_gadget_disconnect(rg) < 0)
+                return -1;
+            /* 分块睡眠 offline_ms（防单次长睡被信号打断精度差） */
+            for (int slept = 0; slept < a->offline_ms; ) {
+                int chunk = a->offline_ms - slept;
+                if (chunk > 50)
+                    chunk = 50;
+                usleep((useconds_t)chunk * 1000);
+                slept += chunk;
+            }
 
             fprintf(stderr, "[faults] F10: HOTPLUG cycle %d/%d: ON\n", i + 1, a->cycles);
-            raw_gadget_vbus_draw(rg, 500);
+            if (raw_gadget_reopen(rg) < 0)
+                return -1;
+            /* 等待 Host 完成重枚举后的稳定 */
             usleep(500 * 1000);
         }
         return 0;
 
     /* ===== F11: DISCONNECT (永久断开) ===== */
     case FAULT_DISCONNECT:
-        fprintf(stderr, "[faults] F11: DISCONNECT — pulling VBUS low\n");
-        return raw_gadget_vbus_draw(rg, 0);
+        fprintf(stderr, "[faults] F11: DISCONNECT — teardown gadget\n");
+        if (raw_gadget_disconnect(rg) < 0)
+            return -1;
+        return 0;
 
     /* ===== F12: DEGRADE (持续延迟注入) ===== */
     case FAULT_DEGRADE:

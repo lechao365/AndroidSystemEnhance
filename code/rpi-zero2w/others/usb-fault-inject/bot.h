@@ -29,10 +29,11 @@ enum fault_hook {
 /* 故障注入配置（由 faults.c 设置，BOT 层读取） */
 struct fault_injection {
     enum fault_hook  hook;
-    int              duration_ms;   /* timeout/abort 持续时间 */
+    int              duration_ms;   /* timeout/abort/stall 持续时间 */
     int              short_bytes;   /* SHORT 故障少发的字节数 */
     int              delay_ms;      /* DEGRADE 每次延迟 */
     bool             active;        /* 是否激活（单次注入后自动清除） */
+    uint64_t         start_ms;      /* 持续注入起点（CLOCK_MONOTONIC，ms；0=未启动） */
 };
 
 /*

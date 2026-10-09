@@ -54,14 +54,21 @@ struct usb_ms_csw {
     uint8_t  bCSWStatus;
 } __attribute__((packed));
 
-/* ===== CBW 损坏字段标识 (corrupt --field) ===== */
-enum corrupt_field {
-    CORRUPT_FIELD_NONE = 0,
-    CORRUPT_FIELD_CBW_SIG,    /* 修改 dCBWSignature */
-    CORRUPT_FIELD_CSW_SIG,    /* 修改 dCSWSignature */
-    CORRUPT_FIELD_CSW_TAG,    /* dCSWTag != CBW.dCBWTag */
-    CORRUPT_FIELD_CSW_STATUS, /* bCSWStatus = 0x02 (Phase Error) */
-    CORRUPT_FIELD_SHORT,      /* Data 阶段短传输 */
-};
+/* ===== 移位式 LE32 读写 =====
+ * CBW/CSW 的 32 位字段在线路上为小端序，用移位读写避免依赖主机字节序，
+ * 也不经 packed 结构体字段直读（协议字段访问统一走此入口）。 */
+static inline uint32_t msd_le32_get(const uint8_t *p)
+{
+    return ((uint32_t)p[0]) | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static inline void msd_le32_put(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v & 0xFF);
+    p[1] = (uint8_t)((v >> 8) & 0xFF);
+    p[2] = (uint8_t)((v >> 16) & 0xFF);
+    p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
 
 #endif

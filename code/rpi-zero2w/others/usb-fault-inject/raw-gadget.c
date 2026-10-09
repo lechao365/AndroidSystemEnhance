@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <poll.h>
+#include <pthread.h>
 
 /* MSD class request 常量 */
 #define USB_REQ_GET_MAX_LUN   0xFE
@@ -34,6 +35,7 @@ struct raw_gadget *raw_gadget_open(const char *udc_name)
     rg->ep_out_handle = -1;
     rg->enumerated = false;
     rg->running = false;
+    snprintf(rg->udc, sizeof(rg->udc), "%s", udc_name);
 
     /* Step 1: open /dev/raw-gadget */
     rg->fd = open("/dev/raw-gadget", O_RDWR);
@@ -74,13 +76,81 @@ struct raw_gadget *raw_gadget_open(const char *udc_name)
     return rg;
 }
 
+/* 断开 gadget：停 EP0 线程 + 关 fd + 复位状态（可重开，幂等）
+ * 返回 0 成功，-1 参数非法。 */
+int raw_gadget_disconnect(struct raw_gadget *rg)
+{
+    if (!rg)
+        return -1;
+    if (rg->ep0_thread_started) {
+        pthread_cancel(rg->ep0_thread);
+        pthread_join(rg->ep0_thread, NULL);
+        rg->ep0_thread_started = false;
+    }
+    if (rg->fd >= 0) {
+        close(rg->fd);
+        rg->fd = -1;
+    }
+    rg->ep_in_handle = -1;
+    rg->ep_out_handle = -1;
+    rg->enumerated = false;
+    rg->running = false;
+    return 0;
+}
+
 void raw_gadget_close(struct raw_gadget *rg)
 {
     if (!rg)
         return;
-    if (rg->fd >= 0)
-        close(rg->fd);
+    raw_gadget_disconnect(rg);
     free(rg);
+}
+
+/* 重开 gadget：disconnect + INIT/RUN + 重枚举（用于 HOTPLUG 等） */
+int raw_gadget_reopen(struct raw_gadget *rg)
+{
+    if (!rg || !rg->udc[0]) {
+        fprintf(stderr, "[rg] reopen: udc not recorded\n");
+        return -1;
+    }
+
+    raw_gadget_disconnect(rg);
+
+    rg->fd = open("/dev/raw-gadget", O_RDWR);
+    if (rg->fd < 0) {
+        perror("[rg] reopen: open /dev/raw-gadget");
+        return -1;
+    }
+
+    struct usb_raw_init init;
+    memset(&init, 0, sizeof(init));
+    snprintf((char *)init.driver_name, sizeof(init.driver_name), "%s", rg->udc);
+    snprintf((char *)init.device_name, sizeof(init.device_name), "%s", rg->udc);
+    init.speed = USB_SPEED_HIGH;
+
+    if (ioctl(rg->fd, USB_RAW_IOCTL_INIT, &init) < 0) {
+        perror("[rg] reopen: USB_RAW_IOCTL_INIT");
+        close(rg->fd);
+        rg->fd = -1;
+        return -1;
+    }
+    fprintf(stderr, "[rg] reopen: INIT ok (udc=%s)\n", rg->udc);
+
+    if (ioctl(rg->fd, USB_RAW_IOCTL_RUN) < 0) {
+        perror("[rg] reopen: USB_RAW_IOCTL_RUN");
+        close(rg->fd);
+        rg->fd = -1;
+        return -1;
+    }
+    rg->running = true;
+    fprintf(stderr, "[rg] reopen: RUN ok, re-enumerating\n");
+
+    /* 重枚举：阻塞直到 SET_CONFIGURATION */
+    if (raw_gadget_enumerate(rg) < 0) {
+        fprintf(stderr, "[rg] reopen: re-enumerate failed\n");
+        return -1;
+    }
+    return 0;
 }
 
 /* ============================================================
@@ -129,7 +199,7 @@ int rg_ep0_read(struct raw_gadget *rg, void *buf, size_t len)
         return -1;
     }
 
-    __u32 actual = io->length;
+    __u32 actual = (__u32)ret; /* 传输长度以 ioctl 返回值为准 */
     if (actual > len) actual = (__u32)len;
     if (actual > 0 && buf)
         memcpy(buf, io->data, actual);
@@ -208,9 +278,9 @@ int rg_handle_ep0_request(struct raw_gadget *rg, const struct usb_ctrlrequest *c
 {
     uint8_t  req_type = ctrl->bRequestType;
     uint8_t  req      = ctrl->bRequest;
-    uint16_t val      = ctrl->wValue;
-    uint16_t len      = ctrl->wLength;
-    (void)ctrl->wIndex;  /* wIndex 当前未直接使用，由 class request 内部处理 */
+    uint16_t val      = __le16_to_cpu(ctrl->wValue);
+    uint16_t len      = __le16_to_cpu(ctrl->wLength);
+    uint16_t wIndex   = __le16_to_cpu(ctrl->wIndex);
 
     uint8_t req_dir   = req_type & USB_DIR_IN;   /* 0x80 = IN, 0 = OUT */
     uint8_t req_type_mask = req_type & USB_TYPE_MASK; /* 0x00=Std, 0x20=Class, 0x40=Vendor */
@@ -272,11 +342,15 @@ int rg_handle_ep0_request(struct raw_gadget *rg, const struct usb_ctrlrequest *c
             fprintf(stderr, "[rg] SET_CONFIGURATION(%d)\n", val);
 
             /* 回复零长度 ACK */
-            rg_ep0_write(rg, NULL, 0);
+            if (rg_ep0_write(rg, NULL, 0) < 0)
+                return -1;
 
             if (val > 0) {
                 /* 进入 Configured 状态 */
-                ioctl(rg->fd, USB_RAW_IOCTL_CONFIGURE);
+                if (ioctl(rg->fd, USB_RAW_IOCTL_CONFIGURE) < 0) {
+                    perror("[rg] USB_RAW_IOCTL_CONFIGURE");
+                    return -1;
+                }
 
                 /* 使能 Bulk 端点 */
                 if (rg->ep_in_handle < 0 || rg->ep_out_handle < 0) {
@@ -286,9 +360,12 @@ int rg_handle_ep0_request(struct raw_gadget *rg, const struct usb_ctrlrequest *c
                     }
                 }
 
-                /* 上报 VBUS 电流 */
-                __u32 vbus = 250; /* 500mA (单位 2mA) */
-                ioctl(rg->fd, USB_RAW_IOCTL_VBUS_DRAW, &vbus);
+                /* 上报 VBUS 电流（单位 2mA；50 = 100mA，对齐 bMaxPower） */
+                __u32 vbus = 50;
+                if (ioctl(rg->fd, USB_RAW_IOCTL_VBUS_DRAW, &vbus) < 0) {
+                    perror("[rg] USB_RAW_IOCTL_VBUS_DRAW");
+                    return -1;
+                }
 
                 rg->enumerated = true;
                 fprintf(stderr, "[rg] Device configured and enumerated!\n");
@@ -296,16 +373,58 @@ int rg_handle_ep0_request(struct raw_gadget *rg, const struct usb_ctrlrequest *c
             return 0;
         }
 
-        /* SET_INTERFACE, CLEAR_FEATURE, SET_FEATURE 等 — 回复 ACK */
+        /* SET_INTERFACE, CLEAR_FEATURE, SET_FEATURE 等 — OUT 方向 */
         if (req_dir == USB_DIR_OUT) {
-            rg_ep0_write(rg, NULL, 0);
-            return 0;
+            /* CLEAR/SET_FEATURE：val=0 (ENDPOINT_HALT) 按 wIndex 低字节控制端点 */
+            if (req == USB_REQ_CLEAR_FEATURE || req == USB_REQ_SET_FEATURE) {
+                if (val == USB_ENDPOINT_HALT) {
+                    uint8_t ep_addr = (uint8_t)(wIndex & 0xFF);
+                    if (req == USB_REQ_CLEAR_FEATURE) {
+                        if (raw_gadget_clear_halt_ep(rg, ep_addr) < 0)
+                            return -1;
+                    } else {
+                        if (raw_gadget_stall_ep(rg, ep_addr) < 0)
+                            return -1;
+                    }
+                }
+                /* ACK */
+                return rg_ep0_write(rg, NULL, 0);
+            }
+
+            /* 其余 OUT 请求：len>0 先 ep0_read 消费数据再 ACK */
+            if (len > 0) {
+                uint8_t tmp[64];
+                uint32_t remaining = len;
+                while (remaining > 0) {
+                    size_t chunk = remaining > sizeof(tmp) ? sizeof(tmp) : remaining;
+                    int n = rg_ep0_read(rg, tmp, chunk);
+                    if (n < 0)
+                        return -1;
+                    if (n == 0)
+                        break;
+                    remaining -= (uint32_t)n;
+                }
+            }
+            return rg_ep0_write(rg, NULL, 0);
         }
 
-        /* GET_INTERFACE, SYNCH_FRAME 等 — 返回 1 字节 0 */
+        /* GET_STATUS/GET_CONFIGURATION/GET_INTERFACE 等 — IN 方向 */
         if (req_dir == USB_DIR_IN && len > 0) {
-            uint8_t zero = 0;
-            return rg_ep0_write(rg, &zero, 1);
+            if (req == USB_REQ_GET_STATUS) {
+                uint8_t zeros[2] = {0, 0};
+                return rg_ep0_write(rg, zeros, 2);
+            }
+            if (req == USB_REQ_GET_CONFIGURATION) {
+                uint8_t cfg = 1; /* 当前配置号 */
+                return rg_ep0_write(rg, &cfg, 1);
+            }
+            if (req == USB_REQ_GET_INTERFACE) {
+                uint8_t iface = 0; /* 接口号 */
+                return rg_ep0_write(rg, &iface, 1);
+            }
+            /* 其余 IN 请求：回 2 字节零 */
+            uint8_t zeros[2] = {0, 0};
+            return rg_ep0_write(rg, zeros, 2);
         }
 
         /* 未处理的标准请求 */
@@ -326,7 +445,8 @@ int rg_handle_ep0_request(struct raw_gadget *rg, const struct usb_ctrlrequest *c
         /* Bulk-Only Mass Storage Reset (0x21 0xFF) — OUT 方向，无数据 */
         if (req == USB_REQ_BULK_RESET && req_dir == USB_DIR_OUT) {
             fprintf(stderr, "[rg] Bulk-Only Reset received\n");
-            rg_ep0_write(rg, NULL, 0); /* ACK */
+            if (rg_ep0_write(rg, NULL, 0) < 0) /* ACK */
+                return -1;
             return 0;
         }
 
@@ -337,6 +457,82 @@ int rg_handle_ep0_request(struct raw_gadget *rg, const struct usb_ctrlrequest *c
     /* Vendor Requests — STALL */
     fprintf(stderr, "[rg] vendor req 0x%02x, STALL\n", req);
     return rg_ep0_stall(rg);
+}
+
+/* ============================================================
+ * Layer 1: EP0 事件处理（枚举循环与 EP0 服务线程共用）
+ * ============================================================ */
+
+/* 阻塞等待并处理一个 raw-gadget 事件（EVENT_FETCH + CONTROL 分发）。
+ * EINTR 自动重试。返回 0 正常处理；-1 致命错误（fetch 失败 / EP0 处理失败）。 */
+static int rg_process_one_event(struct raw_gadget *rg)
+{
+    char ev_buf[1024] __attribute__((aligned(8)));
+    struct usb_raw_event *ev = (struct usb_raw_event *)ev_buf;
+    ev->type = 0;
+    ev->length = sizeof(ev_buf) - sizeof(*ev);
+
+    for (;;) {
+        if (ioctl(rg->fd, USB_RAW_IOCTL_EVENT_FETCH, ev) < 0) {
+            if (errno == EINTR)
+                continue;
+            perror("[rg] EVENT_FETCH");
+            return -1;
+        }
+        break;
+    }
+
+    switch (ev->type) {
+    case USB_RAW_EVENT_CONNECT:
+        fprintf(stderr, "[rg] CONNECT event\n");
+        break;
+
+    case USB_RAW_EVENT_CONTROL: {
+        if (ev->length < sizeof(struct usb_ctrlrequest)) {
+            fprintf(stderr, "[rg] CONTROL event too short (%u)\n", ev->length);
+            rg_ep0_stall(rg);
+            break;
+        }
+        const struct usb_ctrlrequest *ctrl =
+            (const struct usb_ctrlrequest *)ev->data;
+        if (rg_handle_ep0_request(rg, ctrl) < 0) {
+            /* handler 失败仅记日志，不退出事件循环；fetch 失败才退出 */
+            fprintf(stderr, "[rg] EP0 handler failed, continue\n");
+        }
+        break;
+    }
+
+    default:
+        fprintf(stderr, "[rg] unknown event type %u\n", ev->type);
+        break;
+    }
+    return 0;
+}
+
+/* EP0 服务线程：持续应答 EP0 控制请求（ClearHalt/BOMSR/重枚举等），
+ * 与 BOT 主循环并行；fetch/处理失败即退出。 */
+static void *rg_ep0_thread_fn(void *arg)
+{
+    struct raw_gadget *rg = arg;
+    while (rg_process_one_event(rg) == 0)
+        ; /* 持续处理直到失败或被取消 */
+    return NULL;
+}
+
+/* 启动 EP0 服务线程（枚举完成后由 BOT 主循环调用） */
+int raw_gadget_start_ep0_thread(struct raw_gadget *rg)
+{
+    if (!rg)
+        return -1;
+    if (rg->ep0_thread_started)
+        return 0; /* 已启动 */
+    if (pthread_create(&rg->ep0_thread, NULL, rg_ep0_thread_fn, rg) != 0) {
+        perror("[rg] pthread_create (EP0 thread)");
+        return -1;
+    }
+    rg->ep0_thread_started = true;
+    fprintf(stderr, "[rg] EP0 service thread started\n");
+    return 0;
 }
 
 /* ============================================================
@@ -353,42 +549,8 @@ int raw_gadget_enumerate(struct raw_gadget *rg)
     fprintf(stderr, "[rg] entering enumeration loop...\n");
 
     while (!rg->enumerated) {
-        /* EVENT_FETCH — 阻塞等待事件 */
-        char ev_buf[1024] __attribute__((aligned(8)));
-        struct usb_raw_event *ev = (struct usb_raw_event *)ev_buf;
-        ev->type = 0;
-        ev->length = sizeof(ev_buf) - sizeof(*ev);
-
-        if (ioctl(rg->fd, USB_RAW_IOCTL_EVENT_FETCH, ev) < 0) {
-            if (errno == EINTR) continue;
-            perror("[rg] EVENT_FETCH");
+        if (rg_process_one_event(rg) < 0)
             return -1;
-        }
-
-        switch (ev->type) {
-        case USB_RAW_EVENT_CONNECT:
-            fprintf(stderr, "[rg] CONNECT event\n");
-            break;
-
-        case USB_RAW_EVENT_CONTROL: {
-            if (ev->length < sizeof(struct usb_ctrlrequest)) {
-                fprintf(stderr, "[rg] CONTROL event too short (%u)\n", ev->length);
-                rg_ep0_stall(rg);
-                break;
-            }
-            const struct usb_ctrlrequest *ctrl =
-                (const struct usb_ctrlrequest *)ev->data;
-            if (rg_handle_ep0_request(rg, ctrl) < 0) {
-                fprintf(stderr, "[rg] EP0 handler failed\n");
-                return -1;
-            }
-            break;
-        }
-
-        default:
-            fprintf(stderr, "[rg] unknown event type %u\n", ev->type);
-            break;
-        }
     }
 
     fprintf(stderr, "[rg] enumeration complete!\n");
@@ -428,7 +590,7 @@ int raw_gadget_ep_write(struct raw_gadget *rg, const void *buf, size_t len)
         return -errno;
     }
 
-    __u32 actual = io->length;
+    __u32 actual = (__u32)ret; /* 传输长度以 ioctl 返回值为准 */
     free(io);
     return (int)actual;
 }
@@ -459,7 +621,7 @@ int raw_gadget_ep_read(struct raw_gadget *rg, void *buf, size_t len)
         return -errno;
     }
 
-    __u32 actual = io->length;
+    __u32 actual = (__u32)ret; /* 传输长度以 ioctl 返回值为准 */
     if (actual > len) actual = (__u32)len;
     if (actual > 0 && buf)
         memcpy(buf, io->data, actual);

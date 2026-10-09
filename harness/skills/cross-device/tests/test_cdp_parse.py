@@ -171,6 +171,65 @@ class TestParse(unittest.TestCase):
         code, _ = cp.validate_batch(text, role="emit")
         self.assertEqual(code, 17)
 
+    # ── 方向漂移 warn（emit selfcheck）：架构词缺行号锚 ───────────────
+    def test_direction_drift_warn_no_anchor_hit(self):
+        # 无锚命中：方向含架构词（拆出）且缺行号锚 → warn 提示（不阻断）
+        warns = cp.direction_drift_warns("拆出公共校验函数")
+        self.assertEqual(len(warns), 1)
+        self.assertIn("缺行号锚", warns[0])
+        for w in ("共用", "抽取", "拆出"):
+            self.assertEqual(len(cp.direction_drift_warns(f"{w}接口层实现")), 1)
+
+    def test_direction_drift_with_anchor_no_warn(self):
+        # 带锚不命中：方向含架构词且有行号锚（file.c:141）→ 无告警
+        self.assertEqual(
+            cp.direction_drift_warns("expect.c:141 拆出 expect_validate_table"), [])
+        self.assertEqual(
+            cp.direction_drift_warns("cdp_emit_precheck.py:128 共用工作树判定"), [])
+
+    def test_direction_drift_no_word_no_warn(self):
+        # 无词不命中：方向不含架构词（即使缺锚）→ 无告警
+        self.assertEqual(cp.direction_drift_warns("补充 tests 补两类用例"), [])
+        self.assertEqual(cp.direction_drift_warns(""), [])
+
+    def test_cli_emit_direction_drift_warns_exit_zero(self):
+        # emit selfcheck：方向含架构词缺锚 → 输出 warn: 但 exit 0 不变（不阻断）
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        text = "-s base:1a2b3c4d5e6f\n意图: 修复 lcview 空指针\n验收: 无\n方向: 拆出公共校验\n"
+        f = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
+                                        encoding="utf-8")
+        f.write(text)
+        f.close()
+        path = f.name
+        self.addCleanup(Path(path).unlink)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = self._cli("--role", "emit", path)
+        self.assertEqual(rc, 0)
+        self.assertIn("warn: ", buf.getvalue())
+        self.assertIn("缺行号锚", buf.getvalue())
+
+    def test_cli_apply_direction_drift_no_warn(self):
+        # apply 角色不输出方向漂移 warn（该提示为 emit 产批自检专用）
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        text = "-s base:1a2b3c4d5e6f\n意图: 修复 lcview 空指针\n验收: 无\n方向: 拆出公共校验\n"
+        f = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
+                                        encoding="utf-8")
+        f.write(text)
+        f.close()
+        path = f.name
+        self.addCleanup(Path(path).unlink)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = self._cli("--role", "apply", "--expect-base",
+                           "1a2b3c4d5e6f", path)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("缺行号锚", buf.getvalue())
+
     # ── 批次六 C1：引号防呆（EXIT_QUOTE=19，仅 emit 角色校验）─────────
 
     def test_emit_quote_single_is_red(self):

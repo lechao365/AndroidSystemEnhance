@@ -291,6 +291,32 @@ class TestEmitPrecheck(unittest.TestCase):
         # origin/dev 缺失（git log 报 unknown revision）→ 返空不崩
         self.assertEqual(cdp_emit_precheck.commit_prefix_warns(self.root), [])
 
+    # ── 方向 3：工作树判定——仅 tracked 脏判红，untracked 入 warns 放行 ──
+    def test_untracked_only_passes_with_warns(self):
+        # 仅 untracked（?? 行）：precheck 放行（不判红），untracked_warns 提示
+        (self.root / "new_untracked.txt").write_text("x\n", encoding="utf-8")
+        self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        ok, reason, _ = cdp_emit_precheck.precheck(self.root, do_pull=False)
+        self.assertTrue(ok, reason)
+        warns = cdp_emit_precheck.untracked_warns(self.root)
+        self.assertEqual(len(warns), 1)
+        self.assertIn("untracked", warns[0])
+        self.assertIn("new_untracked.txt", warns[0])
+
+    def test_tracked_dirty_still_rejected(self):
+        # tracked 改动（ M 行）仍判红拒绝产批（untracked 放行不弱化 tracked 门禁）
+        self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        (self.root / "README.md").write_text("changed\n", encoding="utf-8")
+        ok, reason, _ = cdp_emit_precheck.precheck(self.root, do_pull=False)
+        self.assertFalse(ok)
+        self.assertIn("工作树不干净", reason)
+        self.assertIn("tracked", reason)
+
+    def test_untracked_warns_clean_no_warning(self):
+        # 工作树干净 → untracked_warns 返空
+        self._git("update-ref", "refs/remotes/origin/dev", "HEAD")
+        self.assertEqual(cdp_emit_precheck.untracked_warns(self.root), [])
+
 
 if __name__ == "__main__":
     unittest.main()

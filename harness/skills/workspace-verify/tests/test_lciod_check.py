@@ -444,6 +444,36 @@ class DiffDevicesTest(unittest.TestCase):
         errors, _ = lc.diff_devices("corrupt", self._current(), ["read_bytes"])
         self.assertTrue(any("基线无设备" in e for e in errors))
 
+    def test_virtual_uas_zero_delta_exempted(self):
+        # 虚拟 UAS 通道（protocol=1 vid=0 pid=0）无增量属无 UAS 流量源预期，
+        # 豁免不判红（记 SKIP 提示行）——真实环境无 UAS 设备时 lciod-trigger
+        # 的 delta 断言不得因虚拟通道恒 0 假红
+        line = VALID_LINE.replace("protocol=0", "protocol=1") \
+            .replace("vid=0x04e8 pid=0x6344", "vid=0x0000 pid=0x0000")
+        base = _baseline_obj(line)
+        devs = _devices(line)  # 无增量（与基线同值）
+        errors, report = lc.diff_devices(base, devs, ["read_bytes"])
+        self.assertEqual(errors, [])
+        self.assertTrue(any("SKIP" in r and "虚拟 UAS" in r for r in report))
+
+    def test_real_uas_zero_delta_still_error(self):
+        # 真实 UAS 设备（protocol=1 且 vid/pid 非零）无增量仍判红——打点链路
+        # 真故障不得因豁免假绿（豁免仅限 vid/pid 全 0 的虚拟占位通道）
+        line = VALID_LINE.replace("protocol=0", "protocol=1") \
+            .replace("vid=0x04e8 pid=0x6344", "vid=0x04e8 pid=0x6300")
+        base = _baseline_obj(line)
+        devs = _devices(line)  # 无增量
+        errors, _ = lc.diff_devices(base, devs, ["read_bytes"])
+        self.assertTrue(any("未增加" in e for e in errors))
+
+    def test_virtual_uas_but_bot_no_increment_still_error(self):
+        # 虚拟 UAS 豁免不掩盖 BOT 设备无增量：真实 BOT 设备（protocol=0）无
+        # 增量仍须判红——豁免仅放行虚拟通道，不改变"触发未生效"核心门禁
+        base = _baseline_obj()
+        devs = _devices(VALID_LINE)  # BOT 设备无增量（与基线同值）
+        errors, _ = lc.diff_devices(base, devs, ["read_bytes"])
+        self.assertTrue(any("未增加" in e for e in errors))
+
 
 # ============================================================
 # R3 方向 7：--mode storm 风暴规则校验（TestModeStorm）

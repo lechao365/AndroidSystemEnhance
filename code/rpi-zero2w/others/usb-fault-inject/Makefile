@@ -11,8 +11,8 @@
 CROSS ?= arm-linux-gnueabihf-
 CC    ?= $(CROSS)gcc
 
-CFLAGS  = -O2 -Wall -Wextra -Wno-unused-parameter
-LDFLAGS =
+CFLAGS  = -O2 -Wall -Wextra -Wno-unused-parameter -pthread
+LDFLAGS = -pthread
 
 TARGET  = usb-fault-inject
 SRCS    = main.c raw-gadget.c usb-descriptors.c scsi.c bot.c faults.c expect.c

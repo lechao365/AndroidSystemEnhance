@@ -19,7 +19,7 @@
 | base | 12 位 hex，= emit 产批时 origin/dev HEAD 前 12 位；apply 以 `--expect-base $(git rev-parse --short=12 HEAD)` 比对，不匹配整批拒绝（exit 18） |
 | checksum | 头部元数据行（紧跟首行），值 = 首行（mode+base）与正文（checksum 行以下全部行）规范化后整体 sha256 前 16 位；**首行纳入覆盖**（防 `-sv`→`-s` 等 mode/base 篡改静默过 checksum）；emit 产批经 `--gen-checksum` 生成（先规范化再定位首行，与解析口径对称），apply 侧解析存在即校验，不符整批拒绝（exit 1，双角色 blocking，防传输篡改/损坏）；无 checksum 行的旧批次 warn 兼容放行。他处出现 checksum 行按未知行报 11。结构错误消息中的行号为规范化后行号（与原始文件行号可能不一致） |
 | 三标签 | 必填各占一段，且不得重复（重复标签报 11 结构错误，emit/apply 均 blocking）；标签顺序不强制 |
-| 预算 | 总字符 50~500（含首行；checksum 行为机器元数据不计入，防 500 上限被挤占） |
+| 预算 | 总字符 50~500（含首行；checksum 行为机器元数据不计入，防 500 上限被挤占）；**位置词（文件路径/行号锚）与安全保护条件（越界/校验/回退等）属硬内容，压缩时只砍范围描述，不得砍位置词与保护条件**——方向含架构词（共用/抽取/拆出）时无行号锚会在 emit selfcheck 触发漂移 warn（见 cdp_parse.py direction_drift_warn，CDP-001 成对评估：预算校验仍只查字符数，parser 无需改） |
 | 引号禁令 | 批次正文禁用单双引号字符（' 与 "，emit 角色校验，违规 exit 19）——apply 侧传输层会展开吞字致批次结构损坏；改用中文标点（「」、——）或去引号 |
 | batch_id | 规范化文本（剥 BOM/strip/去空行/LF，逐行删净行内空白）sha256 前 12 位 |
 | 验收语法 | `-sv` 验收必须为 `case:<id>[,<id>...]`（id 限小写字母数字与连字符，多个用逗号分隔，逐个查 verify-cases.yaml cases 段，任一未知判死）或 `manual:<自由文本>`（**仅 manual 模式保留自由文本**）；用例 id 在 verify-cases.yaml 集中维护，批次内不再书写 svc/log/prop/file 等验收表达式。**用例两级策略（B6）**：`-sv` 常态回归批验收 case 默认取快速回归组（lcview-liveness, lcview-pipeline, lcview-trigger, lciod-liveness, lciod-trigger）；publish-main-base 前的全量验收批取全部 case；批次方向涉及特定 case 的专项修复按需追加——选择依据见 verify-cases.yaml 顶部注释 |

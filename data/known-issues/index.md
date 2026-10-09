@@ -36,3 +36,7 @@ KI-FLAKE-cefa39e1699f-1bac08 pre-existing false auto-flake open
 KI-FLAKE-d9ec6877f6c1-0714c7 pre-existing false auto-flake open
 KI-FLAKE-d9ec6877f6c1-d84e34 pre-existing false auto-flake open
 KI-FLAKE-d9ec6877f6c1-24bc54 pre-existing false auto-flake open
+KI-FLAKE-d9ec6877f6c1-24bc54 pre-existing false auto-flake open
+KI-FLAKE-52e8c1ee2ec2-ee0c4b pre-existing false auto-flake open
+KI-20261008-001 pre-existing false usb-fault-inject open
+KI-20261008-002 pre-existing false usb-fault-inject open

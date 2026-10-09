@@ -8,9 +8,21 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <time.h>
 
 /* Data 阶段最大缓冲区大小（限制单次传输上限，避免过度分配） */
 #define DATA_BUF_MAX   (512 * 1024)  /* 512KB */
+
+/* usleep 参数上限：duration_ms × 1000 不溢出 32 位（2147483ms ≈ 35.8min） */
+#define MAX_USLEEP_MS  2147483
+
+/* CLOCK_MONOTONIC 毫秒（持续注入计时） */
+static uint64_t bot_mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
 
 /*
  * BOT 主循环 — CBW → Data → CSW 状态机
@@ -35,17 +47,39 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
 
     int ret = 0;
 
+    /* 启动 EP0 服务线程，持续应答控制请求（ClearHalt/BOMSR/重枚举） */
+    if (raw_gadget_start_ep0_thread(rg) < 0) {
+        fprintf(stderr, "[bot] failed to start EP0 service thread\n");
+        free(data_buf);
+        return -1;
+    }
+
     while (1) {
-        /* 读取 fault 配置快照（可能在此期间被 main.c 修改） */
+        /* 读取 fault 配置快照（每轮 CBW 读取一次，事务内不变；
+         * 配置由 faults.c 启动前设定，单次注入后由本函数清除 active） */
         enum fault_hook current_hook = fi->active ? fi->hook : HOOK_NONE;
 
         /* ===== 钩子 A: STALL OUT (在 CBW 接收前) ===== */
         if (current_hook == HOOK_STALL_OUT) {
-            fprintf(stderr, "[bot] F2: STALL OUT endpoint before CBW\n");
-            raw_gadget_stall_ep(rg, 0x02);
-            fi->active = false;
-            /* STALL 后 Host 会 ClearHalt 重试，继续循环 */
-            continue;
+            if (fi->duration_ms > 0) {
+                /* 持续注入：期内每轮 STALL OUT，到期放行 */
+                if (fi->start_ms == 0)
+                    fi->start_ms = bot_mono_ms();
+                if (bot_mono_ms() - fi->start_ms >= (uint64_t)fi->duration_ms) {
+                    fprintf(stderr, "[bot] F2: STALL OUT expired, release\n");
+                    fi->active = false;
+                } else {
+                    fprintf(stderr, "[bot] F2: STALL OUT endpoint before CBW\n");
+                    raw_gadget_stall_ep(rg, EP_BULK_OUT);
+                    continue;
+                }
+            } else {
+                /* 单次注入：STALL 一次后清除 */
+                fprintf(stderr, "[bot] F2: STALL OUT endpoint before CBW (single)\n");
+                raw_gadget_stall_ep(rg, EP_BULK_OUT);
+                fi->active = false;
+                continue;
+            }
         }
 
         /* ===== Step 1: 接收 CBW (31 字节) ===== */
@@ -54,24 +88,43 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
 
         int n = raw_gadget_ep_read(rg, &cbw, sizeof(cbw));
         if (n < 0) {
-            if (errno == ESHUTDOWN || errno == ECONNRESET) {
+            if (errno == ESHUTDOWN || errno == ECONNRESET ||
+                errno == ENODEV || errno == EBADF) {
                 fprintf(stderr, "[bot] device disconnected (read)\n");
                 break;
             }
-            /* EPIPE = 端点被 STALL（可能是我们注入的），继续 */
-            if (errno != EPIPE)
-                fprintf(stderr, "[bot] CBW read error: %s (n=%d)\n", strerror(errno), n);
+            /* EPIPE = 端点被 STALL（可能是我们注入的）：10ms 退避后重试 */
+            if (errno == EPIPE) {
+                usleep(10 * 1000);
+                continue;
+            }
+            fprintf(stderr, "[bot] CBW read error: %s (n=%d)\n", strerror(errno), n);
             continue;
         }
 
         if (n != (int)sizeof(cbw)) {
             fprintf(stderr, "[bot] short CBW read: %d/%zu\n", n, sizeof(cbw));
+            /* 短 CBW 属协议异常：STALL OUT 端点触发 Host reset recovery */
+            raw_gadget_stall_ep(rg, EP_BULK_OUT);
             continue;
         }
 
         /* 校验 CBW 签名 */
-        if (cbw.dCBWSignature != USB_MS_CBW_SIGNATURE) {
-            fprintf(stderr, "[bot] bad CBW signature: 0x%08x\n", cbw.dCBWSignature);
+        if (msd_le32_get((const uint8_t *)&cbw.dCBWSignature) != USB_MS_CBW_SIGNATURE) {
+            fprintf(stderr, "[bot] bad CBW signature: 0x%08x\n",
+                    msd_le32_get((const uint8_t *)&cbw.dCBWSignature));
+            /* 坏签名属协议异常：STALL 双端点触发 Host reset recovery */
+            raw_gadget_stall_ep(rg, EP_BULK_IN);
+            raw_gadget_stall_ep(rg, EP_BULK_OUT);
+            continue;
+        }
+
+        /* 校验 CBW 字段：bCBWCBLength 须 1..16、bCBWLUN 须 0；违规 STALL 双端点 */
+        if (cbw.bCBWCBLength < 1 || cbw.bCBWCBLength > 16 || cbw.bCBWLUN != 0) {
+            fprintf(stderr, "[bot] invalid CBW fields: cdblen=%u lun=%u, STALL both EPS\n",
+                    cbw.bCBWCBLength, cbw.bCBWLUN);
+            raw_gadget_stall_ep(rg, EP_BULK_IN);
+            raw_gadget_stall_ep(rg, EP_BULK_OUT);
             continue;
         }
 
@@ -83,7 +136,10 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
         if (current_hook == HOOK_TIMEOUT) {
             fprintf(stderr, "[bot] F3: TIMEOUT — holding %d ms after CBW\n", fi->duration_ms);
             fi->active = false;
-            usleep(fi->duration_ms * 1000);
+            int hold_ms = fi->duration_ms;
+            if (hold_ms > MAX_USLEEP_MS)
+                hold_ms = MAX_USLEEP_MS;
+            usleep((useconds_t)hold_ms * 1000);
             /* 不发送 Data/CSW，Host 超时后触发 reset recovery */
             continue;
         }
@@ -92,8 +148,11 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
         if (current_hook == HOOK_ABORT) {
             fprintf(stderr, "[bot] F9: ABORT — STALL IN + hold %d ms\n", fi->duration_ms);
             fi->active = false;
-            raw_gadget_stall_ep(rg, 0x81);
-            usleep(fi->duration_ms * 1000);
+            raw_gadget_stall_ep(rg, EP_BULK_IN);
+            int hold_ms = fi->duration_ms;
+            if (hold_ms > MAX_USLEEP_MS)
+                hold_ms = MAX_USLEEP_MS;
+            usleep((useconds_t)hold_ms * 1000);
             continue;
         }
 
@@ -109,6 +168,21 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
             cbw.dCBWDataTransferLength,
             NULL, DATA_BUF_MAX);
 
+        /* 方向位一致性：CBW 声明方向与命令实际方向矛盾且带数据相位 → CSW Phase Error */
+        int cbw_dir_in = (cbw.bmCBWFlags & USB_MS_CBW_FLAGS_IN) != 0;
+        if (cbw.dCBWDataTransferLength > 0 &&
+            (sr.dir == SCSI_DIR_IN || sr.dir == SCSI_DIR_OUT)) {
+            int cmd_dir_in = (sr.dir == SCSI_DIR_IN);
+            if (cbw_dir_in != cmd_dir_in) {
+                fprintf(stderr, "[bot] direction mismatch: flags=%s cmd=%s datalen=%u, PHASE\n",
+                        cbw_dir_in ? "IN" : "OUT", cmd_dir_in ? "IN" : "OUT",
+                        cbw.dCBWDataTransferLength);
+                sr.csw_status = USB_MS_CSW_STATUS_PHASE;
+                sr.dir = SCSI_DIR_NONE; /* 跳过数据相位 */
+                sr.data_len = 0;
+            }
+        }
+
         /* ===== Step 3: Data 阶段 ===== */
         uint32_t actually_transferred = 0;
 
@@ -120,6 +194,8 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
                 data_buf, DATA_BUF_MAX);
 
             uint32_t to_send = sr.data_len;
+            if (to_send > DATA_BUF_MAX)
+                to_send = DATA_BUF_MAX;
             if (to_send > cbw.dCBWDataTransferLength)
                 to_send = cbw.dCBWDataTransferLength;
 
@@ -136,12 +212,29 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
 
             /* ===== 钩子 D: STALL IN (Data 发送前) ===== */
             if (current_hook == HOOK_STALL_IN) {
-                fprintf(stderr, "[bot] F1: STALL IN before Data\n");
-                raw_gadget_stall_ep(rg, 0x81);
-                fi->active = false;
-                /* Host 收到 STALL，触发 ClearHalt + reset recovery */
-                /* 跳过 Data/CSW 发送 */
-                continue;
+                if (fi->duration_ms > 0) {
+                    /* 持续注入：期内每轮 STALL IN，到期放行 */
+                    if (fi->start_ms == 0)
+                        fi->start_ms = bot_mono_ms();
+                    if (bot_mono_ms() - fi->start_ms >= (uint64_t)fi->duration_ms) {
+                        fprintf(stderr, "[bot] F1: STALL IN expired, release\n");
+                        fi->active = false;
+                    } else {
+                        fprintf(stderr, "[bot] F1: STALL IN before Data\n");
+                        raw_gadget_stall_ep(rg, EP_BULK_IN);
+                        /* Host 收到 STALL，触发 ClearHalt + reset recovery */
+                        /* 跳过 Data/CSW 发送 */
+                        continue;
+                    }
+                } else {
+                    /* 单次注入：STALL 一次后清除 */
+                    fprintf(stderr, "[bot] F1: STALL IN before Data (single)\n");
+                    raw_gadget_stall_ep(rg, EP_BULK_IN);
+                    fi->active = false;
+                    /* Host 收到 STALL，触发 ClearHalt + reset recovery */
+                    /* 跳过 Data/CSW 发送 */
+                    continue;
+                }
             }
 
             /* 分块发送（每次最多 512B bulk 包） */
@@ -158,7 +251,7 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
             }
             actually_transferred = offset;
 
-            /* 如果发送量 < 请求量且非 512 整数倍，需要发短包终止 */
+            /* 发送量是 512 整数倍且小于请求量时，需发零长度包终止（标记传输结束） */
             if (to_send > 0 && (to_send % 512 == 0) &&
                 to_send < cbw.dCBWDataTransferLength) {
                 /* 发送零长度包标记结束 */
@@ -167,8 +260,11 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
 
         } else if (sr.dir == SCSI_DIR_OUT && cbw.dCBWDataTransferLength > 0) {
             uint32_t to_recv = cbw.dCBWDataTransferLength;
-            if (to_recv > DATA_BUF_MAX)
+            int oversized = 0;
+            if (to_recv > DATA_BUF_MAX) {
                 to_recv = DATA_BUF_MAX;
+                oversized = 1;
+            }
 
             uint32_t offset = 0;
             while (offset < to_recv) {
@@ -185,10 +281,17 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
             }
             actually_transferred = offset;
 
-            /* 将接收的数据传回 SCSI 层（WRITE 操作需要写入内存盘） */
-            if (sr.data_len > 0)
+            if (oversized) {
+                /* OUT 声明超 DATA_BUF_MAX：收满缓冲区后 STALL OUT 且 CSW FAIL */
+                fprintf(stderr, "[bot] OUT transfer %u > DATA_BUF_MAX, STALL OUT + FAIL\n",
+                        cbw.dCBWDataTransferLength);
+                raw_gadget_stall_ep(rg, EP_BULK_OUT);
+                sr.csw_status = USB_MS_CSW_STATUS_FAIL;
+            } else if (sr.data_len > 0) {
+                /* 将接收的数据传回 SCSI 层（WRITE 操作需要写入内存盘） */
                 scsi_handle_command(cbw.CBWCB, cbw.bCBWCBLength,
                                     actually_transferred, data_buf, DATA_BUF_MAX);
+            }
         }
 
         /* ===== 钩子 E: DEGRADE (CSW 发送前延迟) ===== */
@@ -201,9 +304,10 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
         /* ===== Step 4: 构造并发送 CSW ===== */
         struct usb_ms_csw csw;
         memset(&csw, 0, sizeof(csw));
-        csw.dCSWSignature  = USB_MS_CSW_SIGNATURE;
-        csw.dCSWTag        = cbw.dCBWTag;
-        csw.dCSWDataResidue = cbw.dCBWDataTransferLength - actually_transferred;
+        msd_le32_put((uint8_t *)&csw.dCSWSignature, USB_MS_CSW_SIGNATURE);
+        msd_le32_put((uint8_t *)&csw.dCSWTag, cbw.dCBWTag);
+        msd_le32_put((uint8_t *)&csw.dCSWDataResidue,
+                     cbw.dCBWDataTransferLength - actually_transferred);
         csw.bCSWStatus     = sr.csw_status;
 
         /* ===== 钩子 F: CORRUPT CSW 字段 ===== */
@@ -224,6 +328,8 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
         int csent = raw_gadget_ep_write(rg, &csw, sizeof(csw));
         if (csent < 0) {
             fprintf(stderr, "[bot] CSW write error: %s\n", strerror(errno));
+        } else if (csent != (int)sizeof(csw)) {
+            fprintf(stderr, "[bot] CSW short write: %d/%zu bytes\n", csent, sizeof(csw));
         }
     }
 

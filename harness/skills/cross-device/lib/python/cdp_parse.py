@@ -42,6 +42,14 @@ CASE_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 # 正文（checksum 行以下全部行）规范化后 sha256 前 16 位（首行纳入覆盖，
 # 防 -sv→-s 等模式/base 篡改静默过 checksum）
 CHECKSUM_RE = re.compile(r"^checksum:\s*([0-9a-fA-F]{16})$")
+# 方向架构词与行号锚检测（emit selfcheck 漂移 warn，不阻断）：方向含架构词
+# （共用/抽取/拆出）却缺行号锚（如 file.c:141）时，apply 侧无从定位改动点，
+# 存在方向无法执行的漂移风险——warn 提示补锚，exit 0 不变（CDP-001 成对评估：
+# 预算段同步增补硬内容说明，parser 预算校验仍只查字符数）
+_ARCH_WORDS = ("共用", "抽取", "拆出")
+# 行号锚：文件扩展名 + 冒号 + 行号（如 expect.c:141、tests/foo_test.py:12），
+# 用于定位精确改动点；限定带扩展名路径避免误匹配 base:/case: 等标签冒号
+_LINE_ANCHOR_RE = re.compile(r"[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:\d{1,6}")
 
 EXIT_OK = 0
 EXIT_CHECKSUM = 1
@@ -234,6 +242,23 @@ def validate_batch(text: str, role: str = "emit"):
     return EXIT_OK, []
 
 
+def direction_drift_warns(direction: str) -> list[str]:
+    """方向含架构词（共用/抽取/拆出）却缺行号锚时返回告警列表（不阻断）。
+
+    emit selfcheck 漂移提示：架构改动词若不给行号锚（如 expect.c:141），
+    apply 侧无从定位改动点，方向可能无法精确执行——warn 提示补锚，
+    返回空列表表示无告警。exit 0 不变（非门禁，仅提示）。
+    """
+    if not direction:
+        return []
+    if not any(w in direction for w in _ARCH_WORDS):
+        return []
+    if _LINE_ANCHOR_RE.search(direction):
+        return []
+    return ["方向含架构改动词（共用/抽取/拆出）但缺行号锚（如 file.c:141）"
+            "——apply 侧无从定位精确改动点，建议补充行号锚"]
+
+
 def base_matches(text: str, expect_head12: str) -> bool:
     """批次 base 是否与 apply 侧起始 HEAD（前 12 位）匹配（忽略大小写）。"""
     b = parse_batch(text)
@@ -359,6 +384,10 @@ def main(argv=None):
     b = parse_batch(text)
     print(f"batch_id: {batch_id_from_text(text)}")
     print(f"mode: {b.mode} base: {b.base}")
+    # emit selfcheck 漂移提示：方向含架构词缺行号锚时 warn（不阻断，exit 0 不变）
+    if role == "emit":
+        for w in direction_drift_warns(b.direction):
+            print(f"warn: {w}")
     if role == "apply":
         _emit_precheck_mark()
     return EXIT_OK

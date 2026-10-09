@@ -2,11 +2,24 @@
 #include "usb-msd-proto.h"
 #include <stdlib.h>
 #include <string.h>
-#include <arpa/inet.h>  /* htonl/ntohl */
 #include <stdio.h>
+#include <stdbool.h>
 
 /* 64MB 内存盘后端 */
 static uint8_t *g_disk = NULL;
+
+/* ===== Sense 状态机（记录最近一次 CHECK CONDITION 的 SK/ASC） =====
+ * 命令失败时 sense_record() 存档；REQUEST SENSE 应答后清除。 */
+static uint8_t g_sense_key   = 0x00; /* Sense Key（默认 NO SENSE） */
+static uint8_t g_sense_asc   = 0x00; /* Additional Sense Code */
+static bool    g_sense_valid = false;
+
+static void sense_record(uint8_t key, uint8_t asc)
+{
+    g_sense_key = key;
+    g_sense_asc = asc;
+    g_sense_valid = true;
+}
 
 /* ===== INQUIRY 响应数据（36B 标准） ===== */
 static const uint8_t inquiry_data[36] = {
@@ -52,9 +65,14 @@ static void build_read_capacity(uint8_t *buf)
 static void build_request_sense(uint8_t *buf)
 {
     memset(buf, 0, 18);
-    buf[0]  = 0x70;  /* Response Code: current error */
-    buf[2]  = 0x00;  /* Sense Key: NO SENSE */
+    buf[0]  = 0xF0;  /* Valid bit + Response Code: 0x70 current error */
+    buf[2]  = g_sense_valid ? g_sense_key : 0x00; /* Sense Key */
     buf[7]  = 10;    /* Additional Sense Length */
+    if (g_sense_valid) {
+        buf[12] = g_sense_asc;  /* Additional Sense Code */
+        buf[13] = 0x00;         /* Additional Sense Code Qualifier */
+        g_sense_valid = false;  /* 读取后清除 */
+    }
 }
 
 /* ===== MODE SENSE(6) 响应数据（4B 最简） ===== */
@@ -114,10 +132,10 @@ struct scsi_result scsi_handle_command(const uint8_t *cbwcb, uint8_t cbwcb_len,
         r.dir = SCSI_DIR_IN;
         /* EVPD (bit0 of byte 1) 或 page code != 0 → VPD 查询，暂不支持 */
         if (cbwcb_len >= 2 && (cbwcb[1] & 0x01)) {
-            /* VPD: 返回全零 */
-            r.data_len = data_len < 36 ? data_len : 36;
-            if (data_buf)
-                memset(data_buf, 0, r.data_len);
+            /* VPD 暂不支持：INVALID FIELD IN CDB（5/0x24），CSW FAIL */
+            sense_record(0x05, 0x24);
+            r.csw_status = 1;
+            r.data_len = 0;
         } else {
             /* 标准 INQUIRY */
             r.data_len = data_len < 36 ? data_len : 36;
@@ -151,6 +169,7 @@ struct scsi_result scsi_handle_command(const uint8_t *cbwcb, uint8_t cbwcb_len,
 
     case SCSI_OP_READ_10: {
         if (cbwcb_len < 10) {
+            sense_record(0x05, 0x24); /* INVALID FIELD IN CDB */
             r.csw_status = 1;
             break;
         }
@@ -158,52 +177,52 @@ struct scsi_result scsi_handle_command(const uint8_t *cbwcb, uint8_t cbwcb_len,
         uint32_t lba = ((uint32_t)cbwcb[2] << 24) | ((uint32_t)cbwcb[3] << 16) |
                        ((uint32_t)cbwcb[4] << 8)  | (uint32_t)cbwcb[5];
         uint16_t blocks = ((uint16_t)cbwcb[7] << 8) | (uint16_t)cbwcb[8];
+        /* 先判后算：lba 或 lba+blocks 越出 MSD_BLOCK_COUNT 即判失败（防 LBA 回绕越界） */
+        if (lba >= MSD_BLOCK_COUNT || blocks > MSD_BLOCK_COUNT - lba) {
+            sense_record(0x05, 0x21); /* LOGICAL BLOCK ADDRESS OUT OF RANGE */
+            r.csw_status = 1;
+            r.data_len = 0;
+            break;
+        }
         uint32_t total = (uint32_t)blocks * MSD_BLOCK_SIZE;
 
         r.dir = SCSI_DIR_IN;
         r.data_len = data_len < total ? data_len : total;
+        /* data_len 与 buf_size 取小，防越界读 */
+        if (r.data_len > buf_size)
+            r.data_len = (uint32_t)buf_size;
 
-        if (g_disk && data_buf && r.data_len > 0) {
-            size_t disk_off = (size_t)lba * MSD_BLOCK_SIZE;
-            size_t disk_size = (size_t)MSD_BLOCK_COUNT * MSD_BLOCK_SIZE;
-            if (disk_off + r.data_len > disk_size) {
-                /* LBA 越界，截断 */
-                if (disk_off < disk_size)
-                    r.data_len = disk_size - disk_off;
-                else
-                    r.data_len = 0;
-            }
-            if (r.data_len > 0 && r.data_len <= buf_size)
-                memcpy(data_buf, g_disk + disk_off, r.data_len);
-        }
+        if (g_disk && data_buf && r.data_len > 0)
+            memcpy(data_buf, g_disk + (size_t)lba * MSD_BLOCK_SIZE, r.data_len);
         break;
     }
 
     case SCSI_OP_WRITE_10: {
         if (cbwcb_len < 10) {
+            sense_record(0x05, 0x24); /* INVALID FIELD IN CDB */
             r.csw_status = 1;
             break;
         }
         uint32_t lba = ((uint32_t)cbwcb[2] << 24) | ((uint32_t)cbwcb[3] << 16) |
                        ((uint32_t)cbwcb[4] << 8)  | (uint32_t)cbwcb[5];
         uint16_t blocks = ((uint16_t)cbwcb[7] << 8) | (uint16_t)cbwcb[8];
+        /* 先判后算：lba 或 lba+blocks 越出 MSD_BLOCK_COUNT 即判失败（防 LBA 回绕越界） */
+        if (lba >= MSD_BLOCK_COUNT || blocks > MSD_BLOCK_COUNT - lba) {
+            sense_record(0x05, 0x21); /* LOGICAL BLOCK ADDRESS OUT OF RANGE */
+            r.csw_status = 1;
+            r.data_len = 0;
+            break;
+        }
         uint32_t total = (uint32_t)blocks * MSD_BLOCK_SIZE;
 
         r.dir = SCSI_DIR_OUT;
         r.data_len = data_len < total ? data_len : total;
+        /* data_len 与 buf_size 取小，防越界读 */
+        if (r.data_len > buf_size)
+            r.data_len = (uint32_t)buf_size;
 
-        if (g_disk && data_buf && r.data_len > 0) {
-            size_t disk_off = (size_t)lba * MSD_BLOCK_SIZE;
-            size_t disk_size = (size_t)MSD_BLOCK_COUNT * MSD_BLOCK_SIZE;
-            if (disk_off + r.data_len > disk_size) {
-                if (disk_off < disk_size)
-                    r.data_len = disk_size - disk_off;
-                else
-                    r.data_len = 0;
-            }
-            if (r.data_len > 0 && r.data_len <= buf_size)
-                memcpy(g_disk + disk_off, data_buf, r.data_len);
-        }
+        if (g_disk && data_buf && r.data_len > 0)
+            memcpy(g_disk + (size_t)lba * MSD_BLOCK_SIZE, data_buf, r.data_len);
         break;
     }
 
@@ -211,17 +230,14 @@ struct scsi_result scsi_handle_command(const uint8_t *cbwcb, uint8_t cbwcb_len,
         /* 与 MODE SENSE(6) 类似，但响应头是 8 字节而非 4 字节 */
         r.dir = SCSI_DIR_IN;
         r.data_len = data_len < 8 ? data_len : 8;
-        if (data_buf) {
+        if (data_buf)
             memset(data_buf, 0, r.data_len);
-            if (r.data_len >= 2)
-                data_buf[0] = 0x00; /* Mode Data Length (filled later or 0) */
-            data_buf[1] = 0x00; /* Medium Type */
-        }
         break;
 
     default:
         /* 未识别的 SCSI 命令：返回 FAIL + CHECK CONDITION */
         fprintf(stderr, "[scsi] unsupported opcode 0x%02x\n", opcode);
+        sense_record(0x05, 0x20); /* INVALID COMMAND OPERATION CODE */
         r.csw_status = 1; /* CSW FAIL */
         break;
     }
