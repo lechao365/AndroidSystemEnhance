@@ -382,9 +382,22 @@ def diff_devices(baseline, devices, expect_fields):
     if not devices:
         errors.append("当前 probe 输出为空，无法对比")
         return errors, report
+    # 虚拟 UAS 通道豁免（无真实 UAS 流量源）：vid=0x0000 pid=0x0000 的
+    # protocol==1 占位设备无物理 UAS 设备背书，dd 只触发 BOT（protocol==0）
+    # 设备，该通道无增量属预期（无 UAS 流量源），不判红——记入 report 提示。
+    # 真实 UAS 设备（vid/pid 非零）无增量仍判红（打点链路真故障不得假绿）。
+    def _is_virtual_uas(dev):
+        try:
+            return (dev.get("protocol") == "1"
+                    and int(dev.get("vid", "0"), 0) == 0
+                    and int(dev.get("pid", "0"), 0) == 0)
+        except ValueError:
+            return False
+
     for dev in devices:
         minor = str(dev.get("minor", "?"))
         tag = f"minor={minor}"
+        virtual_uas = _is_virtual_uas(dev)
         if minor not in base:
             errors.append(f"{tag}: 设备不在基线中（基线后新出现？重跑 baseline）")
             continue
@@ -411,7 +424,11 @@ def diff_devices(baseline, devices, expect_fields):
             delta = now - before
             report.append(f"{tag}: {f} {before} -> {now} (delta={delta})")
             if delta <= 0:
-                errors.append(f"{tag}: {f} 未增加（delta={delta}），触发未生效")
+                if virtual_uas:
+                    report.append(f"SKIP: {tag}: {f} 无增量（虚拟 UAS 通道 "
+                                  "vid/pid 全 0，无真实 UAS 流量源，豁免）")
+                else:
+                    errors.append(f"{tag}: {f} 未增加（delta={delta}），触发未生效")
     return errors, report
 
 
