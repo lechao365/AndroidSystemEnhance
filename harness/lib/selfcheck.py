@@ -16,16 +16,34 @@ ws_report 拒写令 KIR-002 放行流程自锁——仅摘要缺失（崩溃/截
 refs 结论行同理只取 stdout 末行，stderr 仅附注不参与判定。
 
 输出单行（| 连接，供 ws_report --selfcheck 落盘与门禁判定）：
-    pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n> | refs_rc=<n> | <refs 结论行> | config_rc=<n> | <config 结论行> | contract_rc=<n> | <contract 结论行> | pyenv_rc=<n> | <pyenv 汇总行> | ioctl_rc=<n> | <ioctl 结论行> | manifest_rc=<n> | <manifest 结论行> | durs: py=<s> tools=<s> pyenv=<s> ioctl=<s> manifest=<s>
+    pytest_rc=<n> | <pytest 摘要行> | [slow5: <最慢5用例耗时;...>] | skipped=<n>
+    | refs_rc=<n> | <refs 结论行> | config_rc=<n> | <config 结论行>
+    | contract_rc=<n> | <contract 结论行> | pyenv_rc=<n> | <pyenv 汇总行>
+    | ioctl_rc=<n> | <ioctl 结论行> | lcview_events_rc=<n> | <events 结论行>
+    | manifest_rc=<n> | <manifest 结论行> | discipline_rc=<n> | <discipline 结论行>
+    | scan_rc=<n> | <scan 结论行> | quotepath_rc=<n> | <quotepath 结论行>
+    | known_issues_rc=<n> | <known_issues 结论行> | commit_coverage_rc=<n> | <cc 结论行>
+    | ruff_rc=<n> | <ruff 结论行> | host_rc=<n> | <host 结论行>
+    | durs: py=<s> refs=<s> cfg=<s> pyenv=<s> ioctl=<s> events=<s> manifest=<s>
+            discipline=<s> scan=<s> quotepath=<s> known_issues=<s>
+            commit_coverage=<s> ruff=<s> host=<s>
 skipped=<n> 仅在 pytest_rc=0 且摘要无 skipped 时补 0。config_rc/contract_rc
 为 check_config.py 两模式（配置治理/契约检查，方向 4 接入）；pyenv_rc 为
 check_python_env 探测结果（Python 版本 + requirements.txt 依赖，环境破损
 时后续工具结论均不可信）；ioctl_rc 为 check_ioctl_headers 内核/AOSP ioctl
-头一致性结果（方向 2，双空/漂移判红透出）；manifest_rc 为 gen_manifest
---check-only 的 code/rpi5 manifest 登记完整性结果（方向 2，未登记/有变化
-判红透出）；ws_report 按
-全部 *_rc 键判红（任一非零拒写收据）。退出码恒 0：拒写与否由 ws_report
-按 rc 判定，本脚本只负责如实采集（emit 侧可独立自测）。
+头一致性结果（方向 2，双空/漂移判红透出）；lcview_events_rc 为
+check_lcview_events 事件 schema 与内核发射点契约结果（方向 5，双侧漂移
+判红透出）；manifest_rc 为 gen_manifest --check-only 的 code/rpi5 manifest
+登记完整性结果（方向 2，未登记/有变化判红透出）；discipline_rc 为
+check_test_discipline 测试改动纪律结果（禁新增 xfail/skip/sleep 重试）；
+scan_rc 为 check_hot_path_scan 热路径遍历约束结果（禁全树 rglob/os.walk）；
+quotepath_rc 为 check_quotepath 裸 git 路径输出未带 core.quotepath=false
+结果（KI 2026-09-11 同源缺陷补全）；known_issues_rc 为 check_known_issues
+被引用 KI 编号悬空引用结果；commit_coverage_rc 为 check_commit_coverage
+非 meta 提交收据覆盖结果；ruff_rc 为 check_ruff 静态检查结果；host_rc 为
+check_host_tests 内核 host 单测结果。以上 rc 键与 REQUIRED_RC_KEYS 对齐，
+ws_report 按全部 *_rc 键判红（任一非零拒写收据）。退出码恒 0：拒写与否
+由 ws_report 按 rc 判定，本脚本只负责如实采集（emit 侧可独立自测）。
 """
 import argparse
 import hashlib
@@ -34,6 +52,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -128,12 +147,35 @@ _PYTEST_TIMEOUT_S = 900
 _HOST_TIMEOUT_S = _HOST_TEST_WORST_S + 60
 
 
+# 大输出工具（check_host_tests 的 make 编译诊断）：stdout/stderr=PIPE 时输出
+# 可能超管道缓冲（64KB）阻塞子进程，而 pytest 并行窗口内无排空（方向 6）——
+# 这类工具改走临时文件重定向，收口后读取。按脚本名登记（单点，新增大输出
+# 工具在此登记）。
+_LARGE_OUTPUT_TOOLS = ("check_host_tests.py",)
+
+
 def _spawn_cmd(cmd):
     """Popen 启动单个工具（非阻塞，方向 1：与 pytest 重叠跑，收口在
-    _collect_cmd）。cwd=ROOT 与 run_tool 一致。"""
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        encoding="utf-8", errors="replace", cwd=ROOT)
+    _collect_cmd）。cwd=ROOT 与 run_tool 一致。大输出工具（check_host_tests
+    的 make 编译诊断）改走临时文件重定向（方向 6），防 PIPE 缓冲满阻塞
+    子进程。"""
+    cap_to_file = any(Path(a).name in _LARGE_OUTPUT_TOOLS
+                      for a in cmd[1:])
+    if cap_to_file:
+        # stdout/stderr 各一临时文件，收口后读取（行为与 PIPE 模式一致）
+        _fd_out, _path_out = tempfile.mkstemp(prefix="selfcheck-out-",
+                                              suffix=".log")
+        _fd_err, _path_err = tempfile.mkstemp(prefix="selfcheck-err-",
+                                              suffix=".log")
+        f_out = os.fdopen(_fd_out, "w+", encoding="utf-8", errors="replace")
+        f_err = os.fdopen(_fd_err, "w+", encoding="utf-8", errors="replace")
+        proc = subprocess.Popen(cmd, stdout=f_out, stderr=f_err, cwd=ROOT)
+        proc._cap_files = (f_out, f_err)
+        proc._cap_paths = (_path_out, _path_err)
+    else:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            encoding="utf-8", errors="replace", cwd=ROOT)
     # 方向 4：durs 自 Popen 时刻起（此前 _t0 记在收口时刻，重叠进程
     # communicate 立即返回致 durs 恒 0，emit 无法定位真实耗时）
     proc._spawn_t0 = time.time()
@@ -157,25 +199,63 @@ def _collect_cmd(proc, name, timeout=_TOOL_TIMEOUT_S):
     """收口单个 Popen：communicate + 墙钟，返回 (rc, stdout, stderr, dur_s)。
     超时 kill 返 rc=124（约定超时标记，B3 兜底挂死）。dur_s = 进程退出时刻
     （wait 线程记）减 Popen 时刻（方向 3：工具真实运行时长；wait 线程未记
-    即收口时刻——communicate 返回即退出，近似一致）。"""
+    即收口时刻——communicate 返回即退出，近似一致）。大输出工具（方向 6）
+    走临时文件重定向：wait 收口后读文件，超时 kill 语义与 communicate 一致。
+    """
     _t0 = getattr(proc, "_spawn_t0", time.time())
     try:
-        out, err = proc.communicate(timeout=timeout)
-        rc = proc.returncode
-    except subprocess.TimeoutExpired:
-        proc.kill()
+        _is_popen = isinstance(proc, subprocess.Popen)
+    except TypeError:
+        # subprocess.Popen 被 mock 替换（测试 patch 场景，非 type），按
+        # PIPE 模式处理（communicate 分支）
+        _is_popen = False
+    if _is_popen and getattr(proc, "_cap_paths", None):
+        # 文件重定向模式（方向 6）：无管道可用，wait 收口（_wait_exit 线程
+        # 已并行 wait，此处同 wait 只是等退出码）；超时 kill 返 rc=124
         try:
-            # 第二次 communicate 补 timeout（本批方向 4）：kill 后管道排空
-            # 若无限等待会悬挂拖垮自检主流程，须有上界
-            out, err = proc.communicate(timeout=timeout)
+            proc.wait(timeout=timeout)
+            rc = proc.returncode
+            err = ""
         except subprocess.TimeoutExpired:
-            # kill 后管道仍不排空：放弃等待（防悬挂）
-            print(f"warn: 治理工具 {name} kill 后仍悬挂，放弃等待",
+            proc.kill()
+            try:
+                # kill 后 wait 仍须有上界（防悬挂拖垮自检主流程）
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                print(f"warn: 治理工具 {name} kill 后仍不退出，放弃等待",
+                      file=sys.stderr)
+            print(f"warn: 治理工具超时（>{timeout}s，rc=124）: {name}",
                   file=sys.stderr)
-            out, err = "", ""
-        print(f"warn: 治理工具超时（>{timeout}s，rc=124）: {name}",
-              file=sys.stderr)
-        rc, err = 124, f"timeout after {timeout}s"
+            rc, err = 124, f"timeout after {timeout}s"
+        out = ""
+        for f, p in zip(proc._cap_files, proc._cap_paths):
+            f.flush()
+            f.seek(0)
+            content = f.read()
+            f.close()
+            os.unlink(p)
+            if not out:
+                out = content
+            elif rc != 124:
+                err = content
+    else:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+            rc = proc.returncode
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                # 第二次 communicate 补 timeout（本批方向 4）：kill 后管道排空
+                # 若无限等待会悬挂拖垮自检主流程，须有上界
+                out, err = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # kill 后管道仍不排空：放弃等待（防悬挂）
+                print(f"warn: 治理工具 {name} kill 后仍悬挂，放弃等待",
+                      file=sys.stderr)
+                out, err = "", ""
+            print(f"warn: 治理工具超时（>{timeout}s，rc=124）: {name}",
+                  file=sys.stderr)
+            rc, err = 124, f"timeout after {timeout}s"
     exit_t0 = getattr(proc, "_exit_t0", None)
     # mock/异常形态下 _exit_t0 可能非数值（unittest mock 自动属性），回落收口
     if not isinstance(exit_t0, (int, float)):

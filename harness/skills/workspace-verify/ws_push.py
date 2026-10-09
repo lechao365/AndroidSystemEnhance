@@ -48,8 +48,10 @@ import ws_adb_connect as ac  # noqa: E402
 # harness/config/verify-cases.yaml：push 映射源（与 ws_upload_tests 同路径解析）
 _CASES_PATH = Path(__file__).resolve().parents[2] / "config" / "verify-cases.yaml"
 
-# 标准 SELinux 上下文形态（u:object_r:<type>:s0）
-_CONTEXT_RE = re.compile(r"^u:object_r:\S+:s0$")
+# 标准 SELinux 上下文形态（u:object_r:<type>:s0[:mls_category]）——
+# 检视修复：放宽支持 MLS 类别后缀（如 :c512,c768），旧正则要求 :s0 结尾
+# 会把带 MLS 类别的合法上下文误判非标准形态
+_CONTEXT_RE = re.compile(r"^u:object_r:\S+:s0(?::[0-9a-z,]+)?$")
 
 # 可注入睡眠点（方向 1）：reboot_and_wait 的实时等待（重启 settle 8s /
 # 轮询间隔 5s）统一经此下发；单测 patch 本符号消除真实等待——该等待曾使

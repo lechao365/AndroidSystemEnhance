@@ -75,7 +75,7 @@ class TestCompare(unittest.TestCase):
         (d / Path(SCHEMA_REL).parent).mkdir(parents=True, exist_ok=True)
         (d / Path(EVENTS_H_REL).parent).mkdir(parents=True, exist_ok=True)
         for rel in ("rpi5/kernel/new/vendor/lechao/LcIod",
-                    "rpi5/kernel/new/vendor/lechao/LcIod"):
+                    "rpi5/kernel/new/vendor/lechao/LcView"):
             (d / Path(rel)).mkdir(parents=True, exist_ok=True)
         (d / Path(SCHEMA_REL)).write_text(schema, encoding="utf-8")
         (d / Path(EVENTS_H_REL)).write_text(events_h, encoding="utf-8")

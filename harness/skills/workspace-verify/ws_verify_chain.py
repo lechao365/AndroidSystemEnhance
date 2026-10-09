@@ -395,7 +395,7 @@ def _selfcheck_fallback_rcs(pytest_rc):
         f"{k}={pytest_rc if k == 'pytest_rc' else 1}" for k in REQUIRED_RC_KEYS)
 
 
-def _run_selfcheck(timeout=900):
+def _run_selfcheck(timeout=900, mode="full"):
     """跑 harness/lib/selfcheck.py 取自检摘要文本（board 收据强制入收据，方向 4）。
 
     rc 全 0 与否由 ws_report 扫描 *_rc 键判定——本函数只负责把真实输出
@@ -406,12 +406,19 @@ def _run_selfcheck(timeout=900):
     timeout 与 selfcheck 内部 pytest 上限对齐（_PYTEST_TIMEOUT_S=900，
     wsv2-03）：此前链级 600s 先于内部 900s 到点，慢环境（drvfs 全量自检
     合法耗时 600~900s）会被链误杀产出 rc=124 兜底、成因误判为自检异常。
+    mode: full/quick——selfcheck quick/full 分层接线点（检视修复）：loop
+    中间轮 quick、末轮 full 由 loop 会话 attempt 数决定，而链编排侧读不到
+    loop session（ws_verify_chain 不依赖 loop-engineering），故恒传默认
+    full（不破坏现有行为）；loop 侧需分层时在调用本函数的编排处按 attempt
+    数显式传 mode。
     """
+    argv = [sys.executable, str(_SCRIPT_DIR.parents[1] / "lib" / "selfcheck.py")]
+    if mode != "full":
+        argv += ["--mode", mode]
     try:
         proc = subprocess.run(
-            [sys.executable, str(_SCRIPT_DIR.parents[1] / "lib" / "selfcheck.py")],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout)
+            argv, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout)
         return ((proc.stdout or "") + (proc.stderr or "")).strip()
     except subprocess.TimeoutExpired:
         return (f"error: selfcheck 超时（>{timeout}s）"
@@ -420,11 +427,65 @@ def _run_selfcheck(timeout=900):
         return f"error: selfcheck 启动失败: {e} {_selfcheck_fallback_rcs(1)}"
 
 
+def _compose_report_body(batch_file, run_id, steps, overall):
+    """构造 report --body 内容：批次原文 + 逐方向自报段 +（失败现场摘录）。
+
+    CDP-DOD-003 联动（检视修复）：链式 report 此前直接把批次原文当 --body，
+    而新方向编号格式（1) xxx 2) yyy）方向数 n>0，批次原文无 '- 方向N:' 自报
+    段会触发 ws_report 逐方向自报门禁拒写（整链失败）。此处按批次方向数自动
+    生成每方向一行自报（调用方=验证链，验证=链步 rc 见运行态 JSON），
+    overall=fail 时追加失败现场摘录（失败步 rc + build 日志尾部）供收据审计。
+    返回 body 文本；批次/方向不可解析时回落批次原文（n=0 无自报门禁）。
+    """
+    import ws_report  # 复用 _direction_count（与收据门禁同源不漂移）
+    text = Path(batch_file).read_text(encoding="utf-8")
+    n = 0
+    try:
+        n = ws_report._direction_count(ws_report.parse_batch(text).direction)
+    except Exception:
+        n = 0
+    lines = [text.rstrip()]
+    if n > 0:
+        lines.append("")
+        lines.append("## 逐方向自报")
+        for i in range(1, n + 1):
+            lines.append(
+                f"- 方向{i}: 完成：调用方=workspace-verify 验证链，"
+                f"验证=链步 rc（sync/build/push/unit_test/acceptance）"
+                f"见 run-{run_id}.json，失败现场见 harness/log/verify-chain/")
+    if overall == "fail":
+        failed = next((s for s in steps if s["name"] != "package"
+                       and (s.get("canceled") or s["rc"] is None or s["rc"] != 0)),
+                      None)
+        if failed:
+            lines.append("")
+            lines.append("## 失败现场")
+            rc_desc = "超时取消" if failed.get("canceled") \
+                else f"rc={failed.get('rc')}"
+            lines.append(f"- 失败步: {failed.get('name')}（{rc_desc}）")
+        build_log = (_SCRIPT_DIR.parents[1] / "log" / "verify-chain"
+                     / f"build-{run_id}.log")
+        if build_log.is_file():
+            try:
+                tail = build_log.read_text(encoding="utf-8",
+                                           errors="replace").splitlines()[-20:]
+            except OSError:
+                tail = []
+            if tail:
+                lines.append("- build 日志尾部（最近 20 行）:")
+                lines.extend("  " + l for l in tail)
+    return "\n".join(lines) + "\n"
+
+
 def _build_report_argv(chain_args, derive):
     """report 步骤 argv：收据参数由前序真实结果机械派生（derive dict）。"""
+    # 检视修复：--body 用 report 步生成的 body 文件（批次原文+逐方向自报段+
+    # 失败现场），不再直接传批次原文；缺省回落批次原文（n=0 历史批次无自报
+    # 门禁，行为不变）
+    body = chain_args.get("body_file") or chain_args["batch_file"]
     cmd = [sys.executable, str(_SCRIPT_DIR / "ws_report.py"),
            "--batch-file", chain_args["batch_file"],
-           "--body", chain_args["batch_file"],
+           "--body", body,
            "--result", derive["result"], "--build", derive["build"],
            "--board", derive["board"], "--summary", derive["summary"]]
     for key, flag in (("push_file", "--push-file"),
@@ -750,6 +811,16 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
             # _run_selfcheck——挂死/启动失败返回带 error 标注文本判红）
             chain_args["selfcheck"] = _join_selfcheck_preflight(
                 selfcheck_thread, selfcheck_result)
+            # 检视修复（CDP-DOD-003 联动）：方向数 >0 的批次生成 report-body
+            #（批次原文+逐方向自报段；overall=fail 追加失败现场摘录）替换
+            # --body，n=0 历史批次回落批次原文
+            if batch_file:
+                body_path = _RUNS_DIR / f"{run_id}.report-body.md"
+                body_path.parent.mkdir(parents=True, exist_ok=True)
+                body_path.write_text(
+                    _compose_report_body(batch_file, run_id, steps, overall),
+                    encoding="utf-8")
+                chain_args["body_file"] = str(body_path)
             argv = _build_report_argv(chain_args, derive)
             step_cwd = None
         else:

@@ -33,14 +33,19 @@ def repo_root() -> Path:
 
 
 def _expand_env(val: str) -> str:
-    """展开 ${VAR} / ${VAR:-default} 环境变量引用（不支持嵌套）。"""
+    """展开 ${VAR} / ${VAR:-default} 环境变量引用（不支持嵌套）。
+
+    展开后若以 ~ 开头再经 expanduser 展开：`~/workspace` 未展开时
+    Path("~/workspace").is_absolute() 为 False，会被 path() 拼成
+    repo_root()/~/workspace 的错误相对路径。
+    """
     def _sub(m: re.Match) -> str:
         name, default = m.group(1), m.group(2)
         value = os.environ.get(name, "")
         if value:
             return value
         return default if default is not None else ""
-    return _ENV_RE.sub(_sub, val)
+    return os.path.expanduser(_ENV_RE.sub(_sub, val))
 
 
 def _load_conf() -> dict[str, str]:

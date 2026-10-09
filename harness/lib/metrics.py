@@ -4,7 +4,7 @@
 # 设计目的：AI 一条命令自查项目健康度——聚合 verify 收据 / 趋势行 /
 #   known-issues，输出 pass 率、flake 率、验证时长分布、KI 状态板。
 #   只读聚合（不写仓内文件）；对空目录/坏数据容错（缺字段不崩）。
-# 接入：selfcheck 以 metrics_rc 透出（跑通即 0，聚合异常判红）。
+# 接入：独立自度量工具，metrics_rc 自报（2026-09-15 起不再接入 selfcheck）。
 # 用法：python3 harness/lib/metrics.py --report [--json]
 #   [--verify-dir <dir>] [--issues-dir <dir>]
 # 退出码：0 聚合成功（无论数据多少）/ 1 聚合异常 / 2 参数错误

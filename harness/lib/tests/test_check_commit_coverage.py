@@ -60,8 +60,9 @@ def _mk_receipt(repo: Path, scope: str):
     f.write_text(f"- schema_version: 1\n- batch_id: manual-test\n"
                  f"- result: skip\n- commit_scope: {scope}\n\n## body\nx\n",
                  encoding="utf-8")
-    # 证据只认 HEAD 中已提交的收据（批次 b410b688d206 方向 2）：git add 不
-    # commit 即授予覆盖是漏洞——收据须 commit 到 HEAD 才算覆盖证据
+    # 收据口径为工作区 glob（批次意图一，与 test_untracked_receipt_now_evidence
+    # 一致）：未提交/未跟踪收据落盘即覆盖证据。本 helper 仍 git add+commit
+    # 仅为模拟真实收据形态，覆盖判定不要求已提交
     subprocess.run(["git", "-C", str(repo), "add", "--", f.as_posix()],
                    check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",

@@ -28,6 +28,12 @@ _BATCH = ("-sv base:%s\n"
           "验收: case:lcview-liveness\n"
           "方向: 1) 测试。\n")
 
+# 双方向批次（CDP-DOD-003 联动）：方向为实测历史格式 "1) ... 2) ..."
+_D2_BATCH = ("-sv base:%s\n"
+             "意图: 双方向自报批次\n"
+             "验收: case:lcview-liveness\n"
+             "方向: 1) 方向一。2) 方向二。\n")
+
 _SELFCHECK_OK = ("pytest_rc=0 | 900 passed | skipped=0 | refs_rc=0 | OK | "
                  "config_rc=0 | OK | contract_rc=0 | OK")
 
@@ -77,6 +83,60 @@ class TestChain(unittest.TestCase):
                           "acceptance", "package", "report"])
         self.assertEqual([s["rc"] for s in result["steps"]], [0] * 8)
         self.assertEqual(result["skipped"], [])
+
+    def test_report_body_has_per_direction_reports(self):
+        # CDP-DOD-003 联动（检视修复）：新格式批次（1) ... 2) ...）方向数
+        # n=2，report 步须生成 body 含逐方向自报段——此前链式 report 直接把
+        # 批次原文当 --body（无自报段）会被 ws_report 逐方向门禁拒写整链失败
+        batch = Path(self._tmp.name) / "d2.cdp"
+        batch.write_text(_D2_BATCH % ("a" * 12), encoding="utf-8")
+        ctor, _ = _fake_popen(0)
+        calls = []
+        ctor.side_effect = lambda argv, **kw: (
+            calls.append(argv),
+            mock.Mock(wait=mock.Mock(return_value=0)))[1]
+        with mock.patch.object(wc.subprocess, "Popen", ctor), \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(batch_file=str(batch), use_locks=False)
+        self.assertEqual(rc, 0)
+        rep = next(c for c in calls if "ws_report.py" in c[1])
+        body_arg = rep[rep.index("--body") + 1]
+        body = Path(body_arg).read_text(encoding="utf-8")
+        self.assertIn("## 逐方向自报", body)
+        self.assertIn("- 方向1:", body)
+        self.assertIn("- 方向2:", body)
+        self.assertIn("run-%s.json" % result["run_id"], body)
+        # body 文件按 run_id 命名落 runs 目录（运行态同目录，只读不门禁）
+        self.assertEqual(body_arg,
+                         str(self.runs / f"{result['run_id']}.report-body.md"))
+
+    def test_report_body_failure_site_appended_on_fail(self):
+        # CDP-DOD-003 联动：overall=fail 时 report body 追加失败现场摘录
+        #（失败步 rc + build 日志尾部），供收据审计失败归因
+        batch = Path(self._tmp.name) / "d2.cdp"
+        batch.write_text(_D2_BATCH % ("a" * 12), encoding="utf-8")
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            bad = os.path.basename(argv[1]) == "ws_push.py"
+            return mock.Mock(wait=mock.Mock(return_value=1 if bad else 0))
+
+        ctor = mock.Mock(side_effect=run)
+        with mock.patch.object(wc.subprocess, "Popen", ctor), \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(batch_file=str(batch), use_locks=False)
+        self.assertEqual(rc, 1)
+        rep = next(c for c in calls if "ws_report.py" in c[1])
+        body = Path(rep[rep.index("--body") + 1]).read_text(encoding="utf-8")
+        self.assertIn("- 方向1:", body)
+        self.assertIn("- 方向2:", body)
+        self.assertIn("## 失败现场", body)
+        self.assertIn("失败步: push（rc=1）", body)
 
     def test_package_step_uses_systemd_run_with_batch_id_evidence(self):
         # 方向 3：package 步用 systemd-run --user --wait 拉起 ws_package.py，
@@ -590,25 +650,38 @@ class TestSelfcheckFallbackRcKeys(unittest.TestCase):
         import ws_report
         with tempfile.TemporaryDirectory() as d:
             with mock.patch.dict("os.environ", {"CDP_PROJECT_ROOT": d}):
-                batch = Path(d) / "b.cdp"
-                batch.write_text(
-                    "-s base:1a2b3c4d5e6f\n"
-                    "意图: selfcheck 兜底文本 rc 键覆盖端到端验证用批次（占位"
-                    "说明文字拉长长度以满足批次长度预算要求，无实际编辑意图）。\n"
-                    "验收: 无\n"
-                    "方向: 1) 端到端验证兜底文本能通过 ws_report 缺键门禁判红。\n",
-                    encoding="utf-8")
-                body = Path(d) / "body.txt"
-                body.write_text("## 现场\n", encoding="utf-8")
-                err = io.StringIO()
-                with contextlib.redirect_stderr(err), \
-                        contextlib.redirect_stdout(io.StringIO()):
-                    ws_report.main([
-                        "--batch-file", str(batch), "--body", str(body),
-                        "--result", "skip", "--build", "skip",
-                        "--board", "skip", "--summary", "s",
-                        "--selfcheck", selfcheck_text])
-                return err.getvalue()
+                # 检视修复（_resolve_target 12hex 校验）：批次 base 为假 12hex，
+                # 非 git 仓下 cat-file -e 必失败拒写，拦截存在性校验放行，
+                # 保持本用例聚焦 selfcheck 兜底文本的 rc 键判红路径
+                real_run = subprocess.run
+
+                def _fake_run(args, *a, **kw):
+                    if (isinstance(args, (list, tuple)) and args[:1] == ["git"]
+                            and "cat-file" in args and "-e" in args):
+                        return mock.Mock(returncode=0, stdout="")
+                    return real_run(args, *a, **kw)
+
+                with mock.patch.object(ws_report.subprocess, "run",
+                                       side_effect=_fake_run):
+                    batch = Path(d) / "b.cdp"
+                    batch.write_text(
+                        "-s base:1a2b3c4d5e6f\n"
+                        "意图: selfcheck 兜底文本 rc 键覆盖端到端验证用批次（占位"
+                        "说明文字拉长长度以满足批次长度预算要求，无实际编辑意图）。\n"
+                        "验收: 无\n"
+                        "方向: 端到端验证兜底文本能通过 ws_report 缺键门禁判红。\n",
+                        encoding="utf-8")
+                    body = Path(d) / "body.txt"
+                    body.write_text("## 现场\n", encoding="utf-8")
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        ws_report.main([
+                            "--batch-file", str(batch), "--body", str(body),
+                            "--result", "skip", "--build", "skip",
+                            "--board", "skip", "--summary", "s",
+                            "--selfcheck", selfcheck_text])
+                    return err.getvalue()
 
     def test_timeout_text_covers_required_rc_keys(self):
         # 超时兜底文本：键集合 == REQUIRED_RC_KEYS 全集（动态同源）

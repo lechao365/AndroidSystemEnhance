@@ -35,8 +35,17 @@ def _spawned_tool_paths() -> set[str]:
             parts = [c.value for c in ast.walk(elt)
                      if isinstance(c, ast.Constant)
                      and isinstance(c.value, str)]
-            if parts and parts[-1].endswith(".py"):
-                out.add("/".join(parts))
+            # ast.walk 是 BFS 序（先内层后外层），parts 顺序与路径段相反：
+            # `str(ROOT / "harness" / "lib" / "x.py")` 收集为
+            # ['x.py', 'lib', 'harness']，parts[-1] 恒非 .py 结尾（此前全部
+            # 推导不出、漂移守卫假绿）。改取 .py 结尾段为脚本名，其余段
+            # 逆序拼为目录前缀，拼出真实相对路径（如 harness/lib/x.py）。
+            py_parts = [p for p in parts if p.endswith(".py")]
+            if not py_parts:
+                continue
+            fname = py_parts[0]
+            dirs = [p for p in parts if p != fname][::-1]
+            out.add("/".join(dirs + [fname]))
     # selfcheck 自身亦在守卫面（spawn 工具 import 链源头）
     out.add("harness/lib/selfcheck.py")
     return out

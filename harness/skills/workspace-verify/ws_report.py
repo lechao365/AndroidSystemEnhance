@@ -585,7 +585,23 @@ def _resolve_target(target: str):
     HEAD^，解析失败不得写空串蒙混（比对不等空串恒失败），err 非 None 时
     调用方必须拒绝写收据（照模式 A 校验失败同款返 2）。
     """
-    if not target or _HEX12_RE.match(target):
+    if not target:
+        return target, None
+    if _HEX12_RE.match(target):
+        # 检视修复：12hex 同样校验 git 存在性——此前不存在的 12hex（错拼/
+        # 陈旧 sha）直接放行，verified_commit 落盘后 promote 门禁比 HEAD^
+        # 恒失败才暴露，改为落盘前 git cat-file -e 校验，不存在即拒写
+        try:
+            r = subprocess.run(
+                ["git", "-C", project_root(), "cat-file", "-e",
+                 f"{target}^{{commit}}"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=10)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return "", f"无法校验 --target {target!r}（git 执行失败: {e}）"
+        if r.returncode != 0:
+            return "", (f"无法校验 --target {target!r}"
+                        f"（git cat-file -e 退出 {r.returncode}，commit 不存在）")
         return target, None
     try:
         r = subprocess.run(["git", "rev-parse", "--short=12", target],
@@ -614,12 +630,19 @@ def _sanitize(text: str) -> str:
 
 
 def _direction_count(direction):
-    """批次方向条目数：方向文本形如"1 xxx 2 yyy 3 zzz"，编号前须为行首/
-    句号/分号、编号后须空白（空格/句号/分号分隔均识别）。只认从 1 起的最长
-    连续编号前缀（内容内偶发的数字如"9 处""15s""84 行"前无分隔符、不进入
-    编号集，不干扰计数）。"""
-    nums = {int(m.group(1)) for m in
-            re.finditer(r"(?:^|[。；])\s*(\d+)\s", direction or "")}
+    """批次方向条目数：方向文本形如"1 xxx 2 yyy"或"1) xxx 2) yyy"/
+    "1、xxx 2、yyy"（编号后空白/右括号/顿号/句点任一均识别）。只认从 1 起
+    的最长连续编号前缀（内容内偶发的数字如"9 处""15s""84 行"不进入编号集，
+    不干扰计数）。编号识别分两分支：
+      - 强后缀（后跟 ) 、 . 。）：编号前仅需词边界（\\b），兼容实测 CDP 批次
+        "1) xxx 2) yyy" 连续编号（2 前无句号分隔，旧正则漏识别致 n=0 恒
+        放行、CDP-DOD-003 门禁失效）；
+      - 弱后缀（后跟空白）：编号前须行首/句号/分号（排除"验证 1 处"等中文
+        计数数字被误当成方向编号）。
+    """
+    nums = {int(m.group(1) or m.group(2)) for m in
+            re.finditer(r"\b(\d+)(?=[)）、.。])|(?:^|[。；])\s*(\d+)(?=\s)",
+                        direction or "")}
     n = 0
     while (n + 1) in nums:
         n += 1
@@ -645,7 +668,14 @@ def _enforce_direction_reports(direction, body_path):
     n = _direction_count(direction)
     if n <= 0:
         return 0  # 方向文本不可解析（历史/异常批次）不阻断，避免误伤
-    text = Path(body_path).read_text(encoding="utf-8")
+    try:
+        text = Path(body_path).read_text(encoding="utf-8")
+    except OSError as e:
+        # 检视修复：读 body 加异常保护——正文缺失/不可读时无法核验逐方向
+        # 自报，按拒写语义返 2（与调用方"自报条数不足即拒写"同口径）
+        print(f"error: 收据正文读取失败（{e}）——CDP-DOD-003 无法核验自报，"
+              f"请确认 --body 文件可读后重跑", file=sys.stderr)
+        return 2
     have = _direction_report_count(text)
     if have < n:
         print(f"error: 收据正文须逐方向自报（批次方向数 {n}，"

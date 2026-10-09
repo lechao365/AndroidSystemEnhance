@@ -157,6 +157,10 @@ if r is None:
     sys.exit(1)
 # 方向 5：收据解析有错（非法整数/重复字段/schema 非 1）即拒，不再静默吞错
 if receipt_errs:
+    # 检视修复：sys.exit(1) 被 shell 侧 `) || true` 吞掉 → RECEIPT_INFO 空 →
+    # 误分类 NO_RECEIPT；改向 stdout 打 RECEIPT_FAIL 标记，shell 侧据此
+    # 分类 RECEIPT_FAIL（错误明细仍走 stderr）
+    print("RECEIPT_FAIL")
     print("error: 最新收据解析错误: " + "; ".join(receipt_errs), file=sys.stderr)
     sys.exit(1)
 # 头注释约定相对项目根输出（脚本从项目根运行，relpath 相对 cwd），避免泄露 home 绝对路径
@@ -168,6 +172,11 @@ print(r.verified_tree)
 PYEOF
 ) || true
 [ -n "$RECEIPT_INFO" ] || { check_class NO_RECEIPT; echo "error: 无 verify 收据" >&2; exit 1; }
+# 检视修复：收据解析错误须分类 RECEIPT_FAIL（非 NO_RECEIPT）——python 块对
+# receipt_errs 分支向 stdout 打 RECEIPT_FAIL 标记，此处先于四行解析捕获
+[ "$RECEIPT_INFO" = "RECEIPT_FAIL" ] && {
+  check_class RECEIPT_FAIL
+  echo "error: 最新收据解析错误（详见上方 stderr 明细），拒绝" >&2; exit 1; }
 LATEST=$(echo "$RECEIPT_INFO" | sed -n '1p')
 RESULT=$(echo "$RECEIPT_INFO" | sed -n '2p')
 VC=$(echo "$RECEIPT_INFO" | sed -n '3p')
@@ -403,7 +412,10 @@ git fetch origin || { echo "error: fetch 失败" >&2; exit 1; }
 PROMOTE_SCOPE="$EVIDENCE_SCOPE"
 # 两点语法 origin/main..dev（pub-04）：dev 相对 origin/main 的 code 改动取
 # 「dev 有而 main 无」——三点对称差会把 main 侧领先提交误算成 dev 改动
-CODE_HEAD=$(git log --format=%H origin/main..dev -- code/ | head -1)
+# 检视修复（SIGPIPE）：git log | head 在 set -euo pipefail 下，输出超管道
+# 缓冲时 head 提前退出 → git log 收 SIGPIPE 141 → 命令替换失败被 set -e 终止；
+# 改用 git log -1 --format=%H 单行取最近提交（无管道，无 SIGPIPE 面）
+CODE_HEAD=$(git log -1 --format=%H origin/main..dev -- code/)
 if [ -z "$CODE_HEAD" ]; then
   echo "warn: 最新收据 result=$RESULT verify_mode=$MODEV 非 pass+board，但 dev 相对 origin/main 无 code/ 改动，豁免放行"
   PROMOTE_SCOPE="no-code-change"
@@ -512,7 +524,7 @@ fi
 # 领先 dev 时会混入 main 侧提交，docs 提示口径漂移）
 # -c core.quotepath=false：docs/ 下中文路径（01-打点增强 等）默认转义致
 # '^docs/' 前缀匹配恒 miss——文档同步提示失灵（KI 2026-09-11 同源）
-if ! git -c core.quotepath=false diff --name-only origin/main..dev | grep -q '^docs/'; then
+if [ -z "$(git -c core.quotepath=false diff --name-only origin/main..dev | grep '^docs/')" ]; then
   echo "warn: dev 相对 origin/main 无 docs/ 改动（若本批应同步设计文档，请先 /sync-code-to-doc --base origin/main 并 commit 到 dev）"
 fi
 

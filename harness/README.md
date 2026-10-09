@@ -35,6 +35,7 @@ harness/
 │   ├── known-issues.md         # KIR-001~007：缺陷归属判定有序判据与准入场景表
 │   ├── plantuml.md             # DOC-002：PlantUML 画图约束
 │   ├── cdp-apply-dod.md        # CDP-DOD-001~003：apply 完成判据（检查器门禁三要件/干净克隆/收据自报）
+│   ├── local-dev-dod.md       # LOCAL-DEV-001~003：本地直连开发 DoD（manual 收据/三态自报）
 ├── reference/
 │   ├── README.md                 # RPI5 开发参考文档索引（ENV/BLD/FLASH/INC/DBG/RMT 规则 ID 总表）
 │   ├── env-setup-reference.md    # WSL2 / 宿主环境搭建、AOSP 编译前准备（ENV-001~007）

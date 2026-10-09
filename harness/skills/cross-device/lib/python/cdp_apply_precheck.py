@@ -1,4 +1,5 @@
-"""apply 侧 precheck：分支 dev / 工作树干净 / HEAD==origin/dev / base 匹配。
+"""DEPRECATED（已由 cdp_parse.py --role apply 取代，本文件仅保留历史参考，
+不接入任何工作流）——apply 侧 precheck：分支 dev / 工作树干净 / HEAD==origin/dev / base 匹配。
 
 与 emit 侧 cdp_emit_precheck.py 同款结构（方向 3）：apply 机执行批次编辑
 前的前置门禁机器化——SKILL 步骤 2 的门禁（git branch --show-current 须为

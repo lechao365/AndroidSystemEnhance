@@ -33,6 +33,9 @@ import ws_adb_connect as ac  # noqa: E402
 # harness/config/verify-cases.yaml：test_targets 源（与 ws_acceptance 同路径解析）
 _CASES_PATH = Path(__file__).resolve().parents[2] / "config" / "verify-cases.yaml"
 
+# 新鲜度判定的源码扩展名集合（binary_is_stale 只扫这些文件，避扫生成物）
+_SRC_EXTS = frozenset((".c", ".cpp", ".h", ".hpp"))
+
 # dur_s 自报基准（方向 1）：模块级取值——import 成本归入脚本自报时长，
 # gap 收窄为纯 AI 编排活动（边界按进程边界切分）
 _T0 = time.monotonic()
@@ -72,6 +75,9 @@ def binary_is_stale(binary, aosp_root, src_rel):
     设备单测通道曾首推旧测试二进制仍报 PASS（未含新增用例），制度化为推送前
     校验：源码任一文件比二进制新 → 二进制不含该改动 → 判红，禁止报绿。
     源码目录缺失或二进制不可 stat 时返回 False（不误伤，产物缺失由调用方判红）。
+    扫描范围收窄（检视修复）：只扫源码扩展名文件（.c/.cpp/.h/.hpp），不扫
+    生成物/无关文件——drvfs 粗粒度 mtime 下全目录 rglob 会把编译中间产物、
+    备份等无关文件计入"最新"，误判陈旧假阳性。
     """
     src_root = Path(aosp_root) / src_rel
     if not src_root.is_dir():
@@ -82,7 +88,7 @@ def binary_is_stale(binary, aosp_root, src_rel):
         return False
     newest = 0.0
     for p in src_root.rglob("*"):
-        if p.is_file():
+        if p.is_file() and p.suffix in _SRC_EXTS:
             try:
                 newest = max(newest, p.stat().st_mtime)
             except OSError:

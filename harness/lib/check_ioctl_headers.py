@@ -143,8 +143,9 @@ BLOCK_RE = re.compile(
 IOCTL_CMD_RE = re.compile(
     r"#define\s+(\w+)\s+_(IO|IOR|IOW|IORW)\((.*?)\)\s*$", re.M)
 
-# 提取纯数值 #define 宏：`#define NAME  VALUE`（VALUE 为十进制/十六进制/八进制
-# 整数，或简单常量表达式如 (4096*2)）。供 CONSTANT_PAIRS 跨侧常量值比对。
+# 提取纯数值 #define 宏：`#define NAME  VALUE`（VALUE 仅十进制/十六进制
+# 整数；表达式如 (4096*2) 不匹配，交人工核对）。供 CONSTANT_PAIRS 跨侧
+# 常量值比对。
 DEFINE_RE = re.compile(r"#define\s+(\w+)\s+(0[xX][0-9a-fA-F]+|\d+)")
 
 # 提取 AOSP 侧 offsetof 静态断言：`static_assert(offsetof(struct NAME, FIELD) == N, ...)`

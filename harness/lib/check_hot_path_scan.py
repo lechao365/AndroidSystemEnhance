@@ -32,6 +32,10 @@ _HOT_PATHS = [
     "harness/lib/check_ioctl_headers.py",
     "harness/lib/check_lcview_events.py",
     "harness/lib/check_test_discipline.py",
+    "harness/lib/check_hot_path_scan.py",
+    "harness/lib/check_quotepath.py",
+    "harness/lib/check_known_issues.py",
+    "harness/lib/check_commit_coverage.py",
     "harness/lib/selfcheck.py",
     "harness/lib/check_ruff.py",
     "harness/lib/check_host_tests.py",
@@ -41,10 +45,12 @@ _HOT_PATHS = [
     "harness/lib/paths.py",                # gen_manifest import（profile 路径）
     "harness/lib/cdp_paths.py",            # selfcheck 打点/issue 链（主实现）
     "harness/lib/role_guard.py",           # cdp_parse/cdp_emit_precheck import
+    "harness/lib/commit_scope.py",         # check_commit_coverage import（scope 解析）
     "harness/skills/cross-device/lib/python/cdp_timing.py",   # selfcheck 打点
     "harness/skills/cross-device/lib/python/cdp_parse.py",    # cdp_timing import
     "harness/skills/cross-device/lib/python/cdp_paths.py",    # re-export 垫片
     "harness/skills/cross-device/lib/python/cdp_issue.py",    # selfcheck flake 登记
+    "harness/skills/cross-device/lib/python/cdp_receipt.py",  # check_commit_coverage import
 ]
 
 # 禁令：全树遍历调用（rglob / os.walk）

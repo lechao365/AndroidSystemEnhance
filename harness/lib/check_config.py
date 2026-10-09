@@ -199,7 +199,13 @@ def _iter_dict_keys(node):
 
 
 def check_paths_vs_baseline(root, path_values):
-    """paths.conf 与 baseline-status.yaml 同名字段一致性（方向 2）。"""
+    """paths.conf 与 baseline-status.yaml 同名字段一致性（方向 2）。
+
+    判定基准为「文件面一致」：path_values 来自 paths.conf 文件原值（
+    ${VAR:-default} 按默认值展开），不取 paths.py 的运行时环境展开结果——
+    环境变量覆盖属运行时差异，若按运行时比较会受环境注入干扰判定。本检查
+    约束的是登记文件本身的一致语义。
+    """
     errors = []
     path = root / "harness" / "config" / "baseline-status.yaml"
     try:
@@ -250,8 +256,12 @@ def check_contract(root):
 
 class _DupKeyLoader(yaml.SafeLoader):
     """拦截 YAML 重复映射键：safe_load 默认静默取后值，doc-sync-mapping
-    实测出现过 mode 键重复——重复即判红（构造函数入违观数组）。"""
-    _dup_hits = []
+    实测出现过 mode 键重复——重复即判红（_dup_hits 为实例属性，每次新建
+    loader 实例，防并发调用串数据）。"""
+
+    def __init__(self, stream):
+        super().__init__(stream)
+        self._dup_hits = []
 
     def construct_mapping(self, node, deep=False):
         self.flatten_mapping(node)
@@ -275,12 +285,16 @@ def check_doc_sync_mapping(root):
     errors = []
     path = root / "harness" / "config" / "doc-sync-mapping.yaml"
     try:
-        _DupKeyLoader._dup_hits = []
-        data = yaml.load(path.read_text(encoding="utf-8"),
-                         Loader=_DupKeyLoader) or {}
-    except (OSError, yaml.YAMLError) as e:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
         return [f"doc-sync-mapping.yaml 读取失败: {e}"]
-    for k in _DupKeyLoader._dup_hits:
+    try:
+        # 每次新建 loader 实例（_dup_hits 实例级，防并发调用串数据）
+        loader = _DupKeyLoader(text)
+        data = loader.get_single_data() or {}
+    except yaml.YAMLError as e:
+        return [f"doc-sync-mapping.yaml 读取失败: {e}"]
+    for k in loader._dup_hits:
         _fail(errors, f"doc-sync-mapping.yaml 重复键: {k!r}（后值静默覆盖，须删一）")
     routes = data.get("routes")
     if not isinstance(routes, list) or not routes:

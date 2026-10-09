@@ -6,7 +6,7 @@
 #   无 board 收据是 publish-main-base 卡点根因（2026-10-09 实测）。本检查器
 #   把「未上板」提前到推送阶段告警，避免累积到发布才暴露。
 # 覆盖判定与 promote 同口径（publish_main_base.sh 前置）：
-#   - 最新 board 收据 verified_commit 为 CODE_HEAD 祖先（is-ancestor）视为覆盖
+#   - CODE_HEAD 为 verified_commit 祖先（code_head 改动已被验证点覆盖）视为覆盖
 #   - 或 CODE_HEAD 的父 == verified_commit（验证起点在内容提交之前）视为覆盖
 #   - 其余视为未覆盖 → 告警（warn 不阻断，commit_scope 已管提交面一致性，
 #     本检查器是未上板前置提醒，不是硬拒——硬拒留给 promote）
@@ -16,12 +16,17 @@
 
 import subprocess
 import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _git(*args):
     # 全仓纪律（check_quotepath）：git 输出点一律带 -c core.quotepath=false，
-    # 防非 ASCII 路径输出转义致解析失效（本检查器虽只取 sha，仍遵守统一约束）
-    r = subprocess.run(["git", "-c", "core.quotepath=false", *args],
+    # 防非 ASCII 路径输出转义致解析失效（本检查器虽只取 sha，仍遵守统一约束）；
+    # -C 锚定仓根（不依赖调用方 cwd=仓根，lib-14 同源）
+    r = subprocess.run(["git", "-C", str(_REPO_ROOT),
+                        "-c", "core.quotepath=false", *args],
                        capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
     return r.returncode, r.stdout.strip()
@@ -37,7 +42,10 @@ def _code_head():
 
 def _latest_board_verified():
     """最新 board 收据 verified_commit（无返回 None）。"""
-    sys.path.insert(0, "harness/skills/cross-device/lib/python")
+    # sys.path 用仓根推导的绝对路径（不依赖调用方 cwd=仓根）
+    sys.path.insert(
+        0, str(_REPO_ROOT / "harness" / "skills" / "cross-device"
+               / "lib" / "python"))
     try:
         import cdp_receipt
     except ImportError:

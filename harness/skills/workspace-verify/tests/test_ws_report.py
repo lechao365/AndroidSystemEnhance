@@ -63,6 +63,22 @@ class TestWsReport(unittest.TestCase):
                                     return_value="a" * 40)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # 检视修复（_resolve_target 12hex 校验）：批次 base/target 用假 12hex
+        #（1a2b3c4d5e6f）在非 git 仓的 tmp 下 git cat-file -e 必失败拒写，
+        # 此处拦截 12hex 存在性校验返回 0（模拟目标 commit 存在）保持既有
+        # 模式 A/B 用例行为；真实校验语义由下方专门用例 mock 覆盖
+        real_run = subprocess.run
+
+        def _fake_run(args, *a, **kw):
+            if (isinstance(args, (list, tuple)) and args[:1] == ["git"]
+                    and "cat-file" in args and "-e" in args):
+                return mock.Mock(returncode=0, stdout="")
+            return real_run(args, *a, **kw)
+
+        run_patcher = mock.patch.object(ws_report.subprocess, "run",
+                                        side_effect=_fake_run)
+        run_patcher.start()
+        self.addCleanup(run_patcher.stop)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -1924,10 +1940,29 @@ class TestWsReport(unittest.TestCase):
         self.assertEqual(out, "~/foo 与 ~/bar")
 
     def test_resolve_target_12hex_passthrough(self):
-        # 12hex 原样返回且无错误，不触发 git 调用
+        # 检视修复：12hex 同样走 git 存在性校验（cat-file -e 成功）后原样
+        # 返回且无错误（setUp 拦截 cat-file 返回 0，模拟目标 commit 存在）
         val, err = ws_report._resolve_target("1a2b3c4d5e6f")
         self.assertEqual(val, "1a2b3c4d5e6f")
         self.assertIsNone(err)
+
+    def test_resolve_target_12hex_missing_rejected(self):
+        # 检视修复：不存在的 12hex（git cat-file -e 失败）→ 返回 err 供
+        # 调用方拒写（此前 12hex 直接放行，verified_commit 落盘后才暴露）
+        fake = mock.Mock()
+        fake.returncode = 128
+        fake.stdout = ""
+        with mock.patch.object(ws_report.subprocess, "run", return_value=fake) as m:
+            val, err = ws_report._resolve_target("deadbeef0000")
+        self.assertEqual(val, "")
+        self.assertIn("无法校验", err)
+        self.assertIn("cat-file", m.call_args.args[0])
+        # 存在性校验须在项目根 git 仓执行（git -C <root> cat-file -e）
+        self.assertEqual(m.call_args.args[0][0], "git")
+        self.assertEqual(m.call_args.args[0][1], "-C")
+        self.assertEqual(m.call_args.args[0][2], ws_report.project_root())
+        self.assertEqual(m.call_args.args[0][3], "cat-file")
+        self.assertEqual(m.call_args.args[0][4], "-e")
 
     def test_resolve_target_dev_via_git(self):
         # dev 等描述经 git rev-parse --short=12 换算为 12hex（promote 门禁比对 HEAD^）
@@ -2381,6 +2416,20 @@ class TestPhaseSummary(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
         self._dir = Path(self._tmp.name) / "data" / "verify-results"
+        # 检视修复（_resolve_target 12hex 校验）：批次 base 假 12hex 在非 git
+        # 仓 tmp 下 cat-file 必失败，拦截存在性校验放行（语义由专项用例覆盖）
+        real_run = subprocess.run
+
+        def _fake_run(args, *a, **kw):
+            if (isinstance(args, (list, tuple)) and args[:1] == ["git"]
+                    and "cat-file" in args and "-e" in args):
+                return mock.Mock(returncode=0, stdout="")
+            return real_run(args, *a, **kw)
+
+        run_patcher = mock.patch.object(ws_report.subprocess, "run",
+                                        side_effect=_fake_run)
+        run_patcher.start()
+        self.addCleanup(run_patcher.stop)
 
     def tearDown(self):
         self._tmp.cleanup()

@@ -219,13 +219,17 @@ def _resolve_timing_path(args) -> tuple[Path | None, bool]:
     （start 落盘记录当前批次指针，多文件共存仍定位本批）。该级取不到时
     stderr warn 后返 0（取消静默跳过：缺打点不再无提示，调用方仍不阻断，
     失败不阻断口径不变）。
+
+    检视修复：显式 --batch 非法按参数错误处理——抛 ValueError（错误信息
+    已打 stderr），main 捕获后返 2，与 start 非法 batch 返 2 契约一致
+    （此前 error 前缀却返 0 与契约表"2 参数错误"不符）。
     """
     batch = getattr(args, "batch", None)
     if batch:
         if not BATCH_ID_RE.match(batch):
             print(f"error: batch_id 非法（须 12 位小写 hex）: {batch!r}",
                   file=sys.stderr)
-            return None, True
+            raise ValueError("invalid batch_id")
         return _timing_path(batch), False
     if getattr(args, "file", None):
         return Path(args.file), False
@@ -570,7 +574,10 @@ def main(argv=None) -> int:
     path = None
     silent = False
     if args.cmd in ("mark", "finish"):
-        path, silent = _resolve_timing_path(args)
+        try:
+            path, silent = _resolve_timing_path(args)
+        except ValueError:
+            return 2   # 显式 --batch 非法（参数错误，错误已打 stderr）
         if silent:
             return 0
         if path is None:

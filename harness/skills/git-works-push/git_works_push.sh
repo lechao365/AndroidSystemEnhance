@@ -108,6 +108,14 @@ check_commit_scope() {
   if [ "$1" = "staged" ]; then
     status_out=$(git -c core.quotepath=false diff --cached --name-status --no-renames) || status_out=""
   else
+    # 检视修复（fail-closed）：origin/$BRANCH 引用缺失时 git diff 区间不可
+    # 解析（stderr 被吞、status_out 空）会误走「无待推提交」静默放行
+    # RECEIPT_MISSING 门禁——先验引用存在，缺失即拒（正常 push-only 路径
+    # origin/dev 必已拉取，不受影响）
+    if ! git rev-parse -q --verify "refs/remotes/origin/$BRANCH" >/dev/null 2>&1; then
+      err "error: origin/$BRANCH 引用不可解析（origin/dev 未拉取或不存在），无法判定待推提交面，拒绝 push-only"
+      exit 1
+    fi
     status_out=$(git -c core.quotepath=false diff --name-status --no-renames "origin/$BRANCH"..HEAD 2>/dev/null) || status_out=""
     [ -n "$status_out" ] || return 0   # 无待推提交，无比对对象
   fi
