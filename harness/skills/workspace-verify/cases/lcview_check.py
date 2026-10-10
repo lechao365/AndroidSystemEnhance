@@ -29,17 +29,18 @@
 #                jsonl 行数增量，100ms 直读采样，不含任何人工 sleep 且不受心跳
 #                周期绑架）、daemon RSS（/proc VmHWM 峰值）。
 #                只报数不设门禁，供跨批基线对照。
-#   blk        — 块设备 IO 观测（R3 方向 6，BlockCollector 零内核）：
+#   blk        — 块设备 IO 观测（R5 批二迁入 lciod，lciod BlockCollectorRunLoop）：
 #                --phase baseline 读 /sys/block/<dev>/stat（before）写
 #                --blk-baseline 基线（轮次隔离）；--phase delta 读 after
 #                stat 与基线差分断言 read_ios/read_sectors/write_ios 均增
 #                （差分非增判红）+ --check-write 数据一致性（dd 写固定内容到
 #                LCVIEW_BLOCK_DEV_WRITE → 读回 → sha1sum 比对，走
 #                LCVIEW_ALLOW_DESTRUCTIVE_WRITE 写守卫，不匹配判红）+
-#                logcat 断言 lechao_lcview "block: <dev>" 行（抓取锚点取
-#                基线 captured_at，--log-since 可显式覆盖）。
+#                logcat 断言 lechao_lciod_event JSON 行 {"rule":"block",
+#                "device":"<dev>",...}（抓取锚点取基线 captured_at，
+#                --log-since 可显式覆盖）。
 #                防假绿：stat 读失败 / 差分非增 / 守卫缺失 / sha1sum 不匹配 /
-#                logcat 无 block 行均判红。
+#                logcat 无 block JSON 行均判红。
 #
 # 退出码：0 校验通过 / 1 校验失败 / 2 设备不可达或参数错误
 # ============================================================
@@ -1156,21 +1157,22 @@ def perf_regression_gate(metrics, baseline_path, save=False):
 #   baseline 相：读 /sys/block/<dev>/stat（before）写 --blk-baseline 基线
 #   delta 相  ：读 after stat 与基线差分断言 IO 发生 + 数据一致性
 #               （--check-write，dd 写固定内容→读回→sha1sum 比对，走写守卫）
-#               + logcat 断言 daemon BlockCollector "block: <dev>" 行
+#               + logcat 断言 lciod lechao_lciod_event JSON {"rule":"block"}
 # ============================================================
 
 # /sys/block/<dev>/stat 标准 15 字段（兼容 11 字段）。差分断言只取前 8 个
 # 字段中的 4 个关键计数：field1=read_ios, field3=read_sectors,
 # field5=write_ios, field7=write_sectors（sector=512B）。
 _BLK_STAT_SYSFS_TMPL = "/sys/block/{dev}/stat"
-_BLK_LOG_TAG = "lechao_lcview"
+# R5 批二：块/zram 观测迁入 lciod，事件经 EVENT_ALOG 打 JSON 行，tag 改
+_BLK_LOG_TAG = "lechao_lciod_event"
 
 
 def _blk_dev_name(block_dev):
     """块设备参数归一为 sysfs 目录名：/dev/block/sda → sda。
 
-    sysfs 路径与 logcat "block: <dev>" 行断言共用同一 dev 名（daemon
-    BlockCollector 枚举 /sys/block/* 后按子目录名打日志）。
+    sysfs 路径与 logcat JSON "device" 字段共用同一 dev 名（lciod
+    BlockCollectorRunLoop 枚举 /sys/block/* 后按子目录名打 JSON）。
     """
     dev = block_dev or "/dev/block/sda"
     if dev.startswith("/dev/block/"):
@@ -1263,10 +1265,14 @@ def block_write_check(args):
 
 
 def logcat_has_block(dev, log_since):
-    """logcat 断言 daemon BlockCollector 输出行 "block: <dev>"（tag lechao_lcview）。
+    """logcat 断言 lciod lechao_lciod_event JSON 行 {"rule":"block","device":...}。
+
+    R5 批二：块/zram 观测迁入 lciod（service.cpp BlockCollectorRunLoop），
+    经 EVENT_ALOG 打 JSON 行（tag lechao_lciod_event）；断言该 JSON 行的
+    rule=block 且 device 匹配，取代旧 lcview "block: <dev>" 文本行。
 
     抓取窗口：log_since 非 None 时以该设备 epoch 为锚（-T <epoch>，只覆盖
-    锚点后的缓冲，避免把注入前历史行当新命中）；未提供时全缓冲 grep（daemon
+    锚点后的缓冲，避免把注入前历史行当新命中）；未提供时全缓冲 grep（lciod
     每 10s 打一行，近期必有）。读取失败返回 False（判红防假绿）。
     """
     if log_since:
@@ -1276,7 +1282,27 @@ def logcat_has_block(dev, log_since):
         out, rc = adb(["logcat", "-d", "-s", _BLK_LOG_TAG])
     if rc != 0:
         return False
-    return any(f"block: {dev}" in line for line in out.splitlines())
+    want_rule = '"rule":"block"'
+    want_dev = f'"device":"{dev}"'
+    return any(want_rule in line and want_dev in line
+               for line in out.splitlines())
+
+
+def logcat_has_zram(log_since):
+    """logcat 断言 lciod lechao_lciod_event zram JSON 行 {"rule":"zram",...}。
+
+    R5 批二：zram 水位/io 观测随块观测一并迁入 lciod
+    （service.cpp BlockCollectorRunLoop），每 10s 打 JSON 行。抓取窗口语义
+    同 logcat_has_block；读取失败返回 False（判红防假绿）。
+    """
+    if log_since:
+        out, rc = adb(["logcat", "-d", "-T", str(int(log_since)),
+                       "-s", _BLK_LOG_TAG])
+    else:
+        out, rc = adb(["logcat", "-d", "-s", _BLK_LOG_TAG])
+    if rc != 0:
+        return False
+    return any('"rule":"zram"' in line for line in out.splitlines())
 
 
 def mode_blk_baseline(tmp, args):
@@ -1300,11 +1326,11 @@ def mode_blk_baseline(tmp, args):
 
 def mode_blk_delta(tmp, args):
     """blk delta 相：读 after stat 与基线差分断言 IO 发生 + 数据一致性
-    （--check-write）+ logcat "block: <dev>" 行断言。
+    （--check-write）+ logcat lciod lechao_lciod_event JSON block 行断言。
 
     判红项（防假绿）：stat 读失败 / 基线缺失 / 差分非增（read_ios、
     read_sectors、write_ios 任一未增）/ 写守卫缺失 / sha1sum 不匹配 /
-    logcat 无 block 行。
+    logcat 无 block JSON 行。
     """
     dev = _blk_dev_name(args.block_dev)
     after = read_block_stat(dev)
@@ -1344,14 +1370,17 @@ def mode_blk_delta(tmp, args):
     if log_since is None and isinstance(base.get("captured_at"), int):
         log_since = base["captured_at"]
     if not logcat_has_block(dev, log_since):
-        errors.append(f"logcat 无 \"block: {dev}\" 行"
-                      "（daemon BlockCollector 未输出？）")
+        errors.append(f"logcat 无 block JSON 行（rule=block device={dev}）"
+                      "（lciod BlockCollectorRunLoop 未输出？）")
+    if args.check_zram and not logcat_has_zram(log_since):
+        errors.append('logcat 无 zram JSON 行（rule=zram）'
+                      '（lciod BlockCollectorRunLoop 未输出？）')
 
     if errors:
         for e in errors:
             print(f"ERROR: {e}")
         return 1
-    print(f"OK: 块设备 {dev} IO 观测校验通过（差分增 + block 日志命中）")
+    print(f"OK: 块设备 {dev} IO 观测校验通过（差分增 + lciod block JSON 命中）")
     return 0
 
 
@@ -1436,6 +1465,9 @@ def main(argv=None):
                     help="blk 模式 delta 相：数据一致性（dd 写固定内容到 "
                          "LCVIEW_BLOCK_DEV_WRITE → 读回 → sha1sum 比对，"
                          "走 LCVIEW_ALLOW_DESTRUCTIVE_WRITE 写守卫）")
+    ap.add_argument("--check-zram", action="store_true",
+                    help="blk 模式 delta 相额外断言 lciod zram JSON 行"
+                         "（R5 批二：{\"rule\":\"zram\",...}，lciod-blk 用）")
     ap.add_argument("--log-since", type=int, default=None,
                     help="blk 模式 logcat 抓取锚点（设备 epoch，只判锚点后 "
                          "缓冲，避免注入前历史行当新命中）")

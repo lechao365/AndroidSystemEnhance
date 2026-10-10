@@ -243,9 +243,10 @@ cases:
       - 'adb shell "setprop sys.lechao.lciod.ioqos_level ${SNAPSHOT_0}"'
     timeout_s: 300
 
-  # R3 方向 6：lcview 块设备观测用例（BlockCollector 零内核）：dd + 校验和
-  # 一致性 + block stat 差分 + daemon block 日志断言（用户已确认适配：
-  # fio → dd + sha1sum 校验和）。语义：
+  # R3 方向 6 / R5 批二：lcview 块设备观测用例（dd + 校验和一致性 +
+  # block stat 差分 + lciod block JSON 日志断言）。R5 批二采集已自 lcview
+  # 迁入 lciod（BlockCollectorRunLoop），logcat 断言改 lechao_lciod_event
+  # JSON 行 {"rule":"block","device":"<dev>",...}。语义：
   # - blk baseline：读 /sys/block/sda/stat 基线（before，--mode blk
   #   --phase baseline，基线文件按轮次隔离 ${LCVIEW_BLK_BASELINE_FILE:-...}）
   # - dd 读负载 4MB（/dev/block/sda → /dev/null，无破坏面）触发读 IO
@@ -254,13 +255,31 @@ cases:
   #   dd 会覆盖目标分区数据），写固定已知内容（/dev/zero 4KB）触发写 IO
   # - blk delta：读 after stat，断言 read_ios/read_sectors/write_ios 均增
   #   （差分非增判红）+ --check-write 数据一致性（dd 写固定内容→读回→
-  #   sha1sum 比对，不匹配判红）+ logcat 断言 lechao_lcview "block: sda"
-  #   行出现（daemon BlockCollector 每 10s 输出；抓取锚点取基线 captured_at）
+  #   sha1sum 比对，不匹配判红）+ logcat 断言 lechao_lciod_event
+  #   "rule":"block" JSON 行（lciod BlockCollectorRunLoop 每 10s 输出；
+  #   抓取锚点取基线 captured_at）
   # 副作用字段同 lcview-trigger（authorized 切换 + dd 读/临时文件写读）：一致性
   # 校验走 /data/local/tmp 安全路径（dd 写→读回→sha1sum，不触碰块设备分区，
   # 无破坏性写守卫依赖）
   lcview-blk:
     acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lcview_check.sh --mode blk --phase baseline --block-dev ${LCVIEW_BLOCK_DEV:-/dev/block/sda} --blk-baseline ${LCVIEW_BLK_BASELINE_FILE:-/tmp/lcview_blk_baseline.json}" hostcmd:"adb shell \"echo 3 > /proc/sys/vm/drop_caches; dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode blk --phase delta --block-dev ${LCVIEW_BLOCK_DEV:-/dev/block/sda} --blk-baseline ${LCVIEW_BLK_BASELINE_FILE:-/tmp/lcview_blk_baseline.json} --check-write"'
+    setup_snapshot:
+      - 'adb shell "cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
+    teardown:
+      - 'adb shell "echo ${SNAPSHOT_0} > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
+    timeout_s: 300
+
+  # R5 批二：lciod 块/zram 观测用例（采集自 lcview 迁入 lciod 后的 canonical
+  # 断言）。块观测经 lciod BlockCollectorRunLoop 每 10s 打 lechao_lciod_event
+  # JSON 行；本 case 在 lcview-blk 的 block stat 差分 + 数据一致性基础上，
+  # 额外断言 zram JSON 行（--check-zram）。语义：
+  # - blk baseline/dd 读负载/blk delta 同 lcview-blk（同一 lcview_check blk 模式）
+  # - logcat 断言 lechao_lciod_event JSON：{"rule":"block","device":"<dev>"}
+  #   （device 与 --block-dev 归一）与 {"rule":"zram",...}
+  # 防假绿：stat 读失败 / 差分非增 / sha1sum 不匹配 / 无 block 或 zram JSON
+  # 行均判红。副作用字段同 lcview-blk（authorized 切换 + dd 读/临时文件写读）。
+  lciod-blk:
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lcview_check.sh --mode blk --phase baseline --block-dev ${LCVIEW_BLOCK_DEV:-/dev/block/sda} --blk-baseline ${LCVIEW_BLK_BASELINE_FILE:-/tmp/lcview_blk_baseline.json}" hostcmd:"adb shell \"echo 3 > /proc/sys/vm/drop_caches; dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode blk --phase delta --block-dev ${LCVIEW_BLOCK_DEV:-/dev/block/sda} --blk-baseline ${LCVIEW_BLK_BASELINE_FILE:-/tmp/lcview_blk_baseline.json} --check-write --check-zram"'
     setup_snapshot:
       - 'adb shell "cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
     teardown:

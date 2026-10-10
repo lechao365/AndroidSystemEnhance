@@ -126,6 +126,7 @@ def _args(**kw):
     a.blk_baseline = kw.get("blk_baseline",
                             str(Path(tempfile.gettempdir()) / "lcview_blk_baseline_test.json"))
     a.check_write = kw.get("check_write", False)
+    a.check_zram = kw.get("check_zram", False)
     a.log_since = kw.get("log_since", None)
     return a
 
@@ -1324,14 +1325,20 @@ class TestPerfRegressionGate(unittest.TestCase):
 # write_ios=15 write_sectors=150（after，差分均增）
 _BLK_BEFORE = "10 0 100 0 5 0 50 0 0 0 0 0 0 0 0"
 _BLK_AFTER = "20 0 300 0 15 0 150 0 0 0 0 0 0 0 0"
-# daemon BlockCollector 输出行（tag lechao_lcview，含 "block: sda"）
-_BLK_LOG_OK = ("07-01 12:00:00.000  1234  1234 I lechao_lcview: "
-               "block: sda read_iops=2.0 read_bytes_per_s=102400 "
-               "read_avg_ms=1.00 write_iops=1.0 write_bytes_per_s=51200 "
-               "write_avg_ms=1.00 inflight=0 busy=5.00\n")
-# 无 block 行的 logcat（心跳行，block 断言应判红）
-_BLK_LOG_NO = ("07-01 12:00:00.000  1234  1234 I lechao_lcview: "
-               "heartbeat, loop=1\n")
+# lciod BlockCollectorRunLoop 输出行（tag lechao_lciod_event，EVENT_ALOG JSON，
+# 含 "rule":"block" + "device":"sda"；R5 批二采集自 lcview 迁入 lciod）
+_BLK_LOG_OK = ("07-01 12:00:00.000  1234  1234 I lechao_lciod_event: "
+               '{"rule":"block","device":"sda","read_iops":2.0,'
+               '"read_bytes_per_s":102400,"read_avg_ms":1.00,"write_iops":1.0,'
+               '"write_bytes_per_s":51200,"write_avg_ms":1.00,"inflight":0,'
+               '"busy":5.00}\n')
+# 无 block JSON 行的 logcat（仅 zram 行，block 断言应判红）
+_BLK_LOG_NO = ("07-01 12:00:00.000  1234  1234 I lechao_lciod_event: "
+               '{"rule":"zram","mem_used_total":1048576}\n')
+# zram JSON 行（--check-zram 断言命中）
+_BLK_LOG_ZRAM = ("07-01 12:00:00.000  1234  1234 I lechao_lciod_event: "
+                 '{"rule":"zram","mem_used_total":1048576,"mem_used_max":2097152,'
+                 '"compr_ratio":2.00}\n')
 _SHA_A = "a" * 40
 _SHA_B = "b" * 40
 
@@ -1415,13 +1422,35 @@ class TestModeBlk(unittest.TestCase):
         self.assertEqual(rc, 1)
 
     def test_blk_delta_logcat_no_block_red(self):
-        # logcat 无 "block: sda" 行（daemon BlockCollector 未输出）→ 判红
+        # logcat 无 block JSON 行（lciod BlockCollectorRunLoop 未输出）→ 判红
         with tempfile.TemporaryDirectory() as tmp:
             base = self._blk_base(tmp)
             fake = FakeAdb(blk_stat_out=_BLK_AFTER, blk_stat_rc=0,
                            logcat_out=_BLK_LOG_NO, logcat_rc=0)
             with mock.patch.object(lc, "adb", fake):
                 rc = lc.mode_blk_delta(tmp, _args(blk_baseline=str(base)))
+        self.assertEqual(rc, 1)
+
+    def test_blk_delta_check_zram_ok(self):
+        # --check-zram：logcat 同时命中 block + zram JSON → 通过
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._blk_base(tmp)
+            fake = FakeAdb(blk_stat_out=_BLK_AFTER, blk_stat_rc=0,
+                           logcat_out=_BLK_LOG_OK + _BLK_LOG_ZRAM, logcat_rc=0)
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_blk_delta(tmp, _args(blk_baseline=str(base),
+                                                  check_zram=True))
+        self.assertEqual(rc, 0)
+
+    def test_blk_delta_check_zram_missing_red(self):
+        # --check-zram：logcat 仅 block 行（无 zram JSON）→ 判红
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._blk_base(tmp)
+            fake = FakeAdb(blk_stat_out=_BLK_AFTER, blk_stat_rc=0,
+                           logcat_out=_BLK_LOG_OK, logcat_rc=0)
+            with mock.patch.object(lc, "adb", fake):
+                rc = lc.mode_blk_delta(tmp, _args(blk_baseline=str(base),
+                                                  check_zram=True))
         self.assertEqual(rc, 1)
 
     def test_blk_delta_dev_mismatch_red(self):

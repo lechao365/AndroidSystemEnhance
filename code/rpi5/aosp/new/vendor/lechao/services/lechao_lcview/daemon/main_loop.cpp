@@ -19,7 +19,6 @@
 #include "main_loop.h"
 
 #include "batch_parser.h"
-#include "block_collector.h"
 #include "lechao_log.h"
 #include "../include/lcview_events.h"
 #include <log/log.h>
@@ -425,199 +424,6 @@ static void flushSegment(DeviceReader &reader, SchemaParser &schema, FileWriter 
     writer.enforceRetention();
 }
 
-// ============================================================
-// R3 方向1/2/3：块设备/zram 用户态观测 + 悬挂检测 + 规则二 slow_disk
-// 事件（零内核，全部用户态）。主循环每 10s 采样一次（时间驱动）：
-//   1) 每块设备差分采样 → ALOGI "block: <dev> ..."（lcview-blk 判据）
-//   2) zram 水位/io 统计 → ALOGI "zram: ..."
-//   3) 悬挂检测（inflight 高 + 写延迟高持续 3 次）+ 规则二（写平均延迟
-//      持续超阈）→ 触发写 slow_disk 事件（id=14）
-// 单线程主循环内调用，无锁、无独立线程。
-// ============================================================
-
-namespace {
-
-// CXX-001：daemon 侧合成记录的线上格式显式小端编码——与内核写入端
-// lcview_builder 契约一致（record 头 + TLV 字段）。用位运算逐字节编码，
-// 不依赖宿主字节序（比裸 memcpy 更强：大端平台同样产出小端线材）。
-void putLe16(uint8_t* p, uint16_t v)
-{
-    p[0] = static_cast<uint8_t>(v & 0xFF);
-    p[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
-}
-
-void putLe32(uint8_t* p, uint32_t v)
-{
-    p[0] = static_cast<uint8_t>(v & 0xFF);
-    p[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
-    p[2] = static_cast<uint8_t>((v >> 16) & 0xFF);
-    p[3] = static_cast<uint8_t>((v >> 24) & 0xFF);
-}
-
-void putLe64(uint8_t* p, uint64_t v)
-{
-    for (int i = 0; i < 8; ++i)
-        p[i] = static_cast<uint8_t>((v >> (8 * i)) & 0xFF);
-}
-
-// slow_disk 合成记录 seq_no：进程内全局递增（单线程主循环，无需加锁）。
-// seq 供 NTP 回拨时定序可靠（与内核事件 seq 语义一致）。
-uint32_t gSyntheticSeq = 0;
-
-}  // namespace
-
-// 合成 slow_disk 事件（id=14）并落盘：构造 lcview_record_hdr + TLV 字段流
-//（字段类型对应 schema id=14：device=STRING、write_avg_latency_ms/threshold_ms
-// =INT64、consecutive=INT32），经 FileWriter::writeRecord 写事件文件。
-// schema.find(14) 未命中（配置缺失）须可见（CXX-004），禁止静默丢事件。
-static void writeSlowDiskEvent(SchemaParser& schema, FileWriter& writer,
-                               const std::string& device, double writeAvgLatMs,
-                               double thresholdMs, uint32_t consecutive)
-{
-    const EventSchema* es = schema.find(kEventSlowDiskId);
-    if (!es) {
-        ALOGE("lechao_lcview: slow_disk schema (id=%u) not found, event "
-              "dropped",
-              kEventSlowDiskId);
-        return;
-    }
-
-    const auto nowNs = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::system_clock::now().time_since_epoch())
-            .count());
-    const auto monoNs = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count());
-
-    // record 头：32B 固定布局（见 lcview_events.h），显式小端编码
-    uint8_t hdr[sizeof(lcview_record_hdr)] = {0};
-    putLe16(hdr + offsetof(lcview_record_hdr, magic), LCVIEW_MAGIC);
-    putLe16(hdr + offsetof(lcview_record_hdr, event_id), kEventSlowDiskId);
-    hdr[offsetof(lcview_record_hdr, level)] = LCVIEW_LEVEL_WARN;
-    hdr[offsetof(lcview_record_hdr, field_count)] = 4;
-    putLe64(hdr + offsetof(lcview_record_hdr, timestamp_ns), nowNs);
-    putLe32(hdr + offsetof(lcview_record_hdr, seq_no), ++gSyntheticSeq);
-    putLe64(hdr + offsetof(lcview_record_hdr, mono_ns), monoNs);
-
-    // TLV 字段流：type 字节 + 值区（STRING: 2B 小端长度前缀 + 文本；
-    // INT64: 8B 小端；INT32: 4B 小端）
-    std::vector<uint8_t> fields;
-    // device（STRING）：设备名超长截断防长度前缀溢出（CXX-002 上限校验）
-    fields.push_back(LCVIEW_TYPE_STRING);
-    const size_t lenPos = fields.size();
-    fields.resize(fields.size() + 2);
-    const std::string devName =
-        (device.size() <= UINT16_MAX) ? device : device.substr(0, UINT16_MAX);
-    putLe16(fields.data() + lenPos, static_cast<uint16_t>(devName.size()));
-    fields.insert(fields.end(), devName.begin(), devName.end());
-    // write_avg_latency_ms（INT64）：负值钳 0（延迟不可能为负，防御脏值）。
-    // P2（CXX-003）：double→uint64_t 强转对 NaN/Inf 是 UB——差分统计可能
-    // 产生 NaN（除零），强转前 isfinite 判定，非有限或负值一律钳 0
-    fields.push_back(LCVIEW_TYPE_INT64);
-    const size_t vPos1 = fields.size();
-    fields.resize(fields.size() + 8);
-    putLe64(fields.data() + vPos1,
-            static_cast<uint64_t>(std::isfinite(writeAvgLatMs) && writeAvgLatMs > 0.0
-                                      ? writeAvgLatMs : 0.0));
-    // threshold_ms（INT64）
-    fields.push_back(LCVIEW_TYPE_INT64);
-    const size_t vPos2 = fields.size();
-    fields.resize(fields.size() + 8);
-    putLe64(fields.data() + vPos2,
-            static_cast<uint64_t>(std::isfinite(thresholdMs) && thresholdMs > 0.0
-                                      ? thresholdMs : 0.0));
-    // consecutive（INT32，4 字节有符号整型承载 uint32 值域低 32 位）
-    fields.push_back(LCVIEW_TYPE_INT32);
-    const size_t vPos3 = fields.size();
-    fields.resize(fields.size() + 4);
-    putLe32(fields.data() + vPos3, static_cast<uint32_t>(consecutive));
-
-    // 批次事务包裹（与 parseBatch 同款）：beginBatch → writeRecord →
-    // endBatch 统一 flush，slow_disk 事件即时落盘（非 64KB 攒包路径）
-    writer.beginBatch();
-    writer.writeRecord(*es, reinterpret_cast<const lcview_record_hdr*>(hdr),
-                       fields.data(), fields.size());
-    writer.endBatch();
-    ALOGI("lechao_lcview: slow_disk event written: device=%s write_avg_ms=%.2f "
-          "threshold_ms=%.2f consecutive=%u",
-          devName.c_str(), writeAvgLatMs, thresholdMs, consecutive);
-}
-
-// 每 10s 块设备/zram 采样 + 悬挂检测 + 规则二（见上方模块注释）。单线程
-// 主循环调用。采集器内部维护 prev 差分/状态，跨采样保持；读失败降级
-//（采集器已限频 ALOGE），不影响主循环其他职责（观测是增强项非致命）。
-// 悬挂/慢盘状态按设备维护（hangStates/slowStates 由 runMainLoop 持有，
-// 跨 10s 采样持续）：避免 A 设备 2 次 + B 设备 1 次误触发 A/B 任一事件。
-static void sampleBlockMetrics(BlockCollector& block, ZramCollector& zram,
-                               std::unordered_map<std::string, HangState>& hangStates,
-                               std::unordered_map<std::string, SlowDiskState>& slowStates,
-                               SchemaParser& schema, FileWriter& writer)
-{
-    std::vector<std::string> devs;
-    if (!block.EnumerateBlockDevices(devs))
-        return;  // 枚举失败已限频 ALOGE，跳过本轮（非致命）
-
-    for (const auto& dev : devs) {
-        BlockRates rates;
-        uint64_t inflight = 0;
-        // 首次采样只建 prev（返回 false）；读取失败返回 false（已限频 ALOGE）
-        if (!block.SampleDevice(dev, &rates, &inflight))
-            continue;
-        // 格式严格按契约：lcview-blk case 解析 "block: sda"
-        ALOGI("block: %s read_iops=%.1f read_bytes_per_s=%.0f read_avg_ms=%.2f "
-              "write_iops=%.1f write_bytes_per_s=%.0f write_avg_ms=%.2f "
-              "inflight=%llu busy=%.2f",
-              dev.c_str(), rates.read_iops, rates.read_bytes_per_s,
-              rates.read_avg_lat_ms, rates.write_iops, rates.write_bytes_per_s,
-              rates.write_avg_lat_ms, static_cast<unsigned long long>(inflight),
-              rates.busy_ratio);
-
-        // 悬挂检测（inflight 高 + 写延迟高持续 3 次）：告警可见（CXX-004）。
-        // 按设备取状态；首次见到该设备插入全新状态（CXX-003 显式 emplace）
-        auto hit = hangStates.find(dev);
-        if (hit == hangStates.end())
-            hit = hangStates.emplace(dev, HangState{}).first;
-        if (UpdateHangState(&hit->second, inflight, kInflightHangThreshold,
-                            rates.write_avg_lat_ms, kLatencyHangThresholdMs)) {
-            ALOGW("block: %s hang suspected, inflight=%llu write_avg_ms=%.2f "
-                  "(threshold inflight=%u lat=%.0fms)",
-                  dev.c_str(), static_cast<unsigned long long>(inflight),
-                  rates.write_avg_lat_ms, kInflightHangThreshold,
-                  kLatencyHangThresholdMs);
-        }
-
-        // 规则二：写平均延迟持续超阈 → 落 slow_disk 事件（id=14）
-        auto sit = slowStates.find(dev);
-        if (sit == slowStates.end())
-            sit = slowStates.emplace(dev, SlowDiskState{}).first;
-        if (EvaluateSlowDiskRule(&sit->second, rates.write_avg_lat_ms,
-                                 kSlowDiskWriteLatThresholdMs,
-                                 kSlowDiskRequireConsecutive)) {
-            writeSlowDiskEvent(schema, writer, dev, rates.write_avg_lat_ms,
-                               kSlowDiskWriteLatThresholdMs, sit->second.consecutive);
-            // 触发后重置连续计数：事件按"超阈持续段"收敛（每持续段一条，
-            // 防 10s 采样周期持续超阈时事件风暴）
-            sit->second.consecutive = 0;
-        }
-    }
-
-    // zram 水位与 io 统计（zram0 缺失时降级跳过，限频 ALOGE）
-    ZramCollector::Sample z;
-    if (zram.SampleZram(&z)) {
-        ALOGI("zram: mem_used_total=%llu mem_used_max=%llu compr_ratio=%.2f "
-              "failed_reads=%llu failed_writes=%llu read_bytes=%llu "
-              "write_bytes=%llu",
-              static_cast<unsigned long long>(z.memUsedTotal),
-              static_cast<unsigned long long>(z.memUsedMax), z.comprRatio,
-              static_cast<unsigned long long>(z.failedReads),
-              static_cast<unsigned long long>(z.failedWrites),
-              static_cast<unsigned long long>(z.readBytes),
-              static_cast<unsigned long long>(z.writeBytes));
-    }
-}
-
 // 直读主循环：读内核 → 心跳 → 攒包 flush → 轮转/容量管理
 // reader 为 DeviceReader 抽象接口：生产 EpollDeviceReader，单测
 // 注入 FakeDeviceReader（先返数据再返 -1，验证 writer 收到该批次）
@@ -668,15 +474,6 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
     auto dataArrivedAt = std::chrono::steady_clock::time_point::max();
     // 上次心跳时刻（时间驱动锚点，见主循环心跳判定）
     auto lastBeatAt = std::chrono::steady_clock::now();
-    // R3 方向1/2/3：块设备/zram 采集器与悬挂/慢盘状态（仅主循环线程
-    // 访问，无锁）。上次块采样时刻为时间驱动锚点（每 10s 一采）；
-    // 悬挂/慢盘状态按设备维护，跨 10s 采样持续（见 sampleBlockMetrics）
-    auto lastBlockAt = std::chrono::steady_clock::now();
-    BlockCollector blockCollector;
-    ZramCollector zramCollector;
-    std::unordered_map<std::string, HangState> hangStates;
-    std::unordered_map<std::string, SlowDiskState> slowStates;
-
     // 停止信号统一经 stopSignalRequested() 观测（把 gSignalRequested 同步到
     // gRunning）——SIGTERM/SIGINT 置位退出标志后本轮结束即优雅退出，不打断
     // 正在处理的批次
@@ -740,15 +537,6 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
             // 重置窗口累计供下个窗口独立统计
             window.reset();
             lastBeatAt = now;
-        }
-
-        // R3 方向1/2/3 集成点：块设备/zram 采样 + 悬挂检测 + 规则二
-        //（时间驱动 10s，与心跳 30s 正交）。单线程主循环内调用无锁。
-        // BlockCollector 首次采样只建 prev（无速率行），后续差分出 block 行
-        if (now - lastBlockAt >= std::chrono::seconds(kBlockSampleIntervalSec)) {
-            sampleBlockMetrics(blockCollector, zramCollector, hangStates,
-                               slowStates, schema, writer);
-            lastBlockAt = now;
         }
 
         if (::lechao::debugVerbose()) {
