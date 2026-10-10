@@ -115,6 +115,30 @@
         {"name": "threshold_ms",          "type": "int64"},
         {"name": "consecutive",           "type": "int32"}
       ]
+    },
+    {
+      "id": 15,
+      "name": "sd_health",
+      "desc": "SD/MMC 10s window health aggregate (kernel lciod_sd)",
+      "fields": [
+        {"name": "window_bytes",     "type": "int64"},
+        {"name": "window_requests",  "type": "int64"},
+        {"name": "window_ms",        "type": "int64"},
+        {"name": "total_bytes",      "type": "int64"},
+        {"name": "total_requests",   "type": "int64"},
+        {"name": "stuck_count",      "type": "int64"}
+      ]
+    },
+    {
+      "id": 16,
+      "name": "sd_stuck",
+      "desc": "SD/MMC card-busy stuck with progressive speed downgrade",
+      "fields": [
+        {"name": "old_speed",        "type": "int64"},
+        {"name": "new_speed",        "type": "int64"},
+        {"name": "err",              "type": "int64"},
+        {"name": "stuck_count",      "type": "int64"}
+      ]
     }
   ]
 }

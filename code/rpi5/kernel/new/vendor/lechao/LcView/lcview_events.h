@@ -71,6 +71,12 @@
 #define LCVIEW_EVENT_SLOW_DISK           14 /* 慢盘事件（R3 用户态 daemon 规则二合成，无内核
                                               * 发射点——BlockCollector 写延迟持续超阈落盘，
                                               * 见 DISABLED_EVENTS 豁免） */
+#define LCVIEW_EVENT_SD_HEALTH           15 /* SD/MMC 10s 窗健康聚合（来源：LcIod lciod_sd.c，
+                                              * 触发场景：10s 窗到期上报窗口/累计字节与请求数、
+                                              * 卡死累计数） */
+#define LCVIEW_EVENT_SD_STUCK            16 /* SD/MMC card busy 卡死降档（来源：LcIod lciod_sd.c，
+                                              * 触发场景：STUCK 事件后按 sd_bus_speed 逐级剥 caps
+                                              * 降档，字段为降档前/后速度档、错误码、累计卡死数） */
 
 /* --- 记录魔数 --- */
 #define LCVIEW_MAGIC  0x4C56

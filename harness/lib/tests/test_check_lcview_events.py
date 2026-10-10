@@ -9,7 +9,8 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from check_lcview_events import (DISABLED_EVENTS, EVENTS_H_REL,  # noqa: E402
+from check_lcview_events import (DISABLED_EVENTS, EMIT_SOURCE_RELS,  # noqa: E402
+                                 EVENTS_H_REL,  # noqa: E402
                                  SCHEMA_REL, compare,  # noqa: E402
                                  parse_emit_sequences,  # noqa: E402
                                  parse_event_id_macros, parse_schema)  # noqa: E402
@@ -79,10 +80,13 @@ class TestCompare(unittest.TestCase):
             (d / Path(rel)).mkdir(parents=True, exist_ok=True)
         (d / Path(SCHEMA_REL)).write_text(schema, encoding="utf-8")
         (d / Path(EVENTS_H_REL)).write_text(events_h, encoding="utf-8")
-        (d / "rpi5/kernel/new/vendor/lechao/LcIod"
-         / "lciod_usbd-stats.c").write_text(emit, encoding="utf-8")
-        (d / "rpi5/kernel/new/vendor/lechao/LcIod"
-         / "lciod_usbd.c").write_text("/* no emits */\n", encoding="utf-8")
+        # 按 EMIT_SOURCE_RELS 全量摆发射点源文件（首个承载 emit，其余空），
+        # 使夹具随检查器发射点清单扩展自洽（A 批一新增 lciod_sd.c）
+        for i, rel in enumerate(EMIT_SOURCE_RELS):
+            p = d / Path(rel)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(emit if i == 0 else "/* no emits */\n",
+                         encoding="utf-8")
         return d
 
     def _cleanup(self, d):

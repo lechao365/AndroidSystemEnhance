@@ -9,6 +9,8 @@ kernel:
       source: rpi5-kernel-build/common/Kconfig
     - patch: kernel/modified/arch/arm64/configs/android_rpi5_defconfig.diff
       source: rpi5-kernel-build/common/arch/arm64/configs/android_rpi5_defconfig
+    - patch: kernel/modified/drivers/mmc/core/block.c.diff
+      source: rpi5-kernel-build/common/drivers/mmc/core/block.c
     - patch: kernel/modified/drivers/usb/core/hub.c.diff
       source: rpi5-kernel-build/common/drivers/usb/core/hub.c
     - patch: kernel/modified/drivers/usb/storage/transport.c.diff
@@ -20,6 +22,8 @@ kernel:
     - patch: kernel/modified/drivers/usb/storage/usb.h.diff
       source: rpi5-kernel-build/common/drivers/usb/storage/usb.h
   new:
+    - patch: kernel/new/drivers/mmc/core/lechao_sd_notifier.h
+      source: rpi5-kernel-build/common/drivers/mmc/core/lechao_sd_notifier.h
     - patch: kernel/new/drivers/usb/core/lechao_hub_notifier.h
       source: rpi5-kernel-build/common/drivers/usb/core/lechao_hub_notifier.h
     - patch: kernel/new/drivers/usb/storage/uas-notifier.h
@@ -42,6 +46,10 @@ kernel:
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_read_logic.c
     - patch: kernel/new/vendor/lechao/LcIod/lciod_read_logic.h
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_read_logic.h
+    - patch: kernel/new/vendor/lechao/LcIod/lciod_sd.c
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_sd.c
+    - patch: kernel/new/vendor/lechao/LcIod/lciod_sd.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_sd.h
     - patch: kernel/new/vendor/lechao/LcIod/lciod_usbd-ioctl.h
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_usbd-ioctl.h
     - patch: kernel/new/vendor/lechao/LcIod/lciod_usbd-stats.c
@@ -54,6 +62,8 @@ kernel:
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/tests/Makefile
     - patch: kernel/new/vendor/lechao/LcIod/tests/lciod_read_logic_host_test.c
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/tests/lciod_read_logic_host_test.c
+    - patch: kernel/new/vendor/lechao/LcIod/tests/lciod_sd_host_test.c
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/tests/lciod_sd_host_test.c
     - patch: kernel/new/vendor/lechao/LcView/Kconfig
       source: rpi5-kernel-build/common/vendor/lechao/LcView/Kconfig
     - patch: kernel/new/vendor/lechao/LcView/Makefile

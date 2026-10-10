@@ -9,3 +9,16 @@ config VENDOR_LECHAO_USBD
 	  Monitor transfer rates for USB mass-storage devices.
 	  Provides per-device statistics via character devices named
 	  /dev/vendor_lechao_usbdN (N = 0..15).
+
+config VENDOR_LECHAO_SD_MON
+	bool "Lechao SD/MMC block-layer health monitor"
+	depends on VENDOR_LECHAO
+	depends on LCVIEW
+	depends on MMC_BLOCK=y
+	default y
+	help
+	  Monitor SD/MMC block-layer health: aggregate transfer
+	  bytes/requests over a 10s window and, on card-busy stuck,
+	  progressively strip SD bus-speed caps to downgrade the card.
+	  Events are reported via LcView; enable knob and counters are
+	  exposed under /sys/class/lciod_sd/lciod_sd.

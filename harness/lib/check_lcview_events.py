@@ -29,6 +29,8 @@ EVENTS_H_REL = ("rpi5/kernel/new/vendor/lechao/LcView/lcview_events.h")
 EMIT_SOURCE_RELS = [
     "rpi5/kernel/new/vendor/lechao/LcIod/lciod_usbd-stats.c",
     "rpi5/kernel/new/vendor/lechao/LcIod/lciod_usbd.c",
+    # A 批一：SD/MMC 块层健康监控发射点（SD_HEALTH/SD_STUCK）
+    "rpi5/kernel/new/vendor/lechao/LcIod/lciod_sd.c",
 ]
 
 # 内核发射点字段类型映射（add_* API → schema 字段类型）；正则捕获的是
