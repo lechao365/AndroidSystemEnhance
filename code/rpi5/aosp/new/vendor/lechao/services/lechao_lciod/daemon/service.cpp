@@ -46,6 +46,9 @@
 #include "lechao_log.h"
 /* R2 方向 5+6：全局链路事件监控（独立于 per-device 分片） */
 #include "link_monitor.h"
+/* R5 方向1：块设备/zram 观测采集器（纯函数 + BlockCollector/ZramCollector，
+ * 自 lcview 平移至 lciod），service.cpp 提供 10s 采集线程见 BlockCollectorRunLoop */
+#include "block_collector.h"
 /* R-14 方向 1：共享事件枚举头（AOSP hal 镜像，与内核真相源 1:1 同步），
  * 事件类型/方向名映射单一事实源，消模块内 switch 硬编码 */
 #include "vendor_lechao_usbd-ioctl.h"
@@ -227,6 +230,142 @@ void ProjectSystemIoEvent(const aidl::vendor::lechao::lciod::IoEvent& vev,
     out->retry = vev.retry;
 }
 
+/*
+ * R5 方向3：块设备/zram 观测事件经 EVENT_ALOG 落 logcat JSON 行
+ * （service.cpp:79 标签口径，storm 同款 :817 格式；观测不接 lcview JSONL）。
+ * snprintf 截断（n<0 或超缓冲）则丢弃整行并 ALOGE，不打半截 JSON（CXX-002）。
+ */
+static void EmitCollectorJson(const char* rule, char* line, int n, size_t cap) {
+    if (n < 0 || n >= static_cast<int>(cap)) {
+        LC_ALOGE("%s: JSON line truncated, drop", rule);
+        return;
+    }
+    EVENT_ALOG("%s", line);
+}
+
+/* 块设备差分速率 JSON 行（lcview-block 观测迁移；device 取自 /sys/block 名，
+ * 仅字母数字，无需 JSON 转义） */
+static void EmitBlockSampleJson(const std::string& dev,
+                                const lechao::lciod::BlockRates& r,
+                                uint64_t inflight) {
+    char line[256];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"block\",\"device\":\"%s\",\"read_iops\":%.1f,"
+        "\"read_bytes_per_s\":%.0f,\"read_avg_ms\":%.2f,\"write_iops\":%.1f,"
+        "\"write_bytes_per_s\":%.0f,\"write_avg_ms\":%.2f,\"inflight\":%llu,"
+        "\"busy\":%.2f}",
+        dev.c_str(), r.read_iops, r.read_bytes_per_s, r.read_avg_lat_ms,
+        r.write_iops, r.write_bytes_per_s, r.write_avg_lat_ms,
+        static_cast<unsigned long long>(inflight), r.busy_ratio);
+    EmitCollectorJson("block", line, n, sizeof(line));
+}
+
+/* 规则二（慢盘）触发 JSON 行 */
+static void EmitSlowDiskJson(const std::string& dev, double writeAvgLatMs,
+                             double thresholdMs, uint32_t consecutive) {
+    char line[192];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"slow_disk\",\"device\":\"%s\",\"write_avg_ms\":%.2f,"
+        "\"threshold_ms\":%.2f,\"consecutive\":%u}",
+        dev.c_str(), writeAvgLatMs, thresholdMs,
+        static_cast<unsigned>(consecutive));
+    EmitCollectorJson("slow_disk", line, n, sizeof(line));
+}
+
+/* 悬挂检测触发 JSON 行 */
+static void EmitHangJson(const std::string& dev, uint64_t inflight,
+                         double writeAvgLatMs) {
+    char line[160];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"hang\",\"device\":\"%s\",\"inflight\":%llu,"
+        "\"write_avg_ms\":%.2f}",
+        dev.c_str(), static_cast<unsigned long long>(inflight), writeAvgLatMs);
+    EmitCollectorJson("hang", line, n, sizeof(line));
+}
+
+/* zram0 水位/压缩比/io 统计 JSON 行 */
+static void EmitZramJson(const lechao::lciod::ZramCollector::Sample& z) {
+    char line[224];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"zram\",\"mem_used_total\":%llu,\"mem_used_max\":%llu,"
+        "\"compr_ratio\":%.2f,\"failed_reads\":%llu,\"failed_writes\":%llu,"
+        "\"read_bytes\":%llu,\"write_bytes\":%llu}",
+        static_cast<unsigned long long>(z.memUsedTotal),
+        static_cast<unsigned long long>(z.memUsedMax), z.comprRatio,
+        static_cast<unsigned long long>(z.failedReads),
+        static_cast<unsigned long long>(z.failedWrites),
+        static_cast<unsigned long long>(z.readBytes),
+        static_cast<unsigned long long>(z.writeBytes));
+    EmitCollectorJson("zram", line, n, sizeof(line));
+}
+
+/*
+ * R5 方向2/3：块设备/zram 10s 观测采集线程入口（IoServiceImpl::start() 以
+ * std::thread(...).detach() 启动）。对齐 IoQosManager::RunLoop 的
+ * steady_clock 绝对时间对齐范式（io_qos.cpp:456），每 kBlockSampleIntervalSec
+ * (10s) 一轮：
+ *   1) 枚举 /sys/block 块设备，逐设备差分采样（首次只建 prev，无速率）；
+ *   2) 悬挂检测（inflight 高 + 写延迟高持续 3 次）与规则二慢盘（写平均延迟
+ *      持续超阈 3 次）触发时经 EVENT_ALOG 打 JSON 行（不接 lcview JSONL）；
+ *   3) zram0 水位/压缩比/io 统计打 EVENT_ALOG JSON 行。
+ * 观测为增强项非致命：枚举/采样失败已限频 ALOGE，跳过本轮，线程不退出
+ * （CXX-004：非致命错误不触发进程退出）。
+ */
+static void BlockCollectorRunLoop() {
+    using clock = std::chrono::steady_clock;
+    const auto period = std::chrono::seconds(lechao::lciod::kBlockSampleIntervalSec);
+    lechao::lciod::BlockCollector block;
+    lechao::lciod::ZramCollector zram;
+    /* 悬挂/慢盘状态按设备维护、跨 10s 采样持续——避免 A 设备 2 次 + B 设备
+     * 1 次被合并误判（与 lcview sampleBlockMetrics 同款按设备状态） */
+    std::unordered_map<std::string, lechao::lciod::HangState> hangStates;
+    std::unordered_map<std::string, lechao::lciod::SlowDiskState> slowStates;
+
+    while (true) {
+        const auto now = clock::now();
+        std::this_thread::sleep_until(now + period);
+
+        std::vector<std::string> devs;
+        if (!block.EnumerateBlockDevices(devs))
+            continue;  /* 枚举失败已限频 ALOGE，跳过本轮（非致命） */
+
+        for (const auto& dev : devs) {
+            lechao::lciod::BlockRates rates;
+            uint64_t inflight = 0;
+            /* 首次采样只建 prev（返回 false）；读失败返回 false（已限频 ALOGE） */
+            if (!block.SampleDevice(dev, &rates, &inflight))
+                continue;
+            EmitBlockSampleJson(dev, rates, inflight);
+
+            /* 悬挂检测：触发后清零收敛，按"持续段"每段一条，防 10s 周期刷屏 */
+            auto hit = hangStates.emplace(dev, lechao::lciod::HangState{}).first;
+            if (lechao::lciod::UpdateHangState(
+                    &hit->second, inflight, lechao::lciod::kInflightHangThreshold,
+                    rates.write_avg_lat_ms, lechao::lciod::kLatencyHangThresholdMs)) {
+                EmitHangJson(dev, inflight, rates.write_avg_lat_ms);
+                hit->second.consecutive_high = 0;
+            }
+
+            /* 规则二（慢盘）：写平均延迟持续超阈 → EVENT_ALOG JSON 行 */
+            auto sit = slowStates.emplace(dev, lechao::lciod::SlowDiskState{}).first;
+            if (lechao::lciod::EvaluateSlowDiskRule(
+                    &sit->second, rates.write_avg_lat_ms,
+                    lechao::lciod::kSlowDiskWriteLatThresholdMs,
+                    lechao::lciod::kSlowDiskRequireConsecutive)) {
+                EmitSlowDiskJson(dev, rates.write_avg_lat_ms,
+                                 lechao::lciod::kSlowDiskWriteLatThresholdMs,
+                                 sit->second.consecutive);
+                sit->second.consecutive = 0;  /* 超阈持续段收敛 */
+            }
+        }
+
+        /* zram 水位与 io 统计（zram0 缺失时降级跳过，限频 ALOGE） */
+        lechao::lciod::ZramCollector::Sample z;
+        if (zram.SampleZram(&z))
+            EmitZramJson(z);
+    }
+}
+
 void IoServiceImpl::start() {
     start_monitor();
     /* R2 方向 5+6：启动独立全局链路监控线程（LinkMonitorRun，detach）。
@@ -239,6 +378,10 @@ void IoServiceImpl::start() {
      * （仿 LinkMonitorRun 单调时钟范式）；stop_ 退出标志仅供单测/析构使用，
      * 生产线程随进程生命周期终止（进程非 oneshot，init 自动重启）。 */
     std::thread(&lechao::lciod::IoQosManager::RunLoop, &io_qos_).detach();
+    /* R5 方向2：启动块设备/zram 10s 观测采集线程（BlockCollectorRunLoop，
+     * detach）。与 monitor/QoS 线程并行，观测为增强项非致命；线程随进程
+     * 生命周期终止（进程非 oneshot，init 自动重启）。 */
+    std::thread(BlockCollectorRunLoop).detach();
 }
 
 /*

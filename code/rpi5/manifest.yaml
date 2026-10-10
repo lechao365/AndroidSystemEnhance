@@ -177,6 +177,10 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lciod/common/minor_utils.h
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/Android.bp
       source: aosp/vendor/lechao/services/lechao_lciod/daemon/Android.bp
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/block_collector.cpp
+      source: aosp/vendor/lechao/services/lechao_lciod/daemon/block_collector.cpp
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/block_collector.h
+      source: aosp/vendor/lechao/services/lechao_lciod/daemon/block_collector.h
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/hal_client.cpp
       source: aosp/vendor/lechao/services/lechao_lciod/daemon/hal_client.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/hal_client.h
@@ -237,6 +241,8 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lciod/tests/MinorUtils_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/tests/Service_test.cpp
       source: aosp/vendor/lechao/services/lechao_lciod/tests/Service_test.cpp
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/tests/block_collector_test.cpp
+      source: aosp/vendor/lechao/services/lechao_lciod/tests/block_collector_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/tools/Android.bp
       source: aosp/vendor/lechao/services/lechao_lciod/tools/Android.bp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/tools/lciod_probe.c

@@ -253,3 +253,4 @@
 2026-10-10 09:52:51 manual-2610100952 pass build=pass board=pass acc={"run_id":"03d66a50dbac414388fe7c9ecd93e 本地直连开发：深度检视 A-E 收敛，lcview/lciod 上板验证通过
 2026-10-10 10:56:06 manual-2610101055 skip build=skip board=pass acc=- 本地直连开发：lciod 验收多设备聚合断言+读前 drop_caches/写后
 2026-10-10 11:07:29 manual-2610101107 skip build=skip board=pass acc=- 本地直连开发：lcview 读路径 drop_caches/sync 适配，板上
+2026-10-10 15:10:22 6824b8320bf9 skip build=skip board=skip acc=- R5 批一：块与zram采集迁入 lciod，仅增不删，下批删 lcview 侧 | {"elapsed_s":567,"segs":{"precheck":1.806,"edit_plan":8.165,"edit_item":283.05,"edit_item#2":0.147,"edit_item#3":0.141,"gen_manifest":18.383,"edit":17.319,"apply_selfcheck":46.982,"apply_selfcheck_dur_exceed":0.082,"edit#2":52.13,"apply_selfcheck#2":57.543,"apply_selfcheck#2_dur_exceed":0.081,"edit#3":24.906,"apply_selfcheck#3":48.917,"apply_selfcheck#3_dur_exceed":0.083,"report":0.289,"report_post":7.611,"finish":0.013}}
