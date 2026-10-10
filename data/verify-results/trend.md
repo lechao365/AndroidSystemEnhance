@@ -251,3 +251,4 @@
 2026-10-09 11:35:44 manual-2610091135 pass build=pass board=pass acc={"run_id":"da204fefe6324394880abdf4d1998 publish-main-base 阶段2 上板验证：18 case 全量 PA
 2026-10-09 22:42:47 manual-2610092242 skip build=skip board=skip acc=- 批次1 harness 深度检视修复：tst-02 守卫修复、CDP-DOD-0
 2026-10-10 09:52:51 manual-2610100952 pass build=pass board=pass acc={"run_id":"03d66a50dbac414388fe7c9ecd93e 本地直连开发：深度检视 A-E 收敛，lcview/lciod 上板验证通过
+2026-10-10 10:56:06 manual-2610101055 skip build=skip board=pass acc=- 本地直连开发：lciod 验收多设备聚合断言+读前 drop_caches/写后
