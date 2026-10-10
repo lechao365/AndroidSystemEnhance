@@ -65,7 +65,7 @@ cases:
   # 快速失败（连续两轮同位置判红，独立复现 8 次全成功）——产载尽力而为，
   # 真正判据是其后 files/valid_json/schema 对数据管道完整性的严格校验
   # （有数据则校验、无数据仍判红，不因 dd 失败假绿）；失败仅打警告继续。
-  lcview-pipeline: 'hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null || echo \"warn: dd 产载失败，数据管道校验兜底\"" hostcmd:"sleep 2 && cases/lcview_check.sh --mode files" hostcmd:"cases/lcview_check.sh --mode valid_json" hostcmd:"cases/lcview_check.sh --mode schema"'
+  lcview-pipeline: 'hostcmd:"adb shell \"echo 3 > /proc/sys/vm/drop_caches; dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null || echo \"warn: dd 产载失败，数据管道校验兜底\"" hostcmd:"sleep 2 && cases/lcview_check.sh --mode files" hostcmd:"cases/lcview_check.sh --mode valid_json" hostcmd:"cases/lcview_check.sh --mode schema"'
 
   # L2 传输触发（事件 5 覆盖）：照 trigger 写法——baseline → 真实 USB 动作
   # → delta 断言对应事件增量。
@@ -77,6 +77,8 @@ cases:
   # 写 dd 前置守卫（方向 1/2）：LCVIEW_ALLOW_DESTRUCTIVE_WRITE 须为 YES 且
   #   LCVIEW_BLOCK_DEV_WRITE 显式给出，缺一即判红不执行（错误信息明示
   #   覆盖目标分区数据）；读 dd 只读到 /dev/null，不在本次收紧范围。
+  # 读前 drop_caches、写后 sync 强制真实 USB SCSI（否则重复读命中块设备
+  #   缓冲/写滞留脏页不产 transport_end，delta 恒 0 假红）。
   # dd 失败即判红——不再 || true 吞失败（触发手段不可用须暴露，delta 兜底
   # 是双保险非替代）。基线文件按轮次隔离：${LCVIEW_BASELINE_FILE:-...} 经
   # 环境变量透传（轮次编排层按轮设置唯一路径，防跨轮基线串扰）。
@@ -97,7 +99,7 @@ cases:
     # 合并为单次带 duration_ns 的 END 事件），delta --event 4 永不可达判红；
     # 读路径只产 transport_end（event 5，仍在 commit），故删除 event 4 断言，
     # 保留 event 5。
-    acceptance: 'hostcmd:"cases/lcview_check.sh --mode baseline --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"cases/lcview_check.sh --mode conserve --conserve-load-mb 4" hostcmd:"{ [ \"${LCVIEW_ALLOW_DESTRUCTIVE_WRITE:-}\" = YES ] && [ -n \"${LCVIEW_BLOCK_DEV_WRITE:-}\" ]; } || { echo \"拒绝: 此命令会覆盖目标分区数据,须 LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES 且显式设置 LCVIEW_BLOCK_DEV_WRITE\" >&2; exit 1; } && adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE} bs=1M count=1\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 5 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}"'
+    acceptance: 'hostcmd:"cases/lcview_check.sh --mode baseline --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}" hostcmd:"adb shell \"echo 3 > /proc/sys/vm/drop_caches; dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"cases/lcview_check.sh --mode conserve --conserve-load-mb 4" hostcmd:"{ [ \"${LCVIEW_ALLOW_DESTRUCTIVE_WRITE:-}\" = YES ] && [ -n \"${LCVIEW_BLOCK_DEV_WRITE:-}\" ]; } || { echo \"拒绝: 此命令会覆盖目标分区数据,须 LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES 且显式设置 LCVIEW_BLOCK_DEV_WRITE\" >&2; exit 1; } && adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE} bs=1M count=1; sync\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode delta --event 5 --baseline ${LCVIEW_BASELINE_FILE:-/tmp/lcview_baseline.json}"'
     setup_snapshot:
       - 'adb shell "cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
     teardown:
@@ -110,7 +112,7 @@ cases:
   # 注2：ts 前插 dd 读 U 盘产载（同 lcview-transfer 触发手段）——ts 判据
   #   要求"最新记录与设备时钟偏差 < skew"，静止态无新事件必超窗（事件驱动
   #   模型），组内产载使用例自洽，不再依赖外部验收顺序。
-  lcview-pipeline-warn: 'hostcmd:"cases/lcview_check.sh --mode invalid" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode ts --skew 600"'
+  lcview-pipeline-warn: 'hostcmd:"cases/lcview_check.sh --mode invalid" hostcmd:"adb shell \"echo 3 > /proc/sys/vm/drop_caches; dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode ts --skew 600"'
 
   # L2 触发型全链路（原 cases/lcview_trigger.yaml 收敛于此，requires 拓扑保序）：
   # adb root（显式，写 authorized 需 root，不依赖 baseline 内部 root 的隐式顺序）
@@ -258,7 +260,7 @@ cases:
   # 校验走 /data/local/tmp 安全路径（dd 写→读回→sha1sum，不触碰块设备分区，
   # 无破坏性写守卫依赖）
   lcview-blk:
-    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lcview_check.sh --mode blk --phase baseline --block-dev ${LCVIEW_BLOCK_DEV:-/dev/block/sda} --blk-baseline ${LCVIEW_BLK_BASELINE_FILE:-/tmp/lcview_blk_baseline.json}" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode blk --phase delta --block-dev ${LCVIEW_BLOCK_DEV:-/dev/block/sda} --blk-baseline ${LCVIEW_BLK_BASELINE_FILE:-/tmp/lcview_blk_baseline.json} --check-write"'
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lcview_check.sh --mode blk --phase baseline --block-dev ${LCVIEW_BLOCK_DEV:-/dev/block/sda} --blk-baseline ${LCVIEW_BLK_BASELINE_FILE:-/tmp/lcview_blk_baseline.json}" hostcmd:"adb shell \"echo 3 > /proc/sys/vm/drop_caches; dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lcview_check.sh --mode blk --phase delta --block-dev ${LCVIEW_BLOCK_DEV:-/dev/block/sda} --blk-baseline ${LCVIEW_BLK_BASELINE_FILE:-/tmp/lcview_blk_baseline.json} --check-write"'
     setup_snapshot:
       - 'adb shell "cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
     teardown:

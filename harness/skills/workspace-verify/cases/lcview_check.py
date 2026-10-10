@@ -575,6 +575,9 @@ def mode_conserve(tmp, args):
     # produced>0，守恒有数据可校验；默认 0 保持纯只读（跟随外部负载场景）
     if args.conserve_load_mb:
         dev = args.block_dev or "/dev/block/sda"
+        # 强刷读路径：丢弃 page cache 使 dd 真实下发 USB SCSI——否则重复读
+        # 命中块设备缓冲不产 transport_end，负载窗口 produced=0 假红。
+        adb(["shell", "echo 3 > /proc/sys/vm/drop_caches"])
         _, rc = adb(["shell",
                      f"dd if={dev} of=/dev/null bs=1M count={args.conserve_load_mb} 2>/dev/null"],
                     timeout=args.dd_timeout or 120)
@@ -898,6 +901,10 @@ def mode_perf(tmp, args):
     dist0 = event_id_distribution()
     cpu_ticks0 = _daemon_cpu_ticks()
     io_counts0 = daemon_io_counts()
+
+    # 强刷读路径：丢弃 page cache 使 dd 真实下发 USB SCSI——否则重复读命中
+    # 块设备缓冲不产 transport_end，内核计数无增量导致 perf 判红。
+    adb(["shell", "echo 3 > /proc/sys/vm/drop_caches"])
 
     # dd 计时（host 侧单调钟，不含任何人工 sleep）
     t0 = time.monotonic()
