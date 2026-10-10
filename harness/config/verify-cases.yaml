@@ -194,14 +194,19 @@ cases:
 
   # L2 传输触发全链路：baseline --reset（probe --reset 归零内核计数后
   # 写基线，delta 断言简化为绝对值判定）→ dd 读 → delta read_bytes/
-  # read_cmds 严格增 → dd 写 → delta write_bytes/write_cmds 严格增。
+  # read_cmds → dd 写 → delta write_bytes/write_cmds。
+  # delta 为多设备聚合断言：dd 只作用于一个块设备，其对应 usbd 通道才有
+  # 增量，≥1 设备在全部 expect 字段严格增即视为触发生效（内核枚举顺序不定，
+  # UAS 占位通道 vid/pid 全 0，多设备其余零增量属预期，不再误判红）。
+  # 读前 drop_caches、写后 sync 强制真实 USB SCSI（否则重复读命中块设备
+  # 缓冲/写滞留脏页不触发 lciod 内核计数，delta 恒 0 假红）。
   # dd 失败即判红（2>/dev/null 仅压 dd 进度条噪声，exit code 透传）；
-  # 计数未增判红（触发未生效不得假绿）。块设备 env 覆盖同 lcview-transfer
+  # 无任一设备增量判红（触发未生效不得假绿）。块设备 env 覆盖同 lcview-transfer
   # （LCVIEW_BLOCK_DEV / LCVIEW_BLOCK_DEV_WRITE / LCVIEW_ALLOW_DESTRUCTIVE_WRITE），
   # 写 dd 守卫与轮次隔离基线（LCIOD_BASELINE_FILE）语义同 lcview-transfer。
   # 副作用字段同 lcview-trigger（authorized 切换 + dd 读写）
   lciod-trigger:
-    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lciod_check.sh --mode baseline --reset --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}" hostcmd:"adb shell \"dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode delta --expect read_bytes read_cmds --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}" hostcmd:"{ [ \"${LCVIEW_ALLOW_DESTRUCTIVE_WRITE:-}\" = YES ] && [ -n \"${LCVIEW_BLOCK_DEV_WRITE:-}\" ]; } || { echo \"拒绝: 此命令会覆盖目标分区数据,须 LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES 且显式设置 LCVIEW_BLOCK_DEV_WRITE\" >&2; exit 1; } && adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE} bs=1M count=1\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode delta --expect write_bytes write_cmds --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}"'
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lciod_check.sh --mode baseline --reset --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}" hostcmd:"adb shell \"echo 3 > /proc/sys/vm/drop_caches; dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode delta --expect read_bytes read_cmds --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}" hostcmd:"{ [ \"${LCVIEW_ALLOW_DESTRUCTIVE_WRITE:-}\" = YES ] && [ -n \"${LCVIEW_BLOCK_DEV_WRITE:-}\" ]; } || { echo \"拒绝: 此命令会覆盖目标分区数据,须 LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES 且显式设置 LCVIEW_BLOCK_DEV_WRITE\" >&2; exit 1; } && adb shell \"dd if=/dev/zero of=${LCVIEW_BLOCK_DEV_WRITE} bs=1M count=1; sync\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode delta --expect write_bytes write_cmds --baseline ${LCIOD_BASELINE_FILE:-/tmp/lciod_baseline.json}"'
     setup_snapshot:
       - 'adb shell "cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
     teardown:
@@ -295,7 +300,9 @@ cases:
   # 性能采集（R-02 方向 2，脚本化统一负载，只报数不设门禁）：dd 读块设备
   # 64MB（与 lcview-perf 同负载，对齐性能基线）驱动真实 USB 传输 →
   # lciod_probe 前后差分算 per-IO ns（Δread_ns/Δread_cmds）、吞吐
-  # （Δread_bytes/dd 秒）、最近传输延迟（last_transport_latency_ns），
+  # （Δread_bytes/dd 秒）、最近传输延迟（last_transport_latency_ns）。
+  # 多设备聚合：仅 dd 目标通道（有增量者）入基线，其余零增量跳过；
+  # 无任一设备增量判红（dd 未触发传输即 perf 无意义），
   # METRICS JSON 行供 ws_report --metrics 结构化存档（跨批可 diff）。
   # lciod 内核 GET_STATS 计数（read_bytes/read_cmds/read_ns）与 lcview
   # 事件维度互补——直接观测 USBD 栈传输量，无落盘/攒包路径干扰。

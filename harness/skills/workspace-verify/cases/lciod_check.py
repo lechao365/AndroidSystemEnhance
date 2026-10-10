@@ -24,8 +24,9 @@
 #              值合法、abi_version==4（连接/断开/枚举失败/过流计数）
 #   baseline — [--reset] 取快照存 --baseline（供 delta；
 #              --reset 传给设备工具归零计数，delta 断言简化为绝对值）
-#   delta    — 对比基线，--expect 字段必须严格增加（防假绿：
-#              缺基线/缺字段/未增均判红）
+#   delta    — 对比基线，聚合断言：≥1 设备在全部 --expect 字段严格增加
+#              即视为触发生效（dd 只作用于一个块设备，多设备其余零增量属
+#              预期）；无任一设备增量 / 缺基线 / 缺字段均判红（防假绿）
 #   perf     — 性能采集（R-02 方向 2，只报数不设门禁）：dd 读块设备
 #              --load-mb MB（默认 64）驱动真实 USB 传输 → probe 前后
 #              快照差分算 per-IO ns（Δread_ns/Δread_cmds）、吞吐
@@ -365,8 +366,13 @@ def load_baseline(path):
 def diff_devices(baseline, devices, expect_fields):
     """delta 对比 → (错误列表, 报告行列表)。
 
-    expect_fields 中任一字段未严格增加即判红；设备在基线中缺失、
-    expect 字段缺失同样判红（增量为 0 = 触发未生效，不得假绿）。
+    多设备聚合语义：dd 只作用于一个块设备，其对应的 usbd 通道才有增量；
+    其余设备（内核枚举顺序不定；UAS 占位通道 vid/pid 全 0）零增量属预期。
+    因此核心判据为「至少一个设备在全部 expect 字段上严格增量」——dd 未触发
+    任何设备增量才判红（防假绿）；单设备场景退化为该设备必须增量。
+    设备在基线中缺失、expect 字段缺失/非数字仍逐台判红（结构完整性，
+    与增量归属无关）。全设备均为虚拟 UAS 占位通道（protocol==1 且 vid/pid
+    全 0）且无增量时豁免（无真实 UAS 流量源，记 SKIP 提示）。
     baseline 结构与 load_baseline 返回一致：{minor_str: {field: value}}。
     """
     errors, report = [], []
@@ -382,10 +388,8 @@ def diff_devices(baseline, devices, expect_fields):
     if not devices:
         errors.append("当前 probe 输出为空，无法对比")
         return errors, report
-    # 虚拟 UAS 通道豁免（无真实 UAS 流量源）：vid=0x0000 pid=0x0000 的
-    # protocol==1 占位设备无物理 UAS 设备背书，dd 只触发 BOT（protocol==0）
-    # 设备，该通道无增量属预期（无 UAS 流量源），不判红——记入 report 提示。
-    # 真实 UAS 设备（vid/pid 非零）无增量仍判红（打点链路真故障不得假绿）。
+
+    # 虚拟 UAS 占位通道：protocol==1 且 vid/pid 全 0（无真实 UAS 设备背书）。
     def _is_virtual_uas(dev):
         try:
             return (dev.get("protocol") == "1"
@@ -394,25 +398,32 @@ def diff_devices(baseline, devices, expect_fields):
         except ValueError:
             return False
 
+    incremented_any = False       # 至少一个设备全部 expect 字段严格增量
+    all_virtual = True            # 所有设备是否均为虚拟 UAS 占位通道
     for dev in devices:
         minor = str(dev.get("minor", "?"))
         tag = f"minor={minor}"
-        virtual_uas = _is_virtual_uas(dev)
+        if not _is_virtual_uas(dev):
+            all_virtual = False
         if minor not in base:
             errors.append(f"{tag}: 设备不在基线中（基线后新出现？重跑 baseline）")
             continue
+        dev_incremented = True
         for f in expect_fields:
             if f not in dev:
                 errors.append(f"{tag}: 缺 expect 字段 {f}")
+                dev_incremented = False
                 continue
             try:
                 now = int(dev[f], 0)
             except ValueError:
                 errors.append(f"{tag}: {f} 非数字: {dev[f]}")
+                dev_incremented = False
                 continue
             before = base[minor].get(f)
             if before is None:
                 errors.append(f"{tag}: 基线缺字段 {f}")
+                dev_incremented = False
                 continue
             # 类型归一防御：基线值须为数字（load_baseline 已转 int，
             # 此处兜底 str 形态，非数字判红不崩）
@@ -420,15 +431,24 @@ def diff_devices(baseline, devices, expect_fields):
                 before = int(before, 0) if isinstance(before, str) else int(before)
             except (TypeError, ValueError):
                 errors.append(f"{tag}: 基线 {f} 非数字: {before}")
+                dev_incremented = False
                 continue
             delta = now - before
             report.append(f"{tag}: {f} {before} -> {now} (delta={delta})")
             if delta <= 0:
-                if virtual_uas:
-                    report.append(f"SKIP: {tag}: {f} 无增量（虚拟 UAS 通道 "
-                                  "vid/pid 全 0，无真实 UAS 流量源，豁免）")
-                else:
-                    errors.append(f"{tag}: {f} 未增加（delta={delta}），触发未生效")
+                dev_incremented = False
+        if dev_incremented:
+            incremented_any = True
+
+    if not incremented_any:
+        if all_virtual:
+            report.append("SKIP: 全部设备均为虚拟 UAS 占位通道（protocol==1 "
+                          "且 vid/pid 全 0，无真实 UAS 流量源），无增量豁免")
+        elif not errors:
+            # 无结构错误且无任一设备增量：dd 触发未生效，判红（防假绿）。
+            # 保留 "未增加" 子串以兼容既有红灯用例断言。
+            errors.append("所有设备在 expect 字段上均未增加（delta<=0），"
+                          "dd 触发未生效（无任一设备增量）")
     return errors, report
 
 
@@ -489,6 +509,10 @@ def mode_perf(args):
         print("ERROR: dd 前 probe 快照缺数值字段，拒绝采集")
         return 1
 
+    # 强刷读路径：丢弃 page cache 使 dd 真实下发 USB SCSI——否则重复读同一
+    # 区域命中块设备缓冲，lciod 内核计数不增，perf delta 恒 0 假红。
+    adb(["shell", "echo 3 > /proc/sys/vm/drop_caches"])
+
     # dd 读负载（host 侧单调钟计时；与 lcview perf 同语义，不含人工 sleep）
     t0 = time.monotonic()
     out, rc = adb(["shell",
@@ -513,8 +537,11 @@ def mode_perf(args):
         print("ERROR: dd 后 probe 快照缺数值字段，拒绝采集")
         return 1
 
-    # 差分计算（多设备逐台；无增量判红——dd 未触发传输即 perf 无意义）
+    # 差分计算（多设备聚合语义：dd 只作用于一个块设备，其对应 usbd 通道
+    # 才有增量；其余设备零增量属预期，跳过不入基线。无任一设备增量判红
+    # ——dd 未触发传输即 perf 无意义，拒绝假基线。单设备场景退化为必须增量。）
     metrics_list, lines = [], []
+    incremented_any = False
     for dev_i in after:
         minor = str(dev_i.get("minor", "?"))
         tag = f"minor={minor}"
@@ -526,13 +553,14 @@ def mode_perf(args):
         rd = d["read_bytes"] - b["read_bytes"]
         rc_delta = d["read_cmds"] - b["read_cmds"]
         rns = d["read_ns"] - b["read_ns"]
+        if rd <= 0 or rc_delta <= 0:
+            print(f"{tag}: dd 后 read_bytes/read_cmds 无增量（非本次 dd 目标"
+                  f"通道，跳过）")
+            continue
+        incremented_any = True
         per_io_ns = (rns / rc_delta) if rc_delta > 0 else 0.0
         mbps = (rd / 1e6) / dd_s if dd_s > 0 else 0.0
         lat_ns = d["last_transport_latency_ns"]
-        if rd <= 0 or rc_delta <= 0:
-            print(f"ERROR: {tag} dd 后 read_bytes/read_cmds 无增量（触发未生效，"
-                  f"块设备未就绪？），拒绝出 perf 基线")
-            return 1
         metrics_list.append({
             "minor": minor,
             "per_io_ns": round(per_io_ns, 1),
@@ -544,6 +572,11 @@ def mode_perf(args):
         lines.append(
             f"{tag}: per-IO={per_io_ns:.1f} ns，吞吐={mbps:.3f} MB/s，"
             f"最近传输延迟={lat_ns} ns（Δ{rd}B/{rc_delta}cmds）")
+
+    if not incremented_any:
+        print("ERROR: 无任一设备 dd 后 read_bytes/read_cmds 增量（触发未生效，"
+              "块设备未就绪？），拒绝出 perf 基线")
+        return 1
 
     metrics = {
         "load_mb": load_mb,

@@ -474,6 +474,35 @@ class DiffDevicesTest(unittest.TestCase):
         errors, _ = lc.diff_devices(base, devs, ["read_bytes"])
         self.assertTrue(any("未增加" in e for e in errors))
 
+    def test_multi_device_partial_increment_passes(self):
+        # 真实多设备拓扑回归：dd 只作用于一个块设备，其对应 usbd 通道增量，
+        # 其余设备（内核枚举顺序不定）零增量属预期——聚合断言 ≥1 设备在
+        # 全部 expect 字段严格增即通过，不再因非目标设备零增量误判红。
+        line0 = VALID_LINE  # minor=0，dd 目标，有增量
+        line1 = (VALID_LINE.replace("minor=0", "minor=1")
+                 .replace("usbd0", "usbd1")
+                 .replace("vid=0x04e8 pid=0x6344", "vid=0x0000 pid=0x0000")
+                 .replace("protocol=0", "protocol=1"))  # 非目标，零增量
+        base = {d["minor"]: {f: d[f] for f in lc.REQUIRED_FIELDS}
+                for d in _devices(line0, line1)}
+        cur0 = (line0.replace("read_bytes=4194304", "read_bytes=8388608")
+                .replace("read_cmds=64", "read_cmds=128"))
+        errors, report = lc.diff_devices(base, _devices(cur0, line1),
+                                         ["read_bytes", "read_cmds"])
+        self.assertEqual(errors, [])
+        self.assertTrue(any("minor=1" in r for r in report))
+
+    def test_multi_device_none_increment_error(self):
+        # 多设备均零增量：dd 触发未生效，聚合断言判红（防假绿）
+        line0 = VALID_LINE
+        line1 = (VALID_LINE.replace("minor=0", "minor=1")
+                 .replace("usbd0", "usbd1")
+                 .replace("vid=0x04e8 pid=0x6344", "vid=0x04e8 pid=0x6300"))
+        base = {d["minor"]: {f: d[f] for f in lc.REQUIRED_FIELDS}
+                for d in _devices(line0, line1)}
+        errors, _ = lc.diff_devices(base, _devices(line0, line1), ["read_bytes"])
+        self.assertTrue(any("未增加" in e for e in errors))
+
 
 # ============================================================
 # R3 方向 7：--mode storm 风暴规则校验（TestModeStorm）
