@@ -87,8 +87,9 @@ stages:
     python3 harness/skills/workspace-verify/ws_verify_chain.py \
       --batch-file <cdp> [--case <标签>] [--wait-ready --log-since <reboot 时刻>] \
       [--result-file <chain.json>]
-    六步串联：sync→connect→push→unit_test→acceptance→report，逐段 stdout
-    透传、rc 逐段门禁、失败即停（JSON 标注停在何步）；acceptance/report
+    八步串联：sync→build→connect→push→unit_test→acceptance→package→report，逐段 stdout
+    透传、rc 逐段门禁、失败即停（JSON 标注停在何步；缺批次源时
+    acceptance/package/report 步确定性跳过并记账）；acceptance/report
     参数由 --batch-file/--case/--wait-ready/--log-since 确定性构造，report
     收据参数（result/build/board/summary）由前序真实 rc 机械派生（AI 不手填）；
     编排器自动注入 CDP_RUN_ID 使 push/unit_test/acceptance 产物同批同 run_id
@@ -112,9 +113,9 @@ stages:
    - 测试：先 make <modules.<模块>.test_targets> -j$(nproc)（lcview 即
      lechao_lcview_unit_test——hal_test 已随 HAL 退役并入 unit_test，
      AGENTS.md 强制）
-   - 部署：m <modules.<模块>.targets>（lcview 实读 Android.bp 的 2 个 Soong 模块——
-     HAL 已退役删除，仅存 lechao_lcview 与 vendor.lechao.lcview-config，见
-     verify-cases.yaml modules 段；lciod 才是 4 个 target）；
+   - 部署：m <modules.<模块>.targets>（各模块的 Soong 模块数一律实读
+     verify-cases.yaml modules 段 targets 列表，不在此写死数字——HAL 退役后
+     模块清单曾漂移，该文件是唯一事实源）；
    增量路径按 incremental-dev-reference：
    - aosp 模块：m <module>（BLD-004 先 source build/envsetup.sh + lunch；BLD-005 禁裸 make）
    - boot/内核：make Image dtbs（BLD-001~003 Clang+LLD/产物拷贝 rpi5-kernel/；
@@ -179,10 +180,9 @@ stages:
    --body <正文文件> --batch-file <cdp> --target $(git rev-parse --short=12 HEAD) \
    --metrics "<性能三指标 JSON 对象>"] \
    [--timings-file harness/log/cross-device/timings-<batch_id>.json] \
-   --selfcheck "<自检摘要（全部 *_rc 键，见 harness/lib/selfcheck.py 的
-   REQUIRED_RC_KEYS：pytest/refs/config/contract/pyenv/ioctl/manifest/
-   discipline/scan/ruff/host/quotepath/known_issues/commit_coverage——
-   任一缺失 ws_report 拒写）>"
+   --selfcheck "<自检摘要（全部 *_rc 键，清单以 harness/lib/selfcheck.py 的
+   REQUIRED_RC_KEYS 常量为唯一事实源，不在此逐项枚举——任一缺失 ws_report
+   拒写）>"
    （--batch-file/--target 为模式 A 参数；--body 必传：CDP 原文 + 各阶段明细 +
    失败现场摘录，自动脱敏；PASS 必传 --acceptance-file（步骤 5 自描述验收产物）
    与 --unit-test-file（步骤 4b 自描述单测产物）与 --push-file（步骤 4 自描述

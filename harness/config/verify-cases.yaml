@@ -7,7 +7,8 @@
 # 快速回归组（-sv 常态回归批默认）：lcview-liveness, lcview-pipeline,
 #   lcview-trigger, lciod-liveness, lciod-trigger（5 case，健康态 ~38-64s；
 #   覆盖存活/数据面/触发全链路）
-# 发布全量组（publish-main-base 前全量验收批）：全部 11 case（~120-190s）；
+# 发布全量组（publish-main-base 前全量验收批）：cases 段全部 case（实读本文件
+#   cases 段条目，不写死数量，避免注释计数漂移；~120-190s）；
 #   perf/recover-daemon/transfer 含 IO 副作用或心跳周期绑架，不入常态轮次
 #   （见各 case 注释），发布前必须全量跑一轮
 # 批次方向涉及其它 case 的专项修复时按需追加（如 sepolicy 改动加
@@ -315,8 +316,11 @@ cases:
 
 
   # 事件覆盖登记（驱动级覆盖盘点，2026-08-27 修订）：
-  # - 已覆盖（真实触发 + delta 断言）: 4(transfer-start,lcview-transfer) 5(transfer-end,lcview-transfer)
+  # - 已覆盖（真实触发 + delta 断言）: 5(transfer-end,lcview-transfer)
   #   8(probe,lcview-trigger) 9(disconnect,lcview-trigger)
+  # - 已删除: 4(transfer-start)——R-16 起从 schema 删除（START/END 合并为单次
+  #   带 duration_ns 的 END 事件），delta --event 4 永不可达，不再计覆盖
+  #   （见上方 lcview-transfer 用例注释）
   # - 已观察待确定性触发: 13(usb_rate_degraded)——usbreset 副作用中实测出现
   #   （host xhci 模式打点可达），但触发具随机性（速率波动），无确定性注入手段
   # - 暂无触发手段（打点在 USBD 设备栈或 LcIod 侧而 xhci-host 不经过，需 BOT

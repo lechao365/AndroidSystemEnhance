@@ -65,12 +65,14 @@
 #define LCVIEW_MAGIC  0x4C56
 
 /* 字节序契约（CXX-001 / LCV-02 / KRN-002，与内核 lcview_events.h 同款守卫）：
- * 本头定义的线上格式（lcview_record_hdr + TLV 字段）为主机序裸 memcpy
- * 序列化——事实上的小端契约：内核写入端（lcview_builder/lcview_ring）
- * 与用户态解析端（record_codec/SchemaParser/FileWriter）同机同序
- * （ARM64 LE）三方自洽。
- * 若未来跨大小端设备传输或引入显式字节序转换，必须内核与用户态
- * 同步改造，禁止单侧修改。
+ * 本头定义的线上格式（lcview_record_hdr + TLV 字段）为小端线材：
+ *   - 内核写入端（lcview_builder/lcview_ring）在 ARM64 LE 上以主机序
+ *     裸 memcpy 生成小端字节；
+ *   - 用户态解析端（record_codec/SchemaParser/FileWriter）统一经显式
+ *     小端转换（record_codec.h 的 readLe16/readLe32/...）读取，与内核
+ *     写入字节完全一致，仅消除对宿主字节序的隐式假设。
+ * "禁止单侧修改"针对线上字节格式：任何改变多字节字段线序的改动必须
+ * 内核与用户态同步；不改变字节的读取侧显式转换不在此列。
  * 下面的编译守卫保证大端环境直接编译失败，防隐性错误。 */
 #if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) &&                                 \
     (__BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__)

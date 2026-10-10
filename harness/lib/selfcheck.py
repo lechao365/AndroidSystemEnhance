@@ -58,6 +58,7 @@ import time
 from pathlib import Path
 
 from check_host_tests import _HOST_TEST_WORST_S
+from paths import DATA_DIRNAME, DATA_KNOWN_ISSUES_DIRNAME
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -594,7 +595,7 @@ def _load_cdp_issue():
 
 def _flake_history(nodeid):
     """既有 kind=flake 条目中该 nodeid 的 (轮次, 首现批次)；无则 (0, "")。"""
-    issues_dir = ROOT / "data" / "known-issues"
+    issues_dir = ROOT / DATA_DIRNAME / DATA_KNOWN_ISSUES_DIRNAME
     if not issues_dir.is_dir():
         return 0, ""
     max_round, first_batch = 0, ""
@@ -645,7 +646,7 @@ def _flake_registered_in_batch(nodeid, batch_id):
     """
     if not batch_id:
         return False
-    issues_dir = ROOT / "data" / "known-issues"
+    issues_dir = ROOT / DATA_DIRNAME / DATA_KNOWN_ISSUES_DIRNAME
     if not issues_dir.is_dir():
         return False
     for p in sorted(issues_dir.glob("*.md")):

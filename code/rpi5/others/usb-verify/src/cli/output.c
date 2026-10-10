@@ -149,6 +149,10 @@ int output_event(const struct vendor_lechao_usbd_event *ev, int json, int rc)
  * output_check_report — 输出断言报告
  * 文本格式: 表格（FIELD/ACTUAL/EXPECTED/PASS）
  * JSON 格式: 包含 total/failed/passed/entries[]
+ *
+ * 返回: report->failed > 0 时返回 -1（断言未通过），否则返回 0。
+ * CXX-004 故障可见性：断言失败必须通过返回码传播给调用方，禁止打印
+ * FAIL 却返回成功码，导致脚本/CI 误判 PASS。
  */
 int output_check_report(const struct fv_check_report *report, int json)
 {
@@ -183,7 +187,7 @@ int output_check_report(const struct fv_check_report *report, int json)
                report->count - report->failed, report->count,
                report->failed == 0 ? "PASS" : "FAIL");
     }
-    return 0;
+    return report->failed ? -1 : 0;
 }
 
 /*
@@ -198,6 +202,10 @@ int output_check_report(const struct fv_check_report *report, int json)
  *
  * 检查结果填充到本地 report 后委托给 output_check_report 输出。
  * 标题行仅在文本模式打印（json 模式下直接输出纯 JSON，保证可机读）。
+ *
+ * 返回: 透传 output_check_report 的返回码——任一断言失败返回 -1，
+ *       全部通过（或无断言）返回 0。调用方（main.c check degrade）
+ *       据此置非零退出码（CXX-004）。
  */
 int output_degrade_check(const struct vendor_lechao_usbd_stats *stats,
                          const struct fv_command *cmd, int json)

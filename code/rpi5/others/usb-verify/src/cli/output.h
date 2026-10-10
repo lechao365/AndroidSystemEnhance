@@ -32,12 +32,17 @@ int output_config(const struct vendor_lechao_usbd_config *config, int json);
  */
 int output_event(const struct vendor_lechao_usbd_event *event, int json, int rc);
 
-/* 输出断言报告（通用格式） */
+/*
+ * 输出断言报告（通用格式）
+ * 返回: report->failed > 0 返回 -1，否则返回 0（CXX-004：断言失败
+ *       须由返回码可见，调用方据此置非零退出码）。
+ */
 int output_check_report(const struct fv_check_report *report, int json);
 
 /*
  * 输出降级检查报告（check degrade 统一入口）
  * 此函数完成降级指标计算并填充报告，再调用 output_check_report 输出。
+ * 返回: 透传 output_check_report——任一断言失败 -1，否则 0。
  */
 int output_degrade_check(const struct vendor_lechao_usbd_stats *stats,
                          const struct fv_command *cmd, int json);

@@ -749,6 +749,65 @@ void vendor_lechao_usbd_transport_end_locked(
 }
 
 /*
+ * vendor_lechao_usbd_error_event_locked — 错误类事件共用分发（BOT/UAS）
+ * @rate_dev:        目标设备实例（调用方必须已持有 rate_dev->lock）
+ * @srb:             SCSI 命令上下文（可能为 NULL）
+ * @dir:             数据方向（VENDOR_LECHAO_USBD_DIR_*）。已由调用方按各自
+ *                   方向来源规则解析——BOT 与 UAS 的方向来源优先级不同
+ *                   （BOT 的 TRANSPORT_ERROR 仅取 srb；其余错误分支 srb
+ *                   优先、回退 nd->data_direction；UAS 全部 nd 优先、回退
+ *                   srb），故方向解析保留在各自 handler，本函数只消费结果，
+ *                   不改变任何方向语义。
+ * @event_code:      线材事件类型（VENDOR_LECHAO_USBD_EVENT_*）
+ * @counter:         该类事件的累计计数指针（error/stall/timeout/corrupt）
+ * @mark_last_error: 是否置位 last_transport_error（仅 TRANSPORT_ERROR 为真）
+ * @value:           record/event 的 event_value 字段
+ * @status:          record/event 的 status 字段
+ *
+ * 语义与原 BOT/UAS 两 handler 的逐分支实现逐条一致，仅消除重复：
+ *   - counter++；可选置 last_transport_error；
+ *   - 按 dir 累加 read/write_error_count；
+ *   - record_last_event_locked + event_push 各发射一次（不改变发射次数，
+ *     不引入双计数）。
+ * 调用上下文：必须持有 rate_dev->lock 自旋锁，不可睡眠。
+ */
+static inline void vendor_lechao_usbd_error_event_locked(
+    struct vendor_lechao_usbd_device *rate_dev,
+    struct scsi_cmnd *srb, int dir, u32 event_code,
+    u64 *counter, bool mark_last_error, u32 value, s32 status)
+{
+    (*counter)++;
+    if (mark_last_error)
+        rate_dev->last_transport_error = true;
+    if (dir == VENDOR_LECHAO_USBD_DIR_READ)
+        rate_dev->stats.read_error_count++;
+    else if (dir == VENDOR_LECHAO_USBD_DIR_WRITE)
+        rate_dev->stats.write_error_count++;
+    vendor_lechao_usbd_record_last_event_locked(rate_dev, srb, 0,
+        event_code, value, status, (u8)dir);
+    vendor_lechao_usbd_event_push(rate_dev, srb, 0,
+        event_code, value, status, (u8)dir);
+}
+
+/*
+ * vendor_lechao_usbd_reset_event_locked — RESET 事件共用分发（BOT/UAS）
+ * @rate_dev: 目标设备实例（调用方必须已持有 rate_dev->lock）
+ *
+ * 语义与原 BOT/UAS 两 handler 的 RESET 分支逐条一致：
+ *   reset_count++；以 NULL srb / DIR_NONE 记录并推送一次 RESET 事件。
+ * 调用上下文：必须持有 rate_dev->lock 自旋锁，不可睡眠。
+ */
+static inline void vendor_lechao_usbd_reset_event_locked(
+    struct vendor_lechao_usbd_device *rate_dev)
+{
+    rate_dev->stats.reset_count++;
+    vendor_lechao_usbd_record_last_event_locked(rate_dev, NULL, 0,
+        VENDOR_LECHAO_USBD_EVENT_RESET, 0, 0, VENDOR_LECHAO_USBD_DIR_NONE);
+    vendor_lechao_usbd_event_push(rate_dev, NULL, 0,
+        VENDOR_LECHAO_USBD_EVENT_RESET, 0, 0, VENDOR_LECHAO_USBD_DIR_NONE);
+}
+
+/*
  * vendor_lechao_usbd_handle_event — 核心 notifier 回调，处理所有传输事件
  * @nb:    通知块（container_of 获取 rate_dev）
  * @event: 事件类型（见 usb_stor_notifier_event 枚举）
@@ -830,73 +889,45 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
 
     switch (event) {
     case USB_STOR_NOTIFIER_TRANSPORT_ERROR:
-        rate_dev->stats.error_count++;
-        rate_dev->last_transport_error = true;
+        /* 方向来源（BOT）：此分支 transport.c 仅由 srb 推导，无 nd 回退 */
         trace.dir = srb ? vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction) : 0;
         trace.result = nd ? nd->result : 0;
-        if (trace.dir == VENDOR_LECHAO_USBD_DIR_READ)
-            rate_dev->stats.read_error_count++;
-        else if (trace.dir == VENDOR_LECHAO_USBD_DIR_WRITE)
-            rate_dev->stats.write_error_count++;
-        vendor_lechao_usbd_record_last_event_locked(rate_dev, srb, 0,
+        vendor_lechao_usbd_error_event_locked(rate_dev, srb, trace.dir,
             VENDOR_LECHAO_USBD_EVENT_TRANSPORT_ERROR,
-            (u32)trace.result, trace.result, (u8)trace.dir);
-        vendor_lechao_usbd_event_push(rate_dev, srb, 0,
-            VENDOR_LECHAO_USBD_EVENT_TRANSPORT_ERROR,
-            (u32)trace.result, trace.result, (u8)trace.dir);
+            &rate_dev->stats.error_count, true,
+            (u32)trace.result, trace.result);
         break;
 
     case USB_STOR_NOTIFIER_STALL:
-        rate_dev->stats.stall_count++;
-        /* 优先从 srb 取方向；TIMEOUT 等分支 transport.c 未填 nd->data_direction */
+        /* 方向来源（BOT）：srb 优先；STALL 分支 transport.c 未填
+         * nd->data_direction，回退 nd->data_direction */
         trace.dir = srb ? (int)vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction)
                         : (nd ? (int)nd->data_direction : 0);
         trace.status = nd ? nd->status : 0;
-        if (trace.dir == VENDOR_LECHAO_USBD_DIR_READ)
-            rate_dev->stats.read_error_count++;
-        else if (trace.dir == VENDOR_LECHAO_USBD_DIR_WRITE)
-            rate_dev->stats.write_error_count++;
-        vendor_lechao_usbd_record_last_event_locked(rate_dev, srb, 0,
+        vendor_lechao_usbd_error_event_locked(rate_dev, srb, trace.dir,
             VENDOR_LECHAO_USBD_EVENT_STALL,
-            0, trace.status, (u8)trace.dir);
-        vendor_lechao_usbd_event_push(rate_dev, srb, 0,
-            VENDOR_LECHAO_USBD_EVENT_STALL,
-            0, trace.status, (u8)trace.dir);
+            &rate_dev->stats.stall_count, false, 0, trace.status);
         break;
 
     case USB_STOR_NOTIFIER_TIMEOUT:
-        rate_dev->stats.timeout_count++;
-        /* transport.c 的 TIMEOUT 发射点未填 nd->data_direction，fallback srb */
+        /* 方向来源（BOT）：srb 优先；TIMEOUT 分支 transport.c 未填
+         * nd->data_direction，回退 nd->data_direction */
         trace.dir = srb ? (int)vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction)
                         : (nd ? (int)nd->data_direction : 0);
         trace.status = nd ? nd->status : 0;
-        if (trace.dir == VENDOR_LECHAO_USBD_DIR_READ)
-            rate_dev->stats.read_error_count++;
-        else if (trace.dir == VENDOR_LECHAO_USBD_DIR_WRITE)
-            rate_dev->stats.write_error_count++;
-        vendor_lechao_usbd_record_last_event_locked(rate_dev, srb, 0,
+        vendor_lechao_usbd_error_event_locked(rate_dev, srb, trace.dir,
             VENDOR_LECHAO_USBD_EVENT_TIMEOUT,
-            0, trace.status, (u8)trace.dir);
-        vendor_lechao_usbd_event_push(rate_dev, srb, 0,
-            VENDOR_LECHAO_USBD_EVENT_TIMEOUT,
-            0, trace.status, (u8)trace.dir);
+            &rate_dev->stats.timeout_count, false, 0, trace.status);
         break;
 
     case USB_STOR_NOTIFIER_DATA_CORRUPT:
-        rate_dev->stats.corrupt_count++;
+        /* 方向来源（BOT）：srb 优先；回退 nd->data_direction */
         trace.dir = srb ? (int)vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction)
                         : (nd ? (int)nd->data_direction : 0);
         trace.status = nd ? nd->status : 0;
-        if (trace.dir == VENDOR_LECHAO_USBD_DIR_READ)
-            rate_dev->stats.read_error_count++;
-        else if (trace.dir == VENDOR_LECHAO_USBD_DIR_WRITE)
-            rate_dev->stats.write_error_count++;
-        vendor_lechao_usbd_record_last_event_locked(rate_dev, srb, 0,
+        vendor_lechao_usbd_error_event_locked(rate_dev, srb, trace.dir,
             VENDOR_LECHAO_USBD_EVENT_DATA_CORRUPT,
-            0, trace.status, (u8)trace.dir);
-        vendor_lechao_usbd_event_push(rate_dev, srb, 0,
-            VENDOR_LECHAO_USBD_EVENT_DATA_CORRUPT,
-            0, trace.status, (u8)trace.dir);
+            &rate_dev->stats.corrupt_count, false, 0, trace.status);
         break;
 
     case USB_STOR_NOTIFIER_TRANSPORT_END:
@@ -919,11 +950,7 @@ int vendor_lechao_usbd_handle_event(struct notifier_block *nb,
         break;
 
     case USB_STOR_NOTIFIER_RESET:
-        rate_dev->stats.reset_count++;
-        vendor_lechao_usbd_record_last_event_locked(rate_dev, NULL, 0,
-            VENDOR_LECHAO_USBD_EVENT_RESET, 0, 0, VENDOR_LECHAO_USBD_DIR_NONE);
-        vendor_lechao_usbd_event_push(rate_dev, NULL, 0,
-            VENDOR_LECHAO_USBD_EVENT_RESET, 0, 0, VENDOR_LECHAO_USBD_DIR_NONE);
+        vendor_lechao_usbd_reset_event_locked(rate_dev);
         break;
 
     default:
@@ -1041,80 +1068,48 @@ int vendor_lechao_usbd_uas_handle_event(struct notifier_block *nb,
         break;
 
     case USB_STOR_NOTIFIER_TRANSPORT_ERROR:
-        rate_dev->stats.error_count++;
-        rate_dev->last_transport_error = true;
+        /* 方向来源（UAS）：nd->data_direction 优先，缺失/为 0 时回退 srb */
         trace.dir = (nd && nd->data_direction) ? (int)nd->data_direction
                     : (srb ? (int)vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction) : 0);
         trace.result = nd ? nd->result : 0;
-        if (trace.dir == VENDOR_LECHAO_USBD_DIR_READ)
-            rate_dev->stats.read_error_count++;
-        else if (trace.dir == VENDOR_LECHAO_USBD_DIR_WRITE)
-            rate_dev->stats.write_error_count++;
-        vendor_lechao_usbd_record_last_event_locked(rate_dev, srb, 0,
+        vendor_lechao_usbd_error_event_locked(rate_dev, srb, trace.dir,
             VENDOR_LECHAO_USBD_EVENT_TRANSPORT_ERROR,
-            (u32)trace.result, trace.result, (u8)trace.dir);
-        vendor_lechao_usbd_event_push(rate_dev, srb, 0,
-            VENDOR_LECHAO_USBD_EVENT_TRANSPORT_ERROR,
-            (u32)trace.result, trace.result, (u8)trace.dir);
+            &rate_dev->stats.error_count, true,
+            (u32)trace.result, trace.result);
         break;
 
     case USB_STOR_NOTIFIER_STALL:
-        rate_dev->stats.stall_count++;
+        /* 方向来源（UAS）：nd->data_direction 优先，回退 srb */
         trace.dir = (nd && nd->data_direction) ? (int)nd->data_direction
                     : (srb ? (int)vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction) : 0);
         trace.status = nd ? nd->status : 0;
-        if (trace.dir == VENDOR_LECHAO_USBD_DIR_READ)
-            rate_dev->stats.read_error_count++;
-        else if (trace.dir == VENDOR_LECHAO_USBD_DIR_WRITE)
-            rate_dev->stats.write_error_count++;
-        vendor_lechao_usbd_record_last_event_locked(rate_dev, srb, 0,
+        vendor_lechao_usbd_error_event_locked(rate_dev, srb, trace.dir,
             VENDOR_LECHAO_USBD_EVENT_STALL,
-            0, trace.status, (u8)trace.dir);
-        vendor_lechao_usbd_event_push(rate_dev, srb, 0,
-            VENDOR_LECHAO_USBD_EVENT_STALL,
-            0, trace.status, (u8)trace.dir);
+            &rate_dev->stats.stall_count, false, 0, trace.status);
         break;
 
     case USB_STOR_NOTIFIER_TIMEOUT:
-        rate_dev->stats.timeout_count++;
+        /* 方向来源（UAS）：nd->data_direction 优先，回退 srb */
         trace.dir = (nd && nd->data_direction) ? (int)nd->data_direction
                     : (srb ? (int)vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction) : 0);
         trace.status = nd ? nd->status : 0;
-        if (trace.dir == VENDOR_LECHAO_USBD_DIR_READ)
-            rate_dev->stats.read_error_count++;
-        else if (trace.dir == VENDOR_LECHAO_USBD_DIR_WRITE)
-            rate_dev->stats.write_error_count++;
-        vendor_lechao_usbd_record_last_event_locked(rate_dev, srb, 0,
+        vendor_lechao_usbd_error_event_locked(rate_dev, srb, trace.dir,
             VENDOR_LECHAO_USBD_EVENT_TIMEOUT,
-            0, trace.status, (u8)trace.dir);
-        vendor_lechao_usbd_event_push(rate_dev, srb, 0,
-            VENDOR_LECHAO_USBD_EVENT_TIMEOUT,
-            0, trace.status, (u8)trace.dir);
+            &rate_dev->stats.timeout_count, false, 0, trace.status);
         break;
 
     case USB_STOR_NOTIFIER_DATA_CORRUPT:
-        rate_dev->stats.corrupt_count++;
+        /* 方向来源（UAS）：nd->data_direction 优先，回退 srb */
         trace.dir = (nd && nd->data_direction) ? (int)nd->data_direction
                     : (srb ? (int)vendor_lechao_usbd_dir_to_u8(srb->sc_data_direction) : 0);
         trace.status = nd ? nd->status : 0;
-        if (trace.dir == VENDOR_LECHAO_USBD_DIR_READ)
-            rate_dev->stats.read_error_count++;
-        else if (trace.dir == VENDOR_LECHAO_USBD_DIR_WRITE)
-            rate_dev->stats.write_error_count++;
-        vendor_lechao_usbd_record_last_event_locked(rate_dev, srb, 0,
+        vendor_lechao_usbd_error_event_locked(rate_dev, srb, trace.dir,
             VENDOR_LECHAO_USBD_EVENT_DATA_CORRUPT,
-            0, trace.status, (u8)trace.dir);
-        vendor_lechao_usbd_event_push(rate_dev, srb, 0,
-            VENDOR_LECHAO_USBD_EVENT_DATA_CORRUPT,
-            0, trace.status, (u8)trace.dir);
+            &rate_dev->stats.corrupt_count, false, 0, trace.status);
         break;
 
     case USB_STOR_NOTIFIER_RESET:
-        rate_dev->stats.reset_count++;
-        vendor_lechao_usbd_record_last_event_locked(rate_dev, NULL, 0,
-            VENDOR_LECHAO_USBD_EVENT_RESET, 0, 0, VENDOR_LECHAO_USBD_DIR_NONE);
-        vendor_lechao_usbd_event_push(rate_dev, NULL, 0,
-            VENDOR_LECHAO_USBD_EVENT_RESET, 0, 0, VENDOR_LECHAO_USBD_DIR_NONE);
+        vendor_lechao_usbd_reset_event_locked(rate_dev);
         break;
 
     default:

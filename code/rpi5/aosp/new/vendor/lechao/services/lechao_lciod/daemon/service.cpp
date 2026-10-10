@@ -455,8 +455,12 @@ void IoServiceImpl::start_monitor() {
              * 本分片设备事件。 */
             int epfd = epoll_create1(EPOLL_CLOEXEC);
             if (epfd < 0) {
-                LC_ALOGE("monitor[%d]: epoll_create1 failed: %s", shard, strerror(errno));
-                return;
+                int saved = errno;
+                /* CXX-004：分片 worker 致命错误必须显式退出（与下方 epoll_wait
+                 * 致命错误一致），禁止静默 return 让线程消逝、进程"活着不工作"。
+                 * 进程非 oneshot（见 lechao_lciod.rc），init 按重启策略拉起。 */
+                LC_ALOGE("monitor[%d]: epoll_create1 failed: %s", shard, strerror(saved));
+                std::exit(1);
             }
 
             /* LCD-018：绝对时间对齐调度。epoll_wait 超时 50ms 作为固定节拍。 */
@@ -674,9 +678,10 @@ void IoServiceImpl::start_monitor() {
                     int saved = errno;
                     LC_ALOGE("monitor[%d]: epoll_wait failed: %s (epfd=%d)",
                              shard, strerror(saved), epfd);
-                    /* CXX-004：epoll 致命错误（EBADF 等）4 步退出——置线程不可
-                     * 达前以 ERROR 日志 + exit(1) 交 init 重启（进程为 oneshot，
-                     * 无 alive 标志/等待者需通知，ERROR+exit 即完整退出协议） */
+                    /* CXX-004：epoll 致命错误（EBADF 等）退出——置线程不可达前
+                     * 以 ERROR 日志 + exit(1) 交 init 重启（进程非 oneshot，
+                     * 见 lechao_lciod.rc，init 自动重启；本分片 worker 无 alive
+                     * 标志/等待者需通知，ERROR+exit 即完整退出协议） */
                     std::exit(1);
                 }
 

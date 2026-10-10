@@ -37,6 +37,15 @@ public:
     const std::string& path() const { return name_; }
     void cleanup() {
         if (name_.empty()) return;
+        // P2：rm -rf 前必须确认路径源于本类 mkdtemp 前缀（/tmp/lcview_test_），
+        // 防前缀污染/误删任意路径
+        if (name_.rfind("/tmp/lcview_test_", 0) != 0) {
+            std::fprintf(stderr,
+                         "TempDir: refuse to rm unexpected path: %s\n",
+                         name_.c_str());
+            name_.clear();
+            return;
+        }
         std::string cmd = "rm -rf '" + name_ + "'";
         ::system(cmd.c_str());
         name_.clear();
@@ -712,6 +721,86 @@ TEST(FileWriterWriteInvalidTest, RotateRenameFail_KeepsInvalidSize) {
     SUCCEED();
 }
 
+TEST(FileWriterWriteInvalidTest, BatchMidRotate_Deferred_NoTruncateCorruption) {
+    // P1 修复回归：批内第 2 条 invalid 触发轮转阈值时不得中途 rotateInvalid
+    // ——批次中途 flush+rename 会让 endBatch 整批回滚目标 mInvalidFilename 指向
+    // 轮转后新文件，rollbackFileTo(旧偏移) ftruncate 稀疏扩展破坏
+    // invalid_records.log，且本批 invalid 数据随 rename 持久化但计数被整批
+    // 丢弃。修复后轮转推迟到 endBatch 收口：本批数据先回滚（未落盘），
+    // 再轮转历史诊断，invalid_records.log 不被破坏、计数守恒。
+    TempDir dir;
+    // 预写 invalid_records.log 略低于 1MB 阈值：第 1 条写前不触发轮转，
+    // 写后累计超阈值，第 2 条写前触发（此时 mInvalidBatchStart 已登记）。
+    // 预写量 = 1MB-1 字节：第 1 条写 2B 后累计 = 1MB+1，恰超阈值（-10 过小
+    // 写 2B 后仍 < 1MB，轮转永不触发——除法/乘法阈值均不命中，P1 回归场景
+    // 无法建立）
+    const size_t preSize = 1024 * 1024 - 1;
+    prewriteFile(dir.path() + "/invalid_records.log", preSize);
+    FileWriterConfig cfg;
+    cfg.logDir = dir.path();
+    cfg.maxInvalidFileSizeMb = 1;
+    FileWriter writer(cfg);
+    ASSERT_EQ(writer.mInvalidSize, preSize);
+    auto schema = makeSchema(4, "e", {FieldType::INT64});
+    writer.openFile(4, schema);
+
+    // 失败注入一：事件文件指向 /dev/full —— 写（缓冲/即时）后 endBatch flush
+    // 必失败，触发事件文件整批回滚（dropBatchFlush 事件项）
+    writer.mFiles[4].stream.close();
+    writer.mFiles[4].currentFilename = "/dev/full";
+    writer.mFiles[4].stream.open("/dev/full", std::ios::app);
+    ASSERT_TRUE(writer.mFiles[4].stream.is_open());
+
+    uint8_t data[] = {0xDE, 0xAD};
+    writer.beginBatch();
+    // 第 1 条：写前未超阈值，登记 mInvalidBatchStart = preSize
+    writer.writeInvalid(data, sizeof(data), "inv1");
+    // 第 2 条：写前已超阈值，但批内已触碰 invalid 流 → 推迟轮转（不中途 rename）
+    writer.writeInvalid(data, sizeof(data), "inv2");
+    EXPECT_TRUE(writer.mPendingInvalidRotate);
+    // 事件文件写一行进缓冲（flush 失败由 endBatch 统一暴露）
+    writer.mFiles[4].stream << "{\"x\":1}\n";
+    writer.mBatchStarts[4] = 0;
+
+    // 失败注入二：invalid 流改指 /dev/full 使 endBatch invalid flush 必失败。
+    // 跨 libc 确定性（本用例曾仅 host 通过、bionic 3/3 挂）：不能在写前把
+    // invalid 流切 /dev/full —— libc++（bionic）basic_filebuf 首次 overflow 必
+    // 用 fwrite 冲刷 pending 字节（fstream:824；用户 setbuf/pubsetbuf 也拦不住，
+    // 因首 overflow 发生在写模式建立时），故 ~83B 行首写即对 /dev/full 失败，
+    // 触发 writeInvalid 本地恢复（reopen 真实文件、重试成功），失败被就地吞掉、
+    // 不推迟到 endBatch；libstdc++（host）则全程缓冲、到 endBatch 才暴露。
+    // 改为上面两条写先落真实文件（libc++ 首字节即时 + 余下缓冲；libstdc++ 全程
+    // 缓冲），此处 close 冲净到真实文件、再把流切 /dev/full 并触发一次写，令
+    // 批次尾 flush 触碰 /dev/full 失败。两 libc 一致走到 endBatch invalid flush
+    // 失败 → rollbackFileTo(mInvalidFilename, mInvalidBatchStart) 回滚真实文件 →
+    // 收口延迟轮转。
+    writer.mInvalidStream.close();               // 冲净本批 invalid 到真实文件
+    writer.mInvalidStream.open("/dev/full", std::ios::app);
+    ASSERT_TRUE(writer.mInvalidStream.is_open());
+    writer.mInvalidStream << ".";                // 触发写模式，使 flush 必失败
+
+    bool ok = writer.endBatch();
+    EXPECT_FALSE(ok);
+    // 事件 + invalid 各一次 flush 失败回滚
+    EXPECT_EQ(writer.dropCounters().dropBatchFlush, 2);
+
+    // 轮转已在 endBatch 收口执行：旧内容（回滚后的历史诊断，无零填充）进 p0
+    std::string date = writer.makeDateStr();
+    std::string rotated = dir.path() + "/invalid_records_" + date + "_p0.log";
+    struct stat st;
+    ASSERT_EQ(stat(rotated.c_str(), &st), 0);
+    EXPECT_EQ(st.st_size, static_cast<off_t>(preSize));
+    // 当前文件被轮转重置为空（修复前会被 ftruncate 稀疏扩展到 preSize）
+    struct stat stCur;
+    ASSERT_EQ(stat((dir.path() + "/invalid_records.log").c_str(), &stCur), 0);
+    EXPECT_EQ(stCur.st_size, 0);
+    EXPECT_EQ(writer.mInvalidSize, 0u);
+    // 计数守恒：本批 invalid 数据被回滚（未落盘），mPersist 不累计
+    EXPECT_EQ(writer.persistCounters().invalid, 0u);
+    EXPECT_EQ(writer.persistCounters().valid, 0u);
+    SUCCEED();
+}
+
 TEST(FileWriterWriteInvalidTest, WriteFail_RollbackTruncatesPartialLine) {
     // LCV-07：首写部分落盘后失败，恢复重开前须回退到写前偏移——
     // 否则残留半行与下一条追加粘连成非法 JSONL（与 writeLineFlush
@@ -952,6 +1041,10 @@ TEST(FileWriterWriteRecordTest, WriteFailure_RecoversByReopen) {
 }
 
 TEST(FileWriterWriteRecordTest, WriteFailure_RecoveryReopenFailDrops) {
+    // 恢复路径 reopen 失败 → DROPPING（不崩，故障可见）。
+    // root（adbd root）下 chmod 只读不拦截文件创建：currentFilename 指向
+    // "父级为普通文件"的路径（ENOTDIR，root 也绕不过，与 OpenFileFails_Drops
+    // 同手法）；流置 badbit 触发 writeLineFlush 恢复路径，reopen 必失败。
     TempDir dir;
     FileWriterConfig cfg;
     cfg.logDir = dir.path();
@@ -960,12 +1053,17 @@ TEST(FileWriterWriteRecordTest, WriteFailure_RecoveryReopenFailDrops) {
     auto schema = makeSchema(4, "e", {FieldType::INT64});
 
     writer.openFile(4, schema);
-    // 关闭流 + 删除目标文件并改只读目录？——直接关闭流制造 fail，
-    // 然后移除目录写权限使 reopen 失败
-    std::string fname = writer.mFiles[4].currentFilename;
-    writer.mFiles[4].stream.close();
-    unlink(fname.c_str());
-    chmod(dir.path().c_str(), 0500);  // 只读：reopen 失败
+    // 注入 reopen 失败：父级为普通文件（ENOTDIR）
+    std::string blocker = dir.path() + "/blocked";
+    {
+        std::ofstream f(blocker);
+        f << "x";
+    }
+    std::string badPath = blocker + "/x.jsonl";
+    writer.mFiles[4].currentFilename = badPath;
+    // setstate(badbit) 后 << 保持 bad()，触发 writeLineFlush 恢复路径
+    // （is_open 仍 true，writeRecord 不重走 openFile 分支）
+    writer.mFiles[4].stream.setstate(std::ios::badbit);
 
     struct lcview_record_hdr hdr = {};
     hdr.magic = LCVIEW_MAGIC;
@@ -976,9 +1074,11 @@ TEST(FileWriterWriteRecordTest, WriteFailure_RecoveryReopenFailDrops) {
 
     writer.writeRecord(schema, &hdr, fields, sizeof(fields));
 
-    chmod(dir.path().c_str(), 0755);
-    // reopen 失败 → DROPPING（不崩，故障可见）
-    SUCCEED();
+    // reopen 失败 → DROPPING（不崩，故障可见），计数与磁盘现场一致
+    EXPECT_EQ(writer.dropCounters().reopenFailed, 1);
+    EXPECT_EQ(writer.dropCounters().retryFailed, 0);
+    // 目标路径不可创建：无任何残留
+    EXPECT_NE(access(badPath.c_str(), F_OK), 0);
 }
 
 TEST(FileWriterWriteRecordTest, OpenFileFails_Drops) {

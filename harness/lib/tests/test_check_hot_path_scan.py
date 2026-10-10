@@ -67,6 +67,29 @@ class TestHotPathScan(unittest.TestCase):
     def _put(self, rel: str, content: str):
         (self.repo / rel).write_text(content)
 
+    def _git_repo(self, files: dict) -> Path:
+        """建临时 git 仓并落盘/提交给定文件，返回仓根（R8 依赖推导用）。
+
+        discover_hot_paths 依赖 git ls-files 列跟踪文件（禁全树遍历），依赖
+        推导测试须在真实 git 仓内进行；提交后文件方可被 ls-files 收录。
+        """
+        import subprocess
+        repo = Path(self._tmp.name) / "gitrepo"
+        repo.mkdir(exist_ok=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"],
+                       check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"],
+                       check=True)
+        for rel, content in files.items():
+            p = repo / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "t"],
+                       check=True)
+        return repo
+
     def test_clean_ok(self):
         # 清单文件合规：零违规
         self.assertEqual(chps.scan(self.repo), [])
@@ -117,12 +140,12 @@ class TestHotPathScan(unittest.TestCase):
         self.assertTrue(any("缺失" in o for o in out))
 
     def test_manifest_covers_import_dependencies(self):
-        # lib-14：清单须覆盖受守卫工具的 import 依赖文件（gen_manifest 直接
-        # import harness_lib/paths；selfcheck 打点/issue 链经 sys.path 注入
-        # import cdp_timing/cdp_parse/cdp_issue/cdp_paths 与 role_guard），
-        # 漏登记即依赖文件的 rglob/os.walk 漂移不在守卫覆盖面。
+        # R8：import 依赖面改由 AST/git 自动推导（不再手工登记 required 集合）。
+        # 受守卫工具真实 import 的库文件须在 discover_hot_paths 扫描面内。
         # 注：metrics.py 曾在此清单（7d41df8e24bf 方向 6 锁入），2026-09-15
         # 批次 26cacb40dfd6 摘除 metrics_rc 后不再由 selfcheck spawn，已移除。
+        repo = Path(__file__).resolve().parents[3]
+        discovered = set(chps.discover_hot_paths(repo))
         required = {
             "harness/lib/harness_lib.py",
             "harness/lib/paths.py",
@@ -133,17 +156,32 @@ class TestHotPathScan(unittest.TestCase):
             "harness/skills/cross-device/lib/python/cdp_paths.py",
             "harness/skills/cross-device/lib/python/cdp_issue.py",
         }
-        self.assertTrue(required.issubset(set(chps._HOT_PATHS)),
-                        f"清单缺依赖文件: {sorted(required - set(chps._HOT_PATHS))}")
+        self.assertTrue(required.issubset(discovered),
+                        f"依赖面推导漏文件: {sorted(required - discovered)}")
+
+    def test_import_dependency_auto_registered(self):
+        # R8：新增接线点 import 的依赖经 AST 自动纳入扫描面——临时 git 仓放
+        # check_config（根，import harness_lib）+ harness_lib（依赖），discover
+        # 须自动收录依赖，无需手工登记清单（新增依赖不再漂移漏检）。
+        repo = self._git_repo({
+            "harness/lib/check_config.py": "import harness_lib\n",
+            "harness/lib/harness_lib.py": "VALUE = 1\n",
+        })
+        discovered = set(chps.discover_hot_paths(repo))
+        self.assertIn("harness/lib/harness_lib.py", discovered,
+                      "check_config import 的 harness_lib 须自动纳入扫描面")
 
     def test_dependency_file_rglob_reported(self):
-        # lib-14 红灯：登记的依赖文件内出现裸 rglob → 判红（此前依赖文件
-        # 不在清单，漂移静默无感）
-        self._put("harness/lib/harness_lib.py",
-                  "def f():\n    for x in root.rglob('*'):\n        pass\n")
-        out = chps.scan(self.repo)
+        # R8 红灯：自动纳入的依赖文件内出现裸 rglob → 判红（此前依赖靠手工
+        # 登记，漏登记即漂移静默无感；现由 import 图自动纳入并受禁）
+        repo = self._git_repo({
+            "harness/lib/check_config.py": "import harness_lib\n",
+            "harness/lib/harness_lib.py":
+                "def f():\n    for x in root.rglob('*'):\n        pass\n",
+        })
+        out = chps.scan(repo)
         self.assertTrue(any("harness_lib.py" in o and "rglob" in o
-                            for o in out))
+                            for o in out), out)
 
 
 if __name__ == "__main__":

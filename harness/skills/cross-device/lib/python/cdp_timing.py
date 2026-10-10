@@ -44,7 +44,7 @@ import time
 from pathlib import Path
 
 from cdp_parse import batch_id_from_text
-from cdp_paths import log_apply_dir
+from cdp_paths import file_lock, log_apply_dir
 
 
 @contextlib.contextmanager
@@ -56,32 +56,12 @@ def _locked(path: Path):
     覆盖先写者（last-writer-wins），段被吞。flock 包住整个区间防丢段；
     非阻塞重试至多 10s，拿不到锁降级不加锁直写（打点属诊断面，防 mark 链
     卡死）；无 fcntl 平台（非 POSIX）直接降级。
+
+    实现（R4 去重）：抽取为 cdp_paths.file_lock 共享助手，本函数为薄包装
+    保持调用点名不变（测试与既有调用方仍用 cdp_timing._locked）。
     """
-    try:
-        import fcntl
-    except ImportError:
+    with file_lock(path):
         yield
-        return
-    lock_path = Path(f"{path}.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(lock_path, "a")
-    try:
-        deadline = time.monotonic() + 10.0
-        while True:
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except (BlockingIOError, OSError):
-                if time.monotonic() >= deadline:
-                    break  # 拿锁超时降级不加锁直写
-                time.sleep(0.05)
-        yield
-    finally:
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-        except (OSError, ValueError):
-            pass
-        fh.close()
 
 
 # 链路阶段名常量表：apply/verify 已知链路段。mark 表外名仅 stderr warn

@@ -35,10 +35,9 @@ cc_test {
         ":lechao_lcview_daemon_sources",
         ":lechao_lcview_device_sources",
     ],
-    header_libs: ["vendor.lechao.lcview_headers"],
+    header_libs: ["vendor.lechao.lcview_headers", "vendor_lechao_log_headers"],
     include_dirs: [
         "vendor/lechao/services/lechao_lcview/daemon",
-        "vendor/lechao/services/include",
     ],
     static_libs: [
         "libgmock",

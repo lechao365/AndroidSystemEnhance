@@ -12,9 +12,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from check_ioctl_headers import (compare, compare_abi_versions,  # noqa: E402
+                                 compare_abi_surface,
+                                 compare_abi_surface_pairs,
                                  compare_constants, compare_hdr_layouts,
                                  compare_offsetofs, compare_stats_field_order,
-                                 derive_offsetofs)
+                                 derive_offsetofs, extract_abi_enums,
+                                 extract_abi_macros, extract_abi_structs)
 
 
 class TestCompare(unittest.TestCase):
@@ -548,6 +551,157 @@ class TestCompareStatsFieldOrder(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
         self.assertEqual(rc, 1)
         self.assertIn("无 struct", msg)
+
+
+# ============================================================
+# R7：ABI surface 层（struct 成员/枚举值/数值宏，跨 typedef 别名等价）
+# ============================================================
+
+class TestCompareAbiSurface(unittest.TestCase):
+    """ABI 层等价比对：注释/空行/typedef 差异放行，字段/枚举/宏差异判红。"""
+
+    _BASE = (
+        "#define ABI_VERSION 4\n"
+        "#define PROTO_BOT 0\n"
+        "#define PROTO_UAS 1\n"
+        "#define MAGIC 'R'\n"
+        "#define BUF_SIZE 32\n"
+        "struct s {\n"
+        "    u64 a;\n"
+        "    u32 b;\n"
+        "    u8  c[2];\n"
+        "};\n"
+        "enum e {\n"
+        "    E_A = 0,\n"
+        "    E_B = 1,\n"
+        "};\n"
+    )
+
+    def _write(self, text):
+        f = tempfile.NamedTemporaryFile("w", suffix=".h", delete=False,
+                                        encoding="utf-8")
+        f.write(text)
+        f.close()
+        return Path(f.name)
+
+    def _cmp(self, kernel, mirror):
+        k, a = self._write(kernel), self._write(mirror)
+        try:
+            return compare_abi_surface(k, a)
+        finally:
+            k.unlink()
+            a.unlink()
+
+    def test_ok_absorbs_comments_blank_and_typedef(self):
+        # 注释/空行/typedef 写法差异（uint64_t vs u64、unsigned int vs u32、
+        # 0x0/0x52 vs 0/‘R’）不影响 ABI 判定 → 绿
+        mirror = (
+            "#define ABI_VERSION 4 /* 版本 */\n\n"
+            "#define PROTO_BOT 0x0\n"
+            "#define PROTO_UAS 1\n"
+            "#define MAGIC 0x52\n"
+            "#define BUF_SIZE 32\n"
+            "struct s {\n"
+            "\tuint64_t a;\n"
+            "\tunsigned int b;\n"
+            "\tunsigned char c[2];\n"
+            "};\n"
+            "enum e {\n"
+            "    E_A = 0,\n"
+            "    E_B,\n"          # 隐式递增等价显式 =1
+            "};\n"
+        )
+        rc, msg = self._cmp(self._BASE, mirror)
+        self.assertEqual(rc, 0)
+        self.assertIn("一致", msg)
+
+    def test_struct_field_type_swap_red(self):
+        # 同尺寸类型互换（u32↔s32）→ ABI 漂移判红
+        rc, msg = self._cmp(self._BASE, self._BASE.replace("u32 b;", "s32 b;"))
+        self.assertEqual(rc, 1)
+        self.assertIn("struct ABI 漂移", msg)
+
+    def test_struct_field_order_swap_red(self):
+        # 字段顺序互换 → ABI 漂移判红
+        swapped = self._BASE.replace("    u64 a;\n    u32 b;",
+                                     "    u32 b;\n    u64 a;")
+        rc, msg = self._cmp(self._BASE, swapped)
+        self.assertEqual(rc, 1)
+        self.assertIn("struct ABI 漂移", msg)
+
+    def test_struct_field_name_drift_red(self):
+        # 字段改名（同类型同序）→ ABI 漂移判红
+        rc, msg = self._cmp(self._BASE, self._BASE.replace("u32 b;", "u32 b2;"))
+        self.assertEqual(rc, 1)
+        self.assertIn("struct ABI 漂移", msg)
+
+    def test_struct_missing_on_mirror_red(self):
+        # 镜像缺 struct → 判红（单侧增删结构即 ABI 破坏）
+        rc, msg = self._cmp(self._BASE, "enum e {\n    E_A = 0,\n    E_B = 1,\n};\n")
+        self.assertEqual(rc, 1)
+        self.assertIn("struct", msg)
+
+    def test_enum_value_drift_red(self):
+        # 枚举值漂移（E_B 1→5）→ 判红
+        rc, msg = self._cmp(self._BASE, self._BASE.replace("E_B = 1", "E_B = 5"))
+        self.assertEqual(rc, 1)
+        self.assertIn("enum ABI 漂移", msg)
+
+    def test_enum_member_missing_red(self):
+        # 镜像缺枚举成员 → 判红
+        mirror = self._BASE.replace("    E_B = 1,\n", "")
+        rc, msg = self._cmp(self._BASE, mirror)
+        self.assertEqual(rc, 1)
+        self.assertIn("enum ABI 漂移", msg)
+
+    def test_macro_value_drift_red(self):
+        # 数值宏漂移（PROTO_BOT 0→1）→ 判红
+        rc, msg = self._cmp(self._BASE,
+                            self._BASE.replace("PROTO_BOT 0", "PROTO_BOT 1"))
+        self.assertEqual(rc, 1)
+        self.assertIn("宏 ABI 漂移", msg)
+
+    def test_macro_char_int_equivalent_ok(self):
+        # char 字面量 'R' 与等值整数 0x52 → 一致（数值口径）
+        rc, _ = self._cmp(self._BASE,
+                          self._BASE.replace("#define MAGIC 'R'",
+                                             "#define MAGIC 0x52"))
+        self.assertEqual(rc, 0)
+
+    def test_parse_fail_closed_red(self):
+        # 未知字段类型（void * 之外的不可归一分词）→ 解析失败 fail-closed 判红
+        bad = self._BASE.replace("    u32 b;\n", "    uintptr_t b;\n")
+        rc, msg = self._cmp(self._BASE, bad)
+        self.assertEqual(rc, 1)
+        self.assertIn("解析失败", msg)
+
+    def test_extract_abi_structs_members(self):
+        # 结构提取：成员（归一类型/名/数组后缀）与顺序
+        out = extract_abi_structs(
+            "struct s {\n u64 a;\n unsigned int b;\n u8 c[2];\n};\n")
+        self.assertEqual(out, {"s": [("u64", "a", ""), ("u32", "b", ""),
+                                     ("u8", "c", "[2]")]})
+
+    def test_extract_abi_enums_effective_values(self):
+        # 枚举有效值：显式 + 隐式递增
+        out = extract_abi_enums("enum e {\n A = 5,\n B,\n C = 9,\n};\n")
+        self.assertEqual(out, {"e": [("A", 5), ("B", 6), ("C", 9)]})
+
+    def test_extract_abi_macros_skips_function_and_empty(self):
+        # 函数式/空值/表达式宏不入；char/整数归一
+        out = extract_abi_macros(
+            "#define A 0x10\n#define B 'R'\n#define F(x) (x)\n"
+            "#define G\n#define H (1+2)\n")
+        self.assertEqual(out, {"A": "16", "B": "82"})
+
+    def test_abi_surface_pairs_missing_file_rc2(self):
+        # 文件缺失返 2（repo 无对应路径）
+        d = Path(tempfile.mkdtemp(prefix="ioctl_abi_surface_"))
+        try:
+            rc, _ = compare_abi_surface_pairs(d)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        self.assertEqual(rc, 2)
 
 
 if __name__ == "__main__":

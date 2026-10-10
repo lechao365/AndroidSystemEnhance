@@ -1,5 +1,7 @@
 import os
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -23,7 +25,9 @@ class TestParse(unittest.TestCase):
     def _cli(self, *argv):
         """main() 直调 + 角色环境注入（角色机器化）：按 --role 注入同名
         HARNESS_ROLE 环境变量（--gen-checksum 等无 --role 的 emit 侧命令
-        缺省注入 emit），不依赖本机 paths.conf 实际配置；调用后还原。"""
+        缺省注入 emit），不依赖本机 paths.conf 实际配置；调用后还原。
+        apply 角色追加 --root 指向干净 dev 临时仓——apply git 环境门禁
+        （H7）会读真实 cwd，测试须隔离本仓脏工作树。"""
         role = argv[argv.index("--role") + 1] if "--role" in argv else "emit"
         old = os.environ.get("HARNESS_ROLE")
         os.environ["HARNESS_ROLE"] = role
@@ -34,7 +38,67 @@ class TestParse(unittest.TestCase):
             else:
                 os.environ["HARNESS_ROLE"] = old
         self.addCleanup(_restore)
-        return cp.main(list(argv))
+        argv = list(argv)
+        if role == "apply" and "--root" not in argv:
+            argv += ["--root", self._clean_dev_root()]
+        return cp.main(argv)
+
+    def _make_git_repo(self, branch="dev", dirty=False):
+        """构造临时 git 仓（指定分支，可选脏工作树），供 apply 门禁测试。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+
+        def g(*args):
+            subprocess.run(["git", "-C", str(root), *args], check=True,
+                           capture_output=True, text=True, encoding="utf-8")
+        g("init", "-q")
+        g("symbolic-ref", "HEAD", f"refs/heads/{branch}")
+        g("config", "user.email", "t@example.com")
+        g("config", "user.name", "t")
+        g("config", "commit.gpgsign", "false")
+        (root / "README.md").write_text("init\n", encoding="utf-8")
+        g("add", "-A")
+        g("commit", "-qm", "init")
+        if dirty:
+            (root / "dirty.txt").write_text("x\n", encoding="utf-8")
+        return root
+
+    def _clean_dev_root(self):
+        """缓存干净 dev 临时仓路径（apply 门禁通过用）。"""
+        root = getattr(self, "_gate_root", None)
+        if root is None:
+            root = self._make_git_repo(branch="dev")
+            self._gate_root = root
+        return str(root)
+
+    def _apply_argv(self, root, path):
+        return ["--role", "apply", "--expect-base", "1a2b3c4d5e6f",
+                "--root", str(root), path]
+
+    def _run_apply_raw(self, root, text):
+        """apply 角色直调 cp.main（不经 _cli 的干净 root 注入），返回
+        (rc, stdout)，HARNESS_ROLE 显式置 apply。"""
+        import io
+        from contextlib import redirect_stdout
+        old = os.environ.get("HARNESS_ROLE")
+        os.environ["HARNESS_ROLE"] = "apply"
+
+        def _restore():
+            if old is None:
+                os.environ.pop("HARNESS_ROLE", None)
+            else:
+                os.environ["HARNESS_ROLE"] = old
+        self.addCleanup(_restore)
+        f = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
+                                        encoding="utf-8")
+        f.write(text)
+        f.close()
+        self.addCleanup(Path(f.name).unlink)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cp.main(self._apply_argv(root, f.name))
+        return rc, buf.getvalue()
 
     def test_parse_sv(self):
         b = cp.parse_batch(VALID_SV)
@@ -452,6 +516,55 @@ class TestParse(unittest.TestCase):
         self.assertEqual(cm.exception.code, 1)
         self.assertIn("ROLE_MISMATCH", err_buf.getvalue())
         self.assertIn("emit", err_buf.getvalue())
+
+    # ── H7：apply git 环境门禁（分支 dev / 工作树干净，破坏即判红）──────
+
+    def test_cli_apply_wrong_branch_exit_20(self):
+        # 破坏即判红：分支非 dev → 门禁拒（exit 20），输出含"非 dev"
+        root = self._make_git_repo(branch="main")
+        rc, out = self._run_apply_raw(root, VALID_SV)
+        self.assertEqual(rc, cp.EXIT_GIT_GATE)
+        self.assertIn("非 dev", out)
+        self.assertIn("error:", out)
+
+    def test_cli_apply_dirty_worktree_exit_20(self):
+        # 破坏即判红：dev 分支但工作树脏（untracked 亦计入）→ 门禁拒（exit 20）
+        root = self._make_git_repo(branch="dev", dirty=True)
+        rc, out = self._run_apply_raw(root, VALID_SV)
+        self.assertEqual(rc, cp.EXIT_GIT_GATE)
+        self.assertIn("工作树不干净", out)
+
+    def test_apply_git_gate_fail_closed_non_repo(self):
+        # fail-closed：非 git 目录（branch 命令失败）→ 拒（exit 20），
+        # 不得按空 stdout 放行
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        rc, out = self._run_apply_raw(tmp.name, VALID_SV)
+        self.assertEqual(rc, cp.EXIT_GIT_GATE)
+        self.assertIn("git branch 失败", out)
+
+    def test_apply_git_gate_clean_dev_ok(self):
+        # 正向：干净 dev 仓 → 门禁通过（exit 0），且 precheck 段不受影响
+        root = self._make_git_repo(branch="dev")
+        rc, _ = self._run_apply_raw(root, VALID_SV)
+        self.assertEqual(rc, cp.EXIT_OK)
+
+    def test_emit_role_skips_git_gate(self):
+        # emit 角色不跑 git 门禁（非 apply 侧；cwd 非 git 也不拒）
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        import io
+        from contextlib import redirect_stdout
+        f = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
+                                        encoding="utf-8")
+        f.write(VALID_SV)
+        f.close()
+        self.addCleanup(Path(f.name).unlink)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = self._cli("--role", "emit", "--root", tmp.name, f.name)
+        self.assertEqual(rc, cp.EXIT_OK)
+        self.assertNotIn("git", buf.getvalue())
 
     # ── CDP 批次 checksum（emit 生成 / apply 校验）────────────────────
 

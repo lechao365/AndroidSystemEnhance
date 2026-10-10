@@ -14,18 +14,18 @@
 # ============================================================
 
 import argparse
+import ast
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
 
-# 热路径检查器清单：selfcheck 每次调用并行 spawn 的治理脚本（方向 2）。
+# 热路径检查器根集：selfcheck 每次调用并行 spawn 的治理脚本（方向 2）。
 # 新增治理检查器须登记于此，否则守卫不覆盖（check_test_discipline 亦在内）。
-# 清单维护要求（lib-14）：spawn 检查器 import 的 harness/lib 与
-# cross-device/lib/python 模块会被真实加载执行，须一并登记（含打点链
-# 延迟 import 的 cdp_* 与其 re-export 的 harness/lib 主实现）；新增依赖
-# 文件时同步登记，否则该文件的 rglob/os.walk 漂移不在守卫覆盖面。
+# import 依赖面（lib-14）不再手工登记：discover_hot_paths 从本根集经 AST
+# import 图自动推导（R8），新增依赖文件自动纳入扫描，清单漂移静默无感消除。
 _HOT_PATHS = [
     "harness/lib/check_skill_refs.py",
     "harness/lib/check_config.py",
@@ -40,18 +40,15 @@ _HOT_PATHS = [
     "harness/lib/check_ruff.py",
     "harness/lib/check_host_tests.py",
     "harness/skills/cross-device/lib/python/gen_manifest.py",
-    # ── 受守卫工具的 import 依赖文件（lib-14，spawn 时真实加载）──
-    "harness/lib/harness_lib.py",          # gen_manifest import（日志/初始化）
-    "harness/lib/paths.py",                # gen_manifest import（profile 路径）
-    "harness/lib/cdp_paths.py",            # selfcheck 打点/issue 链（主实现）
-    "harness/lib/role_guard.py",           # cdp_parse/cdp_emit_precheck import
-    "harness/lib/commit_scope.py",         # check_commit_coverage import（scope 解析）
-    "harness/skills/cross-device/lib/python/cdp_timing.py",   # selfcheck 打点
-    "harness/skills/cross-device/lib/python/cdp_parse.py",    # cdp_timing import
-    "harness/skills/cross-device/lib/python/cdp_paths.py",    # re-export 垫片
-    "harness/skills/cross-device/lib/python/cdp_issue.py",    # selfcheck flake 登记
-    "harness/skills/cross-device/lib/python/cdp_receipt.py",  # check_commit_coverage import
 ]
+
+# import 依赖面推导的搜索范围（仓内可被 sys.path 注入加载的库目录）。
+# 仅这些目录下的模块可能被 spawn 检查器真实 import 执行；依赖推导只认
+# git ls-files 列出的**跟踪** py（CDP-DOD-002：不依赖 gitignore 产物）。
+_LIB_DIRS = (
+    "harness/lib/",
+    "harness/skills/cross-device/lib/python/",
+)
 
 # 禁令：全树遍历调用（rglob / os.walk）
 _BAN = [re.compile(r"\.rglob\s*\("), re.compile(r"os\.walk\s*\(")]
@@ -59,10 +56,93 @@ _BAN = [re.compile(r"\.rglob\s*\("), re.compile(r"os\.walk\s*\(")]
 _EXEMPT = "# GITLS-FALLBACK"
 
 
+def _tracked_py(repo: Path) -> dict[str, list[str]]:
+    """git ls-files 列库目录下跟踪 py → {模块基名（去 .py）: [相对路径...]}。
+
+    非 git 仓 / git 不可用 / 命令失败返回空 dict（调用方回落显式根集，不崩）。
+    同名模块可有多份物理文件（如 cdp_paths 主实现 + cross-device re-export
+    垫片，sys.path 先后决定实际加载者）——按基名映射到**全部**候选，扫描面
+    取并集，避免任一物理副本漂移静默漏检。
+    """
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo), "-c", "core.quotepath=false",
+             "ls-files", "*.py"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if r.returncode != 0:
+        return {}
+    out: dict[str, list[str]] = {}
+    for rel in (r.stdout or "").splitlines():
+        rel = rel.strip()
+        if not rel or not rel.startswith(_LIB_DIRS):
+            continue
+        out.setdefault(Path(rel).stem, []).append(rel)
+    return out
+
+
+def _imported_basenames(path: Path) -> set[str]:
+    """AST 提取文件的 import 基名（含延迟 import / importlib / __import__）。
+
+    覆盖形态：`import a.b`（取 b）、`from a.b import c`（取 b 与 c）、
+    `importlib.import_module("x")` / `__import__("x")`（运行时字符串名）。
+    解析失败（缺失/语法错）返回空集（保守不扩面，避免误伤）。
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return set()
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                names.add(a.name.split(".")[-1])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                names.add(node.module.split(".")[-1])
+            for a in node.names:
+                names.add(a.name.split(".")[-1])
+        elif isinstance(node, ast.Call):
+            fn = node.func
+            fname = (fn.attr if isinstance(fn, ast.Attribute)
+                     else fn.id if isinstance(fn, ast.Name) else "")
+            if fname in ("import_module", "__import__") and node.args:
+                arg = node.args[0]
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    names.add(arg.value.split(".")[-1])
+    return names
+
+
+def discover_hot_paths(repo: Path) -> list[str]:
+    """扫描面 = 显式根集（_HOT_PATHS）+ AST 推导的仓内 import 依赖面。
+
+    从根集各文件出发，按 import 图递归解析到库目录下跟踪 py（git ls-files
+    列跟踪文件，禁全树 rglob/os.walk）；依赖文件因此自动纳入守卫，新增依赖
+    无需手工登记。非 git 仓（单测临时目录）无法推导时仅返显式根集。
+    """
+    ordered = list(_HOT_PATHS)
+    seen = set(ordered)
+    table = _tracked_py(repo)
+    if not table:
+        return ordered
+    queue = [repo / rel for rel in ordered if (repo / rel).is_file()]
+    while queue:
+        cur = queue.pop()
+        for base in _imported_basenames(cur):
+            for rel in table.get(base, ()):
+                if rel not in seen:
+                    seen.add(rel)
+                    ordered.append(rel)
+                    queue.append(repo / rel)
+    return ordered
+
+
 def scan(repo: Path) -> list[str]:
     """返回违规明细（空 = 合规）。"""
     findings: list[str] = []
-    for rel in _HOT_PATHS:
+    for rel in discover_hot_paths(repo):
         p = repo / rel
         if not p.is_file():
             findings.append(f"{rel}: 清单文件缺失（热路径守卫覆盖断链）")

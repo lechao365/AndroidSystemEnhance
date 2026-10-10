@@ -106,6 +106,47 @@ class TestCheckSkillRefs(unittest.TestCase):
         # 非目标后缀不纳入（.txt 不在 .md/.py/.sh/.yaml/.yml/.conf 白名单）
         self.assertNotIn("docs/design/notes.txt", rels)
 
+    def test_iter_scan_targets_includes_toplevel_docs(self):
+        # R8：默认扫描纳入顶层治理文档（AGENTS.md/根 README.md/
+        # harness/README.md/harness/rules/harness/reference），此前不在门禁内
+        self._mk("harness/skills/demo/SKILL.md", "ok\n")
+        self._mk("AGENTS.md", "ok\n")
+        self._mk("README.md", "ok\n")
+        self._mk("harness/README.md", "ok\n")
+        self._mk("harness/rules/known-issues.md", "ok\n")
+        self._mk("harness/reference/build-reference.md", "ok\n")
+        rels = [t.relative_to(self.tmp).as_posix()
+                for t in ckr.iter_scan_targets(None)]
+        for r in ("AGENTS.md", "README.md", "harness/README.md",
+                  "harness/rules/known-issues.md",
+                  "harness/reference/build-reference.md"):
+            self.assertIn(r, rels)
+
+    def test_toplevel_doc_dangling_red(self):
+        # R8 红灯：顶层治理文档（AGENTS.md）含悬空引用 → 进扫描面并判红
+        self._mk("AGENTS.md", "[gone](harness/rules/not-exist.md)\n")
+        self.assertEqual(self._scan("AGENTS.md"),
+                         ["harness/rules/not-exist.md"])
+
+    def test_main_toplevel_dangling_red(self):
+        # R8 门禁红灯：默认扫描根下顶层文档悬空 → main() 判红 exit 1
+        self._mk("AGENTS.md", "[gone](harness/rules/not-exist.md)\n")
+        old_argv = sys.argv
+        sys.argv = ["check_skill_refs"]
+        try:
+            rc = ckr.main()
+        finally:
+            sys.argv = old_argv
+        self.assertEqual(rc, 1)
+
+    def test_external_workspace_paths_exempt(self):
+        # R8：AOSP 工作区相对路径与外部裸文件名（设备/SD 产物）豁免——
+        # reference 文档描述 $AOSP_ROOT/SD 产物非本仓资产，不判悬空
+        self._mk("harness/reference/r.md",
+                 "见 `device/brcm/rpi5/boot/config.txt`、`config.txt`、"
+                 "`cmdline.txt` 与 `rpi5-mkimg.sh`\n")
+        self.assertEqual(self._scan("harness/reference/r.md"), [])
+
     def test_command_file_at_ref(self):
         self._mk("harness/skills/demo/SKILL.md", "x\n")
         self._mk("harness/skills/demo/run.py", "x\n")

@@ -2,15 +2,17 @@
 # publish-main-base：基线发布编排器末两步（candidate 登记 + dev → main squash promote）。
 # 前置：最新收据 result∈{pass,skip} 且 最近内容提交或其父(short=12) == verified_commit；
 #       known-issues 门禁无条件执行（实现下移 baseline_register.py check-issues）：
-#       先判登记畸形（validate_issue 有红即拒），--task 缺省时从 status 非 fixed 条目
-#       的 task 集合自动推断，再判目标任务下存在 origin=introduced 或 blocking 且
-#       status!=fixed 的问题即拒。门禁不再依赖显式 task。
+#       先判登记畸形（validate_issue 有红即拒），--task 缺省时从 status 非终态
+#       (fixed/wontfix)条目的 task 集合自动推断，再判目标任务下存在
+#       origin=introduced 或 blocking 且 status 非终态(fixed/wontfix) 的问题即拒。
+#       门禁不再依赖显式 task。
 # --check（= --check-only）：干跑前置校验，失败时输出 check_class=<分类> 供编排分流：
 #   NEED_VERIFY（存在未验证改动→进验证路径）/ NO_RECEIPT（无收据）/ RECEIPT_FAIL（收据
 #   result 非 pass/skip）/ DOC_VIOLATION（文档提交夹带非 docs/ 或 prepare 前已存在文档提交）/
 # KI_BLOCKED（known-issues 门禁）。prepare/promote 模式分类行仅提示不阻断既有行为。
 # promote 收紧：最新收据须 result=pass 且 verify_mode=board；dev 相对 origin/main
-# 无 code/ 改动时豁免放行并 warn，否则 RECEIPT_FAIL 拒绝。
+# 无 code/ 改动时豁免放行并 warn（no-code-change 豁免，同 SKILL.md 前置条件），
+# 否则 RECEIPT_FAIL 拒绝。
 # KIGATE：门禁结论四值——pass（显式 --task 通过）/ inferred（缺省推断唯一 task 通过）/
 # empty-registry（无活跃任务放行）/ not-run（门禁未执行兜底），随 add-candidate
 # --ki-gate 写入 candidate evidence（known-issues 证据链）。
@@ -283,9 +285,10 @@ BH_SHORT=$(git rev-parse --short=12 "$BH")
 
 # ── known-issues 门禁（prepare/promote/check-only 共用，无条件执行）────────
 # 门禁实现下移 baseline_register.py check-issues：先判畸形登记（validate_issue
-# 有红即拒），再判目标任务 origin=introduced/blocking 且 status!=fixed 即拒。
-# --task 缺省时由 check-issues 自动推断：status 非 fixed 条目 task 集合唯一→采用
-# （KIGATE=inferred）、多值→拒、空集→empty-registry 放行（无活跃任务无冲突对象）。
+# 有红即拒），再判目标任务 origin=introduced/blocking 且 status 非终态
+# (fixed/wontfix) 即拒。
+# --task 缺省时由 check-issues 自动推断：status 非终态 (fixed/wontfix) 条目
+# task 集合唯一→采用（KIGATE=inferred）、多值→拒、空集→empty-registry 放行（无活跃任务无冲突对象）。
 # KIGATE 记门禁结论（pass/inferred/empty-registry/not-run），随 add-candidate
 # --ki-gate 写入 candidate 证据链
 KIGATE="not-run"

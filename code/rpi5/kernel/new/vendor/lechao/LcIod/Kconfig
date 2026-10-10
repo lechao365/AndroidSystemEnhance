@@ -1,9 +1,11 @@
 config VENDOR_LECHAO_USBD
 	bool "Lechao USB Storage Rate Monitor"
+	depends on VENDOR_LECHAO
 	depends on USB_STORAGE=y
+	depends on USB_UAS=y
 	select LCVIEW
 	default y
 	help
 	  Monitor transfer rates for USB mass-storage devices.
-	  Provides per-device statistics via character devices under
-	  /dev/vendor_lechao_usbd/.
+	  Provides per-device statistics via character devices named
+	  /dev/vendor_lechao_usbdN (N = 0..15).

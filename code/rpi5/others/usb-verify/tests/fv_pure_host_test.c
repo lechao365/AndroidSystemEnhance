@@ -6,7 +6,8 @@
  *   1) fv_parse_event_type — 事件名↔内核枚举映射契约
  *   2) fv_check_stats       — 统计阈值断言逻辑（含 error/reset）
  *   3) fv_check_event       — 事件类型匹配断言
- *   4) output_check_report  — 断言报告汇总（failed 计数）
+ *   4) output_check_report  — 断言报告汇总（failed 计数 / 返回码契约）
+ *   5) output_degrade_check — check degrade 断言失败返回非零（CXX-004）
  *
  * 运行: make test（在 tests/ 目录下），退出码 0 全过。
  * 接入: harness/lib/check_host_tests.py（R-18 P5 方向 6）。
@@ -171,14 +172,16 @@ static void test_check_event(void)
 
 /*
  * test_output_report — 断言报告汇总输出逻辑
- * 验证 output_check_report 对 failed>0 报告返回 0（输出层不判定成败，
- * 成败由 fv_check_stats/fv_check_event 返回码承载——契约回归保护）。
+ * 验证 output_check_report 返回码契约：failed==0 → 0；
+ * failed>0 → -1（CXX-004：断言失败必须由返回码可见，供 main.c
+ * 置 FV_ERR_CHECK，禁止打印 FAIL 却返回成功码致 CI 误判 PASS）。
  */
 static void test_output_report(void)
 {
     struct fv_check_report report;
     memset(&report, 0, sizeof(report));
 
+    /* 全通过（无失败项）→ 返回 0 */
     CHECK(output_check_report(&report, 0) == 0);
     CHECK(output_check_report(&report, 1) == 0);
 
@@ -188,7 +191,53 @@ static void test_output_report(void)
     e->expected = 5;
     e->passed = 0;
     report.failed = 1;
-    CHECK(output_check_report(&report, 0) == 0);
+    /* 存在失败断言 → 必须返回非零（文本 / JSON 两分支一致） */
+    CHECK(output_check_report(&report, 0) == -1);
+    CHECK(output_check_report(&report, 1) == -1);
+}
+
+/*
+ * test_degrade_check_fail_nonzero — check degrade 断言失败须返回非零
+ * CXX-004 破坏即判红用例：任一降级断言未达标时 output_degrade_check
+ * 必须返回 -1，main.c 据此置 FV_ERR_CHECK 退出码。此前恒返回 0，
+ * 断言失败仅打印 FAIL 而退出码为 0（脚本/CI 误判 PASS 的真 bug）。
+ * 覆盖三项断言（rate_drop / latency_rise / stall）的达标/未达标两态。
+ */
+static void test_degrade_check_fail_nonzero(void)
+{
+    struct vendor_lechao_usbd_stats stats;
+    struct fv_command cmd;
+
+    memset(&stats, 0, sizeof(stats));
+    memset(&cmd, 0, sizeof(cmd));
+    /* 无阈值 → 无断言 → 返回 0 */
+    CHECK(output_degrade_check(&stats, &cmd, 0) == 0);
+
+    /* stall_count 未达标 → 非零；达标 → 0 */
+    stats.stall_count = 1;
+    cmd.stall_ge = 5;
+    CHECK(output_degrade_check(&stats, &cmd, 0) == -1);
+    stats.stall_count = 5;
+    CHECK(output_degrade_check(&stats, &cmd, 0) == 0);
+
+    /* rate_drop (peak-current) 未达标 → 非零；达标 → 0 */
+    memset(&stats, 0, sizeof(stats));
+    memset(&cmd, 0, sizeof(cmd));
+    stats.peak_rate = 100;
+    stats.current_rate = 90; /* drop = 10 */
+    cmd.rate_drop_ge = 50;
+    CHECK(output_degrade_check(&stats, &cmd, 1) == -1);
+    cmd.rate_drop_ge = 10;
+    CHECK(output_degrade_check(&stats, &cmd, 1) == 0);
+
+    /* latency_rise 未达标 → 非零；达标 → 0 */
+    memset(&stats, 0, sizeof(stats));
+    memset(&cmd, 0, sizeof(cmd));
+    stats.last_transport_latency_ns = 100;
+    cmd.latency_rise_ge = 500;
+    CHECK(output_degrade_check(&stats, &cmd, 1) == -1);
+    cmd.latency_rise_ge = 100;
+    CHECK(output_degrade_check(&stats, &cmd, 1) == 0);
 }
 
 /*
@@ -240,6 +289,7 @@ int main(void)
     test_check_stats();
     test_check_event();
     test_output_report();
+    test_degrade_check_fail_nonzero();
     test_output_event_degrade();
 
     if (g_fail) {

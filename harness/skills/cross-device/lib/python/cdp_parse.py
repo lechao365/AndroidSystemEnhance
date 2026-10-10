@@ -12,12 +12,14 @@
 退出码: 0 通过 / 1 checksum 不符(篡改/损坏) / 3 参数错误·文件不可读或非 UTF-8
         / 11 结构错误(含未知行) / 12 空批 / 14 三标签缺失
         / 15 base 非法 / 16 预算超限(>500 或 <50) / 17 验收规则违规 / 18 base 不匹配
+        / 20 apply git 环境门禁(分支非 dev/工作树不干净/git 命令失败)
 角色差异: validate_batch 恒返回原始判定码；降级（apply 仅对 17 → WARN）由
 main() 依据 SOFT_ERRORS + role 统一处理（16/18 双角色 blocking；19 引号
 违规仅 emit 角色校验；1 checksum 不符双角色 blocking——防传输篡改）。
 """
 import hashlib
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,9 +64,15 @@ EXIT_BUDGET = 16
 EXIT_ACCEPTANCE = 17
 EXIT_BASE_MISMATCH = 18
 EXIT_QUOTE = 19
+EXIT_GIT_GATE = 20
 
 # 仅 17 在 apply 角色降级（spec §4.3）；16/1 不降级
 SOFT_ERRORS = {EXIT_ACCEPTANCE}
+
+# apply 侧允许的编辑分支（H7 回归）：批次编辑只落 dev 分支，防在 main/
+# 其他分支上误 apply 致基线污染——分支判定与工作树干净判定由解析器承接
+# （原 cdp_apply_precheck 已 DEPRECATED 且无调用方）。
+_ALLOWED_APPLY_BRANCHES = ("dev",)
 
 
 @dataclass
@@ -303,10 +311,43 @@ def _emit_precheck_mark():
         pass
 
 
+def _git(root, *args):
+    """git 包装：-c core.quotepath=false 防非 ASCII 路径被八进制转义。"""
+    return subprocess.run(["git", "-c", "core.quotepath=false",
+                           "-C", str(root), *args],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=120)
+
+
+def apply_git_gate(root=None):
+    """apply 侧 git 环境门禁（H7 回归）：分支须为 dev、工作树干净。
+
+    返回 (ok, reason)。fail-closed——git 命令失败（非零退出）不得按空
+    stdout 放行，显式检查 returncode 即拒。root 缺省 cwd（生产从仓库根
+    执行），测试可经 --root 注入隔离真实仓库状态。
+    """
+    base = Path(root) if root else Path.cwd()
+    br = _git(base, "branch", "--show-current")
+    if br.returncode != 0:
+        return False, "git branch 失败（分支不可判，拒绝编辑）"
+    branch = br.stdout.strip()
+    if branch not in _ALLOWED_APPLY_BRANCHES:
+        return False, (f"当前分支 {branch!r} 非 "
+                       f"{'/'.join(_ALLOWED_APPLY_BRANCHES)}（apply 仅限 dev "
+                       "分支编辑）")
+    st = _git(base, "status", "--porcelain")
+    if st.returncode != 0:
+        return False, "git status 失败（工作树状态不可判，拒绝编辑）"
+    if st.stdout.strip():
+        return False, "工作树不干净（未提交改动将干扰批次编辑）"
+    return True, ""
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help"):
-        print("用法: cdp_parse.py --role emit|apply [--expect-base <12hex>] <批次文件>")
+        print("用法: cdp_parse.py --role emit|apply [--expect-base <12hex>] "
+              "[--root <仓库根>] <批次文件>")
         print("      cdp_parse.py --gen-checksum <批次文件>"
               "（emit 产批收尾：插入/刷新 checksum 行后整批输出）")
         return 0
@@ -326,7 +367,7 @@ def main(argv=None):
         sys.stdout.write(out if out.endswith("\n") else out + "\n")
         return EXIT_OK
     # 手工解析参数：缺失参数统一 exit 3（argparse 默认 exit 2，不符合契约表）
-    role, expect, path = "emit", None, None
+    role, expect, path, root = "emit", None, None, None
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -336,6 +377,11 @@ def main(argv=None):
             continue
         if a == "--expect-base" and i + 1 < len(argv):
             expect = argv[i + 1]
+            i += 2
+            continue
+        if a == "--root" and i + 1 < len(argv):
+            # 仓库根（apply git 门禁 cwd）；生产缺省 cwd，测试注入隔离真实仓
+            root = argv[i + 1]
             i += 2
             continue
         if a.startswith("--"):
@@ -348,7 +394,8 @@ def main(argv=None):
         print(f"error: 多余参数 {a}")
         return EXIT_ARGS
     if role not in ("emit", "apply") or path is None:
-        print("error: 用法: cdp_parse.py --role emit|apply [--expect-base <12hex>] <批次文件>")
+        print("error: 用法: cdp_parse.py --role emit|apply [--expect-base "
+              "<12hex>] [--root <仓库根>] <批次文件>")
         return EXIT_ARGS
     # 角色机器化门禁：--role 即设备角色（emit 设备自检产批 / apply 设备
     # 解析执行），参数解析后、副作用发生前拦截跨设备误跑
@@ -367,6 +414,14 @@ def main(argv=None):
     if code != EXIT_OK and not softened:
         # 失败路径不打印 batch_id/mode（空批会打印空串误导上层）
         return code
+    # H7：apply git 环境门禁（分支须 dev、工作树干净）——机器化承接原
+    # cdp_apply_precheck（已 DEPRECATED 无调用方）的两项判定，纳入实际
+    # apply 入口，避免退化为人工纪律；fail-closed，拒编辑（exit 20）
+    if role == "apply":
+        ok, reason = apply_git_gate(root)
+        if not ok:
+            print(f"error: {reason}（apply git 环境门禁，exit {EXIT_GIT_GATE}）")
+            return EXIT_GIT_GATE
     if not parse_batch(text).checksum:
         # 旧格式批次无 checksum 行：warn 兼容放行（新批次 emit 侧经
         # --gen-checksum 生成，apply 侧存在即校验）

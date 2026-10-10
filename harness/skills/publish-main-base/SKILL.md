@@ -32,7 +32,7 @@ sync-code-to-doc**——不复制任何子 skill 的实现逻辑。
   verify_mode=board」一致
 - known-issues 门禁：promote 不强制 `--task`（门禁无条件执行，缺省由
   check-issues 推断唯一活跃任务，推断失败即拒）；目标任务下存在
-  origin=introduced 或 blocking 且 status!=fixed 的问题即拒
+  origin=introduced 或 blocking 且 status 非终态 (fixed/wontfix) 的问题即拒
 - package 硬门禁（批次 ff33f92060ac 方向 3）：dev 相对 origin/main 动过 code/
   且 candidate `package_result` 非 PASS 即阻断晋升——PASS 仅由 ws_package
   打包证据（script_rc=0）产生；`evidence_scope=no-code-change`（无代码改动）

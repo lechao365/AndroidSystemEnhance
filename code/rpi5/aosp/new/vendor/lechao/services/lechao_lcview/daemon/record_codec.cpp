@@ -7,8 +7,9 @@
 //       INT32/FLOAT: 4 字节定长
 //       INT64:       8 字节定长
 //       STRING/BINARY: 2 字节小端长度前缀 + 变长数据
-//   字节序契约（LCV-02）：主机序裸 memcpy，事实小端（ARM64 LE），
-//   编译期守卫与完整契约见 lcview_events.h，禁止单侧改转换。
+//   字节序契约（LCV-02）：显式小端——多字节长度/值一律经 readLe16/readLe32
+//   等显式转换（定义见 record_codec.h），不依赖宿主字节序；完整契约与大端
+//   编译守卫见 lcview_events.h。改动不得改变现有小端字节结果。
 //   边界防护：所有长度读取均先校验剩余字节，杜绝越界读（CXX-002）。
 // ============================================================
 
@@ -56,8 +57,7 @@ FieldDecodeResult decodeRecordField(const uint8_t** ptr, const uint8_t* end,
             out->valueLen = 0;  // 长度前缀缺失（未读到长度）
             return FieldDecodeResult::kTruncated;
         }
-        uint16_t flen;
-        memcpy(&flen, p, 2);
+        uint16_t flen = readLe16(p);
         p += 2;
         if ((size_t)(end - p) < flen) {
             out->type = type;

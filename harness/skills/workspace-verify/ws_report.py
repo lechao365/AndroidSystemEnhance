@@ -296,8 +296,9 @@ def _resolve_package(package_arg, batch_id):
     harness/log/workspace-verify/package-<batch_id>.json（ws_package 默认
     落盘路径，与 baseline_register 旧探测同源）。证据内嵌随收据入库可追溯，
     不再依赖 gitignore 域文件（本批意图 1）。
-    返回 (package_json_str, err)：显式路径缺失/非法返 err（调用方拒写）；
-    自动探测缺失/非法仅 warn 降级返空（打包证据非本批必产，不阻断主流程）。
+    返回 (package_json_str, err)：显式路径缺失/非法/跨批（batch_id 与收据
+    不一致）返 err（调用方拒写）；自动探测缺失/非法/跨批仅 warn 降级返空
+    （打包证据非本批必产，不阻断主流程）。
     """
     target = (package_arg or "").strip()
     explicit = bool(target)
@@ -334,6 +335,18 @@ def _resolve_package(package_arg, batch_id):
         return "", None
     if not (data.get("run_id") or "").strip():
         msg = "--package-file 缺 run_id（打包产物身份缺失），拒绝内嵌"
+        if explicit:
+            return "", msg
+        print(f"warn: {msg}（打包证据缺省不内嵌）", file=sys.stderr)
+        return "", None
+    # 跨批采信防线（provenance 失真）：证据自身 batch_id 须与本收据 batch_id
+    # 一致（自动探测按 package-<batch_id>.json 命名天然满足；显式路径可指到
+    # 上一批证据）。不一致即拒内嵌（显式）/降级不内嵌（探测）——内嵌证据缺失
+    # 时 baseline_register 推导 package_result=UNKNOWN，不得伪造 PASS。
+    ev_batch = (data.get("batch_id") or "").strip()
+    if ev_batch and batch_id and ev_batch != batch_id:
+        msg = (f"--package-file 打包证据 batch_id={ev_batch} 与本收据 "
+               f"{batch_id} 不一致（跨批证据），拒绝内嵌")
         if explicit:
             return "", msg
         print(f"warn: {msg}（打包证据缺省不内嵌）", file=sys.stderr)
@@ -629,20 +642,44 @@ def _sanitize(text: str) -> str:
     return text
 
 
+# 方向编号"边界"单点定义（CDP-DOD-003）：编号后紧跟空白 / ) ） 、 / 句点 .
+# （后不接数字，排除小数 1.5）/ 。任一即认。计数与正文自报三态校验共用同一
+# 边界，消除旧版计数 -\s*方向\d+\s*: 与提取 - 方向\d+:\s*(.*) 的不一致
+#（多空格行计数达标却漏三态校验，门禁被静默绕过）。
+_DIRECTION_BOUNDARY = r"\s|[)）、]|\.(?!\d)|。"
+
+
+# 方向编号标记：数字后带边界，前置负断言排除小数小数位（1.5 的 5）与紧邻
+# 数字串。内容内嵌的"9 处"虽成标记，但不在 1..k 连续链上不计；"15s" 后接
+# 字母非边界亦不计。
+_DIRECTION_MARK_RE = re.compile(
+    rf"(?<![\d.])(\d+)(?={_DIRECTION_BOUNDARY})")
+# 连续编号链起点：编号 1 须位于行首或句号/分号之后（并满足编号边界）。
+# 不锚定起点则单方向文本"验证 1 处"（1 在句中）会被误计为方向 1，凭空要求
+# 逐方向自报。
+_DIRECTION_START_RE = re.compile(
+    rf"(?:^|[。；])\s*1(?={_DIRECTION_BOUNDARY})")
+# 收据正文逐方向自报行：- 方向<N>: <三态自报>（容忍多个空格与全/半角冒号）。
+_DIRECTION_REPORT_RE = re.compile(
+    r"-\s*方向\s*(\d+)\s*[:：]\s*(.*)$", re.M)
+
+
 def _direction_count(direction):
-    """批次方向条目数：方向文本形如"1 xxx 2 yyy"或"1) xxx 2) yyy"/
-    "1、xxx 2、yyy"（编号后空白/右括号/顿号/句点任一均识别）。只认从 1 起
-    的最长连续编号前缀（内容内偶发的数字如"9 处""15s""84 行"不进入编号集，
-    不干扰计数）。编号识别分两分支：
-      - 强后缀（后跟 ) 、 . 。）：编号前仅需词边界（\\b），兼容实测 CDP 批次
-        "1) xxx 2) yyy" 连续编号（2 前无句号分隔，旧正则漏识别致 n=0 恒
-        放行、CDP-DOD-003 门禁失效）；
-      - 弱后缀（后跟空白）：编号前须行首/句号/分号（排除"验证 1 处"等中文
-        计数数字被误当成方向编号）。
+    """批次方向条目数（CDP-DOD-003 逐方向自报门禁的 n）。
+
+    只认从 1 起的最长连续编号链：编号后须带边界（空白/右括号/顿号/句点/句号），
+    编号前语境分两类——强语境（行首或句号/分号后）的 1 才可作链起点，其后
+    连续号（空格分隔如契约示例"1 xxx 2 yyy 3 zzz"）跟在 1 后即认。据此：
+      - 空格分隔连续编号正确计数（旧弱后缀要求编号前为 ^/。/；，中间的 2/3
+        前是空格故漏计，契约示例仅计为 1）；
+      - 小数不误报（1.5s 到 2.5s 因句点后接数字非边界、小数位前置负断言全不计）；
+      - 中文计数"9 处""15s"不误判（15s 后接字母非边界；9 不在 1..k 链上）；
+      - 句中数字"验证 1 处"非链起点，计数 0 不误报。
     """
-    nums = {int(m.group(1) or m.group(2)) for m in
-            re.finditer(r"\b(\d+)(?=[)）、.。])|(?:^|[。；])\s*(\d+)(?=\s)",
-                        direction or "")}
+    text = direction or ""
+    if not _DIRECTION_START_RE.search(text):
+        return 0
+    nums = {int(m.group(1)) for m in _DIRECTION_MARK_RE.finditer(text)}
     n = 0
     while (n + 1) in nums:
         n += 1
@@ -651,8 +688,9 @@ def _direction_count(direction):
 
 def _direction_report_count(body):
     """收据正文逐方向自报条数：每条形如"- 方向<N>: ..."（CDP-DOD-003
-    约定，与批次方向编号对应；N 不必连续，缺号即被视为未自报该方向）。"""
-    return len(re.findall(r"-\s*方向\d+\s*:", body or ""))
+    约定，与批次方向编号对应；N 不必连续，缺号即被视为未自报该方向）。
+    与三态提取共用 _DIRECTION_REPORT_RE，消除计数/校验正则不一致。"""
+    return len(_DIRECTION_REPORT_RE.findall(body or ""))
 
 
 def _enforce_direction_reports(direction, body_path):
@@ -684,9 +722,11 @@ def _enforce_direction_reports(direction, body_path):
               file=sys.stderr)
         return 2
     # 方向 2：三态校验——每条自报须以 完成/部分/拒绝 之一开头，拒绝须带
-    # 理由；静默降级（无三态声明）判红，防"写了方向号但没自报完成度"
-    reports = re.findall(r"- 方向\d+:\s*(.*)$", text, re.M)
-    for i, rep in enumerate(reports, 1):
+    # 理由；静默降级（无三态声明）判红，防"写了方向号但没自报完成度"。
+    # 与 _direction_report_count 共用 _DIRECTION_REPORT_RE：多空格行计数达标
+    # 即被提取校验，不再漏检绕过。
+    reports = _DIRECTION_REPORT_RE.findall(text)
+    for i, (_num, rep) in enumerate(reports, 1):
         m = re.match(r"(完成|部分|拒绝)(?:[：:]\s*|\s+|$)", rep)
         if not m:
             print(f"error: 收据第 {i} 条方向自报缺三态前缀（须以 完成/部分/"

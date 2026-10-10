@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # ============================================================
-# ws_verify_chain.py — 上板验证确定性全链编排（六步串联）
+# ws_verify_chain.py — 上板验证确定性全链编排（八步串联）
 # 所属模块：workspace-verify — 编译产物上板验证
 # 设计目的：各步间原为 AI 编排往返（收据 gap_before_verify_* 多段 ~55s/批）。
 #   本脚本把确定性步骤串联为单次执行：
-#     sync → connect → push → unit_test → acceptance → report
+#     sync → build → connect → push → unit_test → acceptance → package → report
+#   （步序以 _CHAIN_STEPS 为唯一事实源；build 锁内直跑 AOSP 编译，package
+#   为收据打包证据补充；缺批次源时 acceptance/package/report 确定性跳过）
 #   逐段透传 stdout、rc 逐段门禁、失败停链（余下验证步记 skipped，report
 #   步仍执行——fail 收据由前序真实 rc 机械派生落盘，loop done --receipt
 #   契约要求失败轮次也有收据记账，A1 修订），
@@ -395,7 +397,7 @@ def _selfcheck_fallback_rcs(pytest_rc):
         f"{k}={pytest_rc if k == 'pytest_rc' else 1}" for k in REQUIRED_RC_KEYS)
 
 
-def _run_selfcheck(timeout=900, mode="full"):
+def _run_selfcheck(timeout=900):
     """跑 harness/lib/selfcheck.py 取自检摘要文本（board 收据强制入收据，方向 4）。
 
     rc 全 0 与否由 ws_report 扫描 *_rc 键判定——本函数只负责把真实输出
@@ -406,15 +408,12 @@ def _run_selfcheck(timeout=900, mode="full"):
     timeout 与 selfcheck 内部 pytest 上限对齐（_PYTEST_TIMEOUT_S=900，
     wsv2-03）：此前链级 600s 先于内部 900s 到点，慢环境（drvfs 全量自检
     合法耗时 600~900s）会被链误杀产出 rc=124 兜底、成因误判为自检异常。
-    mode: full/quick——selfcheck quick/full 分层接线点（检视修复）：loop
-    中间轮 quick、末轮 full 由 loop 会话 attempt 数决定，而链编排侧读不到
-    loop session（ws_verify_chain 不依赖 loop-engineering），故恒传默认
-    full（不破坏现有行为）；loop 侧需分层时在调用本函数的编排处按 attempt
-    数显式传 mode。
+    恒全量（full）：链收据证据须为全量自检；loop 中间轮的 quick 档由 AI
+    按 cross-device-apply SKILL 直接跑 `selfcheck.py --mode quick`（不经本链，
+    链侧读不到 loop session 故不设分层参数——此前 mode 参数无调用方传非
+    full，属死参数已删）。
     """
     argv = [sys.executable, str(_SCRIPT_DIR.parents[1] / "lib" / "selfcheck.py")]
-    if mode != "full":
-        argv += ["--mode", mode]
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True, encoding="utf-8",
@@ -433,8 +432,11 @@ def _compose_report_body(batch_file, run_id, steps, overall):
     CDP-DOD-003 联动（检视修复）：链式 report 此前直接把批次原文当 --body，
     而新方向编号格式（1) xxx 2) yyy）方向数 n>0，批次原文无 '- 方向N:' 自报
     段会触发 ws_report 逐方向自报门禁拒写（整链失败）。此处按批次方向数自动
-    生成每方向一行自报（调用方=验证链，验证=链步 rc 见运行态 JSON），
-    overall=fail 时追加失败现场摘录（失败步 rc + build 日志尾部）供收据审计。
+    生成每方向一行自报（调用方=验证链，验证=链步 rc 见运行态 JSON）。
+    三态语义（本批修复）：仅 overall=pass 时逐方向写「完成」；overall=fail
+    时链未通过，逐方向一律写「部分」并带失败步理由（绝不谎报完成——此前对
+    任何 overall 机械写「完成」致 fail 批自称完成、CDP-DOD-003 恒绿）。
+    overall=fail 另追加失败现场摘录（失败步 rc + build 日志尾部）供审计。
     返回 body 文本；批次/方向不可解析时回落批次原文（n=0 无自报门禁）。
     """
     import ws_report  # 复用 _direction_count（与收据门禁同源不漂移）
@@ -444,19 +446,31 @@ def _compose_report_body(batch_file, run_id, steps, overall):
         n = ws_report._direction_count(ws_report.parse_batch(text).direction)
     except Exception:
         n = 0
+    # 首个失败步（排除 package：打包证据失败不门禁链，方向 3/4）：整体判定与
+    # 逐方向自报理由共用，避免两处口径漂移
+    failed = next((s for s in steps if s["name"] != "package"
+                   and (s.get("canceled") or s["rc"] is None
+                        or s["rc"] != 0)), None)
     lines = [text.rstrip()]
     if n > 0:
         lines.append("")
         lines.append("## 逐方向自报")
-        for i in range(1, n + 1):
-            lines.append(
-                f"- 方向{i}: 完成：调用方=workspace-verify 验证链，"
-                f"验证=链步 rc（sync/build/push/unit_test/acceptance）"
-                f"见 run-{run_id}.json，失败现场见 harness/log/verify-chain/")
+        if overall == "pass":
+            for i in range(1, n + 1):
+                lines.append(
+                    f"- 方向{i}: 完成：调用方=workspace-verify 验证链，"
+                    f"验证=链步 rc（sync/build/push/unit_test/acceptance）"
+                    f"见 run-{run_id}.json，失败现场见 harness/log/verify-chain/")
+        else:
+            rc_desc = "超时取消" if (failed and failed.get("canceled")) \
+                else f"rc={failed.get('rc') if failed else '?'}"
+            step_name = failed.get("name") if failed else "?"
+            for i in range(1, n + 1):
+                lines.append(
+                    f"- 方向{i}: 部分：调用方=workspace-verify 验证链，"
+                    f"验证=链停于 {step_name}（{rc_desc}）未通过，"
+                    f"未达完成（失败现场见 harness/log/verify-chain/）")
     if overall == "fail":
-        failed = next((s for s in steps if s["name"] != "package"
-                       and (s.get("canceled") or s["rc"] is None or s["rc"] != 0)),
-                      None)
         if failed:
             lines.append("")
             lines.append("## 失败现场")
@@ -551,39 +565,6 @@ def _derive_report_args(steps, overall):
             "summary": summary}
 
 
-# selfcheck 预跑 join 上限（秒）：selfcheck 内部对 pytest/治理工具各有
-# 超时兜底（900s/120s），join 再放宽一层防线程悬挂拖死链
-_SELFCHECK_JOIN_TIMEOUT_S = 1200
-
-
-def _start_selfcheck_preflight():
-    """锁外预跑 selfcheck（B3）：返回 (thread, result_dict)。
-
-    selfcheck 是纯文件系统检查（pytest harness + 治理扫描），不触碰
-    workspace/设备态，与锁内 sync/connect/push 等步骤并行无资源冲突；
-    改锁内同步串行（report 前固定 +30s，且拉长 workspace/device 双锁
-    互斥窗口）为后台并行，report 步 join 收割。batch_file 缺失（report
-    必 skipped）时不启动。daemon=True：LockHeld 提前返回等场景主进程
-    退出不挂。
-    """
-    result = {}
-
-    def _worker():
-        result["text"] = _run_selfcheck()
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-    return t, result
-
-
-def _join_selfcheck_preflight(thread, result):
-    """收割预跑结果：join 超限/空结果时同步兜底重跑（保证收据有值）。"""
-    if thread is not None:
-        thread.join(timeout=_SELFCHECK_JOIN_TIMEOUT_S)
-    text = (result.get("text") or "").strip()
-    return text if text else _run_selfcheck()
-
-
 def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
               case=None, wait_ready=False, log_since=None, build=None,
               timeouts=None, use_locks=True):
@@ -626,11 +607,10 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
         "package_file": str(_SCRIPT_DIR.parents[1] / "log" / "workspace-verify"
                             / f"package-{suffix}.json"),
     }
-    selfcheck_thread = selfcheck_result = None
     try:
-        # wsv2-05：env 注入/批次打点/自检预跑全置于 try 内——此前 CDP_RUN_ID
-        # 在 try 前写入，_ensure_timings_started（IO/import）或预跑线程启动
-        # 抛异常时 finally 不执行、env 残留，同进程后续轮次 run_id 串扰
+        # wsv2-05：env 注入/批次打点全置于 try 内——此前 CDP_RUN_ID
+        # 在 try 前写入，_ensure_timings_started（IO/import）抛异常时
+        # finally 不执行、env 残留，同进程后续轮次 run_id 串扰
         if batch_file and batch_id:
             # 链式耗时接线（修 elapsed_s=0/timings 空心）：打点文件缺失即补建
             # （独立拉起场景），并显式下传 --timings-file；CDP_BATCH_ID 注入使
@@ -639,18 +619,10 @@ def run_chain(product="rpi5", out=None, result_file=None, batch_file=None,
             tpath = _ensure_timings_started(batch_id)
             chain_args["timings_file"] = str(tpath) if tpath else None
             os.environ["CDP_BATCH_ID"] = batch_id
-        if batch_file:
-            # 方向 5：selfcheck 待 acceptance 后串行（不再锁外并行预跑）。
-            # 上批（8f58b075d679）链内 selfcheck 与 acceptance 并行竞争资源致
-            # pytest_rc=1 误判红，ws_report 拒写收据；改为 report 步（acceptance
-            # 之后）经 _join_selfcheck_preflight(None, {}) 同步串行执行，
-            # report 前固定同步跑，消除并行竞争。
-            selfcheck_thread, selfcheck_result = None, {}
         with (ws_lock.verify_locks() if use_locks else nullcontext()):
             return _run_chain_locked(run_id, batch_id, product, out,
                                      result_file, batch_file, build,
-                                     timeout_map, chain_args,
-                                     selfcheck_thread, selfcheck_result)
+                                     timeout_map, chain_args)
     except ws_lock.LockHeld as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 3, {"run_id": run_id, "batch_id": batch_id, "overall": "fail",
@@ -763,8 +735,7 @@ def _mark_step(name, batch_id, dur_s=None, zero=False):
 
 
 def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
-                      build, timeout_map, chain_args,
-                      selfcheck_thread=None, selfcheck_result=None):
+                      build, timeout_map, chain_args):
     """锁内编排主体：逐步执行 + 运行态落盘（仅编排器写）。
 
     失败停链语义（A1 修订）：某步失败/取消后，其余验证步记 skipped，
@@ -807,10 +778,11 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
             derive = _derive_report_args(steps, overall)
             if build:  # 显式传参优先（AI 对 build 段的判定不可替代时使用）
                 derive["build"] = build
-            # board 收据强制自检证据：锁外预跑收割（B3；异常兜底见
-            # _run_selfcheck——挂死/启动失败返回带 error 标注文本判红）
-            chain_args["selfcheck"] = _join_selfcheck_preflight(
-                selfcheck_thread, selfcheck_result)
+            # board 收据强制自检证据：report 前同步串行跑（acceptance 之后，
+            # 不锁外并行预跑——并行与 acceptance 竞争资源会致 pytest_rc 误判
+            # 红；异常兜底见 _run_selfcheck，挂死/启动失败返回带 error 标注
+            # 文本交 ws_report 判红）
+            chain_args["selfcheck"] = _run_selfcheck()
             # 检视修复（CDP-DOD-003 联动）：方向数 >0 的批次生成 report-body
             #（批次原文+逐方向自报段；overall=fail 追加失败现场摘录）替换
             # --body，n=0 历史批次回落批次原文
@@ -865,8 +837,8 @@ def _run_chain_locked(run_id, batch_id, product, out, result_file, batch_file,
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description="上板验证确定性全链编排（sync→connect→push→unit_test→"
-                    "acceptance→report）")
+        description="上板验证确定性全链编排（sync→build→connect→push→"
+                    "unit_test→acceptance→package→report）")
     ap.add_argument("--product", default="rpi5")
     ap.add_argument("--out", default=None, help="AOSP out 目录（透传）")
     ap.add_argument("--result-file", default=None,
@@ -880,7 +852,8 @@ def main(argv=None):
     ap.add_argument("--log-since", default=None,
                     help="logcat 时间窗起点（透传 ws_acceptance --log-since）")
     ap.add_argument("--build", choices=["pass", "fail", "skip"], default=None,
-                    help="编译段结果（缺省按 push 真实 rc 派生：push 过=pass）")
+                    help="编译段结果（缺省按 build 步真实 rc 派生：build 步 rc=0=pass，"
+                         "build 步失败=fail，build 步未执行=skip；显式传参优先）")
     ap.add_argument("--quick", action="store_true",
                     help="快检模式：sync + 内核 host 单测 + 自检，不落收据"
                          "（AI 编辑纯逻辑后的廉价反馈，不占真机）")

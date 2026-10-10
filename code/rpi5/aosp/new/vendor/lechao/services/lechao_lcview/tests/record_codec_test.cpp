@@ -28,6 +28,15 @@
 using vendor::lechao::lcview::DecodedField;
 using vendor::lechao::lcview::FieldDecodeResult;
 using vendor::lechao::lcview::decodeRecordField;
+using vendor::lechao::lcview::readLe16;
+using vendor::lechao::lcview::readLe32;
+using vendor::lechao::lcview::readLe64;
+using vendor::lechao::lcview::readLeFloat;
+using vendor::lechao::lcview::recordEventId;
+using vendor::lechao::lcview::recordMagic;
+using vendor::lechao::lcview::recordMonoNs;
+using vendor::lechao::lcview::recordSeqNo;
+using vendor::lechao::lcview::recordTimestampNs;
 using vendor::lechao::lcview::ParsedBatchRecord;
 using vendor::lechao::lcview::parseBatchRecords;
 
@@ -427,4 +436,49 @@ TEST(RecordCodecTest, StringFieldLen_BigEndian_Rejected) {
     // 大端序 5 = 0x0500，le 读为 1280，远超 record → exceeds
     EXPECT_EQ(parseBatch(batch, err), -1);
     EXPECT_NE(err.find("exceeds"), std::string::npos);
+}
+
+// ============================================================
+// CXX-001 显式小端助手契约（readLe*/record* 访问器）
+// 直接对手工小端字节断言，锚定"线材小端"契约；大端平台编译守卫见
+// lcview_events.h（此处无法在 LE 宿主触发，但读取路径不再依赖宿主序）
+// ============================================================
+
+TEST(RecordCodecTest, ReadLe_ExplicitLittleEndian) {
+    const uint8_t b16[] = {0x34, 0x12};
+    EXPECT_EQ(readLe16(b16), 0x1234u);
+
+    const uint8_t b32[] = {0x78, 0x56, 0x34, 0x12};
+    EXPECT_EQ(readLe32(b32), 0x12345678u);
+
+    const uint8_t b64[] = {0xEF, 0xCD, 0xAB, 0x89, 0x67,
+                           0x45, 0x23, 0x01};
+    EXPECT_EQ(readLe64(b64), 0x0123456789ABCDEFull);
+}
+
+TEST(RecordCodecTest, ReadLeFloat_LittleEndianBits) {
+    // 0x40490FDB = 3.14159274f，小端位序
+    const uint8_t pi[] = {0xDB, 0x0F, 0x49, 0x40};
+    EXPECT_FLOAT_EQ(readLeFloat(pi), 3.14159274f);
+}
+
+TEST(RecordCodecTest, RecordHeaderAccessors_ExplicitLittleEndian) {
+    // 手工小端字节构造 32B record 头（不依赖结构体字段写入的宿主序）
+    // 布局：magic@0 event_id@2 level@4 field_count@5
+    //       timestamp_ns@8 seq_no@16 mono_ns@24
+    std::vector<uint8_t> raw(sizeof(lcview_record_hdr), 0);
+    raw[0] = 0x56; raw[1] = 0x4C;                    // magic 0x4C56 (LE)
+    raw[2] = 0x02; raw[3] = 0x01;                    // event_id 0x0102
+    raw[4] = LCVIEW_LEVEL_WARN; raw[5] = 1;
+    for (int i = 0; i < 8; i++) raw[8 + i] = static_cast<uint8_t>(0x10 + i);
+    raw[16] = 0x78; raw[17] = 0x56; raw[18] = 0x34; raw[19] = 0x12;
+    raw[24] = 0xEF; raw[25] = 0xCD; raw[26] = 0xAB; raw[27] = 0x89;
+    raw[28] = 0x67; raw[29] = 0x45; raw[30] = 0x23; raw[31] = 0x01;
+
+    const auto* h = reinterpret_cast<const lcview_record_hdr*>(raw.data());
+    EXPECT_EQ(recordMagic(h), LCVIEW_MAGIC);
+    EXPECT_EQ(recordEventId(h), 0x0102u);
+    EXPECT_EQ(recordTimestampNs(h), 0x1716151413121110ull);
+    EXPECT_EQ(recordSeqNo(h), 0x12345678u);
+    EXPECT_EQ(recordMonoNs(h), 0x0123456789ABCDEFull);
 }

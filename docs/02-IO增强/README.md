@@ -86,7 +86,7 @@ ioctl ABI（`vendor_lechao_usbd-ioctl.h`）是三层共享契约：
 ```plantuml
 @startuml
 rectangle "ioctl ABI（三层共享契约）\n" as ABI {
-    rectangle "struct vendor_lechao_usbd_stats\n23 字段：累计计数器 + 快照 + 设备标识 + 配置状态" as STATS
+    rectangle "struct vendor_lechao_usbd_stats\n31 成员：累计计数器 + 快照 + 设备标识 + 配置状态" as STATS
     rectangle "struct vendor_lechao_usbd_config\nenabled + flags" as CONFIG
     rectangle "struct vendor_lechao_usbd_event\ntimestamp + type + value + status + direction" as EVENT
 }

@@ -35,13 +35,3 @@ def is_excluded(path_str: str) -> bool:
 def is_excluded_dir(name: str) -> bool:
     """判断目录名是否匹配排除目录正则。"""
     return bool(HARNESS_EXCLUDE_DIR_RE.search(name))
-
-
-def filter_files(files: list[str]) -> list[str]:
-    """过滤掉被排除的文件，返回保留列表。"""
-    return [f for f in files if not is_excluded(f)]
-
-
-def count_excluded(files: list[str]) -> int:
-    """统计被排除的文件数量。"""
-    return sum(1 for f in files if is_excluded(f))

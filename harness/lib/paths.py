@@ -93,6 +93,20 @@ def env_path(key: str, default: str | None = None) -> str:
     return val if val else (default if default is not None else "")
 
 
+# 数据目录名单一事实源（R2 字面量收敛）：仓内 data/ 下各数据目录名与相对
+# 路径常量集中于此（本模块有双名加载收敛，harness/lib 各模块以 `from paths
+# import ...` 复用，不会被误缓存为跨设备 cdp_paths 垫片语义）。消费方两类
+# 语义——「工程根绝对定位」（cdp_paths.data_*_dir）与「相对传入 root 只读
+# 定位」（check_known_issues/check_commit_coverage/metrics/selfcheck）；后者
+# 只复用目录名/相对路径常量，不得误用会 mkdir 的 base 目录函数。
+DATA_DIRNAME = "data"
+DATA_VERIFY_RESULTS_DIRNAME = "verify-results"
+DATA_KNOWN_ISSUES_DIRNAME = "known-issues"
+# 相对仓根路径（供 git 路径前缀匹配、EXCLUDE_PATHS 等字符串场景复用）
+DATA_VERIFY_RESULTS_REL = f"{DATA_DIRNAME}/{DATA_VERIFY_RESULTS_DIRNAME}"
+DATA_KNOWN_ISSUES_REL = f"{DATA_DIRNAME}/{DATA_KNOWN_ISSUES_DIRNAME}"
+
+
 def config_dir() -> Path:
     """返回 harness/config/ 目录。"""
     return repo_root() / "harness" / "config"

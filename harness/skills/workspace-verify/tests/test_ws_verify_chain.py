@@ -107,6 +107,8 @@ class TestChain(unittest.TestCase):
         self.assertIn("## 逐方向自报", body)
         self.assertIn("- 方向1:", body)
         self.assertIn("- 方向2:", body)
+        self.assertIn("完成", body)
+        self.assertNotIn("部分", body)
         self.assertIn("run-%s.json" % result["run_id"], body)
         # body 文件按 run_id 命名落 runs 目录（运行态同目录，只读不门禁）
         self.assertEqual(body_arg,
@@ -137,6 +139,34 @@ class TestChain(unittest.TestCase):
         self.assertIn("- 方向2:", body)
         self.assertIn("## 失败现场", body)
         self.assertIn("失败步: push（rc=1）", body)
+
+    def test_report_body_fail_marks_partial_not_done(self):
+        # H2：overall=fail 时逐方向自报须写「部分」并带失败理由，绝不谎报
+        # 「完成」——此前对任何 overall 机械写「完成」致 fail 批自称完成、
+        # 链式路径 CDP-DOD-003 恒绿
+        batch = Path(self._tmp.name) / "d2.cdp"
+        batch.write_text(_D2_BATCH % ("a" * 12), encoding="utf-8")
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            bad = os.path.basename(argv[1]) == "ws_push.py"
+            return mock.Mock(wait=mock.Mock(return_value=1 if bad else 0))
+
+        with mock.patch.object(wc.subprocess, "Popen",
+                               mock.Mock(side_effect=run)), \
+                mock.patch.object(wc, "_RUNS_DIR", self.runs), \
+                mock.patch.object(wc, "_run_selfcheck",
+                                  return_value=_SELFCHECK_OK):
+            rc, result = wc.run_chain(batch_file=str(batch), use_locks=False)
+        self.assertEqual(rc, 1)
+        rep = next(c for c in calls if "ws_report.py" in c[1])
+        body = Path(rep[rep.index("--body") + 1]).read_text(encoding="utf-8")
+        self.assertIn("- 方向1: 部分", body)
+        self.assertIn("- 方向2: 部分", body)
+        self.assertNotIn("- 方向1: 完成", body)
+        self.assertNotIn("- 方向2: 完成", body)
+        self.assertIn("链停于 push", body)
 
     def test_package_step_uses_systemd_run_with_batch_id_evidence(self):
         # 方向 3：package 步用 systemd-run --user --wait 拉起 ws_package.py，

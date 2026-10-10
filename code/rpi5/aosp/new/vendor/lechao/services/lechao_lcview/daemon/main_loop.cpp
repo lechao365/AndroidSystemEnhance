@@ -26,26 +26,65 @@
 #include <csignal>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 namespace vendor {
 namespace lechao {
 namespace lcview {
 
-// 全局运行标志，被信号处理器置 false 以触发优雅退出
+// 信号处理器唯一写入的退出标志：信号处理器只允许写 volatile
+// std::sig_atomic_t（写 std::atomic<bool> 无 async-signal-safe 标准保证，
+// P2 修复）。所有消费点统一经 stopSignalRequested() 读取并同步到 gRunning。
+static volatile std::sig_atomic_t gSignalRequested = 0;
+// 全局运行标志：由 stopSignalRequested() 观测到信号置位后同步为 false，
+// 主循环循环条件据此优雅退出。保持 std::atomic<bool> 类型（仅主线程写、
+// 多处置读）；信号处理器自身不触碰它。
 std::atomic<bool> gRunning(true);
 
-// 信号处理函数：收到 SIGINT/SIGTERM 时设置退出标志，
-// 使主循环自然结束，确保当前批次日志不丢失
+// 信号处理函数：收到 SIGINT/SIGTERM 时置位退出标志（只写 sig_atomic_t，
+// async-signal-safe），由 stopSignalRequested() 读取后自然结束，确保当前
+// 批次日志不丢失
 static void signalHandler(int) {
-    gRunning = false;
+    gSignalRequested = 1;
 }
+
+// 心跳周期常量（时间驱动锚点）：emitHeartbeat 窗口速率分母（records/s、
+// bytes/s）与 runMainLoop 心跳判定共用，消魔法数字 /30
+constexpr std::chrono::seconds kHeartbeatInterval(30);
 
 void installSignalHandlers() {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
+}
+
+bool stopSignalRequested() {
+    // 信号处理器只写 gSignalRequested（volatile sig_atomic_t），此处单点
+    // 读取并同步到 gRunning——主循环 / 启动阶段重试共用，保持 async-
+    // signal-safe 约束（处理器不写 atomic）。返回是否已请求停止。
+    if (gSignalRequested != 0)
+        gRunning = false;
+    return !gRunning.load();
+}
+
+bool openDeviceWithRetry(DeviceReader &reader, const std::function<bool()> &shouldStop,
+                         int maxRetries, std::chrono::milliseconds interval)
+{
+    // attempt 语义：总尝试上限（含首次），与旧主循环 openRetry>=1200 一致
+    int attempt = 0;
+    while (true) {
+        // 停止优先：SIGTERM/SIGINT 置位后立即退出，不再尝试打开或等待
+        if (shouldStop())
+            return false;
+        if (reader.open())
+            return true;
+        if (++attempt >= maxRetries)
+            return false;  // 重试耗尽（非停止，调用方据停止状态区分退出码）
+        std::this_thread::sleep_for(interval);
+    }
 }
 
 // ============================================================
@@ -302,9 +341,9 @@ void emitHeartbeat(uint64_t loopCount, DeviceReader &reader, FileWriter &writer,
     const FileWriter::SeqGapStats seqg = writer.takeSeqGapWindow();
     // R-09 方向 1/3：环水位、窗口峰值字节、窗口速率与 event 分布
     const uint32_t ringUsage = reader.getRingUsageBytes();
-    // 窗口速率：秒 = 窗口累计字节/条 除以固定 30s 窗口（心跳周期常量）
-    uint64_t recordsPerSec = window.windowValidRecords / 30;
-    uint64_t bytesPerSec = window.windowReadBytes / 30;
+    // 窗口速率：秒 = 窗口累计字节/条 除以固定心跳窗口（kHeartbeatInterval）
+    uint64_t recordsPerSec = window.windowValidRecords / static_cast<uint64_t>(kHeartbeatInterval.count());
+    uint64_t bytesPerSec = window.windowReadBytes / static_cast<uint64_t>(kHeartbeatInterval.count());
     HeartbeatFields hb = {
         .loop = loopCount,
         .overrun = overrunAccum,
@@ -371,7 +410,6 @@ static void flushSegment(DeviceReader &reader, SchemaParser &schema, FileWriter 
         invalidRecords += parsed.invalidCnt;
         // R-09 方向 3/4：窗口速率与 invalid 分类累计（心跳可见）
         window.windowValidRecords += parsed.validCnt;
-        window.windowWrittenBytes += offset;
         window.invalidBadLen += parsed.badLenCnt;
         window.invalidSchemaDrift += parsed.schemaDriftCnt;
         ALOGI("lechao_lcview: batch parsed: %u valid, %u invalid, %zuB "
@@ -474,18 +512,22 @@ static void writeSlowDiskEvent(SchemaParser& schema, FileWriter& writer,
         (device.size() <= UINT16_MAX) ? device : device.substr(0, UINT16_MAX);
     putLe16(fields.data() + lenPos, static_cast<uint16_t>(devName.size()));
     fields.insert(fields.end(), devName.begin(), devName.end());
-    // write_avg_latency_ms（INT64）：负值钳 0（延迟不可能为负，防御脏值）
+    // write_avg_latency_ms（INT64）：负值钳 0（延迟不可能为负，防御脏值）。
+    // P2（CXX-003）：double→uint64_t 强转对 NaN/Inf 是 UB——差分统计可能
+    // 产生 NaN（除零），强转前 isfinite 判定，非有限或负值一律钳 0
     fields.push_back(LCVIEW_TYPE_INT64);
     const size_t vPos1 = fields.size();
     fields.resize(fields.size() + 8);
     putLe64(fields.data() + vPos1,
-            static_cast<uint64_t>(writeAvgLatMs < 0.0 ? 0.0 : writeAvgLatMs));
+            static_cast<uint64_t>(std::isfinite(writeAvgLatMs) && writeAvgLatMs > 0.0
+                                      ? writeAvgLatMs : 0.0));
     // threshold_ms（INT64）
     fields.push_back(LCVIEW_TYPE_INT64);
     const size_t vPos2 = fields.size();
     fields.resize(fields.size() + 8);
     putLe64(fields.data() + vPos2,
-            static_cast<uint64_t>(thresholdMs < 0.0 ? 0.0 : thresholdMs));
+            static_cast<uint64_t>(std::isfinite(thresholdMs) && thresholdMs > 0.0
+                                      ? thresholdMs : 0.0));
     // consecutive（INT32，4 字节有符号整型承载 uint32 值域低 32 位）
     fields.push_back(LCVIEW_TYPE_INT32);
     const size_t vPos3 = fields.size();
@@ -598,11 +640,6 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
     ConserveBaseline conserve;
     // R-09 方向 1/3/4：心跳窗口统计（峰值字节/速率/event 分布/invalid 分类）
     WindowStats window;
-    // event_id 分布统计（槽位 = event id，R-09 方向 3）。上限取事件 id
-    // 合法范围上界（内核 LCVIEW_MAX_EVENTS 同源常量在用户态镜像），越界
-    // event_id 记录不计分布（已由 validate 过滤，正常不达）。
-    static constexpr size_t kEventSlots = 64;
-    uint64_t eventDist[kEventSlots] = {};
     // R-02 方向 3：心跳输出端注入生产 writer（ALOGI 落盘）——emitHeartbeat
     // 只依赖 IHeartbeatWriter 接口，单测注入记录型 writer 可断言心跳内容
     LogHeartbeatWriter heartbeatWriter;
@@ -640,7 +677,10 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
     std::unordered_map<std::string, HangState> hangStates;
     std::unordered_map<std::string, SlowDiskState> slowStates;
 
-    while (gRunning) {
+    // 停止信号统一经 stopSignalRequested() 观测（把 gSignalRequested 同步到
+    // gRunning）——SIGTERM/SIGINT 置位退出标志后本轮结束即优雅退出，不打断
+    // 正在处理的批次
+    while (!stopSignalRequested()) {
         // 方向 1 预防性 flush：缓冲剩余空间不足以容纳内核最小读单位时，
         // 先强制落盘清空缓冲，令 read 的 cap-offset 恒 >= kMinReadSize，
         // 根治内核侧 -EINVAL 触发的主循环退出重启环
@@ -689,11 +729,11 @@ int runMainLoop(DeviceReader& reader, SchemaParser& schema, FileWriter& writer)
             return 1;  // 致命读错误：readOnce 已打日志，退出交 init 重启
         }
 
-        // 心跳时间驱动：距上次满 30s 才发（原 loopCount % 30 在重载下
-        // epoll 立返、loop 计数快速膨胀，心跳空转刷屏；时间驱动与
-        // 负载解耦，静默期/高负载期都恒 30s 一发）
+        // 心跳时间驱动：距上次满 kHeartbeatInterval（30s）才发（原 loopCount
+        // % 30 在重载下 epoll 立返、loop 计数快速膨胀，心跳空转刷屏；时间驱动
+        // 与负载解耦，静默期/高负载期都恒 30s 一发）
         auto now = std::chrono::steady_clock::now();
-        if (now - lastBeatAt >= std::chrono::seconds(30)) {
+        if (now - lastBeatAt >= kHeartbeatInterval) {
             emitHeartbeat(loopCount, reader, writer, overrunAccum, readErr, jsonlRecords,
                           invalidRecords, conserve, heartbeatWriter, window);
             // R-09 方向 1/3/4：心跳窗口已消费（峰值/速率/分类进 hb），

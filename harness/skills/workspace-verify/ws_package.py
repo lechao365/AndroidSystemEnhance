@@ -70,12 +70,11 @@ def _resolve_batch_id():
     """batch_id 识别统一口径（方向 2 收窄）：委托 cdp_timing.resolve_batch_id
     两级回落（CDP_BATCH_ID > current-batch.json）。
 
-    旧实现委托 verify_common.resolve_batch_id_fallback 四级（显式参 >
-    CDP_BATCH_ID > current-batch.json > 唯一 timings 文件）；收窄去掉唯一
-    timings 回落——verify 链模式 A 恒注入 CDP_BATCH_ID，回落级对其冗余，
-    手工跑（无批上下文）时打点目录唯一 timings 残留会把打包证据误绑当批
-    （与 ws_acceptance 同源收窄；多 timings 防误标语义由两级内 no-batch
-    兜底）。
+    旧实现曾用四级回落（显式参 > CDP_BATCH_ID > current-batch.json > 唯一
+    timings 文件）；收窄去掉唯一 timings 回落——verify 链模式 A 恒注入
+    CDP_BATCH_ID，回落级对其冗余，手工跑（无批上下文）时打点目录唯一
+    timings 残留会把打包证据误绑当批（与 ws_acceptance 同源收窄；多
+    timings 防误标语义由两级内 no-batch 兜底）。
     """
     sys.path.insert(0, str(_SCRIPT_DIR.parents[1] / "skills" / "cross-device"
                             / "lib" / "python"))

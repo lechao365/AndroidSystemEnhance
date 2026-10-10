@@ -41,6 +41,18 @@ class TestCdpPaths(unittest.TestCase):
         d = cdp_paths.log_apply_dir()
         self.assertTrue(d.is_dir())
 
+    def test_data_dir_names_match_paths_constants(self):
+        # R2 漂移守卫：cdp_paths 数据目录名须与 paths.py 单一事实源一致
+        # （cdp_paths 受限环境回退本地字面量，此处显式载入 paths 校验不漂移）
+        lib = Path(__file__).resolve().parents[2] / "lib"
+        if str(lib) not in sys.path:
+            sys.path.insert(0, str(lib))
+        import paths
+        self.assertEqual(cdp_paths.data_verify_results_dir().name,
+                         paths.DATA_VERIFY_RESULTS_DIRNAME)
+        self.assertEqual(cdp_paths.data_known_issues_dir().name,
+                         paths.DATA_KNOWN_ISSUES_DIRNAME)
+
     @pytest.mark.real_repo("回落包目录探测脚本路径（只读真实仓）")
     def test_cdp_parse_script_path_resolution(self):
         # 未设 CDP_PROJECT_ROOT 时基于包目录探测（只读校验，不 mkdir）。

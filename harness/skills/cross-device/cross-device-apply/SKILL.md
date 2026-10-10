@@ -66,12 +66,16 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
     python3 harness/skills/cross-device/lib/python/cdp_timing.py start --batch-file <批次文件>
     （batch_id 从批次文件内部解析；打点文件 harness/log/cross-device/
     timings-<batch_id>.json，后续各步骤自发 mark 均按其定位）
-2. 门禁：git branch --show-current 须为 dev、git status --porcelain 须为空，否则停止
-3. precheck（含 base 拒批）：
+2. 门禁（机器化，由步骤 3 的 cdp_parse --role apply 承接）：分支须为 dev、
+   工作树须干净（`git status --porcelain` 为空）——不满足即 exit 20 拒绝编辑
+   （`--role apply` 内 fail-closed 校验，不再是人工纪律）；如需人工预检可先行
+   `git branch --show-current` / `git status --porcelain` 查看
+3. precheck（含 base 拒批 + git 环境门禁）：
    python3 harness/skills/cross-device/lib/python/cdp_parse.py --role apply --expect-base "$(git rev-parse --short=12 HEAD)" <批次文件>
    （exit 0 通过；17 在 apply 角色降级 WARN，16 预算超限仍 blocking；
     exit 18 = base 不匹配，整批拒绝回 emit；exit 3 = 参数/文件错误；
-    precheck 段由解析器自发 mark，无需手动打点）
+    exit 20 = git 环境门禁（分支非 dev/工作树不干净/git 失败），先修正分支或
+    提交/清理改动再重跑；precheck 段由解析器自发 mark，无需手动打点）
 4. 编辑：按批次意图/方向编辑 code/ 全目录：
    读取批次方向后打点：cdp_timing.py mark --batch <batch_id> --name edit_plan
    - code/rpi5/{aosp,kernel}/{new,modified}、code/rpi5/others、code/rpi-zero2w：全量文件直接编辑
@@ -96,11 +100,12 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
        末轮收据正文必须含 CDP 原文 + 失败现场 + 逐方向自报（--body；
        超限终结批并含诊断报告）
        （verify_start/verify_end 由 verify 链自发 mark，无需手动打点）
-      **自检分层（方向 2）**：loop 中间轮（修复验证轮）selfcheck 用 quick 档
+      **自检分层（方向 2）**：loop 中间轮（修复验证轮）可另跑 quick 档
       `python3 harness/lib/selfcheck.py --mode quick`（git diff 推导受影响
-      测试，推导不出回落全量，提速中间轮）；末轮必须 full 全量
-      `python3 harness/lib/selfcheck.py --mode full`（缺省即 full）——快速
-      迭代不停快速反馈，最终证据以全量绿为准。
+      测试，推导不出回落全量，提速中间轮）作快速反馈；末轮必须 full 全量
+      `python3 harness/lib/selfcheck.py --mode full`（缺省即 full）——最终证据
+      以全量绿为准。注意：`ws_verify_chain` 链内为收据产出的 selfcheck **恒 full**
+      （证据不可降级；quick 仅作独立快速反馈，不进收据）。
 - 收据落盘是进步骤 6 的前提：ws_report 返 2（如 -sv 缺 --acceptance/--acceptance-file、
       --log-since 非法等参数错误）即收据未落盘，必须补参重试，禁止无收据进步骤 6
    **收据 cases 自动落盘 + 禁改历史口径（2026-09-02 定）**：
@@ -131,3 +136,4 @@ modified/*.diff hunk 内编辑+校验器），-sv 拉起 workspace-verify，统�
 - 2：参数错误（ws_report 返 2 收据未落盘，补参重试）
 - 3：参数/文件错误（cdp_parse）
 - 18：precheck 拒批（base 不匹配回 emit）
+- 20：git 环境门禁拒批（分支非 dev / 工作树不干净 / git 失败，修正后重跑）

@@ -97,7 +97,12 @@ protected:
     }
 
     void TearDown() override {
-        std::string cmd = "rm -rf " + std::string(mTmp);
+        // P2：rm -rf 前必须确认路径源于本 fixture 的 mkdtemp 前缀，防误删
+        if (mTmp.rfind("/data/local/tmp/lcview_daemon_", 0) != 0) {
+            ADD_FAILURE() << "refuse to rm unexpected path: " << mTmp;
+            return;
+        }
+        std::string cmd = "rm -rf " + mTmp;
         system(cmd.c_str());
     }
 
@@ -202,19 +207,19 @@ TEST_F(DaemonLoopTest, MixedBatch_ValidAndInvalidCounts) {
 
 TEST(DaemonLoopHelperTest, SchemaLoadRetry_EventualSuccess) {
     // schema 路径不存在 → 重试失败；maxRetries=0 直接失败
-    // 方向 4 适配：新增 running 参数（测试传本地 atomic，生产传 gRunning）
-    std::atomic<bool> running{true};
+    // 方向 4 适配：中断参数为谓词（测试传永假谓词，生产传 stopSignalRequested）
+    auto neverStop = [] { return false; };
     SchemaParser sp;
-    EXPECT_FALSE(loadSchemaWithRetry(sp, "/nonexistent/lcview_events.json", running, 0,
+    EXPECT_FALSE(loadSchemaWithRetry(sp, "/nonexistent/lcview_events.json", neverStop, 0,
                                      std::chrono::milliseconds(1)));
 }
 
 TEST(DaemonLoopHelperTest, SchemaLoadRetry_SuccessOnFirstTry) {
     // 真实配置（上板路径 /vendor/etc/lcview_events.json）一次加载成功
-    std::atomic<bool> running{true};
+    auto neverStop = [] { return false; };
     SchemaParser sp;
     if (access("/vendor/etc/lcview_events.json", R_OK) == 0) {
-        EXPECT_TRUE(loadSchemaWithRetry(sp, "/vendor/etc/lcview_events.json", running, 0,
+        EXPECT_TRUE(loadSchemaWithRetry(sp, "/vendor/etc/lcview_events.json", neverStop, 0,
                                         std::chrono::milliseconds(1)));
         // R-16 P4 方向 1：START(4) 已并入 END，schema 由 10 事件降为 9 事件
         // R-19 P5 方向 3：新增 id=1~3 预留占位条目，schema 升为 12 事件
@@ -225,16 +230,32 @@ TEST(DaemonLoopHelperTest, SchemaLoadRetry_SuccessOnFirstTry) {
     }
 }
 
-TEST(DaemonLoopHelperTest, SchemaLoadRetry_InterruptibleByRunning)
+TEST(DaemonLoopHelperTest, SchemaLoadRetry_InterruptibleByStopPredicate)
 {
-    // 方向 4：running=false 时重试循环立即中断——schema 加载重试期间收到
-    // SIGTERM（gRunning 置 false）不再等满 maxRetries×interval。
-    // maxRetries 大 + interval 长：若 running 不生效会等满（测试卡死超时），
+    // 方向 4：停止谓词返 true 时重试循环立即中断——schema 加载重试期间收到
+    // SIGTERM（SIGINT 置位 → stopSignalRequested 返 true）不再等满
+    // maxRetries×interval。
+    // maxRetries 大 + interval 长：若谓词不生效会等满（测试卡死超时），
     // 快速返回即证明中断生效
-    std::atomic<bool> running{false};
+    auto alwaysStop = [] { return true; };
     SchemaParser sp;
-    EXPECT_FALSE(loadSchemaWithRetry(sp, "/nonexistent/lcview_events.json", running, 1000,
+    EXPECT_FALSE(loadSchemaWithRetry(sp, "/nonexistent/lcview_events.json", alwaysStop, 1000,
                                      std::chrono::milliseconds(100)));
+}
+
+TEST(DaemonLoopHelperTest, SchemaLoadRetry_StopsMidRetryOnSignal)
+{
+    // 破坏即判红：停止谓词中途置位后重试循环必须立即退出，且谓词确实被
+    // 逐轮轮询（生产即 stopSignalRequested）——否则 SIGTERM 在 schema 加载
+    // 阶段不生效，被最长 maxRetries×interval 窗口卡住。
+    // 谓词第 3 次调用返 true（模拟信号中途到达）：3 次 failed 尝试后退出；
+    // 若检查未接入循环则谓词调用数为 0（判红），若只检查一次则为 1（判红）。
+    int polls = 0;
+    auto stopOnThird = [&polls] { ++polls; return polls >= 3; };
+    SchemaParser sp;
+    EXPECT_FALSE(loadSchemaWithRetry(sp, "/nonexistent/lcview_events.json", stopOnThird, 1000,
+                                     std::chrono::milliseconds(1)));
+    EXPECT_EQ(polls, 3);
 }
 
 TEST(DaemonLoopHelperTest, SchemaExitCode_StoppedReturnsZero)

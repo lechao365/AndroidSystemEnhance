@@ -11,13 +11,12 @@ import platform
 import re
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import yaml
 
 from cdp_paths import (atomic_write_text, data_verify_results_dir,  # noqa: E402
-                       project_root)
+                       file_lock, project_root)
 
 _DETAIL_KEEP = 50
 # 趋势保留行数（审计链增强：200 → 1000，拉长跨批 diff 窗口；趋势行恒
@@ -85,35 +84,13 @@ _AUTOFILL_CACHE: dict = {}
 def _trend_locked(trend: Path):
     """trend.md 读→改→写区间跨进程互斥（CDP-08：并发 append_trend 丢行）。
 
-    与 cdp_timing._locked 同款实现口径（flock 非阻塞重试至多 10s、拿不到
-    降级直写、无 fcntl 平台降级）；本文件内同构实现而非 import 复用——
-    收据链不依赖打点链模块（cdp_timing），保持方向解耦。
+    实现（R4 去重）：抽取为 cdp_paths.file_lock 共享助手——与 cdp_timing
+    的 timings 锁同款语义（flock 非阻塞重试至多 10s、拿不到降级直写、无
+    fcntl 平台降级）。收据链仍不依赖打点链模块（cdp_timing），共享的是
+    两者都已依赖的 cdp_paths，方向解耦不变。
     """
-    try:
-        import fcntl
-    except ImportError:
+    with file_lock(trend):
         yield
-        return
-    lock_path = Path(f"{trend}.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(lock_path, "a")
-    try:
-        deadline = time.monotonic() + 10.0
-        while True:
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except (BlockingIOError, OSError):
-                if time.monotonic() >= deadline:
-                    break  # 拿锁超时降级不加锁直写
-                time.sleep(0.05)
-        yield
-    finally:
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-        except (OSError, ValueError):
-            pass
-        fh.close()
 
 
 def _collect_operator() -> str:

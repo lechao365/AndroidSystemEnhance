@@ -17,9 +17,12 @@ import re
 import sys
 from pathlib import Path
 
+from paths import (DATA_DIRNAME, DATA_KNOWN_ISSUES_DIRNAME,
+                   DATA_VERIFY_RESULTS_DIRNAME)
+
 _ROOT = Path(__file__).resolve().parents[2]
-_VERIFY_DIR = _ROOT / "data" / "verify-results"
-_ISSUES_DIR = _ROOT / "data" / "known-issues"
+_VERIFY_DIR = _ROOT / DATA_DIRNAME / DATA_VERIFY_RESULTS_DIRNAME
+_ISSUES_DIR = _ROOT / DATA_DIRNAME / DATA_KNOWN_ISSUES_DIRNAME
 
 # 趋势行 result 列（第 3 字段）
 _TREND_RESULT_RE = re.compile(r"^\S+\s+\S+\s+(\S+)\s+(\S+)\s+(.*)$")

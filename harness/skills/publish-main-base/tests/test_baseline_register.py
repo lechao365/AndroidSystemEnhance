@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -686,6 +687,34 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(b["package_result"], "PASS")
         self.assertEqual(b["evidence"]["package_rc"], 0)
 
+    def test_add_candidate_receipt_package_batch_mismatch_unknown(self):
+        # H3：收据内嵌打包证据 batch_id 与收据不一致（跨批采信/provenance 失真，
+        # 真实命中 manual-2610091135 采信上一批 2610091031 证据）→ 记 UNKNOWN，
+        # 不得伪造 PASS
+        rp = self._make_receipt_pkg(rc=0, package={
+            "run_id": "r", "batch_id": "batch-other", "script_rc": 0})
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 0)
+        self.assertEqual(br.load()["baselines"][0]["package_result"], "UNKNOWN")
+
+    def test_receipt_package_cross_batch_returns_none(self):
+        # H3 单元：_receipt_package 对跨批证据返 None（供推导 UNKNOWN）；
+        # 同批证据仍认；无 batch_id 的旧证据兼容放行
+        r = Receipt(batch_id="batch-a", batch_base="", verified_commit="abc",
+                    verify_mode="skip", result="skip", build="pass",
+                    push_board="skip", acceptance="", elapsed_s=1,
+                    summary="", cases="",
+                    package=json.dumps({"run_id": "r", "batch_id": "batch-b",
+                                        "script_rc": 0}))
+        self.assertIsNone(br._receipt_package(r))
+        r.package = json.dumps({"run_id": "r", "batch_id": "batch-a",
+                                "script_rc": 0})
+        self.assertEqual(br._receipt_package(r).get("script_rc"), 0)
+        r.package = json.dumps({"run_id": "r", "script_rc": 0})
+        self.assertEqual(br._receipt_package(r).get("script_rc"), 0)
+
     def test_promote_consistency_mismatch_blocked(self):
         # 方向 3（本批意图 3）：基线记 PASS（gitignore 文件证据）但收据无内嵌
         # 打包证据（不可追溯）→ promote 一致性校验推导 UNKNOWN ≠ PASS 即阻断，
@@ -1077,6 +1106,35 @@ class TestBaselineRegister(unittest.TestCase):
         text = self._config.read_text(encoding="utf-8")
         self.assertEqual(text.count("# 头部"), 1)
         self.assertNotIn("条目内", text.split("baselines:", 1)[0])
+
+    def test_save_is_atomic_original_intact_on_commit_failure(self):
+        # H4：save 走原子写——tmp 落盘后 os.replace（原子提交）失败时原文件
+        # 保持不变（非原子 write_text 直写会留下半截/新内容，是本次修复红灯）
+        before = self._config.read_text(encoding="utf-8")
+        with mock.patch.object(Path, "replace", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                br.save({"baselines": [{"baseline_id": "BL-X"}]})
+        self.assertEqual(self._config.read_text(encoding="utf-8"), before)
+
+    def test_save_concurrent_atomic_no_corrupt_no_tmp_left(self):
+        # H4：两线程并发 save 同一文件——原子写下最终留下的必为某次完整写入
+        # （合法 YAML，非混合截断）；结束后无残留 *.tmp
+        barrier = threading.Barrier(2)
+
+        def worker(tag):
+            barrier.wait()
+            for _ in range(15):
+                br.save({"baselines": [{"baseline_id": tag}]})
+
+        threads = [threading.Thread(target=worker, args=(t,))
+                   for t in ("BL-A", "BL-B")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        data = br.load()
+        self.assertIn(data["baselines"][0]["baseline_id"], ("BL-A", "BL-B"))
+        self.assertEqual(list(self._root.glob("*.tmp")), [])
 
     @unittest.skipUnless(__import__("shutil").which("git"), "需要 git 解释器")
     def test_code_changes_since_main_ignores_main_side(self):

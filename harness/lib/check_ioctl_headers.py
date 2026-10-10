@@ -116,6 +116,19 @@ STATS_FIELD_ORDER_PAIRS = [
      "lcview_stats"),
 ]
 
+# ABI surface 层镜像头对（R7）：内核 LcIod 真相源 vs 两处用户态镜像副本
+# （AOSP HAL 与 usb-verify）。元组 (内核相对路径, 镜像相对路径)。比对 struct
+# 成员（名/类型/顺序）、枚举值、数值宏——允许注释/空行/typedef 写法差异，
+# 但字段/枚举/宏的 ABI 差异一律判红（比 signature 层更容忍格式化、且能
+# 跨 typedef 别名比较）。
+ABI_SURFACE_PAIRS = [
+    ("rpi5/kernel/new/vendor/lechao/LcIod/lciod_usbd-ioctl.h",
+     "rpi5/aosp/new/vendor/lechao/services/lechao_lciod/hal/"
+     "vendor_lechao_usbd-ioctl.h"),
+    ("rpi5/kernel/new/vendor/lechao/LcIod/lciod_usbd-ioctl.h",
+     "rpi5/others/usb-verify/include/vendor_lechao_usbd-ioctl.h"),
+]
+
 # C 标量/内建类型字节数（offsetof 推导用；struct lcview_stats 全 uint32_t 4B，
 # 顺序布局天然无 padding 间隙。此处映射覆盖常见标量，未知类型按最宽 8B 保守
 # 判红防假绿——不推导则无法发现手工断言漂移）
@@ -155,6 +168,127 @@ OFFSETOF_ASSERT_RE = re.compile(
 # 从 BLOCK_RE 提取的 struct 字段行提取字段类型与名（去掉尾部数组后缀/初始化）：
 # "uint32_t total_records" → ("uint32_t", "total_records")
 _FIELD_RE = re.compile(r"^(\w+(?:\s*\*)?)\s+(\w+)(?:\[\d*\])?(?:\s*=\s*.*)?$")
+
+# ── ABI surface 层（R7）：struct 成员/枚举值/数值宏的 ABI 等价比对 ──────────
+# 与 signature 层（BLOCK_RE/normalize_block 逐行文本比对）互补：signature 层
+# 对格式化/注释差异敏感度低但对 typedef 写法差异敏感（__u32 vs uint32_t 会
+# 误判漂移），ABI 层把类型折叠到统一 token 后按「成员名/类型/顺序」结构化
+# 比对，并对枚举值与数值宏做语义比对（char 字面量与等值数值视为一致）。
+# 目的：镜像头（usb-verify / AOSP HAL）与内核真相源分叉 94 行（typedef/注释/
+# 空行）仍能如实判 ABI 一致，而字段/枚举/宏的真实 ABI 差异一律判红。
+_ABI_TYPE_ALIASES = {
+    "u8": "u8", "__u8": "u8", "uint8_t": "u8", "unsigned char": "u8",
+    "u16": "u16", "__u16": "u16", "uint16_t": "u16", "unsigned short": "u16",
+    "u32": "u32", "__u32": "u32", "uint32_t": "u32", "unsigned int": "u32",
+    "u64": "u64", "__u64": "u64", "uint64_t": "u64", "unsigned long": "u64",
+    "s8": "s8", "__s8": "s8", "int8_t": "s8",
+    "s16": "s16", "__s16": "s16", "int16_t": "s16", "short": "s16",
+    "s32": "s32", "__s32": "s32", "int32_t": "s32", "int": "s32",
+    "s64": "s64", "__s64": "s64", "int64_t": "s64", "long": "s64",
+    "char": "char",
+}
+
+# struct/enum 块提取（ABI 层）：扁平成员布局（[^}]* 不支持嵌套，嵌套由
+# _nested_block_hits fail-closed 拦截）。
+_ABI_STRUCT_RE = re.compile(r"struct\s+(\w+)\s*\{([^}]*)\}", re.S)
+_ABI_ENUM_RE = re.compile(r"enum\s+(\w+)\s*\{([^}]*)\}", re.S)
+
+# ABI 成员行提取：容忍多词类型（unsigned int）、指针前缀与数组后缀——
+# "u8 reserved[2]" → ("u8","reserved","[2]")、"unsigned int b" → ("unsigned int","b","")、
+# "u8 *p" → ("u8","*p","")。
+_ABI_FIELD_RE = re.compile(r"^(.+?)\s+(\**\w+)\s*(\[[^\]]*\])?$")
+
+# 对象式数值宏提取：`#define NAME VALUE`（VALUE 非空白 token；函数式/空值不匹配）。
+_ABI_DEFINE_RE = re.compile(r"^#define\s+(\w+)\s+(\S+)", re.M)
+
+
+def _abi_norm_type(raw_type: str) -> str | None:
+    """ABI 类型归一：typedef 别名折叠到统一 token；未知类型返回 None。"""
+    is_ptr = raw_type.endswith("*")
+    base = raw_type.rstrip("*").strip()
+    tok = _ABI_TYPE_ALIASES.get(base)
+    if tok is None:
+        return None
+    return tok + ("*" if is_ptr else "")
+
+
+def extract_abi_structs(text: str):
+    """提取 struct 的 ABI 成员序 [{struct 名: [(归一类型, 字段名, 数组后缀)]}]。
+
+    返回 None 表示解析失败（字段行无法解析/类型未知，fail-closed 交人工）；
+    注释/空行/typedef 写法差异被吸收。
+    """
+    out = {}
+    for m in _ABI_STRUCT_RE.finditer(_strip_comments(text)):
+        name, block = m.group(1), m.group(2)
+        members = []
+        for line in block.splitlines():
+            line = line.strip().rstrip(",;").strip()
+            if not line:
+                continue
+            fm = _ABI_FIELD_RE.match(line)
+            if not fm:
+                return None
+            raw_type, fname = fm.group(1).strip(), fm.group(2).strip()
+            is_ptr = fname.startswith("*")
+            fname = fname.lstrip("*")
+            t = _abi_norm_type(raw_type)
+            if t is None:
+                return None
+            members.append((t + ("*" if is_ptr else ""), fname,
+                            fm.group(3) or ""))
+        out[name] = members
+    return out
+
+
+def extract_abi_enums(text: str):
+    """提取 enum 的 ABI 值序 [{enum 名: [(成员名, 有效整数值)]}]。
+
+    有效值按显式赋值/自动递增推导（与 C 语义一致）；无法解析的赋值返回 None
+    （fail-closed）。返回 None 表示解析失败。
+    """
+    out = {}
+    for m in _ABI_ENUM_RE.finditer(_strip_comments(text)):
+        name, block = m.group(1), m.group(2)
+        members, nxt = [], 0
+        for raw in block.split(","):
+            tok = raw.strip()
+            if not tok:
+                continue
+            if "=" in tok:
+                nm, val = tok.split("=", 1)
+                nm, val = nm.strip(), val.strip()
+                try:
+                    nxt = int(val, 0)
+                except ValueError:
+                    return None
+            else:
+                nm = tok
+            members.append((nm, nxt))
+            nxt += 1
+        out[name] = members
+    return out
+
+
+def _norm_macro_value(raw: str) -> str | None:
+    """数值宏值归一：char 字面量折算 ord；整数按十进制；其余（表达式/空）None。"""
+    cm = re.fullmatch(r"'(.)'", raw.strip())
+    if cm:
+        return str(ord(cm.group(1)))
+    try:
+        return str(int(raw.strip(), 0))
+    except ValueError:
+        return None
+
+
+def extract_abi_macros(text: str) -> dict[str, str]:
+    """提取对象式数值/字符宏 → {名: 归一值}（表达式/函数式/空值宏不入）。"""
+    out = {}
+    for m in _ABI_DEFINE_RE.finditer(_strip_comments(text)):
+        v = _norm_macro_value(m.group(2))
+        if v is not None:
+            out[m.group(1)] = v
+    return out
 
 
 def extract_ioctl_cmds(text: str) -> dict[str, str]:
@@ -624,6 +758,78 @@ def compare_stats_field_order(repo: Path) -> tuple[int, str]:
     return 0, f"一致: {checked} 个 stats u64 字段序入检通过"
 
 
+def compare_abi_surface(k_path: Path, a_path: Path) -> tuple[int, str]:
+    """单对镜像头的 ABI surface 比对（R7）：struct 成员/枚举值/数值宏。
+
+    三类 ABI 面须与内核真相源一致；注释/空行/typedef 写法差异被吸收（类型
+    归一化），字段/枚举/宏的真实 ABI 差异判红。任一解析失败（未知类型/畸形
+    成员行/非整型枚举赋值）fail-closed 判红交人工，防静默假绿。
+    """
+    if not k_path.is_file() or not a_path.is_file():
+        return 2, (f"ABI surface 文件缺失: "
+                   f"{'内核' if not k_path.is_file() else '镜像'} "
+                   f"{k_path if not k_path.is_file() else a_path}")
+    ktext = k_path.read_text(encoding="utf-8", errors="replace")
+    atext = a_path.read_text(encoding="utf-8", errors="replace")
+    nested = sorted(set(_nested_block_hits(ktext) + _nested_block_hits(atext)))
+    if nested:
+        return 1, ("ABI surface 嵌套花括号块超出提取器支持范围（lib-09 "
+                   "fail-closed）: " + ", ".join(nested))
+    problems = []
+    ksig = extract_abi_structs(ktext)
+    asig = extract_abi_structs(atext)
+    if ksig is None or asig is None:
+        return 1, "ABI struct 解析失败（未知字段类型/畸形成员行，fail-closed）"
+    if not ksig and not asig:
+        return 1, "ABI struct 双空（内核与镜像均未提取到 struct，解析异常？）"
+    for name in sorted(set(ksig) | set(asig)):
+        if name not in ksig:
+            problems.append(f"仅镜像侧 struct: {name}")
+        elif name not in asig:
+            problems.append(f"仅内核侧 struct: {name}")
+        elif ksig[name] != asig[name]:
+            problems.append(f"struct ABI 漂移: {name} 内核={ksig[name]} "
+                            f"镜像={asig[name]}")
+    kenum = extract_abi_enums(ktext)
+    aenum = extract_abi_enums(atext)
+    if kenum is None or aenum is None:
+        return 1, "ABI enum 解析失败（非整型赋值/畸形成员，fail-closed）"
+    for name in sorted(set(kenum) | set(aenum)):
+        if name not in kenum:
+            problems.append(f"仅镜像侧 enum: {name}")
+        elif name not in aenum:
+            problems.append(f"仅内核侧 enum: {name}")
+        elif kenum[name] != aenum[name]:
+            problems.append(f"enum ABI 漂移: {name} 内核={kenum[name]} "
+                            f"镜像={aenum[name]}")
+    kmacro = extract_abi_macros(ktext)
+    amacro = extract_abi_macros(atext)
+    common = sorted(set(kmacro) & set(amacro))
+    for name in common:
+        if kmacro[name] != amacro[name]:
+            problems.append(f"宏 ABI 漂移: {name} 内核={kmacro[name]} "
+                            f"镜像={amacro[name]}")
+    if not common:
+        problems.append("ABI 数值宏双空（两侧无共有数值宏，解析异常？）")
+    if problems:
+        return 1, "\n".join(problems)
+    return 0, (f"一致: struct {len(ksig)} / enum {len(kenum)} / "
+               f"共有数值宏 {len(common)} 项 ABI 一致")
+
+
+def compare_abi_surface_pairs(repo: Path) -> tuple[int, str]:
+    """ABI surface 层全部镜像头对（R7）批量比对。"""
+    worst, msgs = 0, []
+    for k_rel, a_rel in ABI_SURFACE_PAIRS:
+        rc, msg = compare_abi_surface(repo / k_rel, repo / a_rel)
+        if rc != 0:
+            worst = max(worst, rc)
+            msgs.append(f"{a_rel}: {msg}")
+    if worst:
+        return worst, "\n".join(msgs)
+    return 0, f"一致: {len(ABI_SURFACE_PAIRS)} 对镜像头 ABI surface 一致"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default=str(Path(__file__).resolve().parents[2] / "code"),
@@ -640,11 +846,13 @@ def main() -> int:
             fail_msgs.append(msg)
     # R-04 方向 2：跨侧常量 + offsetof 契约（独立于 HEADER_PAIRS 的文件对）
     # R-15 P3 方向 1：ABI 版本宏 / hdr 布局 / stats 字段序 四方全量校验
+    # R7：ABI surface 层（struct 成员/枚举值/数值宏，跨 typedef 别名等价）
     for name, fn in (("跨侧常量", compare_constants),
                      ("struct offsetof", compare_offsetofs),
                      ("ABI 版本宏", compare_abi_versions),
                      ("hdr 32B 布局", compare_hdr_layouts),
-                     ("stats 字段序", compare_stats_field_order)):
+                     ("stats 字段序", compare_stats_field_order),
+                     ("ABI surface", compare_abi_surface_pairs)):
         rc, msg = fn(repo)
         tag = {0: "OK", 1: "漂移", 2: "缺失"}[rc]
         print(f"[{tag}] {name}\n  {msg}")

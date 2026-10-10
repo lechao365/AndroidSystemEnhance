@@ -7,12 +7,18 @@
 
 ```
 harness/
-├── lib/
-│   ├── harness_lib.py      # 精简运行时库（初始化/退出/日志/步骤）
-│   ├── paths.py            # 路径工具（paths.conf + 环境变量覆盖）
-│   ├── git_workspace_util.py   # workspace 扫描排除正则（sync 脚本共享，迁自 config）
-│   ├── cdp_paths.py            # cross-device 共享路径解析 + 原子写原语（上移自 skills）
-│   └── verify_common.py        # workspace-verify 共享基础（原子写 JSON/batch 回落）
+├── lib/                        # 检查器与共享运行时库（实读目录，数量不写死）
+│   ├── harness_lib.py          # 精简运行时库（初始化/退出/日志/步骤）
+│   ├── paths.py                # 路径工具（paths.conf + 环境变量覆盖）
+│   ├── cdp_paths.py            # cross-device 共享路径解析 + 原子写原语
+│   ├── verify_common.py        # workspace-verify 共享基础（原子写 JSON/batch 回落）
+│   ├── git_workspace_util.py   # workspace 扫描排除正则（sync 脚本共享）
+│   ├── role_guard.py           # 角色守卫（HARNESS_ROLE emit/apply）
+│   ├── check_*.py              # 接入自检判红链的检查器（config/contract/refs/
+│   │                           #   ioctl/lcview_events/manifest/discipline/scan/
+│   │                           #   quotepath/known_issues/commit_coverage/ruff/host）
+│   └── ...                     # 其余运行时库（commit_scope/content_tree/metrics/
+│                               #   log_prune/slow_guard/shell_env/check_unverified 等）
 ├── config/
 │   ├── paths.conf          # 路径配置（PATCHS_DIR / KERNEL_WS / AOSP_WS）
 │   ├── baseline-status.yaml    # baseline 状态登记表
@@ -23,7 +29,12 @@ harness/
 ├── skills/
 │   ├── sync-code-to-workspace/      # code→workspace 同步（dev/main HEAD 真相源）
 │   ├── sync-code-to-doc/             # code→文档同步
-│   ├── cross-device/                 # 跨设备批次（emit 生成 / apply 执行；含 opencode-server）
+│   ├── cross-device/                 # 跨设备批次共享库（无独立 SKILL.md，非 skill 契约面）
+│   │   ├── cross-device-emit/        # emit 侧产批（命令 /cross-device-emit）
+│   │   ├── cross-device-apply/       # apply 侧执行（命令 /cross-device-apply）
+│   │   ├── opencode-server/          # WebUI 入口（命令 /opencode-server）
+│   │   ├── docs/cdp-contract.md      # CDP-001 契约定义（见下方规则 ID 索引）
+│   │   └── lib/python/               # cdp_parse/cdp_issue/cdp_receipt/gen_manifest 等
 │   ├── workspace-verify/             # code→workspace 同步 + 增量编译 + 上板验证 + verify 收据
 │   ├── git-works-push/               # dev 分支 commit + push（收据随批入库）
 │   ├── loop-engineering/             # 验证收敛会话管理（patience/total 计数、失败指纹归因、修复重试）
@@ -33,7 +44,7 @@ harness/
 │   ├── source-code-modify.md   # SRC-001~004：源码改动优先级/归档纪律
 │   ├── cxx-coding-rules.md     # CXX-001~004：C/C++ 编码规范
 │   ├── known-issues.md         # KIR-001~007：缺陷归属判定有序判据与准入场景表
-│   ├── plantuml.md             # DOC-002：PlantUML 画图约束
+│   ├── plantuml.md             # DOC-002：PlantUML 画图约束（DOC-001 未启用）
 │   ├── cdp-apply-dod.md        # CDP-DOD-001~003：apply 完成判据（检查器门禁三要件/干净克隆/收据自报）
 │   ├── local-dev-dod.md       # LOCAL-DEV-001~003：本地直连开发 DoD（manual 收据/三态自报）
 ├── reference/
@@ -48,6 +59,22 @@ harness/
 │   └── mk_rpi5_full_image.sh   # RPI5 一键编译打包
 └── log/                        # 运行时产物目录（plan/verify/构建报告等；可安全清理，不入库）
 ```
+
+## 规则 ID 索引
+
+| 规则 ID | 定义位置 | 摘要 |
+|---------|---------|------|
+| `SRC-001~004` | [rules/source-code-modify.md](rules/source-code-modify.md) | 源码改动优先级/归档纪律 |
+| `CXX-001~004` | [rules/cxx-coding-rules.md](rules/cxx-coding-rules.md) | C/C++ 编码规范 |
+| `KIR-001~007` | [rules/known-issues.md](rules/known-issues.md) | 缺陷归属判定有序判据 |
+| `DOC-002` | [rules/plantuml.md](rules/plantuml.md) | PlantUML 画图约束（`DOC-001` 未启用） |
+| `CDP-DOD-001~003` | [rules/cdp-apply-dod.md](rules/cdp-apply-dod.md) | apply 完成判据（检查器门禁/干净克隆/收据自报） |
+| `LOCAL-DEV-001~003` | [rules/local-dev-dod.md](rules/local-dev-dod.md) | 本地直连开发 DoD |
+| `HPY-001~003` | [rules/harness-python-conventions.md](rules/harness-python-conventions.md) | harness Python 工程约束（双名收敛/原子写/守卫红灯） |
+| `CDP-001` | [skills/cross-device/docs/cdp-contract.md](skills/cross-device/docs/cdp-contract.md) | CDP 批次契约与解析器（`cdp_parse.py`）成对修改 |
+
+> 可复用工程实践沉淀（原子写/自检并行/内核双轨测试/证据链 fail-closed）
+> 见 [docs/harness-design/README.md](../docs/harness-design/README.md)。
 
 ## 快速使用
 
@@ -71,7 +98,7 @@ harness/
 ```bash
 python3 harness/skills/sync-code-to-workspace/sync_code_to_workspace.py --check-only
 python3 harness/skills/sync-code-to-doc/sync_code_to_doc.py --check-only
-python3 harness/lib/check_skill_refs.py    # harness/skills 引用完整性检查（改动 skill 前必跑）
+python3 harness/lib/check_skill_refs.py    # 引用完整性检查（扫描范围：harness/skills + docs + harness/rules + harness/reference + AGENTS.md/README.md/harness/README.md 顶层文档；改动 skill/文档前必跑）
 ./harness/scripts/mk_rpi5_full_image.sh -h
 ```
 
@@ -115,6 +142,10 @@ export HARNESS_ROLE=emit    # 仅 emit 设备（远端）声明
 export KERNEL_WS=~/workspace/rpi5-kernel-build/common
 export AOSP_WS=~/workspace/aosp
 ```
+
+> 当前 `PATCHS_DIR` 归档根仅指向 `code/rpi5`；`code/rpi-zero2w/`（如
+> `others/usb-fault-inject`）为独立维护的归档，不参与 code→workspace 同步，
+> 多平台统一归档根留待重构批（本阶段仅加注说明，不改解析逻辑）。
 
 ## 控制总纲（状态模型与证据要求）
 

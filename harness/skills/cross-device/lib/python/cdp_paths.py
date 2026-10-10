@@ -20,6 +20,7 @@ from harness.lib.cdp_paths import (  # noqa: E402,F401
     data_baselines_dir,
     data_known_issues_dir,
     data_verify_results_dir,
+    file_lock,
     log_apply_dir,
     project_root,
 )
