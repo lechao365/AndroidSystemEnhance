@@ -141,6 +141,18 @@
         {"name": "err",              "type": "int64"},
         {"name": "stuck_count",      "type": "int64"}
       ]
+    },
+    {
+      "id": 17,
+      "name": "usb_latency_tail",
+      "desc": "USB transfer latency long-tail bucket count exceeded threshold (daemon rule)",
+      "fields": [
+        {"name": "device_index",  "type": "int64"},
+        {"name": "direction",     "type": "int64"},
+        {"name": "latency_ms",    "type": "int64"},
+        {"name": "count",         "type": "int64"},
+        {"name": "threshold",     "type": "int64"}
+      ]
     }
   ]
 }

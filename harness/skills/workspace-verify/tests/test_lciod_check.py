@@ -729,5 +729,175 @@ class TestModeQos(unittest.TestCase):
         self.assertEqual(self._run(fake), 1)
 
 
+# ============================================================
+# C 批二 方向 3：--mode histo USB 传输延迟/块大小二维直方图验收
+# （TestParseHisto / TestValidateHisto / TestModeHisto）
+# 覆盖：解析（引号数组/跳过非直方图行/残缺与非法元素抛 ValueError）、
+# 结构断言全判红项（维度/bounds/counts 长度/abi/负值）、mode 端到端
+# （结构通过 + 读方向增量判绿 / 无设备 / 结构失败 / 无增量 / dd 超时）。
+# CDP-DOD-001：每个判红逻辑配套破坏场景红灯用例。
+# ============================================================
+
+
+def _histo_line(minor=0, dirs=lc._HISTO_DIRS, size_bins=lc._HISTO_SIZE_BINS,
+                lat_bins=lc._HISTO_LAT_BINS, abi=5,
+                size_bounds=lc._HISTO_SIZE_BOUNDS,
+                lat_bounds=lc._HISTO_LAT_BOUNDS, counts=None):
+    """构造与 lciod_probe --histo 输出同构的单行样本。"""
+    if counts is None:
+        counts = [0] * lc._HISTO_COUNT_CELLS
+    sb = ",".join(str(x) for x in size_bounds)
+    lb = ",".join(str(x) for x in lat_bounds)
+    cnt = ",".join(str(x) for x in counts)
+    return (f'histo minor={minor} dirs={dirs} size_bins={size_bins} '
+            f'latency_bins={lat_bins} mono_ts_ns=123456789 '
+            f'size_bounds="{sb}" latency_bounds="{lb}" counts="{cnt}" '
+            f'abi_version={abi}')
+
+
+class TestParseHisto(unittest.TestCase):
+    def test_valid_line_all_fields_parsed(self):
+        out = lc.parse_histo_output(_histo_line())
+        self.assertEqual(list(out), ["0"])
+        rec = out["0"]
+        self.assertEqual(rec["dirs"], 2)
+        self.assertEqual(rec["size_bins"], 8)
+        self.assertEqual(rec["latency_bins"], 12)
+        self.assertEqual(rec["abi_version"], 5)
+        self.assertEqual(len(rec["counts"]), 192)
+        self.assertEqual(tuple(rec["size_bounds"]), lc._HISTO_SIZE_BOUNDS)
+        self.assertEqual(tuple(rec["latency_bounds"]), lc._HISTO_LAT_BOUNDS)
+
+    def test_non_histo_lines_skipped(self):
+        # 同时需 minor 与 counts 才识别；普通 stats 行/空白行跳过
+        text = "\n".join([VALID_LINE, "", "kernel noise line"])
+        self.assertEqual(lc.parse_histo_output(text), {})
+
+    def test_missing_array_field_raises(self):
+        # 含 minor 与 counts 但缺 size_bounds → 判为残缺行抛 ValueError
+        line = _histo_line().replace('size_bounds="', 'sizebnds="', 1)
+        with self.assertRaises(ValueError):
+            lc.parse_histo_output(line)
+
+    def test_bad_array_element_raises(self):
+        # counts 含非十进制元素 → 抛 ValueError（残缺数据不得静默当有效）
+        line = _histo_line(counts=[0] * 191 + ["x"])
+        with self.assertRaises(ValueError):
+            lc.parse_histo_output(line)
+
+    def test_missing_scalar_field_raises(self):
+        line = _histo_line().replace("dirs=2 ", "")
+        with self.assertRaises(ValueError):
+            lc.parse_histo_output(line)
+
+
+class TestValidateHisto(unittest.TestCase):
+    def _rec(self, **kw):
+        return lc.parse_histo_output(_histo_line(**kw))["0"]
+
+    def test_valid_passes(self):
+        self.assertEqual(lc.validate_histo(self._rec()), [])
+
+    def test_dirs_wrong_is_error(self):
+        errors = lc.validate_histo(self._rec(dirs=3))
+        self.assertTrue(any("dirs" in e for e in errors))
+
+    def test_size_bins_wrong_is_error(self):
+        errors = lc.validate_histo(self._rec(size_bins=7))
+        self.assertTrue(any("size_bins" in e for e in errors))
+
+    def test_latency_bins_wrong_is_error(self):
+        errors = lc.validate_histo(self._rec(lat_bins=11))
+        self.assertTrue(any("latency_bins" in e for e in errors))
+
+    def test_abi_drift_is_error(self):
+        errors = lc.validate_histo(self._rec(abi=4))
+        self.assertTrue(any("abi_version" in e for e in errors))
+
+    def test_counts_length_is_error(self):
+        errors = lc.validate_histo(self._rec(counts=[0] * 191))
+        self.assertTrue(any("counts 长度" in e for e in errors))
+
+    def test_size_bounds_mismatch_is_error(self):
+        bad = tuple(list(lc._HISTO_SIZE_BOUNDS[:-1]) + [123])
+        errors = lc.validate_histo(self._rec(size_bounds=bad))
+        self.assertTrue(any("size_bounds" in e for e in errors))
+
+    def test_latency_bounds_mismatch_is_error(self):
+        bad = tuple(list(lc._HISTO_LAT_BOUNDS[:-1]) + [456])
+        errors = lc.validate_histo(self._rec(lat_bounds=bad))
+        self.assertTrue(any("latency_bounds" in e for e in errors))
+
+    def test_counts_negative_is_error(self):
+        counts = [0] * lc._HISTO_COUNT_CELLS
+        counts[0] = -1
+        errors = lc.validate_histo(self._rec(counts=counts))
+        self.assertTrue(any("负值" in e for e in errors))
+
+
+class FakeAdbHisto:
+    """伪 adb（histo 模式专用）：仅模拟 drop_caches 与 dd 读调用。"""
+
+    def __init__(self, dd_rc=0):
+        self.dd_rc = dd_rc
+        self.calls = []
+
+    def __call__(self, args, timeout=60):
+        self.calls.append(args)
+        if args[0] == "shell" and "dd if=" in str(args[1]):
+            return ("", self.dd_rc)
+        return ("", 0)
+
+
+def _histo_args(**kw):
+    a = argparse.Namespace()
+    a.dd_timeout = kw.get("dd_timeout", 300)
+    return a
+
+
+class TestModeHisto(unittest.TestCase):
+    def _run(self, probes, dd_rc=0):
+        fake = FakeAdbHisto(dd_rc=dd_rc)
+        with mock.patch.object(lc, "run_histo_probe", side_effect=probes), \
+                mock.patch.object(lc, "adb", fake):
+            return lc.mode_histo(_histo_args()), fake
+
+    def test_pass_with_read_increment(self):
+        # 读方向（dir 0）首格 +5 → 结构通过 + 增量判绿
+        after = [0] * lc._HISTO_COUNT_CELLS
+        after[0] = 5
+        rc, fake = self._run([_histo_line(), _histo_line(counts=after)])
+        self.assertEqual(rc, 0)
+        # dd 只读 /dev/null（无破坏面）
+        self.assertTrue(any("of=/dev/null" in str(c[1]) for c in fake.calls))
+
+    def test_no_devices_red(self):
+        rc, _ = self._run([""])
+        self.assertEqual(rc, 1)
+
+    def test_structure_failure_red(self):
+        rc, _ = self._run([_histo_line(dirs=3)])
+        self.assertEqual(rc, 1)
+
+    def test_no_read_increment_red(self):
+        # 前后读方向计数均 0（dd 触发未生效）→ 判红（防假绿）
+        rc, _ = self._run([_histo_line(), _histo_line()])
+        self.assertEqual(rc, 1)
+
+    def test_write_only_increment_red(self):
+        # 仅写方向（dir 1）增量、读方向零增量 → 不得判绿（读方向为唯一判据）
+        after = [0] * lc._HISTO_COUNT_CELLS
+        after[lc._HISTO_READ_CELLS] = 9  # 写方向首格
+        rc, _ = self._run([_histo_line(), _histo_line(counts=after)])
+        self.assertEqual(rc, 1)
+
+    def test_dd_timeout_returns_minus_one(self):
+        after = [0] * lc._HISTO_COUNT_CELLS
+        after[0] = 5
+        rc, _ = self._run([_histo_line(), _histo_line(counts=after)],
+                          dd_rc=-1)
+        self.assertEqual(rc, -1)
+
+
 if __name__ == "__main__":
     unittest.main()

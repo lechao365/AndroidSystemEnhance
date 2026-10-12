@@ -59,6 +59,7 @@
 #define LCVIEW_EVENT_SLOW_DISK           14
 #define LCVIEW_EVENT_SD_HEALTH           15
 #define LCVIEW_EVENT_SD_STUCK            16
+#define LCVIEW_EVENT_USB_LATENCY_TAIL    17
 
 /* --- 记录魔数 --- */
 /* 每条日志记录的起始固定标志，用于校验数据完整性。

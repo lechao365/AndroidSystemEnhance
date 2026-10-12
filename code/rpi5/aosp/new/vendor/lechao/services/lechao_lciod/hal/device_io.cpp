@@ -245,6 +245,22 @@ int get_stats(int fd, struct vendor_lechao_usbd_stats *stats) {
 }
 
 /*
+ * get_latency_histogram — 通过 IOC_GET_LATENCY_HISTOGRAM ioctl 获取直方图快照
+ * 先 memset 清零输出缓冲区，再 ioctl 读取。
+ * 返回: 0 成功，-1 失败（errno 保留）
+ */
+int get_latency_histogram(int fd, struct vendor_lechao_usbd_latency_histogram *hist) {
+    memset(hist, 0, sizeof(*hist));
+    int ret = ioctl(fd, VENDOR_LECHAO_USBD_IOC_GET_LATENCY_HISTOGRAM, hist);
+    if (ret < 0) {
+        int saved = errno;  // strerror 可能改 errno，先存并 return 前还原
+        LC_LOGE("get_latency_histogram: ioctl failed: " << strerror(saved));
+        errno = saved;
+    }
+    return ret;
+}
+
+/*
  * reset_state — 通过 IOC_RESET_STATE ioctl 重置内核端计数器
  * 返回: 0 成功，-1 失败
  */

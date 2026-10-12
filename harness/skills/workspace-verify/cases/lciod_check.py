@@ -44,6 +44,13 @@
 #                  存在 "id":15 或 "name":"sd_health" 记录；
 #              (3) sd JSON：logcat tag lechao_lciod_event 出现 "rule":"sd"。
 #              缺证据（目录不可读/属性缺失/无事件/无匹配）均判红。
+#   histo    — USB 传输延迟/块大小二维直方图用户态验收（C 批二 方向 3）：
+#              lciod_probe --histo（GET_LATENCY_HISTOGRAM cmd5）取数 → 结构
+#              断言（dirs=2/size_bins=8/latency_bins=12、counts 长度 192、
+#              size/latency 档位上界严格递增且末档饱和、abi_version=5）→
+#              drop_caches + dd 读块设备（默认 /dev/block/sda，LCVIEW_BLOCK_DEV
+#              覆盖，只读到 /dev/null 无破坏面）→ 差分断言 ≥1 设备读方向
+#              （dir 0）计数之和严格增量（防假绿；无增量判红）。
 #
 # 退出码：0 校验通过 / 1 校验失败 / 2 设备不可达或参数错误
 # ============================================================
@@ -97,6 +104,21 @@ _EXPECTED_ABI = "5"
 
 # key=value 解析：vendor="SanDisk Corp" 等引号包裹值支持空格
 _TOKEN_RE = re.compile(r'(\w+)=(?:"([^"]*)"|(\S+))')
+
+# ---- C 批二 方向 3：直方图模式（--mode histo）常量 ----
+# 维度与内核 lciod_histo.h / ABI v5 编译期固定一致
+_HISTO_DIRS = 2
+_HISTO_SIZE_BINS = 8
+_HISTO_LAT_BINS = 12
+# 累计矩阵单元数 = dirs * size_bins * lat_bins = 192
+_HISTO_COUNT_CELLS = _HISTO_DIRS * _HISTO_SIZE_BINS * _HISTO_LAT_BINS
+# 档位上界（内核编译期固定，末档饱和 2^64-1）：size 为字节，latency 为纳秒
+_HISTO_SIZE_BOUNDS = (512, 4096, 16384, 65536, 262144, 1048576, 8388608,
+                      2 ** 64 - 1)
+_HISTO_LAT_BOUNDS = (1000, 5000, 10000, 50000, 100000, 500000, 1000000,
+                     5000000, 10000000, 50000000, 100000000, 2 ** 64 - 1)
+# 读方向（dir 0）计数的矩阵切片长度：size_bins * lat_bins
+_HISTO_READ_CELLS = _HISTO_SIZE_BINS * _HISTO_LAT_BINS
 
 
 def adb(args, timeout=60):
@@ -816,6 +838,175 @@ def mode_sd(args):
 
 
 # ============================================================
+# C 批二 方向 3：USB 传输延迟/块大小二维直方图用户态验收（--mode histo）
+# ============================================================
+
+
+def run_histo_probe():
+    """设备侧执行 lciod_probe --histo（GET_LATENCY_HISTOGRAM ioctl 取数），
+    返回 stdout。失败/超时按语义退出——节点打不开或 ioctl 失败不得当
+    "无输出"假绿（对齐 run_link_probe/run_probe 的 adb 超时透传与退出码语义）。
+    """
+    out, rc = adb(["shell", "lciod_probe", "--histo"])
+    if rc == -1:
+        print("ERROR: adb 执行 lciod_probe --histo 超时")
+        sys.exit(2)
+    if rc != 0:
+        print(f"ERROR: lciod_probe --histo 退出码 {rc}（open/ioctl 失败）")
+        sys.exit(1)
+    return out
+
+
+def parse_histo_output(text):
+    """解析 lciod_probe --histo 输出（每设备一行 key=value）→
+    {minor_str: {"minor","dirs","size_bins","latency_bins","mono_ts_ns",
+    "size_bounds","latency_bounds","counts","abi_version"}}。
+
+    仅识别同时含 minor 与 counts 的行（跳过空行/非直方图噪声）。某行含
+    minor 但缺必需字段或数组元素非十进制时抛 ValueError——残缺数据不得
+    静默当有效快照（防假绿），由调用方转 exit 1。
+    """
+    out = {}
+    for ln, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        fields = {}
+        for m in _TOKEN_RE.finditer(line):
+            fields[m.group(1)] = (m.group(2) if m.group(2) is not None
+                                  else m.group(3))
+        if "minor" not in fields or "counts" not in fields:
+            continue
+        minor = fields["minor"]
+        try:
+            int(minor, 0)
+        except ValueError:
+            raise ValueError(f"histo 行 {ln} minor 非整数: {minor!r}")
+        rec = {"minor": minor}
+        for f in ("dirs", "size_bins", "latency_bins", "mono_ts_ns",
+                  "abi_version"):
+            if f not in fields:
+                raise ValueError(f"histo 行 {ln}(minor={minor}) 缺字段 {f}")
+            try:
+                rec[f] = int(fields[f], 0)
+            except ValueError:
+                raise ValueError(
+                    f"histo 行 {ln}(minor={minor}) {f} 非整数: {fields[f]!r}")
+        for f in ("size_bounds", "latency_bounds", "counts"):
+            if f not in fields:
+                raise ValueError(
+                    f"histo 行 {ln}(minor={minor}) 缺数组字段 {f}")
+            try:
+                rec[f] = [int(x, 0) for x in fields[f].split(",") if x != ""]
+            except ValueError:
+                raise ValueError(f"histo 行 {ln}(minor={minor}) {f} 含非整数"
+                                 f"元素: {fields[f][:80]!r}")
+        out[str(minor)] = rec
+    return out
+
+
+def validate_histo(dev):
+    """直方图结构断言 → 错误列表（空 = 通过）。
+
+    判红项：维度字段不符（dirs/size_bins/latency_bins）/ abi_version 漂移 /
+    counts 单元数 != 192 / size_bounds·latency_bounds 长度或取值与内核
+    编译期档位不符 / 档位上界非严格递增或末档非饱和（2^64-1）/ counts 含负值。
+    """
+    errors = []
+    tag = f"minor={dev.get('minor', '?')}"
+    if dev.get("dirs") != _HISTO_DIRS:
+        errors.append(f"{tag}: dirs={dev.get('dirs')} != {_HISTO_DIRS}")
+    if dev.get("size_bins") != _HISTO_SIZE_BINS:
+        errors.append(f"{tag}: size_bins={dev.get('size_bins')} "
+                      f"!= {_HISTO_SIZE_BINS}")
+    if dev.get("latency_bins") != _HISTO_LAT_BINS:
+        errors.append(f"{tag}: latency_bins={dev.get('latency_bins')} "
+                      f"!= {_HISTO_LAT_BINS}")
+    if dev.get("abi_version") != int(_EXPECTED_ABI):
+        errors.append(f"{tag}: abi_version={dev.get('abi_version')} "
+                      f"!= {_EXPECTED_ABI}")
+    counts = dev.get("counts")
+    if not isinstance(counts, list) or len(counts) != _HISTO_COUNT_CELLS:
+        errors.append(f"{tag}: counts 长度="
+                      f"{len(counts) if isinstance(counts, list) else counts}"
+                      f" != {_HISTO_COUNT_CELLS}")
+    elif any(c < 0 for c in counts):
+        errors.append(f"{tag}: counts 含负值")
+    sb = dev.get("size_bounds")
+    if not isinstance(sb, list) or tuple(sb) != _HISTO_SIZE_BOUNDS:
+        errors.append(f"{tag}: size_bounds 与内核档位不符: {sb}")
+    lb = dev.get("latency_bounds")
+    if not isinstance(lb, list) or tuple(lb) != _HISTO_LAT_BOUNDS:
+        errors.append(f"{tag}: latency_bounds 与内核档位不符: {lb}")
+    for name, bounds in (("size_bounds", sb), ("latency_bounds", lb)):
+        if not isinstance(bounds, list) or len(bounds) < 2:
+            continue
+        if any(bounds[i] <= bounds[i - 1] for i in range(1, len(bounds))):
+            errors.append(f"{tag}: {name} 非严格递增: {bounds}")
+        elif bounds[-1] != 2 ** 64 - 1:
+            errors.append(f"{tag}: {name} 末档非饱和: {bounds[-1]}")
+    return errors
+
+
+def mode_histo(args):
+    """USB 传输延迟/块大小二维直方图用户态验收（C 批二 方向 3）。
+
+    语义：lciod_probe --histo 取数（GET_LATENCY_HISTOGRAM cmd5）→ 结构断言
+    （dirs=2/size_bins=8/latency_bins=12、counts 长度 192、size/latency 档位
+    上界严格递增且末档饱和、abi_version=5）→ drop_caches + dd 读块设备
+    4MB（LCVIEW_BLOCK_DEV 覆盖，默认 /dev/block/sda USB 通道，只读到
+    /dev/null 无破坏面）→ 差分断言 ≥1 设备读方向（dir 0）计数之和严格增量。
+    无任一读方向增量即判红（防假绿）。返回 0 通过 / 1 判红 / -1 adb 超时。
+    """
+    snap0 = parse_histo_output(run_histo_probe())
+    if not snap0:
+        print("ERROR: 无设备直方图快照（probe 输出为空，内核驱动/HAL 未就绪？）")
+        return 1
+    all_errors = []
+    for rec in snap0.values():
+        all_errors += validate_histo(rec)
+    if all_errors:
+        for e in all_errors:
+            print(f"FAIL: {e}")
+        print("ERROR: lciod histo 校验失败（结构断言）")
+        return 1
+    print(f"OK: 直方图结构断言通过（{len(snap0)} 设备）")
+
+    blockdev = os.environ.get("LCVIEW_BLOCK_DEV", "/dev/block/sda")
+    # 强刷读路径：丢弃 page cache 使 dd 真实下发 USB SCSI（对齐 mode_perf）
+    adb(["shell", "echo 3 > /proc/sys/vm/drop_caches"])
+    out, rc = adb(["shell",
+                   f"dd if={blockdev} of=/dev/null bs=1M count=4 2>/dev/null"])
+    if rc == -1:
+        return -1  # adb 超时透传
+    if rc != 0:
+        print(f"ERROR: dd 读 {blockdev} 失败 rc={rc}（块设备不可读？）")
+        return 1
+
+    snap1 = parse_histo_output(run_histo_probe())
+    incremented_any = False
+    for minor, rec0 in snap0.items():
+        if minor not in snap1:
+            continue
+        c0 = sum(rec0["counts"][:_HISTO_READ_CELLS])
+        c1 = sum(snap1[minor]["counts"][:_HISTO_READ_CELLS])
+        delta = c1 - c0
+        if delta > 0:
+            incremented_any = True
+            print(f"OK: minor={minor} 读方向直方图计数增量 {delta}"
+                  f"（{c0} -> {c1}）")
+        else:
+            print(f"minor={minor}: 读方向计数无增量（delta={delta}，"
+                  "非 dd 目标通道）")
+    if not incremented_any:
+        print("FAIL: 无任一设备读方向直方图计数增量（dd 触发未生效？）")
+        print("ERROR: lciod histo 校验失败（差分断言，防假绿）")
+        return 1
+    print("OK: lciod histo 校验通过（结构断言 + 读方向增量）")
+    return 0
+
+
+# ============================================================
 # R4 方向 6：SD 卡写 QoS 限速校验（--mode qos）
 # ============================================================
 
@@ -1012,7 +1203,7 @@ def main():
     ap = argparse.ArgumentParser(description="lciod 板端数据校验器（host 侧）")
     ap.add_argument("--mode", required=True,
                     choices=["stats", "baseline", "delta", "perf", "uas",
-                             "link", "storm", "qos", "sd"])
+                             "link", "storm", "qos", "sd", "histo"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
@@ -1073,6 +1264,14 @@ def main():
     if args.mode == "sd":
         # A 批二 方向 3/4：SD 用户态验收（sysfs + SD_HEALTH + sd JSON）
         rc = mode_sd(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "histo":
+        # C 批二 方向 3：USB 传输延迟/块大小二维直方图用户态验收
+        rc = mode_histo(args)
         if rc == -1:
             print("ERROR: adb 执行超时")
             return 1

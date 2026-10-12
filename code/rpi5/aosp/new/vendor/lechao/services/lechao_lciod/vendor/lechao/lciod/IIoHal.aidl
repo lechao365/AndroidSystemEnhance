@@ -13,12 +13,14 @@
  *   getConfig    — 获取指定设备的运行时配置
  *   setConfig    — 设置指定设备的运行时配置
  *   readEvent    — 从内核事件环形缓冲区读取一条异步事件（带超时）
+ *   getLatencyHistogram — 获取指定设备的传输延迟/块大小二维直方图快照
  * ============================================================ */
 package vendor.lechao.lciod;
 
 import vendor.lechao.lciod.IoStats;
 import vendor.lechao.lciod.IoConfig;
 import vendor.lechao.lciod.IoEvent;
+import vendor.lechao.lciod.LatencyHistogram;
 import android.os.ParcelFileDescriptor;
 
 @VintfStability
@@ -54,4 +56,11 @@ interface IIoHal {
      * 调用方负责关闭返回的 fd；设备离线/未打开返回错误。
      */
     ParcelFileDescriptor dupEventFd(int deviceMinor);
+
+    /*
+     * C 批二：读取指定设备的传输延迟/块大小二维直方图快照
+     * deviceMinor — 设备节点编号
+     * 返回 LatencyHistogram（来自内核 GET_LATENCY_HISTOGRAM ioctl cmd 5）
+     */
+    LatencyHistogram getLatencyHistogram(int deviceMinor);
 }

@@ -187,6 +187,8 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lciod/aidl_api/vendor.lechao.lciod/current/vendor/lechao/lciod/IoEvent.aidl
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/aidl_api/vendor.lechao.lciod/current/vendor/lechao/lciod/IoStats.aidl
       source: aosp/vendor/lechao/services/lechao_lciod/aidl_api/vendor.lechao.lciod/current/vendor/lechao/lciod/IoStats.aidl
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/aidl_api/vendor.lechao.lciod/current/vendor/lechao/lciod/LatencyHistogram.aidl
+      source: aosp/vendor/lechao/services/lechao_lciod/aidl_api/vendor.lechao.lciod/current/vendor/lechao/lciod/LatencyHistogram.aidl
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/common/Android.bp
       source: aosp/vendor/lechao/services/lechao_lciod/common/Android.bp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/common/minor_utils.cpp
@@ -273,6 +275,8 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lciod/vendor/lechao/lciod/IoEvent.aidl
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/vendor/lechao/lciod/IoStats.aidl
       source: aosp/vendor/lechao/services/lechao_lciod/vendor/lechao/lciod/IoStats.aidl
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/vendor/lechao/lciod/LatencyHistogram.aidl
+      source: aosp/vendor/lechao/services/lechao_lciod/vendor/lechao/lciod/LatencyHistogram.aidl
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/config/Android.bp
       source: aosp/vendor/lechao/services/lechao_lcview/config/Android.bp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/config/lcview_events.json

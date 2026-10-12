@@ -297,10 +297,23 @@ cases:
   #   3) logcat tag lechao_lciod_event 含 "rule":"sd" JSON（daemon 每 10s 上报）。
   # 防假绿：sysfs 目录/属性缺失或非数字 / 无 sd_health 文件或无匹配记录 /
   # 设备时钟不可读 / 无 "rule":"sd" 行均判红。无持久副作用（只读 sysfs/logcat
-  # + dd 读无破坏面），不需 setup_snapshot/teardown；读 dd 同 lciod-trigger
-  # （LCVIEW_BLOCK_DEV 覆盖，默认 /dev/block/sda 只读到 /dev/null）。
+  # + dd 读无破坏面），不需 setup_snapshot/teardown；读 dd 同 lciod-trigger，
+  # 但本 case 目的是驱动 SD 卡流量，默认读 SD 卡块设备 /dev/block/mmcblk0
+  # （LCVIEW_BLOCK_DEV 可覆盖），只读到 /dev/null，绝不写系统盘。
   lciod-sd:
-    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"adb shell \"echo 3 > /proc/sys/vm/drop_caches; dd if=${LCVIEW_BLOCK_DEV:-/dev/block/sda} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode sd"'
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"adb shell \"echo 3 > /proc/sys/vm/drop_caches; dd if=${LCVIEW_BLOCK_DEV:-/dev/block/mmcblk0} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode sd"'
+    timeout_s: 300
+
+  # C 批二 方向 3：lciod USB 传输延迟/块大小二维直方图用户态验收（本批新增
+  # 验收 case）。语义：cases/lciod_check.sh --mode histo 内部执行
+  #   lciod_probe --histo 取数（GET_LATENCY_HISTOGRAM cmd5）→ 结构断言
+  #   （dirs=2/size_bins=8/latency_bins=12、counts 长度 192、size/latency
+  #   档位上界严格递增且末档饱和、abi_version=5）→ dd 读块设备（默认
+  #   /dev/block/sda USB 通道，只读到 /dev/null 无破坏面）→ 差分断言
+  #   ≥1 设备读方向直方图计数严格增量（防假绿；无增量判红）。
+  # 无持久副作用（只读 ioctl + dd 读无破坏面），仅登记 timeout_s。
+  lciod-histo:
+    acceptance: 'hostcmd:"cases/lciod_check.sh --mode histo"'
     timeout_s: 300
 
   # R3 方向 7：lciod 风暴规则（附加 case，不入 batch 验收列表，方向 7 单独
@@ -374,6 +387,8 @@ cases:
   #   USBDEVFS_RESET 实测无打点) 10(usb_stall,USBD 栈 STALL) 11(usb_timeout,
   #   LcIod 侧传输超时) 12(usb_data_corrupt,LcIod 侧数据损坏)
   # - 预留未用: 1(usb_connect) 2(gpio_irq) 3(sensor_data)
+  # - 另注（C 批二）：id 17 usb_latency_tail 为 daemon 合成事件（非内核打点
+  #   事件，直方图尾桶溢出时由用户态生成），不在内核事件覆盖盘点口径内。
   # - LcIod 维度补充（2026-08-27，lciod 防护栏落地）：USBD 栈传输观测不再
   #   仅依赖 lcview 事件落盘——lciod-pipeline/trigger 经内核 GET_STATS 计数
   #   （read_bytes/write_cmds 等）直接观测 USBD 栈行为，与上述事件维度互补；

@@ -138,6 +138,62 @@ bool ShouldEmitStorm(const StormWindow& w, uint64_t threshold) {
 }
 
 /*
+ * HistoTailSum — 某方向长尾累计计数（C 批二方向2，纯函数）
+ * counts 为行主序扁平数组，索引 = (dir*sizeBins + s)*latencyBins + l。
+ * 输入防御（CXX-002/003）: dir/startBin 越界、counts 长度不足一律返回 0，
+ * 不读越界内存；和为 10s 级小计数，uint64 累加不回绕。
+ */
+uint64_t HistoTailSum(const aidl::vendor::lechao::lciod::LatencyHistogram& h, int dir, int startBin) {
+    if (dir < 0 || dir >= h.dirs || startBin < 0 || startBin >= h.latencyBins)
+        return 0;
+    const size_t need = static_cast<size_t>(h.dirs) * static_cast<size_t>(h.sizeBins) *
+                        static_cast<size_t>(h.latencyBins);
+    if (h.counts.size() < need)
+        return 0;
+    uint64_t sum = 0;
+    for (int s = 0; s < h.sizeBins; s++) {
+        for (int l = startBin; l < h.latencyBins; l++) {
+            size_t idx = (static_cast<size_t>(dir) * h.sizeBins + s) * h.latencyBins + l;
+            sum += static_cast<uint64_t>(h.counts[idx]);
+        }
+    }
+    return sum;
+}
+
+/* HistoTotalSum — 某方向全档累计计数：等价于 startBin=0 的长尾和。 */
+uint64_t HistoTotalSum(const aidl::vendor::lechao::lciod::LatencyHistogram& h, int dir) {
+    return HistoTailSum(h, dir, 0);
+}
+
+/*
+ * EvaluateHistoTail — 长尾越限判定（C 批二方向2，纯函数）
+ * 首次调用只建 prev 快照返回 0（无上一窗口可比）；其后按 curr-prev 差分，
+ * curr<prev（计数回绕/环重置）时按 curr 重算避免回绕误触发。返回掩码
+ * bit0=读越限、bit1=写越限。
+ */
+int EvaluateHistoTail(HistoTailState* st, uint64_t readTail, uint64_t writeTail,
+                      uint64_t threshold) {
+    if (st == nullptr)
+        return 0;
+    if (!st->valid) {
+        st->valid = true;
+        st->prevRead = readTail;
+        st->prevWrite = writeTail;
+        return 0;
+    }
+    uint64_t dRead = readTail >= st->prevRead ? readTail - st->prevRead : readTail;
+    uint64_t dWrite = writeTail >= st->prevWrite ? writeTail - st->prevWrite : writeTail;
+    int mask = 0;
+    if (dRead >= threshold)
+        mask |= 1;
+    if (dWrite >= threshold)
+        mask |= 2;
+    st->prevRead = readTail;
+    st->prevWrite = writeTail;
+    return mask;
+}
+
+/*
  * ParseFaultInjectValue — 解析用户态合成注入 sysprop 值（R3 方向7）
  * 格式: "stall:<n>" 或 "timeout:<n>"；n 为十进制数字（无符号）。
  * 输入防御（CXX-003）: 前缀精确匹配 + 数字段逐字符校验（禁符号/空白/空值），
@@ -311,6 +367,36 @@ static void EmitSdJson(const lechao::lciod::SdCollector::Sample& s) {
         (unsigned long long)s.ssrSpeedClass, (unsigned long long)s.ssrUhsGrade,
         (unsigned long long)s.ssrValid);
     EmitCollectorJson("sd", line, n, sizeof(line));
+}
+
+/* C 批二方向2：USB 传输延迟直方图 JSON 行（每 10s 采样，rule=histo）。
+ * read/write_total 为全档累计，tail_read/tail_write 为长尾档（>=50ms）累计。 */
+static void EmitHistoJson(int minor, const aidl::vendor::lechao::lciod::LatencyHistogram& h) {
+    char line[320];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"histo\",\"minor\":%d,\"dirs\":%d,\"size_bins\":%d,"
+        "\"latency_bins\":%d,\"mono_ts_ns\":%lld,\"read_total\":%llu,"
+        "\"write_total\":%llu,\"tail_read\":%llu,\"tail_write\":%llu}",
+        minor, h.dirs, h.sizeBins, h.latencyBins,
+        (long long)h.monoTsNs,
+        (unsigned long long)HistoTotalSum(h, 0),
+        (unsigned long long)HistoTotalSum(h, 1),
+        (unsigned long long)HistoTailSum(h, 0, kHistoTailLatStartBin),
+        (unsigned long long)HistoTailSum(h, 1, kHistoTailLatStartBin));
+    EmitCollectorJson("histo", line, n, sizeof(line));
+}
+
+/* C 批二方向2：长尾越限合成事件 JSON 行（rule=usb_latency_tail） */
+static void EmitHistoTailEventJson(int minor, int dir, uint64_t count, uint64_t threshold) {
+    char line[224];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"usb_latency_tail\",\"device_index\":%d,\"direction\":%d,"
+        "\"latency_ms\":%d,\"count\":%llu,\"threshold\":%llu}",
+        minor, dir, kHistoTailLatencyMs,
+        (unsigned long long)count, (unsigned long long)threshold);
+    EmitCollectorJson("usb_latency_tail", line, n, sizeof(line));
+    LC_ALOGI("histo: latency tail minor=%d dir=%d count=%llu threshold=%llu",
+             minor, dir, (unsigned long long)count, (unsigned long long)threshold);
 }
 
 /*
@@ -613,6 +699,9 @@ void IoServiceImpl::start_monitor() {
                 bool stormArmed = true;  /* 窗口累计回落阈值后重新武装 */
             };
             std::unordered_map<int32_t, StormState> stormStates;
+            /* C 批二方向2：per-minor 长尾累计差分状态（跨 10s 采样，仅本分片
+             * worker 线程访问，无锁；设备离线时随 stormStates 一并清理）。 */
+            std::unordered_map<int32_t, HistoTailState> histoTailStates;
             /* 最近一次已处理的注入值（值变化才处理，幂等去重） */
             std::string lastInjectValue;
 
@@ -709,6 +798,14 @@ void IoServiceImpl::start_monitor() {
                     if (std::find(deviceMinors.begin(), deviceMinors.end(), it->first) ==
                         deviceMinors.end())
                         it = stormStates.erase(it);
+                    else
+                        ++it;
+                }
+                /* C 批二方向2：同步清理离线设备的长尾差分状态（CXX-002） */
+                for (auto it = histoTailStates.begin(); it != histoTailStates.end();) {
+                    if (std::find(deviceMinors.begin(), deviceMinors.end(), it->first) ==
+                        deviceMinors.end())
+                        it = histoTailStates.erase(it);
                     else
                         ++it;
                 }
@@ -1022,6 +1119,24 @@ void IoServiceImpl::start_monitor() {
                               (long long)stats.eventDropCount,
                               (unsigned long long)read_err_rate,
                               (unsigned long long)write_err_rate);
+
+                        /* C 批二方向2：每 10s 拉取传输延迟直方图，落 histo JSON
+                         * 行；长尾（>=50ms）计数窗口新增超阈即合成
+                         * usb_latency_tail 事件。仅在 getStats 成功设备上执行
+                         * （前面失败已 continue）。 */
+                        aidl::vendor::lechao::lciod::LatencyHistogram hist;
+                        auto h_status = hal->getLatencyHistogram(minor, &hist);
+                        if (!h_status.isOk()) {
+                            ALOGW("monitor[%d]: getLatencyHistogram failed for minor=%d", shard, minor);
+                        } else {
+                            EmitHistoJson(minor, hist);
+                            uint64_t rt = HistoTailSum(hist, 0, kHistoTailLatStartBin);
+                            uint64_t wt = HistoTailSum(hist, 1, kHistoTailLatStartBin);
+                            HistoTailState& hs = histoTailStates.emplace(minor, HistoTailState{}).first->second;
+                            int mask = EvaluateHistoTail(&hs, rt, wt, kHistoTailThreshold);
+                            if (mask & 1) EmitHistoTailEventJson(minor, 0, rt, kHistoTailThreshold);
+                            if (mask & 2) EmitHistoTailEventJson(minor, 1, wt, kHistoTailThreshold);
+                        }
                     }
                 }
             }

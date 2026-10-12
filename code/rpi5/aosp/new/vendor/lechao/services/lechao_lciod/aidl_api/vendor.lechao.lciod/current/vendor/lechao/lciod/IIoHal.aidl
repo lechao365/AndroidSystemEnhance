@@ -43,4 +43,5 @@ interface IIoHal {
   boolean setConfig(int deviceMinor, in vendor.lechao.lciod.IoConfig config);
   vendor.lechao.lciod.IoEvent readEvent(int deviceMinor, int timeoutMs);
   ParcelFileDescriptor dupEventFd(int deviceMinor);
+  vendor.lechao.lciod.LatencyHistogram getLatencyHistogram(int deviceMinor);
 }

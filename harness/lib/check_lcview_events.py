@@ -71,6 +71,9 @@ DISABLED_EVENTS = {
     # 无内核发射点（lcview_builder_start 不在内核），schema 保留定义供
     # 用户态解析落盘，按停发语义豁免"内核无发射点"判红。
     "LCVIEW_EVENT_SLOW_DISK",
+    # C 批二方向2：USB_LATENCY_TAIL 为 lciod daemon（延迟直方图长尾规则）
+    # 合成事件，无内核发射点，schema 保留定义供用户态解析，按停发语义豁免。
+    "LCVIEW_EVENT_USB_LATENCY_TAIL",
 }
 
 

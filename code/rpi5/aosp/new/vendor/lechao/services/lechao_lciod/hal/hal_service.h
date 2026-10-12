@@ -98,6 +98,13 @@ public:
     ndk::ScopedAStatus dupEventFd(int32_t in_deviceMinor,
                                   ndk::ScopedFileDescriptor* _aidl_return) override;
 
+    /*
+     * C 批二：读取指定设备传输延迟/块大小二维直方图快照
+     * 复用持久 fd（懒打开缓存），设备移除（ENODEV/EIO）关闭 fd 置 -1。
+     */
+    ndk::ScopedAStatus getLatencyHistogram(int32_t in_deviceMinor,
+                                           aidl::vendor::lechao::lciod::LatencyHistogram* _aidl_return) override;
+
 private:
     /* 设备节点缓存: minor → {path, fd} */
     std::unordered_map<int, DeviceEntry> mDeviceMap;

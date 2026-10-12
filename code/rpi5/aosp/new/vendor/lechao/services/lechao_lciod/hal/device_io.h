@@ -45,6 +45,14 @@ void close_device(int fd);
 int get_stats(int fd, struct vendor_lechao_usbd_stats *stats);
 
 /*
+ * get_latency_histogram — 获取设备传输延迟/块大小二维直方图快照（cmd 5）
+ * @fd: 设备 fd
+ * @hist: 输出参数，调用前不需初始化（函数内部 memset 清零）
+ * 返回: 0 成功，-1 失败（ioctl 错误，errno 保留）
+ */
+int get_latency_histogram(int fd, struct vendor_lechao_usbd_latency_histogram *hist);
+
+/*
  * reset_state — 重置设备统计计数器
  * @fd: 设备 fd
  * 返回: 0 成功，-1 失败

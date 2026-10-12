@@ -22,6 +22,7 @@
 #include <aidl/vendor/lechao/lciod/IoConfig.h>
 #include <aidl/vendor/lechao/lciod/IoEvent.h>
 #include <aidl/vendor/lechao/lciod/IoStats.h>
+#include <aidl/vendor/lechao/lciod/LatencyHistogram.h>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -92,6 +93,39 @@ constexpr int kStormWindowSeconds = kStormWindowSlots * kStormSlotSeconds;  /* 6
  *       短路，再求两数之和，防御式避免无符号加法回绕。
  */
 bool ShouldEmitStorm(const StormWindow& w, uint64_t threshold);
+
+/*
+ * C 批二方向2：USB 传输延迟直方图长尾判定。
+ * 延迟档共 kHistoLatBins=12，第 9 档（索引 kHistoTailLatStartBin=9）下界为
+ * 50ms，索引 >= 9 的桶（50/100/500/...ms）视为长尾；10s 采样窗口内某方向
+ * 长尾累计计数新增 >= kHistoTailThreshold 即合成 usb_latency_tail 事件。
+ */
+constexpr int kHistoDirs = 2;
+constexpr int kHistoSizeBins = 8;
+constexpr int kHistoLatBins = 12;
+constexpr int kHistoTailLatStartBin = 9;   /* 长尾起点延迟档索引（下界 50ms） */
+constexpr int kHistoTailLatencyMs = 50;    /* 长尾起点下界（ms），与档位定义对齐 */
+constexpr uint64_t kHistoTailThreshold = 1;
+
+/* HistoTailState — 某设备长尾累计差分状态（跨 10s 采样，首次只建快照不判越限） */
+struct HistoTailState {
+    bool valid = false;
+    uint64_t prevRead = 0;
+    uint64_t prevWrite = 0;
+};
+
+/* HistoTailSum — 某方向长尾（延迟档索引 >= startBin）累计计数（纯函数，供单测）。
+ * 越界有防御：counts 长度不足或 startBin 非法时返回 0。 */
+uint64_t HistoTailSum(const aidl::vendor::lechao::lciod::LatencyHistogram& h, int dir, int startBin);
+
+/* HistoTotalSum — 某方向全档累计计数（纯函数，供单测）。 */
+uint64_t HistoTotalSum(const aidl::vendor::lechao::lciod::LatencyHistogram& h, int dir);
+
+/* EvaluateHistoTail — 长尾越限判定（纯函数，供单测）。
+ * 更新 st 的 prev 快照；返回越限方向掩码：bit0=读、bit1=写（0=无）。
+ * 首次调用（valid=false）只建快照返回 0；计数回绕（curr<prev）按 curr 重算，
+ * 不误触发。 */
+int EvaluateHistoTail(HistoTailState* st, uint64_t readTail, uint64_t writeTail, uint64_t threshold);
 
 /*
  * FaultInjectValue — 用户态合成注入解析结果（R3 方向7）
