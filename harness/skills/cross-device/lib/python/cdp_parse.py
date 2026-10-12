@@ -349,7 +349,7 @@ def main(argv=None):
         print("用法: cdp_parse.py --role emit|apply [--expect-base <12hex>] "
               "[--root <仓库根>] <批次文件>")
         print("      cdp_parse.py --gen-checksum <批次文件>"
-              "（emit 产批收尾：插入/刷新 checksum 行后整批输出）")
+              "（emit 产批收尾：插入/刷新 checksum 行后就地写回该文件）")
         return 0
     # --gen-checksum：emit 侧批次生成收尾入口（角色机器化——仅 emit 设备）
     if argv[0] == "--gen-checksum":
@@ -364,7 +364,18 @@ def main(argv=None):
             print(f"error: 批次文件不可读或非 UTF-8: {e}")
             return EXIT_ARGS
         out = with_checksum(text)
-        sys.stdout.write(out if out.endswith("\n") else out + "\n")
+        # 就地写回：把带 checksum 的批次覆盖原文件（emit 后续 cat 该文件交付）。
+        # 改回写文件（原 stdout 输出）——stdout 经管道/重定向易被截断或人工拷贝
+        # 漏行，致交付文本与 checksum 覆盖内容不符（apply 侧 CHECKSUM_MISMATCH
+        # 拒批）；写回原文件保证文件即校验通过的最终版。确认信息走 stderr，
+        # stdout 不再输出批次（避免调用方误当旧行为拼接）。
+        try:
+            with open(argv[1], "w", encoding="utf-8") as f:
+                f.write(out if out.endswith("\n") else out + "\n")
+        except OSError as e:
+            print(f"error: 批次文件写回失败: {e}")
+            return EXIT_ARGS
+        print(f"checksum 已写回批次文件 {argv[1]}", file=sys.stderr)
         return EXIT_OK
     # 手工解析参数：缺失参数统一 exit 3（argparse 默认 exit 2，不符合契约表）
     role, expect, path, root = "emit", None, None, None

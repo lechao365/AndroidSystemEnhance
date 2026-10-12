@@ -687,31 +687,49 @@ class TestParse(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("无 checksum", buf.getvalue())
 
-    def test_cli_gen_checksum_outputs_valid_batch(self):
-        # emit 产批收尾 CLI：--gen-checksum 输出整批（含 checksum 行），
-        # 与 with_checksum 同值；输出回灌自检（--role emit）须 exit 0
+    def test_cli_gen_checksum_writes_back_batch(self):
+        # emit 产批收尾 CLI：--gen-checksum 就地写回批次文件（含 checksum 行），
+        # 文件内容与 with_checksum 同值；stdout 不再输出批次（改回写文件，
+        # 防管道截断/人工拷贝漏行）；写回文件回灌自检（--role emit）须 exit 0
         import io
         import tempfile
-        from contextlib import redirect_stdout
+        from contextlib import redirect_stdout, redirect_stderr
         f = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
                                         encoding="utf-8")
         f.write(VALID_SV)
         f.close()
         path = f.name
         self.addCleanup(Path(path).unlink)
-        buf = io.StringIO()
-        with redirect_stdout(buf):
+        out_buf, err_buf = io.StringIO(), io.StringIO()
+        with redirect_stdout(out_buf), redirect_stderr(err_buf):
             rc = self._cli("--gen-checksum", path)
         self.assertEqual(rc, 0)
-        generated = buf.getvalue()
-        self.assertEqual(generated, cp.with_checksum(VALID_SV))
-        self.assertIn("checksum: ", generated)
-        f2 = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
-                                         encoding="utf-8")
-        f2.write(generated)
-        f2.close()
-        self.addCleanup(Path(f2.name).unlink)
-        self.assertEqual(self._cli("--role", "emit", f2.name), 0)
+        written = Path(path).read_text(encoding="utf-8")
+        self.assertEqual(written, cp.with_checksum(VALID_SV))
+        self.assertIn("checksum: ", written)
+        self.assertEqual(out_buf.getvalue(), "", "stdout 不应再输出批次")
+        self.assertIn("写回", err_buf.getvalue())
+        # 回灌自检（读同一已写回文件）须 exit 0
+        self.assertEqual(self._cli("--role", "emit", path), 0)
+
+    def test_cli_gen_checksum_idempotent_and_writeback_failure(self):
+        # 重复执行 checksum 稳定（原位刷新不叠加）；不可写路径 → EXIT_ARGS(3)
+        import tempfile
+        f = tempfile.NamedTemporaryFile("w", suffix=".cdp", delete=False,
+                                        encoding="utf-8")
+        f.write(VALID_SV)
+        f.close()
+        path = f.name
+        self.addCleanup(Path(path).unlink)
+        self.assertEqual(self._cli("--gen-checksum", path), 0)
+        first = Path(path).read_text(encoding="utf-8")
+        self.assertEqual(self._cli("--gen-checksum", path), 0)
+        self.assertEqual(Path(path).read_text(encoding="utf-8"), first,
+                         "重复 gen-checksum 须稳定不叠加")
+        # 不存在的文件：读失败 → EXIT_ARGS(3)
+        self.assertEqual(self._cli("--gen-checksum",
+                                   str(Path(path).parent / "no_such.cdp")),
+                         cp.EXIT_ARGS)
 
 
 if __name__ == "__main__":

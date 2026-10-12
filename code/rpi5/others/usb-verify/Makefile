@@ -8,6 +8,7 @@ SRCS := \
   src/check/stats_check.c \
   src/check/event_check.c \
   src/cli/parse.c \
+  src/cli/expect_json.c \
   src/cli/output.c \
   src/cli/main.c
 

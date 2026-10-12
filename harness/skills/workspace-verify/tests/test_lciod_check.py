@@ -626,11 +626,15 @@ class FakeAdbQos:
     def __init__(self, controllers="cpu io cpuset", group_rc=0,
                  limit="8:0 rbps=8388608 wbps=8388608\n", limit_rc=0,
                  in_dd=_QOS_IN_DD, out_dd=_QOS_OUT_DD, dd_rc=0,
-                 std_blkio=False, dev_blkio=False):
+                 std_blkio=False, dev_blkio=False, limit_after_bg=None):
         self.controllers = controllers
         self.group_rc = group_rc
         self.limit = limit
         self.limit_rc = limit_rc
+        # setprop ioqos_level 之后限速文件读回值（None=与 limit 相同）：
+        # 真机 off→bg 场景起点为空、setprop 后由 daemon 写入限速值。
+        self.limit_after_bg = limit_after_bg
+        self._setprop_done = False
         self.in_dd = in_dd
         self.out_dd = out_dd
         self.dd_rc = dd_rc
@@ -644,7 +648,11 @@ class FakeAdbQos:
             if args[1] == "cat":
                 if "cgroup.controllers" in args[2]:
                     return (self.controllers, 0)
-                return (self.limit, self.limit_rc)  # io.max / blkio 限速文件
+                # io.max / blkio 限速文件：setprop 后若注入了 limit_after_bg
+                # 则返回 bg 生效值（模拟 daemon 1s 周期写入）
+                if self._setprop_done and self.limit_after_bg is not None:
+                    return (self.limit_after_bg, self.limit_rc)
+                return (self.limit, self.limit_rc)
             if args[1] == "ls":
                 if "/lechao_bg" in args[-1]:
                     return (args[-1] + "\n", self.group_rc)
@@ -654,6 +662,7 @@ class FakeAdbQos:
                     return (args[-1] + "\n", 0) if self.dev_blkio else ("", 1)
                 return (args[-1] + "\n", self.group_rc)
             if args[1] == "setprop":
+                self._setprop_done = True
                 return ("", 0)
             if args[1] == "rm":
                 return ("", 0)
@@ -703,9 +712,21 @@ class TestModeQos(unittest.TestCase):
         fake = FakeAdbQos(group_rc=1)
         self.assertEqual(self._run(fake), 1)
 
-    def test_qos_limit_file_empty_red(self):
-        # 限速文件为空/不可读（cgroup 未配置限速）→ 判红
+    def test_qos_limit_file_unreadable_red(self):
+        # 限速文件不可读（cat rc!=0）→ 判红（读不到无从判 bg 是否生效）
         fake = FakeAdbQos(limit="", limit_rc=1)
+        self.assertEqual(self._run(fake), 1)
+
+    def test_qos_off_empty_then_bg_applied_passes(self):
+        # 方向 2 假红修复：真机 off 档起点限速文件为空（内核移除限速条目）属
+        # 合法态不得判红；setprop bg 后 daemon 写入限速值 → 通过
+        fake = FakeAdbQos(limit="", limit_rc=0,
+                          limit_after_bg="179:0 8388608\n")
+        self.assertEqual(self._run(fake), 0)
+
+    def test_qos_off_empty_and_bg_not_applied_red(self):
+        # 起点空 + setprop 后仍空（daemon 未应用 bg）→ 判红（防假绿）
+        fake = FakeAdbQos(limit="", limit_rc=0, limit_after_bg="")
         self.assertEqual(self._run(fake), 1)
 
     def test_qos_bg_limit_not_applied_red(self):
@@ -897,6 +918,45 @@ class TestModeHisto(unittest.TestCase):
         rc, _ = self._run([_histo_line(), _histo_line(counts=after)],
                           dd_rc=-1)
         self.assertEqual(rc, -1)
+
+
+# ============================================================
+# 进程级退出码透传回归（方向 1）：perf/storm/qos/sd/histo 模式内部用 return
+# 返回 0/1，入口若只写 main() 会丢弃返回值、进程 rc 恒 0（判红模式假绿）。
+# 本用例以子进程真实执行脚本 __main__ 入口（runpy run_name=__main__，不调
+# main() 自身——避免函数级调用充数），用假 ws_adb_connect 让 perf 模式走到
+# "probe 无设备"陈旧失败分支返回 1，断言进程 rc 非零。
+# ============================================================
+class TestProcessExitCodePassthrough(unittest.TestCase):
+    def test_main_entry_propagates_mode_failure_rc(self):
+        import subprocess
+        import textwrap
+        entry = Path(__file__).resolve().parents[1] / "cases" / "lciod_check.py"
+        # 假 adb 层注入：ws_connected 返回端点、run_adb 对 root 返 already
+        # running（ensure_connected 快路径）、其余返空成功——perf 的 probe
+        # 输出为空 → validate_devices 判红 → mode_perf return 1。
+        code = textwrap.dedent(
+            "import sys, types, runpy\n"
+            "fake = types.ModuleType('ws_adb_connect')\n"
+            "fake.ensure_connected = lambda *a, **k: '127.0.0.1:5555'\n"
+            "fake.host_port = lambda: '127.0.0.1:5555'\n"
+            "def _run_adb(args, timeout=60):\n"
+            "    if 'root' in args:\n"
+            "        return ('already running', 0)\n"
+            "    return ('', 0)\n"
+            "fake.run_adb = _run_adb\n"
+            "sys.modules['ws_adb_connect'] = fake\n"
+            "sys.argv = ['lciod_check.py', '--mode', 'perf']\n"
+            f"runpy.run_path({str(entry)!r}, run_name='__main__')\n"
+        )
+        proc = subprocess.run([sys.executable, "-c", code],
+                              capture_output=True, text=True,
+                              encoding="utf-8", timeout=60)
+        # mode_perf 干净返回 1（非异常）：stdout 含其拒绝采集的 ERROR 行
+        # （脚本用 print 输出，非 stderr）
+        self.assertIn("probe 快照校验未通过", proc.stdout)
+        self.assertEqual(proc.returncode, 1,
+                         "perf 模式失败须透传进程 rc=1，入口丢弃 main 返回值即假绿")
 
 
 if __name__ == "__main__":

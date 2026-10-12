@@ -354,6 +354,10 @@ others:
     source: null
   - patch: others/usb-verify/src/check/stats_check.h
     source: null
+  - patch: others/usb-verify/src/cli/expect_json.c
+    source: null
+  - patch: others/usb-verify/src/cli/expect_json.h
+    source: null
   - patch: others/usb-verify/src/cli/main.c
     source: null
   - patch: others/usb-verify/src/cli/output.c

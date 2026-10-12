@@ -15,6 +15,7 @@
  */
 #define _DEFAULT_SOURCE
 #include "parse.h"
+#include "expect_json.h"
 #include "stats_check.h"
 #include "event_check.h"
 #include "output.h"
@@ -282,6 +283,158 @@ static void test_output_event_degrade(void)
     unlink(path);
 }
 
+/*
+ * test_expect_json_parse_valid — 合法 expect JSON 解析 + 阈值/事件类型映射
+ * KI-20261008-001：消费 usb-fault-inject expect_output_by_id() 单行 JSON。
+ */
+static void test_expect_json_parse_valid(void)
+{
+    const char *json =
+        "{\"fault\":\"stall-in\",\"expect\":{\"kernel_event\":2,"
+        "\"error_count\":1,\"reset_count\":1,\"stall_count\":1}}";
+    struct fv_expect_json ej;
+    memset(&ej, 0, sizeof(ej));
+
+    CHECK(fv_parse_expect_json_buf(json, strlen(json), &ej) == 0);
+    CHECK(ej.has_fault == 1 && strcmp(ej.fault, "stall-in") == 0);
+    CHECK(ej.has_kernel_event == 1 && ej.kernel_event == 2);
+    CHECK(ej.error_count == 1);
+    CHECK(ej.reset_count == 1);
+    CHECK(ej.stall_count == 1);
+    /* 未出现的计数字段保持 -1（不校验） */
+    CHECK(ej.corrupt_count == -1);
+    CHECK(ej.timeout_count == -1);
+
+    /* 映射到 fv_command：事件类型 + 各自 *_ge */
+    struct fv_command cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    CHECK(fv_apply_expect_json(&ej, &cmd) == 0);
+    CHECK(cmd.expect_event_type == VENDOR_LECHAO_USBD_EVENT_STALL);
+    CHECK(cmd.error_ge == 1);
+    CHECK(cmd.reset_ge == 1);
+    CHECK(cmd.stall_ge == 1);
+    CHECK(cmd.corrupt_ge == 0); /* -1 未提供 → 不设阈值 */
+    CHECK(cmd.timeout_ge == 0);
+}
+
+/*
+ * test_expect_json_counts_sentinel — 计数 -1 不设阈值 / >=0 设阈值
+ */
+static void test_expect_json_counts_sentinel(void)
+{
+    const char *json =
+        "{\"fault\":\"degrade\",\"expect\":{\"kernel_event\":6,"
+        "\"corrupt_count\":-1,\"timeout_count\":0}}";
+    struct fv_expect_json ej;
+    memset(&ej, 0, sizeof(ej));
+    CHECK(fv_parse_expect_json_buf(json, strlen(json), &ej) == 0);
+    CHECK(ej.corrupt_count == -1);
+    CHECK(ej.timeout_count == 0);
+
+    struct fv_command cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    CHECK(fv_apply_expect_json(&ej, &cmd) == 0);
+    CHECK(cmd.corrupt_ge == 0); /* -1 → 不设 */
+    CHECK(cmd.timeout_ge == 0); /* 0 → 不产生断言（actual>=0 恒真） */
+    CHECK(cmd.expect_event_type == VENDOR_LECHAO_USBD_EVENT_RATE_DEGRADED);
+}
+
+/*
+ * test_expect_json_apply_cli_priority — 命令行阈值优先，JSON 只填空缺
+ */
+static void test_expect_json_apply_cli_priority(void)
+{
+    const char *json =
+        "{\"fault\":\"stall-in\",\"expect\":{\"kernel_event\":2,"
+        "\"error_count\":1,\"stall_count\":5}}";
+    struct fv_expect_json ej;
+    memset(&ej, 0, sizeof(ej));
+    CHECK(fv_parse_expect_json_buf(json, strlen(json), &ej) == 0);
+
+    struct fv_command cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.error_ge = 9; /* 命令行显式阈值 */
+    cmd.expect_event_type = VENDOR_LECHAO_USBD_EVENT_TIMEOUT; /* 命令行显式类型 */
+    CHECK(fv_apply_expect_json(&ej, &cmd) == 0);
+    CHECK(cmd.error_ge == 9); /* 不被 JSON 覆盖 */
+    CHECK(cmd.expect_event_type == VENDOR_LECHAO_USBD_EVENT_TIMEOUT);
+    CHECK(cmd.stall_ge == 5); /* 空缺字段由 JSON 填充 */
+}
+
+/*
+ * test_expect_json_invalid — 非法 JSON / 缺字段 / 尾部多余 → 判失败
+ */
+static void test_expect_json_invalid(void)
+{
+    struct fv_expect_json ej;
+    const char *cases[] = {
+        "not json",
+        "{}",
+        "{\"fault\":\"x\"}",                                   /* 缺 expect */
+        "{\"expect\":{\"kernel_event\":2}}",                   /* 缺 fault */
+        "{\"fault\":\"x\",\"expect\":{\"error_count\":1}}",    /* 缺 kernel_event */
+        "{\"fault\":\"x\",\"expect\":{\"kernel_event\":\"s\"}}", /* 非整数 */
+        "{\"fault\":\"x\",\"expect\":{\"kernel_event\":2}}xz", /* 尾部多余 */
+        "{\"fault\":\"x\",\"expect\":{\"kernel_event\":2}",     /* 未闭合 */
+        "{\"fault\":\"x\",\"expect\":{\"error_count\":-2}}",    /* 计数 < -1 */
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        memset(&ej, 0, sizeof(ej));
+        CHECK(fv_parse_expect_json_buf(cases[i], strlen(cases[i]), &ej) == -1);
+    }
+
+    /* NULL / 空输入 */
+    CHECK(fv_parse_expect_json_buf(NULL, 0, &ej) == -1);
+    CHECK(fv_parse_expect_json_buf("x", 0, &ej) == -1);
+}
+
+/*
+ * test_expect_json_kernel_event_range — kernel_event 越界判失败
+ */
+static void test_expect_json_kernel_event_range(void)
+{
+    struct fv_expect_json ej;
+
+    const char *ok = "{\"fault\":\"x\",\"expect\":{\"kernel_event\":6}}";
+    CHECK(fv_parse_expect_json_buf(ok, strlen(ok), &ej) == 0);
+    CHECK(ej.kernel_event == 6);
+
+    const char *over = "{\"fault\":\"x\",\"expect\":{\"kernel_event\":7}}";
+    CHECK(fv_parse_expect_json_buf(over, strlen(over), &ej) == -1);
+
+    const char *neg = "{\"fault\":\"x\",\"expect\":{\"kernel_event\":-1}}";
+    CHECK(fv_parse_expect_json_buf(neg, strlen(neg), &ej) == -1);
+}
+
+/*
+ * test_expect_json_file — 文件通道：合法文件解析成功 / 文件不存在判失败
+ */
+static void test_expect_json_file(void)
+{
+    char path[] = "/tmp/fv_expect_XXXXXX";
+    int fd = mkstemp(path);
+    CHECK(fd >= 0);
+    const char *json =
+        "{\"fault\":\"timeout\",\"expect\":{\"kernel_event\":4,"
+        "\"timeout_count\":1}}";
+    ssize_t wn = write(fd, json, strlen(json));
+    CHECK(wn == (ssize_t)strlen(json));
+    close(fd);
+
+    struct fv_expect_json ej;
+    memset(&ej, 0, sizeof(ej));
+    CHECK(fv_parse_expect_json_file(path, &ej) == 0);
+    CHECK(strcmp(ej.fault, "timeout") == 0);
+    CHECK(ej.kernel_event == 4);
+    CHECK(ej.timeout_count == 1);
+    unlink(path);
+
+    /* 文件不存在 → 判失败 */
+    memset(&ej, 0, sizeof(ej));
+    CHECK(fv_parse_expect_json_file("/tmp/fv_expect_does_not_exist_XXXX",
+                                    &ej) == -1);
+}
+
 int main(void)
 {
     test_proto_macros();
@@ -291,6 +444,12 @@ int main(void)
     test_output_report();
     test_degrade_check_fail_nonzero();
     test_output_event_degrade();
+    test_expect_json_parse_valid();
+    test_expect_json_counts_sentinel();
+    test_expect_json_apply_cli_priority();
+    test_expect_json_invalid();
+    test_expect_json_kernel_event_range();
+    test_expect_json_file();
 
     if (g_fail) {
         fprintf(stderr, "fv_pure_host_test: FAILED\n");

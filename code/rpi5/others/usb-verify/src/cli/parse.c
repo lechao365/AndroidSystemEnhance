@@ -13,6 +13,7 @@
  * ============================================================
  */
 #include "parse.h"
+#include "expect_json.h"
 #include "fv_ioctl_compat.h"
 
 #include <errno.h>
@@ -45,6 +46,8 @@ void usage(const char *prog)
         "  --device <path>              Device path (default: /dev/vendor_lechao_usbd)\n"
         "  --timeout-ms <ms>            Timeout in milliseconds\n"
         "  --type <type>                Event type: stall|timeout|corrupt|disconnect|probe|degrade|reset|transport_error\n"
+        "  --expect-json <path>         Consume usb-fault-inject expect JSON (fault + kernel_event + *_count);\n"
+        "                               fills event type / *_ge thresholds not already set on the command line\n"
         "  --stall-ge <n>               Assert stall_count >= n\n"
         "  --timeout-ge <n>             Assert timeout_count >= n\n"
         "  --corrupt-ge <n>             Assert corrupt_count >= n\n"
@@ -193,6 +196,20 @@ int fv_parse_args(int argc, char **argv, struct fv_command *cmd)
                 fprintf(stderr, "Unknown event type: %s\n", argv[i]);
                 return -1;
             }
+            i++;
+        } else if (strcmp(argv[i], "--expect-json") == 0) {
+            if (++i >= argc) { usage(argv[0]); return -1; }
+            struct fv_expect_json ej;
+            if (fv_parse_expect_json_file(argv[i], &ej) != 0) {
+                fprintf(stderr, "Invalid --expect-json file: %s\n", argv[i]);
+                return -1;
+            }
+            if (fv_apply_expect_json(&ej, cmd) != 0) {
+                fprintf(stderr, "Failed to apply --expect-json: %s\n", argv[i]);
+                return -1;
+            }
+            fprintf(stderr, "expect-json: fault=%s kernel_event=%d\n",
+                    ej.has_fault ? ej.fault : "(none)", ej.kernel_event);
             i++;
         } else if (strcmp(argv[i], "--stall-ge") == 0) {
             if (++i >= argc) { usage(argv[0]); return -1; }

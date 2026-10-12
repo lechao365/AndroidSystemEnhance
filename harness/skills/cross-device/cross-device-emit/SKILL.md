@@ -62,8 +62,9 @@ stages:
     单双引号字符（' 与 "），如有则改述为描述性说法
  5. 产批收尾：python3 harness/skills/cross-device/lib/python/cdp_parse.py
     --gen-checksum <批次临时文件>——插入/刷新批次头部 checksum 行（sha256
-    前 16 位）后整批输出，交付该带 checksum 版本；apply 侧对存在 checksum
-    行的批次强校验（CHECKSUM_MISMATCH 拒），防人工拷贝传输静默截断/损坏
+    前 16 位）后就地写回该批次文件（不再经 stdout 输出整批，避免管道截断/
+    人工拷贝漏行致交付文本与 checksum 不符）；交付时 cat 该文件；apply 侧对
+    存在 checksum 行的批次强校验（CHECKSUM_MISMATCH 拒），防静默截断/损坏
   6. 输出：纯文本批次，无包裹标记；产一批等一批，不并行产下一条
 ## 复盘对照（产批自评落盘闭环）
 - 产批时（步骤 3 后）落盘自评：`harness/log/cross-device-emit/batch-YYYYMMDD-HHMMSS.review.md`，

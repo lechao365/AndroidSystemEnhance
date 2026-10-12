@@ -1119,8 +1119,9 @@ def mode_qos(args):
     """SD 卡写 QoS 限速校验（R4 方向 4/6，依赖 daemon IoQosManager 建组）。
 
     前置（adb root 由 main ensure_connected 承担）：lechao_bg 组存在且
-    限速文件非空；setprop ioqos_level=bg → sleep 2（等 daemon 1s 周期应用）
-    → cat 限速文件断言含 8388608（v2 io.max / v1 blkio 限速值）。
+    限速文件可读（off 档内核移除限速条目致读回为空，属合法态不判红）；
+    setprop ioqos_level=bg → sleep 2（等 daemon 1s 周期应用）→ cat 限速
+    文件断言含 8388608（v2 io.max / v1 blkio 限速值）。
     组内压制：设备 shell 自迁 pid（$$）入组，dd 写 /data/local/tmp 临时
     文件 --qos-dd-mb MB → 复算速率断言 ≤ --qos-in-max-mib（默认 12，
     bg 8MiB/s 留 1.5x 容差）。
@@ -1142,11 +1143,16 @@ def mode_qos(args):
               "（daemon IoQosManager 未建组？）")
         return 1
     out, rc = adb(["shell", "cat", paths["limit_file"]])
-    if rc != 0 or not out.strip():
-        print(f"ERROR: 限速文件 {paths['limit_file']} 为空或不可读"
+    if rc != 0:
+        print(f"ERROR: 限速文件 {paths['limit_file']} 不可读"
               "（cgroup 未配置限速？）")
         return 1
-    print(f"cgroup 版本 {paths['version']}，限速文件当前值: {out.strip()}")
+    # off 档（ioqos_level 空/off）时内核会移除限速条目，限速文件读回为空属
+    # 合法态（真机 v1 /dev/blkio 实测：写 0 即移除条目，读回空字符串）。
+    # 不得因起点为空判红（假红）——bg 生效断言在下文 setprop 之后，组存在性
+    # 已由上方 group_dir 检查覆盖。
+    print(f"cgroup 版本 {paths['version']}，限速文件当前值: {out.strip()!r}"
+          "（off 档可为空）")
 
     out, rc = adb(["shell", "setprop", _QOS_LEVEL_PROP, "bg"])
     if rc == -1:
@@ -1352,4 +1358,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # raise SystemExit(main())：perf/storm/qos/sd/histo 等模式内部用 return
+    # 返回 0/1，若此入口只写 main() 则返回值被丢弃、进程 rc 恒 0（判红模式
+    # 假绿）；对齐 lcview_check.py 入口，把 main 返回值透传为进程退出码。
+    raise SystemExit(main())
