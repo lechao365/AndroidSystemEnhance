@@ -774,3 +774,9 @@ baselines:
       result: full
       missing: []
       run_count: 21
+  reverify_required: true
+  reverify_reason: '旧全量收据 data/verify-results/20261012-173756-manual-2610121737.md
+    不构成 promote 依据：lciod-qos 项 detail 打印 ERROR（限速文件为空/不可读）却因
+    lciod_check.py 入口丢弃 return 值而记 pass，属验收链假绿。已在 181f15c 修复入口
+    rc 透传并放开 qos off 档空文件判据；须以修复后新全量收据重登 candidate 方可评审
+    promote（上批遗漏子项补落）。'

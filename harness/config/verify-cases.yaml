@@ -286,9 +286,11 @@ cases:
       - 'adb shell "echo ${SNAPSHOT_0} > /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized && cat /sys/bus/usb/devices/${LCVIEW_USB_DEV:-1-2}/authorized"'
     timeout_s: 300
 
-  # A 批二 方向 3/4：lciod SD 用户态验收（本批新增验收 case）。语义：dd 读块
-  # 设备产载（drop_caches + dd 读 4MB，触发 SD 流量，令 window_bytes/
-  # sd_health 有数据）→ cases/lciod_check.sh --mode sd 三重断言：
+  # A 批二 方向 3/4：lciod SD 用户态验收（本批新增验收 case）。语义：产载
+  # （drop_caches + dd 读 4MB，触发 SD 流量，令 window_bytes/sd_health 有数据）
+  # 由 lciod_check.py --mode sd 自驱，产载设备读独立变量 LCIOD_SD_BLOCK_DEV
+  # （默认 /dev/block/mmcblk0），不复用 LCVIEW_BLOCK_DEV（环境全局导出时指向
+  # USB 设备会致 SD 产载错配）→ 三重断言：
   #   1) sysfs：/sys/class/lciod_sd/lciod_sd/ 下 enable/window_bytes/
   #      window_requests/stuck_count/ssr_speed_class/ssr_uhs_grade/ssr_valid
   #      属性齐全且数值合法（enable/ssr_valid ∈{0,1}，其余非负十进制）；
@@ -297,11 +299,10 @@ cases:
   #   3) logcat tag lechao_lciod_event 含 "rule":"sd" JSON（daemon 每 10s 上报）。
   # 防假绿：sysfs 目录/属性缺失或非数字 / 无 sd_health 文件或无匹配记录 /
   # 设备时钟不可读 / 无 "rule":"sd" 行均判红。无持久副作用（只读 sysfs/logcat
-  # + dd 读无破坏面），不需 setup_snapshot/teardown；读 dd 同 lciod-trigger，
-  # 但本 case 目的是驱动 SD 卡流量，默认读 SD 卡块设备 /dev/block/mmcblk0
-  # （LCVIEW_BLOCK_DEV 可覆盖），只读到 /dev/null，绝不写系统盘。
+  # + dd 读无破坏面），不需 setup_snapshot/teardown；产载 dd 只读到 /dev/null，
+  # 绝不写系统盘（LCIOD_SD_BLOCK_DEV 覆盖，默认 SD 卡 /dev/block/mmcblk0）。
   lciod-sd:
-    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"adb shell \"echo 3 > /proc/sys/vm/drop_caches; dd if=${LCVIEW_BLOCK_DEV:-/dev/block/mmcblk0} of=/dev/null bs=1M count=4\" 2>/dev/null" hostcmd:"sleep 2 && cases/lciod_check.sh --mode sd"'
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lciod_check.sh --mode sd"'
     timeout_s: 300
 
   # C 批二 方向 3：lciod USB 传输延迟/块大小二维直方图用户态验收（本批新增

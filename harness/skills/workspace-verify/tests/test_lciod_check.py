@@ -921,6 +921,62 @@ class TestModeHisto(unittest.TestCase):
 
 
 # ============================================================
+# 方向 2：SD 产载设备读独立变量 LCIOD_SD_BLOCK_DEV（不复用 LCVIEW_BLOCK_DEV）。
+# 防外部全局导出 LCVIEW_BLOCK_DEV（指向 USB 设备）时 SD 产载错配。
+# ============================================================
+class TestSdBlockDev(unittest.TestCase):
+    def test_env_overrides_default(self):
+        with mock.patch.dict(os.environ,
+                             {"LCIOD_SD_BLOCK_DEV": "/dev/block/mmcblk1"}):
+            self.assertEqual(lc._sd_block_dev(), "/dev/block/mmcblk1")
+
+    def test_default_is_sd_mmcblk0(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(lc._sd_block_dev(), "/dev/block/mmcblk0")
+
+    def test_ignores_lcview_block_dev(self):
+        # 关键回归锚点：LCVIEW_BLOCK_DEV 全局导出（USB 设备）不得影响 SD 产载
+        with mock.patch.dict(os.environ,
+                             {"LCVIEW_BLOCK_DEV": "/dev/block/sda"},
+                             clear=True):
+            self.assertEqual(lc._sd_block_dev(), "/dev/block/mmcblk0")
+
+
+class _FakeAdbSd:
+    """伪 adb（mode_sd 产载检查）：记录调用、统一返回空成功。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, args, timeout=60):
+        self.calls.append(args)
+        return ("", 0)
+
+
+class TestModeSdLoadDevice(unittest.TestCase):
+    def _args(self):
+        a = argparse.Namespace()
+        a.dd_timeout = 300
+        a.log_since = 123
+        return a
+
+    def test_load_uses_sd_var_not_lcview(self):
+        # mode_sd 自驱产载须读 LCIOD_SD_BLOCK_DEV，且绝不读 LCVIEW_BLOCK_DEV
+        fake = _FakeAdbSd()
+        env = {"LCVIEW_BLOCK_DEV": "/dev/block/sda",
+               "LCIOD_SD_BLOCK_DEV": "/dev/block/mmcblk0"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(lc, "adb", fake), \
+                mock.patch.object(lc.time, "sleep"):
+            rc = lc.mode_sd(self._args())
+        dd_calls = [c for c in fake.calls if "dd if=" in str(c)]
+        self.assertTrue(dd_calls, "mode_sd 须自驱产载 dd")
+        self.assertTrue(any("mmcblk0" in str(c) for c in dd_calls))
+        self.assertFalse(any("/dev/block/sda" in str(c) for c in fake.calls))
+        self.assertEqual(rc, 1)  # 伪 adb 无 sysfs 属性 → 正常判红退出
+
+
+# ============================================================
 # 进程级退出码透传回归（方向 1）：perf/storm/qos/sd/histo 模式内部用 return
 # 返回 0/1，入口若只写 main() 会丢弃返回值、进程 rc 恒 0（判红模式假绿）。
 # 本用例以子进程真实执行脚本 __main__ 入口（runpy run_name=__main__，不调

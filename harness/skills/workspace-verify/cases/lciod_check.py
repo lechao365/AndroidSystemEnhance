@@ -36,7 +36,9 @@
 #              sysprop，值变化时把 n 加进当前桶，幂等一次性）→ sleep 等
 #              daemon 10s tick + 规则三评估窗口 → logcat 断言 tag
 #              lechao_lciod_event 出现 "rule":"storm"（判红否则）
-#   sd       — SD 卡用户态验收（A 批二 方向 3/4）：三重断言——
+#   sd       — SD 卡用户态验收（A 批二 方向 3/4）：自驱产载（drop_caches +
+#              dd 读 LCIOD_SD_BLOCK_DEV，默认 mmcblk0，只读到 /dev/null）+
+#              三重断言——
 #              (1) sysfs：/sys/class/lciod_sd/lciod_sd/ 下 enable/window_bytes/
 #                  window_requests/stuck_count/ssr_speed_class/ssr_uhs_grade/
 #                  ssr_valid 属性齐全且数值合法；
@@ -684,6 +686,16 @@ _SD_REQUIRED_ATTRS = ["enable", "window_bytes", "window_requests",
                       "ssr_valid"]
 # 仅允许 0/1 的布尔属性（其余属性校验非负十进制数字）
 _SD_BOOL_ATTRS = ("enable", "ssr_valid")
+# SD 产载读块设备变量（方向 2）：独立变量 LCIOD_SD_BLOCK_DEV（默认 SD 卡
+# mmcblk0），不复用 LCVIEW_BLOCK_DEV——后者在验证环境全局导出时指向 USB 块
+# 设备（sda），会让 SD 产载错读 USB 通道致产载错配。只读到 /dev/null 无破坏面。
+_SD_BLOCK_DEV_ENV = "LCIOD_SD_BLOCK_DEV"
+_SD_BLOCK_DEV_DEFAULT = "/dev/block/mmcblk0"
+
+
+def _sd_block_dev():
+    """SD 产载目标块设备：LCIOD_SD_BLOCK_DEV 覆盖，缺省 SD 卡 mmcblk0。"""
+    return os.environ.get(_SD_BLOCK_DEV_ENV) or _SD_BLOCK_DEV_DEFAULT
 
 
 def _check_sd_sysfs():
@@ -781,10 +793,27 @@ def _check_sd_health():
 def mode_sd(args):
     """SD 用户态验收（A 批二 方向 3/4）：sysfs + SD_HEALTH + sd JSON 三重断言。
 
+    自驱 SD 产载（方向 2）：drop_caches + dd 读 LCIOD_SD_BLOCK_DEV（默认
+    /dev/block/mmcblk0）→ /dev/null，令 window_bytes/sd_health/SD 事件有数据
+    ——产载设备经独立变量解析，不复用 LCVIEW_BLOCK_DEV（环境全局导出时指向
+    USB 设备会错配）；dd 只读到 /dev/null 无破坏面，失败仅告警不判红（无 SD
+    卡时仍以只读 sysfs/logcat 断言为准）。
     判红项（防假绿）：sysfs 目录/属性缺失或不可读或非数字 / 无 sd_health
     日志文件 / 无 id=15 记录 / 设备时钟不可读 / logcat 无 "rule":"sd" 行。
     任一步 adb 超时（rc==-1）return -1 由 main 透传为失败。
     """
+    blockdev = _sd_block_dev()
+    adb(["shell", "echo 3 > /proc/sys/vm/drop_caches"])
+    _, lrc = adb(["shell",
+                  f"dd if={blockdev} of=/dev/null bs=1M count=4 2>/dev/null"],
+                 timeout=args.dd_timeout)
+    if lrc == -1:
+        return -1  # adb 超时透传
+    if lrc != 0:
+        print(f"warn: SD 产载 dd 读 {blockdev} 失败 rc={lrc}"
+              "（无 SD 卡？继续只读断言）")
+    time.sleep(2)  # 等 SD 流量与 daemon 10s 上报窗口（对齐原 case hostcmd sleep 2）
+
     errors, timeout = _check_sd_sysfs()
     if timeout:
         return -1

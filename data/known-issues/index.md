@@ -42,3 +42,4 @@ KI-20261008-002 pre-existing false usb-fault-inject fixed
 KI-20261008-001 pre-existing false usb-fault-inject fixed
 KI-FLAKE-6824b8320bf9-8ed89d pre-existing false auto-flake open
 KI-FLAKE-da7ebadae4b2-ed391a pre-existing false auto-flake open
+KI-FLAKE-6824b8320bf9-8ed89d pre-existing false auto-flake open
