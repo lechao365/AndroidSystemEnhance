@@ -69,6 +69,9 @@ struct lechao_sd_notifier_data {
 /* 链头在 block.c 定义并 EXPORT，本头提供操作接口 */
 extern struct atomic_notifier_head lechao_sd_nh;
 
+/* Lechao: mmc core sd.c 提供的 SD Status Register 读取薄导出（A 批二） */
+int lechao_mmc_read_sd_status(struct mmc_card *card, u32 *ssr);
+
 static inline int lechao_sd_notifier_register(struct notifier_block *nb)
 {
 	return atomic_notifier_chain_register(&lechao_sd_nh, nb);

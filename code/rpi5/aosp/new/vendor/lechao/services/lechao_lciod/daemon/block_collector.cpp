@@ -362,5 +362,75 @@ bool ZramCollector::SampleZram(Sample* out)
     return true;
 }
 
+// 解析 sysfs 属性值为非负 uint64：仅去除行尾空白（sysfs 属性值带尾随换行），
+// 行首空白/负号/字母等一律判false（CXX-003 输入防御）。空/out 空指针返回
+// false；逐字符十进制校验并防累加溢出回绕（CXX-002）。
+bool SdCollector::ParseU64(const std::string& line, uint64_t* out)
+{
+    if (!out)
+        return false;
+    size_t end = line.size();
+    while (end > 0) {
+        const char c = line[end - 1];
+        if (c == '\n' || c == '\r' || c == ' ' || c == '\t')
+            --end;
+        else
+            break;
+    }
+    if (end == 0)
+        return false;
+    uint64_t v = 0;
+    for (size_t i = 0; i < end; ++i) {
+        const char ch = line[i];
+        if (ch < '0' || ch > '9')
+            return false;  // CXX-003：非十进制数字（含负号/内部空白）判非法
+        const uint64_t digit = static_cast<uint64_t>(ch - '0');
+        // CXX-002：累加前检溢出，超 uint64 上界判 false（不回绕）
+        if (v > (UINT64_MAX - digit) / 10)
+            return false;
+        v = v * 10 + digit;
+    }
+    *out = v;
+    return true;
+}
+
+// 采样 lciod_sd sysfs（enable/window_bytes/window_requests/stuck_count 与
+// SSR 解码速度档 ssr_speed_class/ssr_uhs_grade/ssr_valid）。逐属性读取，
+// 任一读/解析失败即限频 ALOGE 并返回 false（CXX-002 不吞错）；模块缺失时
+// 由调用方降级跳过本轮。
+bool SdCollector::SampleSd(Sample* out)
+{
+    if (!out)
+        return false;
+    *out = Sample{};
+    const std::string base = "/sys/class/lciod_sd/lciod_sd/";
+    struct Prop {
+        const char* name;
+        uint64_t* field;
+    };
+    const Prop props[] = {
+        {"enable", &out->enable},
+        {"window_bytes", &out->windowBytes},
+        {"window_requests", &out->windowRequests},
+        {"stuck_count", &out->stuckCount},
+        {"ssr_speed_class", &out->ssrSpeedClass},
+        {"ssr_uhs_grade", &out->ssrUhsGrade},
+        {"ssr_valid", &out->ssrValid},
+    };
+    for (const auto& p : props) {
+        std::string content;
+        if (!readFileToString(base + p.name, content)) {
+            logReadErrorRateLimited("read lciod_sd sysfs", base);
+            return false;
+        }
+        if (!ParseU64(content, p.field)) {
+            logReadErrorRateLimited("read lciod_sd sysfs", base);
+            return false;
+        }
+    }
+    out->ok = true;
+    return true;
+}
+
 }  // namespace lciod
 }  // namespace lechao

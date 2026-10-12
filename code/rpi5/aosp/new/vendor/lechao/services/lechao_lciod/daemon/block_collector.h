@@ -7,6 +7,8 @@
 //   规则二（慢盘）判定。无 I/O、无状态，可脱离系统独立测试；
 //   采集器层（BlockCollector/ZramCollector，仅主循环线程调用，无锁）：
 //   枚举块设备、读 sysfs、内部维护 prev 差分状态，主循环每 10s 采样。
+// A 批二方向2 增 SdCollector：读 /sys/class/lciod_sd 聚合 SD/MMC 健康与 SSR
+// 解码速度档（纯函数 ParseU64 可直接单测）。
 // ============================================================
 
 #pragma once
@@ -204,6 +206,28 @@ public:
     // 采样 zram0。任一关键文件读取/解析失败返回 false（限频 ALOGE，
     // CXX-002 不吞错）。
     bool SampleZram(Sample* out);
+};
+
+// SdCollector：读 /sys/class/lciod_sd/lciod_sd/* 的 SD/MMC 健康聚合与
+// SSR 解码速度档（A 批二方向2），仅主循环线程调用（无锁）。
+class SdCollector {
+public:
+    struct Sample {
+        bool ok = false;            // 任一必需属性读取/解析失败即 false
+        uint64_t enable = 0;        // enable（0/1）
+        uint64_t windowBytes = 0;   // window_bytes
+        uint64_t windowRequests = 0;// window_requests
+        uint64_t stuckCount = 0;    // stuck_count
+        uint64_t ssrSpeedClass = 0; // ssr_speed_class（SSR 解码）
+        uint64_t ssrUhsGrade = 0;   // ssr_uhs_grade（SSR 解码）
+        uint64_t ssrValid = 0;      // ssr_valid（0/1）
+    };
+    // 采样 lciod_sd sysfs。任一必需属性打开/读取/解析失败返回 false
+    // （限频 ALOGE，CXX-002 不吞错）。out 空指针返回 false。
+    bool SampleSd(Sample* out);
+    // 纯函数：把 sysfs 文本行解析为非负 uint64；空/非数字返回 false。
+    // （供单测直接覆盖，无 I/O）
+    static bool ParseU64(const std::string& line, uint64_t* out);
 };
 
 }  // namespace lciod

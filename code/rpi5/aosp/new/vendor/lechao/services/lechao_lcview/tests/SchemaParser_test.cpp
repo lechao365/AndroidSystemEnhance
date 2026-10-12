@@ -280,18 +280,20 @@ TEST(SchemaParserParseJsonTest, ProductionConfig_LoadsAll9Events) {
     // R-19 P5 方向 3：新增 id=1~3 预留占位条目，schema 由 9 事件升为 12 事件
     // R3 方向 1/3：新增 id=14 slow_disk（daemon BlockCollector 规则二），
     // schema 升为 13 事件
-    EXPECT_EQ(sp.eventCount(), 13u);
-    // id 1..14 全部定义（含 1~3 预留占位 + 5~13 USB 事件 + 14 slow_disk，
-    // 与内核 lcview_events.h 的 LCVIEW_EVENT_* 宏一致）
-    for (uint16_t id = 1; id <= 14; id++) {
+    // A 批一（内核 SD/MMC 健康契约）：新增 id=15 sd_health、id=16 sd_stuck，
+    // schema 升为 15 事件
+    EXPECT_EQ(sp.eventCount(), 15u);
+    // id 1..16 全部定义（含 1~3 预留占位 + 5~13 USB 事件 + 14 slow_disk +
+    // 15 sd_health + 16 sd_stuck，与内核 lcview_events.h 的 LCVIEW_EVENT_* 宏一致）
+    for (uint16_t id = 1; id <= 16; id++) {
         if (id == 4) continue;  // id=4 TRANSPORT_START 已删除
         const EventSchema* s = sp.find(id);
         ASSERT_NE(s, nullptr) << "事件 " << id << " 缺失";
         EXPECT_FALSE(s->name.empty());
     }
     // 1~3 为预留占位（字段未定义，允许空 fields）；5~13 为实际 USB 事件，
-    // 14 为 daemon 合成 slow_disk 事件（含字段）
-    for (uint16_t id = 5; id <= 14; id++) {
+    // 14 为 daemon 合成 slow_disk、15/16 为内核 SD 健康事件（均含字段）
+    for (uint16_t id = 5; id <= 16; id++) {
         const EventSchema* s = sp.find(id);
         ASSERT_NE(s, nullptr) << "事件 " << id << " 缺失";
         EXPECT_FALSE(s->fields.empty()) << "事件 " << id << " 无字段";

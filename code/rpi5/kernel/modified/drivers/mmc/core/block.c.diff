@@ -1,4 +1,5 @@
 diff --git a/drivers/mmc/core/block.c b/drivers/mmc/core/block.c
+index 246cacb107e7..283c33af2939 100644
 --- a/drivers/mmc/core/block.c
 +++ b/drivers/mmc/core/block.c
 @@ -40,6 +40,7 @@
@@ -9,8 +10,7 @@ diff --git a/drivers/mmc/core/block.c b/drivers/mmc/core/block.c
  
  #include <linux/mmc/ioctl.h>
  #include <linux/mmc/card.h>
-@@ -57,6 +58,14 @@
- #include "crypto.h"
+@@ -58,6 +59,14 @@
  #include "host.h"
  #include "bus.h"
  #include "mmc_ops.h"
@@ -24,7 +24,8 @@ diff --git a/drivers/mmc/core/block.c b/drivers/mmc/core/block.c
 +EXPORT_SYMBOL_GPL(lechao_sd_nh);
  #include "quirks.h"
  #include "sd_ops.h"
-@@ -2078,5 +2087,16 @@ static int mmc_blk_card_busy(struct mmc_card *card, struct request *req)
+ 
+@@ -2078,6 +2087,17 @@ static int mmc_blk_card_busy(struct mmc_card *card, struct request *req)
  	if (mmc_card_mmc(card) && cb_data.status & R1_EXCEPTION_EVENT)
  		mqrq->brq.cmd.resp[0] |= R1_EXCEPTION_EVENT;
  
@@ -41,8 +42,8 @@ diff --git a/drivers/mmc/core/block.c b/drivers/mmc/core/block.c
 +
  	return err;
  }
-@@ -2092,7 +2112,18 @@ static void mmc_blk_mq_complete_rq(struct mmc_queue *mq, struct request *req)
- static void mmc_blk_mq_complete_rq(struct mmc_queue *mq, struct request *req)
+ 
+@@ -2093,6 +2113,17 @@ static void mmc_blk_mq_complete_rq(struct mmc_queue *mq, struct request *req)
  {
  	struct mmc_queue_req *mqrq = req_to_mmc_queue_req(req);
  	unsigned int nr_bytes = mqrq->brq.data.bytes_xfered;

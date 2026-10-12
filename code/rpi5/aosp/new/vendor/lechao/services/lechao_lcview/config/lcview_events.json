@@ -126,7 +126,9 @@
         {"name": "window_ms",        "type": "int64"},
         {"name": "total_bytes",      "type": "int64"},
         {"name": "total_requests",   "type": "int64"},
-        {"name": "stuck_count",      "type": "int64"}
+        {"name": "stuck_count",      "type": "int64"},
+        {"name": "ssr_speed_class",  "type": "int64"},
+        {"name": "ssr_uhs_grade",    "type": "int64"}
       ]
     },
     {

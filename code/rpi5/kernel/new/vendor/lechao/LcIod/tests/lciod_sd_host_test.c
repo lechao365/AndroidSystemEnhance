@@ -99,11 +99,42 @@ static void test_downgrade_combo(void)
     CHECK(mode == 0x01u);
 }
 
+/* SSR 解码：SPEED_CLASS 落 raw[2] 高字节，UHS_SPEED_GRADE 落 raw[3][15:12] */
+static void test_decode_ssr(void)
+{
+    unsigned int raw[16] = {0};
+    struct lciod_sd_ssr d;
+
+    /* raw[2] 高字节 SPEED_CLASS=3；[15:12]=2 为 AU_SIZE 恒例（不应干扰） */
+    raw[2] = (0x03u << 24) | (0x02u << 12);
+    raw[3] = (0x01u << 12);
+    lciod_sd_decode_ssr(raw, &d);
+    CHECK(d.speed_class == 3u);
+    CHECK(d.uhs_speed_grade == 1u);
+
+    /* 全 0 输入 → 0/0 */
+    {
+        unsigned int zero[16] = {0};
+        struct lciod_sd_ssr z;
+
+        lciod_sd_decode_ssr(zero, &z);
+        CHECK(z.speed_class == 0u);
+        CHECK(z.uhs_speed_grade == 0u);
+    }
+
+    /* out == NULL：不崩（防御性，仅此路径） */
+    d.speed_class = 9u;
+    d.uhs_speed_grade = 9u;
+    lciod_sd_decode_ssr(raw, NULL);
+    CHECK(d.speed_class == 9u && d.uhs_speed_grade == 9u);
+}
+
 int main(void)
 {
     test_next_lower_speed();
     test_strip_modes_above();
     test_downgrade_combo();
+    test_decode_ssr();
     if (g_fails) {
         printf("FAIL: %d/%d checks failed\n", g_fails, g_checks);
         return 1;

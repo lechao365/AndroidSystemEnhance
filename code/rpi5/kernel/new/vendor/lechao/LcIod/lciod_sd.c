@@ -64,6 +64,10 @@ struct lciod_sd_state {
 	u64 total_requests;         /* 累计请求数 */
 	u64 stuck_count;            /* 累计 STUCK 次数 */
 	unsigned int last_speed;    /* 最近降档后速度档位（0 起） */
+	struct mmc_card *card;          /* 最近一次事件关联卡片（非空即持引用，WRITE_ONCE） */
+	unsigned int ssr_speed_class;   /* 最近解码 SD 速度档 SPEED_CLASS */
+	unsigned int ssr_uhs_grade;     /* 最近解码 UHS_SPEED_GRADE */
+	unsigned int ssr_valid;         /* SSR 最近读取是否成功（1/0） */
 };
 
 static struct lciod_sd_state sd_state;
@@ -76,10 +80,12 @@ int lciod_sd_notifier(struct notifier_block *nb, unsigned long action,
 
 static void lciod_sd_trace_health(u64 bytes, u64 requests, u64 window_ms,
 				  u64 total_bytes, u64 total_requests,
-				  u64 stuck_count);
+				  u64 stuck_count, unsigned int speed_class,
+				  unsigned int uhs_grade);
 static void lciod_sd_trace_stuck(unsigned int old_speed, unsigned int new_speed,
 				 int err);
 static void lciod_sd_downgrade(struct mmc_card *card, int err);
+static void lciod_sd_refresh_ssr(void);
 
 /*
  * lciod_sd_trace_health — 上报一次 10s 窗聚合结果到 LcView
@@ -87,11 +93,13 @@ static void lciod_sd_downgrade(struct mmc_card *card, int err);
  * @window_ms：窗口长度（毫秒）
  * @total_bytes/total_requests：累计字节/请求数
  * @stuck_count：累计卡死次数
+ * @speed_class/uhs_grade：最近解码 SD 速度档（SSR，A 批二方向 1）
  * 调用上下文：进程上下文（delayed_work）。builder 失败静默降级（cancel）。
  */
 static void lciod_sd_trace_health(u64 bytes, u64 requests, u64 window_ms,
 				  u64 total_bytes, u64 total_requests,
-				  u64 stuck_count)
+				  u64 stuck_count, unsigned int speed_class,
+				  unsigned int uhs_grade)
 {
 	struct lcview_builder *b;
 	int rc;
@@ -107,6 +115,8 @@ static void lciod_sd_trace_health(u64 bytes, u64 requests, u64 window_ms,
 	rc |= lcview_builder_add_int(b, (int64_t)total_bytes);
 	rc |= lcview_builder_add_int(b, (int64_t)total_requests);
 	rc |= lcview_builder_add_int(b, (int64_t)stuck_count);
+	rc |= lcview_builder_add_int(b, (int64_t)speed_class);
+	rc |= lcview_builder_add_int(b, (int64_t)uhs_grade);
 
 	if (rc || lcview_builder_commit(b, &lcview_ring))
 		lcview_builder_cancel(b);
@@ -218,6 +228,13 @@ int lciod_sd_notifier(struct notifier_block *nb, unsigned long action,
 	}
 	spin_unlock_irqrestore(&sd_state.lock, flags);
 
+	/*
+	 * 记录最近关联卡片（WRITE_ONCE，供 SSR 刷新线程 READ_ONCE 读取）。
+	 * 放锁外（仍 atomic），指针写入用 WRITE_ONCE 防撕裂。
+	 */
+	if (nd->card)
+		WRITE_ONCE(sd_state.card, nd->card);
+
 	/* 降档需解引用 card：放锁外（仍 atomic），仅 WRITE_ONCE 赋值 */
 	if (nd->category == LECHAO_SD_EVENT_STUCK && nd->card)
 		lciod_sd_downgrade(nd->card, nd->err);
@@ -230,15 +247,58 @@ struct notifier_block lciod_sd_nb = {
 };
 
 /*
+ * lciod_sd_refresh_ssr — 读取并解码 SD Status Register 速度档
+ *
+ * 调用上下文：进程上下文（delayed_work 10s 窗）。读最近关联卡片；仅对
+ * SD 卡（mmc_card_sd）读取。读取期间 get_device 持 card 引用防拔卡，
+ * 完成后 put_device 释放。读取失败仅 ratelimited 告警并置 ssr_valid=0，
+ * 不阻断窗口上报（CXX-002：错误经 sysfs ssr_valid 可见，不静默吞噬）。
+ */
+static void lciod_sd_refresh_ssr(void)
+{
+	struct mmc_card *card = READ_ONCE(sd_state.card);
+	struct lciod_sd_ssr d;
+	unsigned int raw_ssr[LCIOD_SD_SSR_WORDS];
+	unsigned long flags;
+
+	if (!card || !mmc_card_sd(card))
+		return;
+
+	/* 持 card 引用防读取期间拔卡（CXX-002 资源生命周期） */
+	get_device(&card->dev);
+
+	if (lechao_mmc_read_sd_status(card, raw_ssr) == 0) {
+		lciod_sd_decode_ssr(raw_ssr, &d);
+		spin_lock_irqsave(&sd_state.lock, flags);
+		sd_state.ssr_speed_class = d.speed_class;
+		sd_state.ssr_uhs_grade = d.uhs_speed_grade;
+		sd_state.ssr_valid = 1;
+		spin_unlock_irqrestore(&sd_state.lock, flags);
+	} else {
+		spin_lock_irqsave(&sd_state.lock, flags);
+		sd_state.ssr_valid = 0;
+		spin_unlock_irqrestore(&sd_state.lock, flags);
+		pr_warn_ratelimited(PREFIX "sd: read SD status failed\n");
+	}
+
+	put_device(&card->dev);
+}
+
+/*
  * lciod_sd_window_work — 10s 窗口到期：快照并上报聚合结果后重排
  *
  * 锁内快照并清零窗口累加器，锁外（进程上下文）经 LcView 上报，避免在
- * 持锁期间调用 builder。上报后重新调度下一个 10s 窗口。
+ * 持锁期间调用 builder。上报前先刷新 SSR 速度档（进程上下文可睡眠）。
+ * 上报后重新调度下一个 10s 窗口。
  */
 static void lciod_sd_window_work(struct work_struct *work)
 {
 	unsigned long flags;
 	u64 bytes, requests, total_bytes, total_requests, stuck;
+	unsigned int speed_class, uhs_grade;
+
+	/* 进程上下文刷新 SSR（含 mmc claim/release host，可睡眠） */
+	lciod_sd_refresh_ssr();
 
 	spin_lock_irqsave(&sd_state.lock, flags);
 	bytes = sd_state.window_bytes;
@@ -248,10 +308,13 @@ static void lciod_sd_window_work(struct work_struct *work)
 	total_bytes = sd_state.total_bytes;
 	total_requests = sd_state.total_requests;
 	stuck = sd_state.stuck_count;
+	speed_class = sd_state.ssr_speed_class;
+	uhs_grade = sd_state.ssr_uhs_grade;
 	spin_unlock_irqrestore(&sd_state.lock, flags);
 
 	lciod_sd_trace_health(bytes, requests, LCIOD_SD_WINDOW_MS,
-			      total_bytes, total_requests, stuck);
+			      total_bytes, total_requests, stuck,
+			      speed_class, uhs_grade);
 
 	schedule_delayed_work(&sd_work, msecs_to_jiffies(LCIOD_SD_WINDOW_MS));
 }
@@ -324,11 +387,56 @@ static ssize_t stuck_count_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(stuck_count);
 
+static ssize_t ssr_speed_class_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	unsigned long flags;
+	unsigned int v;
+
+	spin_lock_irqsave(&sd_state.lock, flags);
+	v = sd_state.ssr_speed_class;
+	spin_unlock_irqrestore(&sd_state.lock, flags);
+
+	return sysfs_emit(buf, "%u\n", v);
+}
+static DEVICE_ATTR_RO(ssr_speed_class);
+
+static ssize_t ssr_uhs_grade_show(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	unsigned long flags;
+	unsigned int v;
+
+	spin_lock_irqsave(&sd_state.lock, flags);
+	v = sd_state.ssr_uhs_grade;
+	spin_unlock_irqrestore(&sd_state.lock, flags);
+
+	return sysfs_emit(buf, "%u\n", v);
+}
+static DEVICE_ATTR_RO(ssr_uhs_grade);
+
+static ssize_t ssr_valid_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	unsigned long flags;
+	unsigned int v;
+
+	spin_lock_irqsave(&sd_state.lock, flags);
+	v = sd_state.ssr_valid;
+	spin_unlock_irqrestore(&sd_state.lock, flags);
+
+	return sysfs_emit(buf, "%u\n", v);
+}
+static DEVICE_ATTR_RO(ssr_valid);
+
 static struct attribute *lciod_sd_attrs[] = {
 	&dev_attr_enable.attr,
 	&dev_attr_window_bytes.attr,
 	&dev_attr_window_requests.attr,
 	&dev_attr_stuck_count.attr,
+	&dev_attr_ssr_speed_class.attr,
+	&dev_attr_ssr_uhs_grade.attr,
+	&dev_attr_ssr_valid.attr,
 	NULL,
 };
 
@@ -355,6 +463,10 @@ static int __init lciod_sd_init(void)
 	sd_state.total_requests = 0;
 	sd_state.stuck_count = 0;
 	sd_state.last_speed = LCIOD_SD_SPEED_MAX;
+	sd_state.card = NULL;
+	sd_state.ssr_speed_class = 0;
+	sd_state.ssr_uhs_grade = 0;
+	sd_state.ssr_valid = 0;
 	INIT_DELAYED_WORK(&sd_work, lciod_sd_window_work);
 
 	lciod_sd_class = class_create(LCIOD_SD_NAME);

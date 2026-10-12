@@ -84,6 +84,39 @@ static inline unsigned int lciod_sd_strip_modes_above(unsigned int sd3_bus_mode,
 	return sd3_bus_mode & keep;
 }
 
+/* SD Status Register 字数（512bit = 16 x u32） */
+#define LCIOD_SD_SSR_WORDS 16
+
+/* SSR 速度档解码结果（A 批二方向 1） */
+struct lciod_sd_ssr {
+	unsigned int speed_class;     /* SD Status SPEED_CLASS (bits 447:440) */
+	unsigned int uhs_speed_grade; /* SD Status UHS_SPEED_GRADE (bits 399:396) */
+};
+
+/*
+ * lciod_sd_decode_ssr — 从已转主机序的 SD Status Register 解码速度档
+ * @raw_ssr：u32[16]，已由内核 be32_to_cpu 逐字转换（MSB-first 数组）
+ * @out：解码结果输出
+ *
+ * 语义：口径与 mmc core sd.c 的 UNSTUFF_BITS 一致——SD Status 规格按
+ * LSB-first 编号；AU_SIZE(bits 431:428)=raw_ssr[2]>>12 是该口径的既有锚点。
+ * SPEED_CLASS 落 raw_ssr[2] 高字节，UHS_SPEED_GRADE 落 raw_ssr[3][15:12]。
+ * 无内核 API 依赖，host 与内核共用同一实现（禁内核依赖）。
+ */
+static inline void lciod_sd_decode_ssr(const unsigned int raw_ssr[LCIOD_SD_SSR_WORDS],
+					struct lciod_sd_ssr *out)
+{
+	if (!raw_ssr || !out) {
+		if (out) {
+			out->speed_class = 0;
+			out->uhs_speed_grade = 0;
+		}
+		return;
+	}
+	out->speed_class = (raw_ssr[2] >> 24) & 0xFFu;
+	out->uhs_speed_grade = (raw_ssr[3] >> 12) & 0x0Fu;
+}
+
 #ifdef __KERNEL__
 /* notifier 回调（lciod_sd.c 定义；供内核内部引用） */
 int lciod_sd_notifier(struct notifier_block *nb, unsigned long action,

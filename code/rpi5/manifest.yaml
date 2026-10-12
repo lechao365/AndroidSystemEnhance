@@ -11,6 +11,8 @@ kernel:
       source: rpi5-kernel-build/common/arch/arm64/configs/android_rpi5_defconfig
     - patch: kernel/modified/drivers/mmc/core/block.c.diff
       source: rpi5-kernel-build/common/drivers/mmc/core/block.c
+    - patch: kernel/modified/drivers/mmc/core/sd.c.diff
+      source: rpi5-kernel-build/common/drivers/mmc/core/sd.c
     - patch: kernel/modified/drivers/usb/core/hub.c.diff
       source: rpi5-kernel-build/common/drivers/usb/core/hub.c
     - patch: kernel/modified/drivers/usb/storage/transport.c.diff

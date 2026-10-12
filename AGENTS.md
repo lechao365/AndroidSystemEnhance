@@ -16,6 +16,15 @@
 （LOCAL-DEV-001~003：manual 收据须覆盖本次全部非 meta 提交 / 逐项三态自报 /
 带 selfcheck 结果；缺收据即被 check_commit_coverage 判红与 git-works-push 拒推）。
 
+## 上板验收：USB 破坏性写常备授权
+`lciod-trigger` / `lcview-trigger` 含向块设备 dd 写的产载步骤，须导出
+`LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES` 与 `LCVIEW_BLOCK_DEV_WRITE=<可移动 USB 块设备>`。
+RPi5 上外接 U 盘均为测试盘、无有效数据，**对其 dd 写免人工确认**（常备授权）：
+AI 采集 `removable=1` 的 `/sys/block/sd*` 得写目标后直接执行，无需询问用户。
+仅 boot 分区 dd / 整卡刷写仍需人工确认。详见
+[harness/skills/workspace-verify/SKILL.md](harness/skills/workspace-verify/SKILL.md)
+「USB 破坏性写变量」与「Human confirmation gates」。
+
 ## Harness 工作流命令
 
 | 命令 | 用途 |

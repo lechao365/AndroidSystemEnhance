@@ -370,3 +370,28 @@ TEST(BlockCollectorRuleTest, EvaluateSlowDiskRule_NullState_False)
 {
     EXPECT_FALSE(EvaluateSlowDiskRule(nullptr, 300.0, 200.0, 3));
 }
+
+// ============================================================
+// SdCollector::ParseU64（A 批二方向2）
+// ============================================================
+
+TEST(BlockCollectorSdTest, ParseU64_Valid)
+{
+    uint64_t v = 0;
+    ASSERT_TRUE(SdCollector::ParseU64("0", &v));
+    EXPECT_EQ(v, 0u);
+    ASSERT_TRUE(SdCollector::ParseU64("12345", &v));
+    EXPECT_EQ(v, 12345u);
+}
+
+TEST(BlockCollectorSdTest, ParseU64_Invalid)
+{
+    uint64_t v = 0;
+    // 空串 / 负号 / 非数字 / 行首空白均判非法（CXX-003 输入防御）
+    EXPECT_FALSE(SdCollector::ParseU64("", &v));
+    EXPECT_FALSE(SdCollector::ParseU64("-1", &v));
+    EXPECT_FALSE(SdCollector::ParseU64("12x", &v));
+    EXPECT_FALSE(SdCollector::ParseU64(" 12", &v));
+    // out 空指针判 false
+    EXPECT_FALSE(SdCollector::ParseU64("123", nullptr));
+}

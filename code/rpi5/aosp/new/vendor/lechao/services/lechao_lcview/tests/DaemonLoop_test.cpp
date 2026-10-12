@@ -224,7 +224,9 @@ TEST(DaemonLoopHelperTest, SchemaLoadRetry_SuccessOnFirstTry) {
         // R-16 P4 方向 1：START(4) 已并入 END，schema 由 10 事件降为 9 事件
         // R-19 P5 方向 3：新增 id=1~3 预留占位条目，schema 升为 12 事件
         // R3 方向 1/3：新增 id=14 slow_disk，schema 升为 13 事件
-        EXPECT_EQ(sp.eventCount(), 13u);
+        // A 批一（内核 SD/MMC 健康契约）：新增 id=15 sd_health、id=16 sd_stuck，
+        // schema 升为 15 事件
+        EXPECT_EQ(sp.eventCount(), 15u);
     } else {
         GTEST_SKIP() << "真配置不存在（host 环境）";
     }

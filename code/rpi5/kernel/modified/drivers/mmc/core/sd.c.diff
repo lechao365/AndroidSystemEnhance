@@ -1,0 +1,39 @@
+diff --git a/drivers/mmc/core/sd.c b/drivers/mmc/core/sd.c
+index 77cae22558a7..db7408cbfac2 100644
+--- a/drivers/mmc/core/sd.c
++++ b/drivers/mmc/core/sd.c
+@@ -320,6 +320,34 @@ static int mmc_read_ssr(struct mmc_card *card)
+ 	return 0;
+ }
+ 
++/*
++ * lechao_mmc_read_sd_status - 供 vendor 模块读取 SD Status Register 的薄导出
++ * @card: SD 卡
++ * @ssr: 调用方提供的 u32[16] 输出缓冲（主机序）
++ * 语义：内部 mmc_claim_host/release_host 串行化，规避 vendor 侧直接持锁与
++ * 卡移除竞态；成功时 be32_to_cpu 逐字回填 ssr，失败返回负 errno。
++ */
++int lechao_mmc_read_sd_status(struct mmc_card *card, u32 *ssr)
++{
++	__be32 *raw;
++	int i, err;
++
++	if (!card || !ssr)
++		return -EINVAL;
++	raw = kmalloc(sizeof(__be32) * 16, GFP_KERNEL);
++	if (!raw)
++		return -ENOMEM;
++	mmc_claim_host(card->host);
++	err = mmc_app_sd_status(card, raw);
++	mmc_release_host(card->host);
++	if (!err)
++		for (i = 0; i < 16; i++)
++			ssr[i] = be32_to_cpu(raw[i]);
++	kfree(raw);
++	return err;
++}
++EXPORT_SYMBOL_GPL(lechao_mmc_read_sd_status);
++
+ /*
+  * Fetches and decodes switch information
+  */

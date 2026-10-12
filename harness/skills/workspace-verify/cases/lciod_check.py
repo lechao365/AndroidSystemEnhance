@@ -36,6 +36,14 @@
 #              sysprop，值变化时把 n 加进当前桶，幂等一次性）→ sleep 等
 #              daemon 10s tick + 规则三评估窗口 → logcat 断言 tag
 #              lechao_lciod_event 出现 "rule":"storm"（判红否则）
+#   sd       — SD 卡用户态验收（A 批二 方向 3/4）：三重断言——
+#              (1) sysfs：/sys/class/lciod_sd/lciod_sd/ 下 enable/window_bytes/
+#                  window_requests/stuck_count/ssr_speed_class/ssr_uhs_grade/
+#                  ssr_valid 属性齐全且数值合法；
+#              (2) SD_HEALTH：lcview 日志目录下含 sd_health 的 JSONL 文件中
+#                  存在 "id":15 或 "name":"sd_health" 记录；
+#              (3) sd JSON：logcat tag lechao_lciod_event 出现 "rule":"sd"。
+#              缺证据（目录不可读/属性缺失/无事件/无匹配）均判红。
 #
 # 退出码：0 校验通过 / 1 校验失败 / 2 设备不可达或参数错误
 # ============================================================
@@ -639,6 +647,175 @@ def mode_storm(args):
 
 
 # ============================================================
+# A 批二 方向 3/4：SD 用户态验收（--mode sd）
+# ============================================================
+
+# 内核 lciod_sd 暴露的 sysfs 目录（/sys/class/lciod_sd/lciod_sd/）
+_SD_SYSFS_DIR = "/sys/class/lciod_sd/lciod_sd"
+# daemon SD 健康 ALOG tag（每 10s 打 JSON 行；复用 storm 的 tag 常量）
+_SD_LOG_TAG = _STORM_LOG_TAG
+# lcview daemon 落盘 JSONL 目录（sd_health 事件 id=15，文件名含 sd_health）
+_SD_LVVIEW_LOG_DIR = "/data/vendor/lechao_lcview/logs"
+# sysfs 必须齐全的属性（缺任一即内核打点回归，判红）
+_SD_REQUIRED_ATTRS = ["enable", "window_bytes", "window_requests",
+                      "stuck_count", "ssr_speed_class", "ssr_uhs_grade",
+                      "ssr_valid"]
+# 仅允许 0/1 的布尔属性（其余属性校验非负十进制数字）
+_SD_BOOL_ATTRS = ("enable", "ssr_valid")
+
+
+def _check_sd_sysfs():
+    """sysfs 断言（A 批二 方向 3）→ (错误列表, adb 超时 bool)。
+
+    ls sysfs 目录须 rc==0 且输出含全部 _SD_REQUIRED_ATTRS；逐个 cat：rc==0
+    且 strip 后为数字（int(x, 0) 非负），enable/ssr_valid 额外限 ∈{0,1}。
+    任一缺失/不可读/非数字判红。adb 超时 rc==-1 置 timeout=True 由调用方
+    透传（不得当"无属性"假绿）。
+    """
+    errors = []
+    out, rc = adb(["shell", "ls", _SD_SYSFS_DIR])
+    if rc == -1:
+        return errors, True
+    if rc != 0:
+        return [f"sysfs 目录 {_SD_SYSFS_DIR} 不可读 rc={rc}"
+                "（lciod_sd 内核模块未加载？）"], False
+    names = set(out.split())
+    for attr in _SD_REQUIRED_ATTRS:
+        if attr not in names:
+            errors.append(f"sysfs 缺属性 {attr}（{_SD_SYSFS_DIR}）")
+            continue
+        val, vrc = adb(["shell", "cat", f"{_SD_SYSFS_DIR}/{attr}"])
+        if vrc == -1:
+            return errors, True
+        if vrc != 0:
+            errors.append(f"sysfs 属性 {attr} 不可读 rc={vrc}")
+            continue
+        s = val.strip()
+        try:
+            n = int(s, 0)
+        except ValueError:
+            errors.append(f"sysfs 属性 {attr} 非数字: {s!r}")
+            continue
+        if n < 0:
+            errors.append(f"sysfs 属性 {attr} 为负值: {s}")
+        elif attr in _SD_BOOL_ATTRS and n not in (0, 1):
+            errors.append(f"sysfs 属性 {attr}={s} 非 0/1")
+    return errors, False
+
+
+def _check_sd_health():
+    """SD_HEALTH 事件断言（A 批二 方向 4）→ (错误列表, adb 超时 bool)。
+
+    列出 lcview 日志目录中含 sd_health 的文件并读取内容，逐行 json.loads
+    容错解析（失败行跳过计数），断言存在 "id":15 或 "name":"sd_health" 的
+    JSONL 记录。目录不可读/无 sd_health 文件/无匹配记录均判红（防假绿）。
+    设备端 glob 未展开时回退整目录 ls 过滤（逐文件 cat）。
+    """
+    # 直接 ls 目录取 basename 后拼全路径 cat：设备端 `sh -c <glob>` 经
+    # adb 多参拼接会被拆成 `sh -c ls <path>`（-c 只吃第一个 token，glob
+    # 与 2>/dev/null 沦为位置参数），导致 glob 不展开、回退又 cat 相对
+    # basename 而失败（A 批二首跑 sd_health 读取 rc=1 即此因）。
+    out, rc = adb(["shell", "ls", _SD_LVVIEW_LOG_DIR])
+    if rc == -1:
+        return [], True
+    if rc != 0:
+        return [f"lcview 日志目录 {_SD_LVVIEW_LOG_DIR} 不可读 rc={rc}"], False
+    files = [f.split("/")[-1] for f in out.split()
+             if "sd_health" in f and "*" not in f]
+    if not files:
+        return [f"lcview 日志目录无含 sd_health 的日志文件"
+                f"（SD_HEALTH 事件未落盘？dir={_SD_LVVIEW_LOG_DIR}）"], False
+
+    matched = 0
+    total = 0
+    parsed_bad = 0
+    for fn in files:
+        body, brc = adb(["shell", "cat", f"{_SD_LVVIEW_LOG_DIR}/{fn}"])
+        if brc == -1:
+            return [], True
+        if brc != 0:
+            return [f"读取 sd_health 日志文件失败 rc={brc}: {fn}"], False
+        for line in body.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            total += 1
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                parsed_bad += 1
+                continue
+            if not isinstance(rec, dict):
+                parsed_bad += 1
+                continue
+            if rec.get("id") == 15 or rec.get("name") == "sd_health":
+                matched += 1
+    if matched == 0:
+        return [f"sd_health 日志无 id=15/name=sd_health 记录"
+                f"（{len(files)} 文件 {total} 行，解析失败 {parsed_bad} 行）"], False
+    return [], False
+
+
+def mode_sd(args):
+    """SD 用户态验收（A 批二 方向 3/4）：sysfs + SD_HEALTH + sd JSON 三重断言。
+
+    判红项（防假绿）：sysfs 目录/属性缺失或不可读或非数字 / 无 sd_health
+    日志文件 / 无 id=15 记录 / 设备时钟不可读 / logcat 无 "rule":"sd" 行。
+    任一步 adb 超时（rc==-1）return -1 由 main 透传为失败。
+    """
+    errors, timeout = _check_sd_sysfs()
+    if timeout:
+        return -1
+    if errors:
+        for e in errors:
+            print(f"FAIL: {e}")
+        print("ERROR: lciod sd 校验失败（sysfs）")
+        return 1
+    print("OK: sysfs 属性齐全且数值合法")
+
+    errors, timeout = _check_sd_health()
+    if timeout:
+        return -1
+    if errors:
+        for e in errors:
+            print(f"FAIL: {e}")
+        print("ERROR: lciod sd 校验失败（SD_HEALTH）")
+        return 1
+    print("OK: SD_HEALTH 事件存在（lcview sd_health 落盘）")
+
+    since = args.log_since
+    if since is None:
+        now = device_now()
+        if now is None:
+            print("ERROR: 无法读取设备时钟（logcat 抓取窗口无法锚定）")
+            return 1
+        since = now
+    # daemon 每 10s 一轮 sd JSON：以锚点起轮询最多 ~18s（3x6s），避免锚点
+    # 落在上一轮之后、下一轮之前时误判"未上报"（防假红）。判红仍以窗口内
+    # 命中 "rule":"sd" 为唯一依据（防假绿）。
+    found = False
+    out = ""
+    for _ in range(4):
+        out, rc = adb(["logcat", "-d", "-t", str(int(since)), "-s", _SD_LOG_TAG])
+        if rc == -1:
+            return -1
+        if rc != 0:
+            print(f"ERROR: logcat 抓取失败 rc={rc}（tag {_SD_LOG_TAG}）")
+            return 1
+        if '"rule":"sd"' in out:
+            found = True
+            break
+        time.sleep(6)
+    if not found:
+        print('FAIL: logcat 无 "rule":"sd" 行（daemon sd 规则未上报？）')
+        print("ERROR: lciod sd 校验失败（sd JSON）")
+        return 1
+    print('OK: logcat 命中 "rule":"sd" JSON')
+    print("OK: lciod sd 校验通过（sysfs + SD_HEALTH + sd JSON）")
+    return 0
+
+
+# ============================================================
 # R4 方向 6：SD 卡写 QoS 限速校验（--mode qos）
 # ============================================================
 
@@ -835,7 +1012,7 @@ def main():
     ap = argparse.ArgumentParser(description="lciod 板端数据校验器（host 侧）")
     ap.add_argument("--mode", required=True,
                     choices=["stats", "baseline", "delta", "perf", "uas",
-                             "link", "storm", "qos"])
+                             "link", "storm", "qos", "sd"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
@@ -852,7 +1029,7 @@ def main():
                     help="storm 模式注入后等待秒数（等 daemon 10s tick + "
                          "规则三评估窗口）")
     ap.add_argument("--log-since", type=int, default=None,
-                    help="storm 模式 logcat 抓取锚点（设备 epoch，只判锚点后 "
+                    help="storm/sd 模式 logcat 抓取锚点（设备 epoch，只判锚点后 "
                          "缓冲；未给时注入前自动取设备时钟）")
     ap.add_argument("--qos-dd-mb", type=int, default=16,
                     help="qos 模式 dd 写临时文件大小（MB），默认 16")
@@ -888,6 +1065,14 @@ def main():
     if args.mode == "qos":
         # R4 方向 6：SD 卡写 QoS 限速校验（依赖 daemon IoQosManager cgroup）
         rc = mode_qos(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "sd":
+        # A 批二 方向 3/4：SD 用户态验收（sysfs + SD_HEALTH + sd JSON）
+        rc = mode_sd(args)
         if rc == -1:
             print("ERROR: adb 执行超时")
             return 1

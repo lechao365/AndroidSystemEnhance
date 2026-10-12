@@ -299,6 +299,20 @@ static void EmitZramJson(const lechao::lciod::ZramCollector::Sample& z) {
     EmitCollectorJson("zram", line, n, sizeof(line));
 }
 
+/* lciod_sd sysfs 聚合 + SSR 解码速度档 JSON 行（A 批二方向2） */
+static void EmitSdJson(const lechao::lciod::SdCollector::Sample& s) {
+    char line[256];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"sd\",\"enable\":%llu,\"window_bytes\":%llu,"
+        "\"window_requests\":%llu,\"stuck_count\":%llu,"
+        "\"ssr_speed_class\":%llu,\"ssr_uhs_grade\":%llu,\"ssr_valid\":%llu}",
+        (unsigned long long)s.enable, (unsigned long long)s.windowBytes,
+        (unsigned long long)s.windowRequests, (unsigned long long)s.stuckCount,
+        (unsigned long long)s.ssrSpeedClass, (unsigned long long)s.ssrUhsGrade,
+        (unsigned long long)s.ssrValid);
+    EmitCollectorJson("sd", line, n, sizeof(line));
+}
+
 /*
  * R5 方向2/3：块设备/zram 10s 观测采集线程入口（IoServiceImpl::start() 以
  * std::thread(...).detach() 启动）。对齐 IoQosManager::RunLoop 的
@@ -307,7 +321,9 @@ static void EmitZramJson(const lechao::lciod::ZramCollector::Sample& z) {
  *   1) 枚举 /sys/block 块设备，逐设备差分采样（首次只建 prev，无速率）；
  *   2) 悬挂检测（inflight 高 + 写延迟高持续 3 次）与规则二慢盘（写平均延迟
  *      持续超阈 3 次）触发时经 EVENT_ALOG 打 JSON 行（不接 lcview JSONL）；
- *   3) zram0 水位/压缩比/io 统计打 EVENT_ALOG JSON 行。
+ *   3) zram0 水位/压缩比/io 统计打 EVENT_ALOG JSON 行；
+ *   4) lciod_sd sysfs 健康聚合（enable/window_bytes/window_requests/
+ *      stuck_count）与 SSR 解码速度档打 EVENT_ALOG JSON 行（A 批二方向2）。
  * 观测为增强项非致命：枚举/采样失败已限频 ALOGE，跳过本轮，线程不退出
  * （CXX-004：非致命错误不触发进程退出）。
  */
@@ -316,6 +332,7 @@ static void BlockCollectorRunLoop() {
     const auto period = std::chrono::seconds(lechao::lciod::kBlockSampleIntervalSec);
     lechao::lciod::BlockCollector block;
     lechao::lciod::ZramCollector zram;
+    lechao::lciod::SdCollector sd;
     /* 悬挂/慢盘状态按设备维护、跨 10s 采样持续——避免 A 设备 2 次 + B 设备
      * 1 次被合并误判（与 lcview sampleBlockMetrics 同款按设备状态） */
     std::unordered_map<std::string, lechao::lciod::HangState> hangStates;
@@ -363,6 +380,11 @@ static void BlockCollectorRunLoop() {
         lechao::lciod::ZramCollector::Sample z;
         if (zram.SampleZram(&z))
             EmitZramJson(z);
+
+        /* lciod_sd 健康聚合 + SSR 速度档（模块缺失时降级跳过，限频 ALOGE） */
+        lechao::lciod::SdCollector::Sample sdSample;
+        if (sd.SampleSd(&sdSample))
+            EmitSdJson(sdSample);
     }
 }
 
