@@ -751,3 +751,38 @@ baselines:
       archived_in: ''
   approved_by: release-review <review@lechao.dev>
   approved_at: '2026-10-09T12:12:09+08:00'
+- baseline_id: BL-20261012-01
+  status: candidate
+  source_branch: dev
+  source_commit: ba8db58b4a9f
+  sync_manifest: data/verify-results/20261012-151548-60360f4c4cef.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lciod-blk,lciod-histo,lciod-liveness,lciod-sd,lciod-trigger,lcview-blk,lcview-liveness,lcview-pipeline,lcview-trigger
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20261012-151548-60360f4c4cef.md
+    ki_gate: pass
+    evidence_scope: lciod-blk,lciod-histo,lciod-liveness,lciod-sd,lciod-trigger,lcview-blk,lcview-liveness,lcview-pipeline,lcview-trigger
+    known_issues_carried: KI-20261008-002,KI-20261008-001
+    package_evidence: data/verify-results/20261012-151548-60360f4c4cef.md
+    package_rc: 0
+    cases_coverage:
+      result: partial
+      missing:
+      - lcview-sepolicy-label
+      - lcview-perf
+      - lcview-recover-daemon
+      - lcview-transfer
+      - lcview-pipeline-warn
+      - lciod-pipeline
+      - lciod-uas
+      - lciod-qos
+      - lciod-storm
+      - lciod-link
+      - lciod-perf
+      - lciod-recover-hal
+      run_count: 9
