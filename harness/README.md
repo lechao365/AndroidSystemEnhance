@@ -47,6 +47,7 @@ harness/
 │   ├── plantuml.md             # DOC-002：PlantUML 画图约束（DOC-001 未启用）
 │   ├── cdp-apply-dod.md        # CDP-DOD-001~003：apply 完成判据（检查器门禁三要件/干净克隆/收据自报）
 │   ├── local-dev-dod.md       # LOCAL-DEV-001~003：本地直连开发 DoD（manual 收据/三态自报）
+│   ├── env-baseline.md        # ENV-BASE-001~002：方案设计前环境基线必测/产批锚点 git 可见
 ├── reference/
 │   ├── README.md                 # RPI5 开发参考文档索引（ENV/BLD/FLASH/INC/DBG/RMT 规则 ID 总表）
 │   ├── env-setup-reference.md    # WSL2 / 宿主环境搭建、AOSP 编译前准备（ENV-001~007）
@@ -70,6 +71,7 @@ harness/
 | `DOC-002` | [rules/plantuml.md](rules/plantuml.md) | PlantUML 画图约束（`DOC-001` 未启用） |
 | `CDP-DOD-001~003` | [rules/cdp-apply-dod.md](rules/cdp-apply-dod.md) | apply 完成判据（检查器门禁/干净克隆/收据自报） |
 | `LOCAL-DEV-001~003` | [rules/local-dev-dod.md](rules/local-dev-dod.md) | 本地直连开发 DoD |
+| `ENV-BASE-001~002` | [rules/env-baseline.md](rules/env-baseline.md) | 环境基线与产批锚点（方案前必测基线/git 可见锚点） |
 | `HPY-001~003` | [rules/harness-python-conventions.md](rules/harness-python-conventions.md) | harness Python 工程约束（双名收敛/原子写/守卫红灯） |
 | `CDP-001` | [skills/cross-device/docs/cdp-contract.md](skills/cross-device/docs/cdp-contract.md) | CDP 批次契约与解析器（`cdp_parse.py`）成对修改 |
 

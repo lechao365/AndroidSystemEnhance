@@ -63,6 +63,13 @@ harness 能力全部内聚在 `harness/` 目录（不依赖 LcHarness），使�
 （CDP-DOD-001 检查器门禁三要件 / CDP-DOD-002 测试与文档引用禁依赖未跟踪产物 /
 CDP-DOD-003 收据逐方向自报调用方与验证）。
 
+## 方案设计前的环境基线
+方案设计 / 产批（`/cross-device-emit`、`/sync-code-to-doc` 方案先行）涉及目标设备环境
+假设（文件系统类型、内核特性、挂载状态、ABI / 事件 ID、设备节点与 sysfs 属性等）前，必须先加载
+[harness/rules/env-baseline.md](harness/rules/env-baseline.md)
+（ENV-BASE-001~002：方案设计前必测目标环境基线并随批入 git /
+产批锚点必须 git 可见文件、禁引未入库文档）。
+
 ## RPI5 环境与开发参考文档
 涉及 RPI5 环境搭建、编译、部署、调试、远程访问时，必须先加载 `harness/reference/` 下对应文档（索引见 [harness/reference/README.md](harness/reference/README.md)）：
 
