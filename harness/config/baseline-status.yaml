@@ -755,34 +755,22 @@ baselines:
   status: candidate
   source_branch: dev
   source_commit: ba8db58b4a9f
-  sync_manifest: data/verify-results/20261012-151548-60360f4c4cef.md
+  sync_manifest: data/verify-results/20261012-173756-manual-2610121737.md
   build_result: PASS
   package_result: PASS
   board_verify: PASS
-  evidence_scope: lciod-blk,lciod-histo,lciod-liveness,lciod-sd,lciod-trigger,lcview-blk,lcview-liveness,lcview-pipeline,lcview-trigger
+  evidence_scope: lciod-blk,lciod-histo,lciod-link,lciod-liveness,lciod-perf,lciod-pipeline,lciod-qos,lciod-recover-hal,lciod-sd,lciod-storm,lciod-trigger,lciod-uas,lcview-blk,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
   evidence:
     build_result: PASS
     package_result: PASS
     board_verify: PASS
-    sync_manifest: data/verify-results/20261012-151548-60360f4c4cef.md
+    sync_manifest: data/verify-results/20261012-173756-manual-2610121737.md
     ki_gate: pass
-    evidence_scope: lciod-blk,lciod-histo,lciod-liveness,lciod-sd,lciod-trigger,lcview-blk,lcview-liveness,lcview-pipeline,lcview-trigger
+    evidence_scope: lciod-blk,lciod-histo,lciod-link,lciod-liveness,lciod-perf,lciod-pipeline,lciod-qos,lciod-recover-hal,lciod-sd,lciod-storm,lciod-trigger,lciod-uas,lcview-blk,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
     known_issues_carried: KI-20261008-002,KI-20261008-001
-    package_evidence: data/verify-results/20261012-151548-60360f4c4cef.md
+    package_evidence: data/verify-results/20261012-173756-manual-2610121737.md
     package_rc: 0
     cases_coverage:
-      result: partial
-      missing:
-      - lcview-sepolicy-label
-      - lcview-perf
-      - lcview-recover-daemon
-      - lcview-transfer
-      - lcview-pipeline-warn
-      - lciod-pipeline
-      - lciod-uas
-      - lciod-qos
-      - lciod-storm
-      - lciod-link
-      - lciod-perf
-      - lciod-recover-hal
-      run_count: 9
+      result: full
+      missing: []
+      run_count: 21
