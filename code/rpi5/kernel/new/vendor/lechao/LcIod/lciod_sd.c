@@ -22,6 +22,7 @@
 
 #include "lciod_sd.h"
 #include "lechao_sd_notifier.h"
+#include "lciod_histo.h"
 #include "lcview_internal.h"
 #include "lcview_events.h"
 #include "kernel_lechao_log.h"
@@ -63,6 +64,7 @@ struct lciod_sd_state {
 	u64 total_bytes;            /* 累计有效字节 */
 	u64 total_requests;         /* 累计请求数 */
 	u64 stuck_count;            /* 累计 STUCK 次数 */
+	struct lciod_histo histo;   /* 传输延迟/块大小二维直方图（lock 保护，累计） */
 	unsigned int last_speed;    /* 最近降档后速度档位（0 起） */
 	struct mmc_card *card;          /* 最近一次事件关联卡片（非空即持引用，WRITE_ONCE） */
 	unsigned int ssr_speed_class;   /* 最近解码 SD 速度档 SPEED_CLASS */
@@ -216,6 +218,15 @@ int lciod_sd_notifier(struct notifier_block *nb, unsigned long action,
 		sd_state.window_requests++;
 		sd_state.total_bytes += nd->bytes;
 		sd_state.total_requests++;
+		/*
+		 * C 批一：延迟/块大小直方图入桶（elapsed=nd->duration_ns，
+		 * bytes=nd->bytes）。当前持 sd_state.lock（irqsave），入桶无需
+		 * 再加锁；方向 LECHAO_SD_DIR_READ→读，其余→写。
+		 */
+		lciod_histo_add(&sd_state.histo,
+				(nd->direction == LECHAO_SD_DIR_READ) ?
+					LCIOD_HISTO_DIR_READ : LCIOD_HISTO_DIR_WRITE,
+				nd->bytes, nd->duration_ns);
 		break;
 	case LECHAO_SD_EVENT_STUCK:
 		sd_state.stuck_count++;

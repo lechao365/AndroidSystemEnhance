@@ -193,10 +193,12 @@ _ABI_TYPE_ALIASES = {
 _ABI_STRUCT_RE = re.compile(r"struct\s+(\w+)\s*\{([^}]*)\}", re.S)
 _ABI_ENUM_RE = re.compile(r"enum\s+(\w+)\s*\{([^}]*)\}", re.S)
 
-# ABI 成员行提取：容忍多词类型（unsigned int）、指针前缀与数组后缀——
+# ABI 成员行提取：容忍多词类型（unsigned int）、指针前缀与多维数组后缀——
 # "u8 reserved[2]" → ("u8","reserved","[2]")、"unsigned int b" → ("unsigned int","b","")、
-# "u8 *p" → ("u8","*p","")。
-_ABI_FIELD_RE = re.compile(r"^(.+?)\s+(\**\w+)\s*(\[[^\]]*\])?$")
+# "u8 *p" → ("u8","*p","")、"u32 counts[2][8][12]" → ("u32","counts","[2][8][12]")。
+# 多维数组后缀须整体捕获，否则矩阵类成员（v5 延迟直方图 counts[dir][size][lat]）
+# 解析失败触发 ABI surface 层 fail-closed 假红。
+_ABI_FIELD_RE = re.compile(r"^(.+?)\s+(\**\w+)\s*((?:\[[^\]]*\])*)$")
 
 # 对象式数值宏提取：`#define NAME VALUE`（VALUE 非空白 token；函数式/空值不匹配）。
 _ABI_DEFINE_RE = re.compile(r"^#define\s+(\w+)\s+(\S+)", re.M)

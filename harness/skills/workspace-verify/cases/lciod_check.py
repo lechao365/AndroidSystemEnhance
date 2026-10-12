@@ -8,7 +8,7 @@
 #   在 host 完成；设备侧只做单二进制最小操作。
 #
 # 模式：
-#   stats    — 校验 probe 快照：≥1 设备、abi_version==4、字段齐全、
+#   stats    — 校验 probe 快照：≥1 设备、abi_version==5、字段齐全、
 #              数值非负、vendor/product 非空、protocol∈{0,1}（字段映射
 #              完整性回归点）
 #   uas      — UAS 专项（R1 维测）：要求 ≥1 设备 protocol==1（UAS 设备）
@@ -21,7 +21,7 @@
 #              ≥ 20MiB/s）；无破坏性写守卫依赖（临时文件走安全路径）
 #   link     — 全局链路节点（R2 方向 7）：/dev/vendor_lechao_usbd_link
 #              GET_LINK_STATS ioctl 快照校验——节点可打开、字段齐全、
-#              值合法、abi_version==4（连接/断开/枚举失败/过流计数）
+#              值合法、abi_version==5（连接/断开/枚举失败/过流计数）
 #   baseline — [--reset] 取快照存 --baseline（供 delta；
 #              --reset 传给设备工具归零计数，delta 断言简化为绝对值）
 #   delta    — 对比基线，聚合断言：≥1 设备在全部 --expect 字段严格增加
@@ -76,7 +76,7 @@ def _default_baseline(env_name="LCIOD_BASELINE_FILE"):
 
 BASELINE_DEFAULT = _default_baseline()
 
-# probe 输出必须齐全的字段（与 lciod_probe.c 输出、ioctl.h v4 ABI 对齐；
+# probe 输出必须齐全的字段（与 lciod_probe.c 输出、ioctl.h v5 ABI 对齐；
 # 缺任一字段即字段映射回归，stats 模式判红）
 REQUIRED_FIELDS = [
     "minor", "path", "vid", "pid", "protocol", "vendor", "product",
@@ -93,7 +93,7 @@ REQUIRED_FIELDS = [
 ]
 # 非数值字段（vendor/product 可含空格引号包裹；path 为字符串）
 _TEXT_FIELDS = {"path", "vendor", "product"}
-_EXPECTED_ABI = "4"
+_EXPECTED_ABI = "5"
 
 # key=value 解析：vendor="SanDisk Corp" 等引号包裹值支持空格
 _TOKEN_RE = re.compile(r'(\w+)=(?:"([^"]*)"|(\S+))')
@@ -173,7 +173,7 @@ def validate_devices(devices):
     """stats 模式校验 → 错误列表（空 = 通过）。
 
     判红项：零设备 / 字段缺失 / 数值字段非数字或负值 /
-    vendor·product 为空 / abi_version != 4（镜像副本与内核真相源漂移）。
+    vendor·product 为空 / abi_version != 5（镜像副本与内核真相源漂移）。
     """
     errors = []
     if not devices:
@@ -320,7 +320,7 @@ def validate_link_stats(fields):
 
     判红项：字段缺失 / 无符号计数非数字或负值 / last_err 非数字（s32
     errno 允许负值，只查数字）/ last_event_type 超出枚举范围 /
-    abi_version != 4（镜像副本与内核真相源漂移）。
+    abi_version != 5（镜像副本与内核真相源漂移）。
     """
     errors = []
     missing = [f for f in REQUIRED_LINK_FIELDS if f not in fields]

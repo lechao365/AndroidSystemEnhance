@@ -682,6 +682,14 @@ class TestCompareAbiSurface(unittest.TestCase):
         self.assertEqual(out, {"s": [("u64", "a", ""), ("u32", "b", ""),
                                      ("u8", "c", "[2]")]})
 
+    def test_extract_abi_structs_multidim_array(self):
+        # 多维数组后缀整体捕获（v5 延迟直方图 counts[2][8][12]）：
+        # 单维 [2] 行为不变，多维须解析为单个后缀 token 而非 fail-closed
+        out = extract_abi_structs(
+            "struct h {\n u64 ts;\n u32 counts[2][8][12];\n};\n")
+        self.assertEqual(out, {"h": [("u64", "ts", ""),
+                                     ("u32", "counts", "[2][8][12]")]})
+
     def test_extract_abi_enums_effective_values(self):
         # 枚举有效值：显式 + 隐式递增
         out = extract_abi_enums("enum e {\n A = 5,\n B,\n C = 9,\n};\n")

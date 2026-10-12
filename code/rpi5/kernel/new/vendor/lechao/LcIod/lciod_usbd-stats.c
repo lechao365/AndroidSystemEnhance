@@ -601,6 +601,8 @@ void vendor_lechao_usbd_do_reset(struct vendor_lechao_usbd_device *rate_dev)
     rate_dev->last_event.event_type = VENDOR_LECHAO_USBD_EVENT_NONE;
     rate_dev->stats.enabled = rate_dev->config.enabled;
     rate_dev->stats.flags = rate_dev->config.flags;
+    /* C 批一：reset 一并清零延迟/块大小直方图（调用契约已持 rate_dev->lock） */
+    memset(&rate_dev->histo, 0, sizeof(rate_dev->histo));
 
     pr_debug(PREFIX "reset done\n");
 }
@@ -664,6 +666,16 @@ void vendor_lechao_usbd_transport_end_locked(
             rate_dev->stats.write_ns += elapsed_ns;
             rate_dev->stats.write_cmds++;
         }
+
+        /*
+         * C 批一：延迟/块大小直方图入桶。调用契约为入参已持有
+         * rate_dev->lock，故此处无需再加锁；方向映射：DMA_FROM_DEVICE→读，
+         * 其余→写（与 stats 分项口径一致）。
+         */
+        lciod_histo_add(&rate_dev->histo,
+                        (srb->sc_data_direction == DMA_FROM_DEVICE) ?
+                            LCIOD_HISTO_DIR_READ : LCIOD_HISTO_DIR_WRITE,
+                        bytes, elapsed_ns);
 
         {
             u64 prev_rate = rate_dev->stats.current_rate;

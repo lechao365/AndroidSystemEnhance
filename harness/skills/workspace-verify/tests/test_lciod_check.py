@@ -81,7 +81,7 @@ class TestEnsureConnected(unittest.TestCase):
         ex.assert_called_once_with(2)
 
 # 与 lciod_probe.c 输出同构的合法单行样本（vendor 含空格验证引号解析；
-# 与 ioctl.h v4 ABI 对齐：read/write_error_count + abi_version=4）
+# 与 ioctl.h v5 ABI 对齐：read/write_error_count + abi_version=5）
 VALID_LINE = (
     'device minor=0 path=/dev/vendor_lechao_usbd0 vid=0x04e8 pid=0x6344 protocol=0 '
     'vendor="SanDisk Corp" product="Ultra USB 3.0" '
@@ -92,7 +92,7 @@ VALID_LINE = (
     'last_event_ts_ns=987654321 last_update=111222333 stall_count=0 '
     'corrupt_count=0 timeout_count=0 last_event_type=5 '
     'enabled=1 flags=0 event_drop_count=0 read_error_count=0 write_error_count=0 '
-    'abi_version=4'
+    'abi_version=5'
 )
 
 
@@ -115,7 +115,7 @@ class ParseProbeOutputTest(unittest.TestCase):
         self.assertEqual(dev["vendor"], "SanDisk Corp")
         self.assertEqual(dev["product"], "Ultra USB 3.0")
         self.assertEqual(dev["read_bytes"], "4194304")
-        self.assertEqual(dev["abi_version"], "4")
+        self.assertEqual(dev["abi_version"], "5")
         self.assertEqual(dev["read_error_count"], "0")
         self.assertEqual(dev["write_error_count"], "0")
         self.assertEqual(dev["last_update"], "111222333")
@@ -169,7 +169,7 @@ class ValidateDevicesTest(unittest.TestCase):
 
     def test_abi_drift_is_error(self):
         # 旧版 ABI（abi_version=2）判红：镜像副本与内核真相源漂移不得静默
-        line = VALID_LINE.replace("abi_version=4", "abi_version=2")
+        line = VALID_LINE.replace("abi_version=5", "abi_version=2")
         errors = lc.validate_devices(_devices(line))
         self.assertTrue(any("abi_version" in e for e in errors))
 
@@ -281,7 +281,7 @@ VALID_LINK_LINE = (
     'link connect_count=3 disconnect_count=1 enum_fail_count=0 overcurrent_count=1 '
     'last_event_ts_ns=123456789 last_event_type=9 '
     'last_busnum=1 last_port=2 last_vid=0x0781 last_pid=0x5583 '
-    'last_err=0 last_count=1 last_duration_ns=500000 abi_version=4'
+    'last_err=0 last_count=1 last_duration_ns=500000 abi_version=5'
 )
 
 
@@ -302,7 +302,7 @@ class LinkModeTest(unittest.TestCase):
         self.assertEqual(fields["overcurrent_count"], "1")
         self.assertEqual(fields["last_event_type"], "9")
         self.assertEqual(fields["last_vid"], "0x0781")
-        self.assertEqual(fields["abi_version"], "4")
+        self.assertEqual(fields["abi_version"], "5")
 
     def test_parse_missing_connect_count_raises(self):
         with self.assertRaises(ValueError):
@@ -317,8 +317,8 @@ class LinkModeTest(unittest.TestCase):
         self.assertTrue(any("disconnect_count" in e for e in errors))
 
     def test_bad_abi_is_error(self):
-        # ABI 漂移（3 != 4）判红
-        line = VALID_LINK_LINE.replace("abi_version=4", "abi_version=3")
+        # ABI 漂移（3 != 5）判红
+        line = VALID_LINK_LINE.replace("abi_version=5", "abi_version=3")
         errors = lc.validate_link_stats(_link_fields(line))
         self.assertTrue(any("abi_version" in e for e in errors))
 

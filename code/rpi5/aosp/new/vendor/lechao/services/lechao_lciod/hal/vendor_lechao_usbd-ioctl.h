@@ -24,6 +24,10 @@
  *   - v4：追加链路事件 7/8/9（LINK_CONNECT/LINK_DISCONNECT/LINK_OVERCURRENT），
  *         新增 struct vendor_lechao_usbd_link_stats 与 GET_LINK_STATS
  *         （R2 链路事件维测与供电归因）
+ *   - v5：新增 struct vendor_lechao_usbd_latency_histogram 与
+ *         GET_LATENCY_HISTOGRAM ioctl（C 批一 直方图内核侧：2 方向 x 8 块
+ *         大小档 x 12 延迟档累计矩阵 + 档位元数据 + mono 时戳，由 USB
+ *         transport_end 与 SD COMPLETE 双链接入）
  */
 
 #ifndef _VENDOR_LECHAO_USBD_IOCTL_H
@@ -32,7 +36,7 @@
 #include <linux/types.h>
 
 /* ABI 版本号：必须与内核真相源保持一致 */
-#define VENDOR_LECHAO_USBD_ABI_VERSION  4
+#define VENDOR_LECHAO_USBD_ABI_VERSION  5
 
 /*
  * 传输协议类型（R1 UAS 维测：零 ABI bump 扩展）
@@ -135,6 +139,36 @@ struct vendor_lechao_usbd_link_stats {
 	u32 last_count;         /* 最近一次事件计数（过流计数/枚举耗尽重试次数） */
 	u64 last_duration_ns;   /* 最近一次事件时长 */
 	u8  reserved[8];        /* 预留：对齐填充 */
+};
+
+/*
+ * 延迟直方图维度（v5，编译期固定）：2 方向 x 8 块大小档 x 12 延迟档。
+ * 与内核侧 struct lciod_histo（lciod_histo.h）矩阵维度一致。
+ */
+#define VENDOR_LECHAO_USBD_HISTO_DIRS       2
+#define VENDOR_LECHAO_USBD_HISTO_SIZE_BINS  8
+#define VENDOR_LECHAO_USBD_HISTO_LAT_BINS   12
+
+/*
+ * struct vendor_lechao_usbd_latency_histogram — 传输延迟/块大小二维直方图快照（v5）
+ *
+ * 【用途】通过 VENDOR_LECHAO_USBD_IOC_GET_LATENCY_HISTOGRAM 返回给用户态。
+ * 【矩阵】counts[dir][size][lat]：dir 0=读/1=写（对应
+ *        VENDOR_LECHAO_USBD_DIR_READ/DIR_WRITE），size 为 8 档块大小、lat 为
+ *        12 档传输延迟；累计计数，RESET_STATE 时清零。仅持锁累加，快照锁内拷贝。
+ * 【档位元数据】size_bounds/latency_bounds 为各档上界（字节/纳秒，末档饱和），
+ *        编译期固定，用户态据此还原桶区间。
+ * 【时戳】mono_ts_ns 为本次快照的 CLOCK_MONOTONIC 纳秒时刻。
+ */
+struct vendor_lechao_usbd_latency_histogram {
+	u64 mono_ts_ns;                  /* 快照时戳（CLOCK_MONOTONIC 纳秒） */
+	u32 dirs;                        /* 方向数 = VENDOR_LECHAO_USBD_HISTO_DIRS */
+	u32 size_bins;                   /* 块大小档数 = VENDOR_LECHAO_USBD_HISTO_SIZE_BINS */
+	u32 latency_bins;                /* 延迟档数 = VENDOR_LECHAO_USBD_HISTO_LAT_BINS */
+	u32 reserved;                    /* 预留：对齐填充 */
+	u64 size_bounds[8];              /* 块大小档上界（字节，末档饱和） */
+	u64 latency_bounds[12];          /* 延迟档上界（纳秒，末档饱和） */
+	u32 counts[2][8][12];            /* 累计矩阵 [dir][size][lat] */
 };
 
 /*
@@ -270,5 +304,8 @@ static inline const char *vendor_lechao_usbd_data_direction_name(u8 dir)
 
 /* 获取全局链路节点统计快照（v4，只读） */
 #define VENDOR_LECHAO_USBD_IOC_GET_LINK_STATS _IOR(VENDOR_LECHAO_USBD_IOC_MAGIC, 4, struct vendor_lechao_usbd_link_stats)
+
+/* 获取传输延迟/块大小二维直方图快照（v5，只读；C 批一 直方图内核侧） */
+#define VENDOR_LECHAO_USBD_IOC_GET_LATENCY_HISTOGRAM _IOR(VENDOR_LECHAO_USBD_IOC_MAGIC, 5, struct vendor_lechao_usbd_latency_histogram)
 
 #endif /* _VENDOR_LECHAO_USBD_IOCTL_H */
