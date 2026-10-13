@@ -8,7 +8,9 @@
  *       上报 LCVIEW_EVENT_SD_HEALTH（窗口字节/请求数 + 累计值 + 卡死数）；
  *     - STUCK：依据 card->sd_bus_speed 逐级降档并剥除高于新档的模式位
  *       （纯函数见 lciod_sd.h），上报 LCVIEW_EVENT_SD_STUCK。
- *   暴露 sysfs 开关（enable，默认开）与窗口/卡死计数只读属性。
+ *   暴露 sysfs 开关（enable，默认开）、窗口/卡死计数与最近降档档位
+ *   （last_speed）只读属性，及自愈演练入口（inject_stuck，root-only 写一次
+ *   触发一次：内存构造合成 STUCK 走完整 notifier 降档链，不触碰真实卡）。
  *
  * 【线程/上下文安全（CXX-001~004）】
  *   - notifier 回调运行在 atomic notifier 链上下文（blk-mq 完成路径可能为
@@ -241,9 +243,11 @@ int lciod_sd_notifier(struct notifier_block *nb, unsigned long action,
 
 	/*
 	 * 记录最近关联卡片（WRITE_ONCE，供 SSR 刷新线程 READ_ONCE 读取）。
-	 * 放锁外（仍 atomic），指针写入用 WRITE_ONCE 防撕裂。
+	 * 放锁外（仍 atomic），指针写入用 WRITE_ONCE 防撕裂。演练合成事件
+	 * （synthetic）的 card 为临时内存卡，禁止写入 sd_state.card——否则
+	 * kfree 后 SSR 刷新线程会 READ_ONCE 到悬空指针。
 	 */
-	if (nd->card)
+	if (nd->card && !nd->synthetic)
 		WRITE_ONCE(sd_state.card, nd->card);
 
 	/* 降档需解引用 card：放锁外（仍 atomic），仅 WRITE_ONCE 赋值 */
@@ -398,6 +402,65 @@ static ssize_t stuck_count_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(stuck_count);
 
+static ssize_t last_speed_show(struct device *dev,
+			       struct device_attribute *attr, char *buf)
+{
+	unsigned long flags;
+	unsigned int v;
+
+	spin_lock_irqsave(&sd_state.lock, flags);
+	v = sd_state.last_speed;
+	spin_unlock_irqrestore(&sd_state.lock, flags);
+
+	return sysfs_emit(buf, "%u\n", v);
+}
+static DEVICE_ATTR_RO(last_speed);
+
+/*
+ * inject_stuck_store — SD 自愈演练入口（root-only，写一次触发一次）
+ *
+ * 在内存构造一张临时 SD 卡（起点 DDR50 + 全模式位），构造合成 STUCK 事件
+ * 置 synthetic=1 后经 lechao_sd_notify 走**完整 notifier 处理链**：
+ * stuck_count 递增 → 依据合成卡 sd_bus_speed 逐级剥 caps 降档 → SD_STUCK
+ * 事件上报。**仅内存模拟**：合成卡随本次调用 kzalloc/kfree，全程不触碰
+ * 真实 mmc 卡与硬件操作；synthetic 标记确保回调不将合成卡写入 sd_state.card
+ * （防 SSR 误读已释放卡）。调用上下文：进程上下文（sysfs store，可睡眠分配）。
+ */
+static ssize_t inject_stuck_store(struct device *dev,
+				  struct device_attribute *attr,
+				  const char *buf, size_t count)
+{
+	struct lechao_sd_notifier_data nd = {0};
+	struct lciod_sd_stuck_evt evt;
+	struct mmc_card *card;
+
+	card = kzalloc(sizeof(*card), GFP_KERNEL);
+	if (!card)
+		return -ENOMEM;
+
+	/* 演练起点契约（纯函数，host 单测同源）：合成卡起始档位/模式 */
+	lciod_sd_build_stuck_evt(LCIOD_SD_DRILL_START_SPEED,
+				 LCIOD_SD_DRILL_START_MODE,
+				 LCIOD_SD_DRILL_ERR, &evt);
+	card->type = MMC_TYPE_SD;
+	card->sd_bus_speed = evt.old_speed;
+	card->sw_caps.sd3_bus_mode = evt.old_mode;
+
+	nd.card = card;
+	nd.category = LECHAO_SD_EVENT_STUCK;
+	nd.err = evt.err;
+	nd.synthetic = 1; /* 合成事件：回调不占据 sd_state.card */
+
+	lechao_sd_notify(&nd);
+
+	kfree(card);
+
+	pr_info(PREFIX "sd drill: inject synthetic STUCK (expect speed %u->%u)\n",
+		evt.old_speed, evt.new_speed);
+	return count;
+}
+static DEVICE_ATTR_WO(inject_stuck);
+
 static ssize_t ssr_speed_class_show(struct device *dev,
 				    struct device_attribute *attr, char *buf)
 {
@@ -445,6 +508,8 @@ static struct attribute *lciod_sd_attrs[] = {
 	&dev_attr_window_bytes.attr,
 	&dev_attr_window_requests.attr,
 	&dev_attr_stuck_count.attr,
+	&dev_attr_last_speed.attr,
+	&dev_attr_inject_stuck.attr,
 	&dev_attr_ssr_speed_class.attr,
 	&dev_attr_ssr_uhs_grade.attr,
 	&dev_attr_ssr_valid.attr,

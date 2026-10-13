@@ -53,6 +53,15 @@
 #              drop_caches + dd 读块设备（默认 /dev/block/sda，LCVIEW_BLOCK_DEV
 #              覆盖，只读到 /dev/null 无破坏面）→ 差分断言 ≥1 设备读方向
 #              （dir 0）计数之和严格增量（防假绿；无增量判红）。
+#   sd-inject — SD 自愈演练闭环校验（SD 自愈演练接口与故障面断言闭环）：
+#              自驱向 sysfs inject_stuck（root-only，写一次触发一次）注入一次
+#              合成 STUCK 事件（仅内存模拟，不依赖真卡异常）→ 四重断言——
+#              (1) stuck_count 计数递增（注入前读基线）；
+#              (2) lcview JSONL 新增 sd_stuck(id=16) 记录；
+#              (3) last_speed 反映降档（等于新增事件 new_speed，且 old>new）；
+#              (4) 内核留痕：logcat -b kernel（或 dmesg 计数增量）含 "sd stuck"。
+#              缺证据（属性不可读/注入失败/计数未增/无新事件/速度不符/无留痕）
+#              均判红。
 #
 # 退出码：0 校验通过 / 1 校验失败 / 2 设备不可达或参数错误
 # ============================================================
@@ -682,8 +691,8 @@ _SD_LOG_TAG = _STORM_LOG_TAG
 _SD_LVVIEW_LOG_DIR = "/data/vendor/lechao_lcview/logs"
 # sysfs 必须齐全的属性（缺任一即内核打点回归，判红）
 _SD_REQUIRED_ATTRS = ["enable", "window_bytes", "window_requests",
-                      "stuck_count", "ssr_speed_class", "ssr_uhs_grade",
-                      "ssr_valid"]
+                      "stuck_count", "last_speed", "ssr_speed_class",
+                      "ssr_uhs_grade", "ssr_valid"]
 # 仅允许 0/1 的布尔属性（其余属性校验非负十进制数字）
 _SD_BOOL_ATTRS = ("enable", "ssr_valid")
 # SD 产载读块设备变量（方向 2）：独立变量 LCIOD_SD_BLOCK_DEV（默认 SD 卡
@@ -863,6 +872,222 @@ def mode_sd(args):
         return 1
     print('OK: logcat 命中 "rule":"sd" JSON')
     print("OK: lciod sd 校验通过（sysfs + SD_HEALTH + sd JSON）")
+    return 0
+
+
+# ============================================================
+# SD 自愈演练闭环：合成 STUCK 注入 + 故障面断言（--mode sd-inject）
+# ============================================================
+
+# 演练入口属性（root-only，写一次触发一次；内存构造合成 STUCK，不触碰真卡）
+_SD_DRILL_ATTR = "inject_stuck"
+# 演练事件 JSONL 文件名关键字（16_sd_stuck_<YYYYMMDD>_pN.jsonl）
+_SD_STUCK_JSONL_KEY = "sd_stuck"
+# 内核留痕正文（lciod_sd.c pr_warn_ratelimited "kernel_lechao_usb: sd stuck:"）
+_SD_STUCK_KMSG = "sd stuck"
+
+
+def _sd_sysfs_read(attr):
+    """读单个 SD sysfs 属性 → (值 int 或 None, rc)。
+
+    rc==-1 adb 超时透传；rc!=0 不可读；rc==2 内容非十进制（值 None）。调用
+    方据 rc 区分"不可读"与"非法值"，不得静默当 0（防假绿）。
+    """
+    val, rc = adb(["shell", "cat", f"{_SD_SYSFS_DIR}/{attr}"])
+    if rc == -1:
+        return None, -1
+    if rc != 0:
+        return None, rc
+    try:
+        return int(val.strip(), 0), 0
+    except ValueError:
+        return None, 2
+
+
+def _read_sd_stuck_records():
+    """读取 lcview 日志目录全部 sd_stuck(id=16) 记录 → (记录列表, 超时, 错误列表)。
+
+    文件名为 16_sd_stuck_<YYYYMMDD>_pN.jsonl，按文件名排序取读；逐行
+    json.loads 容错（失败行跳过），收集 rec["id"]==16 的记录。JSONL 记录
+    无 name 字段，判据只能用 id（照 _check_sd_health 口径）。目录/文件不可读
+    返回错误（不得当"无事件"假绿）。
+    """
+    out, rc = adb(["shell", "ls", _SD_LVVIEW_LOG_DIR])
+    if rc == -1:
+        return [], True, []
+    if rc != 0:
+        return [], False, [f"lcview 日志目录 {_SD_LVVIEW_LOG_DIR} 不可读 rc={rc}"]
+    files = sorted(f.split("/")[-1] for f in out.split()
+                   if _SD_STUCK_JSONL_KEY in f and "*" not in f)
+    records = []
+    for fn in files:
+        body, brc = adb(["shell", "cat", f"{_SD_LVVIEW_LOG_DIR}/{fn}"])
+        if brc == -1:
+            return records, True, []
+        if brc != 0:
+            return records, False, [f"读取 sd_stuck 日志文件失败 rc={brc}: {fn}"]
+        for line in body.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and rec.get("id") == 16:
+                records.append(rec)
+    return records, False, []
+
+
+def _max_sd_stuck_seq(records):
+    """记录集内 sd_stuck 最大 seq（无记录返 -1）——增量判据用 seq 而非条数，
+    防日志轮转/文件读取顺序致条数比较误判。"""
+    return max((r.get("seq", -1) for r in records), default=-1)
+
+
+def _sd_stuck_kmsg_count():
+    """dmesg 中 "sd stuck" 出现次数；adb 超时返 -1，dmesg 不可读返 None。"""
+    out, rc = adb(["shell", "dmesg"])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        return None
+    return sum(1 for ln in out.splitlines() if _SD_STUCK_KMSG in ln)
+
+
+def _sd_stuck_logcat_trace(since):
+    """内核 "sd stuck" logcat 留痕检测 → (命中 bool, adb超时 bool)。
+
+    优先 logcat -b kernel -T <since>（本设备 ro.logd.kernel=true，内核 printk
+    入 kernel 缓冲）；仅判锚点后的行，避免旧留痕假绿；adb 超时透传。
+    """
+    out, rc = adb(["logcat", "-d", "-b", "kernel", "-T", str(int(since))])
+    if rc == -1:
+        return False, True
+    return (rc == 0 and _SD_STUCK_KMSG in out), False
+
+
+def mode_sd_inject(args):
+    """SD 自愈演练闭环校验（--mode sd-inject）。
+
+    自驱向 inject_stuck 注入一次合成 STUCK（仅内存模拟，不依赖真卡异常），
+    四重断言（防假绿判红项）：
+      1) stuck_count 递增（注入前读基线）；
+      2) lcview JSONL 新增 sd_stuck(id=16) 记录（seq 增量判据）；
+      3) last_speed 反映降档（== 新增事件 new_speed 且 old_speed > new_speed）；
+      4) 内核留痕 "sd stuck"（logcat -b kernel 锚点后命中，或 dmesg 计数增量）；
+    任一步 adb 超时（rc==-1）return -1 由 main 透传为失败。
+    """
+    # 1) 注入前基线：stuck_count + last_speed + 已有 sd_stuck 记录 + dmesg 计数
+    base_count, crc = _sd_sysfs_read("stuck_count")
+    if crc == -1:
+        return -1
+    if base_count is None:
+        print(f"ERROR: stuck_count 不可读 rc={crc}（lciod_sd 未加载？）")
+        return 1
+    base_speed, src = _sd_sysfs_read("last_speed")
+    if src == -1:
+        return -1
+    if base_speed is None:
+        print(f"ERROR: last_speed 不可读 rc={src}（演练属性缺失？）")
+        return 1
+    recs_before, timeout, rerrs = _read_sd_stuck_records()
+    if timeout:
+        return -1
+    if rerrs:
+        for e in rerrs:
+            print(f"FAIL: {e}")
+        print("ERROR: lciod sd-inject 校验失败（读取 sd_stuck 基线）")
+        return 1
+    base_seq = _max_sd_stuck_seq(recs_before)
+    base_kmsg = _sd_stuck_kmsg_count()
+    if base_kmsg == -1:
+        return -1
+
+    # 2) 注入前取设备时钟锚点（logcat -T 只判锚点后缓冲，防旧留痕假绿）
+    since = args.log_since
+    if since is None:
+        since = device_now()
+        if since is None:
+            print("ERROR: 无法读取设备时钟（logcat 抓取窗口无法锚定）")
+            return 1
+
+    # 3) 注入一次合成 STUCK（root-only 触发属性）
+    out, rc = adb(["shell", f"echo 1 > {_SD_SYSFS_DIR}/{_SD_DRILL_ATTR}"])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print(f"ERROR: 注入 {_SD_DRILL_ATTR} 失败 rc={rc}"
+              "（root-only 触发属性不可写？）")
+        return 1
+
+    # 4) 轮询等待：计数递增 + 事件经 daemon 消费落盘（最多 ~12s）
+    after_count = base_count
+    recs_after = recs_before
+    for _ in range(6):
+        time.sleep(2)
+        c, c2 = _sd_sysfs_read("stuck_count")
+        if c2 == -1:
+            return -1
+        if c is not None:
+            after_count = c
+        r, t, _ = _read_sd_stuck_records()
+        if t:
+            return -1
+        recs_after = r
+        if after_count > base_count and _max_sd_stuck_seq(r) > base_seq:
+            break
+
+    # 5) 断言：计数递增 + 新增事件降档 + last_speed 反映
+    errors = []
+    if after_count <= base_count:
+        errors.append(f"stuck_count 未递增（{base_count}→{after_count}），注入未生效")
+    new_recs = [r for r in recs_after if r.get("seq", -1) > base_seq]
+    if not new_recs:
+        errors.append(f"lcview JSONL 无新增 sd_stuck(id=16) 记录"
+                      f"（基线 seq={base_seq}）")
+    else:
+        evt = max(new_recs, key=lambda r: r.get("seq", -1))
+        fields = evt.get("f") or []
+        if (len(fields) < 2 or not isinstance(fields[0], int)
+                or not isinstance(fields[1], int)):
+            errors.append(f"sd_stuck 记录字段非法（f={fields!r}）")
+        else:
+            old_speed, new_speed = fields[0], fields[1]
+            if old_speed <= new_speed:
+                errors.append(f"sd_stuck 未反映降档（old={old_speed} "
+                              f"new={new_speed}）")
+            after_speed, s2 = _sd_sysfs_read("last_speed")
+            if s2 == -1:
+                return -1
+            if after_speed is None:
+                errors.append("last_speed 注入后不可读")
+            elif after_speed != new_speed:
+                errors.append(f"last_speed={after_speed} 与事件 new_speed="
+                              f"{new_speed} 不符（未反映降档）")
+
+    # 6) 内核留痕：logcat -b kernel 锚点后命中，或 dmesg 计数增量
+    trace, t = _sd_stuck_logcat_trace(since)
+    if t:
+        return -1
+    if not trace:
+        after_kmsg = _sd_stuck_kmsg_count()
+        if after_kmsg == -1:
+            return -1
+        if (after_kmsg is not None and base_kmsg is not None
+                and after_kmsg > base_kmsg):
+            trace = True
+    if not trace:
+        errors.append('无内核留痕（logcat -b kernel -T 与 dmesg 均无 "sd stuck"）')
+
+    if errors:
+        for e in errors:
+            print(f"FAIL: {e}")
+        print("ERROR: lciod sd-inject 校验失败")
+        return 1
+    print(f"OK: stuck_count {base_count}→{after_count}，新增 sd_stuck "
+          f"{len(new_recs)} 条，last_speed 反映降档，内核留痕")
+    print("OK: lciod sd-inject 校验通过（合成 STUCK 演练闭环）")
     return 0
 
 
@@ -1246,7 +1471,7 @@ def main():
     ap = argparse.ArgumentParser(description="lciod 板端数据校验器（host 侧）")
     ap.add_argument("--mode", required=True,
                     choices=["stats", "baseline", "delta", "perf", "uas",
-                             "link", "storm", "qos", "sd", "histo"])
+                             "link", "storm", "qos", "sd", "sd-inject", "histo"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
@@ -1307,6 +1532,14 @@ def main():
     if args.mode == "sd":
         # A 批二 方向 3/4：SD 用户态验收（sysfs + SD_HEALTH + sd JSON）
         rc = mode_sd(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "sd-inject":
+        # SD 自愈演练闭环：合成 STUCK 注入 + 故障面四重断言
+        rc = mode_sd_inject(args)
         if rc == -1:
             print("ERROR: adb 执行超时")
             return 1

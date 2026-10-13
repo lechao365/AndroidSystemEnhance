@@ -308,6 +308,22 @@ cases:
     acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lciod_check.sh --mode sd"'
     timeout_s: 300
 
+  # SD 自愈演练闭环（合成 STUCK 注入 + 故障面断言，本批新增验收 case）。语义：
+  # lciod_check.py --mode sd-inject 自驱向 sysfs inject_stuck（root-only，写一次
+  # 触发一次）注入一次**内存合成**的 STUCK 事件（仅内存模拟，不依赖真卡异常）
+  # → 四重断言：
+  #   1) stuck_count 计数递增（注入前读基线）；
+  #   2) lcview JSONL 新增 sd_stuck(id=16) 记录（文件名含 sd_stuck，判据 id）；
+  #   3) last_speed 反映降档（== 新增事件 new_speed 且 old_speed > new_speed）；
+  #   4) 内核留痕：logcat -b kernel 锚点后命中 "sd stuck"，或 dmesg 计数增量。
+  # 防假绿：sysfs 不可读 / 注入失败 / 计数未增 / 无新增事件 / 速度不符 / 无
+  # 内核留痕均判红。无持久副作用（合成事件 + 只读 sysfs/logcat/kernel 缓冲）；
+  # 演练卡为临时内存卡（kzalloc/kfree），不触碰真实 mmc 卡与硬件操作，不写
+  # 系统盘。注入属性 root-only，acceptance 前置 adb root。
+  lciod-sd-inject:
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lciod_check.sh --mode sd-inject"'
+    timeout_s: 120
+
   # C 批二 方向 3：lciod USB 传输延迟/块大小二维直方图用户态验收（本批新增
   # 验收 case）。语义：cases/lciod_check.sh --mode histo 内部执行
   #   lciod_probe --histo 取数（GET_LATENCY_HISTOGRAM cmd5）→ 结构断言

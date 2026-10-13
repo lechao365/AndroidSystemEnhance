@@ -994,6 +994,133 @@ class TestModeSdLoadDevice(unittest.TestCase):
 
 
 # ============================================================
+# SD 自愈演练闭环：--mode sd-inject 合成 STUCK 注入 + 故障面四重断言
+# （TestModeSdInject）覆盖：计数递增 / 新增 sd_stuck 事件 / last_speed 反映
+# 降档 / 内核留痕四判据的判绿与各破坏场景判红。CDP-DOD-001：每个判红逻辑
+# 配套破坏场景红灯用例。
+# ============================================================
+
+class _FakeAdbSdInject:
+    """伪 adb（sd-inject 模式）：模拟 sysfs 计数/速度、sd_stuck JSONL、
+    dmesg 内核留痕与 logcat -b kernel。注入前后按 self.injected 切换态。"""
+
+    def __init__(self, stuck_inc=True, speed_after=3, event_after=True,
+                 old=4, new=3, logcat_hit=True, kmsg_hit=True,
+                 inject_rc=0, sysfs_rc=0):
+        self.stuck_inc = stuck_inc
+        self.speed_after = speed_after
+        self.event_after = event_after
+        self.old = old
+        self.new = new
+        self.logcat_hit = logcat_hit
+        self.kmsg_hit = kmsg_hit
+        self.inject_rc = inject_rc
+        self.sysfs_rc = sysfs_rc
+        self.injected = False
+        self.calls = []
+        # 注入前已有 1 条 sd_stuck 记录（seq=100），注入后追加 seq=101
+        self._before = [{"ts": 1, "id": 16, "level": 2, "seq": 100,
+                         "mono": 1, "f": [4, 3, -5, 1]}]
+
+    def _recs(self):
+        recs = list(self._before)
+        if self.injected and self.event_after:
+            recs.append({"ts": 2, "id": 16, "level": 2, "seq": 101,
+                         "mono": 2, "f": [self.old, self.new, -5, 2]})
+        return recs
+
+    def __call__(self, args, timeout=60):
+        self.calls.append(args)
+        if args[0] == "logcat":
+            return ("X kernel_lechao_usb: sd stuck\n" if self.logcat_hit
+                    else "", 0)
+        if args[0] != "shell":
+            return ("", 0)
+        if len(args) >= 3 and args[1] == "cat":
+            path = args[2]
+            if path.endswith("/stuck_count"):
+                if self.sysfs_rc:
+                    return ("", self.sysfs_rc)
+                n = 1 + (1 if self.injected and self.stuck_inc else 0)
+                return (f"{n}\n", 0)
+            if path.endswith("/last_speed"):
+                if self.sysfs_rc:
+                    return ("", self.sysfs_rc)
+                return (f"{self.speed_after if self.injected else 4}\n", 0)
+            body = "\n".join(json.dumps(r) for r in self._recs())
+            return (body, 0)
+        if len(args) >= 2 and args[1] == "ls":
+            return ("/data/vendor/lechao_lcview/logs/"
+                    "16_sd_stuck_20261013_p0.jsonl\n", 0)
+        if len(args) >= 2 and str(args[1]).startswith("echo 1 >"):
+            if self.inject_rc:
+                return ("", self.inject_rc)
+            self.injected = True
+            return ("", 0)
+        if len(args) >= 2 and args[1] == "dmesg":
+            return ("kernel_lechao_usb: sd stuck\n"
+                    if (self.injected and self.kmsg_hit) else "", 0)
+        return ("", 0)
+
+
+def _sd_inject_args(**kw):
+    a = argparse.Namespace()
+    a.log_since = kw.get("log_since", 123)
+    return a
+
+
+class TestModeSdInject(unittest.TestCase):
+    def _run(self, fake, **kw):
+        with mock.patch.object(lc, "adb", fake), \
+                mock.patch.object(lc.time, "sleep"):
+            return lc.mode_sd_inject(_sd_inject_args(**kw))
+
+    def test_pass_all_four_assertions(self):
+        # 计数递增 + 新增降档事件 + last_speed==new_speed + 内核留痕 → 判绿
+        self.assertEqual(self._run(_FakeAdbSdInject()), 0)
+
+    def test_pass_via_dmesg_fallback(self):
+        # logcat -b kernel 未命中但 dmesg 留痕计数增量 → 判绿（降级兜底）
+        fake = _FakeAdbSdInject(logcat_hit=False, kmsg_hit=True)
+        self.assertEqual(self._run(fake), 0)
+
+    def test_count_not_incremented_red(self):
+        # 注入后 stuck_count 未增（注入未生效）→ 判红
+        self.assertEqual(self._run(_FakeAdbSdInject(stuck_inc=False)), 1)
+
+    def test_no_new_event_red(self):
+        # 无新增 sd_stuck(id=16) 记录（daemon 未落盘）→ 判红
+        self.assertEqual(self._run(_FakeAdbSdInject(event_after=False)), 1)
+
+    def test_last_speed_mismatch_red(self):
+        # last_speed 与事件 new_speed 不符（未反映降档）→ 判红
+        self.assertEqual(self._run(_FakeAdbSdInject(speed_after=2)), 1)
+
+    def test_no_downgrade_red(self):
+        # 事件 old_speed<=new_speed（未发生降档）→ 判红
+        self.assertEqual(self._run(_FakeAdbSdInject(old=3, new=3)), 1)
+
+    def test_inject_write_fail_red(self):
+        # inject_stuck 写失败（root-only 属性不可写）→ 判红（注入不可用不蒙混）
+        self.assertEqual(self._run(_FakeAdbSdInject(inject_rc=1)), 1)
+
+    def test_no_kernel_trace_red(self):
+        # logcat -b kernel 与 dmesg 均无 "sd stuck" → 判红（内核留痕缺失）
+        self.assertEqual(
+            self._run(_FakeAdbSdInject(logcat_hit=False, kmsg_hit=False)), 1)
+
+    def test_sysfs_unreadable_red(self):
+        # stuck_count 不可读（lciod_sd 未加载）→ 判红（不得当基线 0 假绿）
+        self.assertEqual(self._run(_FakeAdbSdInject(sysfs_rc=1)), 1)
+
+    def test_inject_writes_drill_attr(self):
+        # 回归锚点：注入须写 sysfs inject_stuck（root-only 触发属性）
+        fake = _FakeAdbSdInject()
+        self.assertEqual(self._run(fake), 0)
+        self.assertTrue(any("inject_stuck" in str(c) for c in fake.calls))
+
+
+# ============================================================
 # 进程级退出码透传回归（方向 1）：perf/storm/qos/sd/histo 模式内部用 return
 # 返回 0/1，入口若只写 main() 会丢弃返回值、进程 rc 恒 0（判红模式假绿）。
 # 本用例以子进程真实执行脚本 __main__ 入口（runpy run_name=__main__，不调
