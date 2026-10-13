@@ -93,14 +93,21 @@ bool ParseAutoFlag(const std::string& val, bool* out) {
     return false;
 }
 
-IoQosLevel DecideAutoLevel(uint64_t avg_lat_us, uint64_t tail_count,
-                           uint64_t threshold_us) {
-    /* 长尾计数 > 0，或阈值有效且平均延迟达标 → 收紧 */
+IoQosLevel DecideAutoLevel(IoQosLevel current, uint64_t avg_lat_us,
+                           uint64_t tail_count, uint64_t tighten_us,
+                           uint64_t relax_us) {
+    /* 已收紧：仅当无长尾且均值落到放松阈以下才放松（滞回保持，防边界翻转） */
+    if (current == IoQosLevel::kBg) {
+        if (tail_count == 0 && (relax_us == 0 || avg_lat_us < relax_us))
+            return IoQosLevel::kOff;
+        return IoQosLevel::kBg;
+    }
+    /* 未收紧：长尾计数 > 0，或收紧阈有效且平均延迟达标 → 收紧 */
     if (tail_count > 0)
         return IoQosLevel::kBg;
-    if (threshold_us > 0 && avg_lat_us >= threshold_us)
+    if (tighten_us > 0 && avg_lat_us >= tighten_us)
         return IoQosLevel::kBg;
-    return IoQosLevel::kOff;  /* 无长尾且均值低于阈值 → 放松 */
+    return IoQosLevel::kOff;  /* 无长尾且均值低于收紧阈 → 保持放松 */
 }
 
 std::string BuildIoMaxLine(const std::string& majmin, uint64_t bytes) {
@@ -508,14 +515,27 @@ void IoQosManager::ReadSdWindowLat(uint64_t* avg_lat_us,
 }
 
 void IoQosManager::PollAndApplyAuto() {
-    /* 阈值（毫秒）sysprop，缺省 kIoQosAutoLatThresholdMs；非法值回落缺省 */
+    /* 收紧阈（毫秒）sysprop，缺省 kIoQosAutoLatThresholdMs；非法值回落缺省 */
     char thr_buf[PROP_VALUE_MAX] = {0};
     __system_property_get("sys.lechao.lciod.ioqos_lat_ms", thr_buf);
     uint64_t threshold_ms = kIoQosAutoLatThresholdMs;
     uint64_t parsed = 0;
     if (thr_buf[0] != '\0' && ParseU64Str(std::string(thr_buf), &parsed))
         threshold_ms = parsed;
-    uint64_t threshold_us = threshold_ms * 1000ULL;
+    uint64_t tighten_us = threshold_ms * 1000ULL;
+
+    /* 放松阈（毫秒）sysprop，缺省取收紧阈半值（滞回）；非法值回落缺省 */
+    char relax_buf[PROP_VALUE_MAX] = {0};
+    __system_property_get(kIoQosRelaxLatProp, relax_buf);
+    uint64_t relax_us = 0;
+    uint64_t parsed_relax = 0;
+    if (relax_buf[0] != '\0' && ParseU64Str(std::string(relax_buf), &parsed_relax))
+        relax_us = parsed_relax * 1000ULL;
+    if (relax_us == 0)
+        relax_us = tighten_us / kIoQosAutoRelaxDivisor;
+    /* 滞回须满足 relax < tighten；否则退化为收紧阈半值，防阈值边界翻转抖动 */
+    if (tighten_us > 0 && relax_us >= tighten_us)
+        relax_us = tighten_us / kIoQosAutoRelaxDivisor;
 
     char dev_buf[PROP_VALUE_MAX] = {0};
     __system_property_get("sys.lechao.lciod.ioqos_dev", dev_buf);
@@ -528,7 +548,10 @@ void IoQosManager::PollAndApplyAuto() {
     if (!ResolveMajMin(std::string(dev_buf), &majmin))
         return;
 
-    IoQosLevel desired = DecideAutoLevel(avg_lat_us, tail_count, threshold_us);
+    /* 滞回状态：以当前自动档档位为决策输入（未生效时视为 kOff） */
+    IoQosLevel current = autoActive_ ? lastAutoLevel_ : IoQosLevel::kOff;
+    IoQosLevel desired = DecideAutoLevel(current, avg_lat_us, tail_count,
+                                         tighten_us, relax_us);
     /* 幂等：自动档已生效且档位未变化则不重复应用/留痕 */
     if (autoActive_ && desired == lastAutoLevel_)
         return;
@@ -539,15 +562,16 @@ void IoQosManager::PollAndApplyAuto() {
     autoActive_ = true;
 
     /* 留痕 logcat JSON（EVENT_ALOG 同款，snprintf 截断丢弃整行，CXX-002） */
-    char line[256];
+    char line[320];
     int n = snprintf(line, sizeof(line),
         "{\"rule\":\"qos_auto\",\"level\":\"%s\",\"avg_lat_us\":%llu,"
-        "\"tail_count\":%llu,\"threshold_us\":%llu,\"dev\":\"%s\","
-        "\"limit_bytes_per_s\":%llu,\"cgroup\":\"%s\"}",
+        "\"tail_count\":%llu,\"threshold_us\":%llu,\"relax_us\":%llu,"
+        "\"dev\":\"%s\",\"limit_bytes_per_s\":%llu,\"cgroup\":\"%s\"}",
         IoQosLevelToString(desired),
         static_cast<unsigned long long>(avg_lat_us),
         static_cast<unsigned long long>(tail_count),
-        static_cast<unsigned long long>(threshold_us), majmin.c_str(),
+        static_cast<unsigned long long>(tighten_us),
+        static_cast<unsigned long long>(relax_us), majmin.c_str(),
         static_cast<unsigned long long>(LevelToBytesPerSec(desired)),
         CgroupVersionToString(version_));
     if (n < 0 || n >= static_cast<int>(sizeof(line))) {
@@ -556,10 +580,13 @@ void IoQosManager::PollAndApplyAuto() {
     } else {
         EVENT_ALOG("%s", line);
     }
-    LC_ALOGI("qos_auto: adjust level=%s avg_lat_us=%llu tail=%llu dev=%s",
+    LC_ALOGI("qos_auto: adjust level=%s avg_lat_us=%llu tail=%llu "
+             "tighten_us=%llu relax_us=%llu dev=%s",
              IoQosLevelToString(desired),
              static_cast<unsigned long long>(avg_lat_us),
-             static_cast<unsigned long long>(tail_count), majmin.c_str());
+             static_cast<unsigned long long>(tail_count),
+             static_cast<unsigned long long>(tighten_us),
+             static_cast<unsigned long long>(relax_us), majmin.c_str());
 }
 
 void IoQosManager::PollAndApply() {

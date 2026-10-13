@@ -41,10 +41,15 @@ enum class IoQosLevel {
 constexpr uint64_t kIoQosFgBytesPerSec = 16ULL * 1024ULL * 1024ULL;  /* 16777216 */
 constexpr uint64_t kIoQosBgBytesPerSec = 8ULL * 1024ULL * 1024ULL;   /* 8388608 */
 
-/* 自动档（QoS 延迟感知自动分级）默认延迟阈值（毫秒）：SD 窗口平均延迟
- * 超阈收紧 bg 限速，窗口回落（无长尾且均值低于阈值）放松；sysprop
- * sys.lechao.lciod.ioqos_lat_ms 可覆盖。 */
+/* 自动档（QoS 延迟感知自动分级）默认收紧延迟阈值（毫秒）：SD 窗口平均延迟
+ * 超阈收紧 bg 限速；sysprop sys.lechao.lciod.ioqos_lat_ms 可覆盖。 */
 constexpr uint64_t kIoQosAutoLatThresholdMs = 50;
+/* 自动档滞回：放松阈默认取收紧阈的 1/kIoQosAutoRelaxDivisor（= 半值）；独立
+ * sysprop sys.lechao.lciod.ioqos_relax_lat_ms（毫秒）可覆盖。均值须回落至放松
+ * 阈以下且无长尾才放松，防阈值边界档位翻转抖动。 */
+constexpr uint64_t kIoQosAutoRelaxDivisor = 2;
+constexpr const char* kIoQosRelaxLatProp =
+    "sys.lechao.lciod.ioqos_relax_lat_ms";
 /* 自动档反馈源：内核 lciod_sd 只读导出的窗口延迟（平均微秒 / 长尾计数） */
 constexpr const char* kSdWindowLatAvgPath =
     "/sys/class/lciod_sd/lciod_sd/window_lat_avg_us";
@@ -60,15 +65,22 @@ bool ParseAutoFlag(const std::string& val, bool* out);
 
 /*
  * DecideAutoLevel — 自动档档位决策（纯函数，供单测）
+ * @current：当前自动档档位（滞回状态；自动档未生效时传 kOff）
  * @avg_lat_us：SD 窗口平均延迟（微秒）
  * @tail_count：SD 窗口长尾计数（历时 >= 长尾阈值的请求数）
- * @threshold_us：延迟阈值（微秒）
- * 语义（收紧/放松）：长尾计数 > 0 或（阈值有效且平均延迟 >= 阈值）→
- * kBg（收紧 bg 限速）；否则 kOff（放松）。threshold_us == 0 视为阈值无效，
- * 不因平均延迟触发（仅长尾触发，防阈值缺省 0 致恒收紧）。
+ * @tighten_us：收紧延迟阈值（微秒，ioqos_lat_ms）
+ * @relax_us：放松延迟阈值（微秒，ioqos_relax_lat_ms；0 表示无均值门）
+ * 语义（带滞回，防阈值边界档位翻转抖动）：
+ *   - current == kBg（已收紧）：仅当 tail_count == 0 且（relax_us == 0 或
+ *     avg_lat_us < relax_us）才放松 kOff，否则维持 kBg（滞回保持）；
+ *   - 否则（未收紧）：tail_count > 0 或（tighten_us > 0 且 avg_lat_us >=
+ *     tighten_us）→ kBg，否则 kOff。
+ * tighten_us == 0 视为阈值无效：不因平均延迟触发（仅长尾触发，防缺省 0
+ * 致恒收紧）。
  */
-IoQosLevel DecideAutoLevel(uint64_t avg_lat_us, uint64_t tail_count,
-                           uint64_t threshold_us);
+IoQosLevel DecideAutoLevel(IoQosLevel current, uint64_t avg_lat_us,
+                           uint64_t tail_count, uint64_t tighten_us,
+                           uint64_t relax_us);
 
 /*
  * ParseIoQosLevel — 解析 ioqos_level sysprop 档位值（纯函数，供单测）
@@ -190,9 +202,10 @@ private:
     void ReadSdWindowLat(uint64_t* avg_lat_us, uint64_t* tail_count);
 
     /*
-     * PollAndApplyAuto — 自动档单周期：读 ioqos_auto 开关与 ioqos_lat_ms
-     * 阈值 + SD 窗口延迟 → DecideAutoLevel → ApplyLevel；档位变化时打
-     * logcat JSON rule=qos_auto 留痕。自动档关闭时由调用方回落手动档。
+     * PollAndApplyAuto — 自动档单周期：读 ioqos_auto 开关、收紧阈
+     * ioqos_lat_ms 与放松阈 ioqos_relax_lat_ms（缺省收紧阈半值）+ SD 窗口
+     * 延迟 → DecideAutoLevel（带滞回）→ ApplyLevel；档位变化时打 logcat
+     * JSON rule=qos_auto 留痕。自动档关闭时由调用方回落手动档。
      */
     void PollAndApplyAuto();
 
