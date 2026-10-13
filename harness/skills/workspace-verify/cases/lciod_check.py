@@ -1121,7 +1121,11 @@ def _run_qos_dd(path, mb, group_procs, root_procs, timeout):
     复算速率。返回：float 速率 / -1（adb 超时透传）/ None（dd 失败或速率
     解析失败，判红防假绿）。
     """
-    dd_cmd = f"dd if=/dev/zero of={path} bs=1M count={mb} 2>&1"
+    # conv=fsync 强制同步写回：裸 dd 写文件靠 page cache（实测 >1GB/s），
+    # 写回由内核 kthread（root cgroup）提交，不计入 lechao_bg → blk-throttle
+    # 失效（组内不压制假红）。fsync 令 bio 在调用进程上下文提交，blkio 组
+    # 限速才生效（实测组内 8MiB/s / 组外 48MiB/s）。
+    dd_cmd = f"dd if=/dev/zero of={path} bs=1M count={mb} conv=fsync 2>&1"
     if group_procs:
         # 自迁入组须先成功（写 cgroup.procs 失败即整段判红，防假压制）；
         # dd 结束后自迁回根组，shell 退出后进程即离组
@@ -1130,7 +1134,11 @@ def _run_qos_dd(path, mb, group_procs, root_procs, timeout):
                      f"exit $rc")
     else:
         shell_cmd = dd_cmd
-    out, rc = adb(["shell", "sh", "-c", shell_cmd], timeout=timeout)
+    # 单参下发整段复合命令：adb 多参拼接（shell sh -c <cmd>）不保留引号，
+    # 设备外层 shell 会把 >/;/|| 重新解析（echo $$ > tasks 退化成写非法内容
+    # 致 MIGRATE_FAIL，rc=1）——同 748 行既有认知，须作为单个 shell 参数
+    # 原样下发由设备 shell 解析。
+    out, rc = adb(["shell", shell_cmd], timeout=timeout)
     if rc == -1:
         return -1  # adb 超时透传
     if rc != 0:

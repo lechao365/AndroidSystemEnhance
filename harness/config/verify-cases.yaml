@@ -239,8 +239,11 @@ cases:
     acceptance: 'hostcmd:"cases/lciod_check.sh --mode qos"'
     setup_snapshot:
       - 'adb shell "getprop sys.lechao.lciod.ioqos_level"'
+    # 空值须引号包裹下发：toybox setprop 对"无值"（adb 多参拼接后仅 1 参）
+    # 报 usage；快照初值为空（常态）时 ${SNAPSHOT_0} 展开为空，须显式 \"" 令
+    # 设备 shell 传空值参（实测 setprop NAME "" 清空 rc=0）。
     teardown:
-      - 'adb shell "setprop sys.lechao.lciod.ioqos_level ${SNAPSHOT_0}"'
+      - 'adb shell "setprop sys.lechao.lciod.ioqos_level \"${SNAPSHOT_0}\""'
     timeout_s: 300
 
   # R3 方向 6 / R5 批二：lcview 块设备观测用例（dd + 校验和一致性 +

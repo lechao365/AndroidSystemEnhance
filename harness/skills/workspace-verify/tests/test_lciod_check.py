@@ -666,10 +666,11 @@ class FakeAdbQos:
                 return ("", 0)
             if args[1] == "rm":
                 return ("", 0)
-            if args[1] == "sh":
-                shell_cmd = args[3]
-                return (self.in_dd if "lciod_qos_in_" in shell_cmd
-                        else self.out_dd, self.dd_rc)
+            # dd 测速：单参下发（["shell", <cmd>]），命令串直接是 args[1]
+            if "lciod_qos_in_" in args[1]:
+                return (self.in_dd, self.dd_rc)
+            if "lciod_qos_out_" in args[1]:
+                return (self.out_dd, self.dd_rc)
             return ("", 0)
         return ("", 0)
 
@@ -748,6 +749,22 @@ class TestModeQos(unittest.TestCase):
         # dd 执行失败（rc!=0）→ 判红（测速不可得不得当压制/不受限蒙混）
         fake = FakeAdbQos(dd_rc=1)
         self.assertEqual(self._run(fake), 1)
+
+    def test_qos_dd_command_single_arg_and_sync(self):
+        # 回归锚点（CDP-DOD-001）：qos dd 测速须「单参下发」且带 conv=fsync。
+        # 多参 ["shell","sh","-c",cmd] 经 adb 拼接会被设备外层 shell 重解析
+        # （echo $$ > tasks 退化写非法内容 → MIGRATE_FAIL）；裸 dd 靠 page
+        # cache 令写回由内核 kthread 提交、不计入 lechao_bg → blk-throttle 失效。
+        fake = FakeAdbQos()
+        self.assertEqual(self._run(fake), 0)
+        dd_calls = [c for c in fake.calls
+                    if len(c) == 2 and isinstance(c[1], str)
+                    and "dd if=/dev/zero" in c[1]]
+        self.assertTrue(dd_calls, "须有 dd 测速调用")
+        for c in dd_calls:
+            self.assertEqual(c[0], "shell")
+            self.assertNotIn("sh", c[:1])
+            self.assertIn("conv=fsync", c[1])
 
 
 # ============================================================
