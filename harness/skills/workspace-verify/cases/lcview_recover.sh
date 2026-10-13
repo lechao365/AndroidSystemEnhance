@@ -112,7 +112,9 @@ wait_heartbeat "heartbeat, loop=" "$(last_beat_ts "heartbeat, loop=")" \
 # 4. dd 读 4MB 产生新事件（transport-end event 5，R-13 判据修正：
 #    transport-start event 4 自 R-11 方向 3 停发、R-16 P4 方向 1 起从 schema
 #    删除，永不落盘；块设备失败即判红）
-if ! ADB shell "dd if=/dev/block/sda of=/dev/null bs=1M count=4 2>/dev/null" \
+#    读前 drop_caches 强制真实 USB SCSI——否则重复读命中块设备缓冲不产
+#    transport_end 新事件，delta --event 5 假红。
+if ! ADB shell "echo 3 > /proc/sys/vm/drop_caches; dd if=/dev/block/sda of=/dev/null bs=1M count=4 2>/dev/null" \
      >/dev/null; then
   echo "ERROR: dd 触发失败（块设备不可读？）"
   exit 1

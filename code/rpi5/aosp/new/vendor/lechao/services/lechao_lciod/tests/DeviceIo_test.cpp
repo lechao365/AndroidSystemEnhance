@@ -287,7 +287,9 @@ TEST(AbiContractTest, StructSizesFrozen) {
 TEST(AbiContractTest, AbiVersionAndBufSizeFrozen) {
     // v4: 追加链路事件 7/8/9（LINK_CONNECT/DISCONNECT/OVERCURRENT）+ 全局链路节点
     // link_stats 与 GET_LINK_STATS（R2 链路事件维测与供电归因）
-    EXPECT_EQ(VENDOR_LECHAO_USBD_ABI_VERSION, 4u);
+    // v5: 追加延迟/块大小二维直方图 struct vendor_lechao_usbd_latency_histogram
+    // 与 GET_LATENCY_HISTOGRAM（C 批一 直方图内核侧）
+    EXPECT_EQ(VENDOR_LECHAO_USBD_ABI_VERSION, 5u);
     EXPECT_EQ(VENDOR_LECHAO_USBD_EVENT_BUF_SIZE, 32);
 }
 

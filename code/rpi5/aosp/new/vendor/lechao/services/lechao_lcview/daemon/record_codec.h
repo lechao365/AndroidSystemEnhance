@@ -14,11 +14,77 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 #include <string>
+#include "../include/lcview_events.h"
 
 namespace vendor {
 namespace lechao {
 namespace lcview {
+
+// ============================================================
+// 显式小端访问助手（CXX-001）
+// 线材契约：lcview 线上格式（record 头 + TLV 字段）多字节字段一律小端
+// （见 lcview_events.h 字节序契约与大端编译守卫）。用户态读取端统一经
+// 此处显式转换，禁止裸 memcpy / 结构体强转假设主机序。ARM64 LE 上转换
+// 结果与旧实现字节完全一致（行为不变，仅消除隐式假设）。
+// ============================================================
+inline uint16_t readLe16(const uint8_t* p)
+{
+    return static_cast<uint16_t>(p[0]) |
+           static_cast<uint16_t>(static_cast<uint16_t>(p[1]) << 8);
+}
+
+inline uint32_t readLe32(const uint8_t* p)
+{
+    return static_cast<uint32_t>(p[0]) |
+           (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) |
+           (static_cast<uint32_t>(p[3]) << 24);
+}
+
+inline uint64_t readLe64(const uint8_t* p)
+{
+    return static_cast<uint64_t>(readLe32(p)) |
+           (static_cast<uint64_t>(readLe32(p + 4)) << 32);
+}
+
+// FLOAT 线材为 IEEE754 单精度小端：先小端取位模式，再按宿主 float 重解释
+// （memcpy 在此仅做位模式类型双关，不承担字节序转换）
+inline float readLeFloat(const uint8_t* p)
+{
+    uint32_t bits = readLe32(p);
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+// record 头多字节字段的显式小端读取（偏移见 lcview_events.h packed 定义）
+inline uint16_t recordMagic(const struct lcview_record_hdr* h)
+{
+    return readLe16(reinterpret_cast<const uint8_t*>(h) +
+                    offsetof(struct lcview_record_hdr, magic));
+}
+inline uint16_t recordEventId(const struct lcview_record_hdr* h)
+{
+    return readLe16(reinterpret_cast<const uint8_t*>(h) +
+                    offsetof(struct lcview_record_hdr, event_id));
+}
+inline uint64_t recordTimestampNs(const struct lcview_record_hdr* h)
+{
+    return readLe64(reinterpret_cast<const uint8_t*>(h) +
+                    offsetof(struct lcview_record_hdr, timestamp_ns));
+}
+inline uint32_t recordSeqNo(const struct lcview_record_hdr* h)
+{
+    return readLe32(reinterpret_cast<const uint8_t*>(h) +
+                    offsetof(struct lcview_record_hdr, seq_no));
+}
+inline uint64_t recordMonoNs(const struct lcview_record_hdr* h)
+{
+    return readLe64(reinterpret_cast<const uint8_t*>(h) +
+                    offsetof(struct lcview_record_hdr, mono_ns));
+}
 
 // 字段解码结果
 enum class FieldDecodeResult {

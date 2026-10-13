@@ -502,6 +502,35 @@ static long vendor_lechao_usbd_ioctl(struct file *file, unsigned int cmd,
         spin_unlock_irqrestore(&rate_dev->lock, flags);
         return 0;
     }
+    case VENDOR_LECHAO_USBD_IOC_GET_LATENCY_HISTOGRAM: {
+        struct vendor_lechao_usbd_latency_histogram hist;
+        unsigned int i;
+
+        /*
+         * C 批一：延迟/块大小二维直方图快照。档位上界从内核单一事实源
+         * lciod_histo_*_bounds 拷贝，保证与 counts 矩阵同源；矩阵在锁内
+         * 拷贝到栈，锁外 copy_to_user（避免持锁访问用户态）。
+         */
+        memset(&hist, 0, sizeof(hist));
+        hist.mono_ts_ns = ktime_get_ns();
+        hist.dirs = VENDOR_LECHAO_USBD_HISTO_DIRS;
+        hist.size_bins = VENDOR_LECHAO_USBD_HISTO_SIZE_BINS;
+        hist.latency_bins = VENDOR_LECHAO_USBD_HISTO_LAT_BINS;
+        for (i = 0; i < VENDOR_LECHAO_USBD_HISTO_SIZE_BINS; i++)
+            hist.size_bounds[i] = lciod_histo_size_bounds[i];
+        for (i = 0; i < VENDOR_LECHAO_USBD_HISTO_LAT_BINS; i++)
+            hist.latency_bounds[i] = lciod_histo_latency_bounds[i];
+
+        spin_lock_irqsave(&rate_dev->lock, flags);
+        memcpy(hist.counts, rate_dev->histo.counts, sizeof(hist.counts));
+        spin_unlock_irqrestore(&rate_dev->lock, flags);
+
+        if (copy_to_user(argp, &hist, sizeof(hist))) {
+            pr_err(PREFIX "ioctl cmd 0x%x: copy failed\n", cmd);
+            return -EFAULT;
+        }
+        return 0;
+    }
     default:
         pr_warn(PREFIX "unknown ioctl cmd=0x%x\n", cmd);
         return -ENOTTY;

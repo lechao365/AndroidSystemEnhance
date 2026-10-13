@@ -32,7 +32,7 @@ sync-code-to-doc**——不复制任何子 skill 的实现逻辑。
   verify_mode=board」一致
 - known-issues 门禁：promote 不强制 `--task`（门禁无条件执行，缺省由
   check-issues 推断唯一活跃任务，推断失败即拒）；目标任务下存在
-  origin=introduced 或 blocking 且 status!=fixed 的问题即拒
+  origin=introduced 或 blocking 且 status 非终态 (fixed/wontfix) 的问题即拒
 - package 硬门禁（批次 ff33f92060ac 方向 3）：dev 相对 origin/main 动过 code/
   且 candidate `package_result` 非 PASS 即阻断晋升——PASS 仅由 ws_package
   打包证据（script_rc=0）产生；`evidence_scope=no-code-change`（无代码改动）
@@ -117,6 +117,10 @@ bash harness/skills/publish-main-base/publish_main_base.sh --prepare [--task <id
 （--evidence-scope 缺省从最新 board 收据 cases 推导；人工传值须为其子集，防过度声称）
 ```
 （登记 candidate 随 dev 提交推送；输出 baseline_id）
+（登记门禁：dev 相对 origin/main 有 code/ 改动时 package_result 须为 PASS——
+  UNKNOWN 提前到 prepare 拦截，不再等 promote 才暴露。打包在会话内被 BLD-013
+  禁止，可用 systemd-run 豁免（见 build-reference.md BLD-013 段）或会话外终端
+  执行 ws_package.py 后重登记）
 
 ### 阶段 4：人工评审门
 | 路径 | 门 |
@@ -147,6 +151,11 @@ bash harness/skills/publish-main-base/publish_main_base.sh --promote \
 （squash 会把阶段 5 文档改动一并并入 main；--approved-by 必填，审批凭据
 外部化不再回落默认；登记/checkout/merge/squash/树断言/push main 失败自动
 rollback_promote，含清理中途落盘的证据快照）
+（--message-file 首行须为 <中文type>(<scope>): <subject>（词表：新增/修复/
+  重构/文档/构建/杂项），例如 `构建(baseline): 发布 BL-YYYYMMDD-NN——<内容摘要>`；
+  否则 squash 提交信息格式校验拒绝并自动回滚，promote 不产生污染）
+（promote 前置证据链校验：candidate sync_manifest 须为最新 board 收据——prepare
+  后又有新 board 收据入库而未重登记时拒绝并提示重跑 --prepare）
 
 ### 阶段 7：完成报告
 输出：baseline_id / main 新 sha / dev 重建状态 / 收据路径 / 文档同步摘要 / 是否含修复

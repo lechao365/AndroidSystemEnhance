@@ -11,6 +11,7 @@
 
 config LCVIEW
     bool "LcView logging trace subsystem"
+    depends on VENDOR_LECHAO
     help
       LcView is a structured event logging system for kernel modules.
       It provides a builder-style API for other kernel code to log

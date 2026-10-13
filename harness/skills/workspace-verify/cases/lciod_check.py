@@ -8,7 +8,7 @@
 #   在 host 完成；设备侧只做单二进制最小操作。
 #
 # 模式：
-#   stats    — 校验 probe 快照：≥1 设备、abi_version==4、字段齐全、
+#   stats    — 校验 probe 快照：≥1 设备、abi_version==5、字段齐全、
 #              数值非负、vendor/product 非空、protocol∈{0,1}（字段映射
 #              完整性回归点）
 #   uas      — UAS 专项（R1 维测）：要求 ≥1 设备 protocol==1（UAS 设备）
@@ -21,11 +21,12 @@
 #              ≥ 20MiB/s）；无破坏性写守卫依赖（临时文件走安全路径）
 #   link     — 全局链路节点（R2 方向 7）：/dev/vendor_lechao_usbd_link
 #              GET_LINK_STATS ioctl 快照校验——节点可打开、字段齐全、
-#              值合法、abi_version==4（连接/断开/枚举失败/过流计数）
+#              值合法、abi_version==5（连接/断开/枚举失败/过流计数）
 #   baseline — [--reset] 取快照存 --baseline（供 delta；
 #              --reset 传给设备工具归零计数，delta 断言简化为绝对值）
-#   delta    — 对比基线，--expect 字段必须严格增加（防假绿：
-#              缺基线/缺字段/未增均判红）
+#   delta    — 对比基线，聚合断言：≥1 设备在全部 --expect 字段严格增加
+#              即视为触发生效（dd 只作用于一个块设备，多设备其余零增量属
+#              预期）；无任一设备增量 / 缺基线 / 缺字段均判红（防假绿）
 #   perf     — 性能采集（R-02 方向 2，只报数不设门禁）：dd 读块设备
 #              --load-mb MB（默认 64）驱动真实 USB 传输 → probe 前后
 #              快照差分算 per-IO ns（Δread_ns/Δread_cmds）、吞吐
@@ -35,6 +36,23 @@
 #              sysprop，值变化时把 n 加进当前桶，幂等一次性）→ sleep 等
 #              daemon 10s tick + 规则三评估窗口 → logcat 断言 tag
 #              lechao_lciod_event 出现 "rule":"storm"（判红否则）
+#   sd       — SD 卡用户态验收（A 批二 方向 3/4）：自驱产载（drop_caches +
+#              dd 读 LCIOD_SD_BLOCK_DEV，默认 mmcblk0，只读到 /dev/null）+
+#              三重断言——
+#              (1) sysfs：/sys/class/lciod_sd/lciod_sd/ 下 enable/window_bytes/
+#                  window_requests/stuck_count/ssr_speed_class/ssr_uhs_grade/
+#                  ssr_valid 属性齐全且数值合法；
+#              (2) SD_HEALTH：lcview 日志目录下含 sd_health 的 JSONL 文件中
+#                  存在 "id":15 或 "name":"sd_health" 记录；
+#              (3) sd JSON：logcat tag lechao_lciod_event 出现 "rule":"sd"。
+#              缺证据（目录不可读/属性缺失/无事件/无匹配）均判红。
+#   histo    — USB 传输延迟/块大小二维直方图用户态验收（C 批二 方向 3）：
+#              lciod_probe --histo（GET_LATENCY_HISTOGRAM cmd5）取数 → 结构
+#              断言（dirs=2/size_bins=8/latency_bins=12、counts 长度 192、
+#              size/latency 档位上界严格递增且末档饱和、abi_version=5）→
+#              drop_caches + dd 读块设备（默认 /dev/block/sda，LCVIEW_BLOCK_DEV
+#              覆盖，只读到 /dev/null 无破坏面）→ 差分断言 ≥1 设备读方向
+#              （dir 0）计数之和严格增量（防假绿；无增量判红）。
 #
 # 退出码：0 校验通过 / 1 校验失败 / 2 设备不可达或参数错误
 # ============================================================
@@ -67,7 +85,7 @@ def _default_baseline(env_name="LCIOD_BASELINE_FILE"):
 
 BASELINE_DEFAULT = _default_baseline()
 
-# probe 输出必须齐全的字段（与 lciod_probe.c 输出、ioctl.h v4 ABI 对齐；
+# probe 输出必须齐全的字段（与 lciod_probe.c 输出、ioctl.h v5 ABI 对齐；
 # 缺任一字段即字段映射回归，stats 模式判红）
 REQUIRED_FIELDS = [
     "minor", "path", "vid", "pid", "protocol", "vendor", "product",
@@ -84,10 +102,25 @@ REQUIRED_FIELDS = [
 ]
 # 非数值字段（vendor/product 可含空格引号包裹；path 为字符串）
 _TEXT_FIELDS = {"path", "vendor", "product"}
-_EXPECTED_ABI = "4"
+_EXPECTED_ABI = "5"
 
 # key=value 解析：vendor="SanDisk Corp" 等引号包裹值支持空格
 _TOKEN_RE = re.compile(r'(\w+)=(?:"([^"]*)"|(\S+))')
+
+# ---- C 批二 方向 3：直方图模式（--mode histo）常量 ----
+# 维度与内核 lciod_histo.h / ABI v5 编译期固定一致
+_HISTO_DIRS = 2
+_HISTO_SIZE_BINS = 8
+_HISTO_LAT_BINS = 12
+# 累计矩阵单元数 = dirs * size_bins * lat_bins = 192
+_HISTO_COUNT_CELLS = _HISTO_DIRS * _HISTO_SIZE_BINS * _HISTO_LAT_BINS
+# 档位上界（内核编译期固定，末档饱和 2^64-1）：size 为字节，latency 为纳秒
+_HISTO_SIZE_BOUNDS = (512, 4096, 16384, 65536, 262144, 1048576, 8388608,
+                      2 ** 64 - 1)
+_HISTO_LAT_BOUNDS = (1000, 5000, 10000, 50000, 100000, 500000, 1000000,
+                     5000000, 10000000, 50000000, 100000000, 2 ** 64 - 1)
+# 读方向（dir 0）计数的矩阵切片长度：size_bins * lat_bins
+_HISTO_READ_CELLS = _HISTO_SIZE_BINS * _HISTO_LAT_BINS
 
 
 def adb(args, timeout=60):
@@ -164,7 +197,7 @@ def validate_devices(devices):
     """stats 模式校验 → 错误列表（空 = 通过）。
 
     判红项：零设备 / 字段缺失 / 数值字段非数字或负值 /
-    vendor·product 为空 / abi_version != 4（镜像副本与内核真相源漂移）。
+    vendor·product 为空 / abi_version != 5（镜像副本与内核真相源漂移）。
     """
     errors = []
     if not devices:
@@ -311,7 +344,7 @@ def validate_link_stats(fields):
 
     判红项：字段缺失 / 无符号计数非数字或负值 / last_err 非数字（s32
     errno 允许负值，只查数字）/ last_event_type 超出枚举范围 /
-    abi_version != 4（镜像副本与内核真相源漂移）。
+    abi_version != 5（镜像副本与内核真相源漂移）。
     """
     errors = []
     missing = [f for f in REQUIRED_LINK_FIELDS if f not in fields]
@@ -365,8 +398,13 @@ def load_baseline(path):
 def diff_devices(baseline, devices, expect_fields):
     """delta 对比 → (错误列表, 报告行列表)。
 
-    expect_fields 中任一字段未严格增加即判红；设备在基线中缺失、
-    expect 字段缺失同样判红（增量为 0 = 触发未生效，不得假绿）。
+    多设备聚合语义：dd 只作用于一个块设备，其对应的 usbd 通道才有增量；
+    其余设备（内核枚举顺序不定；UAS 占位通道 vid/pid 全 0）零增量属预期。
+    因此核心判据为「至少一个设备在全部 expect 字段上严格增量」——dd 未触发
+    任何设备增量才判红（防假绿）；单设备场景退化为该设备必须增量。
+    设备在基线中缺失、expect 字段缺失/非数字仍逐台判红（结构完整性，
+    与增量归属无关）。全设备均为虚拟 UAS 占位通道（protocol==1 且 vid/pid
+    全 0）且无增量时豁免（无真实 UAS 流量源，记 SKIP 提示）。
     baseline 结构与 load_baseline 返回一致：{minor_str: {field: value}}。
     """
     errors, report = [], []
@@ -382,10 +420,8 @@ def diff_devices(baseline, devices, expect_fields):
     if not devices:
         errors.append("当前 probe 输出为空，无法对比")
         return errors, report
-    # 虚拟 UAS 通道豁免（无真实 UAS 流量源）：vid=0x0000 pid=0x0000 的
-    # protocol==1 占位设备无物理 UAS 设备背书，dd 只触发 BOT（protocol==0）
-    # 设备，该通道无增量属预期（无 UAS 流量源），不判红——记入 report 提示。
-    # 真实 UAS 设备（vid/pid 非零）无增量仍判红（打点链路真故障不得假绿）。
+
+    # 虚拟 UAS 占位通道：protocol==1 且 vid/pid 全 0（无真实 UAS 设备背书）。
     def _is_virtual_uas(dev):
         try:
             return (dev.get("protocol") == "1"
@@ -394,25 +430,32 @@ def diff_devices(baseline, devices, expect_fields):
         except ValueError:
             return False
 
+    incremented_any = False       # 至少一个设备全部 expect 字段严格增量
+    all_virtual = True            # 所有设备是否均为虚拟 UAS 占位通道
     for dev in devices:
         minor = str(dev.get("minor", "?"))
         tag = f"minor={minor}"
-        virtual_uas = _is_virtual_uas(dev)
+        if not _is_virtual_uas(dev):
+            all_virtual = False
         if minor not in base:
             errors.append(f"{tag}: 设备不在基线中（基线后新出现？重跑 baseline）")
             continue
+        dev_incremented = True
         for f in expect_fields:
             if f not in dev:
                 errors.append(f"{tag}: 缺 expect 字段 {f}")
+                dev_incremented = False
                 continue
             try:
                 now = int(dev[f], 0)
             except ValueError:
                 errors.append(f"{tag}: {f} 非数字: {dev[f]}")
+                dev_incremented = False
                 continue
             before = base[minor].get(f)
             if before is None:
                 errors.append(f"{tag}: 基线缺字段 {f}")
+                dev_incremented = False
                 continue
             # 类型归一防御：基线值须为数字（load_baseline 已转 int，
             # 此处兜底 str 形态，非数字判红不崩）
@@ -420,15 +463,24 @@ def diff_devices(baseline, devices, expect_fields):
                 before = int(before, 0) if isinstance(before, str) else int(before)
             except (TypeError, ValueError):
                 errors.append(f"{tag}: 基线 {f} 非数字: {before}")
+                dev_incremented = False
                 continue
             delta = now - before
             report.append(f"{tag}: {f} {before} -> {now} (delta={delta})")
             if delta <= 0:
-                if virtual_uas:
-                    report.append(f"SKIP: {tag}: {f} 无增量（虚拟 UAS 通道 "
-                                  "vid/pid 全 0，无真实 UAS 流量源，豁免）")
-                else:
-                    errors.append(f"{tag}: {f} 未增加（delta={delta}），触发未生效")
+                dev_incremented = False
+        if dev_incremented:
+            incremented_any = True
+
+    if not incremented_any:
+        if all_virtual:
+            report.append("SKIP: 全部设备均为虚拟 UAS 占位通道（protocol==1 "
+                          "且 vid/pid 全 0，无真实 UAS 流量源），无增量豁免")
+        elif not errors:
+            # 无结构错误且无任一设备增量：dd 触发未生效，判红（防假绿）。
+            # 保留 "未增加" 子串以兼容既有红灯用例断言。
+            errors.append("所有设备在 expect 字段上均未增加（delta<=0），"
+                          "dd 触发未生效（无任一设备增量）")
     return errors, report
 
 
@@ -489,6 +541,10 @@ def mode_perf(args):
         print("ERROR: dd 前 probe 快照缺数值字段，拒绝采集")
         return 1
 
+    # 强刷读路径：丢弃 page cache 使 dd 真实下发 USB SCSI——否则重复读同一
+    # 区域命中块设备缓冲，lciod 内核计数不增，perf delta 恒 0 假红。
+    adb(["shell", "echo 3 > /proc/sys/vm/drop_caches"])
+
     # dd 读负载（host 侧单调钟计时；与 lcview perf 同语义，不含人工 sleep）
     t0 = time.monotonic()
     out, rc = adb(["shell",
@@ -513,8 +569,11 @@ def mode_perf(args):
         print("ERROR: dd 后 probe 快照缺数值字段，拒绝采集")
         return 1
 
-    # 差分计算（多设备逐台；无增量判红——dd 未触发传输即 perf 无意义）
+    # 差分计算（多设备聚合语义：dd 只作用于一个块设备，其对应 usbd 通道
+    # 才有增量；其余设备零增量属预期，跳过不入基线。无任一设备增量判红
+    # ——dd 未触发传输即 perf 无意义，拒绝假基线。单设备场景退化为必须增量。）
     metrics_list, lines = [], []
+    incremented_any = False
     for dev_i in after:
         minor = str(dev_i.get("minor", "?"))
         tag = f"minor={minor}"
@@ -526,13 +585,14 @@ def mode_perf(args):
         rd = d["read_bytes"] - b["read_bytes"]
         rc_delta = d["read_cmds"] - b["read_cmds"]
         rns = d["read_ns"] - b["read_ns"]
+        if rd <= 0 or rc_delta <= 0:
+            print(f"{tag}: dd 后 read_bytes/read_cmds 无增量（非本次 dd 目标"
+                  f"通道，跳过）")
+            continue
+        incremented_any = True
         per_io_ns = (rns / rc_delta) if rc_delta > 0 else 0.0
         mbps = (rd / 1e6) / dd_s if dd_s > 0 else 0.0
         lat_ns = d["last_transport_latency_ns"]
-        if rd <= 0 or rc_delta <= 0:
-            print(f"ERROR: {tag} dd 后 read_bytes/read_cmds 无增量（触发未生效，"
-                  f"块设备未就绪？），拒绝出 perf 基线")
-            return 1
         metrics_list.append({
             "minor": minor,
             "per_io_ns": round(per_io_ns, 1),
@@ -544,6 +604,11 @@ def mode_perf(args):
         lines.append(
             f"{tag}: per-IO={per_io_ns:.1f} ns，吞吐={mbps:.3f} MB/s，"
             f"最近传输延迟={lat_ns} ns（Δ{rd}B/{rc_delta}cmds）")
+
+    if not incremented_any:
+        print("ERROR: 无任一设备 dd 后 read_bytes/read_cmds 增量（触发未生效，"
+              "块设备未就绪？），拒绝出 perf 基线")
+        return 1
 
     metrics = {
         "load_mb": load_mb,
@@ -602,6 +667,371 @@ def mode_storm(args):
         print('ERROR: logcat 无 "rule":"storm" 行（规则三未触发，注入未生效？）')
         return 1
     print('OK: 风暴规则触发确认（logcat 命中 "rule":"storm"）')
+    return 0
+
+
+# ============================================================
+# A 批二 方向 3/4：SD 用户态验收（--mode sd）
+# ============================================================
+
+# 内核 lciod_sd 暴露的 sysfs 目录（/sys/class/lciod_sd/lciod_sd/）
+_SD_SYSFS_DIR = "/sys/class/lciod_sd/lciod_sd"
+# daemon SD 健康 ALOG tag（每 10s 打 JSON 行；复用 storm 的 tag 常量）
+_SD_LOG_TAG = _STORM_LOG_TAG
+# lcview daemon 落盘 JSONL 目录（sd_health 事件 id=15，文件名含 sd_health）
+_SD_LVVIEW_LOG_DIR = "/data/vendor/lechao_lcview/logs"
+# sysfs 必须齐全的属性（缺任一即内核打点回归，判红）
+_SD_REQUIRED_ATTRS = ["enable", "window_bytes", "window_requests",
+                      "stuck_count", "ssr_speed_class", "ssr_uhs_grade",
+                      "ssr_valid"]
+# 仅允许 0/1 的布尔属性（其余属性校验非负十进制数字）
+_SD_BOOL_ATTRS = ("enable", "ssr_valid")
+# SD 产载读块设备变量（方向 2）：独立变量 LCIOD_SD_BLOCK_DEV（默认 SD 卡
+# mmcblk0），不复用 LCVIEW_BLOCK_DEV——后者在验证环境全局导出时指向 USB 块
+# 设备（sda），会让 SD 产载错读 USB 通道致产载错配。只读到 /dev/null 无破坏面。
+_SD_BLOCK_DEV_ENV = "LCIOD_SD_BLOCK_DEV"
+_SD_BLOCK_DEV_DEFAULT = "/dev/block/mmcblk0"
+
+
+def _sd_block_dev():
+    """SD 产载目标块设备：LCIOD_SD_BLOCK_DEV 覆盖，缺省 SD 卡 mmcblk0。"""
+    return os.environ.get(_SD_BLOCK_DEV_ENV) or _SD_BLOCK_DEV_DEFAULT
+
+
+def _check_sd_sysfs():
+    """sysfs 断言（A 批二 方向 3）→ (错误列表, adb 超时 bool)。
+
+    ls sysfs 目录须 rc==0 且输出含全部 _SD_REQUIRED_ATTRS；逐个 cat：rc==0
+    且 strip 后为数字（int(x, 0) 非负），enable/ssr_valid 额外限 ∈{0,1}。
+    任一缺失/不可读/非数字判红。adb 超时 rc==-1 置 timeout=True 由调用方
+    透传（不得当"无属性"假绿）。
+    """
+    errors = []
+    out, rc = adb(["shell", "ls", _SD_SYSFS_DIR])
+    if rc == -1:
+        return errors, True
+    if rc != 0:
+        return [f"sysfs 目录 {_SD_SYSFS_DIR} 不可读 rc={rc}"
+                "（lciod_sd 内核模块未加载？）"], False
+    names = set(out.split())
+    for attr in _SD_REQUIRED_ATTRS:
+        if attr not in names:
+            errors.append(f"sysfs 缺属性 {attr}（{_SD_SYSFS_DIR}）")
+            continue
+        val, vrc = adb(["shell", "cat", f"{_SD_SYSFS_DIR}/{attr}"])
+        if vrc == -1:
+            return errors, True
+        if vrc != 0:
+            errors.append(f"sysfs 属性 {attr} 不可读 rc={vrc}")
+            continue
+        s = val.strip()
+        try:
+            n = int(s, 0)
+        except ValueError:
+            errors.append(f"sysfs 属性 {attr} 非数字: {s!r}")
+            continue
+        if n < 0:
+            errors.append(f"sysfs 属性 {attr} 为负值: {s}")
+        elif attr in _SD_BOOL_ATTRS and n not in (0, 1):
+            errors.append(f"sysfs 属性 {attr}={s} 非 0/1")
+    return errors, False
+
+
+def _check_sd_health():
+    """SD_HEALTH 事件断言（A 批二 方向 4）→ (错误列表, adb 超时 bool)。
+
+    列出 lcview 日志目录中含 sd_health 的文件并读取内容，逐行 json.loads
+    容错解析（失败行跳过计数），断言存在 "id":15 或 "name":"sd_health" 的
+    JSONL 记录。目录不可读/无 sd_health 文件/无匹配记录均判红（防假绿）。
+    设备端 glob 未展开时回退整目录 ls 过滤（逐文件 cat）。
+    """
+    # 直接 ls 目录取 basename 后拼全路径 cat：设备端 `sh -c <glob>` 经
+    # adb 多参拼接会被拆成 `sh -c ls <path>`（-c 只吃第一个 token，glob
+    # 与 2>/dev/null 沦为位置参数），导致 glob 不展开、回退又 cat 相对
+    # basename 而失败（A 批二首跑 sd_health 读取 rc=1 即此因）。
+    out, rc = adb(["shell", "ls", _SD_LVVIEW_LOG_DIR])
+    if rc == -1:
+        return [], True
+    if rc != 0:
+        return [f"lcview 日志目录 {_SD_LVVIEW_LOG_DIR} 不可读 rc={rc}"], False
+    files = [f.split("/")[-1] for f in out.split()
+             if "sd_health" in f and "*" not in f]
+    if not files:
+        return [f"lcview 日志目录无含 sd_health 的日志文件"
+                f"（SD_HEALTH 事件未落盘？dir={_SD_LVVIEW_LOG_DIR}）"], False
+
+    matched = 0
+    total = 0
+    parsed_bad = 0
+    for fn in files:
+        body, brc = adb(["shell", "cat", f"{_SD_LVVIEW_LOG_DIR}/{fn}"])
+        if brc == -1:
+            return [], True
+        if brc != 0:
+            return [f"读取 sd_health 日志文件失败 rc={brc}: {fn}"], False
+        for line in body.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            total += 1
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                parsed_bad += 1
+                continue
+            if not isinstance(rec, dict):
+                parsed_bad += 1
+                continue
+            if rec.get("id") == 15 or rec.get("name") == "sd_health":
+                matched += 1
+    if matched == 0:
+        return [f"sd_health 日志无 id=15/name=sd_health 记录"
+                f"（{len(files)} 文件 {total} 行，解析失败 {parsed_bad} 行）"], False
+    return [], False
+
+
+def mode_sd(args):
+    """SD 用户态验收（A 批二 方向 3/4）：sysfs + SD_HEALTH + sd JSON 三重断言。
+
+    自驱 SD 产载（方向 2）：drop_caches + dd 读 LCIOD_SD_BLOCK_DEV（默认
+    /dev/block/mmcblk0）→ /dev/null，令 window_bytes/sd_health/SD 事件有数据
+    ——产载设备经独立变量解析，不复用 LCVIEW_BLOCK_DEV（环境全局导出时指向
+    USB 设备会错配）；dd 只读到 /dev/null 无破坏面，失败仅告警不判红（无 SD
+    卡时仍以只读 sysfs/logcat 断言为准）。
+    判红项（防假绿）：sysfs 目录/属性缺失或不可读或非数字 / 无 sd_health
+    日志文件 / 无 id=15 记录 / 设备时钟不可读 / logcat 无 "rule":"sd" 行。
+    任一步 adb 超时（rc==-1）return -1 由 main 透传为失败。
+    """
+    blockdev = _sd_block_dev()
+    adb(["shell", "echo 3 > /proc/sys/vm/drop_caches"])
+    _, lrc = adb(["shell",
+                  f"dd if={blockdev} of=/dev/null bs=1M count=4 2>/dev/null"],
+                 timeout=args.dd_timeout)
+    if lrc == -1:
+        return -1  # adb 超时透传
+    if lrc != 0:
+        print(f"warn: SD 产载 dd 读 {blockdev} 失败 rc={lrc}"
+              "（无 SD 卡？继续只读断言）")
+    time.sleep(2)  # 等 SD 流量与 daemon 10s 上报窗口（对齐原 case hostcmd sleep 2）
+
+    errors, timeout = _check_sd_sysfs()
+    if timeout:
+        return -1
+    if errors:
+        for e in errors:
+            print(f"FAIL: {e}")
+        print("ERROR: lciod sd 校验失败（sysfs）")
+        return 1
+    print("OK: sysfs 属性齐全且数值合法")
+
+    errors, timeout = _check_sd_health()
+    if timeout:
+        return -1
+    if errors:
+        for e in errors:
+            print(f"FAIL: {e}")
+        print("ERROR: lciod sd 校验失败（SD_HEALTH）")
+        return 1
+    print("OK: SD_HEALTH 事件存在（lcview sd_health 落盘）")
+
+    since = args.log_since
+    if since is None:
+        now = device_now()
+        if now is None:
+            print("ERROR: 无法读取设备时钟（logcat 抓取窗口无法锚定）")
+            return 1
+        since = now
+    # daemon 每 10s 一轮 sd JSON：以锚点起轮询最多 ~18s（3x6s），避免锚点
+    # 落在上一轮之后、下一轮之前时误判"未上报"（防假红）。判红仍以窗口内
+    # 命中 "rule":"sd" 为唯一依据（防假绿）。
+    found = False
+    out = ""
+    for _ in range(4):
+        out, rc = adb(["logcat", "-d", "-t", str(int(since)), "-s", _SD_LOG_TAG])
+        if rc == -1:
+            return -1
+        if rc != 0:
+            print(f"ERROR: logcat 抓取失败 rc={rc}（tag {_SD_LOG_TAG}）")
+            return 1
+        if '"rule":"sd"' in out:
+            found = True
+            break
+        time.sleep(6)
+    if not found:
+        print('FAIL: logcat 无 "rule":"sd" 行（daemon sd 规则未上报？）')
+        print("ERROR: lciod sd 校验失败（sd JSON）")
+        return 1
+    print('OK: logcat 命中 "rule":"sd" JSON')
+    print("OK: lciod sd 校验通过（sysfs + SD_HEALTH + sd JSON）")
+    return 0
+
+
+# ============================================================
+# C 批二 方向 3：USB 传输延迟/块大小二维直方图用户态验收（--mode histo）
+# ============================================================
+
+
+def run_histo_probe():
+    """设备侧执行 lciod_probe --histo（GET_LATENCY_HISTOGRAM ioctl 取数），
+    返回 stdout。失败/超时按语义退出——节点打不开或 ioctl 失败不得当
+    "无输出"假绿（对齐 run_link_probe/run_probe 的 adb 超时透传与退出码语义）。
+    """
+    out, rc = adb(["shell", "lciod_probe", "--histo"])
+    if rc == -1:
+        print("ERROR: adb 执行 lciod_probe --histo 超时")
+        sys.exit(2)
+    if rc != 0:
+        print(f"ERROR: lciod_probe --histo 退出码 {rc}（open/ioctl 失败）")
+        sys.exit(1)
+    return out
+
+
+def parse_histo_output(text):
+    """解析 lciod_probe --histo 输出（每设备一行 key=value）→
+    {minor_str: {"minor","dirs","size_bins","latency_bins","mono_ts_ns",
+    "size_bounds","latency_bounds","counts","abi_version"}}。
+
+    仅识别同时含 minor 与 counts 的行（跳过空行/非直方图噪声）。某行含
+    minor 但缺必需字段或数组元素非十进制时抛 ValueError——残缺数据不得
+    静默当有效快照（防假绿），由调用方转 exit 1。
+    """
+    out = {}
+    for ln, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        fields = {}
+        for m in _TOKEN_RE.finditer(line):
+            fields[m.group(1)] = (m.group(2) if m.group(2) is not None
+                                  else m.group(3))
+        if "minor" not in fields or "counts" not in fields:
+            continue
+        minor = fields["minor"]
+        try:
+            int(minor, 0)
+        except ValueError:
+            raise ValueError(f"histo 行 {ln} minor 非整数: {minor!r}")
+        rec = {"minor": minor}
+        for f in ("dirs", "size_bins", "latency_bins", "mono_ts_ns",
+                  "abi_version"):
+            if f not in fields:
+                raise ValueError(f"histo 行 {ln}(minor={minor}) 缺字段 {f}")
+            try:
+                rec[f] = int(fields[f], 0)
+            except ValueError:
+                raise ValueError(
+                    f"histo 行 {ln}(minor={minor}) {f} 非整数: {fields[f]!r}")
+        for f in ("size_bounds", "latency_bounds", "counts"):
+            if f not in fields:
+                raise ValueError(
+                    f"histo 行 {ln}(minor={minor}) 缺数组字段 {f}")
+            try:
+                rec[f] = [int(x, 0) for x in fields[f].split(",") if x != ""]
+            except ValueError:
+                raise ValueError(f"histo 行 {ln}(minor={minor}) {f} 含非整数"
+                                 f"元素: {fields[f][:80]!r}")
+        out[str(minor)] = rec
+    return out
+
+
+def validate_histo(dev):
+    """直方图结构断言 → 错误列表（空 = 通过）。
+
+    判红项：维度字段不符（dirs/size_bins/latency_bins）/ abi_version 漂移 /
+    counts 单元数 != 192 / size_bounds·latency_bounds 长度或取值与内核
+    编译期档位不符 / 档位上界非严格递增或末档非饱和（2^64-1）/ counts 含负值。
+    """
+    errors = []
+    tag = f"minor={dev.get('minor', '?')}"
+    if dev.get("dirs") != _HISTO_DIRS:
+        errors.append(f"{tag}: dirs={dev.get('dirs')} != {_HISTO_DIRS}")
+    if dev.get("size_bins") != _HISTO_SIZE_BINS:
+        errors.append(f"{tag}: size_bins={dev.get('size_bins')} "
+                      f"!= {_HISTO_SIZE_BINS}")
+    if dev.get("latency_bins") != _HISTO_LAT_BINS:
+        errors.append(f"{tag}: latency_bins={dev.get('latency_bins')} "
+                      f"!= {_HISTO_LAT_BINS}")
+    if dev.get("abi_version") != int(_EXPECTED_ABI):
+        errors.append(f"{tag}: abi_version={dev.get('abi_version')} "
+                      f"!= {_EXPECTED_ABI}")
+    counts = dev.get("counts")
+    if not isinstance(counts, list) or len(counts) != _HISTO_COUNT_CELLS:
+        errors.append(f"{tag}: counts 长度="
+                      f"{len(counts) if isinstance(counts, list) else counts}"
+                      f" != {_HISTO_COUNT_CELLS}")
+    elif any(c < 0 for c in counts):
+        errors.append(f"{tag}: counts 含负值")
+    sb = dev.get("size_bounds")
+    if not isinstance(sb, list) or tuple(sb) != _HISTO_SIZE_BOUNDS:
+        errors.append(f"{tag}: size_bounds 与内核档位不符: {sb}")
+    lb = dev.get("latency_bounds")
+    if not isinstance(lb, list) or tuple(lb) != _HISTO_LAT_BOUNDS:
+        errors.append(f"{tag}: latency_bounds 与内核档位不符: {lb}")
+    for name, bounds in (("size_bounds", sb), ("latency_bounds", lb)):
+        if not isinstance(bounds, list) or len(bounds) < 2:
+            continue
+        if any(bounds[i] <= bounds[i - 1] for i in range(1, len(bounds))):
+            errors.append(f"{tag}: {name} 非严格递增: {bounds}")
+        elif bounds[-1] != 2 ** 64 - 1:
+            errors.append(f"{tag}: {name} 末档非饱和: {bounds[-1]}")
+    return errors
+
+
+def mode_histo(args):
+    """USB 传输延迟/块大小二维直方图用户态验收（C 批二 方向 3）。
+
+    语义：lciod_probe --histo 取数（GET_LATENCY_HISTOGRAM cmd5）→ 结构断言
+    （dirs=2/size_bins=8/latency_bins=12、counts 长度 192、size/latency 档位
+    上界严格递增且末档饱和、abi_version=5）→ drop_caches + dd 读块设备
+    4MB（LCVIEW_BLOCK_DEV 覆盖，默认 /dev/block/sda USB 通道，只读到
+    /dev/null 无破坏面）→ 差分断言 ≥1 设备读方向（dir 0）计数之和严格增量。
+    无任一读方向增量即判红（防假绿）。返回 0 通过 / 1 判红 / -1 adb 超时。
+    """
+    snap0 = parse_histo_output(run_histo_probe())
+    if not snap0:
+        print("ERROR: 无设备直方图快照（probe 输出为空，内核驱动/HAL 未就绪？）")
+        return 1
+    all_errors = []
+    for rec in snap0.values():
+        all_errors += validate_histo(rec)
+    if all_errors:
+        for e in all_errors:
+            print(f"FAIL: {e}")
+        print("ERROR: lciod histo 校验失败（结构断言）")
+        return 1
+    print(f"OK: 直方图结构断言通过（{len(snap0)} 设备）")
+
+    blockdev = os.environ.get("LCVIEW_BLOCK_DEV", "/dev/block/sda")
+    # 强刷读路径：丢弃 page cache 使 dd 真实下发 USB SCSI（对齐 mode_perf）
+    adb(["shell", "echo 3 > /proc/sys/vm/drop_caches"])
+    out, rc = adb(["shell",
+                   f"dd if={blockdev} of=/dev/null bs=1M count=4 2>/dev/null"])
+    if rc == -1:
+        return -1  # adb 超时透传
+    if rc != 0:
+        print(f"ERROR: dd 读 {blockdev} 失败 rc={rc}（块设备不可读？）")
+        return 1
+
+    snap1 = parse_histo_output(run_histo_probe())
+    incremented_any = False
+    for minor, rec0 in snap0.items():
+        if minor not in snap1:
+            continue
+        c0 = sum(rec0["counts"][:_HISTO_READ_CELLS])
+        c1 = sum(snap1[minor]["counts"][:_HISTO_READ_CELLS])
+        delta = c1 - c0
+        if delta > 0:
+            incremented_any = True
+            print(f"OK: minor={minor} 读方向直方图计数增量 {delta}"
+                  f"（{c0} -> {c1}）")
+        else:
+            print(f"minor={minor}: 读方向计数无增量（delta={delta}，"
+                  "非 dd 目标通道）")
+    if not incremented_any:
+        print("FAIL: 无任一设备读方向直方图计数增量（dd 触发未生效？）")
+        print("ERROR: lciod histo 校验失败（差分断言，防假绿）")
+        return 1
+    print("OK: lciod histo 校验通过（结构断言 + 读方向增量）")
     return 0
 
 
@@ -691,7 +1121,11 @@ def _run_qos_dd(path, mb, group_procs, root_procs, timeout):
     复算速率。返回：float 速率 / -1（adb 超时透传）/ None（dd 失败或速率
     解析失败，判红防假绿）。
     """
-    dd_cmd = f"dd if=/dev/zero of={path} bs=1M count={mb} 2>&1"
+    # conv=fsync 强制同步写回：裸 dd 写文件靠 page cache（实测 >1GB/s），
+    # 写回由内核 kthread（root cgroup）提交，不计入 lechao_bg → blk-throttle
+    # 失效（组内不压制假红）。fsync 令 bio 在调用进程上下文提交，blkio 组
+    # 限速才生效（实测组内 8MiB/s / 组外 48MiB/s）。
+    dd_cmd = f"dd if=/dev/zero of={path} bs=1M count={mb} conv=fsync 2>&1"
     if group_procs:
         # 自迁入组须先成功（写 cgroup.procs 失败即整段判红，防假压制）；
         # dd 结束后自迁回根组，shell 退出后进程即离组
@@ -700,7 +1134,11 @@ def _run_qos_dd(path, mb, group_procs, root_procs, timeout):
                      f"exit $rc")
     else:
         shell_cmd = dd_cmd
-    out, rc = adb(["shell", "sh", "-c", shell_cmd], timeout=timeout)
+    # 单参下发整段复合命令：adb 多参拼接（shell sh -c <cmd>）不保留引号，
+    # 设备外层 shell 会把 >/;/|| 重新解析（echo $$ > tasks 退化成写非法内容
+    # 致 MIGRATE_FAIL，rc=1）——同 748 行既有认知，须作为单个 shell 参数
+    # 原样下发由设备 shell 解析。
+    out, rc = adb(["shell", shell_cmd], timeout=timeout)
     if rc == -1:
         return -1  # adb 超时透传
     if rc != 0:
@@ -718,8 +1156,9 @@ def mode_qos(args):
     """SD 卡写 QoS 限速校验（R4 方向 4/6，依赖 daemon IoQosManager 建组）。
 
     前置（adb root 由 main ensure_connected 承担）：lechao_bg 组存在且
-    限速文件非空；setprop ioqos_level=bg → sleep 2（等 daemon 1s 周期应用）
-    → cat 限速文件断言含 8388608（v2 io.max / v1 blkio 限速值）。
+    限速文件可读（off 档内核移除限速条目致读回为空，属合法态不判红）；
+    setprop ioqos_level=bg → sleep 2（等 daemon 1s 周期应用）→ cat 限速
+    文件断言含 8388608（v2 io.max / v1 blkio 限速值）。
     组内压制：设备 shell 自迁 pid（$$）入组，dd 写 /data/local/tmp 临时
     文件 --qos-dd-mb MB → 复算速率断言 ≤ --qos-in-max-mib（默认 12，
     bg 8MiB/s 留 1.5x 容差）。
@@ -741,11 +1180,16 @@ def mode_qos(args):
               "（daemon IoQosManager 未建组？）")
         return 1
     out, rc = adb(["shell", "cat", paths["limit_file"]])
-    if rc != 0 or not out.strip():
-        print(f"ERROR: 限速文件 {paths['limit_file']} 为空或不可读"
+    if rc != 0:
+        print(f"ERROR: 限速文件 {paths['limit_file']} 不可读"
               "（cgroup 未配置限速？）")
         return 1
-    print(f"cgroup 版本 {paths['version']}，限速文件当前值: {out.strip()}")
+    # off 档（ioqos_level 空/off）时内核会移除限速条目，限速文件读回为空属
+    # 合法态（真机 v1 /dev/blkio 实测：写 0 即移除条目，读回空字符串）。
+    # 不得因起点为空判红（假红）——bg 生效断言在下文 setprop 之后，组存在性
+    # 已由上方 group_dir 检查覆盖。
+    print(f"cgroup 版本 {paths['version']}，限速文件当前值: {out.strip()!r}"
+          "（off 档可为空）")
 
     out, rc = adb(["shell", "setprop", _QOS_LEVEL_PROP, "bg"])
     if rc == -1:
@@ -802,7 +1246,7 @@ def main():
     ap = argparse.ArgumentParser(description="lciod 板端数据校验器（host 侧）")
     ap.add_argument("--mode", required=True,
                     choices=["stats", "baseline", "delta", "perf", "uas",
-                             "link", "storm", "qos"])
+                             "link", "storm", "qos", "sd", "histo"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
@@ -819,7 +1263,7 @@ def main():
                     help="storm 模式注入后等待秒数（等 daemon 10s tick + "
                          "规则三评估窗口）")
     ap.add_argument("--log-since", type=int, default=None,
-                    help="storm 模式 logcat 抓取锚点（设备 epoch，只判锚点后 "
+                    help="storm/sd 模式 logcat 抓取锚点（设备 epoch，只判锚点后 "
                          "缓冲；未给时注入前自动取设备时钟）")
     ap.add_argument("--qos-dd-mb", type=int, default=16,
                     help="qos 模式 dd 写临时文件大小（MB），默认 16")
@@ -855,6 +1299,22 @@ def main():
     if args.mode == "qos":
         # R4 方向 6：SD 卡写 QoS 限速校验（依赖 daemon IoQosManager cgroup）
         rc = mode_qos(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "sd":
+        # A 批二 方向 3/4：SD 用户态验收（sysfs + SD_HEALTH + sd JSON）
+        rc = mode_sd(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "histo":
+        # C 批二 方向 3：USB 传输延迟/块大小二维直方图用户态验收
+        rc = mode_histo(args)
         if rc == -1:
             print("ERROR: adb 执行超时")
             return 1
@@ -935,4 +1395,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # raise SystemExit(main())：perf/storm/qos/sd/histo 等模式内部用 return
+    # 返回 0/1，若此入口只写 main() 则返回值被丢弃、进程 rc 恒 0（判红模式
+    # 假绿）；对齐 lcview_check.py 入口，把 main 返回值透传为进程退出码。
+    raise SystemExit(main())

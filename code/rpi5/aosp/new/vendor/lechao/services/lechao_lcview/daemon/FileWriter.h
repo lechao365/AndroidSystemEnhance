@@ -273,8 +273,6 @@ public:
     //   记录 mInvalidBatchStart。
     void beginBatch();
     bool endBatch();
-    // 本批次触碰的事件文件数（endBatch flush 判空用，0=空批直接返回）
-    bool hasBatchTouched() const { return !mBatchStarts.empty(); }
 
   private:
     // 根据 event schema、日期和轮转序号生成文件名
@@ -424,6 +422,14 @@ public:
     // 首次写前的 mInvalidSize（无触碰时用 SIZE_MAX 标记）。
     std::unordered_map<uint16_t, size_t> mBatchStarts;
     size_t mInvalidBatchStart = SIZE_MAX;
+    // P1：批内延迟的 invalid 轮转标志。writeInvalid 写前触发轮转阈值时，
+    // 若本批已触碰 invalid 流（mInvalidBatchStart != SIZE_MAX）不得中途
+    // rotateInvalid——批次中途 flush+rename 会让 mInvalidFilename 指向轮转
+    // 后的新文件，endBatch 整批回滚 rollbackFileTo(mInvalidFilename,
+    // mInvalidBatchStart) 时以旧文件偏移 ftruncate 新文件，零填充稀疏扩展
+    // 破坏 invalid_records.log 且本批 invalid 数据随 rename 持久化但计数
+    // 被整批丢弃（计数不守恒）。置本标志后由 endBatch 收口统一轮转。
+    bool mPendingInvalidRotate = false;
     // R-08 方向 2：批次内累计计数（endBatch 成功才并入全局 mPersist/
     // mWritesSinceRetention；flush 失败整批回滚则丢弃，防守恒右式虚增）
     uint64_t mBatchPersistValid = 0;

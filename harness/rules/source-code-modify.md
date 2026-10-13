@@ -8,7 +8,7 @@
 > - **SRC-002（修订）**：workspace 是 code 的编译缓存镜像，由 workspace-verify /
 >   sync-code-to-workspace 单向同步（code → workspace）；禁止把 workspace 改动
 >   反向归档回 code（workspace→code 方向已废止）。
-> - **SRC-003**：`code/others/` 不依赖 workspace，允许独立维护。
+> - **SRC-003**：`code/<平台>/others/`（如 `code/rpi5/others/`、`code/rpi-zero2w/others/`）不依赖 workspace，允许独立维护。
 > - **SRC-004（修订）**：code 仓 dev/main HEAD 可作为恢复真相源（workspace 灾难恢复
 >   sync-code-to-workspace 不再要求 promoted baseline——dev 为日常改动处，主干为基线，
 >   同步后经 workspace-verify 上板验证即产生证据）；未验证的 dev 改动不得宣称为基线；
@@ -24,11 +24,11 @@
 | 目标 | 操作流程 |
 |------|---------|
 | `code/` 下 `kernel/`、`aosp/` 等（对应 workspace 源码） | **必须先改 `code/`（dev 分支）**，经 `workspace-verify` 同步到 workspace 编译验证 → 收据随批 push dev → 验证 OK 后经 `publish-main-base` 一键建立 main 基线 |
-| `code/others/`（无 workspace 备份的独立程序） | 直接在 `code/others/` 中编辑维护 |
+| `code/<平台>/others/`（无 workspace 备份的独立程序） | 直接在 `code/<平台>/others/` 中编辑维护 |
 
 > **"验证通过"的定义**（缺一不可，必须作为 baseline 证据落盘）：
 > 1. **build**：增量编译成功（`make bootimage/systemimage/vendorimage`）→ `build_result`
-> 2. **package**：打包镜像成功（`mk_rpi5_full_image.sh`）→ `package_result`
+> 2. **package**：打包镜像成功（`harness/scripts/mk_rpi5_full_image.sh`）→ `package_result`
 > 3. **board verify**：刷机上板，功能验证 OK → `board_verify`
 > 4. **operator**：执行人/批准人 → `approved_by`
 > 5. **timestamp**：验证完成时间 → `approved_at`

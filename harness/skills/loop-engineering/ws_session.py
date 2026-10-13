@@ -300,9 +300,13 @@ def apply_done(session, receipt_path, stage=None, error_line=None,
         # 替换 AI 手填 --stage 与收据 pass/fail 代理 0/1
         stage, verify_exit = _stage_rc_from_run_state(run_state)
     else:
-        # verify_exit 是 pass/fail 代理（0/1），非真实子进程退出码
-        # （spec §4.1/§4.3）；仅无链式运行态时回落此口径
+        # 无运行态回落（verify_exit 双口径归一化，检视修复）：stage 取调用方
+        # --stage 并剥空白；verify_exit 按收据 result 映射 0/1（pass→0 /
+        # fail→1），失败恒 1——与有运行态的正常链失败（exit_rc=1）同口径，
+        # 防同一失败在轮次间"有无 --run-file 交替"时因 verify_exit 分量漂移
+        # 指纹而清零 patience（spec §4.3 防演化误判）
         verify_exit = 0 if r.result == "pass" else 1
+        stage = (stage or "").strip()
     fp = compute_fingerprint(stage, verify_exit, first_err)
     frozen = bool(prev_fail and prev_fail["fingerprint"] == fp)
 

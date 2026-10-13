@@ -37,6 +37,14 @@
 using vendor::lechao::lcview::DecodedField;
 using vendor::lechao::lcview::FieldDecodeResult;
 using vendor::lechao::lcview::decodeRecordField;
+// CXX-001：显式小端读取助手（线材契约小端，禁止裸 memcpy 假设主机序）
+using vendor::lechao::lcview::readLe32;
+using vendor::lechao::lcview::readLe64;
+using vendor::lechao::lcview::readLeFloat;
+using vendor::lechao::lcview::recordEventId;
+using vendor::lechao::lcview::recordMonoNs;
+using vendor::lechao::lcview::recordSeqNo;
+using vendor::lechao::lcview::recordTimestampNs;
 
 // 递归创建目录：
 // Android 上 mkdir 不自动创建父目录，所以需要逐级创建。
@@ -156,7 +164,11 @@ std::string FileWriter::makeDateStr()
         ALOGE("FileWriter: makeDateStr: localtime_r failed: %s, fallback to "
               "epoch",
               strerror(errno));
-        return "19700101";
+        // 回退日期同步写入缓存（mDateChecked 标记本轮已核对）：同秒内后续
+        // 调用复用回退值，缓存语义与正常路径一致（注释与实现对齐）
+        mDateStr = "19700101";
+        mDateChecked = now;
+        return mDateStr;
     }
     char buf[16];
     strftime(buf, sizeof(buf), "%Y%m%d", &tm_buf);
@@ -366,6 +378,32 @@ namespace
 // hex 查表：BINARY 字段与控制字符 \u00XX 编码共用，避免逐字节
 // ostringstream << hex << setw(2) 的操纵符状态机开销
 constexpr char kHexDigits[] = "0123456789abcdef";
+
+// 1 MiB 字节数（阈值换算基准），与配置字段 max*Mb 的单位约定一致
+constexpr size_t kBytesPerMb = 1024 * 1024;
+
+// 单文件轮转阈值判定（writeInvalid / checkRotation 共用）：
+//   - 采用「先除后判」语义（size / 1MiB >= maxMb），与既有实现逐条一致；
+//   - 除法天然免疫 maxMb * 1MiB 的乘法溢出回绕，无需溢出前置判断；
+//   - 语义为 >=（达到或超过阈值即触发轮转），与淘汰段的 <= 不同，
+//     故独立成函数并按名区分，避免两处误用同一助手。
+inline bool reachesRotateSizeMb(size_t size, size_t maxMb)
+{
+    return size / kBytesPerMb >= maxMb;
+}
+
+// 总容量淘汰阈值判定（evictOldFiles 专用）：
+//   - 淘汰语义为 <=（totalSize 未超上限即停止删除），与轮转 >= 不同；
+//   - 保持「乘法 + 溢出前置钳制」语义：maxMb 大到乘法回绕时视为无限
+//     容量（SIZE_MAX，永不淘汰，安全方向），否则按 totalSize <=
+//     maxMb * 1MiB 比较。不可用除法——除法在 (maxMb*1MiB, (maxMb+1)*1MiB)
+//     区间会把本应继续删除的 totalSize 整除为 maxMb 而提前停止。
+inline bool withinRetentionSizeMb(size_t totalSize, size_t maxMb)
+{
+    const bool overflow = maxMb > SIZE_MAX / kBytesPerMb;
+    const size_t maxBytes = overflow ? SIZE_MAX : maxMb * kBytesPerMb;
+    return totalSize <= maxBytes;
+}
 } // namespace
 
 static void jsonEscapeString(std::string &out, const std::string &s)
@@ -449,20 +487,18 @@ static void appendFieldValue(std::string &out, const DecodedField &df,
     }
     switch (df.type) {
     case LCVIEW_TYPE_INT32: {
-        int32_t val;
-        memcpy(&val, df.value, 4);
+        // CXX-001：显式小端解码，不依赖宿主字节序
+        int32_t val = static_cast<int32_t>(readLe32(df.value));
         out += std::to_string(val);
         break;
     }
     case LCVIEW_TYPE_INT64: {
-        int64_t val;
-        memcpy(&val, df.value, 8);
+        int64_t val = static_cast<int64_t>(readLe64(df.value));
         out += std::to_string(val);
         break;
     }
     case LCVIEW_TYPE_FLOAT: {
-        float val;
-        memcpy(&val, df.value, 4);
+        float val = readLeFloat(df.value);
         // LCV-04：NaN/Inf（除零等场景）的默认输出 "nan"/"inf" 非合法
         // JSON 数值——严格解析器对整行抛异常。降级 null 保整行可解析，
         // 数值丢失由消费端 null 判读
@@ -536,18 +572,19 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
     out.clear(); // 清空内容（保留底层 buffer 复用，消堆分配）
 
     out += "{\"ts\":";
-    out += std::to_string(hdr->timestamp_ns);
+    // CXX-001：record 头多字节字段经显式小端读取（禁止结构体强转假设主机序）
+    out += std::to_string(recordTimestampNs(hdr));
     out += ",\"id\":";
-    out += std::to_string(hdr->event_id);
+    out += std::to_string(recordEventId(hdr));
     out += ",\"level\":";
     out += std::to_string(static_cast<int>(hdr->level));
     // R-13 方向 2：信封字段 seq/mono——seq 为内核全局递增事件序号（NTP
     // 回拨时按此定序可靠，ts 为 wall 受校准调整不可作排序基）；mono 为
     // CLOCK_MONOTONIC 单调时间戳（延迟/抖动分析不受时钟校准影响）。
     out += ",\"seq\":";
-    out += std::to_string(hdr->seq_no);
+    out += std::to_string(recordSeqNo(hdr));
     out += ",\"mono\":";
-    out += std::to_string(hdr->mono_ns);
+    out += std::to_string(recordMonoNs(hdr));
     out += ",\"f\":[";
 
     const uint8_t* ptr = fields;
@@ -583,7 +620,7 @@ std::string FileWriter::formatJsonLine(const EventSchema& schema,
     }
     // R-13 方向 2：收到记录即记 seq（0 忽略——无 seq 语义的旧内核记录不
     // 参与 gap 统计），供心跳窗口 gap 判定（see takeSeqGapWindow）
-    mSeqGap.record(hdr->seq_no);
+    mSeqGap.record(recordSeqNo(hdr));
     out += "]}\n";
     // R-19 P5 方向 2：返回前终检非空换行与结构——JSONL 每行必须是完整 JSON
     // 对象 + 换行结尾（{\"ts\":... 开头、f 数组 ]} 闭合），任一不满足即判定
@@ -1003,6 +1040,7 @@ void FileWriter::beginBatch()
 {
     mBatchStarts.clear();
     mInvalidBatchStart = SIZE_MAX;
+    mPendingInvalidRotate = false;
     mBatchPersistValid = 0;
     mBatchPersistInvalid = 0;
     mBatchWritesSinceRetention = 0;
@@ -1090,6 +1128,19 @@ bool FileWriter::endBatch()
             mDrops.dropBatchFlush++;
             allOk = false;
         }
+    }
+    // P1：批内延迟的 invalid 轮转收口。置于本批 invalid 流 flush/回滚处理
+    // 之后、计数合并之前：
+    //   - 正常路径（flush 成功）：本批 invalid 数据先落盘并入计数，再轮转
+    //     （数据随 rename 保留且计数守恒）；
+    //   - 失败回滚路径：先把本批数据截回批次起点（未落盘、计数丢弃一致），
+    //     再轮转已回滚文件中的历史诊断，不破坏整批回滚。
+    // 若此处不轮转（如延迟前流已不可用），mPendingInvalidRotate 已消费，
+    // 下批 writeInvalid 写前阈值判定仍会重新触发轮转，不丢轮转语义
+    if (mPendingInvalidRotate)
+    {
+        mPendingInvalidRotate = false;
+        rotateInvalid();
     }
     // 成功批次才并入全局落盘计数（守恒右式 + 保留策略触发）
     if (allOk)
@@ -1247,9 +1298,22 @@ void FileWriter::writeInvalid(const uint8_t* data, size_t len,
         }
         ALOGI("FileWriter: writeInvalid: reopened invalid stream");
     }
-    // 超过单文件轮转阈值：先轮转再写（写前检查，单文件最多超一个 payload）
-    if (mInvalidSize >= mCfg.maxInvalidFileSizeMb * 1024 * 1024)
-        rotateInvalid();
+    // 超过单文件轮转阈值：写前检查，单文件最多超一个 payload。
+    // P1：批内已触碰 invalid 流（mInvalidBatchStart != SIZE_MAX）时禁止
+    // 中途 rotateInvalid——批次中途 flush+rename 会让 mInvalidFilename 指向
+    // 轮转后新文件，endBatch 整批回滚以旧偏移 rollbackFileTo 会 ftruncate
+    // 稀疏扩展破坏 invalid_records.log，且本批 invalid 数据随 rename 持久化
+    // 但计数被整批丢弃。改为置 mPendingInvalidRotate 由 endBatch 收口轮转。
+    // 本批首条 invalid（未触碰）才允许立即轮转（此时无批次回滚依赖）。
+    // 阈值判定经 reachesRotateSizeMb（先除后判防 maxInvalidFileSizeMb*1MiB
+    // 溢出回绕使轮转判定失效，语义与既有 >= 一致）
+    if (reachesRotateSizeMb(mInvalidSize, mCfg.maxInvalidFileSizeMb))
+    {
+        if (mInvalidBatchStart == SIZE_MAX)
+            rotateInvalid();
+        else
+            mPendingInvalidRotate = true;
+    }
     if (!mInvalidStream.is_open()) {
         // rotateInvalid 重开失败：按未打开语义计数（防轮转失败后静默丢弃）
         ALOGE("FileWriter: writeInvalid: rotate left stream closed, DROPPING reason=%s",
@@ -1370,8 +1434,9 @@ void FileWriter::checkRotation()
         if (fs.currentDate != today)
             needRotate = true;
 
-        // 文件超过大小限制 → 轮转
-        if (fs.currentSize >= mCfg.maxFileSizeMb * 1024 * 1024)
+        // 文件超过大小限制 → 轮转（阈值判定经 reachesRotateSizeMb：先除
+        // 后判防 maxFileSizeMb*1MiB 溢出回绕使轮转判定失效，语义保持一致）
+        if (reachesRotateSizeMb(fs.currentSize, mCfg.maxFileSizeMb))
             needRotate = true;
 
         if (needRotate) {
@@ -1507,8 +1572,6 @@ std::vector<FileWriter::LogFile> FileWriter::scanLogFiles()
 static constexpr unsigned kEvictSkipWarnEvery = 64;
 void FileWriter::evictOldFiles(std::vector<LogFile>& files)
 {
-    size_t maxBytes = mCfg.maxTotalSizeMb * 1024 * 1024;
-
     // 按修改时间升序排列（最旧的在前）
     std::sort(files.begin(), files.end(),
               [](const LogFile& a, const LogFile& b) {
@@ -1520,9 +1583,9 @@ void FileWriter::evictOldFiles(std::vector<LogFile>& files)
     for (const auto& f : files)
         totalSize += static_cast<size_t>(f.size);
 
-    // 从最旧文件开始删除，直到总大小 <= maxBytes
+    // 从最旧文件开始删除，直到总大小 <= maxTotalSizeMb
     // 跳过当前正在写入的文件，避免删除后 writeRecord 写入失败
-    // NOTE（R-10 方向 4 修订）："是否打开"的判定改用 inode 集合
+    // NOTE（R-10 方向 4 修订）："是否打开"的判定首选 inode 集合
     // （st_dev + st_ino）比较，替代原路径字符串相等比较（fs.currentFilename
     // == f.path / f.path == mInvalidFilename）。路径两侧拼法不同源：
     // openFile 拼 mCfg.logDir + "/" + name，而 scanLogFiles 拼
@@ -1532,15 +1595,29 @@ void FileWriter::evictOldFiles(std::vector<LogFile>& files)
     // 拼法无关，两侧 stat 得同一 (dev,ino) 必然命中；符号链接/rename 后
     // inode 变化属文件身份变化，语义正确。f.dev/f.ino 由 scanLogFiles 的
     // stat 填充；打开文件 dev/ino 由 openFile/checkRotation/openInvalidStream
-    // 记录；任何一侧 stat 失败（hasInode=false）退化为不视为打开中——
-    // 两侧 stat 同时失败（文件不存在）时文件本身也不在淘汰扫描结果里，
-    // 不会出现"打开中文件 stat 失败被删"（打开中文件 stat 必成功）
+    // 记录。
+    // P2 兜底：任一打开侧 stat 失败（hasInode=false，inode 判定不可用）时，
+    // 保守视为打开中——对该文件退化为"路径字符串相等"兜底比较（打开中文件
+    // 的 currentFilename/mInvalidFilename 与扫描路径相同即跳过），防打开中
+    // 文件失去淘汰保护被 unlink（unlink 后 fd 写已删 inode，空间泄漏）
+    // 总容量阈值判定经 withinRetentionSizeMb（乘法 + 溢出前置钳制，保持原
+    // `totalSize <= maxTotalSizeMb*1MiB` 语义；淘汰判定是 <= 与轮转 >=
+    // 不同，除法会在边界区间提前停止，故此处不用除法）
     for (const auto& f : files) {
-        if (totalSize <= maxBytes) break;
+        if (withinRetentionSizeMb(totalSize, mCfg.maxTotalSizeMb)) break;
         bool isOpen = false;
         // 事件文件：inode 集合判定（hasInode 双方都有效才比较）
         for (const auto& [id, fs] : mFiles) {
             if (fs.hasInode && f.ino != 0 && fs.dev == f.dev && fs.ino == f.ino)
+            {
+                isOpen = true;
+                break;
+            }
+            // P2：openFile/checkRotation stat 失败时 hasInode=false（inode 判定
+            // 不可用），保守视为打开中——按路径字符串兜底比较（打开中文件的
+            // currentFilename 与扫描路径相同即跳过），防打开中文件失去淘汰
+            // 保护被 unlink（unlink 后 fd 写已删 inode，空间泄漏 CXX-002）
+            if (!fs.hasInode && f.path == fs.currentFilename)
             {
                 isOpen = true;
                 break;
@@ -1551,6 +1628,11 @@ void FileWriter::evictOldFiles(std::vector<LogFile>& files)
         // R-10 方向 4：改用 invalid 流 inode 集合判定（替代 f.path ==
         // mInvalidFilename 路径比较）
         if (mInvalidHasInode && f.ino != 0 && mInvalidDev == f.dev && mInvalidIno == f.ino)
+            isOpen = true;
+        // P2：invalid 流 stat 失败（mInvalidHasInode=false）时 inode 判定
+        // 不可用——按路径字符串兜底比较（与事件文件同语义，防打开中文件
+        // 失去淘汰保护）
+        if (!mInvalidHasInode && f.path == mInvalidFilename)
             isOpen = true;
         if (isOpen)
         {

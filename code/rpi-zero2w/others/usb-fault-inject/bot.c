@@ -128,8 +128,16 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
             continue;
         }
 
+        /*
+         * CXX-001：CBW 多字节字段在线路上为小端，统一经 msd_le32_get 显式
+         * 读取（usb-msd-proto.h:59 契约——协议字段访问统一走此入口），
+         * 禁止直读 packed 结构体字段（依赖宿主字节序）。
+         */
+        const uint32_t cbw_tag  = msd_le32_get((const uint8_t *)&cbw.dCBWTag);
+        const uint32_t cbw_dlen = msd_le32_get((const uint8_t *)&cbw.dCBWDataTransferLength);
+
         fprintf(stderr, "[bot] CBW: tag=0x%08x flags=0x%02x datalen=%u cdb[0]=0x%02x cdblen=%u\n",
-                cbw.dCBWTag, cbw.bmCBWFlags, cbw.dCBWDataTransferLength,
+                cbw_tag, cbw.bmCBWFlags, cbw_dlen,
                 cbw.CBWCB[0], cbw.bCBWCBLength);
 
         /* ===== 钩子 B: TIMEOUT (收到 CBW 后不响应) ===== */
@@ -165,18 +173,18 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
          */
         struct scsi_result sr = scsi_handle_command(
             cbw.CBWCB, cbw.bCBWCBLength,
-            cbw.dCBWDataTransferLength,
+            cbw_dlen,
             NULL, DATA_BUF_MAX);
 
         /* 方向位一致性：CBW 声明方向与命令实际方向矛盾且带数据相位 → CSW Phase Error */
         int cbw_dir_in = (cbw.bmCBWFlags & USB_MS_CBW_FLAGS_IN) != 0;
-        if (cbw.dCBWDataTransferLength > 0 &&
+        if (cbw_dlen > 0 &&
             (sr.dir == SCSI_DIR_IN || sr.dir == SCSI_DIR_OUT)) {
             int cmd_dir_in = (sr.dir == SCSI_DIR_IN);
             if (cbw_dir_in != cmd_dir_in) {
                 fprintf(stderr, "[bot] direction mismatch: flags=%s cmd=%s datalen=%u, PHASE\n",
                         cbw_dir_in ? "IN" : "OUT", cmd_dir_in ? "IN" : "OUT",
-                        cbw.dCBWDataTransferLength);
+                        cbw_dlen);
                 sr.csw_status = USB_MS_CSW_STATUS_PHASE;
                 sr.dir = SCSI_DIR_NONE; /* 跳过数据相位 */
                 sr.data_len = 0;
@@ -190,14 +198,14 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
             /* 生成 IN 方向真实响应数据（Step 2 仅解析未填充缓冲区） */
             sr = scsi_handle_command(
                 cbw.CBWCB, cbw.bCBWCBLength,
-                cbw.dCBWDataTransferLength,
+                cbw_dlen,
                 data_buf, DATA_BUF_MAX);
 
             uint32_t to_send = sr.data_len;
             if (to_send > DATA_BUF_MAX)
                 to_send = DATA_BUF_MAX;
-            if (to_send > cbw.dCBWDataTransferLength)
-                to_send = cbw.dCBWDataTransferLength;
+            if (to_send > cbw_dlen)
+                to_send = cbw_dlen;
 
             /* ===== 钩子 C: SHORT (少发 short_bytes) ===== */
             if (current_hook == HOOK_SHORT && fi->short_bytes > 0) {
@@ -253,13 +261,13 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
 
             /* 发送量是 512 整数倍且小于请求量时，需发零长度包终止（标记传输结束） */
             if (to_send > 0 && (to_send % 512 == 0) &&
-                to_send < cbw.dCBWDataTransferLength) {
+                to_send < cbw_dlen) {
                 /* 发送零长度包标记结束 */
                 raw_gadget_ep_write(rg, NULL, 0);
             }
 
-        } else if (sr.dir == SCSI_DIR_OUT && cbw.dCBWDataTransferLength > 0) {
-            uint32_t to_recv = cbw.dCBWDataTransferLength;
+        } else if (sr.dir == SCSI_DIR_OUT && cbw_dlen > 0) {
+            uint32_t to_recv = cbw_dlen;
             int oversized = 0;
             if (to_recv > DATA_BUF_MAX) {
                 to_recv = DATA_BUF_MAX;
@@ -284,7 +292,7 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
             if (oversized) {
                 /* OUT 声明超 DATA_BUF_MAX：收满缓冲区后 STALL OUT 且 CSW FAIL */
                 fprintf(stderr, "[bot] OUT transfer %u > DATA_BUF_MAX, STALL OUT + FAIL\n",
-                        cbw.dCBWDataTransferLength);
+                        cbw_dlen);
                 raw_gadget_stall_ep(rg, EP_BULK_OUT);
                 sr.csw_status = USB_MS_CSW_STATUS_FAIL;
             } else if (sr.data_len > 0) {
@@ -305,19 +313,20 @@ int bot_main_loop(struct raw_gadget *rg, struct fault_injection *fi)
         struct usb_ms_csw csw;
         memset(&csw, 0, sizeof(csw));
         msd_le32_put((uint8_t *)&csw.dCSWSignature, USB_MS_CSW_SIGNATURE);
-        msd_le32_put((uint8_t *)&csw.dCSWTag, cbw.dCBWTag);
+        msd_le32_put((uint8_t *)&csw.dCSWTag, cbw_tag);
         msd_le32_put((uint8_t *)&csw.dCSWDataResidue,
-                     cbw.dCBWDataTransferLength - actually_transferred);
+                     cbw_dlen - actually_transferred);
         csw.bCSWStatus     = sr.csw_status;
 
         /* ===== 钩子 F: CORRUPT CSW 字段 ===== */
         if (current_hook == HOOK_CORRUPT_CSW_SIG) {
             fprintf(stderr, "[bot] F5: CORRUPT CSW signature\n");
-            csw.dCSWSignature = 0xDEADBEEF;
+            /* CXX-001：篡改也走 msd_le32_put，保持线材小端一致 */
+            msd_le32_put((uint8_t *)&csw.dCSWSignature, 0xDEADBEEFu);
             fi->active = false;
         } else if (current_hook == HOOK_CORRUPT_CSW_TAG) {
             fprintf(stderr, "[bot] F6: CORRUPT CSW tag\n");
-            csw.dCSWTag = cbw.dCBWTag + 1;
+            msd_le32_put((uint8_t *)&csw.dCSWTag, cbw_tag + 1u);
             fi->active = false;
         } else if (current_hook == HOOK_CORRUPT_CSW_STATUS) {
             fprintf(stderr, "[bot] F7: CORRUPT CSW status = Phase Error\n");

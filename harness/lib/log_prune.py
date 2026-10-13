@@ -96,7 +96,14 @@ def run(days=30, max_files=500, targets=None, apply=False):
     plan = {"days": days, "max_files": max_files, "apply": apply,
             "patterns": [], "errors": []}
     cutoff = time.time() - days * 86400
+    # lib-12：公共接口越界拒绝——绝对模式（is_absolute）或含 .. 段的 pattern
+    # （可上溯越出仓根）会经 REPO_ROOT.glob 越仓扫描/误删，拒绝并记 error
+    # （main 的 --target 已前置拦截，run() 作为公共函数须自守）
     for pattern in targets:
+        if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
+            plan["errors"].append({"pattern": pattern,
+                                   "reason": "越出仓根，拒绝"})
+            continue
         _prune_dir(pattern, cutoff, max_files, plan)
     plan["total_removed"] = sum(len(p["removed"]) for p in plan["patterns"])
     return plan

@@ -31,7 +31,10 @@ import subprocess
 import sys
 import tempfile
 
-# 两侧统一的排除集合（前缀匹配：目录带 / 结尾，文件全名）
+# 两侧统一的排除集合（前缀匹配：目录带 / 结尾，文件全名）。
+# 注（冗余说明）：harness/ 已覆盖其下全部子路径，harness/config/
+# baseline-status.yaml、harness/log/ 仍显式列出——排除面精确到文件级，
+# 语义可读可测试，防将来前缀收紧/语义变化时漏排（防误删的显式声明）
 EXCLUDE_PATHS = (
     "harness/",
     "harness/config/baseline-status.yaml",

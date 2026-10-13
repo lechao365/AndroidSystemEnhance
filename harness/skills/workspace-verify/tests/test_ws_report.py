@@ -63,6 +63,22 @@ class TestWsReport(unittest.TestCase):
                                     return_value="a" * 40)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # 检视修复（_resolve_target 12hex 校验）：批次 base/target 用假 12hex
+        #（1a2b3c4d5e6f）在非 git 仓的 tmp 下 git cat-file -e 必失败拒写，
+        # 此处拦截 12hex 存在性校验返回 0（模拟目标 commit 存在）保持既有
+        # 模式 A/B 用例行为；真实校验语义由下方专门用例 mock 覆盖
+        real_run = subprocess.run
+
+        def _fake_run(args, *a, **kw):
+            if (isinstance(args, (list, tuple)) and args[:1] == ["git"]
+                    and "cat-file" in args and "-e" in args):
+                return mock.Mock(returncode=0, stdout="")
+            return real_run(args, *a, **kw)
+
+        run_patcher = mock.patch.object(ws_report.subprocess, "run",
+                                        side_effect=_fake_run)
+        run_patcher.start()
+        self.addCleanup(run_patcher.stop)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -154,6 +170,52 @@ class TestWsReport(unittest.TestCase):
         self.assertIn("逐方向自报", err.getvalue())
         self.assertFalse(self._dir.exists())
 
+    def test_package_file_batch_mismatch_rejected(self):
+        # H3：显式 --package-file 证据 batch_id 与本收据不一致（跨批采信、
+        # provenance 失真）→ 返 2 拒写，不得内嵌后由 baseline 当 PASS
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        pkg = self._write_pkg(script_rc=0, batch_id="manual-0000000000")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", _selfcheck_ok(),
+                                 "--package-file", pkg])
+        self.assertEqual(rc, 2)
+        self.assertIn("不一致", err.getvalue())
+        self.assertFalse(self._dir.exists())
+
+    def test_package_auto_probe_batch_mismatch_not_embedded(self):
+        # H3：自动探测命中的证据内部 batch_id 与本批不一致 → warn 降级不内嵌
+        # （收据 package 空 → baseline_register 推导 UNKNOWN，不伪造 PASS）
+        from cdp_parse import batch_id_from_text
+        batch = self._write(VALID_S, ".cdp")
+        body = self._write("## 现场\n")
+        bid = batch_id_from_text(Path(batch).read_text(encoding="utf-8"))
+        probe_dir = Path(self._tmp.name) / "log" / "workspace-verify"
+        probe_dir.mkdir(parents=True)
+        # 文件名按本批 batch_id（探测命中），内容 batch_id 却是上一批
+        (probe_dir / f"package-{bid}.json").write_text(
+            json.dumps({"run_id": "r", "batch_id": "manual-oldbatch",
+                        "script_rc": 0}), encoding="utf-8")
+        err = io.StringIO()
+        with mock.patch.object(ws_report, "_PACKAGE_EVIDENCE_DIR", probe_dir), \
+                redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", _selfcheck_ok()])
+        self.assertEqual(rc, 0)
+        self.assertIn("不一致", err.getvalue())
+        details = [f for f in self._dir.glob("*.md") if f.name != "trend.md"]
+        content = details[0].read_text(encoding="utf-8")
+        pkg_line = [l for l in content.splitlines()
+                    if l.startswith("- package: ")][0]
+        self.assertEqual(pkg_line.strip(), "- package:")
+
     def test_receipt_partial_direction_report_rejected(self):
         # 方向 3：方向数 2 但正文仅 1 条自报 → 返 2（部分自报不算完成）
         batch = self._write(D2_S, ".cdp")
@@ -240,6 +302,25 @@ class TestWsReport(unittest.TestCase):
                                  "--board", "skip", "--summary", "s",
                                  "--selfcheck", _selfcheck_ok()])
         self.assertEqual(rc, 0)
+
+    def test_receipt_multispace_report_bypass_rejected(self):
+        # H2：多空格自报行（-  方向2:）此前计数达标（-\s*方向\d+\s*:）却因
+        # 三态提取正则（- 方向\d+:）要求单空格而漏检 → 静默绕过三态门禁；
+        # 共用正则后同样被提取校验，第二条无三态前缀即返 2 拒写
+        batch = self._write(D2_S, ".cdp")
+        body = self._write(
+            "## 逐方向自报\n"
+            "-  方向1: 完成: 改动 A（调用方 selfcheck；验证单测 A）\n"
+            "-  方向2: 改动 B（调用方 ws_report；验证单测 B）\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = ws_report.main(["--batch-file", batch, "--body", body,
+                                 "--result", "skip", "--build", "skip",
+                                 "--board", "skip", "--summary", "s",
+                                 "--selfcheck", _selfcheck_ok()])
+        self.assertEqual(rc, 2)
+        self.assertIn("三态前缀", err.getvalue())
+        self.assertFalse(self._dir.exists())
 
     _RC = ("pytest_rc=0 refs_rc=0 config_rc=0 contract_rc=0 pyenv_rc=0 "
            "ioctl_rc=0 manifest_rc=0 discipline_rc=0 scan_rc=0 "
@@ -1924,10 +2005,29 @@ class TestWsReport(unittest.TestCase):
         self.assertEqual(out, "~/foo 与 ~/bar")
 
     def test_resolve_target_12hex_passthrough(self):
-        # 12hex 原样返回且无错误，不触发 git 调用
+        # 检视修复：12hex 同样走 git 存在性校验（cat-file -e 成功）后原样
+        # 返回且无错误（setUp 拦截 cat-file 返回 0，模拟目标 commit 存在）
         val, err = ws_report._resolve_target("1a2b3c4d5e6f")
         self.assertEqual(val, "1a2b3c4d5e6f")
         self.assertIsNone(err)
+
+    def test_resolve_target_12hex_missing_rejected(self):
+        # 检视修复：不存在的 12hex（git cat-file -e 失败）→ 返回 err 供
+        # 调用方拒写（此前 12hex 直接放行，verified_commit 落盘后才暴露）
+        fake = mock.Mock()
+        fake.returncode = 128
+        fake.stdout = ""
+        with mock.patch.object(ws_report.subprocess, "run", return_value=fake) as m:
+            val, err = ws_report._resolve_target("deadbeef0000")
+        self.assertEqual(val, "")
+        self.assertIn("无法校验", err)
+        self.assertIn("cat-file", m.call_args.args[0])
+        # 存在性校验须在项目根 git 仓执行（git -C <root> cat-file -e）
+        self.assertEqual(m.call_args.args[0][0], "git")
+        self.assertEqual(m.call_args.args[0][1], "-C")
+        self.assertEqual(m.call_args.args[0][2], ws_report.project_root())
+        self.assertEqual(m.call_args.args[0][3], "cat-file")
+        self.assertEqual(m.call_args.args[0][4], "-e")
 
     def test_resolve_target_dev_via_git(self):
         # dev 等描述经 git rev-parse --short=12 换算为 12hex（promote 门禁比对 HEAD^）
@@ -2273,10 +2373,13 @@ class TestWsReport(unittest.TestCase):
 
     def test_package_file_embedded_singlelined(self):
         # 显式 --package-file（ws_package 打包证据 JSON）→ 内嵌收据 package
-        # 字段（单行），随收据入库可追溯（不再只落 gitignore 域）
+        # 字段（单行），随收据入库可追溯（不再只落 gitignore 域）。证据
+        # batch_id 须与本批一致（H3 跨批采信防线），故按实际 batch_id 造证据
+        from cdp_parse import batch_id_from_text
         batch = self._write(VALID_S, ".cdp")
         body = self._write("## 现场\n")
-        pkg = self._write_pkg(script_rc=0)
+        bid = batch_id_from_text(Path(batch).read_text(encoding="utf-8"))
+        pkg = self._write_pkg(script_rc=0, batch_id=bid)
         buf = io.StringIO()
         with redirect_stdout(buf):
             rc = ws_report.main(["--batch-file", batch, "--body", body,
@@ -2381,6 +2484,20 @@ class TestPhaseSummary(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         os.environ["CDP_PROJECT_ROOT"] = self._tmp.name
         self._dir = Path(self._tmp.name) / "data" / "verify-results"
+        # 检视修复（_resolve_target 12hex 校验）：批次 base 假 12hex 在非 git
+        # 仓 tmp 下 cat-file 必失败，拦截存在性校验放行（语义由专项用例覆盖）
+        real_run = subprocess.run
+
+        def _fake_run(args, *a, **kw):
+            if (isinstance(args, (list, tuple)) and args[:1] == ["git"]
+                    and "cat-file" in args and "-e" in args):
+                return mock.Mock(returncode=0, stdout="")
+            return real_run(args, *a, **kw)
+
+        run_patcher = mock.patch.object(ws_report.subprocess, "run",
+                                        side_effect=_fake_run)
+        run_patcher.start()
+        self.addCleanup(run_patcher.stop)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -2560,6 +2677,34 @@ class TestDirectionParsing(unittest.TestCase):
             "3 device_io 短读置 EIO；4 AGENTS.md 84 行"), 4)
         self.assertEqual(ws_report._direction_count(
             "1 xxx；2 yyy 9 处 strerror；3 zzz 15s"), 3)
+
+    def test_count_space_separated_consecutive(self):
+        # H2：契约示例空格分隔连续编号「1 xxx 2 yyy 3 zzz」须计为 3
+        # （旧弱后缀要求编号前为 ^/。/；，中间号前是空格故仅计为 1）
+        self.assertEqual(ws_report._direction_count("1 xxx 2 yyy 3 zzz"), 3)
+        self.assertEqual(ws_report._direction_count(
+            "1 修复 a 2 修复 b 3 修复 c"), 3)
+
+    def test_count_ignores_decimals(self):
+        # H2：小数不得被当编号——句点后接数字非编号边界、小数位前置负断言
+        self.assertEqual(ws_report._direction_count("耗时 1.5s 到 2.5s"), 0)
+        self.assertEqual(ws_report._direction_count("版本 1.2.3"), 0)
+
+    def test_count_ignores_chinese_measure_words(self):
+        # H2：中文计数「9 处」「15s」不误判——9 不在 1..k 连续链上；
+        # 15s 后接字母非编号边界；句中数字「验证 1 处」非链起点
+        self.assertEqual(ws_report._direction_count("验证 9 处，耗时 15s"), 0)
+        self.assertEqual(ws_report._direction_count("验证 1 处"), 0)
+        self.assertEqual(ws_report._direction_count(
+            "1 修复 a 9 处 2 修复 b"), 2)
+
+    def test_report_count_and_tristate_share_regex_multispace(self):
+        # H2：计数与三态提取共用 _DIRECTION_REPORT_RE——多空格自报行
+        # （-  方向2:）计数与提取口径一致，不再计数达标却漏三态校验
+        body = ("-  方向1: 完成: A\n"
+                "-  方向2: B\n")
+        self.assertEqual(ws_report._direction_report_count(body), 2)
+        self.assertEqual(len(ws_report._DIRECTION_REPORT_RE.findall(body)), 2)
 
     def test_report_count_counts_direction_prefix_lines(self):
         body = ("## 逐方向自报\n"

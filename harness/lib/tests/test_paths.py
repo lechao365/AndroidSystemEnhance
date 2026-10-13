@@ -60,13 +60,14 @@ class TestPathsCore(unittest.TestCase):
         self.assertTrue((real_paths.repo_root() / "harness").is_dir())
 
     def test_env_expansion_with_default(self):
-        # ${VAR:-default}：env 有值用 env，无值用默认
+        # ${VAR:-default}：env 有值用 env，无值用默认；~ 前缀值经 expanduser
+        # 展开为绝对路径（防 path() 把 `~/workspace` 当相对路径拼仓根）
         conf = ('KERNEL_WS=${MY_TEST_VAR:-~/workspace/rpi5-kernel-build/common}\n'
                 'AOSP_WS=${MY_TEST_VAR:-~/workspace/aosp}\n'
                 'LC_VERIFY_EXPECT_SERIAL=\n')
         mod = self._load_isolated(conf)
         self.assertEqual(mod.env_path("KERNEL_WS"),
-                         "~/workspace/rpi5-kernel-build/common")
+                         os.path.expanduser("~/workspace/rpi5-kernel-build/common"))
         os.environ["MY_TEST_VAR"] = "/custom/ws"
         mod2 = self._load_isolated(conf)
         self.assertEqual(mod2.env_path("KERNEL_WS"), "/custom/ws")

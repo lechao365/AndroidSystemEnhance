@@ -131,20 +131,7 @@ index f794cb3..27d04f7 100644
  	dev_dbg(&devinfo->intf->dev, "scan complete\n");
  }
  
-@@ -167,6 +268,12 @@ static void uas_zap_pending(struct uas_dev_info *devinfo, int result)
- 		/* Sense urbs were killed, clear COMMAND_INFLIGHT manually */
- 		cmdinfo->state &= ~COMMAND_INFLIGHT;
- 		cmnd->result = result << 16;
-+		/*
-+		 * 命令被 reset/disconnect 清空，未走正常状态机 END 路径，
-+		 * 此处补发 TRANSPORT_END（result 为入参 result<<16 的原始 int），
-+		 * 确保监控驱动对每条 pending 命令都能收到收尾事件
-+		 */
-+		uas_emit(devinfo, USB_STOR_NOTIFIER_TRANSPORT_END, cmnd, result, 0);
- 		err = uas_try_complete(cmnd, __func__);
- 		WARN_ON(err != 0);
- 	}
-@@ -254,6 +361,18 @@ static int uas_try_complete(struct scsi_cmnd *cmnd, const char *caller)
+@@ -254,6 +355,18 @@ static int uas_try_complete(struct scsi_cmnd *cmnd, const char *caller)
  		return -EBUSY;
  	devinfo->cmnd[cmdinfo->uas_tag - 1] = NULL;
  	uas_free_unsubmitted_urbs(cmnd);
@@ -163,7 +150,7 @@ index f794cb3..27d04f7 100644
  	scsi_done(cmnd);
  	return 0;
  }
-@@ -316,6 +435,16 @@ static void uas_stat_cmplt(struct urb *urb)
+@@ -316,6 +429,16 @@ static void uas_stat_cmplt(struct urb *urb)
  	if (status) {
  		if (status != -ENOENT && status != -ECONNRESET && status != -ESHUTDOWN)
  			dev_err(&urb->dev->dev, "stat urb: status %d\n", status);
@@ -180,7 +167,7 @@ index f794cb3..27d04f7 100644
  		goto out;
  	}
  
-@@ -423,6 +552,11 @@ static void uas_data_cmplt(struct urb *urb)
+@@ -423,6 +546,11 @@ static void uas_data_cmplt(struct urb *urb)
  		/* error: no data transfered */
  		scsi_set_resid(cmnd, sdb->length);
  		set_host_byte(cmnd, DID_ERROR);
@@ -192,7 +179,7 @@ index f794cb3..27d04f7 100644
  	} else {
  		scsi_set_resid(cmnd, sdb->length - urb->actual_length);
  	}
-@@ -711,6 +845,17 @@ static int uas_queuecommand_lck(struct scsi_cmnd *cmnd)
+@@ -711,6 +839,17 @@ static int uas_queuecommand_lck(struct scsi_cmnd *cmnd)
  	}
  
  	devinfo->cmnd[idx] = cmnd;
@@ -210,7 +197,7 @@ index f794cb3..27d04f7 100644
  zombie:
  	spin_unlock_irqrestore(&devinfo->lock, flags);
  	return 0;
-@@ -749,6 +894,16 @@ static int uas_eh_abort_handler(struct scsi_cmnd *cmnd)
+@@ -749,6 +888,16 @@ static int uas_eh_abort_handler(struct scsi_cmnd *cmnd)
  
  	spin_unlock_irqrestore(&devinfo->lock, flags);
  
@@ -227,7 +214,7 @@ index f794cb3..27d04f7 100644
  	if (data_in_urb) {
  		usb_kill_urb(data_in_urb);
  		usb_put_urb(data_in_urb);
-@@ -801,6 +956,15 @@ static int uas_eh_device_reset_handler(struct scsi_cmnd *cmnd)
+@@ -801,6 +950,15 @@ static int uas_eh_device_reset_handler(struct scsi_cmnd *cmnd)
  		return FAILED;
  	}
  
@@ -243,7 +230,7 @@ index f794cb3..27d04f7 100644
  	shost_printk(KERN_INFO, sdev->host, "%s success\n", __func__);
  	return SUCCESS;
  }
-@@ -1041,6 +1205,18 @@ static int uas_probe(struct usb_interface *intf, const struct usb_device_id *id)
+@@ -1041,6 +1199,18 @@ static int uas_probe(struct usb_interface *intf, const struct usb_device_id *id)
  	if (result)
  		goto free_streams;
  
@@ -262,7 +249,7 @@ index f794cb3..27d04f7 100644
  	/* Submit the delayed_work for SCSI-device scanning */
  	schedule_work(&devinfo->scan_work);
  
-@@ -1201,6 +1377,18 @@ static void uas_disconnect(struct usb_interface *intf)
+@@ -1201,6 +1371,18 @@ static void uas_disconnect(struct usb_interface *intf)
  	struct uas_dev_info *devinfo = (struct uas_dev_info *)shost->hostdata;
  	unsigned long flags;
  

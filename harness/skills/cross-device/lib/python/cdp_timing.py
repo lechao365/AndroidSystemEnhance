@@ -44,7 +44,7 @@ import time
 from pathlib import Path
 
 from cdp_parse import batch_id_from_text
-from cdp_paths import log_apply_dir
+from cdp_paths import file_lock, log_apply_dir
 
 
 @contextlib.contextmanager
@@ -56,32 +56,12 @@ def _locked(path: Path):
     覆盖先写者（last-writer-wins），段被吞。flock 包住整个区间防丢段；
     非阻塞重试至多 10s，拿不到锁降级不加锁直写（打点属诊断面，防 mark 链
     卡死）；无 fcntl 平台（非 POSIX）直接降级。
+
+    实现（R4 去重）：抽取为 cdp_paths.file_lock 共享助手，本函数为薄包装
+    保持调用点名不变（测试与既有调用方仍用 cdp_timing._locked）。
     """
-    try:
-        import fcntl
-    except ImportError:
+    with file_lock(path):
         yield
-        return
-    lock_path = Path(f"{path}.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(lock_path, "a")
-    try:
-        deadline = time.monotonic() + 10.0
-        while True:
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except (BlockingIOError, OSError):
-                if time.monotonic() >= deadline:
-                    break  # 拿锁超时降级不加锁直写
-                time.sleep(0.05)
-        yield
-    finally:
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-        except (OSError, ValueError):
-            pass
-        fh.close()
 
 
 # 链路阶段名常量表：apply/verify 已知链路段。mark 表外名仅 stderr warn
@@ -219,13 +199,17 @@ def _resolve_timing_path(args) -> tuple[Path | None, bool]:
     （start 落盘记录当前批次指针，多文件共存仍定位本批）。该级取不到时
     stderr warn 后返 0（取消静默跳过：缺打点不再无提示，调用方仍不阻断，
     失败不阻断口径不变）。
+
+    检视修复：显式 --batch 非法按参数错误处理——抛 ValueError（错误信息
+    已打 stderr），main 捕获后返 2，与 start 非法 batch 返 2 契约一致
+    （此前 error 前缀却返 0 与契约表"2 参数错误"不符）。
     """
     batch = getattr(args, "batch", None)
     if batch:
         if not BATCH_ID_RE.match(batch):
             print(f"error: batch_id 非法（须 12 位小写 hex）: {batch!r}",
                   file=sys.stderr)
-            return None, True
+            raise ValueError("invalid batch_id")
         return _timing_path(batch), False
     if getattr(args, "file", None):
         return Path(args.file), False
@@ -570,7 +554,10 @@ def main(argv=None) -> int:
     path = None
     silent = False
     if args.cmd in ("mark", "finish"):
-        path, silent = _resolve_timing_path(args)
+        try:
+            path, silent = _resolve_timing_path(args)
+        except ValueError:
+            return 2   # 显式 --batch 非法（参数错误，错误已打 stderr）
         if silent:
             return 0
         if path is None:

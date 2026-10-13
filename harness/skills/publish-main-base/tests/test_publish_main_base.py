@@ -480,6 +480,19 @@ class TestSyncModifyToMainBase(unittest.TestCase):
         self.assertIn("t1", r.stderr)
         self.assertIn("t2", r.stderr)
 
+    def test_check_issues_wontfix_excluded_from_active(self):
+        # 本批修正：wontfix 视为终态（与 fixed 同），不参与活跃任务集合——
+        # t1 open+introduced（活项） + t2 wontfix（仅测试夹具引用）→ 推断单一
+        # 活跃任务 t1，不再被 t2 干扰成多值拒绝（2026-10-09 发布实测：仅测试
+        # 夹具引用的 wontfix 条目致活跃集合多值、须显式 --task 的 quirk）
+        cdp_issue.write_issue(self._mk_issue(task="t1"), "现场")
+        cdp_issue.write_issue(self._mk_issue(task="t2", issue_id="KI-Y",
+                                             status="wontfix"), "现场")
+        r = self._run_register("check-issues")
+        self.assertEqual(r.returncode, 1)  # 推断 t1 后按其门禁（open+introduced → 拒）
+        self.assertIn("task=t1", r.stderr)
+        self.assertNotIn("多值", r.stderr)
+
     def test_check_issues_rejects_typo_task(self):
         # 显式 --task 不在活跃集合内 → exit 3（防拼错静默通过）
         cdp_issue.write_issue(self._mk_issue(task="lcview-refactor"), "现场")

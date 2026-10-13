@@ -125,7 +125,13 @@ def scan(repo: Path) -> list[str]:
     # 执行，净克隆/CI 才暴露不可执行）判红；与 quotepath 同源"库态缺陷
     # 本地掩盖、净克隆暴露"，一次门禁覆盖
     sh_mode_map: dict[str, str] = {}
-    mode_lines = _git_lines(["ls-files", "-s"], repo) or []
+    mode_lines = _git_lines(["ls-files", "-s"], repo)
+    if mode_lines is None:
+        # 与主扫描同款 fail-closed（lib-07 同源）：ls-files -s 失败不得静默
+        # 返空（此前 or [] 会把 .sh 可执行位守卫静默中断）——判红防假绿
+        print("error: git ls-files -s 失败（仓库异常/命令不可用），无法核对"
+              " .sh 可执行位，判红", file=sys.stderr)
+        return [f"{repo}: git ls-files -s 失败，无法核对 .sh 可执行位（按违规判红）"]
     for ln in mode_lines:
         parts = ln.split()
         if len(parts) >= 4:

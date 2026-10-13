@@ -93,7 +93,9 @@ list_web_pids() {
 }
 
 port_is_listening() {
-    ss -tln 2>/dev/null | grep -q "${SERVER_HOST}:${PORT} "
+    # 检视修复（SIGPIPE）：grep -q 在 set -uo pipefail 下提前退出会把
+    # SIGPIPE 误判为未监听；改命令替换判非空，grep 完整消费 ss 输出
+    [ -n "$(ss -tln 2>/dev/null | grep "${SERVER_HOST}:${PORT} ")" ]
 }
 
 stop_legacy_web_processes() {

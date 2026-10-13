@@ -32,6 +32,7 @@
 #include "usb.h"
 #include "uas-notifier.h"
 #include "lciod_usbd-ioctl.h"
+#include "lciod_histo.h"
 
 struct us_data;
 struct scsi_cmnd;
@@ -62,6 +63,7 @@ struct vendor_lechao_usbd_device {
                                       * 不透明类型，仅持指针 + 调用 uas-notifier.h API，不解引用内部字段 */
     u8 protocol;                     /* 传输协议标识：VENDOR_LECHAO_USBD_PROTO_BOT / _UAS（alloc 时设定后不变） */
     struct vendor_lechao_usbd_stats stats;       /* 传输统计快照（通过 lock 自旋锁保护） */
+    struct lciod_histo histo;                    /* 传输延迟/块大小二维直方图（由 rate_dev->lock 自旋锁保护） */
     struct vendor_lechao_usbd_config config;     /* 运行时配置（enabled/flags，通过 lock 自旋锁保护） */
     struct vendor_lechao_usbd_event last_event;  /* 最近一条异常事件记录（通过 lock 自旋锁保护） */
     struct notifier_block nb;        /* 注册到 us_data->notifier 的通知块，回调为 handle_event */

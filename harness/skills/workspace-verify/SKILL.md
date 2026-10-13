@@ -23,12 +23,18 @@ stages:
 ## Preconditions（前置条件）
 - 本仓 dev/main 分支存在；KERNEL_WS/AOSP_WS 可访问（paths.conf）
 - 设备可达（网络 adb；不可达时走串口诊断，见 Failure）
-- 高危动作（整卡刷写、boot 分区 dd）必须人工确认
+- 高危动作（整卡刷写、boot 分区 dd）必须人工确认；USB 测试盘 dd 写
+  （LCVIEW_BLOCK_DEV_WRITE）为常备授权，免确认（见「USB 破坏性写变量」）
 ## Inputs（输入）
 - 模式 A：批次文件路径（验收标签从批次解析）；模式 B：目标 commit + 验收用例标签
   （--case，一等入口默认 lcview-liveness；手打验收文本为兜底）
 ## Human confirmation gates（人工确认门）
 - 仅整卡刷写 / boot 分区 dd 需确认；其余零确认
+- **USB 测试盘破坏性写免确认（常备授权，2026-10-12 用户指示）**：RPi5 上外接的
+  U 盘均为测试盘、无有效数据，对 `LCVIEW_BLOCK_DEV_WRITE`（可移动 USB 块设备，
+  如 `/dev/block/sdX`）的 dd 写属常规用例步骤——AI 直接导出
+  `LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES` 并执行，**无需向用户确认**。
+  仅 boot 分区 dd / 整卡刷写仍需人工确认。
 ## Outputs / artifacts（输出/产物）
 - data/verify-results/<时间戳>-<batch_id>.md + trend.md（只落盘，不 commit——由 git-works-push 随批统一提交）
 - 收据 header `timings` 字段：模式 A 打点（apply 侧 start 后，verify 内部
@@ -87,8 +93,9 @@ stages:
     python3 harness/skills/workspace-verify/ws_verify_chain.py \
       --batch-file <cdp> [--case <标签>] [--wait-ready --log-since <reboot 时刻>] \
       [--result-file <chain.json>]
-    六步串联：sync→connect→push→unit_test→acceptance→report，逐段 stdout
-    透传、rc 逐段门禁、失败即停（JSON 标注停在何步）；acceptance/report
+    八步串联：sync→build→connect→push→unit_test→acceptance→package→report，逐段 stdout
+    透传、rc 逐段门禁、失败即停（JSON 标注停在何步；缺批次源时
+    acceptance/package/report 步确定性跳过并记账）；acceptance/report
     参数由 --batch-file/--case/--wait-ready/--log-since 确定性构造，report
     收据参数（result/build/board/summary）由前序真实 rc 机械派生（AI 不手填）；
     编排器自动注入 CDP_RUN_ID 使 push/unit_test/acceptance 产物同批同 run_id
@@ -112,9 +119,9 @@ stages:
    - 测试：先 make <modules.<模块>.test_targets> -j$(nproc)（lcview 即
      lechao_lcview_unit_test——hal_test 已随 HAL 退役并入 unit_test，
      AGENTS.md 强制）
-   - 部署：m <modules.<模块>.targets>（lcview 实读 Android.bp 的 2 个 Soong 模块——
-     HAL 已退役删除，仅存 lechao_lcview 与 vendor.lechao.lcview-config，见
-     verify-cases.yaml modules 段；lciod 才是 4 个 target）；
+   - 部署：m <modules.<模块>.targets>（各模块的 Soong 模块数一律实读
+     verify-cases.yaml modules 段 targets 列表，不在此写死数字——HAL 退役后
+     模块清单曾漂移，该文件是唯一事实源）；
    增量路径按 incremental-dev-reference：
    - aosp 模块：m <module>（BLD-004 先 source build/envsetup.sh + lunch；BLD-005 禁裸 make）
    - boot/内核：make Image dtbs（BLD-001~003 Clang+LLD/产物拷贝 rpi5-kernel/；
@@ -179,10 +186,9 @@ stages:
    --body <正文文件> --batch-file <cdp> --target $(git rev-parse --short=12 HEAD) \
    --metrics "<性能三指标 JSON 对象>"] \
    [--timings-file harness/log/cross-device/timings-<batch_id>.json] \
-   --selfcheck "<自检摘要（全部 *_rc 键，见 harness/lib/selfcheck.py 的
-   REQUIRED_RC_KEYS：pytest/refs/config/contract/pyenv/ioctl/manifest/
-   discipline/scan/ruff/host/quotepath/known_issues/commit_coverage——
-   任一缺失 ws_report 拒写）>"
+   --selfcheck "<自检摘要（全部 *_rc 键，清单以 harness/lib/selfcheck.py 的
+   REQUIRED_RC_KEYS 常量为唯一事实源，不在此逐项枚举——任一缺失 ws_report
+   拒写）>"
    （--batch-file/--target 为模式 A 参数；--body 必传：CDP 原文 + 各阶段明细 +
    失败现场摘录，自动脱敏；PASS 必传 --acceptance-file（步骤 5 自描述验收产物）
    与 --unit-test-file（步骤 4b 自描述单测产物）与 --push-file（步骤 4 自描述
@@ -383,5 +389,32 @@ EOS
 > 端口号是 bus 顺序号非固定值）。
 
 导出示例：`export LCVIEW_USB_DEV=1-2 LCVIEW_USB_VID=1256 LCVIEW_USB_PID=25344`。
+
+### USB 破坏性写变量（上板跑 lcview-trigger / lciod-trigger 前导出）
+
+`lcview-trigger` / `lciod-trigger` 含"写 dd 产载"步骤（向块设备写 1MB 零），由写
+守卫把守：`LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES` 且 `LCVIEW_BLOCK_DEV_WRITE` 显式
+给出，缺一即判红不执行。两变量经 host 环境传给 hostcmd 步骤（ws_acceptance 的
+`_hostcmd_env` 继承 `os.environ`），须在跑验证链前 `export`。
+
+**常备授权（2026-10-12 用户确认）**：RPi5 上外接的 U 盘均为测试盘、无有效数据，
+对其 dd 写免人工确认——AI 直接采集可移动 USB 块设备并导出，**无需询问用户**。
+
+采集可移动 USB 块设备（`removable==1` 即测试盘）：
+
+```bash
+adb shell 'for d in /sys/block/sd*; do echo ${d##*/} removable=$(cat $d/removable) size=$(cat $d/size); done'
+```
+
+导出示例（可移动设备为 `/dev/block/sdb` 时）：
+
+```bash
+export LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES
+export LCVIEW_BLOCK_DEV_WRITE=/dev/block/sdb   # 取上述 removable=1 的设备
+```
+
+> 注意：`LCVIEW_BLOCK_DEV`（读，默认 `/dev/block/sda` 只读到 `/dev/null`）与
+> `LCVIEW_BLOCK_DEV_WRITE`（写，无默认值）不同；写目标必须是可移动测试盘，
+> 不得指向系统分区或 boot 盘（boot 分区 dd 仍属人工确认门）。
 
 

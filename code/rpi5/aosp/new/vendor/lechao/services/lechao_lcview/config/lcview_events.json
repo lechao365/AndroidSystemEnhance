@@ -115,6 +115,44 @@
         {"name": "threshold_ms",          "type": "int64"},
         {"name": "consecutive",           "type": "int32"}
       ]
+    },
+    {
+      "id": 15,
+      "name": "sd_health",
+      "desc": "SD/MMC 10s window health aggregate (kernel lciod_sd)",
+      "fields": [
+        {"name": "window_bytes",     "type": "int64"},
+        {"name": "window_requests",  "type": "int64"},
+        {"name": "window_ms",        "type": "int64"},
+        {"name": "total_bytes",      "type": "int64"},
+        {"name": "total_requests",   "type": "int64"},
+        {"name": "stuck_count",      "type": "int64"},
+        {"name": "ssr_speed_class",  "type": "int64"},
+        {"name": "ssr_uhs_grade",    "type": "int64"}
+      ]
+    },
+    {
+      "id": 16,
+      "name": "sd_stuck",
+      "desc": "SD/MMC card-busy stuck with progressive speed downgrade",
+      "fields": [
+        {"name": "old_speed",        "type": "int64"},
+        {"name": "new_speed",        "type": "int64"},
+        {"name": "err",              "type": "int64"},
+        {"name": "stuck_count",      "type": "int64"}
+      ]
+    },
+    {
+      "id": 17,
+      "name": "usb_latency_tail",
+      "desc": "USB transfer latency long-tail bucket count exceeded threshold (daemon rule)",
+      "fields": [
+        {"name": "device_index",  "type": "int64"},
+        {"name": "direction",     "type": "int64"},
+        {"name": "latency_ms",    "type": "int64"},
+        {"name": "count",         "type": "int64"},
+        {"name": "threshold",     "type": "int64"}
+      ]
     }
   ]
 }

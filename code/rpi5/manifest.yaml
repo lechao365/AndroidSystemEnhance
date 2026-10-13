@@ -9,6 +9,10 @@ kernel:
       source: rpi5-kernel-build/common/Kconfig
     - patch: kernel/modified/arch/arm64/configs/android_rpi5_defconfig.diff
       source: rpi5-kernel-build/common/arch/arm64/configs/android_rpi5_defconfig
+    - patch: kernel/modified/drivers/mmc/core/block.c.diff
+      source: rpi5-kernel-build/common/drivers/mmc/core/block.c
+    - patch: kernel/modified/drivers/mmc/core/sd.c.diff
+      source: rpi5-kernel-build/common/drivers/mmc/core/sd.c
     - patch: kernel/modified/drivers/usb/core/hub.c.diff
       source: rpi5-kernel-build/common/drivers/usb/core/hub.c
     - patch: kernel/modified/drivers/usb/storage/transport.c.diff
@@ -20,6 +24,8 @@ kernel:
     - patch: kernel/modified/drivers/usb/storage/usb.h.diff
       source: rpi5-kernel-build/common/drivers/usb/storage/usb.h
   new:
+    - patch: kernel/new/drivers/mmc/core/lechao_sd_notifier.h
+      source: rpi5-kernel-build/common/drivers/mmc/core/lechao_sd_notifier.h
     - patch: kernel/new/drivers/usb/core/lechao_hub_notifier.h
       source: rpi5-kernel-build/common/drivers/usb/core/lechao_hub_notifier.h
     - patch: kernel/new/drivers/usb/storage/uas-notifier.h
@@ -34,6 +40,10 @@ kernel:
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/Kconfig
     - patch: kernel/new/vendor/lechao/LcIod/Makefile
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/Makefile
+    - patch: kernel/new/vendor/lechao/LcIod/lciod_histo.c
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_histo.c
+    - patch: kernel/new/vendor/lechao/LcIod/lciod_histo.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_histo.h
     - patch: kernel/new/vendor/lechao/LcIod/lciod_link.c
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_link.c
     - patch: kernel/new/vendor/lechao/LcIod/lciod_link.h
@@ -42,6 +52,10 @@ kernel:
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_read_logic.c
     - patch: kernel/new/vendor/lechao/LcIod/lciod_read_logic.h
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_read_logic.h
+    - patch: kernel/new/vendor/lechao/LcIod/lciod_sd.c
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_sd.c
+    - patch: kernel/new/vendor/lechao/LcIod/lciod_sd.h
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_sd.h
     - patch: kernel/new/vendor/lechao/LcIod/lciod_usbd-ioctl.h
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_usbd-ioctl.h
     - patch: kernel/new/vendor/lechao/LcIod/lciod_usbd-stats.c
@@ -52,8 +66,12 @@ kernel:
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/lciod_usbd.h
     - patch: kernel/new/vendor/lechao/LcIod/tests/Makefile
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/tests/Makefile
+    - patch: kernel/new/vendor/lechao/LcIod/tests/lciod_histo_host_test.c
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/tests/lciod_histo_host_test.c
     - patch: kernel/new/vendor/lechao/LcIod/tests/lciod_read_logic_host_test.c
       source: rpi5-kernel-build/common/vendor/lechao/LcIod/tests/lciod_read_logic_host_test.c
+    - patch: kernel/new/vendor/lechao/LcIod/tests/lciod_sd_host_test.c
+      source: rpi5-kernel-build/common/vendor/lechao/LcIod/tests/lciod_sd_host_test.c
     - patch: kernel/new/vendor/lechao/LcView/Kconfig
       source: rpi5-kernel-build/common/vendor/lechao/LcView/Kconfig
     - patch: kernel/new/vendor/lechao/LcView/Makefile
@@ -169,6 +187,8 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lciod/aidl_api/vendor.lechao.lciod/current/vendor/lechao/lciod/IoEvent.aidl
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/aidl_api/vendor.lechao.lciod/current/vendor/lechao/lciod/IoStats.aidl
       source: aosp/vendor/lechao/services/lechao_lciod/aidl_api/vendor.lechao.lciod/current/vendor/lechao/lciod/IoStats.aidl
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/aidl_api/vendor.lechao.lciod/current/vendor/lechao/lciod/LatencyHistogram.aidl
+      source: aosp/vendor/lechao/services/lechao_lciod/aidl_api/vendor.lechao.lciod/current/vendor/lechao/lciod/LatencyHistogram.aidl
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/common/Android.bp
       source: aosp/vendor/lechao/services/lechao_lciod/common/Android.bp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/common/minor_utils.cpp
@@ -177,6 +197,10 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lciod/common/minor_utils.h
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/Android.bp
       source: aosp/vendor/lechao/services/lechao_lciod/daemon/Android.bp
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/block_collector.cpp
+      source: aosp/vendor/lechao/services/lechao_lciod/daemon/block_collector.cpp
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/block_collector.h
+      source: aosp/vendor/lechao/services/lechao_lciod/daemon/block_collector.h
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/hal_client.cpp
       source: aosp/vendor/lechao/services/lechao_lciod/daemon/hal_client.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/hal_client.h
@@ -237,6 +261,8 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lciod/tests/MinorUtils_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/tests/Service_test.cpp
       source: aosp/vendor/lechao/services/lechao_lciod/tests/Service_test.cpp
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/tests/block_collector_test.cpp
+      source: aosp/vendor/lechao/services/lechao_lciod/tests/block_collector_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/tools/Android.bp
       source: aosp/vendor/lechao/services/lechao_lciod/tools/Android.bp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/tools/lciod_probe.c
@@ -249,6 +275,8 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lciod/vendor/lechao/lciod/IoEvent.aidl
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/vendor/lechao/lciod/IoStats.aidl
       source: aosp/vendor/lechao/services/lechao_lciod/vendor/lechao/lciod/IoStats.aidl
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/vendor/lechao/lciod/LatencyHistogram.aidl
+      source: aosp/vendor/lechao/services/lechao_lciod/vendor/lechao/lciod/LatencyHistogram.aidl
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/config/Android.bp
       source: aosp/vendor/lechao/services/lechao_lcview/config/Android.bp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/config/lcview_events.json
@@ -271,10 +299,6 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lcview/daemon/batch_parser.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/daemon/batch_parser.h
       source: aosp/vendor/lechao/services/lechao_lcview/daemon/batch_parser.h
-    - patch: aosp/new/vendor/lechao/services/lechao_lcview/daemon/block_collector.cpp
-      source: aosp/vendor/lechao/services/lechao_lcview/daemon/block_collector.cpp
-    - patch: aosp/new/vendor/lechao/services/lechao_lcview/daemon/block_collector.h
-      source: aosp/vendor/lechao/services/lechao_lcview/daemon/block_collector.h
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/daemon/lechao_lcview.cpp
       source: aosp/vendor/lechao/services/lechao_lcview/daemon/lechao_lcview.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/daemon/lechao_lcview.rc
@@ -305,8 +329,6 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lcview/tests/MainLoop_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/tests/SchemaParser_test.cpp
       source: aosp/vendor/lechao/services/lechao_lcview/tests/SchemaParser_test.cpp
-    - patch: aosp/new/vendor/lechao/services/lechao_lcview/tests/block_collector_test.cpp
-      source: aosp/vendor/lechao/services/lechao_lcview/tests/block_collector_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/tests/record_codec_test.cpp
       source: aosp/vendor/lechao/services/lechao_lcview/tests/record_codec_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/tools/Android.bp
@@ -331,6 +353,10 @@ others:
   - patch: others/usb-verify/src/check/stats_check.c
     source: null
   - patch: others/usb-verify/src/check/stats_check.h
+    source: null
+  - patch: others/usb-verify/src/cli/expect_json.c
+    source: null
+  - patch: others/usb-verify/src/cli/expect_json.h
     source: null
   - patch: others/usb-verify/src/cli/main.c
     source: null

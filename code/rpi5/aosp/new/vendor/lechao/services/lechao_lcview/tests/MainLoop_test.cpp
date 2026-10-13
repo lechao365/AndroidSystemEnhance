@@ -156,7 +156,12 @@ protected:
     }
 
     void TearDown() override {
-        std::string cmd = "rm -rf " + std::string(mTmp);
+        // P2：rm -rf 前必须确认路径源于本 fixture 的 mkdtemp 前缀，防误删
+        if (mTmp.rfind("/data/local/tmp/lcview_mainloop_", 0) != 0) {
+            ADD_FAILURE() << "refuse to rm unexpected path: " << mTmp;
+            return;
+        }
+        std::string cmd = "rm -rf " + mTmp;
         system(cmd.c_str());
     }
 
@@ -497,6 +502,84 @@ TEST(MainLoopHeartbeatWriterTest, FieldsPassThrough)
     EXPECT_TRUE(conserve.initialized);
     EXPECT_EQ(conserve.total, 1000u);
 
-    std::string cmd = "rm -rf " + std::string(tmp);
-    system(cmd.c_str());
+    // P2：rm -rf 前必须确认路径源于本测试的 mkdtemp 前缀，防误删
+    if (std::string(tmp).rfind("/data/local/tmp/lcview_hb_", 0) != 0) {
+        ADD_FAILURE() << "refuse to rm unexpected path: " << tmp;
+    } else {
+        std::string cmd = "rm -rf " + std::string(tmp);
+        system(cmd.c_str());
+    }
+}
+
+// ============================================================
+// 启动阶段信号中断（P1 回归修复）：openDeviceWithRetry 的阻塞重试必须响应
+// 停止谓词——SIGTERM/SIGINT 在设备打开阶段即生效，不被最长 1200×100ms
+// （约 120s）的重试窗口卡住。生产谓词即 stopSignalRequested。
+// ============================================================
+
+namespace
+{
+
+// 设备打开始终失败的 reader（中断测试用；open 非阻塞，便于计数）
+class AlwaysFailOpenReader : public DeviceReader
+{
+  public:
+    bool open() override
+    {
+        ++openCalls;
+        return false;
+    }
+    ssize_t waitAndRead(uint8_t *, size_t, size_t, int) override { return -1; }
+    uint64_t getOverrun() override { return 0; }
+    uint64_t getTotalRecords() override { return 0; }
+    uint64_t ioctlErr() const override { return 0; }
+    uint64_t eofCount() const override { return 0; }
+    void close() override {}
+
+    int openCalls = 0;
+};
+
+// 第 succeedOn 次 open 才成功的 reader（成功路径测试用）
+class FailThenSucceedOpenReader : public DeviceReader
+{
+  public:
+    explicit FailThenSucceedOpenReader(int succeedOn) : mSucceedOn(succeedOn) {}
+    bool open() override { return ++mCalls >= mSucceedOn; }
+    ssize_t waitAndRead(uint8_t *, size_t, size_t, int) override { return -1; }
+    uint64_t getOverrun() override { return 0; }
+    uint64_t getTotalRecords() override { return 0; }
+    uint64_t ioctlErr() const override { return 0; }
+    uint64_t eofCount() const override { return 0; }
+    void close() override {}
+
+    int calls() const { return mCalls; }
+
+  private:
+    int mSucceedOn;
+    int mCalls = 0;
+};
+
+}  // namespace
+
+TEST(MainLoopStartupSignalTest, OpenDeviceRetry_StopsMidRetryOnStopPredicate)
+{
+    // 破坏即判红：停止谓词中途置位后设备打开重试必须立即退出——不打开成功、
+    // 也不耗尽 maxRetries。谓词被逐轮轮询（第 3 次返 true）即证明检查已接入
+    // 重试循环；若未接入则谓词调用数为 0（判红）且会耗尽重试。
+    int polls = 0;
+    auto stopOnThird = [&polls] { ++polls; return polls >= 3; };
+    AlwaysFailOpenReader reader;
+    const bool ok = openDeviceWithRetry(reader, stopOnThird, 1000, std::chrono::milliseconds(1));
+    EXPECT_FALSE(ok);
+    EXPECT_EQ(polls, 3);            // 谓词逐轮轮询直到置位
+    EXPECT_EQ(reader.openCalls, 2); // 停止后不再尝试打开
+}
+
+TEST(MainLoopStartupSignalTest, OpenDeviceRetry_OpensEventually)
+{
+    // 正常路径：前 2 次失败第 3 次成功 → 返回 true；停止谓词始终不置位
+    auto neverStop = [] { return false; };
+    FailThenSucceedOpenReader reader(/*succeedOn=*/3);
+    EXPECT_TRUE(openDeviceWithRetry(reader, neverStop, 10, std::chrono::milliseconds(1)));
+    EXPECT_EQ(reader.calls(), 3);
 }

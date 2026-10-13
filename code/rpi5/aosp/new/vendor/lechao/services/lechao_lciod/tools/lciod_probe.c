@@ -15,6 +15,10 @@
 //   lciod_probe --link     打印全局链路节点（/dev/vendor_lechao_usbd_link）
 //                          GET_LINK_STATS 快照（R2 方向 7：lciod-check
 //                          --mode link 取数，供电归因链路计数）
+//   lciod_probe --histo    逐设备打印 GET_LATENCY_HISTOGRAM（v5）二维直方图
+//                          快照：dirs/size_bins/latency_bins 维度、mono_ts_ns
+//                          时戳、档位元数据（size/latency bounds）与累计矩阵
+//                          counts（C 批二 方向 3；lciod-check --mode histo 取数）
 //
 // 退出码：0 成功（无设备也返回 0、输出为空，由 host 侧判红）/
 //         1 open 或 ioctl 失败 / 2 参数错误
@@ -138,16 +142,97 @@ static int probe_link(void)
     return 0;
 }
 
+/* 将 u64 数组按逗号拼接为十进制字符串（供 host 侧解析档位上界）。
+ * 始终保留结尾 NUL 位，防写越界；返回已写字符数（不含 NUL）。 */
+static int join_u64_csv(char* buf, size_t cap, const u64* vals, size_t n)
+{
+    size_t off = 0;
+    for (size_t i = 0; i < n; ++i) {
+        int w = snprintf(buf + off, cap - off, "%s%llu", i ? "," : "",
+                         (unsigned long long)vals[i]);
+        if (w < 0 || (size_t)w >= cap - off) {
+            buf[cap - 1] = '\0';
+            break;
+        }
+        off += (size_t)w;
+    }
+    return (int)off;
+}
+
+/* 将 u32 数组按逗号拼接为十进制字符串（counts 矩阵用）。
+ * 同 join_u64_csv：保留结尾 NUL，返回已写字符数。 */
+static int join_u32_csv(char* buf, size_t cap, const u32* vals, size_t n)
+{
+    size_t off = 0;
+    for (size_t i = 0; i < n; ++i) {
+        int w = snprintf(buf + off, cap - off, "%s%u", i ? "," : "", vals[i]);
+        if (w < 0 || (size_t)w >= cap - off) {
+            buf[cap - 1] = '\0';
+            break;
+        }
+        off += (size_t)w;
+    }
+    return (int)off;
+}
+
+/* 对单个设备节点执行 GET_LATENCY_HISTOGRAM（v5 二维直方图）并单行打印。
+ * 数组字段（size_bounds/latency_bounds/counts）逗号拼接后用双引号包裹，
+ * 保证 host 侧正则 (\w+)=(?:"([^"]*)"|(\S+)) 正确取值（值内无空格但含逗号，
+ * 引号包裹可兼容其他 key=value 混排）。counts 按行主序展开 dir*size_bins*lat。 */
+static int probe_histo_device(const char* path)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr, "lciod_probe: open %s failed: %s\n", path, strerror(errno));
+        return 1;
+    }
+
+    struct vendor_lechao_usbd_latency_histogram h;
+    memset(&h, 0, sizeof(h));
+    if (ioctl(fd, VENDOR_LECHAO_USBD_IOC_GET_LATENCY_HISTOGRAM, &h) < 0) {
+        fprintf(stderr, "lciod_probe: GET_LATENCY_HISTOGRAM %s failed: %s\n",
+                path, strerror(errno));
+        close(fd);
+        return 1;
+    }
+    close(fd);
+
+    /* 缓冲尺寸：size 8 档 * 21B；latency 12 档 * 21B；counts 192 格 * 21B */
+    char size_buf[256];
+    char lat_buf[384];
+    char cnt_buf[4608];
+    join_u64_csv(size_buf, sizeof(size_buf), h.size_bounds,
+                 VENDOR_LECHAO_USBD_HISTO_SIZE_BINS);
+    join_u64_csv(lat_buf, sizeof(lat_buf), h.latency_bounds,
+                 VENDOR_LECHAO_USBD_HISTO_LAT_BINS);
+    join_u32_csv(cnt_buf, sizeof(cnt_buf), &h.counts[0][0][0],
+                 (size_t)VENDOR_LECHAO_USBD_HISTO_DIRS
+                 * VENDOR_LECHAO_USBD_HISTO_SIZE_BINS
+                 * VENDOR_LECHAO_USBD_HISTO_LAT_BINS);
+
+    printf("histo minor=%d dirs=%u size_bins=%u latency_bins=%u mono_ts_ns=%llu "
+           "size_bounds=\"%s\" latency_bounds=\"%s\" counts=\"%s\" abi_version=%u\n",
+           tail_minor(path), h.dirs, h.size_bins, h.latency_bins,
+           (unsigned long long)h.mono_ts_ns,
+           size_buf, lat_buf, cnt_buf,
+           VENDOR_LECHAO_USBD_ABI_VERSION);
+    fflush(stdout);
+    return 0;
+}
+
 int main(int argc, char* argv[])
 {
     int do_reset = 0;
     int do_link = 0;
+    int do_histo = 0;
     if (argc == 2 && strcmp(argv[1], "--reset") == 0) {
         do_reset = 1;
     } else if (argc == 2 && strcmp(argv[1], "--link") == 0) {
         do_link = 1;
+    } else if (argc == 2 && strcmp(argv[1], "--histo") == 0) {
+        do_histo = 1;
     } else if (argc != 1) {
-        fprintf(stderr, "usage: %s [--reset|--link]\n", argv[0]);
+        fprintf(stderr, "usage: %s [--reset|--link|--histo]\n", argv[0]);
         return 2;
     }
 
@@ -160,14 +245,18 @@ int main(int argc, char* argv[])
      * 该全局链路节点只支持 GET_LINK_STATS，向其发 GET_STATS/RESET_STATE
      * 会 ENOTTY 判红，2026-10-07 上板回归首现） */
     if (glob(DEV_PREFIX "[0-9]*", 0, NULL, &gl) != 0 || gl.gl_pathc == 0) {
-        /* 无设备：正常退出 + 空输出（host 侧 stats 模式判红） */
+        /* 无设备：正常退出 + 空输出（host 侧 stats/histo 模式判红） */
         globfree(&gl);
         return 0;
     }
 
     int ret = 0;
-    for (size_t i = 0; i < gl.gl_pathc; ++i)
-        ret |= probe_device(gl.gl_pathv[i], do_reset);
+    for (size_t i = 0; i < gl.gl_pathc; ++i) {
+        if (do_histo)
+            ret |= probe_histo_device(gl.gl_pathv[i]);
+        else
+            ret |= probe_device(gl.gl_pathv[i], do_reset);
+    }
     globfree(&gl);
     return ret;
 }

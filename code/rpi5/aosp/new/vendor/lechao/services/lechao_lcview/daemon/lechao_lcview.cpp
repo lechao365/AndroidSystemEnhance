@@ -26,7 +26,6 @@
 #include "../include/lcview_ioctl.h"
 #include "../include/lcview_events.h"
 #include <log/log.h>
-#include <thread>
 #include "lechao_log.h"
 
 using namespace vendor::lechao::lcview;
@@ -50,12 +49,16 @@ int main(int argc, char* argv[])
     //   因为 schema 文件所在的 vendor 分区可能在启动早期尚未挂载完成。
     //   替代旧版本直接 FATAL 退出的策略，提高启动可靠性。
     //   （重试逻辑抽入 batch_parser 可测函数）
-    const bool schemaOk = loadSchemaWithRetry(schema, schemaPath, gRunning, 30);
+    // 停止谓词接入 schema 重试：SIGTERM/SIGINT 置位即中断
+    // （stopSignalRequested 内部把信号同步到 gRunning），不再等满 30×500ms
+    const bool schemaOk =
+        loadSchemaWithRetry(schema, schemaPath, stopSignalRequested, 30);
     if (!schemaOk) {
         ALOGE("lechao_lcview: failed to load schema from %s", schemaPath.c_str());
-        // 方向 4：退出码抽纯函数——未运行（关停中断，gRunning=false）
-        // 返回 0 优雅退出，init 不判崩溃；真失败返回 1 交 init 重启重试
-        return schemaLoadExitCode(schemaOk, gRunning);
+        // 方向 4：退出码抽纯函数——关停中断（stopSignalRequested 返 true，
+        // 运行标志已同步 false）返回 0 优雅退出，init 不判崩溃；真失败返回 1
+        // 交 init 重启重试
+        return schemaLoadExitCode(schemaOk, !stopSignalRequested());
     }
     ALOGI("lechao_lcview: loaded %zu event schemas", schema.eventCount());
 
@@ -72,19 +75,16 @@ int main(int argc, char* argv[])
     // 直读内核设备（原 HAL 职责并入 daemon；设备节点单打开限制，
     // 部署须先停 HAL，否则 open 返 EBUSY）
     EpollDeviceReader reader;
-    int openRetry = 0;
-    while (gRunning && !reader.open()) {
-        if (++openRetry >= 1200) {
-            /* CXX-004: 设备打开失败退出，rc 非 oneshot 交 init 重启重试；
-             * 禁止静默 return 伪装正常（采集链路不可用须可见） */
-            ALOGE("lechao_lcview: cannot open device after retries, exiting for init restart");
-            return 1;
+    // 设备打开重试（可中断）：SIGTERM/SIGINT 置位后立即退出重试窗口
+    if (!openDeviceWithRetry(reader, stopSignalRequested, 1200)) {
+        if (stopSignalRequested()) {
+            ALOGI("lechao_lcview: exiting (stopped during open)");
+            return 0;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    if (!gRunning) {
-        ALOGI("lechao_lcview: exiting (stopped during open)");
-        return 0;
+        /* CXX-004: 设备打开失败退出，rc 非 oneshot 交 init 重启重试；
+         * 禁止静默 return 伪装正常（采集链路不可用须可见） */
+        ALOGE("lechao_lcview: cannot open device after retries, exiting for init restart");
+        return 1;
     }
     // R-13 方向 1：启动 ABI 协商判红——设备打开成功但内核版本不匹配
     // （旧内核缺 LCVIEW_GET_ABI_VERSION 返 ENOTTY，或版本号低于 daemon

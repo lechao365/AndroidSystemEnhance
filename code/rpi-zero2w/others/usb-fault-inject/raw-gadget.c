@@ -76,14 +76,24 @@ struct raw_gadget *raw_gadget_open(const char *udc_name)
     return rg;
 }
 
-/* 断开 gadget：停 EP0 线程 + 关 fd + 复位状态（可重开，幂等）
- * 返回 0 成功，-1 参数非法。 */
+/* 断开 gadget：先唤醒 EP0 线程再回收 + 关 fd + 复位状态（可重开，幂等）
+ * 返回 0 成功，-1 参数非法。
+ *
+ * CXX-004：EP0 线程阻塞在 USB_RAW_IOCTL_EVENT_FETCH（非 pthread 取消点）时，
+ * 若先 pthread_cancel+join 再 close(fd)，join 会无限挂死（取消信号无法在
+ * 阻塞 ioctl 处生效）。故先置取消标志 + close(fd) 令阻塞 ioctl 立即返回
+ * 错误唤醒线程，再 pthread_cancel/join 回收。 */
 int raw_gadget_disconnect(struct raw_gadget *rg)
 {
     if (!rg)
         return -1;
     if (rg->ep0_thread_started) {
-        pthread_cancel(rg->ep0_thread);
+        rg->ep0_cancel = true;   /* 事件循环在 EINTR/错误路径据此退出 */
+        if (rg->fd >= 0) {
+            close(rg->fd);       /* 唤醒阻塞在 EVENT_FETCH 的 EP0 线程 */
+            rg->fd = -1;
+        }
+        pthread_cancel(rg->ep0_thread);  /* 兜底：阻塞在退出重试/取消点时立即生效 */
         pthread_join(rg->ep0_thread, NULL);
         rg->ep0_thread_started = false;
     }
@@ -95,6 +105,7 @@ int raw_gadget_disconnect(struct raw_gadget *rg)
     rg->ep_out_handle = -1;
     rg->enumerated = false;
     rg->running = false;
+    rg->ep0_cancel = false;
     return 0;
 }
 
@@ -474,8 +485,13 @@ static int rg_process_one_event(struct raw_gadget *rg)
 
     for (;;) {
         if (ioctl(rg->fd, USB_RAW_IOCTL_EVENT_FETCH, ev) < 0) {
-            if (errno == EINTR)
+            if (errno == EINTR) {
+                /* CXX-004：取消标志置位即退出事件循环，而非无条件 continue
+                 * ——否则断开时被信号打断会陷入永不退出的重试 */
+                if (rg->ep0_cancel)
+                    return -1;
                 continue;
+            }
             perror("[rg] EVENT_FETCH");
             return -1;
         }
@@ -526,6 +542,7 @@ int raw_gadget_start_ep0_thread(struct raw_gadget *rg)
         return -1;
     if (rg->ep0_thread_started)
         return 0; /* 已启动 */
+    rg->ep0_cancel = false;  /* 清除上次断开遗留的取消标志 */
     if (pthread_create(&rg->ep0_thread, NULL, rg_ep0_thread_fn, rg) != 0) {
         perror("[rg] pthread_create (EP0 thread)");
         return -1;

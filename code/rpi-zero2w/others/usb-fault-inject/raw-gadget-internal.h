@@ -16,6 +16,7 @@ struct raw_gadget {
     bool     running;        /* gadget 是否已 RUN */
     pthread_t ep0_thread;    /* EP0 服务线程（枚举后启动，持续应答控制请求） */
     bool     ep0_thread_started; /* EP0 线程是否已启动待回收 */
+    volatile bool ep0_cancel;    /* EP0 线程取消标志：置位后事件循环在 EINTR 处退出（CXX-004） */
     char     udc[64];        /* UDC 名称（reopen 时重新绑定用） */
 };
 

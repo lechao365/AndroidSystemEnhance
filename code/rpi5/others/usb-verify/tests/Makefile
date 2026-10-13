@@ -12,6 +12,7 @@ SRCS := \
   ../src/check/stats_check.c \
   ../src/check/event_check.c \
   ../src/cli/parse.c \
+  ../src/cli/expect_json.c \
   ../src/cli/output.c
 
 fv_pure_host_test: fv_pure_host_test.c $(SRCS)

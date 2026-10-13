@@ -1,5 +1,5 @@
 diff --git a/drivers/usb/storage/usb.h b/drivers/usb/storage/usb.h
-index fd3f32670873..1ef7bb36f998 100644
+index fd3f32670873..cb765c676e7f 100644
 --- a/drivers/usb/storage/usb.h
 +++ b/drivers/usb/storage/usb.h
 @@ -38,6 +38,80 @@
@@ -83,7 +83,7 @@ index fd3f32670873..1ef7bb36f998 100644
  /*
   * Unusual device list definitions 
   */
-@@ -148,6 +222,21 @@ struct us_data {
+@@ -148,6 +222,24 @@ struct us_data {
  	/* hacks for READ CAPACITY bug handling */
  	int			use_last_sector_hacks;
  	int			last_sector_retries;
@@ -96,16 +96,19 @@ index fd3f32670873..1ef7bb36f998 100644
 +	 *
 +	 * last_fault_type：最近一次 USB 传输故障的类型（USB_STOR_XFER_xxx）
 +	 * last_fault_status：最近一次故障的 URB status 码
++	 *   【预留、暂无消费者】当前仅由 transport.c 发射 notifier 时写入，
++	 *   内核内无读取点；故障上下文经 usb_stor_notifier_data 载荷传递给
++	 *   vendor 驱动。两字段留作后续"最近一次故障"快照扩展，非死代码。
 +	 * last_rate_sample_ns / last_rate_sample_bytes：预留用于速率采样（当前未使用）
 +	 */
-+	int			last_fault_type;    /* 最近 USB 传输故障类型 */
-+	int			last_fault_status;  /* 最近故障的 URB status */
++	int			last_fault_type;    /* 预留：最近 USB 传输故障类型（暂无消费者） */
++	int			last_fault_status;  /* 预留：最近故障的 URB status（暂无消费者） */
 +	u64			last_rate_sample_ns;    /* 预留：速率采样时间 */
 +	u64			last_rate_sample_bytes; /* 预留：速率采样字节数 */
  };
  
  /* Convert between us_data and the corresponding Scsi_Host */
-@@ -207,4 +296,45 @@ static void __exit __driver##_exit(void) \
+@@ -207,4 +299,45 @@ static void __exit __driver##_exit(void) \
  } \
  module_exit(__driver##_exit)
  

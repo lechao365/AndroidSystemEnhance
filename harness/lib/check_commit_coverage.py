@@ -22,6 +22,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from paths import (DATA_DIRNAME, DATA_KNOWN_ISSUES_REL,
+                   DATA_VERIFY_RESULTS_DIRNAME, DATA_VERIFY_RESULTS_REL)
+
 _ROOT = Path(__file__).resolve().parents[2]
 
 # meta 提交 = 提交标题 type ∈ {构建, 文档}（基线发布/晋升与纯文档豁免收据覆盖）
@@ -43,7 +46,7 @@ _DOC_PREFIXES = ("docs/", "doc/")
 _BUILD_META_EXEMPT_PATHS = frozenset({
     "harness/config/baseline-status.yaml",
     "data/baselines/",
-    "data/known-issues/",
+    DATA_KNOWN_ISSUES_REL + "/",
 })
 
 
@@ -60,10 +63,10 @@ def _build_meta_exempt_file(path: str) -> bool:
 # 程序读取的 md 面（批次 b410b688d206 方向 1 收窄）：harness/rules/ 是判据、
 # data/known-issues/ 是 known-issue 数据，被程序读取的 md 改动即改判据/关
 # known-issue，不得按纯文档豁免（否则 文档(x): 标题即可零收据改判据）
-_PROGRAM_MD_PREFIXES = ("harness/rules/", "data/known-issues/")
+_PROGRAM_MD_PREFIXES = ("harness/rules/", DATA_KNOWN_ISSUES_REL + "/")
 
 # 收据目录自引用豁免：commit_scope 生成侧排除 data/verify-results/，判定侧同排除
-_VERIFY_PREFIX = "data/verify-results"
+_VERIFY_PREFIX = DATA_VERIFY_RESULTS_REL
 
 
 def _git(args: list[str], cwd: Path):
@@ -97,7 +100,9 @@ def recent_promoted_baseline_commit(root: Path) -> str:
     last = ""
     for b in bases:
         if isinstance(b, dict) and b.get("status") == "promoted":
-            sc = (b.get("source_commit") or "").strip()
+            # str 强制：短 sha 全为数字时 YAML 解析为 int（如 123456789012），
+            # 直接 .strip() 会 AttributeError 崩溃——统一转字符串再规整
+            sc = str(b.get("source_commit") or "").strip()
             if sc:
                 last = sc
     return last
@@ -280,7 +285,7 @@ def _receipt_scopes(root: Path) -> tuple[list[set[str]], list[str]]:
 
     scopes: list[set[str]] = []
     errors: list[str] = []
-    d = root / "data" / "verify-results"
+    d = root / DATA_DIRNAME / DATA_VERIFY_RESULTS_DIRNAME
     if not d.is_dir():
         return scopes, errors
     # 收据证据口径统一为工作区 .md（批次意图一，与 commit_scope.latest_scope

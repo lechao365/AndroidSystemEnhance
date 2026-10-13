@@ -172,7 +172,10 @@ int main(int argc, char **argv)
             ret = FV_ERR_IOCTL;
             break;
         }
-        output_degrade_check(&stats, &cmd, cmd.json_output);
+        /* 断言失败须传播为 FV_ERR_CHECK（CXX-004：禁止打印 FAIL 而退出码为 0） */
+        rc = output_degrade_check(&stats, &cmd, cmd.json_output);
+        if (rc < 0)
+            ret = FV_ERR_CHECK;
         break;
     }
     }

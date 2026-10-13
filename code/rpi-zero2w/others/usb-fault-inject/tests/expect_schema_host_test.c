@@ -15,6 +15,7 @@
 #include "faults.h"
 #include "bot.h"
 #include "raw-gadget.h"
+#include "usb-msd-proto.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -230,6 +231,27 @@ static void test_json_output(void)
     }
 }
 
+/* CXX-001：usb-msd-proto.h 显式小端 CBW/CSW 字段读写契约
+ * bot.c 所有多字节字段经 msd_le32_get/put，此处锚定其小端线材语义 */
+static void test_msd_le32_endian(void)
+{
+    uint8_t buf[4];
+    msd_le32_put(buf, 0x12345678u);
+    CHECK(buf[0] == 0x78 && buf[1] == 0x56 && buf[2] == 0x34 &&
+          buf[3] == 0x12);
+    CHECK(msd_le32_get(buf) == 0x12345678u);
+
+    /* 逆序字节读得大端值不同 → 证明显式小端而非主机序依赖 */
+    uint8_t be[4] = {0x12, 0x34, 0x56, 0x78};
+    CHECK(msd_le32_get(be) == 0x78563412u);
+
+    /* 协议签名常量往返 */
+    msd_le32_put(buf, USB_MS_CBW_SIGNATURE);
+    CHECK(msd_le32_get(buf) == USB_MS_CBW_SIGNATURE);
+    msd_le32_put(buf, USB_MS_CSW_SIGNATURE);
+    CHECK(msd_le32_get(buf) == USB_MS_CSW_SIGNATURE);
+}
+
 int main(void)
 {
     test_enum_boundary();
@@ -237,6 +259,7 @@ int main(void)
     test_name_consistency();
     test_validate_table_negative();
     test_json_output();
+    test_msd_le32_endian();
 
     if (g_fail) {
         fprintf(stderr, "expect_schema_host_test: FAILED\n");

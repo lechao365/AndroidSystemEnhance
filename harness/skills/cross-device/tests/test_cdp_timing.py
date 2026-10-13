@@ -619,13 +619,15 @@ class TestCdpTiming(unittest.TestCase):
         self.assertIn("batch_id 非法", err.getvalue())
 
     def test_mark_rejects_invalid_batch_id(self):
+        # 检视修复：显式 --batch 非法按参数错误返 2（与 start 契约一致），
+        # 不再 error 前缀却返 0；不写错路径（防路径注入）
         cdp_timing.main(["start", "--batch", self.batch])
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             rc = cdp_timing.main(["mark", "--batch", "../evil",
                                   "--name", "edit"])
-        self.assertEqual(rc, 0)
-        self.assertIn("batch_id 非法", err.getvalue())  # warn 跳过不写错路径
+        self.assertEqual(rc, 2)
+        self.assertIn("batch_id 非法", err.getvalue())
         self.assertFalse((cdp_paths.log_apply_dir().parent.parent.parent
                           / "evil.json").exists())
 

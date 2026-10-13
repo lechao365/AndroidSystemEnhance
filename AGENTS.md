@@ -16,6 +16,15 @@
 （LOCAL-DEV-001~003：manual 收据须覆盖本次全部非 meta 提交 / 逐项三态自报 /
 带 selfcheck 结果；缺收据即被 check_commit_coverage 判红与 git-works-push 拒推）。
 
+## 上板验收：USB 破坏性写常备授权
+`lciod-trigger` / `lcview-trigger` 含向块设备 dd 写的产载步骤，须导出
+`LCVIEW_ALLOW_DESTRUCTIVE_WRITE=YES` 与 `LCVIEW_BLOCK_DEV_WRITE=<可移动 USB 块设备>`。
+RPi5 上外接 U 盘均为测试盘、无有效数据，**对其 dd 写免人工确认**（常备授权）：
+AI 采集 `removable=1` 的 `/sys/block/sd*` 得写目标后直接执行，无需询问用户。
+仅 boot 分区 dd / 整卡刷写仍需人工确认。详见
+[harness/skills/workspace-verify/SKILL.md](harness/skills/workspace-verify/SKILL.md)
+「USB 破坏性写变量」与「Human confirmation gates」。
+
 ## Harness 工作流命令
 
 | 命令 | 用途 |
@@ -53,6 +62,13 @@ harness 能力全部内聚在 `harness/` 目录（不依赖 LcHarness），使�
 书写 harness 测试或文档引用时，必须先加载 [harness/rules/cdp-apply-dod.md](harness/rules/cdp-apply-dod.md)
 （CDP-DOD-001 检查器门禁三要件 / CDP-DOD-002 测试与文档引用禁依赖未跟踪产物 /
 CDP-DOD-003 收据逐方向自报调用方与验证）。
+
+## 方案设计前的环境基线
+方案设计 / 产批（`/cross-device-emit`、`/sync-code-to-doc` 方案先行）涉及目标设备环境
+假设（文件系统类型、内核特性、挂载状态、ABI / 事件 ID、设备节点与 sysfs 属性等）前，必须先加载
+[harness/rules/env-baseline.md](harness/rules/env-baseline.md)
+（ENV-BASE-001~002：方案设计前必测目标环境基线并随批入 git /
+产批锚点必须 git 可见文件、禁引未入库文档）。
 
 ## RPI5 环境与开发参考文档
 涉及 RPI5 环境搭建、编译、部署、调试、远程访问时，必须先加载 `harness/reference/` 下对应文档（索引见 [harness/reference/README.md](harness/reference/README.md)）：

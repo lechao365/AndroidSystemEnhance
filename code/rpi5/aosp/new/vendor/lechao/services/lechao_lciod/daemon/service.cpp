@@ -46,6 +46,9 @@
 #include "lechao_log.h"
 /* R2 方向 5+6：全局链路事件监控（独立于 per-device 分片） */
 #include "link_monitor.h"
+/* R5 方向1：块设备/zram 观测采集器（纯函数 + BlockCollector/ZramCollector，
+ * 自 lcview 平移至 lciod），service.cpp 提供 10s 采集线程见 BlockCollectorRunLoop */
+#include "block_collector.h"
 /* R-14 方向 1：共享事件枚举头（AOSP hal 镜像，与内核真相源 1:1 同步），
  * 事件类型/方向名映射单一事实源，消模块内 switch 硬编码 */
 #include "vendor_lechao_usbd-ioctl.h"
@@ -132,6 +135,62 @@ bool ShouldEmitStorm(const StormWindow& w, uint64_t threshold) {
     if (w.stall >= threshold || w.timeout >= threshold)
         return true;
     return w.stall + w.timeout >= threshold;
+}
+
+/*
+ * HistoTailSum — 某方向长尾累计计数（C 批二方向2，纯函数）
+ * counts 为行主序扁平数组，索引 = (dir*sizeBins + s)*latencyBins + l。
+ * 输入防御（CXX-002/003）: dir/startBin 越界、counts 长度不足一律返回 0，
+ * 不读越界内存；和为 10s 级小计数，uint64 累加不回绕。
+ */
+uint64_t HistoTailSum(const aidl::vendor::lechao::lciod::LatencyHistogram& h, int dir, int startBin) {
+    if (dir < 0 || dir >= h.dirs || startBin < 0 || startBin >= h.latencyBins)
+        return 0;
+    const size_t need = static_cast<size_t>(h.dirs) * static_cast<size_t>(h.sizeBins) *
+                        static_cast<size_t>(h.latencyBins);
+    if (h.counts.size() < need)
+        return 0;
+    uint64_t sum = 0;
+    for (int s = 0; s < h.sizeBins; s++) {
+        for (int l = startBin; l < h.latencyBins; l++) {
+            size_t idx = (static_cast<size_t>(dir) * h.sizeBins + s) * h.latencyBins + l;
+            sum += static_cast<uint64_t>(h.counts[idx]);
+        }
+    }
+    return sum;
+}
+
+/* HistoTotalSum — 某方向全档累计计数：等价于 startBin=0 的长尾和。 */
+uint64_t HistoTotalSum(const aidl::vendor::lechao::lciod::LatencyHistogram& h, int dir) {
+    return HistoTailSum(h, dir, 0);
+}
+
+/*
+ * EvaluateHistoTail — 长尾越限判定（C 批二方向2，纯函数）
+ * 首次调用只建 prev 快照返回 0（无上一窗口可比）；其后按 curr-prev 差分，
+ * curr<prev（计数回绕/环重置）时按 curr 重算避免回绕误触发。返回掩码
+ * bit0=读越限、bit1=写越限。
+ */
+int EvaluateHistoTail(HistoTailState* st, uint64_t readTail, uint64_t writeTail,
+                      uint64_t threshold) {
+    if (st == nullptr)
+        return 0;
+    if (!st->valid) {
+        st->valid = true;
+        st->prevRead = readTail;
+        st->prevWrite = writeTail;
+        return 0;
+    }
+    uint64_t dRead = readTail >= st->prevRead ? readTail - st->prevRead : readTail;
+    uint64_t dWrite = writeTail >= st->prevWrite ? writeTail - st->prevWrite : writeTail;
+    int mask = 0;
+    if (dRead >= threshold)
+        mask |= 1;
+    if (dWrite >= threshold)
+        mask |= 2;
+    st->prevRead = readTail;
+    st->prevWrite = writeTail;
+    return mask;
 }
 
 /*
@@ -227,6 +286,194 @@ void ProjectSystemIoEvent(const aidl::vendor::lechao::lciod::IoEvent& vev,
     out->retry = vev.retry;
 }
 
+/*
+ * R5 方向3：块设备/zram 观测事件经 EVENT_ALOG 落 logcat JSON 行
+ * （service.cpp:79 标签口径，storm 同款 :817 格式；观测不接 lcview JSONL）。
+ * snprintf 截断（n<0 或超缓冲）则丢弃整行并 ALOGE，不打半截 JSON（CXX-002）。
+ */
+static void EmitCollectorJson(const char* rule, char* line, int n, size_t cap) {
+    if (n < 0 || n >= static_cast<int>(cap)) {
+        LC_ALOGE("%s: JSON line truncated, drop", rule);
+        return;
+    }
+    EVENT_ALOG("%s", line);
+}
+
+/* 块设备差分速率 JSON 行（lcview-block 观测迁移；device 取自 /sys/block 名，
+ * 仅字母数字，无需 JSON 转义） */
+static void EmitBlockSampleJson(const std::string& dev,
+                                const lechao::lciod::BlockRates& r,
+                                uint64_t inflight) {
+    char line[256];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"block\",\"device\":\"%s\",\"read_iops\":%.1f,"
+        "\"read_bytes_per_s\":%.0f,\"read_avg_ms\":%.2f,\"write_iops\":%.1f,"
+        "\"write_bytes_per_s\":%.0f,\"write_avg_ms\":%.2f,\"inflight\":%llu,"
+        "\"busy\":%.2f}",
+        dev.c_str(), r.read_iops, r.read_bytes_per_s, r.read_avg_lat_ms,
+        r.write_iops, r.write_bytes_per_s, r.write_avg_lat_ms,
+        static_cast<unsigned long long>(inflight), r.busy_ratio);
+    EmitCollectorJson("block", line, n, sizeof(line));
+}
+
+/* 规则二（慢盘）触发 JSON 行 */
+static void EmitSlowDiskJson(const std::string& dev, double writeAvgLatMs,
+                             double thresholdMs, uint32_t consecutive) {
+    char line[192];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"slow_disk\",\"device\":\"%s\",\"write_avg_ms\":%.2f,"
+        "\"threshold_ms\":%.2f,\"consecutive\":%u}",
+        dev.c_str(), writeAvgLatMs, thresholdMs,
+        static_cast<unsigned>(consecutive));
+    EmitCollectorJson("slow_disk", line, n, sizeof(line));
+}
+
+/* 悬挂检测触发 JSON 行 */
+static void EmitHangJson(const std::string& dev, uint64_t inflight,
+                         double writeAvgLatMs) {
+    char line[160];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"hang\",\"device\":\"%s\",\"inflight\":%llu,"
+        "\"write_avg_ms\":%.2f}",
+        dev.c_str(), static_cast<unsigned long long>(inflight), writeAvgLatMs);
+    EmitCollectorJson("hang", line, n, sizeof(line));
+}
+
+/* zram0 水位/压缩比/io 统计 JSON 行 */
+static void EmitZramJson(const lechao::lciod::ZramCollector::Sample& z) {
+    char line[224];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"zram\",\"mem_used_total\":%llu,\"mem_used_max\":%llu,"
+        "\"compr_ratio\":%.2f,\"failed_reads\":%llu,\"failed_writes\":%llu,"
+        "\"read_bytes\":%llu,\"write_bytes\":%llu}",
+        static_cast<unsigned long long>(z.memUsedTotal),
+        static_cast<unsigned long long>(z.memUsedMax), z.comprRatio,
+        static_cast<unsigned long long>(z.failedReads),
+        static_cast<unsigned long long>(z.failedWrites),
+        static_cast<unsigned long long>(z.readBytes),
+        static_cast<unsigned long long>(z.writeBytes));
+    EmitCollectorJson("zram", line, n, sizeof(line));
+}
+
+/* lciod_sd sysfs 聚合 + SSR 解码速度档 JSON 行（A 批二方向2） */
+static void EmitSdJson(const lechao::lciod::SdCollector::Sample& s) {
+    char line[256];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"sd\",\"enable\":%llu,\"window_bytes\":%llu,"
+        "\"window_requests\":%llu,\"stuck_count\":%llu,"
+        "\"ssr_speed_class\":%llu,\"ssr_uhs_grade\":%llu,\"ssr_valid\":%llu}",
+        (unsigned long long)s.enable, (unsigned long long)s.windowBytes,
+        (unsigned long long)s.windowRequests, (unsigned long long)s.stuckCount,
+        (unsigned long long)s.ssrSpeedClass, (unsigned long long)s.ssrUhsGrade,
+        (unsigned long long)s.ssrValid);
+    EmitCollectorJson("sd", line, n, sizeof(line));
+}
+
+/* C 批二方向2：USB 传输延迟直方图 JSON 行（每 10s 采样，rule=histo）。
+ * read/write_total 为全档累计，tail_read/tail_write 为长尾档（>=50ms）累计。 */
+static void EmitHistoJson(int minor, const aidl::vendor::lechao::lciod::LatencyHistogram& h) {
+    char line[320];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"histo\",\"minor\":%d,\"dirs\":%d,\"size_bins\":%d,"
+        "\"latency_bins\":%d,\"mono_ts_ns\":%lld,\"read_total\":%llu,"
+        "\"write_total\":%llu,\"tail_read\":%llu,\"tail_write\":%llu}",
+        minor, h.dirs, h.sizeBins, h.latencyBins,
+        (long long)h.monoTsNs,
+        (unsigned long long)HistoTotalSum(h, 0),
+        (unsigned long long)HistoTotalSum(h, 1),
+        (unsigned long long)HistoTailSum(h, 0, kHistoTailLatStartBin),
+        (unsigned long long)HistoTailSum(h, 1, kHistoTailLatStartBin));
+    EmitCollectorJson("histo", line, n, sizeof(line));
+}
+
+/* C 批二方向2：长尾越限合成事件 JSON 行（rule=usb_latency_tail） */
+static void EmitHistoTailEventJson(int minor, int dir, uint64_t count, uint64_t threshold) {
+    char line[224];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"usb_latency_tail\",\"device_index\":%d,\"direction\":%d,"
+        "\"latency_ms\":%d,\"count\":%llu,\"threshold\":%llu}",
+        minor, dir, kHistoTailLatencyMs,
+        (unsigned long long)count, (unsigned long long)threshold);
+    EmitCollectorJson("usb_latency_tail", line, n, sizeof(line));
+    LC_ALOGI("histo: latency tail minor=%d dir=%d count=%llu threshold=%llu",
+             minor, dir, (unsigned long long)count, (unsigned long long)threshold);
+}
+
+/*
+ * R5 方向2/3：块设备/zram 10s 观测采集线程入口（IoServiceImpl::start() 以
+ * std::thread(...).detach() 启动）。对齐 IoQosManager::RunLoop 的
+ * steady_clock 绝对时间对齐范式（io_qos.cpp:456），每 kBlockSampleIntervalSec
+ * (10s) 一轮：
+ *   1) 枚举 /sys/block 块设备，逐设备差分采样（首次只建 prev，无速率）；
+ *   2) 悬挂检测（inflight 高 + 写延迟高持续 3 次）与规则二慢盘（写平均延迟
+ *      持续超阈 3 次）触发时经 EVENT_ALOG 打 JSON 行（不接 lcview JSONL）；
+ *   3) zram0 水位/压缩比/io 统计打 EVENT_ALOG JSON 行；
+ *   4) lciod_sd sysfs 健康聚合（enable/window_bytes/window_requests/
+ *      stuck_count）与 SSR 解码速度档打 EVENT_ALOG JSON 行（A 批二方向2）。
+ * 观测为增强项非致命：枚举/采样失败已限频 ALOGE，跳过本轮，线程不退出
+ * （CXX-004：非致命错误不触发进程退出）。
+ */
+static void BlockCollectorRunLoop() {
+    using clock = std::chrono::steady_clock;
+    const auto period = std::chrono::seconds(lechao::lciod::kBlockSampleIntervalSec);
+    lechao::lciod::BlockCollector block;
+    lechao::lciod::ZramCollector zram;
+    lechao::lciod::SdCollector sd;
+    /* 悬挂/慢盘状态按设备维护、跨 10s 采样持续——避免 A 设备 2 次 + B 设备
+     * 1 次被合并误判（与 lcview sampleBlockMetrics 同款按设备状态） */
+    std::unordered_map<std::string, lechao::lciod::HangState> hangStates;
+    std::unordered_map<std::string, lechao::lciod::SlowDiskState> slowStates;
+
+    while (true) {
+        const auto now = clock::now();
+        std::this_thread::sleep_until(now + period);
+
+        std::vector<std::string> devs;
+        if (!block.EnumerateBlockDevices(devs))
+            continue;  /* 枚举失败已限频 ALOGE，跳过本轮（非致命） */
+
+        for (const auto& dev : devs) {
+            lechao::lciod::BlockRates rates;
+            uint64_t inflight = 0;
+            /* 首次采样只建 prev（返回 false）；读失败返回 false（已限频 ALOGE） */
+            if (!block.SampleDevice(dev, &rates, &inflight))
+                continue;
+            EmitBlockSampleJson(dev, rates, inflight);
+
+            /* 悬挂检测：触发后清零收敛，按"持续段"每段一条，防 10s 周期刷屏 */
+            auto hit = hangStates.emplace(dev, lechao::lciod::HangState{}).first;
+            if (lechao::lciod::UpdateHangState(
+                    &hit->second, inflight, lechao::lciod::kInflightHangThreshold,
+                    rates.write_avg_lat_ms, lechao::lciod::kLatencyHangThresholdMs)) {
+                EmitHangJson(dev, inflight, rates.write_avg_lat_ms);
+                hit->second.consecutive_high = 0;
+            }
+
+            /* 规则二（慢盘）：写平均延迟持续超阈 → EVENT_ALOG JSON 行 */
+            auto sit = slowStates.emplace(dev, lechao::lciod::SlowDiskState{}).first;
+            if (lechao::lciod::EvaluateSlowDiskRule(
+                    &sit->second, rates.write_avg_lat_ms,
+                    lechao::lciod::kSlowDiskWriteLatThresholdMs,
+                    lechao::lciod::kSlowDiskRequireConsecutive)) {
+                EmitSlowDiskJson(dev, rates.write_avg_lat_ms,
+                                 lechao::lciod::kSlowDiskWriteLatThresholdMs,
+                                 sit->second.consecutive);
+                sit->second.consecutive = 0;  /* 超阈持续段收敛 */
+            }
+        }
+
+        /* zram 水位与 io 统计（zram0 缺失时降级跳过，限频 ALOGE） */
+        lechao::lciod::ZramCollector::Sample z;
+        if (zram.SampleZram(&z))
+            EmitZramJson(z);
+
+        /* lciod_sd 健康聚合 + SSR 速度档（模块缺失时降级跳过，限频 ALOGE） */
+        lechao::lciod::SdCollector::Sample sdSample;
+        if (sd.SampleSd(&sdSample))
+            EmitSdJson(sdSample);
+    }
+}
+
 void IoServiceImpl::start() {
     start_monitor();
     /* R2 方向 5+6：启动独立全局链路监控线程（LinkMonitorRun，detach）。
@@ -239,6 +486,10 @@ void IoServiceImpl::start() {
      * （仿 LinkMonitorRun 单调时钟范式）；stop_ 退出标志仅供单测/析构使用，
      * 生产线程随进程生命周期终止（进程非 oneshot，init 自动重启）。 */
     std::thread(&lechao::lciod::IoQosManager::RunLoop, &io_qos_).detach();
+    /* R5 方向2：启动块设备/zram 10s 观测采集线程（BlockCollectorRunLoop，
+     * detach）。与 monitor/QoS 线程并行，观测为增强项非致命；线程随进程
+     * 生命周期终止（进程非 oneshot，init 自动重启）。 */
+    std::thread(BlockCollectorRunLoop).detach();
 }
 
 /*
@@ -448,6 +699,9 @@ void IoServiceImpl::start_monitor() {
                 bool stormArmed = true;  /* 窗口累计回落阈值后重新武装 */
             };
             std::unordered_map<int32_t, StormState> stormStates;
+            /* C 批二方向2：per-minor 长尾累计差分状态（跨 10s 采样，仅本分片
+             * worker 线程访问，无锁；设备离线时随 stormStates 一并清理）。 */
+            std::unordered_map<int32_t, HistoTailState> histoTailStates;
             /* 最近一次已处理的注入值（值变化才处理，幂等去重） */
             std::string lastInjectValue;
 
@@ -455,8 +709,12 @@ void IoServiceImpl::start_monitor() {
              * 本分片设备事件。 */
             int epfd = epoll_create1(EPOLL_CLOEXEC);
             if (epfd < 0) {
-                LC_ALOGE("monitor[%d]: epoll_create1 failed: %s", shard, strerror(errno));
-                return;
+                int saved = errno;
+                /* CXX-004：分片 worker 致命错误必须显式退出（与下方 epoll_wait
+                 * 致命错误一致），禁止静默 return 让线程消逝、进程"活着不工作"。
+                 * 进程非 oneshot（见 lechao_lciod.rc），init 按重启策略拉起。 */
+                LC_ALOGE("monitor[%d]: epoll_create1 failed: %s", shard, strerror(saved));
+                std::exit(1);
             }
 
             /* LCD-018：绝对时间对齐调度。epoll_wait 超时 50ms 作为固定节拍。 */
@@ -540,6 +798,14 @@ void IoServiceImpl::start_monitor() {
                     if (std::find(deviceMinors.begin(), deviceMinors.end(), it->first) ==
                         deviceMinors.end())
                         it = stormStates.erase(it);
+                    else
+                        ++it;
+                }
+                /* C 批二方向2：同步清理离线设备的长尾差分状态（CXX-002） */
+                for (auto it = histoTailStates.begin(); it != histoTailStates.end();) {
+                    if (std::find(deviceMinors.begin(), deviceMinors.end(), it->first) ==
+                        deviceMinors.end())
+                        it = histoTailStates.erase(it);
                     else
                         ++it;
                 }
@@ -674,9 +940,10 @@ void IoServiceImpl::start_monitor() {
                     int saved = errno;
                     LC_ALOGE("monitor[%d]: epoll_wait failed: %s (epfd=%d)",
                              shard, strerror(saved), epfd);
-                    /* CXX-004：epoll 致命错误（EBADF 等）4 步退出——置线程不可
-                     * 达前以 ERROR 日志 + exit(1) 交 init 重启（进程为 oneshot，
-                     * 无 alive 标志/等待者需通知，ERROR+exit 即完整退出协议） */
+                    /* CXX-004：epoll 致命错误（EBADF 等）退出——置线程不可达前
+                     * 以 ERROR 日志 + exit(1) 交 init 重启（进程非 oneshot，
+                     * 见 lechao_lciod.rc，init 自动重启；本分片 worker 无 alive
+                     * 标志/等待者需通知，ERROR+exit 即完整退出协议） */
                     std::exit(1);
                 }
 
@@ -852,6 +1119,24 @@ void IoServiceImpl::start_monitor() {
                               (long long)stats.eventDropCount,
                               (unsigned long long)read_err_rate,
                               (unsigned long long)write_err_rate);
+
+                        /* C 批二方向2：每 10s 拉取传输延迟直方图，落 histo JSON
+                         * 行；长尾（>=50ms）计数窗口新增超阈即合成
+                         * usb_latency_tail 事件。仅在 getStats 成功设备上执行
+                         * （前面失败已 continue）。 */
+                        aidl::vendor::lechao::lciod::LatencyHistogram hist;
+                        auto h_status = hal->getLatencyHistogram(minor, &hist);
+                        if (!h_status.isOk()) {
+                            ALOGW("monitor[%d]: getLatencyHistogram failed for minor=%d", shard, minor);
+                        } else {
+                            EmitHistoJson(minor, hist);
+                            uint64_t rt = HistoTailSum(hist, 0, kHistoTailLatStartBin);
+                            uint64_t wt = HistoTailSum(hist, 1, kHistoTailLatStartBin);
+                            HistoTailState& hs = histoTailStates.emplace(minor, HistoTailState{}).first->second;
+                            int mask = EvaluateHistoTail(&hs, rt, wt, kHistoTailThreshold);
+                            if (mask & 1) EmitHistoTailEventJson(minor, 0, rt, kHistoTailThreshold);
+                            if (mask & 2) EmitHistoTailEventJson(minor, 1, wt, kHistoTailThreshold);
+                        }
                     }
                 }
             }

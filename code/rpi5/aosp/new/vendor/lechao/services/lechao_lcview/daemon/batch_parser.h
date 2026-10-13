@@ -89,18 +89,20 @@ BatchParseResult parseBatch(SchemaParser& schema, FileWriter& writer,
 // maxRetries 为"总尝试上限"（含首次，R-19 P5 方向 4 修 off-by-one；
 // do-while 保证至少尝试 1 次，maxRetries=0 时仅首次尝试），
 // 每次失败间隔 interval，eventCount>0 即成功。
-// running 为可中断开关（生产传全局 gRunning）：重试期间收到停止信号
-// （SIGTERM 置 gRunning=false）立即退出，不再等满 maxRetries×interval
-// （原实现最长 15s 无法及时响应 init stop，方向 4）
+// shouldStop 为可中断谓词（生产传 stopSignalRequested，其内部把信号处理器
+// 置位的 gSignalRequested 同步到 gRunning）：重试期间收到停止信号
+// （SIGTERM/SIGINT 置位 → 谓词返 true）立即退出，不再等满
+// maxRetries×interval（原实现最长 15s 无法及时响应 init stop，方向 4）
 bool loadSchemaWithRetry(SchemaParser &schema, const std::string &path,
-                         const std::atomic<bool> &running, int maxRetries,
+                         const std::function<bool()> &shouldStop, int maxRetries,
                          std::chrono::milliseconds interval = std::chrono::milliseconds(500));
 
 // schema 加载失败时的 main 退出码（方向 4，纯函数）：
 // 加载成功 → 0（正常继续）；因关停中断（running=false，重试窗口被
 // SIGTERM 打断）→ 0（优雅退出，init 不判崩溃）；真失败（running 仍
 // true，schema 文件确不可用）→ 1（交 init 重启重试）。原实现失败一律
-// return 1——init stop 时 gRunning 已置 false 仍返 1，init 视作崩溃重启
+// return 1——init stop 时停止信号未被观测（运行标志仍 true）仍返 1，init
+// 视作崩溃重启
 int schemaLoadExitCode(bool schemaOk, bool running);
 
 // flush 触发判定（hal_test readerLoop 的满/超时/滞留窗语义并入 daemon）：

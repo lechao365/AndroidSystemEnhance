@@ -25,6 +25,9 @@
 using vendor::lechao::lcview::DecodedField;
 using vendor::lechao::lcview::FieldDecodeResult;
 using vendor::lechao::lcview::decodeRecordField;
+// CXX-001：record 头多字节字段显式小端读取（禁止结构体强转假设主机序）
+using vendor::lechao::lcview::recordEventId;
+using vendor::lechao::lcview::recordMagic;
 
 // 将 JSON 中的字符串类型名映射为 FieldType 枚举值
 // 设计决策：写死字符串到枚举的映射而非通过反射，
@@ -293,15 +296,15 @@ bool SchemaParser::validate(const uint8_t* data, size_t len,
     const struct lcview_record_hdr* hdr =
         reinterpret_cast<const struct lcview_record_hdr*>(data);
 
-    // 魔数校验：快速识别数据损坏
-    if (hdr->magic != LCVIEW_MAGIC) {
+    // 魔数校验：快速识别数据损坏（多字节字段显式小端读取，CXX-001）
+    if (recordMagic(hdr) != LCVIEW_MAGIC) {
         errMsg = "bad magic";
         return false;
     }
 
-    const EventSchema* schema = find(hdr->event_id);
+    const EventSchema* schema = find(recordEventId(hdr));
     if (!schema) {
-        errMsg = "unknown event_id " + std::to_string(hdr->event_id);
+        errMsg = "unknown event_id " + std::to_string(recordEventId(hdr));
         return false;
     }
 

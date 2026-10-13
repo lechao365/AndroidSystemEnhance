@@ -24,6 +24,8 @@ import re
 import sys
 from pathlib import Path
 
+from paths import DATA_DIRNAME, DATA_KNOWN_ISSUES_DIRNAME
+
 _ROOT = Path(__file__).resolve().parents[2]
 
 try:
@@ -78,7 +80,7 @@ def ref_ids(root: Path):
 
 def existing_ids(root: Path) -> set[str]:
     """data/known-issues/ 下记录文件（排除 index.md）的实际 issue_id 集合。"""
-    d = root / "data" / "known-issues"
+    d = root / DATA_DIRNAME / DATA_KNOWN_ISSUES_DIRNAME
     ids: set[str] = set()
     if not d.is_dir():
         return ids

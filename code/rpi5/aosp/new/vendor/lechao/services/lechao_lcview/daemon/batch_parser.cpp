@@ -10,6 +10,7 @@
 #define LOG_TAG "lechao_lcview"
 
 #include "batch_parser.h"
+#include "record_codec.h"
 #include "../include/lcview_events.h"
 #include <log/log.h>
 #include <cstring>
@@ -56,15 +57,19 @@ int vendor::lechao::lcview::classifyInvalidReason(const std::string &reason)
 //   - bad magic（魔数不符）
 // 字段级/schema 语义校验留在 kValid 回调（生产走 schema.validate，测试走
 // decodeRecordField），本层不耦合 SchemaParser。
+// CXX-001：批次 4B 长度前缀与 record 头多字节字段统一走 record_codec.h
+// 的显式小端助手（readLe32/recordMagic/recordEventId），线材契约小端
+// （lcview_events.h 大端编译守卫），禁止裸 memcpy 假设主机序
+
 void vendor::lechao::lcview::parseBatchRecords(
     const uint8_t* data, size_t len, const ParsedBatchCallback& cb)
 {
     size_t offset = 0;
     while (offset + 4 <= len) {
-        // 读取本条记录的总长度（含自身 4 字节）。LCV-02：主机序裸 memcpy
-        //（事实小端契约，与内核写入端 lcview_builder 同机同序，禁单侧改转换）
-        uint32_t total_len;
-        memcpy(&total_len, data + offset, 4);
+        // 读取本条记录的总长度（含自身 4 字节）。LCV-02：小端线材契约，
+        // readLe32 显式字节拼接（与内核写入端 lcview_builder 同机同序，
+        // 保持现有小端结果不变；CXX-001 防跨大小端假设）
+        const uint32_t total_len = readLe32(data + offset);
 
         // 长度校验：最小长度和边界检查
         if (total_len < 4 || offset + total_len > len) {
@@ -95,9 +100,10 @@ void vendor::lechao::lcview::parseBatchRecords(
         }
 
         // 魔数校验：快速识别数据损坏（与 schema 无关的结构级检查）
+        // CXX-001：多字节 magic 显式小端读取，禁止结构体强转假设主机序
         const struct lcview_record_hdr* hdr =
             reinterpret_cast<const struct lcview_record_hdr*>(recordStart);
-        if (hdr->magic != LCVIEW_MAGIC) {
+        if (recordMagic(hdr) != LCVIEW_MAGIC) {
             ParsedBatchRecord rec;
             rec.kind = ParsedBatchRecord::Kind::kBadMagic;
             rec.data = recordStart;
@@ -189,7 +195,7 @@ BatchParseResult vendor::lechao::lcview::parseBatch(
             // 字段类型和总长度是否完整合法
             std::string errMsg;
             if (schema.validate(rec.data, rec.len, errMsg)) {
-                const EventSchema* es = schema.find(hdr->event_id);
+                const EventSchema* es = schema.find(recordEventId(hdr));
                 if (es) {
                     writer.writeRecord(*es, hdr, fields, fieldsLen);
                     result.validCnt++;
@@ -197,7 +203,7 @@ BatchParseResult vendor::lechao::lcview::parseBatch(
                     // validate 通过但 find 失败（理论不可达）：防御分支，
                     // 禁止静默丢数据（CXX-004 故障可见性）
                     ALOGE("lechao_lcview: parse: schema for event %u vanished",
-                          hdr->event_id);
+                          recordEventId(hdr));
                     writer.writeInvalid(rec.data, rec.len, "schema vanished");
                     result.invalidCnt++;
                     result.miscInvalidCnt++; // R-09 方向 4：防御分支归其他
@@ -228,12 +234,14 @@ BatchParseResult vendor::lechao::lcview::parseBatch(
 }
 
 bool vendor::lechao::lcview::loadSchemaWithRetry(SchemaParser &schema, const std::string &path,
-                                                 const std::atomic<bool> &running, int maxRetries,
+                                                 const std::function<bool()> &shouldStop,
+                                                 int maxRetries,
                                                  std::chrono::milliseconds interval)
 {
     // 方向 4：可中断 + 总尝试上限语义。
-    //   running：重试期间收到停止信号（gRunning=false）立即退出，不再等满
-    //   maxRetries×interval——否则 init stop 被最长 15s 的重试窗口卡住。
+    //   shouldStop：重试期间收到停止信号（SIGTERM/SIGINT 置位 → 谓词返
+    //   true）立即退出，不再等满 maxRetries×interval——否则 init stop 被
+    //   最长 15s 的重试窗口卡住。
     //   maxRetries 为"总尝试上限"（含首次）：do-while 保证至少尝试 1 次
     //   （maxRetries=0 时仅首次尝试，成功即返回、失败即退出）。
     //   R-19 P5 方向 4 修正 off-by-one——原实现首次尝试在 while 条件内不
@@ -248,7 +256,7 @@ bool vendor::lechao::lcview::loadSchemaWithRetry(SchemaParser &schema, const std
         ALOGW("lechao_lcview: schema load attempt %d/%d failed", attempt, maxRetries);
         if (attempt >= maxRetries)
             break;  // 总尝试已达上限，不再重试
-        if (!running.load())
+        if (shouldStop())
             break;  // 停止信号：立即退出，不等满重试窗口
         std::this_thread::sleep_for(interval);
     } while (true);

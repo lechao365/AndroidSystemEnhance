@@ -8,6 +8,11 @@
 #   3. candidate baseline 阶段需在 archive 基础上补齐 build_result / package_result
 #   4. 任一字段缺失 → 状态不可前进，禁止作为 sync-code-to-workspace 真相源
 #   5. 新流程：candidate 由 publish-main-base --prepare 依据最新 verify 收据自动登记，archive 阶段仅旧流程历史
+#   6. 本模板仅列「最小证据集」；baseline_register.py 实写的完整字段集（见
+#      baseline-status.yaml 各实例）另含：evidence_scope / verified_commit /
+#      verified_tree / evidence_source / ki_gate / known_issues_carried /
+#      known_issues_closed / package_evidence / package_rc / cases_coverage。
+#      登记/核对完整字段时以 baseline-status.yaml 实例为事实源。
 
 # 模板（复制填写）:
 # baseline_id: BL-YYYYMMDD-NN       # 基线唯一标识（与 baseline-status.yaml 主键一致）
@@ -24,3 +29,15 @@
 # approved_at:                       # 批准完成时间戳（如 2026-06-20T12:34:56+08:00）
 # sync_count: 0                         # 被同步回拉次数（0 = 从未同步回拉）
 # sync_target: BL-YYYYMMDD-NN           # 同步目标 baseline（仅 sync-code-to-workspace 操作填充）
+#
+# ── 完整字段集（baseline_register.py 实写，最小集之外）─────────────────
+# evidence_scope:                    # 证据覆盖范围（board 收据 cases 推导；或 no-code-change 豁免）
+# verified_commit:                   # 收据实际验证的 commit（12hex）
+# verified_tree:                     # verified_commit 的树 hash（promote 树等价断言）
+# evidence_source:                   # 证据来源说明（如继承自旧收据 / 本批实测）
+# ki_gate:                           # known-issues 门禁结论（pass/inferred/empty-registry/not-run）
+# known_issues_carried:              # 带病项（逗号分隔 KI/FLAKE id，只记录不阻断）
+# known_issues_closed:               # 本批闭环终态项明细（issue_id/resolved_in/title/archived_in）
+# package_evidence:                  # 打包证据路径（收据内嵌 package 字段来源）
+# package_rc:                        # 打包脚本 rc（0=PASS；null=未取得证据）
+# cases_coverage:                    # 发布全量组覆盖（result=full/partial/missing，missing 列表，run_count）

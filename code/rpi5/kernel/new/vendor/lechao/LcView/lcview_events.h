@@ -43,6 +43,7 @@
  *   - USB 1, 5-13：vendor_lechao_usbd-stats.c（USB 存储监控）
  *   - GPIO 2：lechao_gpio_irq 驱动（GPIO 中断监控）
  *   - SENSOR 3：lechao_sensor 驱动（传感器数据采集）
+ *   - daemon 合成 14(slow_disk) / 17(usb_latency_tail)：用户态规则，无内核发射点
  */
 #define LCVIEW_EVENT_USB_CONNECT         1  /* USB 设备连接（预留，当前由 PROBE 替代） */
 #define LCVIEW_EVENT_GPIO_IRQ            2  /* GPIO 中断触发（来源：lechao_gpio_irq 驱动） */
@@ -71,6 +72,16 @@
 #define LCVIEW_EVENT_SLOW_DISK           14 /* 慢盘事件（R3 用户态 daemon 规则二合成，无内核
                                               * 发射点——BlockCollector 写延迟持续超阈落盘，
                                               * 见 DISABLED_EVENTS 豁免） */
+#define LCVIEW_EVENT_SD_HEALTH           15 /* SD/MMC 10s 窗健康聚合（来源：LcIod lciod_sd.c，
+                                              * 触发场景：10s 窗到期上报窗口/累计字节与请求数、
+                                              * 卡死累计数） */
+#define LCVIEW_EVENT_SD_STUCK            16 /* SD/MMC card busy 卡死降档（来源：LcIod lciod_sd.c，
+                                              * 触发场景：STUCK 事件后按 sd_bus_speed 逐级剥 caps
+                                              * 降档，字段为降档前/后速度档、错误码、累计卡死数） */
+#define LCVIEW_EVENT_USB_LATENCY_TAIL    17 /* USB 传输延迟长尾（C 批二方向2，用户态 daemon
+                                              * 合成，无内核发射点——lciod 每 10s 拉取延迟直方图，
+                                              * 长尾档（>=50ms）计数窗口新增超阈即合成，见
+                                              * DISABLED_EVENTS 豁免） */
 
 /* --- 记录魔数 --- */
 #define LCVIEW_MAGIC  0x4C56

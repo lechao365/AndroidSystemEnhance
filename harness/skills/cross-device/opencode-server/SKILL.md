@@ -58,7 +58,8 @@ emit 侧（远端）经 tailnet 从浏览器/手机访问，衔接 `/cross-devic
 6. **配置 Tailscale serve**：Windows 宿主 `tailscale serve --https=<port>` -> `http://localhost:PORT`
 7. **输出汇总**：service/listen/auth_user/serve_url/project_root/service_file
 
-`--status-only` 仅执行 2/5/6/7；`--restart-serve-only` 跳过 3/4（service 重启）。
+`--status-only` 执行 1(前置检查)+2/5/6/7（前置检查与凭据加载无条件前置）；
+`--restart-serve-only` 跳过 3/4（service 重启）。
 
 ## 输出（Outputs / artifacts）
 

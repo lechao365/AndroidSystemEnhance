@@ -1,7 +1,7 @@
 version: 1 
 
 # 文档目录清单（业务文档实际目录，位于 docs/ 下）：
-#   00-环境准备/ — 环境搭建、构建、刷机（静态文档，不随 code 变动，已并入 harness/reference）
+#   （00-环境准备/ 目录已移除——环境搭建/构建/刷机文档并入 harness/reference/）
 #   docs/01-打点增强/ — LcView 内核态/HAL/Daemon（来源：**/LcView/**、**/lcview*）
 #   docs/02-IO增强/   — LcIod 内核态/HAL/Service + USB 工具（来源：**/LcIod/**、**/lciod*、others/usb-*）
 # 注意：route 命中后，若目标目录尚未创建，由调用方跳过并 log_warn。

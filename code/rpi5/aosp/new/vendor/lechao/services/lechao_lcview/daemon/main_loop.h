@@ -7,13 +7,18 @@
 //   此前 runMainLoop 在含 main() 的 lechao_lcview.cpp 内，单测
 //   无法编译该文件（与 gtest 主函数冲突），主循环长期零检出。
 //   可测边界同时收口信号：installSignalHandlers 注册 SIGINT/
-//   SIGTERM 置 gRunning=false 触发优雅退出，main 不再自行 signal。
+//   SIGTERM 置位信号标志（main_loop.cpp 内 gSignalRequested，sig_atomic_t），
+//   统一经 stopSignalRequested() 把标志同步到 gRunning 触发优雅退出；
+//   主循环与启动阶段两段阻塞重试（schema 加载 / 设备打开）共用该入口，
+//   确保 SIGTERM/SIGINT 在任一阶段都能被及时观测。main 不再自行 signal。
 // ============================================================
 
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <functional>
 
 #include "../include/lcview_events.h"
 #include "DeviceReader.h"
@@ -29,11 +34,30 @@ namespace lcview {
 // 未更新时以心跳日志时间戳辅助判读即可
 #define LCVIEW_BUILD_TAG "LCVIEW-VERIFY-20260912-01"
 
-// 全局运行标志，被信号处理器置 false 以触发优雅退出
+// 全局运行标志：由 stopSignalRequested() 在观测到信号置位后同步为 false，
+// 主循环循环条件据此优雅退出。类型保持 std::atomic<bool>（仅主线程写、
+// 多处置读）；信号处理器自身不触碰它（只写 gSignalRequested，见 main_loop.cpp）。
 extern std::atomic<bool> gRunning;
 
-// 注册 SIGINT/SIGTERM 信号处理器（置 gRunning=false）
+// 注册 SIGINT/SIGTERM 信号处理器（只写 async-signal-safe 的 gSignalRequested）
 void installSignalHandlers();
+
+// 统一停止信号查询入口：把信号处理器置位的 gSignalRequested（volatile
+// sig_atomic_t，async-signal-safe 写）单点同步到 gRunning，并返回当前
+// 是否已请求停止。主循环每轮与启动阶段两段阻塞重试（schema 加载 / 设备
+// 打开）共用此入口——避免各调用点直读 gSignalRequested 的同步遗漏，
+// 且不违反信号处理器"只写 volatile std::sig_atomic_t"的约束。
+bool stopSignalRequested();
+
+// 设备打开重试（可中断）：直读设备节点可能在启动早期尚未就绪，按 interval
+// 轮询重试，最多 maxRetries 次（含首次）。
+// shouldStop 为停止谓词（生产传 stopSignalRequested）：返回 true 时立即退出，
+// 避免 init 已发 SIGTERM/SIGINT 仍被最长 maxRetries×interval 的开设备窗口卡住。
+// 返回 true 表示设备已打开；false 表示未打开（收到停止请求或重试耗尽，由
+// 调用方按停止状态区分退出码）。
+bool openDeviceWithRetry(DeviceReader &reader, const std::function<bool()> &shouldStop,
+                         int maxRetries,
+                         std::chrono::milliseconds interval = std::chrono::milliseconds(100));
 
 // 直读主循环：读内核 → 心跳 → 攒包 flush → 轮转/容量管理
 // reader 为 DeviceReader 抽象接口——生产注入 EpollDeviceReader，
@@ -131,7 +155,6 @@ struct WindowStats
     uint64_t windowReadBytes = 0; // 窗口内累计读字节（速率计算分子）
     // 方向 3：窗口速率（容量规划有据）
     uint64_t windowValidRecords = 0; // 窗口内合法落盘条数
-    uint64_t windowWrittenBytes = 0; // 窗口内落盘字节（event 文件 + invalid）
     // 方向 4：invalid 按 reason 分类窗口累计（坏长度 vs schema 漂移）
     long long invalidBadLen = 0;      // 窗口坏长度/坏前缀 invalid 累计
     long long invalidSchemaDrift = 0; // 窗口 schema 漂移 invalid 累计
@@ -141,7 +164,6 @@ struct WindowStats
         peakReadBytes = 0;
         windowReadBytes = 0;
         windowValidRecords = 0;
-        windowWrittenBytes = 0;
         invalidBadLen = 0;
         invalidSchemaDrift = 0;
     }

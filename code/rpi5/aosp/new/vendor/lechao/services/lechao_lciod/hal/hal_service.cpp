@@ -36,6 +36,7 @@
 #include <cinttypes>
 #include <cstring>
 #include <fcntl.h>
+#include <limits>
 
 using namespace ndk;
 using aidl::vendor::lechao::lciod::IoStats;
@@ -301,6 +302,55 @@ ndk::ScopedAStatus IoHalImpl::getStats(int32_t in_deviceMinor, IoStats* _aidl_re
     _aidl_return->lastEventType = raw.last_event_type;
     _aidl_return->enabled = raw.enabled;
     _aidl_return->flags = raw.flags;
+    return ndk::ScopedAStatus::ok();
+}
+
+/*
+ * getLatencyHistogram — 读取指定设备传输延迟/块大小二维直方图快照（C 批二）
+ *
+ * 与 getStats 同款持久 fd（entry->fd）懒打开缓存；设备移除（ENODEV/EIO）
+ * 时关闭 fd 置 -1。内核 struct → parcelable 映射：counts 定长三维矩阵
+ * [dir][size][lat] 展开为行主序扁平数组（AIDL 不支持定长数组），档位上界
+ * 饱和末档（u64 全 1）钳为 INT64_MAX。
+ */
+ndk::ScopedAStatus IoHalImpl::getLatencyHistogram(int32_t in_deviceMinor,
+                                                  aidl::vendor::lechao::lciod::LatencyHistogram* _aidl_return) {
+    *_aidl_return = {};
+    auto* entry = resolve_device(in_deviceMinor);
+    if (!entry) { LC_LOGW("getLatencyHistogram: device not found for minor"); return ndk::ScopedAStatus::fromServiceSpecificError(-ENODEV); }
+    if (entry->fd < 0) {
+        LC_LOGD("getLatencyHistogram: reopening persistent fd");
+        entry->fd = ::open_device(entry->path.c_str());
+    }
+    if (entry->fd < 0) { int saved = errno; LC_LOGE("getLatencyHistogram: open device failed: " << strerror(saved)); return ndk::ScopedAStatus::fromServiceSpecificError(-saved); }
+
+    struct vendor_lechao_usbd_latency_histogram raw;
+    int ret = ::get_latency_histogram(entry->fd, &raw);
+    int saved = errno;
+    if (ret < 0) {
+        LC_LOGE("getLatencyHistogram: ioctl GET_LATENCY_HISTOGRAM failed: " << strerror(saved));
+        if (saved == ENODEV || saved == EIO) { LC_LOGW("getLatencyHistogram: device removed (errno=" << saved << ")"); ::close_device(entry->fd); entry->fd = -1; }
+        return ndk::ScopedAStatus::fromServiceSpecificError(-saved);
+    }
+    /* 边界钳制：内核返回维度按契约应为 2/8/12，防御式取 min 防越界 */
+    const uint32_t dirs = raw.dirs  < VENDOR_LECHAO_USBD_HISTO_DIRS      ? raw.dirs  : VENDOR_LECHAO_USBD_HISTO_DIRS;
+    const uint32_t sb   = raw.size_bins < VENDOR_LECHAO_USBD_HISTO_SIZE_BINS ? raw.size_bins : VENDOR_LECHAO_USBD_HISTO_SIZE_BINS;
+    const uint32_t lb   = raw.latency_bins < VENDOR_LECHAO_USBD_HISTO_LAT_BINS ? raw.latency_bins : VENDOR_LECHAO_USBD_HISTO_LAT_BINS;
+    _aidl_return->monoTsNs = static_cast<int64_t>(raw.mono_ts_ns);
+    _aidl_return->dirs = static_cast<int32_t>(raw.dirs);
+    _aidl_return->sizeBins = static_cast<int32_t>(raw.size_bins);
+    _aidl_return->latencyBins = static_cast<int32_t>(raw.latency_bins);
+    _aidl_return->sizeBounds.reserve(sb);
+    for (uint32_t i = 0; i < sb; i++)
+        _aidl_return->sizeBounds.push_back(raw.size_bounds[i] > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ? std::numeric_limits<int64_t>::max() : static_cast<int64_t>(raw.size_bounds[i]));
+    _aidl_return->latencyBounds.reserve(lb);
+    for (uint32_t i = 0; i < lb; i++)
+        _aidl_return->latencyBounds.push_back(raw.latency_bounds[i] > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ? std::numeric_limits<int64_t>::max() : static_cast<int64_t>(raw.latency_bounds[i]));
+    _aidl_return->counts.reserve(dirs * sb * lb);
+    for (uint32_t d = 0; d < dirs; d++)
+        for (uint32_t s = 0; s < sb; s++)
+            for (uint32_t l = 0; l < lb; l++)
+                _aidl_return->counts.push_back(static_cast<int32_t>(raw.counts[d][s][l]));
     return ndk::ScopedAStatus::ok();
 }
 

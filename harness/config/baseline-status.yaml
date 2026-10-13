@@ -751,3 +751,69 @@ baselines:
       archived_in: ''
   approved_by: release-review <review@lechao.dev>
   approved_at: '2026-10-09T12:12:09+08:00'
+- baseline_id: BL-20261012-01
+  status: candidate
+  source_branch: dev
+  source_commit: ba8db58b4a9f
+  sync_manifest: data/verify-results/20261012-173756-manual-2610121737.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lciod-blk,lciod-histo,lciod-link,lciod-liveness,lciod-perf,lciod-pipeline,lciod-qos,lciod-recover-hal,lciod-sd,lciod-storm,lciod-trigger,lciod-uas,lcview-blk,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20261012-173756-manual-2610121737.md
+    ki_gate: pass
+    evidence_scope: lciod-blk,lciod-histo,lciod-link,lciod-liveness,lciod-perf,lciod-pipeline,lciod-qos,lciod-recover-hal,lciod-sd,lciod-storm,lciod-trigger,lciod-uas,lcview-blk,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+    known_issues_carried: KI-20261008-002,KI-20261008-001
+    package_evidence: data/verify-results/20261012-173756-manual-2610121737.md
+    package_rc: 0
+    cases_coverage:
+      result: full
+      missing: []
+      run_count: 21
+  reverify_required: true
+  reverify_reason: 旧全量收据 data/verify-results/20261012-173756-manual-2610121737.md
+    不构成 promote 依据：lciod-qos 项 detail 打印 ERROR（限速文件为空/不可读）却因 lciod_check.py 入口丢弃 return
+    值而记 pass，属验收链假绿。已在 181f15c 修复入口 rc 透传并放开 qos off 档空文件判据；须以修复后新全量收据重登 candidate
+    方可评审 promote（上批遗漏子项补落）。
+- baseline_id: BL-20261013-01
+  status: promoted
+  source_branch: dev
+  source_commit: 1b2825253284
+  sync_manifest: data/verify-results/20261013-095232-manual-2610130952.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lciod-blk,lciod-histo,lciod-link,lciod-liveness,lciod-perf,lciod-pipeline,lciod-qos,lciod-recover-hal,lciod-sd,lciod-storm,lciod-trigger,lciod-uas,lcview-blk,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20261013-095232-manual-2610130952.md
+    ki_gate: inferred
+    evidence_scope: lciod-blk,lciod-histo,lciod-link,lciod-liveness,lciod-perf,lciod-pipeline,lciod-qos,lciod-recover-hal,lciod-sd,lciod-storm,lciod-trigger,lciod-uas,lcview-blk,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger
+    known_issues_carried: KI-FLAKE-20d380d0f753-e1789e,KI-FLAKE-cefa39e1699f-1bac08,KI-FLAKE-d9ec6877f6c1-0714c7,KI-FLAKE-d9ec6877f6c1-d84e34,KI-FLAKE-d9ec6877f6c1-24bc54,KI-FLAKE-52e8c1ee2ec2-ee0c4b,KI-FLAKE-6824b8320bf9-8ed89d,KI-FLAKE-da7ebadae4b2-ed391a
+    package_evidence: data/verify-results/20261013-095232-manual-2610130952.md
+    package_rc: 0
+    cases_coverage:
+      result: full
+      missing: []
+      run_count: 21
+    known_issues_closed:
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+    - issue_id: KI-20261008-002
+      resolved_in: dev-e0b6b624da78
+      title: bot.c 对 packed CBW 结构体 dCBWDataTransferLength 字段多处直接取址直读（未走 le32 移位）
+      archived_in: ''
+    - issue_id: KI-20261008-001
+      resolved_in: dev-e0b6b624da78
+      title: rpi5 侧 usb-verify 未消费 usb-fault-inject 的 --expect JSON（跨设备契约缺口）
+      archived_in: ''
+  approved_by: release-review <review@lechao.dev>
+  approved_at: '2026-10-13T11:52:29+08:00'

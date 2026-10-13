@@ -22,6 +22,7 @@ cc_test {
         "Service_test.cpp",
         "HalClient_test.cpp",
         "IoQos_test.cpp",      // R4 方向 5：SD 卡写 QoS 限速（纯函数 + IoQosManager）
+        "block_collector_test.cpp",  // R5 方向 5：块设备/zram 观测纯函数（自 lcview 平移）
         ":lechao_lciod_daemon_sources",
     ],
     include_dirs: [

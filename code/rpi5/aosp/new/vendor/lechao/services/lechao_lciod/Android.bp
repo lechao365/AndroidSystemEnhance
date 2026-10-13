@@ -38,6 +38,7 @@ aidl_interface {
         "vendor/lechao/lciod/IoStats.aidl",
         "vendor/lechao/lciod/IoConfig.aidl",
         "vendor/lechao/lciod/IoEvent.aidl",
+        "vendor/lechao/lciod/LatencyHistogram.aidl",
     ],
     backend: {
         ndk: {

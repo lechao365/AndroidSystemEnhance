@@ -108,6 +108,14 @@ check_commit_scope() {
   if [ "$1" = "staged" ]; then
     status_out=$(git -c core.quotepath=false diff --cached --name-status --no-renames) || status_out=""
   else
+    # 检视修复（fail-closed）：origin/$BRANCH 引用缺失时 git diff 区间不可
+    # 解析（stderr 被吞、status_out 空）会误走「无待推提交」静默放行
+    # RECEIPT_MISSING 门禁——先验引用存在，缺失即拒（正常 push-only 路径
+    # origin/dev 必已拉取，不受影响）
+    if ! git rev-parse -q --verify "refs/remotes/origin/$BRANCH" >/dev/null 2>&1; then
+      err "error: origin/$BRANCH 引用不可解析（origin/dev 未拉取或不存在），无法判定待推提交面，拒绝 push-only"
+      exit 1
+    fi
     status_out=$(git -c core.quotepath=false diff --name-status --no-renames "origin/$BRANCH"..HEAD 2>/dev/null) || status_out=""
     [ -n "$status_out" ] || return 0   # 无待推提交，无比对对象
   fi
@@ -154,6 +162,13 @@ import check_commit_coverage as c; print(c.recent_promoted_baseline_commit('.'))
   if [ -z "$(printf '%s\n' "$status_out" | grep -E '^[AMD]+[[:space:]]+code/')" ]; then
     echo "warn: 提交面不含 code/ 业务文件，跳过与收据 commit_scope 比对（非业务改动无需上板收据）" >&2
     return 0
+  fi
+  # 未上板告警（check_unverified.py）：code/ 改动未被最新 board 收据覆盖时
+  # warn 提醒（非硬拒——提交面一致性已由下方 commit_scope 把关；本告警是把
+  # 「未上板验证」提前到推送阶段，避免六批 code 改动全 -s skip 累积到发布才
+  # 被 RECEIPT_FAIL 卡点）。rc=1 仅告警，不阻断推送。
+  if ! python3 harness/lib/check_unverified.py 2>/dev/null; then
+    echo "warn: 检测到 code/ 改动尚未被 board 收据覆盖（详见上方 check_unverified 输出）——建议推送后尽快 /workspace-verify 上板验证" >&2
   fi
   diffs=$(printf '%s\n' "$status_out" | python3 harness/lib/commit_scope.py --check "$latest_scope") || true
   if [ -n "$diffs" ]; then

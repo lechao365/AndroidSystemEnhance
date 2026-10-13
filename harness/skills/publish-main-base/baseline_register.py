@@ -24,11 +24,11 @@ VERIFY_CASES_PATH = (Path(__file__).resolve().parents[2] / "config"
 
 # 仿 ws_report.py：引入 cross-device 共享收据模块，candidate 实读真实 verify 收据
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cross-device" / "lib" / "python"))
-from cdp_receipt import read_receipt  # noqa: E402
+from cdp_receipt import latest_board_receipt, read_receipt  # noqa: E402
 from cdp_issue import (closed_issue_details, closed_issue_paths,
                        issue_files, read_index, read_issue, set_archived_in,
                        validate_issue)  # noqa: E402
-from cdp_paths import data_baselines_dir, project_root  # noqa: E402
+from cdp_paths import atomic_write_text, data_baselines_dir, project_root  # noqa: E402
 
 
 def load():
@@ -68,6 +68,9 @@ def save(data):
     """整文件重写但保留头部 '#' 注释行（语义说明不丢失）。
 
     注释收集遇首个非 '#' 非空行即停，避免把 yaml 条目内的注释行反复上提。
+    写盘走 cdp_paths.atomic_write_text 原子原语（tmp 带 pid+线程 id，os.replace
+    提交）：并发/中断下不留半写登记（半写 yaml 曾可按 latest 身份进入 promote
+    判定），语义与 write_receipt 同源。
     """
     text = CONFIG.read_text(encoding="utf-8")
     header = []
@@ -79,7 +82,7 @@ def save(data):
         else:
             break
     body = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
-    CONFIG.write_text("".join(header) + body, encoding="utf-8")
+    atomic_write_text(CONFIG, "".join(header) + body, encoding="utf-8")
 
 
 def _package_evidence_path(batch_id):
@@ -91,15 +94,37 @@ def _package_evidence_path(batch_id):
     return p if p.is_file() else None
 
 
-def _load_package_evidence(path):
-    """读打包证据 JSON dict；缺失/不可读/非对象均返 None（如实不声称）。"""
+def _match_evidence_batch(evidence, receipt_batch_id):
+    """打包证据 batch_id 与载体批一致性校验（H3 provenance 防线）。
+
+    证据未记 batch_id（旧证据/无批上下文）或与载体收据 batch_id 一致才认；
+    跨批（证据 batch_id 非空且 != 收据 batch_id）返 None——上层据此记
+    UNKNOWN，不伪造 PASS（真实命中：收据 manual-2610091135 内嵌上一批
+    manual-2610091031 的打包证据仍被当 PASS 采信）。
+    """
+    ev = (str(evidence.get("batch_id") or "")).strip()
+    rid = (str(receipt_batch_id or "")).strip()
+    if ev and rid and ev != rid:
+        return None
+    return evidence
+
+
+def _load_package_evidence(path, expected_batch_id=""):
+    """读打包证据 JSON dict；缺失/不可读/非对象均返 None（如实不声称）。
+
+    expected_batch_id 非空时附加 batch_id 一致性校验（H3）：跨批证据返 None。
+    """
     if not path:
         return None
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    if expected_batch_id:
+        return _match_evidence_batch(data, expected_batch_id)
+    return data
 
 
 def _receipt_package(r):
@@ -107,6 +132,8 @@ def _receipt_package(r):
 
     收据 package 字段由 ws_report 内嵌 ws_package 自描述证据单行 JSON 串
     （随收据入库可追溯，本批意图 1）；空/非法/非对象返 None（如实不声称）。
+    证据自身 batch_id 与本收据 batch_id 不一致（跨批采信，provenance 失真）
+    亦返 None → package_result 记 UNKNOWN，不得伪造 PASS（H3）。
     """
     text = (getattr(r, "package", "") or "").strip()
     if not text:
@@ -115,13 +142,17 @@ def _receipt_package(r):
         data = json.loads(text)
     except (ValueError, json.JSONDecodeError):
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    return _match_evidence_batch(data, getattr(r, "batch_id", ""))
 
 
 def _package_result_from_evidence(pkg_evidence, evidence_scope):
     """由打包证据机械推导 package_result（方向 2 同源口径）：
     证据 script_rc==0 记 PASS；evidence_scope=no-code-change 记 SKIP（无代码
-    改动打包豁免）；其余（无证据/证据 rc 非 0/不可读）留 UNKNOWN 不声称。
+    改动打包豁免）；其余（无证据/跨批证据/证据 rc 非 0/不可读）留 UNKNOWN
+    不声称。跨批证据已在 _receipt_package/_load_package_evidence 处归零为
+    None（H3），故此处无需再判 batch_id。
     """
     pkg_rc = pkg_evidence.get("script_rc") if pkg_evidence else None
     if pkg_rc == 0:
@@ -282,9 +313,9 @@ def check_issues_gate(task=None, issues_dir=None):
 
     先判畸形登记（validate_issue 有红即拒：文件名/头字段/枚举/index 一致性
     全局把关，防 index 按空格切分错位等畸形记录污染门禁判定）→ task 推断/
-    白名单（缺省从 status 非 fixed 条目的 task 集合推断，显式传值须在活跃
-    集合内防拼错）→ 判目标任务未解决阻塞（origin=introduced 或 blocking 且
-    status!=fixed 即拒）。
+    白名单（缺省从 status 非终态 (fixed/wontfix) 条目的 task 集合推断，显式
+    传值须在活跃集合内防拼错）→ 判目标任务未解决阻塞（origin=introduced 或
+    blocking 且 status 非终态 (fixed/wontfix) 即拒）。
     数据源 issues_dir 缺省取仓库真实根（_real_known_issues_dir，不随
     CDP_PROJECT_ROOT 改道——承重门禁不得被环境变量关掉）。
     返回 rc：0 通过 / 1 畸形或未解决阻塞 / 3 task 不在活跃集合。
@@ -308,9 +339,12 @@ def check_issues_gate(task=None, issues_dir=None):
             print("error: known-issues 畸形登记，拒绝（先修复登记再发布基线）",
                   file=sys.stderr)
             return 1
-    # task 推断：缺省从 status 非 fixed 条目的 task 集合推断（自动，无需人工申报）
+    # task 推断：缺省从 status 非终态条目的 task 集合推断（自动，无需人工申报）。
+    # 终态 = fixed / wontfix（wonfix 与 fixed 同等视为已闭环，不再参与活跃任务
+    # 集合——否则仅测试夹具引用的 wontfix 条目会干扰活跃集合多值推断）
+    _TERMINAL_STATUS = ("fixed", "wontfix")
     active_tasks = {i.task for _p, i in issues
-                    if i is not None and i.status != "fixed" and i.task}
+                    if i is not None and i.status not in _TERMINAL_STATUS and i.task}
     if task:
         # 白名单：显式传 --task 不在活跃集合内即 exit 3（防拼错静默通过；
         # 空集合时放行——无活跃任务则无冲突对象）
@@ -328,12 +362,13 @@ def check_issues_gate(task=None, issues_dir=None):
             return 1
         else:
             task = "empty-registry"
-    # 再判目标任务未解决阻塞：origin=introduced 或 blocking 且 status!=fixed 即拒
+    # 再判目标任务未解决阻塞：origin=introduced 或 blocking 且 status 非终态即拒
     bad = []
     for p, i in issues:
         if i is None or i.task != task:
             continue
-        if (i.origin == "introduced" or i.blocking) and i.status != "fixed":
+        if (i.origin == "introduced" or i.blocking) \
+                and i.status not in _TERMINAL_STATUS:
             bad.append(f"{p.name}: origin={i.origin} blocking={i.blocking} "
                        f"status={i.status}")
     if bad:
@@ -528,7 +563,8 @@ def main(argv=None):
         else:
             pkg_evidence_path = ((args.package_evidence or "").strip()
                                  or _package_evidence_path(r.batch_id))
-            pkg_evidence = _load_package_evidence(pkg_evidence_path)
+            pkg_evidence = _load_package_evidence(pkg_evidence_path,
+                                                  r.batch_id)
         pkg_rc = pkg_evidence.get("script_rc") if pkg_evidence else None
         package_result = _package_result_from_evidence(pkg_evidence,
                                                        evidence_scope)
@@ -586,6 +622,21 @@ def main(argv=None):
             print(f"error: 收据 build/board_verify 非 PASS/SKIP"
                   f"（build={build_result} board_verify={board_verify}），"
                   "拒绝登记（UNKNOWN 视同 FAIL，须人工复核）", file=sys.stderr)
+            return 1
+        # 方向 3（本批意图 1）登记门禁前移：package_result 非 PASS/SKIP 拒绝
+        # 登记（与 promote 硬门禁同口径，提前到 prepare 阶段拦截而非 promote
+        # 才暴露）。机器核对动过 code 与否：dev 相对 origin/main 有 code/ 改动
+        # 且 package 证据非 PASS 即拒；核对失败（None）与无改动（空）均放行——
+        # 登记非晋升，promote 阶段仍有 package/coverage 硬门禁兜底，此处只拦截
+        # 明确有 code 改动却无打包证据的登记，不放宽 promote。
+        code_changes = _code_changes_since_main()
+        if code_changes and package_result not in ("PASS", "SKIP"):
+            print(f"error: 登记门禁：dev 相对 origin/main 有 code/ 改动"
+                  f"（{len(code_changes)} 提交）且 package_result={package_result}"
+                  f" 非 PASS（须 ws_package 打包证据；no-code-change 豁免不受限）。"
+                  "打包在 opencode 会话内被 BLD-013 禁止，可用 systemd-run --user "
+                  "豁免或会话外终端执行 ws_package.py 后重登记（见 "
+                  "harness/reference/build-reference.md）", file=sys.stderr)
             return 1
         # ki_gate：known-issues 门禁结论（拒批已在脚本层 exit，缺参视为 not-run）
         ki_gate = (args.ki_gate or "").strip() or "not-run"
@@ -668,6 +719,30 @@ def main(argv=None):
                     print(f"error: 收据文件不存在，无法生成证据快照: {receipt}",
                           file=sys.stderr)
                     return 1
+                # 方向 3（本批意图 2）promote 前置证据链校验：candidate 若以
+                # board 收据为证据（动过 code 的上板验证），其 sync_manifest
+                # 须为最新 board 收据——prepare 后又有新 board 收据入库而
+                # candidate 未重登记时，promote 会拿旧收据算 cases_coverage/
+                # package，误背书新证据场景。校验不一致即拒并提示重 prepare
+                #（add-candidate 去重复用会同步对齐最新收据）。
+                # 豁免：candidate 以 skip/非 board 收据为证据（no-code-change
+                # harness 批无需上板验证，sync_manifest 指向 skip 收据合法）——
+                # 仅 board 收据场景强制对齐最新。latest_board_receipt 与
+                # prepare 的 EVIDENCE_RECEIPT 同源（publish_main_base.sh:322-335）。
+                sync_mode = (read_receipt(receipt)[0].verify_mode
+                             if receipt.is_file() else "")
+                if sync_mode == "board":
+                    lbp, _lr, lb_errs = latest_board_receipt()
+                    if lb_errs:
+                        print(f"error: promote 证据链校验：最新 board 收据解析有错"
+                              f"（{'; '.join(lb_errs)}），拒绝 promote", file=sys.stderr)
+                        return 1
+                    if lbp is not None and Path(lbp).resolve() != receipt.resolve():
+                        print(f"error: promote 证据链校验：candidate sync_manifest "
+                              f"({receipt.name}) 非最新 board 收据"
+                              f"（{Path(lbp).name}）——prepare 后证据链已更新，须重跑 "
+                              "--prepare 重新登记 candidate 后再 promote", file=sys.stderr)
+                        return 1
                 # 方向 6 + P1-B：审批凭据外部化——promote 审批人不得为执行人、
                 # token 须与 promote-approval.env 预设一致（在写快照前校验，
                 # 防快照污染），不再回落默认常量（防审批可自证，闭环

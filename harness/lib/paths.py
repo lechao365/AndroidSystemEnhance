@@ -33,14 +33,19 @@ def repo_root() -> Path:
 
 
 def _expand_env(val: str) -> str:
-    """展开 ${VAR} / ${VAR:-default} 环境变量引用（不支持嵌套）。"""
+    """展开 ${VAR} / ${VAR:-default} 环境变量引用（不支持嵌套）。
+
+    展开后若以 ~ 开头再经 expanduser 展开：`~/workspace` 未展开时
+    Path("~/workspace").is_absolute() 为 False，会被 path() 拼成
+    repo_root()/~/workspace 的错误相对路径。
+    """
     def _sub(m: re.Match) -> str:
         name, default = m.group(1), m.group(2)
         value = os.environ.get(name, "")
         if value:
             return value
         return default if default is not None else ""
-    return _ENV_RE.sub(_sub, val)
+    return os.path.expanduser(_ENV_RE.sub(_sub, val))
 
 
 def _load_conf() -> dict[str, str]:
@@ -86,6 +91,20 @@ def env_path(key: str, default: str | None = None) -> str:
     conf = _load_conf()
     val = conf.get(key, "")
     return val if val else (default if default is not None else "")
+
+
+# 数据目录名单一事实源（R2 字面量收敛）：仓内 data/ 下各数据目录名与相对
+# 路径常量集中于此（本模块有双名加载收敛，harness/lib 各模块以 `from paths
+# import ...` 复用，不会被误缓存为跨设备 cdp_paths 垫片语义）。消费方两类
+# 语义——「工程根绝对定位」（cdp_paths.data_*_dir）与「相对传入 root 只读
+# 定位」（check_known_issues/check_commit_coverage/metrics/selfcheck）；后者
+# 只复用目录名/相对路径常量，不得误用会 mkdir 的 base 目录函数。
+DATA_DIRNAME = "data"
+DATA_VERIFY_RESULTS_DIRNAME = "verify-results"
+DATA_KNOWN_ISSUES_DIRNAME = "known-issues"
+# 相对仓根路径（供 git 路径前缀匹配、EXCLUDE_PATHS 等字符串场景复用）
+DATA_VERIFY_RESULTS_REL = f"{DATA_DIRNAME}/{DATA_VERIFY_RESULTS_DIRNAME}"
+DATA_KNOWN_ISSUES_REL = f"{DATA_DIRNAME}/{DATA_KNOWN_ISSUES_DIRNAME}"
 
 
 def config_dir() -> Path:

@@ -10,6 +10,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include "service.h"
 /* R2 方向 5+6：规则一纯函数（供电不足归因）单测 */
 #include "link_monitor.h"
@@ -394,4 +396,112 @@ TEST(ApplyPowerSuspectRuleTest, EventInFuture_NotSuspect) {
     const uint64_t now = 2000000000000ULL;
     EXPECT_FALSE(ApplyPowerSuspectRule(now + 1000000000ULL, now, 0x10000,
                                        VENDOR_LECHAO_USBD_EVENT_LINK_DISCONNECT));
+}
+
+/* --- 延迟直方图长尾纯函数（C 批二方向2） --- */
+
+namespace {
+/* 构造 dirs*sizeBins*latencyBins 全零直方图（默认 2*8*12=192） */
+aidl::vendor::lechao::lciod::LatencyHistogram MakeHisto(int dirs = kHistoDirs,
+                                                        int sizeBins = kHistoSizeBins,
+                                                        int latencyBins = kHistoLatBins) {
+    aidl::vendor::lechao::lciod::LatencyHistogram h;
+    h.dirs = dirs;
+    h.sizeBins = sizeBins;
+    h.latencyBins = latencyBins;
+    h.counts.assign(static_cast<size_t>(dirs) * sizeBins * latencyBins, 0);
+    return h;
+}
+}  // namespace
+
+TEST(HistoTailSumTest, EmptyCounts_ReturnsZero) {
+    // counts 长度不足（空）→ 防御返回 0，不读越界
+    aidl::vendor::lechao::lciod::LatencyHistogram h;
+    h.dirs = kHistoDirs;
+    h.sizeBins = kHistoSizeBins;
+    h.latencyBins = kHistoLatBins;
+    EXPECT_EQ(HistoTailSum(h, 0, kHistoTailLatStartBin), 0u);
+    EXPECT_EQ(HistoTotalSum(h, 0), 0u);
+}
+
+TEST(HistoTailSumTest, TailSum_ExcludesBinsBelowStart) {
+    // dir=0/size=0 每档置 1（共 12 档），长尾 [9,12) 共 3 档
+    aidl::vendor::lechao::lciod::LatencyHistogram h = MakeHisto();
+    for (int l = 0; l < kHistoLatBins; l++)
+        h.counts[(0 * kHistoSizeBins + 0) * kHistoLatBins + l] = 1;
+    EXPECT_EQ(HistoTailSum(h, 0, kHistoTailLatStartBin), 3u);
+    EXPECT_EQ(HistoTotalSum(h, 0), 12u);
+    // 写方向无数据 → 0
+    EXPECT_EQ(HistoTailSum(h, 1, kHistoTailLatStartBin), 0u);
+    EXPECT_EQ(HistoTotalSum(h, 1), 0u);
+}
+
+TEST(HistoTailSumTest, TailSum_SumsAllSizes) {
+    // 同一延迟档跨所有 size 档累加：每个 size 档的 l=11 置 1 → 长尾 8
+    aidl::vendor::lechao::lciod::LatencyHistogram h = MakeHisto();
+    for (int s = 0; s < kHistoSizeBins; s++)
+        h.counts[(1 * kHistoSizeBins + s) * kHistoLatBins + (kHistoLatBins - 1)] = 1;
+    EXPECT_EQ(HistoTailSum(h, 1, kHistoTailLatStartBin), 8u);
+}
+
+TEST(HistoTailSumTest, DirOutOfRange_ReturnsZero) {
+    aidl::vendor::lechao::lciod::LatencyHistogram h = MakeHisto();
+    std::fill(h.counts.begin(), h.counts.end(), 1);
+    EXPECT_EQ(HistoTailSum(h, -1, 0), 0u);
+    EXPECT_EQ(HistoTailSum(h, kHistoDirs, 0), 0u);
+}
+
+TEST(HistoTailSumTest, StartBinOutOfRange_ReturnsZero) {
+    aidl::vendor::lechao::lciod::LatencyHistogram h = MakeHisto();
+    std::fill(h.counts.begin(), h.counts.end(), 1);
+    EXPECT_EQ(HistoTailSum(h, 0, -1), 0u);
+    EXPECT_EQ(HistoTailSum(h, 0, kHistoLatBins), 0u);
+}
+
+TEST(EvaluateHistoTailTest, FirstCall_BuildsBaseline_ReturnsZero) {
+    // 首次调用（valid=false）只建快照返回 0，不判越限
+    HistoTailState st;
+    EXPECT_EQ(EvaluateHistoTail(&st, 5, 7, kHistoTailThreshold), 0);
+    EXPECT_TRUE(st.valid);
+    EXPECT_EQ(st.prevRead, 5u);
+    EXPECT_EQ(st.prevWrite, 7u);
+}
+
+TEST(EvaluateHistoTailTest, DeltaAtThreshold_ReadBit) {
+    HistoTailState st;
+    EvaluateHistoTail(&st, 0, 0, 1);              // baseline
+    EXPECT_EQ(EvaluateHistoTail(&st, 1, 0, 1), 1);  // 读 +1 >= 1 → bit0
+}
+
+TEST(EvaluateHistoTailTest, DeltaAtThreshold_WriteBit) {
+    HistoTailState st;
+    EvaluateHistoTail(&st, 0, 0, 1);
+    EXPECT_EQ(EvaluateHistoTail(&st, 0, 1, 1), 2);  // 写 +1 >= 1 → bit1
+}
+
+TEST(EvaluateHistoTailTest, BothDirections_BothBits) {
+    HistoTailState st;
+    EvaluateHistoTail(&st, 0, 0, 1);
+    EXPECT_EQ(EvaluateHistoTail(&st, 3, 4, 1), 3);
+}
+
+TEST(EvaluateHistoTailTest, BelowThreshold_ReturnsZero) {
+    HistoTailState st;
+    EvaluateHistoTail(&st, 0, 0, 5);
+    EXPECT_EQ(EvaluateHistoTail(&st, 3, 4, 5), 0);  // 3,4 < 5 均不触发
+}
+
+TEST(EvaluateHistoTailTest, NoChange_ReturnsZero) {
+    HistoTailState st;
+    EvaluateHistoTail(&st, 10, 10, 1);
+    EXPECT_EQ(EvaluateHistoTail(&st, 10, 10, 1), 0);  // 无新增
+}
+
+TEST(EvaluateHistoTailTest, WrapAround_UsesCurrentValue) {
+    // 计数回绕（curr<prev）→ 按 curr 重算，不因回绕误触发大增量
+    HistoTailState st;
+    EvaluateHistoTail(&st, 100, 100, 1);
+    EXPECT_EQ(EvaluateHistoTail(&st, 2, 3, 1), 3);
+    EXPECT_EQ(st.prevRead, 2u);
+    EXPECT_EQ(st.prevWrite, 3u);
 }

@@ -23,13 +23,14 @@
 | 引号禁令 | 批次正文禁用单双引号字符（' 与 "，emit 角色校验，违规 exit 19）——apply 侧传输层会展开吞字致批次结构损坏；改用中文标点（「」、——）或去引号 |
 | batch_id | 规范化文本（剥 BOM/strip/去空行/LF，逐行删净行内空白）sha256 前 12 位 |
 | 验收语法 | `-sv` 验收必须为 `case:<id>[,<id>...]`（id 限小写字母数字与连字符，多个用逗号分隔，逐个查 verify-cases.yaml cases 段，任一未知判死）或 `manual:<自由文本>`（**仅 manual 模式保留自由文本**）；用例 id 在 verify-cases.yaml 集中维护，批次内不再书写 svc/log/prop/file 等验收表达式。**用例两级策略（B6）**：`-sv` 常态回归批验收 case 默认取快速回归组（lcview-liveness, lcview-pipeline, lcview-trigger, lciod-liveness, lciod-trigger）；publish-main-base 前的全量验收批取全部 case；批次方向涉及特定 case 的专项修复按需追加——选择依据见 verify-cases.yaml 顶部注释 |
-| 方向编号 | 多方向时以「1 xxx 2 yyy 3 zzz」连续编号；**编号前须为行首或句号或分号、编号后须带空白**（`(?:^|[。；])\s*(\d+)\s`，ws_report 方向数解析与 CDP-DOD-003 逐方向自报条数门禁据此计数，分号格式批次曾被解析为 0 绕过门禁） |
+| 方向编号 | 多方向时以「1 xxx 2 yyy 3 zzz」连续编号；**1 须在行首或句号/分号后，后续连续编号可空格分隔，每个编号后须带边界（空白 / `)` `）` `、` / 句点 `.` / 句号 `。`）**（ws_report 方向数解析与 CDP-DOD-003 逐方向自报条数门禁据此计数：只认从 1 起的最长连续编号链；小数（1.5）与「9 处」「15s」等中文计数不计，分号/空格格式批次曾被解析为 0 绕过门禁或误报） |
+| apply git 门禁 | `--role apply` 在结构/base 校验前机器校验「分支为 dev」+「工作树干净（`git status --porcelain` 为空）」：分支非 dev / 工作树脏 / git 命令失败均拒（exit 20，fail-closed）——原 cdp_apply_precheck 的这两项判定纳入实际 apply 入口，防退化为人工纪律。`--root <仓库根>` 缺省 cwd（生产从仓库根执行），仅供测试注入 |
 
 ## 退出码
 
 0 通过 / 1 checksum 不符（篡改/损坏，双角色 blocking）/ 3 参数错误·文件不可读或非 UTF-8 / 11 结构错误（含未知行）/ 12 空批 / 14 三标签缺失 /
-15 base 非法 / 16 预算超限 / 17 验收规则违规 / 18 base 不匹配 / 19 引号违规（仅 emit）
-（emit 全 blocking；apply 仅对 17 降级 WARN，16/1/18 双角色 blocking，19 仅 emit 校验）
+15 base 非法 / 16 预算超限 / 17 验收规则违规 / 18 base 不匹配 / 19 引号违规（仅 emit）/ 20 apply git 环境门禁（分支非 dev / 工作树不干净 / git 命令失败）
+（emit 全 blocking；apply 仅对 17 降级 WARN，16/1/18 双角色 blocking，19 仅 emit 校验，20 仅 apply 角色触发——apply git 环境门禁）
 
 ## 收据字段：timings（链路耗时打点）
 

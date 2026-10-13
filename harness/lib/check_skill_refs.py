@@ -6,7 +6,9 @@
 解析失败），长期未被发现（2026-08-30 修复）。本脚本把检查固化，防止 skill 改动
 再次引入悬空引用。
 
-检查范围（harness/skills 全部 skill + docs 设计文档 + .opencode/command）：
+检查范围（默认扫描根：harness/skills + docs + harness/rules +
+harness/reference + AGENTS.md + README.md + harness/README.md；R8 扩展——
+顶层治理文档引用最密集，此前不在门禁内致悬空漏网）：
   1. markdown 链接 `[..](path)` —— 剥离 `#锚点` 后按文件相对目录/项目根解析
   2. 反引号内类路径 token（含 .md/.py/.sh/.yaml/.conf 等扩展名，或 harness/ 等前缀）
   3. `python3|bash <path>` 命令路径
@@ -67,10 +69,30 @@ _OR_EXT_RE = re.compile(r"\.\w+/\.[a-z]+\s*$")
 # Android 设备根绝对路径（文档引用设备侧文件路径，非仓库内引用）
 _DEVICE_ROOT = ("/vendor/", "/system/", "/data/", "/dev/", "/proc/", "/sys/",
                 "/product/", "/apex/")
+# AOSP 工作区相对路径前缀（R8）：reference 文档描述 $AOSP_ROOT 下源码树/产物
+# （如 device/brcm/rpi5/boot/config.txt），非本仓资产。本仓引用一律带
+# code/ docs/ harness/ data/ 前缀，故整前缀豁免不掩真悬空（与 _DEVICE_ROOT
+# 的绝对路径豁免同源，覆盖 workspace 相对写法）。
+_AOSP_WS_PREFIXES = ("device/", "frameworks/", "build/", "prebuilts/",
+                     "out/", "vendor/", "system/", "hardware/", "external/")
+# 外部裸文件名（无斜杠，R8）：SD 卡 boot 文件 / AOSP 根打包脚本等设备/编译
+# 环境产物，本仓无同名文件，reference 文档引用非仓库资产（如 rpi5-mkimg.sh、
+# config.txt）。显式登记防 basename 零命中被误判为悬空仓库引用。
+_EXTERNAL_BARE_NAMES = frozenset({
+    "config.txt", "cmdline.txt", "rpi5-mkimg.sh",
+})
 
 # 豁免目录（相对 ROOT 清单常量，运行时基于当前 ROOT 拼接；方向 3 可扩展）：
 # 设计文档历史计划与运行日志含大量示例/模板引用，纳入豁免减少误报
 EXEMPT_RELS = ("docs/superpowers", "harness/log")
+
+# 默认扫描根（相对 ROOT，R8 扩展）：skill 文档 + 设计文档之外，纳入引用最
+# 密集的顶层治理文档——AGENTS.md、根 README.md、harness/README.md、
+# harness/rules/*、harness/reference/*。此前仅扫 harness/skills + docs 致
+# 这些顶层文档的悬空引用长期不在门禁内（漏网）。
+_DEFAULT_SCAN_RELS = ("harness/skills", "docs", "harness/rules",
+                      "harness/reference", "AGENTS.md", "README.md",
+                      "harness/README.md")
 
 
 def is_remote(p: str) -> bool:
@@ -110,9 +132,17 @@ def path_like(p: str) -> bool:
         # 无斜杠裸文件名：路径无法按目录解析，改由 scan_file._add 按
         # basename 仓内唯一匹配校验（方向 3）；此处仅放行带扩展名的文件
         # 名 token，无扩展名裸词视为描述文字非路径（EXT_HINT 统一兜底）。
+        # R8：显式登记的外部产物裸名（SD boot / AOSP 打包脚本）先豁免，
+        # 防其 basename 仓内零命中被误判为悬空仓库引用。
+        if p in _EXTERNAL_BARE_NAMES:
+            return False
         return EXT_HINT.search(p) is not None
     if p.startswith(_DEVICE_ROOT):
         # Android 设备根绝对路径（如 /vendor/etc/...，文档引用设备侧文件）跳过
+        return False
+    if p.startswith(_AOSP_WS_PREFIXES):
+        # AOSP 工作区相对路径（如 device/brcm/...，reference 文档引用
+        # $AOSP_ROOT 下源码/产物）跳过
         return False
     if p.startswith(".vscode/"):
         # 编辑器配置示例（指导创建 .vscode/settings.json 等，非仓库引用）跳过
@@ -280,18 +310,20 @@ def scan_command_files() -> list[tuple[Path, list[str]]]:
 def iter_scan_targets(rel: str | None) -> list[Path]:
     """收集待检查文件；排除 __pycache__ / .pytest_cache / tests/ 目录。
 
-    默认（rel 为空）扫描 harness/skills 与 docs 两个根（skill 文档与设计
-    文档的引用同样须防悬空）；--path 指定时只扫描该文件/目录。
+    默认（rel 为空）扫描 _DEFAULT_SCAN_RELS 各根（skill 文档、设计文档与
+    顶层治理文档的引用同样须防悬空）；--path 指定时只扫描该文件/目录。
+    根可为文件（AGENTS.md/README.md/harness/README.md）或目录，两分支
+    （git ls-files / rglob 回落）统一处理。
     """
-    bases = [ROOT / rel] if rel else [ROOT / "harness" / "skills", ROOT / "docs"]
+    base_rels = [Path(rel)] if rel else [Path(r) for r in _DEFAULT_SCAN_RELS]
+    bases = [ROOT / r for r in base_rels]
     exempt = tuple(ROOT / r for r in EXEMPT_RELS)
     targets: list[Path] = []
     files = _git_ls_files()
     if files is not None:
         # 文件面=跟踪+未跟踪非忽略（无 __pycache__/.pytest_cache 且不含
         # .git），输出相对 ROOT（快）；tests 目录与豁免/后缀过滤与 rglob
-        # 口径一致
-        base_rels = [Path(rel)] if rel else [Path("harness/skills"), Path("docs")]
+        # 口径一致。文件型根（AGENTS.md 等）按 is_relative_to 自身命中。
         exempt_rel = tuple(Path(r) for r in EXEMPT_RELS)
         for f in files:
             if not any(f.is_relative_to(b) for b in base_rels):
@@ -326,10 +358,11 @@ def iter_scan_targets(rel: str | None) -> list[Path]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="harness/skills + docs 引用完整性检查")
+        description="harness 引用完整性检查（skills/docs/rules/reference + "
+                    "顶层治理文档）")
     parser.add_argument("--path", default=None,
                         help="仅检查指定相对路径（文件或目录），"
-                             "默认全量 harness/skills + docs")
+                             "默认全量默认扫描根")
     parser.add_argument("--report", default=None,
                         help="悬空引用清单落盘路径（相对 ROOT 或绝对路径），"
                              "有悬空时写入（可跟踪，随批提交供清零追踪）")
@@ -379,7 +412,7 @@ def main() -> int:
         # 收据，倒逼悬空清零。明细已落 --report 清单供追踪。
         print(f"\n==== 共 {total} 处悬空引用（判红，见 --report 清单）====")
         return 1
-    print("OK: harness/skills + docs 引用完整，无悬空。")
+    print("OK: 引用完整，无悬空。")
     return 0
 
 

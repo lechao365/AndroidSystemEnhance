@@ -101,6 +101,15 @@ bool EpollDeviceReader::open()
                   << stats.total_records << " overrun=" << stats.overrun_cnt
                   << " usage=" << stats.ring_usage_bytes << "B/"
                   << stats.ring_size_bytes << "B";
+    else
+    {
+        // P2：启动诊断 ioctl 失败须可见（与 refreshStats 同口径 mIoctlErr++ +
+        // ERROR 日志）——静默会让"启动时内核统计不可读"无信号，心跳 ioctl_err
+        // 兜底判红也依赖该计数
+        mIoctlErr++;
+        LOG(ERROR) << "EpollDeviceReader: ring init ioctl GET_STATS failed, "
+                   << "errno=" << errno;
+    }
 
     // R-13 方向 1：启动 ABI 协商。内核版本不匹配（ioctl 失败=旧内核缺命令
     // 返 ENOTTY，或版本号低于 daemon 预期）→ mAbiOk=false，main() 据此
