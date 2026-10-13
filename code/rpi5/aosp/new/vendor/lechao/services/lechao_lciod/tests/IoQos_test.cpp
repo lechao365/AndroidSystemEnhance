@@ -22,9 +22,11 @@
 
 using lechao::lciod::BuildBlkioLine;
 using lechao::lciod::BuildIoMaxLine;
+using lechao::lciod::DecideAutoLevel;
 using lechao::lciod::IoQosLevel;
 using lechao::lciod::IoQosManager;
 using lechao::lciod::LevelToBytesPerSec;
+using lechao::lciod::ParseAutoFlag;
 using lechao::lciod::ParseIoQosLevel;
 
 namespace {
@@ -133,6 +135,67 @@ TEST(LevelToBytesPerSecTest, Fg_16MiBPerSec) {
 
 TEST(LevelToBytesPerSecTest, Bg_8MiBPerSec) {
     EXPECT_EQ(LevelToBytesPerSec(IoQosLevel::kBg), 8388608u);  // 8MiB/s
+}
+
+/* --- ParseAutoFlag：自动档开关解析（QoS 延迟感知分级） --- */
+
+TEST(ParseAutoFlagTest, OnValues_True) {
+    bool out = false;
+    EXPECT_TRUE(ParseAutoFlag("1", &out));
+    EXPECT_TRUE(out);
+    EXPECT_TRUE(ParseAutoFlag("on", &out));
+    EXPECT_TRUE(out);
+    EXPECT_TRUE(ParseAutoFlag("true", &out));
+    EXPECT_TRUE(out);
+}
+
+TEST(ParseAutoFlagTest, OffValues_False) {
+    bool out = true;
+    EXPECT_TRUE(ParseAutoFlag("0", &out));
+    EXPECT_FALSE(out);
+    EXPECT_TRUE(ParseAutoFlag("off", &out));
+    EXPECT_FALSE(out);
+    EXPECT_TRUE(ParseAutoFlag("", &out));  // 空串视为关
+    EXPECT_FALSE(out);
+}
+
+TEST(ParseAutoFlagTest, UnknownValue_Rejected_NoOutPollution) {
+    // CXX-003：未知开关值拒绝且不写 out
+    bool out = true;
+    EXPECT_FALSE(ParseAutoFlag("yes", &out));
+    EXPECT_TRUE(out);
+    EXPECT_FALSE(ParseAutoFlag(" ON", &out));
+    EXPECT_FALSE(ParseAutoFlag("1 ", &out));
+}
+
+TEST(ParseAutoFlagTest, NullOut_ReturnsFalse) {
+    EXPECT_FALSE(ParseAutoFlag("1", nullptr));
+}
+
+/* --- DecideAutoLevel：自动档档位决策（收紧/放松） --- */
+
+TEST(DecideAutoLevelTest, TailCount_Tightens) {
+    // 长尾计数 > 0 → 收紧 bg（无论平均延迟）
+    EXPECT_EQ(DecideAutoLevel(0, 1, 50000), IoQosLevel::kBg);
+    EXPECT_EQ(DecideAutoLevel(1, 3, 50000), IoQosLevel::kBg);
+}
+
+TEST(DecideAutoLevelTest, AvgOverThreshold_Tightens) {
+    // 无长尾但平均延迟 >= 阈值 → 收紧
+    EXPECT_EQ(DecideAutoLevel(50000, 0, 50000), IoQosLevel::kBg);
+    EXPECT_EQ(DecideAutoLevel(60000, 0, 50000), IoQosLevel::kBg);
+}
+
+TEST(DecideAutoLevelTest, NoTailAvgBelow_Relaxes) {
+    // 无长尾且平均延迟低于阈值 → 放松 off
+    EXPECT_EQ(DecideAutoLevel(10000, 0, 50000), IoQosLevel::kOff);
+    EXPECT_EQ(DecideAutoLevel(0, 0, 50000), IoQosLevel::kOff);
+}
+
+TEST(DecideAutoLevelTest, ZeroThreshold_NotTriggeredByAvg) {
+    // 阈值 0 视为无效：不因平均延迟触发（仅长尾触发），防缺省 0 恒收紧
+    EXPECT_EQ(DecideAutoLevel(999999, 0, 0), IoQosLevel::kOff);
+    EXPECT_EQ(DecideAutoLevel(999999, 1, 0), IoQosLevel::kBg);
 }
 
 /* --- BuildIoMaxLine / BuildBlkioLine：限速行拼接 --- */

@@ -324,6 +324,30 @@ cases:
     acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lciod_check.sh --mode sd-inject"'
     timeout_s: 120
 
+  # QoS 延迟感知自动分级闭环（本批新增验收 case，批次验收 case:qos-auto）。
+  # 语义：lciod_check.py --mode qos-auto 自驱 setprop ioqos_auto=1 + 延迟阈值
+  # → 反复向 sysfs inject_latency（root-only，写一次触发一次）注入**内存合成**
+  # 慢 COMPLETE（仅内存模拟，无块设备裸写）抬升 SD 窗口延迟 → daemon
+  # IoQosManager 自动档据窗口延迟反馈（window_lat_avg_us/window_lat_tail）
+  # 收紧 bg 限速 → 四重断言：
+  #   1) 限速文件进入 bg（含 8388608，自动档收紧）；
+  #   2) lcview JSONL 新增 qos_auto_adjust(id=18) 记录（seq 增量判据）；
+  #   3) logcat tag lechao_lciod_event 含 "rule":"qos_auto"（档位变化留痕）；
+  #   4) 停止注入待 10s 窗回落后限速文件退出 bg（自动档放松）。
+  # 防假绿：cgroup 组缺失 / setprop 失败 / 注入失败 / 限速文件不可读 / 未收紧
+  # / 无新增事件 / 无 logcat 留痕 / 未放松均判红。无块设备写（inject_latency
+  # 仅内存合成）；副作用字段 ioqos_auto/ioqos_lat_ms sysprop（快照/恢复），
+  # timeout_s 180（含收紧 ~16s + 放松 ~20s + daemon 周期等待）。
+  qos-auto:
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lciod_check.sh --mode qos-auto"'
+    setup_snapshot:
+      - 'adb shell "getprop sys.lechao.lciod.ioqos_auto"'
+      - 'adb shell "getprop sys.lechao.lciod.ioqos_lat_ms"'
+    teardown:
+      - 'adb shell "setprop sys.lechao.lciod.ioqos_auto \"${SNAPSHOT_0}\""'
+      - 'adb shell "setprop sys.lechao.lciod.ioqos_lat_ms \"${SNAPSHOT_1}\""'
+    timeout_s: 180
+
   # C 批二 方向 3：lciod USB 传输延迟/块大小二维直方图用户态验收（本批新增
   # 验收 case）。语义：cases/lciod_check.sh --mode histo 内部执行
   #   lciod_probe --histo 取数（GET_LATENCY_HISTOGRAM cmd5）→ 结构断言

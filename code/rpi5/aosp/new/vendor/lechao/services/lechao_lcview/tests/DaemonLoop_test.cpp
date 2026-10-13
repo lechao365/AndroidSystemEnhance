@@ -227,7 +227,8 @@ TEST(DaemonLoopHelperTest, SchemaLoadRetry_SuccessOnFirstTry) {
         // A 批一（内核 SD/MMC 健康契约）：新增 id=15 sd_health、id=16 sd_stuck，
         // schema 升为 15 事件
         // C 批二方向2：新增 id=17 usb_latency_tail（daemon 合成），schema 升为 16 事件
-        EXPECT_EQ(sp.eventCount(), 16u);
+        // QoS 延迟感知分级：新增 id=18 qos_auto_adjust，schema 升为 17 事件
+        EXPECT_EQ(sp.eventCount(), 17u);
     } else {
         GTEST_SKIP() << "真配置不存在（host 环境）";
     }

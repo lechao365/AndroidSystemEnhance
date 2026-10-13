@@ -1121,6 +1121,179 @@ class TestModeSdInject(unittest.TestCase):
 
 
 # ============================================================
+# QoS 延迟感知自动分级：--mode qos-auto 注入抬延迟 → 收紧/放松断言
+# （TestModeQosAuto）覆盖：bg 收紧 / 新增 qos_auto_adjust(id=18) / logcat
+# 留痕 / 回落放松四判据的判绿与各破坏场景判红。CDP-DOD-001：每个判红逻辑
+# 配套破坏场景红灯用例。
+# ============================================================
+
+class _FakeAdbQosAuto:
+    """伪 adb（qos-auto 模式）：模拟 cgroup v2 探测、限速文件、qos_auto
+    JSONL 与 logcat。注入后限速文件进入 bg；停止注入（连续 3 次未注入读
+    限速）后回落 off，模拟 10s 窗延迟回落放松。"""
+
+    def __init__(self, bg_after_inject=True, relax=True, event_after=True,
+                 logcat_hit=True, inject_rc=0, limit_unreadable=False):
+        self.bg_after_inject = bg_after_inject
+        self.relax = relax
+        self.event_after = event_after
+        self.logcat_hit = logcat_hit
+        self.inject_rc = inject_rc
+        self.limit_unreadable = limit_unreadable
+        self.injected = False
+        self.limit_bg = False
+        self.cats_since_inject = 0
+        self.calls = []
+        # 注入前已有 1 条 qos_auto_adjust 记录（seq=200），注入后追加 seq=201
+        self._before = [{"ts": 1, "id": 18, "level": 2, "seq": 200,
+                         "mono": 1, "f": [500000, 1, 50000]}]
+
+    def _recs(self):
+        recs = list(self._before)
+        if self.injected and self.event_after:
+            recs.append({"ts": 2, "id": 18, "level": 2, "seq": 201,
+                         "mono": 2, "f": [500000, 1, 50000]})
+        return recs
+
+    def __call__(self, args, timeout=60):
+        self.calls.append(args)
+        if args[0] == "logcat":
+            return ('X lechao_lciod_event {"rule":"qos_auto","level":"bg"}\n'
+                    if self.logcat_hit else "", 0)
+        if args[0] != "shell":
+            return ("", 0)
+        if len(args) >= 2 and args[1] == "setprop":
+            return ("", 0)
+        if len(args) >= 3 and args[1] == "cat":
+            path = args[2]
+            if path.endswith("cgroup.controllers"):
+                return ("cpu io memory\n", 0)
+            if path.endswith("io.max") or "blkio.throttle" in path:
+                if self.limit_unreadable:
+                    return ("", 1)
+                self.cats_since_inject += 1
+                if (self.limit_bg and self.relax
+                        and self.cats_since_inject >= 3):
+                    self.limit_bg = False  # 延迟回落 → 放松
+                if self.limit_bg:
+                    return ("179:0 rbps=8388608 wbps=8388608\n", 0)
+                return ("179:0 rbps=max wbps=max\n", 0)
+            if "18_qos_auto_adjust" in path:
+                return ("\n".join(json.dumps(r) for r in self._recs()), 0)
+            return ("", 0)
+        if len(args) >= 2 and args[1] == "ls":
+            if len(args) >= 3 and args[2] == "-d":
+                return (f"{args[3]}\n", 0)  # cgroup 组目录存在
+            return ("/data/vendor/lechao_lcview/logs/"
+                    "18_qos_auto_adjust_20261013_p0.jsonl\n", 0)
+        if len(args) >= 2 and str(args[1]).startswith("echo 1 >"):
+            if self.inject_rc:
+                return ("", self.inject_rc)
+            self.injected = True
+            self.limit_bg = self.bg_after_inject
+            self.cats_since_inject = 0
+            return ("", 0)
+        return ("", 0)
+
+
+def _qos_auto_args(**kw):
+    a = argparse.Namespace()
+    a.log_since = kw.get("log_since", 123)
+    a.qos_auto_lat_ms = kw.get("qos_auto_lat_ms", 50)
+    a.qos_auto_rounds = kw.get("qos_auto_rounds", 8)
+    a.qos_auto_sleep = kw.get("qos_auto_sleep", 2.0)
+    a.qos_auto_relax_rounds = kw.get("qos_auto_relax_rounds", 10)
+    a.qos_auto_relax_sleep = kw.get("qos_auto_relax_sleep", 2.0)
+    return a
+
+
+class TestModeQosAuto(unittest.TestCase):
+    def _run(self, fake, **kw):
+        with mock.patch.object(lc, "adb", fake), \
+                mock.patch.object(lc.time, "sleep"):
+            return lc.mode_qos_auto(_qos_auto_args(**kw))
+
+    def test_pass_tighten_then_relax(self):
+        # 注入抬延迟 → bg 收紧 + 新增 id=18 + logcat 留痕 → 回落放松 → 判绿
+        self.assertEqual(self._run(_FakeAdbQosAuto()), 0)
+
+    def test_no_cgroup_red(self):
+        # cgroup 既非 v2 也无 blkio → 判红（无反馈面不得假绿）
+        fake = _FakeAdbQosAuto()
+
+        def _no_io(args, timeout=60):
+            fake.calls.append(args)
+            if args[0] == "shell" and len(args) >= 3 and args[1] == "cat" \
+                    and args[2].endswith("cgroup.controllers"):
+                return ("cpu memory\n", 0)
+            if args[0] == "shell" and len(args) >= 2 and args[1] == "ls":
+                return ("", 1)
+            return ("", 0)
+
+        with mock.patch.object(lc, "adb", _no_io), \
+                mock.patch.object(lc.time, "sleep"):
+            self.assertEqual(lc.mode_qos_auto(_qos_auto_args()), 1)
+
+    def test_group_missing_red(self):
+        # lechao_bg 组目录缺失（daemon 未建组）→ 判红
+        fake = _FakeAdbQosAuto()
+
+        def _no_group(args, timeout=60):
+            fake.calls.append(args)
+            if args[0] == "shell" and len(args) >= 3 and args[1] == "cat" \
+                    and args[2].endswith("cgroup.controllers"):
+                return ("cpu io memory\n", 0)
+            if args[0] == "shell" and len(args) >= 3 and args[1] == "ls" \
+                    and args[2] == "-d":
+                return ("", 1)
+            return ("", 0)
+
+        with mock.patch.object(lc, "adb", _no_group), \
+                mock.patch.object(lc.time, "sleep"):
+            self.assertEqual(lc.mode_qos_auto(_qos_auto_args()), 1)
+
+    def test_not_tightened_red(self):
+        # 注入后限速文件未进入 bg（自动档未收紧）→ 判红
+        self.assertEqual(self._run(_FakeAdbQosAuto(bg_after_inject=False)), 1)
+
+    def test_no_new_event_red(self):
+        # 无新增 qos_auto_adjust(id=18) 记录 → 判红
+        self.assertEqual(self._run(_FakeAdbQosAuto(event_after=False)), 1)
+
+    def test_no_logcat_trace_red(self):
+        # logcat 无 "rule":"qos_auto" 行（自动档留痕缺失）→ 判红
+        self.assertEqual(self._run(_FakeAdbQosAuto(logcat_hit=False)), 1)
+
+    def test_not_relaxed_red(self):
+        # 停止注入后仍为 bg（延迟回落未放松）→ 判红
+        self.assertEqual(self._run(_FakeAdbQosAuto(relax=False)), 1)
+
+    def test_inject_write_fail_red(self):
+        # inject_latency 写失败（root-only 属性不可写）→ 判红
+        self.assertEqual(self._run(_FakeAdbQosAuto(inject_rc=1)), 1)
+
+    def test_limit_file_unreadable_red(self):
+        # 限速文件不可读 → 判红（不得当放松假绿）
+        self.assertEqual(self._run(_FakeAdbQosAuto(limit_unreadable=True)), 1)
+
+    def test_inject_writes_latency_attr(self):
+        # 回归锚点：注入须写 sysfs inject_latency（root-only 触发属性）
+        fake = _FakeAdbQosAuto()
+        self.assertEqual(self._run(fake), 0)
+        self.assertTrue(any("inject_latency" in str(c) for c in fake.calls))
+
+    def test_sets_auto_prop_and_teardown_clears(self):
+        # 回归锚点：须 setprop ioqos_auto=1 且 teardown 清空自动档属性
+        fake = _FakeAdbQosAuto()
+        self.assertEqual(self._run(fake), 0)
+        auto_calls = [c for c in fake.calls
+                      if len(c) >= 2 and c[1] == "setprop"
+                      and c[2] == "sys.lechao.lciod.ioqos_auto"]
+        self.assertTrue(any(c[3] == "1" for c in auto_calls))
+        self.assertTrue(any(c[3] == "" for c in auto_calls))
+
+
+# ============================================================
 # 进程级退出码透传回归（方向 1）：perf/storm/qos/sd/histo 模式内部用 return
 # 返回 0/1，入口若只写 main() 会丢弃返回值、进程 rc 恒 0（判红模式假绿）。
 # 本用例以子进程真实执行脚本 __main__ 入口（runpy run_name=__main__，不调

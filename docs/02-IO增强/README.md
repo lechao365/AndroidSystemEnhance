@@ -13,8 +13,9 @@
 | 02.05 | [故障注入验证](./02.05-故障注入验证-usb-verify.md) | 外围 (Host 端) | usb-verify — 统计读取 + 事件等待 + 阈值断言 CLI |
 | 02.06 | [IO 增强落地报告](./02.06-IO增强落地报告.md) | 总结 | R5/A/C 收官实况、B 取消证据与 env-baseline 机制沉淀 |
 | 02.07 | [SD 故障演练闭环](./02.07-SD故障演练闭环.md) | 内核态/验收 | SD 自愈演练接口（inject_stuck/last_speed）与故障面四重断言闭环 |
+| 02.08 | [IO QoS 延迟感知分级](./02.08-IO-QoS延迟感知分级.md) | 内核态/用户态/验收 | SD 窗口延迟反馈源（window_lat_avg_us/tail）驱动 daemon 自动档收紧/放松 bg 限速闭环 |
 
-> **阅读建议**：先读本 README 建立全局视角，再按层级深入子文档。02.01-02.03 为监控系统主体，02.04-02.05 为外围验证工具，02.06 为 R5/A/C 收官与 B 取消的落地报告，02.07 为 SD 故障演练闭环的安全边界与断言口径。
+> **阅读建议**：先读本 README 建立全局视角，再按层级深入子文档。02.01-02.03 为监控系统主体，02.04-02.05 为外围验证工具，02.06 为 R5/A/C 收官与 B 取消的落地报告，02.07 为 SD 故障演练闭环的安全边界与断言口径，02.08 为 QoS 延迟感知自动分级的反馈源口径与档位策略。
 
 ## 逻辑视图
 
@@ -305,7 +306,7 @@ LcIod 内核驱动 `select LCVIEW`（Kconfig），调用 LcView `EXPORT_SYMBOL` 
 | `LCVIEW_EVENT_USB_STALL/TIMEOUT/CORRUPT/RESET` | device_index, status | WARN | 异常事件 |
 | `LCVIEW_EVENT_USB_RATE_DEGRADED` | device_index, latency_ns | WARN | 性能降级 |
 
-LcView 共提供 **16 个事件 ID**（1~3 预留占位；id=4 为历史空洞、删除不回收；5~17 连续分配——其中 15/16 为 SD 健康（`LCVIEW_EVENT_SD_HEALTH`/`SD_STUCK`）、14 与 17 由 daemon 合成），LcIod 在 notifier 回调中调用 `lcview_builder_start/commit` 上送。完整 id 分配与 A/C 两线新增实况见 [IO 增强落地报告](./02.06-IO增强落地报告.md)。
+LcView 共提供 **17 个事件 ID**（1~3 预留占位；id=4 为历史空洞、删除不回收；5~18 连续分配——其中 15/16 为 SD 健康（`LCVIEW_EVENT_SD_HEALTH`/`SD_STUCK`）、18 为 SD 窗口延迟自动分级（`LCVIEW_EVENT_QOS_AUTO_ADJUST`）、14 与 17 由 daemon 合成），LcIod 在 notifier 回调中调用 `lcview_builder_start/commit` 上送。完整 id 分配与 A/C 两线新增实况见 [IO 增强落地报告](./02.06-IO增强落地报告.md)。
 
 ## 与 LcView 的架构对比
 

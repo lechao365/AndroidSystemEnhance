@@ -128,6 +128,39 @@ static inline void lciod_sd_build_stuck_evt(unsigned int speed,
 	out->err = err;
 }
 
+/*
+ * SD 延迟感知自动分级（QoS 延迟反馈）——窗口延迟只读导出与延迟演练契约
+ *
+ * COMPLETE 事件在 10s 窗内累计请求历时：窗口平均延迟 window_lat_avg_us 与
+ * 长尾计数 window_lat_tail（历时 >= LCIOD_SD_LAT_TAIL_NS 的请求数）为 daemon
+ * IoQosManager 自动档的反馈源——超阈收紧 bg 限速、回落放松（口径见
+ * docs/02-IO增强/02.08-IO-QoS延迟感知分级.md）。窗口到期若长尾计数 > 0，
+ * 经 LcView 上报 QOS_AUTO_ADJUST（id=18）。纯函数 host 单测直接覆盖。
+ */
+#define LCIOD_SD_LAT_TAIL_NS 50000000ULL /* 50ms 长尾阈值（纳秒） */
+
+/* 延迟演练入口（inject_latency）合成一次慢 COMPLETE 的历时与块大小 */
+#define LCIOD_SD_DRILL_LAT_NS    500000000ULL /* 500ms 慢 COMPLETE 历时 */
+#define LCIOD_SD_DRILL_LAT_BYTES 131072u      /* 128KiB（入块大小直方图档） */
+
+/* 长尾判据宏：请求历时是否达到长尾阈值 */
+#define LCIOD_SD_LAT_IS_TAIL(duration_ns) \
+	((uint64_t)(duration_ns) >= LCIOD_SD_LAT_TAIL_NS)
+
+/*
+ * lciod_sd_lat_avg_us — 窗口平均延迟（微秒，纯函数）
+ * @sum_ns：窗口内累计请求历时（纳秒）
+ * @count：窗口内计入历时的请求数
+ * 语义：count == 0 时返回 0（CXX-002 除零防护）；否则 sum_ns/count/1000。
+ * 无内核 API 依赖（仅整数运算），host 与内核共用同一实现。
+ */
+static inline uint64_t lciod_sd_lat_avg_us(uint64_t sum_ns, uint64_t count)
+{
+	if (count == 0)
+		return 0;
+	return sum_ns / count / 1000ULL;
+}
+
 /* SD Status Register 字数（512bit = 16 x u32） */
 #define LCIOD_SD_SSR_WORDS 16
 

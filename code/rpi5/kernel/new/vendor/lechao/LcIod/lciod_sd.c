@@ -63,6 +63,9 @@ struct lciod_sd_state {
 	bool enabled;               /* sysfs 开关，默认 true（开） */
 	u64 window_bytes;           /* 本窗口累计有效字节 */
 	u64 window_requests;        /* 本窗口累计请求数 */
+	u64 window_lat_sum_ns;      /* 本窗口累计请求历时（纳秒，延迟反馈源） */
+	u64 window_lat_count;       /* 本窗口计入历时的请求数（求均值分母） */
+	u64 window_lat_tail;        /* 本窗口长尾请求数（历时 >= 长尾阈值） */
 	u64 total_bytes;            /* 累计有效字节 */
 	u64 total_requests;         /* 累计请求数 */
 	u64 stuck_count;            /* 累计 STUCK 次数 */
@@ -88,6 +91,8 @@ static void lciod_sd_trace_health(u64 bytes, u64 requests, u64 window_ms,
 				  unsigned int uhs_grade);
 static void lciod_sd_trace_stuck(unsigned int old_speed, unsigned int new_speed,
 				 int err);
+static void lciod_sd_trace_qos_auto(u64 avg_lat_us, u64 tail_count,
+				    u64 threshold_us);
 static void lciod_sd_downgrade(struct mmc_card *card, int err);
 static void lciod_sd_refresh_ssr(void);
 
@@ -147,6 +152,35 @@ static void lciod_sd_trace_stuck(unsigned int old_speed, unsigned int new_speed,
 	rc |= lcview_builder_add_int(b, (int64_t)new_speed);
 	rc |= lcview_builder_add_int(b, (int64_t)err);
 	rc |= lcview_builder_add_int(b, (int64_t)READ_ONCE(sd_state.stuck_count));
+
+	if (rc || lcview_builder_commit(b, &lcview_ring))
+		lcview_builder_cancel(b);
+}
+
+/*
+ * lciod_sd_trace_qos_auto — 上报一次窗口延迟触发自动分级事件到 LcView
+ * @avg_lat_us：本窗口平均请求延迟（微秒）
+ * @tail_count：本窗口长尾（>= LCIOD_SD_LAT_TAIL_NS）请求数
+ * @threshold_us：长尾阈值（微秒）
+ *
+ * 触发条件：10s 窗内长尾计数 > 0（窗口到期时判定）。事件为 daemon
+ * IoQosManager 自动档的观测锚点（daemon 读 window_lat_avg_us/window_lat_tail
+ * 决定收紧/放松 bg 限速）。调用上下文：进程上下文（delayed_work）。
+ */
+static void lciod_sd_trace_qos_auto(u64 avg_lat_us, u64 tail_count,
+				    u64 threshold_us)
+{
+	struct lcview_builder *b;
+	int rc;
+
+	b = lcview_builder_start(LCVIEW_EVENT_QOS_AUTO_ADJUST, LCVIEW_LEVEL_WARN);
+	if (!b)
+		return;
+
+	/* 字段顺序必须与 lcview_events.json id=18 的 fields 顺序一致 */
+	rc = lcview_builder_add_int(b, (int64_t)avg_lat_us);
+	rc |= lcview_builder_add_int(b, (int64_t)tail_count);
+	rc |= lcview_builder_add_int(b, (int64_t)threshold_us);
 
 	if (rc || lcview_builder_commit(b, &lcview_ring))
 		lcview_builder_cancel(b);
@@ -229,6 +263,11 @@ int lciod_sd_notifier(struct notifier_block *nb, unsigned long action,
 				(nd->direction == LECHAO_SD_DIR_READ) ?
 					LCIOD_HISTO_DIR_READ : LCIOD_HISTO_DIR_WRITE,
 				nd->bytes, nd->duration_ns);
+		/* 延迟反馈源：累计窗口历时/计数与长尾计数（QoS 自动档输入） */
+		sd_state.window_lat_sum_ns += nd->duration_ns;
+		sd_state.window_lat_count++;
+		if (LCIOD_SD_LAT_IS_TAIL(nd->duration_ns))
+			sd_state.window_lat_tail++;
 		break;
 	case LECHAO_SD_EVENT_STUCK:
 		sd_state.stuck_count++;
@@ -310,6 +349,7 @@ static void lciod_sd_window_work(struct work_struct *work)
 {
 	unsigned long flags;
 	u64 bytes, requests, total_bytes, total_requests, stuck;
+	u64 lat_avg_us, lat_tail;
 	unsigned int speed_class, uhs_grade;
 
 	/* 进程上下文刷新 SSR（含 mmc claim/release host，可睡眠） */
@@ -318,8 +358,15 @@ static void lciod_sd_window_work(struct work_struct *work)
 	spin_lock_irqsave(&sd_state.lock, flags);
 	bytes = sd_state.window_bytes;
 	requests = sd_state.window_requests;
+	/* 延迟反馈源快照（窗口作用域：窗口到期清零，下窗重新累计） */
+	lat_avg_us = lciod_sd_lat_avg_us(sd_state.window_lat_sum_ns,
+					 sd_state.window_lat_count);
+	lat_tail = sd_state.window_lat_tail;
 	sd_state.window_bytes = 0;
 	sd_state.window_requests = 0;
+	sd_state.window_lat_sum_ns = 0;
+	sd_state.window_lat_count = 0;
+	sd_state.window_lat_tail = 0;
 	total_bytes = sd_state.total_bytes;
 	total_requests = sd_state.total_requests;
 	stuck = sd_state.stuck_count;
@@ -330,6 +377,14 @@ static void lciod_sd_window_work(struct work_struct *work)
 	lciod_sd_trace_health(bytes, requests, LCIOD_SD_WINDOW_MS,
 			      total_bytes, total_requests, stuck,
 			      speed_class, uhs_grade);
+
+	/*
+	 * 窗口长尾延迟触发自动分级：长尾计数 > 0 时上报 QOS_AUTO_ADJUST
+	 * （daemon 自动档观测锚点），携带本窗平均延迟/长尾计数/长尾阈值。
+	 */
+	if (lat_tail > 0)
+		lciod_sd_trace_qos_auto(lat_avg_us, lat_tail,
+					LCIOD_SD_LAT_TAIL_NS / 1000ULL);
 
 	schedule_delayed_work(&sd_work, msecs_to_jiffies(LCIOD_SD_WINDOW_MS));
 }
@@ -417,6 +472,47 @@ static ssize_t last_speed_show(struct device *dev,
 static DEVICE_ATTR_RO(last_speed);
 
 /*
+ * window_lat_avg_us_show — 本窗口平均请求延迟（微秒，只读）
+ *
+ * daemon IoQosManager 自动档反馈源之一：平均延迟超阈收紧 bg 限速。窗口
+ * 到期由 lciod_sd_window_work 清零，故反映"当前窗口"的实时均值。
+ */
+static ssize_t window_lat_avg_us_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	unsigned long flags;
+	u64 v;
+
+	spin_lock_irqsave(&sd_state.lock, flags);
+	v = lciod_sd_lat_avg_us(sd_state.window_lat_sum_ns,
+				sd_state.window_lat_count);
+	spin_unlock_irqrestore(&sd_state.lock, flags);
+
+	return sysfs_emit(buf, "%llu\n", (unsigned long long)v);
+}
+static DEVICE_ATTR_RO(window_lat_avg_us);
+
+/*
+ * window_lat_tail_show — 本窗口长尾请求数（历时 >= 长尾阈值，只读）
+ *
+ * daemon 自动档反馈源之一：长尾计数 > 0 收紧 bg 限速；窗口到期（计数清零）
+ * 后无长尾则放松。亦为 QOS_AUTO_ADJUST 事件的触发判据。
+ */
+static ssize_t window_lat_tail_show(struct device *dev,
+				     struct device_attribute *attr, char *buf)
+{
+	unsigned long flags;
+	u64 v;
+
+	spin_lock_irqsave(&sd_state.lock, flags);
+	v = sd_state.window_lat_tail;
+	spin_unlock_irqrestore(&sd_state.lock, flags);
+
+	return sysfs_emit(buf, "%llu\n", (unsigned long long)v);
+}
+static DEVICE_ATTR_RO(window_lat_tail);
+
+/*
  * inject_stuck_store — SD 自愈演练入口（root-only，写一次触发一次）
  *
  * 在内存构造一张临时 SD 卡（起点 DDR50 + 全模式位），构造合成 STUCK 事件
@@ -460,6 +556,37 @@ static ssize_t inject_stuck_store(struct device *dev,
 	return count;
 }
 static DEVICE_ATTR_WO(inject_stuck);
+
+/*
+ * inject_latency_store — SD 延迟演练入口（root-only，写一次触发一次）
+ *
+ * 构造一次**慢 COMPLETE** 合成事件（large duration_ns，无关联真实卡）经
+ * lechao_sd_notify 走**完整 notifier 处理链**：累计窗口/总字节与请求数 →
+ * 延迟/块大小直方图入桶 → 延迟反馈源累计（window_lat_sum_ns/count/tail）。
+ * 窗口到期若长尾计数 > 0 即上报 QOS_AUTO_ADJUST，daemon IoQosManager 据此
+ * 收紧 bg 限速。**仅内存模拟**：无 card（COMPLETE 路径不解引用卡），全程
+ * 不触碰真实 mmc 卡与硬件操作。上下文：进程上下文（sysfs store）。
+ */
+static ssize_t inject_latency_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct lechao_sd_notifier_data nd = {0};
+
+	nd.category = LECHAO_SD_EVENT_COMPLETE;
+	nd.direction = LECHAO_SD_DIR_WRITE;
+	nd.bytes = LCIOD_SD_DRILL_LAT_BYTES;
+	nd.duration_ns = LCIOD_SD_DRILL_LAT_NS;
+	nd.synthetic = 1; /* 合成事件：无真实卡，回调不占据 sd_state.card */
+
+	lechao_sd_notify(&nd);
+
+	pr_info(PREFIX "sd drill: inject synthetic slow COMPLETE (lat=%llums bytes=%u)\n",
+		(unsigned long long)(LCIOD_SD_DRILL_LAT_NS / 1000000ULL),
+		LCIOD_SD_DRILL_LAT_BYTES);
+	return count;
+}
+static DEVICE_ATTR_WO(inject_latency);
 
 static ssize_t ssr_speed_class_show(struct device *dev,
 				    struct device_attribute *attr, char *buf)
@@ -509,7 +636,10 @@ static struct attribute *lciod_sd_attrs[] = {
 	&dev_attr_window_requests.attr,
 	&dev_attr_stuck_count.attr,
 	&dev_attr_last_speed.attr,
+	&dev_attr_window_lat_avg_us.attr,
+	&dev_attr_window_lat_tail.attr,
 	&dev_attr_inject_stuck.attr,
+	&dev_attr_inject_latency.attr,
 	&dev_attr_ssr_speed_class.attr,
 	&dev_attr_ssr_uhs_grade.attr,
 	&dev_attr_ssr_valid.attr,
@@ -535,6 +665,9 @@ static int __init lciod_sd_init(void)
 	sd_state.enabled = true; /* 默认开 */
 	sd_state.window_bytes = 0;
 	sd_state.window_requests = 0;
+	sd_state.window_lat_sum_ns = 0;
+	sd_state.window_lat_count = 0;
+	sd_state.window_lat_tail = 0;
 	sd_state.total_bytes = 0;
 	sd_state.total_requests = 0;
 	sd_state.stuck_count = 0;

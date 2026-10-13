@@ -1092,6 +1092,226 @@ def mode_sd_inject(args):
 
 
 # ============================================================
+# QoS 延迟感知自动分级闭环校验（--mode qos-auto）
+# ============================================================
+
+# 自动档开关与延迟阈值 sysprop（与 io_qos.cpp 对齐）：
+#   ioqos_auto 开关（"1" 开 / 空或 "0" 关）；ioqos_lat_ms 延迟阈值（毫秒）
+_QOS_AUTO_PROP = "sys.lechao.lciod.ioqos_auto"
+_QOS_LAT_PROP = "sys.lechao.lciod.ioqos_lat_ms"
+# 延迟演练入口属性（root-only，写一次触发一次；合成慢 COMPLETE 入窗口/直方图）
+_SD_LAT_DRILL_ATTR = "inject_latency"
+# qos_auto 事件 JSONL 文件名关键字（18_qos_auto_adjust_<YYYYMMDD>_pN.jsonl）
+_QOS_AUTO_JSONL_KEY = "qos_auto_adjust"
+# daemon 自动档 JSON 留痕 rule 值（logcat tag lechao_lciod_event）
+_QOS_AUTO_RULE = '"rule":"qos_auto"'
+# 延迟阈值缺省（毫秒）：与 daemon kIoQosAutoLatThresholdMs 对齐
+_QOS_AUTO_LAT_MS_DEFAULT = 50
+
+
+def _read_qos_auto_records():
+    """读取 lcview 日志目录全部 qos_auto_adjust(id=18) 记录。
+
+    返回 (记录列表, 超时 bool, 错误列表)。文件名形如
+    18_qos_auto_adjust_<YYYYMMDD>_pN.jsonl，按名排序取读；逐行 json.loads
+    容错（失败行跳过），收集 rec["id"]==18 的记录（JSONL 无 name 字段，
+    判据只能用 id，照 sd_stuck 口径）。目录/文件不可读返回错误（不得当
+    "无事件"假绿）。
+    """
+    out, rc = adb(["shell", "ls", _SD_LVVIEW_LOG_DIR])
+    if rc == -1:
+        return [], True, []
+    if rc != 0:
+        return [], False, [f"lcview 日志目录 {_SD_LVVIEW_LOG_DIR} 不可读 rc={rc}"]
+    files = sorted(f.split("/")[-1] for f in out.split()
+                   if _QOS_AUTO_JSONL_KEY in f and "*" not in f)
+    records = []
+    for fn in files:
+        body, brc = adb(["shell", "cat", f"{_SD_LVVIEW_LOG_DIR}/{fn}"])
+        if brc == -1:
+            return records, True, []
+        if brc != 0:
+            return records, False, [f"读取 qos_auto 日志文件失败 rc={brc}: {fn}"]
+        for line in body.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and rec.get("id") == 18:
+                records.append(rec)
+    return records, False, []
+
+
+def _max_qos_auto_seq(records):
+    """记录集内 qos_auto 最大 seq（无记录返 -1）——增量判据用 seq 而非条数，
+    防日志轮转/文件读取顺序致条数比较误判。"""
+    return max((r.get("seq", -1) for r in records), default=-1)
+
+
+def _qos_auto_logcat_trace(since):
+    """daemon "rule":"qos_auto" logcat 留痕检测 → (命中 bool, 超时 bool)。
+
+    抓 tag lechao_lciod_event（IoQosManager 自动档档位变化经 EVENT_ALOG 打
+    JSON 行）；只判锚点后的行，避免旧留痕假绿；adb 超时透传。
+    """
+    out, rc = adb(["logcat", "-d", "-T", str(int(since)), "-s", _SD_LOG_TAG])
+    if rc == -1:
+        return False, True
+    return (rc == 0 and _QOS_AUTO_RULE in out), False
+
+
+def _qos_limit_contains_bg(paths):
+    """读限速文件判断当前是否处于 bg 收紧态 → (state, 超时 bool)。
+
+    state ∈ {"bg","off","unreadable"}：含 bg 限速值（8388608）为 "bg"；off
+    档（内核移除/清空限速条目）读回空/0/max 均属合法"放松"态为 "off"；
+    文件不可读为 "unreadable"（调用方判红，不得当放松假绿）。
+    """
+    out, rc = adb(["shell", "cat", paths["limit_file"]])
+    if rc == -1:
+        return "unreadable", True
+    if rc != 0:
+        return "unreadable", False
+    if _QOS_BG_BYTES in out:
+        return "bg", False
+    return "off", False
+
+
+def mode_qos_auto(args):
+    """QoS 延迟感知自动分级闭环校验（--mode qos-auto）。
+
+    自驱向 inject_latency 注入慢 COMPLETE（仅内存模拟，不依赖真卡异常）
+    抬升 SD 窗口延迟 → daemon IoQosManager 自动档据反馈收紧 bg 限速；停止
+    注入待 10s 窗回落 → 断言放松。四重断言（防假绿判红项）：
+      1) setprop ioqos_auto=1 + 阈值后注入抬延迟 → 限速文件进入 bg
+         （含 8388608，自动档收紧）；
+      2) lcview JSONL 新增 qos_auto_adjust(id=18) 记录（seq 增量判据）；
+      3) logcat tag lechao_lciod_event 新增 "rule":"qos_auto" 行（档位变化
+         留痕）；
+      4) 停止注入待窗口回落 → 限速文件退出 bg（自动档放松）。
+    产载沿临时文件/内存注入模式，禁块设备裸写（inject_latency 仅内存合成
+    慢 COMPLETE，无任何块设备读写）。teardown（finally 兜底）：关自动档 +
+    清延迟阈值。任一步 adb 超时（rc==-1）return -1 由 main 透传为失败。
+    """
+    paths = _qos_cgroup_paths()
+    if paths is None:
+        print("ERROR: 无法探测 cgroup（v2 cgroup.controllers 无 io 且 "
+              "v1 blkio 目录缺失），qos-auto 校验无法进行")
+        return 1
+    out, rc = adb(["shell", "ls", "-d", paths["group_dir"]])
+    if rc != 0 or not out.strip():
+        print(f"ERROR: cgroup 组 {paths['group_dir']} 不存在"
+              "（daemon IoQosManager 未建组？）")
+        return 1
+
+    # 基线：qos_auto 事件 seq + 设备时钟锚点（logcat -T 只判锚点后缓冲）
+    recs_before, t, rerrs = _read_qos_auto_records()
+    if t:
+        return -1
+    if rerrs:
+        for e in rerrs:
+            print(f"FAIL: {e}")
+        print("ERROR: lciod qos-auto 校验失败（读取 qos_auto 基线）")
+        return 1
+    base_seq = _max_qos_auto_seq(recs_before)
+
+    since = args.log_since
+    if since is None:
+        since = device_now()
+        if since is None:
+            print("ERROR: 无法读取设备时钟（logcat 抓取窗口无法锚定）")
+            return 1
+
+    try:
+        # 打开自动档 + 阈值（阈值约束平均延迟分支；长尾分支独立触发）
+        for prop, val in ((_QOS_LAT_PROP, str(args.qos_auto_lat_ms)),
+                          (_QOS_AUTO_PROP, "1")):
+            _out, prc = adb(["shell", "setprop", prop, val])
+            if prc == -1:
+                return -1
+            if prc != 0:
+                print(f"ERROR: setprop {prop}={val} 失败 rc={prc}")
+                return 1
+
+        # 注入抬延迟 → 轮询等待：daemon 收紧 bg + id=18 + logcat 留痕。
+        # 每轮重复注入防 10s 窗到期清零后延迟回落致误判放松。
+        bg_ok = False
+        new_seq = base_seq
+        trace_ok = False
+        for _ in range(args.qos_auto_rounds):
+            out, rc = adb(["shell",
+                           f"echo 1 > {_SD_SYSFS_DIR}/{_SD_LAT_DRILL_ATTR}"])
+            if rc == -1:
+                return -1
+            if rc != 0:
+                print(f"ERROR: 注入 {_SD_LAT_DRILL_ATTR} 失败 rc={rc}"
+                      "（root-only 触发属性不可写？）")
+                return 1
+            time.sleep(args.qos_auto_sleep)
+            state, st = _qos_limit_contains_bg(paths)
+            if st:
+                return -1
+            if state == "unreadable":
+                print(f"ERROR: 限速文件 {paths['limit_file']} 不可读")
+                return 1
+            recs, rt, _ = _read_qos_auto_records()
+            if rt:
+                return -1
+            new_seq = max(new_seq, _max_qos_auto_seq(recs))
+            tr, tt = _qos_auto_logcat_trace(since)
+            if tt:
+                return -1
+            bg_ok = (state == "bg")
+            trace_ok = trace_ok or tr
+            if bg_ok and new_seq > base_seq and trace_ok:
+                break
+
+        errors = []
+        if not bg_ok:
+            errors.append("注入抬延迟后限速文件未进入 bg（自动档未收紧）")
+        if new_seq <= base_seq:
+            errors.append(f"lcview JSONL 无新增 qos_auto_adjust(id=18) 记录"
+                          f"（基线 seq={base_seq}）")
+        if not trace_ok:
+            errors.append('logcat 无 "rule":"qos_auto" 行（自动档留痕缺失）')
+        if errors:
+            for e in errors:
+                print(f"FAIL: {e}")
+            print("ERROR: lciod qos-auto 校验失败（收紧阶段）")
+            return 1
+        print(f"OK: 自动档收紧 bg（窗口延迟超阈），新增 qos_auto_adjust "
+              f"(seq {base_seq}→{new_seq})，logcat 留痕")
+
+        # 停止注入 → 待 10s 窗回落（窗口清零后无长尾）→ 断言放松
+        relaxed = False
+        for _ in range(args.qos_auto_relax_rounds):
+            time.sleep(args.qos_auto_relax_sleep)
+            state, st = _qos_limit_contains_bg(paths)
+            if st:
+                return -1
+            if state == "unreadable":
+                print(f"ERROR: 限速文件 {paths['limit_file']} 不可读")
+                return 1
+            if state != "bg":
+                relaxed = True
+                break
+        if not relaxed:
+            print("FAIL: 停止注入后限速文件仍为 bg（延迟回落未放松）")
+            print("ERROR: lciod qos-auto 校验失败（放松阶段）")
+            return 1
+        print("OK: 延迟回落后自动档放松（限速文件退出 bg）")
+        print("OK: lciod qos-auto 校验通过（延迟感知自动分级闭环）")
+        return 0
+    finally:
+        # teardown：关自动档 + 清延迟阈值（回落手动 ioqos_level 常规驱动）
+        adb(["shell", "setprop", _QOS_AUTO_PROP, ""])
+        adb(["shell", "setprop", _QOS_LAT_PROP, ""])
+
+
+# ============================================================
 # C 批二 方向 3：USB 传输延迟/块大小二维直方图用户态验收（--mode histo）
 # ============================================================
 
@@ -1471,7 +1691,8 @@ def main():
     ap = argparse.ArgumentParser(description="lciod 板端数据校验器（host 侧）")
     ap.add_argument("--mode", required=True,
                     choices=["stats", "baseline", "delta", "perf", "uas",
-                             "link", "storm", "qos", "sd", "sd-inject", "histo"])
+                             "link", "storm", "qos", "qos-auto", "sd",
+                             "sd-inject", "histo"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
@@ -1501,6 +1722,19 @@ def main():
     ap.add_argument("--qos-sleep", type=float, default=2.0,
                     help="qos 模式 setprop 后等待秒数（等 daemon 1s 周期应用），"
                          "默认 2")
+    ap.add_argument("--qos-auto-lat-ms", type=int,
+                    default=_QOS_AUTO_LAT_MS_DEFAULT,
+                    help="qos-auto 模式自动档延迟阈值（毫秒），默认 50")
+    ap.add_argument("--qos-auto-rounds", type=int, default=8,
+                    help="qos-auto 模式收紧阶段注入/轮询轮数（每轮注入一次抬"
+                         "延迟），默认 8")
+    ap.add_argument("--qos-auto-sleep", type=float, default=2.0,
+                    help="qos-auto 模式收紧阶段每轮等待秒数（等 daemon 1s 周期"
+                         "与 10s 窗），默认 2")
+    ap.add_argument("--qos-auto-relax-rounds", type=int, default=10,
+                    help="qos-auto 模式放松阶段轮询轮数（等 10s 窗回落），默认 10")
+    ap.add_argument("--qos-auto-relax-sleep", type=float, default=2.0,
+                    help="qos-auto 模式放松阶段每轮等待秒数，默认 2")
     args = ap.parse_args()
 
     ensure_connected()
@@ -1540,6 +1774,14 @@ def main():
     if args.mode == "sd-inject":
         # SD 自愈演练闭环：合成 STUCK 注入 + 故障面四重断言
         rc = mode_sd_inject(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "qos-auto":
+        # QoS 延迟感知自动分级闭环：注入抬延迟 → 收紧/放松断言
+        rc = mode_qos_auto(args)
         if rc == -1:
             print("ERROR: adb 执行超时")
             return 1

@@ -132,6 +132,32 @@ static void test_build_stuck_evt(void)
                              LCIOD_SD_DRILL_ERR, NULL);
 }
 
+/* 窗口平均延迟纯函数：count==0 除零防护；否则 sum/count/1000（微秒） */
+static void test_lat_avg_us(void)
+{
+    /* 单请求 500ms → 平均 500000us */
+    CHECK(lciod_sd_lat_avg_us(500000000ULL, 1) == 500000ULL);
+    /* 两请求 500ms + 100ms = 600ms / 2 = 300ms = 300000us */
+    CHECK(lciod_sd_lat_avg_us(600000000ULL, 2) == 300000ULL);
+    /* count==0：除零防护返回 0（不得崩） */
+    CHECK(lciod_sd_lat_avg_us(123ULL, 0) == 0ULL);
+    /* 1us = 1000ns → 平均 1us */
+    CHECK(lciod_sd_lat_avg_us(1000ULL, 1) == 1ULL);
+    /* 亚微秒截断：1500ns → 1us */
+    CHECK(lciod_sd_lat_avg_us(1500ULL, 1) == 1ULL);
+}
+
+/* 长尾判据：历时 >= 50ms 阈值（>= 边界，演练 500ms 必为长尾） */
+static void test_lat_is_tail(void)
+{
+    CHECK(LCIOD_SD_LAT_IS_TAIL(LCIOD_SD_LAT_TAIL_NS));
+    CHECK(LCIOD_SD_LAT_IS_TAIL(LCIOD_SD_LAT_TAIL_NS + 1ULL));
+    CHECK(!LCIOD_SD_LAT_IS_TAIL(LCIOD_SD_LAT_TAIL_NS - 1ULL));
+    /* 演练延迟（500ms）必为长尾 */
+    CHECK(LCIOD_SD_LAT_IS_TAIL(LCIOD_SD_DRILL_LAT_NS));
+    CHECK(!LCIOD_SD_LAT_IS_TAIL(0ULL));
+}
+
 /* SSR 解码：SPEED_CLASS 落 raw[2] 高字节，UHS_SPEED_GRADE 落 raw[3][15:12] */
 static void test_decode_ssr(void)
 {
@@ -168,6 +194,8 @@ int main(void)
     test_strip_modes_above();
     test_downgrade_combo();
     test_build_stuck_evt();
+    test_lat_avg_us();
+    test_lat_is_tail();
     test_decode_ssr();
     if (g_fails) {
         printf("FAIL: %d/%d checks failed\n", g_fails, g_checks);
