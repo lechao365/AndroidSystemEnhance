@@ -230,5 +230,63 @@ public:
     static bool ParseU64(const std::string& line, uint64_t* out);
 };
 
+// ============================================================
+// zram 换入压力观测（方向三批一）
+// ============================================================
+// 事件 id（与 config/lcview_events.json id=19 zram_swap_pressure 对应）
+inline constexpr uint16_t kEventZramSwapPressureId = 19;
+// 换入压力窗默认阈值（页/10s 窗）：窗口内换入页数达此值即合成上报。
+// 取值理由：单页 4KiB，256 页 ≈ 1MiB/窗，超出正常后台回收均值，可捕换入
+// 风暴；演练经 sysprop 调低至 1 令合成/背景换入即触发（禁真实压测）。
+inline constexpr uint64_t kZramSwapPressureThresholdPages = 256;
+// 反馈源：PSI io（/proc/pressure/io，proc_pressure_io）/ vmstat 换入换出
+// 计数（/proc/vmstat pswpin/pswpout，proc_vmstat）
+inline constexpr const char* kPsiIoPath = "/proc/pressure/io";
+inline constexpr const char* kVmstatPath = "/proc/vmstat";
+
+// PSI io "some ..." 行采样（/proc/pressure/io 首行）。
+struct PsiIoSample {
+    double avg10 = 0.0;     // some avg10（%）
+    double avg60 = 0.0;     // some avg60（%）
+    double avg300 = 0.0;    // some avg300（%）
+    uint64_t total_us = 0;  // some total（累计阻塞微秒，单调）
+};
+// 解析 PSI io "some avg10=.. avg60=.. avg300=.. total=.." 行；缺字段/非法判 false。
+bool ParsePsiIoSome(const std::string& line, PsiIoSample* out);
+
+// 从 /proc/vmstat 文本提取键值（如 pswpin/pswpout）→ 非负十进制；缺键/非法 false。
+bool ParseVmstatKey(const std::string& text, const std::string& key, uint64_t* out);
+
+// 换入压力超阈判定（纯函数）：窗口换入页数 > 0 且 >= 阈值 → true。
+// 阈值 0 表示"任何换入即触发"（演练降阈用，仍在 >0 前提下）。
+bool ShouldReportZramSwapPressure(uint64_t swapin_pages, uint64_t threshold_pages);
+
+// ZramSwapPressureCollector：10s 窗聚合换入压力——/proc/vmstat 换入/换出页数、
+// /proc/pressure/io some total、zram0 io_stat 读写字节的单调差分。仅主循环
+// 线程调用（无锁，内部 prev 状态不被并发访问）。
+class ZramSwapPressureCollector {
+public:
+    struct Sample {
+        bool primed = false;         // 首次采样只建 prev，无窗口差分
+        uint64_t swapinPages = 0;    // 窗口换入页数（vmstat pswpin 差分）
+        uint64_t swapoutPages = 0;   // 窗口换出页数（vmstat pswpout 差分）
+        uint64_t zramReadBytes = 0;  // 窗口 zram 读字节（io_stat 差分，换入读）
+        uint64_t zramWriteBytes = 0; // 窗口 zram 写字节（io_stat 差分，换出写）
+        uint64_t psiIoTotalUs = 0;   // 窗口 PSI io some total 差分（累计阻塞微秒）
+    };
+    // 采样一窗：读 /proc/vmstat + /proc/pressure/io + zram0 io_stat 并差分。
+    // 首次调用只建 prev（out->primed=false）返回 true；任一必需源读取/解析
+    // 失败返回 false（限频 ALOGE，CXX-002 不吞错），调用方降级跳过本轮。
+    bool SampleWindow(Sample* out);
+
+private:
+    bool have_ = false;             // 是否已建立 prev（首窗无差分）
+    uint64_t prevSwapin_ = 0;
+    uint64_t prevSwapout_ = 0;
+    uint64_t prevZramRead_ = 0;
+    uint64_t prevZramWrite_ = 0;
+    uint64_t prevPsiTotal_ = 0;
+};
+
 }  // namespace lciod
 }  // namespace lechao

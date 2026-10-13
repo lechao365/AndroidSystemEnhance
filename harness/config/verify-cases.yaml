@@ -348,6 +348,28 @@ cases:
       - 'adb shell "setprop sys.lechao.lciod.ioqos_lat_ms \"${SNAPSHOT_1}\""'
     timeout_s: 180
 
+  # zram 启用与换入压力观测闭环（本批新增验收 case，批次验收 case:zram）。
+  # 语义：lciod_check.py --mode zram 三段断言——
+  #   1) 启用态：/proc/swaps 含 /dev/block/zram0 且 /sys/block/zram0/disksize>0
+  #      （init rpi5-zram-setup 脚本按 MemTotal 四成配置并 swapon 生效）；
+  #   2) 采集留痕：logcat tag lechao_lciod_event 含 "rule":"zram"（daemon
+  #      ZramCollector 每 10s 采 zram0 在跑）；
+  #   3) 事件触发：降阈 sysprop sys.lechao.lciod.zram_swap_threshold=1 +
+  #      注入合成换入页 sys.lechao.lciod.zram_swap_drill（OOM-safe 确定性，
+  #      无真实内存压力/无块设备裸写）→ logcat 新增 "rule":"zram_swap_pressure" 行。
+  # 防假绿：swap 未生效 / disksize 不可读为 0 / 无 "rule":"zram" 采集留痕 /
+  # 无 "rule":"zram_swap_pressure" 触发留痕均判红。副作用字段为两个 sysprop
+  # （快照/恢复），无块设备写；timeout_s 180（含 daemon 10s 周期与两段轮询）。
+  zram:
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lciod_check.sh --mode zram"'
+    setup_snapshot:
+      - 'adb shell "getprop sys.lechao.lciod.zram_swap_threshold"'
+      - 'adb shell "getprop sys.lechao.lciod.zram_swap_drill"'
+    teardown:
+      - 'adb shell "setprop sys.lechao.lciod.zram_swap_threshold \"${SNAPSHOT_0}\""'
+      - 'adb shell "setprop sys.lechao.lciod.zram_swap_drill \"${SNAPSHOT_1}\""'
+    timeout_s: 180
+
   # C 批二 方向 3：lciod USB 传输延迟/块大小二维直方图用户态验收（本批新增
   # 验收 case）。语义：cases/lciod_check.sh --mode histo 内部执行
   #   lciod_probe --histo 取数（GET_LATENCY_HISTOGRAM cmd5）→ 结构断言
@@ -510,6 +532,11 @@ modules:
       # 并集已含 lcview 的这两个（跨模块重复 config 检查判红），仅在本模块
       # push 段登记推送（同 lcview 先例）
       - system.lechao.lciod-ndk
+      # 方向三批一：zram 启用 init 脚本与 rc（device/brcm/rpi5/scripts/Android.bp）。
+      # sh_binary rpi5_zram_setup 落 /system/bin；prebuilt_etc rpi5_zram_setup_rc
+      # 落 /system/etc/init（init 扫描该目录加载 service rpi5_zram_setup）
+      - rpi5_zram_setup
+      - rpi5_zram_setup_rc
     # 测试 target（AGENTS.md 强制四个 test target 含 lcview 两个，
     # tests/Android.bp 定义）
     test_targets:
@@ -548,6 +575,14 @@ modules:
       - module: system.lechao.lciod-ndk
         dst:
           - /system/lib64/system.lechao.lciod-ndk.so
+      # 方向三批一：zram 启用 init 脚本（/system/bin/rpi5_zram_setup）与 rc
+      # （/system/etc/init/rpi5-zram-setup.rc，prebuilt_etc filename_from_src）
+      - module: rpi5_zram_setup
+        dst:
+          - /system/bin/rpi5_zram_setup
+      - module: rpi5_zram_setup_rc
+        dst:
+          - /system/etc/init/rpi5-zram-setup.rc
       # R4 方向 4：sepolicy cgroup 建组写授权（lechao_lciod.te 新增 allow），
       # vendor_file_contexts/precompiled_sepolicy 手工推送——同 lcview 先例
       # （2026-09-15），清刷不推必炸，须登记

@@ -163,6 +163,10 @@ aosp:
       source: aosp/device/brcm/rpi5/scripts/Android.bp
     - patch: aosp/new/device/brcm/rpi5/scripts/rpi5-wifi-connect.sh
       source: aosp/device/brcm/rpi5/scripts/rpi5-wifi-connect.sh
+    - patch: aosp/new/device/brcm/rpi5/scripts/rpi5-zram-setup.rc
+      source: aosp/device/brcm/rpi5/scripts/rpi5-zram-setup.rc
+    - patch: aosp/new/device/brcm/rpi5/scripts/rpi5-zram-setup.sh
+      source: aosp/device/brcm/rpi5/scripts/rpi5-zram-setup.sh
     - patch: aosp/new/device/brcm/rpi5/sepolicy/lechao_lciod.te
       source: aosp/device/brcm/rpi5/sepolicy/lechao_lciod.te
     - patch: aosp/new/device/brcm/rpi5/sepolicy/lechao_lciod_hal.te
@@ -171,6 +175,8 @@ aosp:
       source: aosp/device/brcm/rpi5/sepolicy/lechao_lcview.te
     - patch: aosp/new/device/brcm/rpi5/sepolicy/rpi5_wifi_connect.te
       source: aosp/device/brcm/rpi5/sepolicy/rpi5_wifi_connect.te
+    - patch: aosp/new/device/brcm/rpi5/sepolicy/rpi5_zram_setup.te
+      source: aosp/device/brcm/rpi5/sepolicy/rpi5_zram_setup.te
     - patch: aosp/new/vendor/lechao/Android.bp
       source: aosp/vendor/lechao/Android.bp
     - patch: aosp/new/vendor/lechao/services/include/Android.bp

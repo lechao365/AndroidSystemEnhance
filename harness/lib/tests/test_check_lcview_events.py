@@ -151,6 +151,8 @@ class TestCompare(unittest.TestCase):
         # 无内核发射点同样豁免。
         # C 批二方向2：USB_LATENCY_TAIL（id=17）为 lciod daemon 延迟直方图
         # 长尾规则合成事件，无内核发射点同样豁免。
+        # 方向三批一：ZRAM_SWAP_PRESSURE（id=19）为 lciod daemon zram 换入
+        # 压力窗聚合规则合成事件，无内核发射点同样豁免。
         # 集合非空（含预留事件宏），未登记事件缺发射点仍判红（语义收敛到
         # test_non_disabled_missing_emit_still_red）。
         self.assertEqual(DISABLED_EVENTS, {
@@ -159,6 +161,7 @@ class TestCompare(unittest.TestCase):
             "LCVIEW_EVENT_SENSOR_DATA",
             "LCVIEW_EVENT_SLOW_DISK",
             "LCVIEW_EVENT_USB_LATENCY_TAIL",
+            "LCVIEW_EVENT_ZRAM_SWAP_PRESSURE",
         })
 
     def test_non_disabled_missing_emit_still_red(self):

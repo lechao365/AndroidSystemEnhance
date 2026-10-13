@@ -17,6 +17,7 @@
 #include <fstream>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 
 namespace lechao {
 namespace lciod {
@@ -429,6 +430,156 @@ bool SdCollector::SampleSd(Sample* out)
         }
     }
     out->ok = true;
+    return true;
+}
+
+// ============================================================
+// zram 换入压力观测（方向三批一）
+// ============================================================
+
+// 解析 PSI io "some ..." 行（avg10/avg60/avg300/total）。仅认 some 行，供
+// 换入压力窗聚合的 PSI 维度；缺 total 或缺 avg 判 false（CXX-003 输入防御）。
+bool ParsePsiIoSome(const std::string& line, PsiIoSample* out)
+{
+    if (!out)
+        return false;
+    std::istringstream iss(line);
+    std::string first;
+    if (!(iss >> first) || first != "some")
+        return false;
+    bool have_avg = false;
+    bool have_total = false;
+    std::string tok;
+    while (iss >> tok) {
+        const size_t eq = tok.find('=');
+        if (eq == std::string::npos)
+            continue;
+        const std::string k = tok.substr(0, eq);
+        const std::string v = tok.substr(eq + 1);
+        if (k == "avg10") {
+            out->avg10 = std::strtod(v.c_str(), nullptr);
+            have_avg = true;
+        } else if (k == "avg60") {
+            out->avg60 = std::strtod(v.c_str(), nullptr);
+        } else if (k == "avg300") {
+            out->avg300 = std::strtod(v.c_str(), nullptr);
+        } else if (k == "total") {
+            // CXX-003：仅接受整段为十进制数字（防尾随垃圾被吞）
+            char* endp = nullptr;
+            const unsigned long long n = std::strtoull(v.c_str(), &endp, 10);
+            if (endp != nullptr && *endp == '\0') {
+                out->total_us = static_cast<uint64_t>(n);
+                have_total = true;
+            }
+        }
+    }
+    return have_avg && have_total;
+}
+
+// 从 /proc/vmstat 文本提取键值（"<key> <value>" 逐对读取）→ 非负十进制。
+// 缺键/越界/非数字判 false（CXX-003）。
+bool ParseVmstatKey(const std::string& text, const std::string& key, uint64_t* out)
+{
+    if (!out || key.empty())
+        return false;
+    std::istringstream iss(text);
+    std::string k;
+    uint64_t v;
+    while (iss >> k >> v) {
+        if (k == key) {
+            *out = v;
+            return true;
+        }
+    }
+    return false;
+}
+
+// 换入压力超阈判定：窗口换入页数 > 0 且 >= 阈值 → true。阈值 0 表示任何
+// 换入即触发（演练降阈用），但仍在"确有换入"前提下，避免零活动假绿。
+bool ShouldReportZramSwapPressure(uint64_t swapin_pages, uint64_t threshold_pages)
+{
+    return swapin_pages > 0 && swapin_pages >= threshold_pages;
+}
+
+// 采样一窗换入压力。任一必需源（vmstat/PSI io）读取或解析失败即限频 ALOGE
+// 并返回 false（调用方降级跳过本轮，CXX-002 不吞错）；zram io_stat 属可选
+// （zram 未启用时缺失，视为 0 不阻断）。counter reset 时差分取 curr（防下溢）。
+bool ZramSwapPressureCollector::SampleWindow(Sample* out)
+{
+    if (!out)
+        return false;
+    std::string vm;
+    if (!readFileToString(kVmstatPath, vm)) {
+        logReadErrorRateLimited("read vmstat", kVmstatPath);
+        return false;
+    }
+    uint64_t swapin = 0;
+    uint64_t swapout = 0;
+    if (!ParseVmstatKey(vm, "pswpin", &swapin) ||
+        !ParseVmstatKey(vm, "pswpout", &swapout)) {
+        logReadErrorRateLimited("parse vmstat swap counters", kVmstatPath);
+        return false;
+    }
+
+    std::string psi;
+    if (!readFileToString(kPsiIoPath, psi)) {
+        logReadErrorRateLimited("read psi io", kPsiIoPath);
+        return false;
+    }
+    PsiIoSample ps;
+    bool psi_ok = false;
+    {
+        std::istringstream iss(psi);
+        std::string l;
+        while (std::getline(iss, l)) {
+            if (ParsePsiIoSome(l, &ps)) {
+                psi_ok = true;
+                break;
+            }
+        }
+    }
+    if (!psi_ok) {
+        logReadErrorRateLimited("parse psi io some", kPsiIoPath);
+        return false;
+    }
+
+    // zram0 io_stat 为可选维度：未启用/缺节点时不阻断（换入压力主判据为 vmstat）
+    uint64_t zread = 0;
+    uint64_t zwrite = 0;
+    std::string io_line;
+    if (readFileToString("/sys/block/zram0/io_stat", io_line)) {
+        ZramIoSample io;
+        if (ParseZramIoStat(io_line, &io)) {
+            zread = io.read_bytes;
+            zwrite = io.write_bytes;
+        }
+    }
+
+    *out = Sample{};
+    if (!have_) {
+        // 首窗只建 prev（无差分），下一窗起输出
+        have_ = true;
+        prevSwapin_ = swapin;
+        prevSwapout_ = swapout;
+        prevZramRead_ = zread;
+        prevZramWrite_ = zwrite;
+        prevPsiTotal_ = ps.total_us;
+        return true;
+    }
+    auto diff = [](uint64_t cur, uint64_t prev) {
+        return cur >= prev ? (cur - prev) : cur;  // reset 取 curr，永不下溢
+    };
+    out->primed = true;
+    out->swapinPages = diff(swapin, prevSwapin_);
+    out->swapoutPages = diff(swapout, prevSwapout_);
+    out->zramReadBytes = diff(zread, prevZramRead_);
+    out->zramWriteBytes = diff(zwrite, prevZramWrite_);
+    out->psiIoTotalUs = diff(ps.total_us, prevPsiTotal_);
+    prevSwapin_ = swapin;
+    prevSwapout_ = swapout;
+    prevZramRead_ = zread;
+    prevZramWrite_ = zwrite;
+    prevPsiTotal_ = ps.total_us;
     return true;
 }
 

@@ -61,6 +61,7 @@
 #define LCVIEW_EVENT_SD_STUCK            16
 #define LCVIEW_EVENT_USB_LATENCY_TAIL    17
 #define LCVIEW_EVENT_QOS_AUTO_ADJUST     18
+#define LCVIEW_EVENT_ZRAM_SWAP_PRESSURE  19
 
 /* --- 记录魔数 --- */
 /* 每条日志记录的起始固定标志，用于校验数据完整性。

@@ -10,7 +10,7 @@ index 8de7b0f..9afc8eb 100644
      $(DEVICE_PATH)/ramdisk/ueventd.rpi5.rc:$(TARGET_COPY_OUT_VENDOR)/etc/ueventd.rc
  
  # Seccomp
-@@ -166,8 +167,42 @@ PRODUCT_COPY_FILES += \
+@@ -166,8 +167,47 @@ PRODUCT_COPY_FILES += \
      $(DEVICE_PATH)/seccomp_policy/mediacodec.policy:$(TARGET_COPY_OUT_VENDOR)/etc/seccomp_policy/mediacodec.policy \
      $(DEVICE_PATH)/seccomp_policy/mediaswcodec.policy:$(TARGET_COPY_OUT_VENDOR)/etc/seccomp_policy/mediaswcodec.policy
  
@@ -51,10 +51,15 @@ index 8de7b0f..9afc8eb 100644
 +# 读取 /boot/wifi.conf（用户在 SD 卡 boot 分区创建），开机自动连接指定路由器
 +PRODUCT_PACKAGES += \
 +    rpi5_wifi_connect
++
++# 方向三批一：开机启用 zram 脚本与 init 配置（按 MemTotal 四成 + zstd）
++PRODUCT_PACKAGES += \
++    rpi5_zram_setup \
++    rpi5_zram_setup_rc
  
  # Storage
  $(call inherit-product, $(SRC_TARGET_DIR)/product/emulated_storage.mk)
-@@ -194,6 +229,8 @@ PRODUCT_COPY_FILES += \
+@@ -194,6 +234,8 @@ PRODUCT_COPY_FILES += \
      frameworks/native/data/etc/android.hardware.usb.host.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.usb.host.xml \
      frameworks/native/data/etc/android.software.midi.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.software.midi.xml
  
@@ -63,7 +68,7 @@ index 8de7b0f..9afc8eb 100644
  # Virtualization
  $(call inherit-product, packages/modules/Virtualization/apex/product_packages.mk)
  
-@@ -207,3 +244,16 @@ PRODUCT_PACKAGES += \
+@@ -207,3 +249,16 @@ PRODUCT_PACKAGES += \
  
  PRODUCT_COPY_FILES += \
      frameworks/native/data/etc/android.hardware.wifi.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.wifi.xml

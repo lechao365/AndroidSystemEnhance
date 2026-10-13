@@ -395,3 +395,74 @@ TEST(BlockCollectorSdTest, ParseU64_Invalid)
     // out 空指针判 false
     EXPECT_FALSE(SdCollector::ParseU64("123", nullptr));
 }
+
+// ============================================================
+// 方向三批一：zram 换入压力观测（ParsePsiIoSome / ParseVmstatKey /
+// ShouldReportZramSwapPressure）
+// ============================================================
+
+TEST(BlockCollectorZramSwapTest, ParsePsiIoSome_Valid)
+{
+    PsiIoSample s;
+    ASSERT_TRUE(ParsePsiIoSome(
+        "some avg10=1.50 avg60=0.75 avg300=0.25 total=8192947", &s));
+    EXPECT_DOUBLE_EQ(s.avg10, 1.50);
+    EXPECT_DOUBLE_EQ(s.avg60, 0.75);
+    EXPECT_DOUBLE_EQ(s.avg300, 0.25);
+    EXPECT_EQ(s.total_us, 8192947u);
+}
+
+TEST(BlockCollectorZramSwapTest, ParsePsiIoSome_FullLineRejected)
+{
+    // full 行非 some，判 false（仅取 some 维度）
+    PsiIoSample s;
+    EXPECT_FALSE(ParsePsiIoSome(
+        "full avg10=0.00 avg60=0.00 avg300=0.00 total=6510807", &s));
+}
+
+TEST(BlockCollectorZramSwapTest, ParsePsiIoSome_MissingOrInvalid_False)
+{
+    PsiIoSample s;
+    // 缺 total
+    EXPECT_FALSE(ParsePsiIoSome("some avg10=1.0 avg60=0.0 avg300=0.0", &s));
+    // total 带尾随垃圾（CXX-003 整段校验）
+    EXPECT_FALSE(ParsePsiIoSome(
+        "some avg10=1.0 avg60=0.0 avg300=0.0 total=12x", &s));
+    // 空行 / out 空指针
+    EXPECT_FALSE(ParsePsiIoSome("", &s));
+    EXPECT_FALSE(ParsePsiIoSome("some avg10=1.0 total=1", nullptr));
+}
+
+TEST(BlockCollectorZramSwapTest, ParseVmstatKey_Valid)
+{
+    const std::string vm =
+        "nr_free_pages 12345\n"
+        "pswpin 678\n"
+        "pswpout 91011\n"
+        "pgpgin 42\n";
+    uint64_t v = 0;
+    ASSERT_TRUE(ParseVmstatKey(vm, "pswpin", &v));
+    EXPECT_EQ(v, 678u);
+    ASSERT_TRUE(ParseVmstatKey(vm, "pswpout", &v));
+    EXPECT_EQ(v, 91011u);
+}
+
+TEST(BlockCollectorZramSwapTest, ParseVmstatKey_MissingOrInvalid_False)
+{
+    uint64_t v = 0;
+    EXPECT_FALSE(ParseVmstatKey("pswpin 1\n", "pswpout", &v));  // 缺键
+    EXPECT_FALSE(ParseVmstatKey("", "pswpin", &v));             // 空文本
+    EXPECT_FALSE(ParseVmstatKey("pswpin 1\n", "", &v));         // 空 key
+    EXPECT_FALSE(ParseVmstatKey("pswpin 1\n", "pswpin", nullptr));  // out 空
+}
+
+TEST(BlockCollectorZramSwapTest, ShouldReport_ThresholdSemantics)
+{
+    // 阈值 256：达阈触发，未达不触发
+    EXPECT_TRUE(ShouldReportZramSwapPressure(256, 256));
+    EXPECT_TRUE(ShouldReportZramSwapPressure(300, 256));
+    EXPECT_FALSE(ShouldReportZramSwapPressure(255, 256));
+    // 阈值 0（演练降阈）：任何非零换入即触发，但零换入不触发（防零活动假绿）
+    EXPECT_TRUE(ShouldReportZramSwapPressure(1, 0));
+    EXPECT_FALSE(ShouldReportZramSwapPressure(0, 0));
+}

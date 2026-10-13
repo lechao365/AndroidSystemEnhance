@@ -355,6 +355,53 @@ static void EmitZramJson(const lechao::lciod::ZramCollector::Sample& z) {
     EmitCollectorJson("zram", line, n, sizeof(line));
 }
 
+/* 解析 sysprop 非负十进制为 uint64（CXX-003 外部输入防御）：空/非数字返回 false */
+static bool ParsePropU64(const char* name, uint64_t* out) {
+    if (name == nullptr || out == nullptr)
+        return false;
+    char buf[PROP_VALUE_MAX] = {0};
+    __system_property_get(name, buf);
+    if (buf[0] == '\0')
+        return false;
+    char* endp = nullptr;
+    errno = 0;
+    const unsigned long long v = strtoull(buf, &endp, 10);
+    if (endp == nullptr || *endp != '\0')
+        return false;
+    *out = static_cast<uint64_t>(v);
+    return true;
+}
+
+/* 方向三批一：zram 换入压力超阈合成上报 JSON 行（rule=zram_swap_pressure，
+ * 事件 id=19）。effective_pages = 实测换入页数 + 演练合成页数。 */
+static void EmitZramSwapPressureJson(
+    const lechao::lciod::ZramSwapPressureCollector::Sample& s,
+    uint64_t effective_pages, uint64_t drill_pages, uint64_t threshold_pages) {
+    char line[320];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"zram_swap_pressure\",\"swapin_pages\":%llu,"
+        "\"swapout_pages\":%llu,\"zram_read_bytes\":%llu,"
+        "\"zram_write_bytes\":%llu,\"psi_io_total_us\":%llu,"
+        "\"drill_pages\":%llu,\"effective_pages\":%llu,"
+        "\"threshold_pages\":%llu}",
+        static_cast<unsigned long long>(s.swapinPages),
+        static_cast<unsigned long long>(s.swapoutPages),
+        static_cast<unsigned long long>(s.zramReadBytes),
+        static_cast<unsigned long long>(s.zramWriteBytes),
+        static_cast<unsigned long long>(s.psiIoTotalUs),
+        static_cast<unsigned long long>(drill_pages),
+        static_cast<unsigned long long>(effective_pages),
+        static_cast<unsigned long long>(threshold_pages));
+    EmitCollectorJson("zram_swap_pressure", line, n, sizeof(line));
+    LC_ALOGI("zram_swap_pressure: swapin=%llu drill=%llu effective=%llu "
+             "threshold=%llu psi_io_total_us=%llu",
+             static_cast<unsigned long long>(s.swapinPages),
+             static_cast<unsigned long long>(drill_pages),
+             static_cast<unsigned long long>(effective_pages),
+             static_cast<unsigned long long>(threshold_pages),
+             static_cast<unsigned long long>(s.psiIoTotalUs));
+}
+
 /* lciod_sd sysfs 聚合 + SSR 解码速度档 JSON 行（A 批二方向2） */
 static void EmitSdJson(const lechao::lciod::SdCollector::Sample& s) {
     char line[256];
@@ -409,7 +456,9 @@ static void EmitHistoTailEventJson(int minor, int dir, uint64_t count, uint64_t 
  *      持续超阈 3 次）触发时经 EVENT_ALOG 打 JSON 行（不接 lcview JSONL）；
  *   3) zram0 水位/压缩比/io 统计打 EVENT_ALOG JSON 行；
  *   4) lciod_sd sysfs 健康聚合（enable/window_bytes/window_requests/
- *      stuck_count）与 SSR 解码速度档打 EVENT_ALOG JSON 行（A 批二方向2）。
+ *      stuck_count）与 SSR 解码速度档打 EVENT_ALOG JSON 行（A 批二方向2）；
+ *   5) zram 换入压力窗聚合（PSI io + vmstat 换入换出 + zram io_stat 差分）
+ *      超阈合成上报（rule=zram_swap_pressure，方向三批一）。
  * 观测为增强项非致命：枚举/采样失败已限频 ALOGE，跳过本轮，线程不退出
  * （CXX-004：非致命错误不触发进程退出）。
  */
@@ -419,6 +468,11 @@ static void BlockCollectorRunLoop() {
     lechao::lciod::BlockCollector block;
     lechao::lciod::ZramCollector zram;
     lechao::lciod::SdCollector sd;
+    lechao::lciod::ZramSwapPressureCollector zramSwap;
+    /* 换入压力边沿触发状态（超阈段首窗上报一次，回落复位）与演练注入状态 */
+    bool zramSwapOver = false;
+    uint64_t lastZramDrill = 0;
+    uint64_t pendingZramDrill = 0;
     /* 悬挂/慢盘状态按设备维护、跨 10s 采样持续——避免 A 设备 2 次 + B 设备
      * 1 次被合并误判（与 lcview sampleBlockMetrics 同款按设备状态） */
     std::unordered_map<std::string, lechao::lciod::HangState> hangStates;
@@ -471,6 +525,36 @@ static void BlockCollectorRunLoop() {
         lechao::lciod::SdCollector::Sample sdSample;
         if (sd.SampleSd(&sdSample))
             EmitSdJson(sdSample);
+
+        /* 方向三批一：zram 换入压力窗聚合（PSI io some total + vmstat 换入/
+         * 换出页数 + zram0 io_stat 读写字节单调差分）。超阈合成上报
+         * （rule=zram_swap_pressure，事件 id=19，超阈段首窗一条，回落复位）。
+         * 阈值 sysprop sys.lechao.lciod.zram_swap_threshold（页/窗，缺省
+         * kZramSwapPressureThresholdPages）；演练经 sysprop
+         * sys.lechao.lciod.zram_swap_drill（页，值变化一次性计入本窗合成压力，
+         * 不触碰真实内存、无 OOM 风险，仿 fault_inject 幂等一次）。 */
+        lechao::lciod::ZramSwapPressureCollector::Sample sp;
+        if (zramSwap.SampleWindow(&sp) && sp.primed) {
+            uint64_t threshold = lechao::lciod::kZramSwapPressureThresholdPages;
+            uint64_t v = 0;
+            if (ParsePropU64("sys.lechao.lciod.zram_swap_threshold", &v))
+                threshold = v;
+            uint64_t drill = 0;
+            if (ParsePropU64("sys.lechao.lciod.zram_swap_drill", &drill) &&
+                drill != lastZramDrill) {
+                lastZramDrill = drill;
+                if (drill > 0)
+                    pendingZramDrill = drill;  /* 值变化一次性计入 */
+            }
+            const uint64_t drillUsed = pendingZramDrill;
+            const uint64_t effective = sp.swapinPages + drillUsed;
+            pendingZramDrill = 0;
+            const bool over = lechao::lciod::ShouldReportZramSwapPressure(
+                effective, threshold);
+            if (over && !zramSwapOver)
+                EmitZramSwapPressureJson(sp, effective, drillUsed, threshold);
+            zramSwapOver = over;  /* 边沿触发：超阈段首窗上报一次 */
+        }
     }
 }
 

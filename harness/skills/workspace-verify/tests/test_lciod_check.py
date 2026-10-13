@@ -1332,5 +1332,129 @@ class TestProcessExitCodePassthrough(unittest.TestCase):
                          "perf 模式失败须透传进程 rc=1，入口丢弃 main 返回值即假绿")
 
 
+# ============================================================
+# zram 启用与换入压力观测闭环：--mode zram 三段断言
+# （TestModeZram）覆盖：swap 生效 / "rule":"zram" 采集留痕 /
+# "rule":"zram_swap_pressure" 降阈+合成换入触发 的判绿与各破坏场景判红。
+# CDP-DOD-001：每个判红逻辑配套破坏场景红灯用例。
+# ============================================================
+
+class _FakeAdbZram:
+    """伪 adb（zram 模式）：模拟 /proc/swaps、zram0 disksize、daemon logcat
+    留痕与 setprop 降阈/演练注入。drill 注入后 logcat 出现换入压力事件。"""
+
+    def __init__(self, swap_active=True, swap_readable=True, zram_trace=True,
+                 pressure_after=True, setprop_fail=False, timeout=False):
+        self.swap_active = swap_active
+        self.swap_readable = swap_readable
+        self.zram_trace = zram_trace
+        self.pressure_after = pressure_after
+        self.setprop_fail = setprop_fail
+        self.timeout = timeout
+        self.drilled = False
+        self.calls = []
+
+    def __call__(self, args, timeout=60):
+        self.calls.append(args)
+        if args[0] == "logcat":
+            lines = []
+            if self.zram_trace:
+                lines.append('X lechao_lciod_event '
+                             '{"rule":"zram","mem_used_total":0}')
+            if self.drilled and self.pressure_after:
+                lines.append('X lechao_lciod_event '
+                             '{"rule":"zram_swap_pressure","swapin_pages":0}')
+            return ("\n".join(lines) + "\n", 0)
+        if args[0] != "shell":
+            return ("", 0)
+        if len(args) >= 2 and args[1] == "setprop":
+            if self.setprop_fail and args[2] == lc._ZRAM_THRESHOLD_PROP:
+                return ("", 1)
+            # drill 置非空值视为注入（"" 为 teardown 清空）
+            if args[2] == lc._ZRAM_DRILL_PROP and args[3] != "":
+                self.drilled = True
+            return ("", 0)
+        if len(args) >= 3 and args[1] == "cat":
+            path = args[2]
+            if path == lc._ZRAM_SWAP_FILE:
+                if self.timeout:
+                    return ("", -1)
+                if not self.swap_readable:
+                    return ("", 1)
+                body = ("Filename\t\t\t\tType\t\tSize\tUsed\tPriority\n")
+                if self.swap_active:
+                    body += ("/dev/block/zram0                          "
+                             "partition\t4131389440\t0\t-2\n")
+                return (body, 0)
+            if path.endswith("disksize"):
+                return ("4131389440\n" if self.swap_active else "0\n", 0)
+            return ("", 0)
+        return ("", 0)
+
+
+def _zram_args(**kw):
+    a = argparse.Namespace()
+    a.log_since = kw.get("log_since", 123)
+    a.zram_drill_pages = kw.get("zram_drill_pages", 64)
+    a.zram_threshold_pages = kw.get("zram_threshold_pages", 1)
+    a.zram_rounds = kw.get("zram_rounds", 3)
+    a.zram_sleep = kw.get("zram_sleep", 0.0)
+    return a
+
+
+class TestModeZram(unittest.TestCase):
+    def _run(self, fake, **kw):
+        with mock.patch.object(lc, "adb", fake), \
+                mock.patch.object(lc.time, "sleep"):
+            return lc.mode_zram(_zram_args(**kw))
+
+    def test_pass(self):
+        # swap 生效 + 采集留痕 + 降阈注入触发换入压力事件 → 判绿
+        self.assertEqual(self._run(_FakeAdbZram()), 0)
+
+    def test_swap_inactive_red(self):
+        # /proc/swaps 无 zram0（init 未生效）→ 判红
+        self.assertEqual(self._run(_FakeAdbZram(swap_active=False)), 1)
+
+    def test_swap_unreadable_red(self):
+        # /proc/swaps 不可读 → 判红（不得当未启用假绿）
+        self.assertEqual(self._run(_FakeAdbZram(swap_readable=False)), 1)
+
+    def test_no_zram_trace_red(self):
+        # logcat 无 "rule":"zram"（采集未留痕）→ 判红
+        self.assertEqual(self._run(_FakeAdbZram(zram_trace=False)), 1)
+
+    def test_no_pressure_event_red(self):
+        # 降阈+合成换入后仍无 "rule":"zram_swap_pressure" → 判红
+        self.assertEqual(self._run(_FakeAdbZram(pressure_after=False)), 1)
+
+    def test_setprop_fail_red(self):
+        # 降阈 setprop 失败 → 判红
+        self.assertEqual(self._run(_FakeAdbZram(setprop_fail=True)), 1)
+
+    def test_adb_timeout_returns_minus1(self):
+        # adb 超时（rc==-1）→ 返回 -1 由 main 透传失败
+        self.assertEqual(self._run(_FakeAdbZram(timeout=True)), -1)
+
+    def test_lowered_threshold_and_drill_set(self):
+        # 回归锚点：须 setprop 降阈 + 合成换入页（OOM-safe 确定性触发）
+        fake = _FakeAdbZram()
+        self.assertEqual(self._run(fake), 0)
+        sets = [(c[2], c[3]) for c in fake.calls
+                if len(c) >= 4 and c[1] == "setprop"]
+        self.assertIn((lc._ZRAM_THRESHOLD_PROP, "1"), sets)
+        self.assertIn((lc._ZRAM_DRILL_PROP, "64"), sets)
+
+    def test_teardown_clears_props(self):
+        # 回归锚点：teardown 清空降阈/演练 sysprop
+        fake = _FakeAdbZram()
+        self.assertEqual(self._run(fake), 0)
+        clears = [c for c in fake.calls
+                  if len(c) >= 4 and c[1] == "setprop" and c[3] == ""]
+        cleared = {c[2] for c in clears}
+        self.assertIn(lc._ZRAM_THRESHOLD_PROP, cleared)
+        self.assertIn(lc._ZRAM_DRILL_PROP, cleared)
+
+
 if __name__ == "__main__":
     unittest.main()

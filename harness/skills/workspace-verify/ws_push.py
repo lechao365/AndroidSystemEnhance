@@ -232,12 +232,19 @@ def restart_service(ep, service):
 
     方向 1：非 reboot 生效类产物推送后旧进程仍在跑，验收会报绿；ctl.restart
     让新进程生效。服务不存在（init.svc.<svc> prop 为空，如纯工具二进制
-    lciod_probe）→ ok=None 表示跳过不判红；pid 重启前后各取一次作"新进程
-    生效"证据，after 为空或未变化判红。
+    lciod_probe）→ ok=None 表示跳过不判红；oneshot 服务执行完 state 为
+    stopped（无常驻 pid）同按跳过（无旧进程可替换）。pid 重启前后各取一次作
+    "新进程生效"证据，after 为空或未变化判红。
     """
     out, _ = adb_run(ep, ["shell", f"getprop init.svc.{service}"], timeout=30)
-    if not out.strip():
+    state = out.strip()
+    if not state:
         return None, None, None, "无对应 init 服务（纯工具/非服务产物），跳过"
+    # 方向三批一：oneshot 服务执行完 init.svc 为 stopped（无常驻 pid），无
+    #   "运行中的旧进程"需替换，pid 前后取证无意义（否则误判红）；未启用
+    #   (disabled) 同此。按跳过处理，功能生效由验收用例兜底。
+    if state in ("stopped", "success", "disabled"):
+        return None, None, None, f"服务未运行（state={state}，oneshot/未启用），跳过重启校验"
     out, _ = adb_run(ep, ["shell", f"pidof {service}"], timeout=30)
     before = out.strip() or None
     adb_run(ep, ["shell", f"setprop ctl.restart {service}"], timeout=30)

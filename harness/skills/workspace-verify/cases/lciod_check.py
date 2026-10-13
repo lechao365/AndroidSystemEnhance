@@ -1312,9 +1312,153 @@ def mode_qos_auto(args):
 
 
 # ============================================================
-# C 批二 方向 3：USB 传输延迟/块大小二维直方图用户态验收（--mode histo）
+# zram 启用与换入压力观测闭环校验（--mode zram）
 # ============================================================
 
+# zram0 设备 sysfs / swap 表路径
+_ZRAM_SYSFS = "/sys/block/zram0"
+_ZRAM_SWAP_FILE = "/proc/swaps"
+_ZRAM_SWAP_DEV = "/dev/block/zram0"
+# daemon 留痕 rule 值（logcat tag lechao_lciod_event）：
+#   "zram" 为 ZramCollector 每 10s 采集；"zram_swap_pressure" 为换入压力超阈合成
+_ZRAM_RULE = '"rule":"zram"'
+_ZRAM_SWAP_PRESSURE_RULE = '"rule":"zram_swap_pressure"'
+# 降阈/演练 sysprop（与 service.cpp 对齐）：zram_swap_threshold 超阈页数（0/缺省
+# 用 daemon 默认），zram_swap_drill 合成换入页数（值变化一次性计入，OOM-safe）
+_ZRAM_THRESHOLD_PROP = "sys.lechao.lciod.zram_swap_threshold"
+_ZRAM_DRILL_PROP = "sys.lechao.lciod.zram_swap_drill"
+
+
+def _zram_swap_state():
+    """读 /proc/swaps 与 zram0 disksize 判定 swap 是否生效。
+
+    返回 (state, timeout)：state ∈ {"active","inactive","unreadable"}。
+    active=swaps 含 /dev/block/zram0 且 disksize>0；任一源不可读为
+    unreadable（判红，不得当未启用假绿）。
+    """
+    out, rc = adb(["shell", "cat", _ZRAM_SWAP_FILE])
+    if rc == -1:
+        return "unreadable", True
+    if rc != 0:
+        return "unreadable", False
+    if _ZRAM_SWAP_DEV not in out:
+        return "inactive", False
+    ds, drc = adb(["shell", "cat", _ZRAM_SYSFS + "/disksize"])
+    if drc == -1:
+        return "unreadable", True
+    if drc != 0 or not ds.strip().isdigit() or int(ds.strip()) <= 0:
+        return "inactive", False
+    return "active", False
+
+
+def _zram_logcat_trace(since, needle):
+    """daemon logcat 留痕检测 → (命中 bool, 超时 bool)。
+
+    抓 tag lechao_lciod_event，只判锚点后的行（防旧留痕假绿），adb 超时透传。
+    """
+    out, rc = adb(["logcat", "-d", "-T", str(int(since)), "-s", _SD_LOG_TAG])
+    if rc == -1:
+        return False, True
+    return (rc == 0 and needle in out), False
+
+
+def mode_zram(args):
+    """zram 启用与换入压力观测闭环校验（--mode zram）。
+
+    三段断言（防假绿判红项）：
+      1) 启用态：/proc/swaps 含 /dev/block/zram0 且 disksize>0（init
+         rpi5-zram-setup 生效，swap 可用）；
+      2) 采集留痕：logcat tag lechao_lciod_event 有 "rule":"zram" 行
+         （daemon ZramCollector 采集在跑）；
+      3) 事件触发：降阈 sysprop（threshold=1）+ 循环注入合成换入页
+         （zram_swap_drill，OOM-safe 确定性、无真实内存压力）→ logcat
+         新增 "rule":"zram_swap_pressure" 行。
+    产载沿 sysfs/sysprop 内存合成，禁块设备裸写与真实内存压测（防 OOM）。
+    teardown（finally 兜底）：清 threshold/drill sysprop。任一步 adb 超时
+    （rc==-1）return -1 由 main 透传为失败。
+    """
+    since = args.log_since
+    if since is None:
+        since = device_now()
+        if since is None:
+            print("ERROR: 无法读取设备时钟（logcat 抓取窗口无法锚定）")
+            return 1
+
+    try:
+        # 段1：swap 生效
+        state, st = _zram_swap_state()
+        if st:
+            return -1
+        if state == "unreadable":
+            print(f"ERROR: {_ZRAM_SWAP_FILE} 或 {_ZRAM_SYSFS}/disksize 不可读")
+            return 1
+        if state != "active":
+            print(f"FAIL: zram swap 未生效（{_ZRAM_SWAP_FILE} 无 {_ZRAM_SWAP_DEV} "
+                  "或 disksize=0）")
+            print("ERROR: lciod zram 校验失败（init 启用未生效）")
+            return 1
+        print(f"OK: zram swap 生效（{_ZRAM_SWAP_FILE} 含 {_ZRAM_SWAP_DEV}，"
+              "disksize>0）")
+
+        # 段2：采集留痕（daemon 每 10s 采 zram0 → "rule":"zram"）
+        trace_ok = False
+        for _ in range(args.zram_rounds):
+            tr, tt = _zram_logcat_trace(since, _ZRAM_RULE)
+            if tt:
+                return -1
+            if tr:
+                trace_ok = True
+                break
+            time.sleep(args.zram_sleep)
+        if not trace_ok:
+            print('FAIL: logcat 无 "rule":"zram" 行（daemon zram 采集未留痕）')
+            print("ERROR: lciod zram 校验失败（采集留痕缺失）")
+            return 1
+        print('OK: daemon zram 采集留痕（"rule":"zram"）')
+
+        # 段3：降阈 + 合成换入页 → 换入压力事件
+        for prop, val in ((_ZRAM_THRESHOLD_PROP, str(args.zram_threshold_pages)),
+                          (_ZRAM_DRILL_PROP, str(args.zram_drill_pages))):
+            _o, prc = adb(["shell", "setprop", prop, val])
+            if prc == -1:
+                return -1
+            if prc != 0:
+                print(f"ERROR: setprop {prop}={val} 失败 rc={prc}")
+                return 1
+        pressure_ok = False
+        for _ in range(args.zram_rounds):
+            # drill 为值变化一次性计入：先置 0 再置目标页，保证每轮重新触发
+            for val in ("0", str(args.zram_drill_pages)):
+                _o, prc = adb(["shell", "setprop", _ZRAM_DRILL_PROP, val])
+                if prc == -1:
+                    return -1
+                if prc != 0:
+                    print(f"ERROR: setprop {_ZRAM_DRILL_PROP}={val} 失败 rc={prc}")
+                    return 1
+            time.sleep(args.zram_sleep)
+            tr, tt = _zram_logcat_trace(since, _ZRAM_SWAP_PRESSURE_RULE)
+            if tt:
+                return -1
+            if tr:
+                pressure_ok = True
+                break
+        if not pressure_ok:
+            print('FAIL: logcat 无 "rule":"zram_swap_pressure" 行'
+                  "（降阈+合成换入未触发上报）")
+            print("ERROR: lciod zram 校验失败（换入压力事件未触发）")
+            return 1
+        print('OK: 换入压力事件触发（"rule":"zram_swap_pressure"，降阈+合成换入）')
+        print("OK: lciod zram 校验通过（zram 启用与换入压力观测闭环）")
+        return 0
+    finally:
+        # teardown：清降阈与演练 sysprop（回 daemon 默认阈值）
+        adb(["shell", "setprop", _ZRAM_THRESHOLD_PROP, ""])
+        adb(["shell", "setprop", _ZRAM_DRILL_PROP, ""])
+
+
+# ============================================================
+# C 批二 方向 3：USB 传输延迟/块大小二维直方图用户态验收（--mode histo）
+# ============================================================
 
 def run_histo_probe():
     """设备侧执行 lciod_probe --histo（GET_LATENCY_HISTOGRAM ioctl 取数），
@@ -1692,7 +1836,7 @@ def main():
     ap.add_argument("--mode", required=True,
                     choices=["stats", "baseline", "delta", "perf", "uas",
                              "link", "storm", "qos", "qos-auto", "sd",
-                             "sd-inject", "histo"])
+                             "sd-inject", "histo", "zram"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
@@ -1735,6 +1879,16 @@ def main():
                     help="qos-auto 模式放松阶段轮询轮数（等 10s 窗回落），默认 10")
     ap.add_argument("--qos-auto-relax-sleep", type=float, default=2.0,
                     help="qos-auto 模式放松阶段每轮等待秒数，默认 2")
+    ap.add_argument("--zram-drill-pages", type=int, default=64,
+                    help="zram 模式合成换入页数（sysprop zram_swap_drill），"
+                         "默认 64（OOM-safe 确定性合成，无真实内存压力）")
+    ap.add_argument("--zram-threshold-pages", type=int, default=1,
+                    help="zram 模式降阈页数（sysprop zram_swap_threshold），"
+                         "默认 1（令合成换入即触发上报）")
+    ap.add_argument("--zram-rounds", type=int, default=8,
+                    help="zram 模式采集留痕/事件触发轮询轮数，默认 8")
+    ap.add_argument("--zram-sleep", type=float, default=4.0,
+                    help="zram 模式每轮等待秒数（等 daemon 10s 采集窗），默认 4")
     args = ap.parse_args()
 
     ensure_connected()
@@ -1790,6 +1944,14 @@ def main():
     if args.mode == "histo":
         # C 批二 方向 3：USB 传输延迟/块大小二维直方图用户态验收
         rc = mode_histo(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "zram":
+        # 方向三批一：zram 启用与换入压力观测闭环
+        rc = mode_zram(args)
         if rc == -1:
             print("ERROR: adb 执行超时")
             return 1
