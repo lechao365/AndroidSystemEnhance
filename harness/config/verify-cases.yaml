@@ -370,6 +370,23 @@ cases:
       - 'adb shell "setprop sys.lechao.lciod.zram_swap_drill \"${SNAPSHOT_1}\""'
     timeout_s: 180
 
+  # zram writeback 预研闭环（本批新增验收 case，批次验收 case:zram-writeback）。
+  # 语义：lciod_check.py --mode zram-writeback——
+  #   1) U 盘在位（sd* removable=1，严禁 mmcblk 系统盘）才校验，不在位打印
+  #      "SKIP:" exit 0（验收层转 skip 态不判红）；
+  #   2) 自驱配置 zram0 写回（swapoff→reset→绑 backing_dev=U 盘（须在
+  #      disksize 之前）→设 disksize→dd 写随机页构造已分配页→标记 idle→
+  #      触发 writeback），断言 backing_dev 回读指向 U 盘且 bd_stat 写回页数
+  #      （第 3 字段）严格递增；
+  #   3) 复原 mkswap + swapon（backing_dev 保持绑定）。
+  # 防假绿：U 盘在位但 backing_dev 未绑定 / bd_stat 不可读 / 写回页数未递增
+  # 均判红。副作用：zram0 重置并重建 swap（swap 内容丢弃，属可恢复态）；
+  # backing_dev 裸块写 U 盘（可移除测试介质，无有效数据）。timeout_s 300
+  # （含 swapoff/mkswap/swapon 与 dd 演练）。
+  zram-writeback:
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lciod_check.sh --mode zram-writeback"'
+    timeout_s: 300
+
   # C 批二 方向 3：lciod USB 传输延迟/块大小二维直方图用户态验收（本批新增
   # 验收 case）。语义：cases/lciod_check.sh --mode histo 内部执行
   #   lciod_probe --histo 取数（GET_LATENCY_HISTOGRAM cmd5）→ 结构断言

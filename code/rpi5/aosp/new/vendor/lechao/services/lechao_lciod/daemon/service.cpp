@@ -339,19 +339,23 @@ static void EmitHangJson(const std::string& dev, uint64_t inflight,
     EmitCollectorJson("hang", line, n, sizeof(line));
 }
 
-/* zram0 水位/压缩比/io 统计 JSON 行 */
+/* zram0 水位/压缩比/io 统计 JSON 行（方向三批二追加 bd_stat 写回计数） */
 static void EmitZramJson(const lechao::lciod::ZramCollector::Sample& z) {
-    char line[224];
+    char line[384];
     int n = snprintf(line, sizeof(line),
         "{\"rule\":\"zram\",\"mem_used_total\":%llu,\"mem_used_max\":%llu,"
         "\"compr_ratio\":%.2f,\"failed_reads\":%llu,\"failed_writes\":%llu,"
-        "\"read_bytes\":%llu,\"write_bytes\":%llu}",
+        "\"read_bytes\":%llu,\"write_bytes\":%llu,"
+        "\"bd_count\":%llu,\"bd_reads\":%llu,\"bd_writes\":%llu}",
         static_cast<unsigned long long>(z.memUsedTotal),
         static_cast<unsigned long long>(z.memUsedMax), z.comprRatio,
         static_cast<unsigned long long>(z.failedReads),
         static_cast<unsigned long long>(z.failedWrites),
         static_cast<unsigned long long>(z.readBytes),
-        static_cast<unsigned long long>(z.writeBytes));
+        static_cast<unsigned long long>(z.writeBytes),
+        static_cast<unsigned long long>(z.bdCount),
+        static_cast<unsigned long long>(z.bdReads),
+        static_cast<unsigned long long>(z.bdWrites));
     EmitCollectorJson("zram", line, n, sizeof(line));
 }
 

@@ -141,6 +141,19 @@ struct ZramIoSample {
 // 解析 zram io_stat 一行。4~6 字段兼容，缺省补 0；全空行/out 空指针判 false。
 bool ParseZramIoStat(const std::string& line, ZramIoSample* out);
 
+// zram 写回后备（backing_dev）统计采样（bd_stat 3 字段，CONFIG_ZRAM_WRITEBACK
+// 开启时导出；每字段为 4KiB 页数，内核 FOUR_K 宏口径）。bd_count=当前驻留
+// 后备的页数，bd_reads=累计读回页数，bd_writes=累计写回页数（单调累计，
+// 换出页回写量的观测源）。
+struct ZramBdSample {
+    uint64_t bd_count = 0;
+    uint64_t bd_reads = 0;
+    uint64_t bd_writes = 0;
+};
+// 解析 zram bd_stat 一行（3 字段）。全空行/out 空指针判 false 并 ALOGE；
+// 字段数不足 3 时缺省补 0（兼容旧内核/写回未配置节点）。
+bool ParseZramBdStat(const std::string& line, ZramBdSample* out);
+
 // 悬挂检测状态：consecutive_high 连续满足条件次数。
 struct HangState {
     uint32_t consecutive_high = 0;
@@ -202,9 +215,13 @@ public:
         uint64_t failedWrites = 0; // io_stat.failed_writes
         uint64_t readBytes = 0;    // io_stat.read_bytes
         uint64_t writeBytes = 0;   // io_stat.write_bytes
+        // 写回后备统计（bd_stat；写回未配置/节点缺失时缺省 0，属降级不判失败）
+        uint64_t bdCount = 0;      // bd_stat.bd_count（当前驻留后备页数）
+        uint64_t bdReads = 0;      // bd_stat.bd_reads（累计读回页数）
+        uint64_t bdWrites = 0;     // bd_stat.bd_writes（累计写回页数）
     };
-    // 采样 zram0。任一关键文件读取/解析失败返回 false（限频 ALOGE，
-    // CXX-002 不吞错）。
+    // 采样 zram0（mm_stat/io_stat 为关键源，任一失败返回 false；bd_stat 为
+    // 可选增强源，缺失/解析失败仅缺省 0 并限频 ALOGE，不判失败）。
     bool SampleZram(Sample* out);
 };
 

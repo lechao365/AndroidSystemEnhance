@@ -4,6 +4,7 @@
 //   DiffBlockSamples：单调差分 / counter reset（curr<prev 取 curr）
 //   ComputeBlockRates：正常速率与平均延迟数值 / 除零（ios=0、period=0）
 //   ParseZramMmStat / ParseZramIoStat：字段缺省补 0
+//   ParseZramBdStat：bd_stat 3 字段 / 字段不足补 0 / 空行判 false
 //   UpdateHangState：三连判 true / 中断清零 / 阈值边界（>= 语义）
 //   EvaluateSlowDiskRule：严格大于边界 / 连续计数 / require_consecutive
 
@@ -275,6 +276,34 @@ TEST(BlockCollectorZramTest, ParseZramIoStat_FourFields_MissingDefaultZero)
     EXPECT_EQ(s.notify_free, 4u);
     EXPECT_EQ(s.read_bytes, 0u);
     EXPECT_EQ(s.write_bytes, 0u);
+}
+
+TEST(BlockCollectorZramTest, ParseZramBdStat_ThreeFields)
+{
+    const std::string line = "       16        0       16";
+    ZramBdSample s;
+    ASSERT_TRUE(ParseZramBdStat(line, &s));
+    EXPECT_EQ(s.bd_count, 16u);
+    EXPECT_EQ(s.bd_reads, 0u);
+    EXPECT_EQ(s.bd_writes, 16u);
+}
+
+TEST(BlockCollectorZramTest, ParseZramBdStat_Truncated_MissingDefaultZero)
+{
+    // 旧内核/写回未配置时节点裁剪：字段不足 3 缺省补 0
+    const std::string line = "7";
+    ZramBdSample s;
+    ASSERT_TRUE(ParseZramBdStat(line, &s));
+    EXPECT_EQ(s.bd_count, 7u);
+    EXPECT_EQ(s.bd_reads, 0u);
+    EXPECT_EQ(s.bd_writes, 0u);
+}
+
+TEST(BlockCollectorZramTest, ParseZramBdStat_Empty_False)
+{
+    ZramBdSample s;
+    EXPECT_FALSE(ParseZramBdStat("", &s));
+    EXPECT_FALSE(ParseZramBdStat("", nullptr));
 }
 
 // ============================================================

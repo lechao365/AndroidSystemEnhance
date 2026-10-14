@@ -212,6 +212,30 @@ bool ParseZramIoStat(const std::string& line, ZramIoSample* out)
     return true;
 }
 
+// 解析 zram bd_stat 一行（3 字段：bd_count/bd_reads/bd_writes，均 4KiB 页数）。
+// 全空行/out 空指针判 false 并 ALOGE；字段数不足 3 时缺省补 0（兼容旧内核
+// 或写回未配置时的裁剪节点）。
+bool ParseZramBdStat(const std::string& line, ZramBdSample* out)
+{
+    if (!out)
+        return false;
+    std::istringstream iss(line);
+    uint64_t vals[3] = {0};
+    int n = 0;
+    uint64_t v;
+    while (n < 3 && (iss >> v))
+        vals[n++] = v;
+    if (n < 1) {
+        // CXX-003：空行/无字段判 false 带上下文
+        ALOGE("lechao_lciod: zram bd_stat: empty line");
+        return false;
+    }
+    out->bd_count = vals[0];
+    out->bd_reads = vals[1];
+    out->bd_writes = vals[2];
+    return true;
+}
+
 // 悬挂检测：inflight 高且写延迟高持续 3 次判悬挂。
 bool UpdateHangState(HangState* state, uint64_t inflight,
                      uint64_t inflight_threshold, double write_lat_ms,
@@ -360,6 +384,23 @@ bool ZramCollector::SampleZram(Sample* out)
     out->failedWrites = io.failed_writes;
     out->readBytes = io.read_bytes;
     out->writeBytes = io.write_bytes;
+
+    // 写回后备统计（bd_stat）：可选增强源——CONFIG_ZRAM_WRITEBACK 关闭或
+    // backing_dev 未配置时节点可能缺失，缺失/解析失败仅缺省 0（*out 已置 0）
+    // 并限频 ALOGE，不判失败（zram 观测主功能不依赖写回）。方向三批二：
+    // daemon 采集 bd_stat 写回计数供换出页回写量观测。
+    const std::string bdPath = base + "/bd_stat";
+    std::string bdLine;
+    if (readFileToString(bdPath, bdLine)) {
+        ZramBdSample bd;
+        if (ParseZramBdStat(bdLine, &bd)) {
+            out->bdCount = bd.bd_count;
+            out->bdReads = bd.bd_reads;
+            out->bdWrites = bd.bd_writes;
+        }
+    } else {
+        logReadErrorRateLimited("read zram bd_stat", bdPath);
+    }
     return true;
 }
 

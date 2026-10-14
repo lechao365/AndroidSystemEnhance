@@ -1456,5 +1456,112 @@ class TestModeZram(unittest.TestCase):
         self.assertIn(lc._ZRAM_DRILL_PROP, cleared)
 
 
+class _FakeAdbZramWb:
+    """伪 adb（zram-writeback 模式）：模拟 U 盘枚举、backing_dev 绑定/回读、
+    bd_stat 前后差分与 writeback 触发。状态机：writeback 触发后 bd_stat 递增。"""
+
+    def __init__(self, usb=True, bind_ok=True, backing_readback=None,
+                 increment=True, bd_readable=True, timeout=False):
+        self.usb = usb
+        self.bind_ok = bind_ok
+        # None → 绑定时回读 /dev/block/sdb；否则返回给定值（如 none）
+        self.backing_readback = backing_readback
+        self.increment = increment
+        self.bd_readable = bd_readable
+        self.timeout = timeout
+        self.written_back = False
+        self.calls = []
+
+    def __call__(self, args, timeout=60):
+        self.calls.append(args)
+        if self.timeout:
+            return ("", -1)
+        if args[0] != "shell" or len(args) < 2:
+            return ("", 0)
+        if args[1] == "cat":
+            path = args[2]
+            if path == lc._ZRAM_WB_DISKSIZE:
+                return ("67108864\n", 0)
+            if path == lc._ZRAM_WB_BACKING:
+                if self.backing_readback is not None:
+                    return (self.backing_readback + "\n", 0)
+                return ("/dev/block/sdb\n", 0)
+            if path == lc._ZRAM_WB_BD_STAT:
+                if not self.bd_readable:
+                    return ("", 1)
+                return ("16 0 16\n" if self.written_back else "0 0 0\n", 0)
+            return ("", 0)
+        cmd = args[1]
+        if "for d in /sys/block/sd*" in cmd:
+            return ("sdb 1\n" if self.usb else "", 0)
+        if "> /sys/block/zram0/backing_dev" in cmd:
+            return ("", 0 if self.bind_ok else 1)
+        if "> /sys/block/zram0/writeback" in cmd:
+            self.written_back = self.increment
+            return ("", 0)
+        return ("", 0)
+
+
+def _zram_wb_args(**kw):
+    a = argparse.Namespace()
+    a.zram_wb_pages = kw.get("zram_wb_pages", 16)
+    a.dd_timeout = kw.get("dd_timeout", 300)
+    return a
+
+
+class TestModeZramWriteback(unittest.TestCase):
+    def _run(self, fake, **kw):
+        with mock.patch.object(lc, "adb", fake):
+            return lc.mode_zram_writeback(_zram_wb_args(**kw))
+
+    def test_pass(self):
+        # U 盘在位 + backing_dev 绑定 + bd_stat 递增 → 判绿
+        self.assertEqual(self._run(_FakeAdbZramWb()), 0)
+
+    def test_no_usb_skips_exit_zero(self):
+        # 无 removable USB 块设备 → SKIP exit 0（验收层转 skip 不判红）
+        self.assertEqual(self._run(_FakeAdbZramWb(usb=False)), 0)
+
+    def test_bind_fail_red(self):
+        # backing_dev 写失败 → 判红
+        self.assertEqual(self._run(_FakeAdbZramWb(bind_ok=False)), 1)
+
+    def test_bind_mismatch_red(self):
+        # backing_dev 回读未指向 U 盘 → 判红
+        self.assertEqual(self._run(_FakeAdbZramWb(backing_readback="none")), 1)
+
+    def test_no_increment_red(self):
+        # writeback 后 bd_stat 未递增 → 判红（防假绿）
+        self.assertEqual(self._run(_FakeAdbZramWb(increment=False)), 1)
+
+    def test_bd_stat_unreadable_red(self):
+        # bd_stat 不可读 → 判红（不得当无写回假绿）
+        self.assertEqual(self._run(_FakeAdbZramWb(bd_readable=False)), 1)
+
+    def test_adb_timeout_returns_minus1(self):
+        # adb 超时（rc==-1）→ 返回 -1 由 main 透传失败
+        self.assertEqual(self._run(_FakeAdbZramWb(timeout=True)), -1)
+
+    def test_binds_before_disksize(self):
+        # 回归锚点：backing_dev 写须在 disksize 写之前（内核 init_done 约束）
+        fake = _FakeAdbZramWb()
+        self.assertEqual(self._run(fake), 0)
+        cmds = [c[1] for c in fake.calls if len(c) >= 2 and c[0] == "shell"]
+        bind_idx = next(i for i, c in enumerate(cmds)
+                        if c.startswith("echo") and "backing_dev" in c)
+        ds_idx = next(i for i, c in enumerate(cmds)
+                      if c.startswith("echo 67108864 >"))
+        self.assertLess(bind_idx, ds_idx)
+
+    def test_restores_swap(self):
+        # 回归锚点：收尾 mkswap + swapon 复原 swap
+        fake = _FakeAdbZramWb()
+        self.assertEqual(self._run(fake), 0)
+        joined = " ".join(c[1] for c in fake.calls
+                          if len(c) >= 2 and c[0] == "shell")
+        self.assertIn("mkswap", joined)
+        self.assertIn("swapon", joined)
+
+
 if __name__ == "__main__":
     unittest.main()

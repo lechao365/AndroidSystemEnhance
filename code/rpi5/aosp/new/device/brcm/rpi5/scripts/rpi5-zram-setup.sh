@@ -6,14 +6,18 @@
 # 职责（boot-time，root）：
 #   1) 按 MemTotal 四成自适应计算 zram0 disksize；
 #   2) comp_algorithm 置 zstd（压缩率高、CPU 开销可接受）；
-#   3) mkswap + swapon 启用换入。
+#   3) 枚举 removable 标志为 1 的 USB 块设备（/sys/block/sd*）作 zram0 写回
+#      后备（backing_dev），令 idle 换出页可回写到 U 盘；无 U 盘则跳过，
+#      退化为纯内存 zram（不影响 swap 启用）；
+#   4) mkswap + swapon 启用换入；标记全部页 idle 并触发一次 writeback（预研）。
 #
-# 失败不影响启动：任一步失败即回退——swapoff 并清零 disksize（禁 swap），
-#   脚本恒以 exit 0 结束，绝不阻断 init boot 流程。
+# 失败不影响启动：任一步失败即回退——swapoff 并复位 zram0（reset 同时清除
+#   backing_dev 绑定），脚本恒以 exit 0 结束，绝不阻断 init boot 流程。
 # 幂等：已启用（disksize>0 且在 /proc/swaps 内）时直接跳过，不重复 mkswap。
 #
-# 安全边界：仅操作 zram0（内存压缩块设备，无物理介质），不触碰任何物理
-#   块设备 / SD 卡 / USB 盘，无破坏性写。
+# 安全边界：zram0 为内存压缩块设备（无物理介质）；写回后备仅选 removable==1
+#   的 sd* USB 块设备（可移除测试介质），严禁选系统盘 mmcblk（系统根/SD 卡）。
+#   backing_dev 以裸块写回 U 盘，不触碰系统盘与 SD 卡。
 # ============================================================
 
 ZRAM=/sys/block/zram0
@@ -26,14 +30,31 @@ kmsg() {
 }
 
 # 复位 zram0：内核要求改 disksize 前无活动用户；仅写 0 不彻底复位（实测二次
-#   写 disksize 会 EBUSY），须写 reset（无该属性时退化为写 0）。
+#   写 disksize 会 EBUSY），须写 reset（无该属性时退化为写 0）。reset 经
+#   zram_reset_device → reset_bdev 同时释放 backing_dev 绑定。
 reset_zram() {
     echo 1 > "$ZRAM/reset" 2>/dev/null || echo 0 > "$ZRAM/disksize" 2>/dev/null
 }
 
-# 回退：禁 swap + 复位（禁 swap），恒 exit 0（不影响启动）
+# 枚举 removable 标志为 1 的 USB 块设备：仅扫 /sys/block/sd*（USB 存储命名），
+#   命中即打印 /dev/block/<name>；无命中打印空串（跳过写回，退化为纯内存 zram）。
+#   严禁 mmcblk（系统盘）：不匹配 sd* 前缀，天然排除；removable==0 的固定
+#   USB SSD（如 sda）亦跳过，只取可移除测试介质。
+find_usb_backing_dev() {
+    for sb in /sys/block/sd*; do
+        [ -e "$sb/removable" ] || continue
+        if [ "$(cat "$sb/removable" 2>/dev/null)" = "1" ]; then
+            echo "/dev/block/${sb##*/}"
+            return 0
+        fi
+    done
+    echo ""
+}
+
+# 回退：禁 swap + 复位 zram0（reset 同时清除 backing_dev 绑定），恒 exit 0
+#   （不影响启动）
 fail() {
-    kmsg "setup failed: $1 -> rollback (swapoff + reset)"
+    kmsg "setup failed: $1 -> rollback (swapoff + reset/clear backing_dev)"
     swapoff "$DEV" 2>/dev/null
     reset_zram
     exit 0
@@ -65,6 +86,21 @@ esac
 # 配置算法与容量（先复位确保可写；sysfs 写失败即回退）
 reset_zram
 echo zstd > "$ZRAM/comp_algorithm" 2>/dev/null
+
+# 写回后备（backing_dev）：必须在 disksize 之前绑定——内核 init_done 后
+#   写 backing_dev 返回 EBUSY。仅 U 盘在位时绑定；无 U 盘跳过（纯内存 zram，
+#   不影响 swap 启用）。
+usb_dev=$(find_usb_backing_dev)
+if [ -n "$usb_dev" ]; then
+    if echo "$usb_dev" > "$ZRAM/backing_dev" 2>/dev/null; then
+        kmsg "backing_dev bound: $usb_dev"
+    else
+        kmsg "backing_dev bind failed ($usb_dev), continue memory-only"
+    fi
+else
+    kmsg "no removable USB block device, memory-only zram"
+fi
+
 echo "$disksize" > "$ZRAM/disksize" 2>/dev/null || fail "write disksize=$disksize"
 # disksize 回读校验：内核按内部粒度对齐回读值（可能与写入值不同），故只校验
 #   非空且为非零十进制（字符串判据，避 32 位 [ -gt ] 溢出与对齐误判）
@@ -78,5 +114,13 @@ esac
 mkswap "$DEV" >/dev/null 2>&1 || fail "mkswap $DEV"
 swapon "$DEV" 2>/dev/null || fail "swapon $DEV"
 
-kmsg "enabled: disksize=${disksize}B (40% of ${memtotal_kb}kB) algo=zstd"
+# 写回预研：标记全部页 idle 并触发一次 writeback（仅 U 盘后备在位时；开机
+#   初期通常无换出页，writeback 为 no-op，不判失败——页随时间换出后由
+#   daemon 采集 bd_stat 观测写回量）。best-effort，不影响 swap 生效。
+if [ -n "$usb_dev" ]; then
+    echo all > "$ZRAM/idle" 2>/dev/null
+    echo idle > "$ZRAM/writeback" 2>/dev/null
+fi
+
+kmsg "enabled: disksize=${disksize}B (40% of ${memtotal_kb}kB) algo=zstd backing=${usb_dev:-none}"
 exit 0

@@ -62,6 +62,11 @@
 #              (4) 内核留痕：logcat -b kernel（或 dmesg 计数增量）含 "sd stuck"。
 #              缺证据（属性不可读/注入失败/计数未增/无新事件/速度不符/无留痕）
 #              均判红。
+#   zram-writeback — zram 写回预研闭环校验：U 盘在位（sd* removable=1，严禁
+#              mmcblk 系统盘）才校验，不在位 SKIP；自驱配置 zram0 写回
+#              （swapoff→reset→绑 backing_dev=U 盘→disksize→写随机页→idle→
+#              writeback），断言 backing_dev 绑定且 bd_stat 写回页数递增；
+#              复原 mkswap+swapon。任一步 adb 超时返 -1 透传失败。
 #
 # 退出码：0 校验通过 / 1 校验失败 / 2 设备不可达或参数错误
 # ============================================================
@@ -1457,6 +1462,183 @@ def mode_zram(args):
 
 
 # ============================================================
+# zram writeback 预研闭环校验（--mode zram-writeback）
+# ============================================================
+
+# zram0 写回相关 sysfs 节点与设备路径
+_ZRAM_WB_BACKING = "/sys/block/zram0/backing_dev"
+_ZRAM_WB_BD_STAT = "/sys/block/zram0/bd_stat"
+_ZRAM_WB_IDLE = "/sys/block/zram0/idle"
+_ZRAM_WB_WRITEBACK = "/sys/block/zram0/writeback"
+_ZRAM_WB_RESET = "/sys/block/zram0/reset"
+_ZRAM_WB_DISKSIZE = "/sys/block/zram0/disksize"
+_ZRAM_WB_SWAP_DEV = "/dev/block/zram0"
+# 未配置 zram0 时演练用默认 disksize（64MiB，足够容纳演练随机页）
+_ZRAM_WB_DEFAULT_DISKSIZE = 64 * 1024 * 1024
+
+
+def _list_removable_usb_block_devs():
+    """枚举 removable 标志为 1 的 USB 块设备（/sys/block/sd*）→ (名字列表, 超时)。
+
+    仅扫 sd*（USB 存储命名），严禁 mmcblk 系统盘（不匹配前缀，天然排除）；
+    removable==0 的固定 USB SSD 亦跳过，只取可移除测试介质。末尾 true 保证
+    无匹配时 rc 仍为 0（for 循环末命令失败不视为错误）。adb 超时 rc==-1
+    返回 timeout=True 由调用方透传（不得当"无设备"假 SKIP）。
+    """
+    cmd = ('for d in /sys/block/sd*; do [ -e "$d/removable" ] && '
+           'echo "$(basename $d) $(cat $d/removable)"; done; true')
+    out, rc = adb(["shell", cmd])
+    if rc == -1:
+        return [], True
+    if rc != 0:
+        return [], False
+    names = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == "1":
+            names.append(parts[0])
+    return names, False
+
+
+def _zram_wb_read(path):
+    """读 sysfs 文本 → (strip 值, rc)。rc==-1 adb 超时；rc!=0 不可读。"""
+    out, rc = adb(["shell", "cat", path])
+    if rc == -1:
+        return None, -1
+    if rc != 0:
+        return None, rc
+    return out.strip(), 0
+
+
+def _parse_bd_stat(text):
+    """解析 bd_stat 一行（bd_count bd_reads bd_writes）→ 三元组 int；非法 None。"""
+    parts = text.split() if text else []
+    if len(parts) < 3:
+        return None
+    try:
+        return tuple(int(p, 0) for p in parts[:3])
+    except ValueError:
+        return None
+
+
+def mode_zram_writeback(args):
+    """zram writeback 预研闭环校验（--mode zram-writeback）。
+
+    语义（U 盘在位才校验，不在位 SKIP）：
+      1) 枚举 removable==1 的 USB 块设备（/sys/block/sd*，严禁 mmcblk 系统盘）；
+         无则打印 "SKIP:" exit 0（验收层转 skip 态不判红）；
+      2) 自驱配置 zram0 写回闭环（确定性，不依赖开机 init setup 重跑）：
+         swapoff zram0 → reset（清 backing_dev/计数）→ 绑 backing_dev=U 盘
+         （内核要求须在 disksize 之前）→ 设 disksize → dd 写随机页构造已分配页
+         → 标记 idle → 触发 writeback；
+      3) 断言：backing_dev 回读指向 U 盘；bd_stat 写回页数（第 3 字段）严格
+         递增（防假绿——无任一递增即判红）；
+      4) 复原：mkswap + swapon zram0（恢复 swap 生效，backing_dev 保持绑定）。
+
+    产载仅写 zram0（内存压缩块设备，无物理介质）与 U 盘 backing（可移除测试
+    介质，backing_dev 裸块写回）；不触碰系统盘 mmcblk 与 SD 卡。任一步 adb
+    超时（rc==-1）return -1 由 main 透传为失败。
+    """
+    names, t = _list_removable_usb_block_devs()
+    if t:
+        return -1
+    if not names:
+        print("SKIP: 板上无 removable USB 块设备（sd* removable=1）")
+        return 0
+    usb_name = names[0]
+    usb_dev = f"/dev/block/{usb_name}"
+
+    # 记录当前 disksize 以复原（未配置/不可读时用默认 64MiB）
+    ds, drc = _zram_wb_read(_ZRAM_WB_DISKSIZE)
+    if drc == -1:
+        return -1
+    disksize = _ZRAM_WB_DEFAULT_DISKSIZE
+    if drc == 0 and ds and ds.isdigit() and int(ds) > 0:
+        disksize = int(ds)
+
+    # 复位 zram0（先 swapoff 释放活动用户）并绑定 backing_dev
+    _o, rc = adb(["shell", f"swapoff {_ZRAM_WB_SWAP_DEV} 2>/dev/null; true"])
+    if rc == -1:
+        return -1
+    _o, rc = adb(["shell", f"echo 1 > {_ZRAM_WB_RESET} 2>/dev/null; true"])
+    if rc == -1:
+        return -1
+    _o, rc = adb(["shell", f"echo {usb_dev} > {_ZRAM_WB_BACKING}"])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print(f"ERROR: 绑定 backing_dev={usb_dev} 失败 rc={rc}")
+        return 1
+    bd, brc = _zram_wb_read(_ZRAM_WB_BACKING)
+    if brc == -1:
+        return -1
+    if brc != 0 or usb_name not in (bd or ""):
+        print(f"FAIL: backing_dev 未绑定到 U 盘（读到 {bd!r}，期望含 {usb_name}）")
+        print("ERROR: lciod zram-writeback 校验失败（backing_dev 绑定）")
+        return 1
+    print(f"OK: backing_dev 绑定 {bd}")
+
+    # 设 disksize + 写随机页（构造已分配页；零页会标记 ZRAM_SAME 不写回，
+    # 故用 urandom 生成不可压缩非零页）
+    _o, rc = adb(["shell", f"echo {disksize} > {_ZRAM_WB_DISKSIZE}"])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print(f"ERROR: 写 disksize={disksize} 失败 rc={rc}")
+        return 1
+    _o, rc = adb(["shell",
+                  f"dd if=/dev/urandom of={_ZRAM_WB_SWAP_DEV} "
+                  f"bs=4096 count={args.zram_wb_pages} 2>/dev/null"],
+                 timeout=args.dd_timeout)
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print(f"ERROR: 写 {_ZRAM_WB_SWAP_DEV} 构造已分配页失败 rc={rc}")
+        return 1
+
+    # baseline bd_stat → idle + writeback → after bd_stat
+    base, brc = _zram_wb_read(_ZRAM_WB_BD_STAT)
+    if brc == -1:
+        return -1
+    base_stat = _parse_bd_stat(base)
+    if base_stat is None:
+        print(f"FAIL: bd_stat 不可读/非法: {base!r}")
+        print("ERROR: lciod zram-writeback 校验失败（bd_stat 基线）")
+        return 1
+    _o, rc = adb(["shell", f"echo all > {_ZRAM_WB_IDLE} 2>/dev/null; true"])
+    if rc == -1:
+        return -1
+    _o, rc = adb(["shell", f"echo idle > {_ZRAM_WB_WRITEBACK}"])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print(f"ERROR: 触发 writeback 失败 rc={rc}")
+        return 1
+    after, arc = _zram_wb_read(_ZRAM_WB_BD_STAT)
+    if arc == -1:
+        return -1
+    after_stat = _parse_bd_stat(after)
+    if after_stat is None:
+        print(f"FAIL: bd_stat 不可读/非法: {after!r}")
+        print("ERROR: lciod zram-writeback 校验失败（bd_stat 回读）")
+        return 1
+
+    # 复原 swap（mkswap + swapon；backing_dev 保持绑定，backing 写回路径不变）
+    _o, rc = adb(["shell", f"mkswap {_ZRAM_WB_SWAP_DEV} >/dev/null 2>&1; "
+                           f"swapon {_ZRAM_WB_SWAP_DEV} 2>/dev/null; true"])
+    if rc == -1:
+        return -1
+
+    if after_stat[2] <= base_stat[2]:
+        print(f"FAIL: bd_stat 写回页数未递增（{base_stat[2]} -> {after_stat[2]}）")
+        print("ERROR: lciod zram-writeback 校验失败（writeback 未生效）")
+        return 1
+    print(f"OK: bd_stat 写回页数递增 {base_stat[2]} -> {after_stat[2]}")
+    print("OK: lciod zram-writeback 校验通过（backing_dev 绑定 + 写回递增）")
+    return 0
+
+
+# ============================================================
 # C 批二 方向 3：USB 传输延迟/块大小二维直方图用户态验收（--mode histo）
 # ============================================================
 
@@ -1836,7 +2018,7 @@ def main():
     ap.add_argument("--mode", required=True,
                     choices=["stats", "baseline", "delta", "perf", "uas",
                              "link", "storm", "qos", "qos-auto", "sd",
-                             "sd-inject", "histo", "zram"])
+                             "sd-inject", "histo", "zram", "zram-writeback"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
@@ -1889,6 +2071,9 @@ def main():
                     help="zram 模式采集留痕/事件触发轮询轮数，默认 8")
     ap.add_argument("--zram-sleep", type=float, default=4.0,
                     help="zram 模式每轮等待秒数（等 daemon 10s 采集窗），默认 4")
+    ap.add_argument("--zram-wb-pages", type=int, default=16,
+                    help="zram-writeback 模式演练随机页数（构造已分配页），"
+                         "默认 16")
     args = ap.parse_args()
 
     ensure_connected()
@@ -1952,6 +2137,14 @@ def main():
     if args.mode == "zram":
         # 方向三批一：zram 启用与换入压力观测闭环
         rc = mode_zram(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "zram-writeback":
+        # 方向三批二：zram writeback 预研闭环（U 盘 backing_dev + bd_stat 递增）
+        rc = mode_zram_writeback(args)
         if rc == -1:
             print("ERROR: adb 执行超时")
             return 1
