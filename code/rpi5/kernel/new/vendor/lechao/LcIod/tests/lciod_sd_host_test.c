@@ -2,7 +2,8 @@
  * lciod_sd_host_test.c — lciod SD 健康剥位/降档纯逻辑 host 单测
  * 编译执行：make -C tests（gcc host 编译，无内核依赖）
  * 覆盖：lciod_sd_next_lower_speed 逐级降档、lciod_sd_strip_modes_above
- *       按 sd_bus_speed 剥除高位模式位（A 批一方向 4）
+ *       按 sd_bus_speed 剥除高位模式位（A 批一方向 4）、lciod_sd_build_stuck_evt
+ *       演练合成 STUCK 事件构造契约（SD 自愈演练闭环）
  * ============================================================ */
 
 #include <stdio.h>
@@ -99,6 +100,64 @@ static void test_downgrade_combo(void)
     CHECK(mode == 0x01u);
 }
 
+/* 演练入口：合成 STUCK 事件构造契约（起点档位 → 降档结果，与内核同源） */
+static void test_build_stuck_evt(void)
+{
+    struct lciod_sd_stuck_evt e;
+
+    /* 演练起点（DDR50 + 全模式位）：DDR50(4)→SDR104(3)，剥去 bit4 */
+    lciod_sd_build_stuck_evt(LCIOD_SD_DRILL_START_SPEED,
+                             LCIOD_SD_DRILL_START_MODE,
+                             LCIOD_SD_DRILL_ERR, &e);
+    CHECK(e.old_speed == LCIOD_SD_SPEED_UHS_DDR50);
+    CHECK(e.new_speed == LCIOD_SD_SPEED_UHS_SDR104);
+    CHECK(e.old_mode == ALL_MODES);
+    CHECK(e.new_mode == 0x0Fu);
+    CHECK(e.err == LCIOD_SD_DRILL_ERR);
+
+    /* 最低档起点：无档可降（new==old），模式仅剩 bit0 */
+    lciod_sd_build_stuck_evt(LCIOD_SD_SPEED_UHS_SDR12, ALL_MODES,
+                             LCIOD_SD_DRILL_ERR, &e);
+    CHECK(e.old_speed == LCIOD_SD_SPEED_UHS_SDR12 && e.new_speed == 0u);
+    CHECK(e.new_mode == LCIOD_SD_MODE_UHS_SDR12);
+
+    /* 未知档位（>MAX）：回落 MAX-1（防御性，不越界降档） */
+    lciod_sd_build_stuck_evt(LCIOD_SD_SPEED_MAX + 1u, ALL_MODES,
+                             LCIOD_SD_DRILL_ERR, &e);
+    CHECK(e.new_speed == LCIOD_SD_SPEED_MAX - 1u);
+
+    /* out == NULL：不崩（防御性，仅此路径） */
+    lciod_sd_build_stuck_evt(LCIOD_SD_DRILL_START_SPEED,
+                             LCIOD_SD_DRILL_START_MODE,
+                             LCIOD_SD_DRILL_ERR, NULL);
+}
+
+/* 窗口平均延迟纯函数：count==0 除零防护；否则 sum/count/1000（微秒） */
+static void test_lat_avg_us(void)
+{
+    /* 单请求 500ms → 平均 500000us */
+    CHECK(lciod_sd_lat_avg_us(500000000ULL, 1) == 500000ULL);
+    /* 两请求 500ms + 100ms = 600ms / 2 = 300ms = 300000us */
+    CHECK(lciod_sd_lat_avg_us(600000000ULL, 2) == 300000ULL);
+    /* count==0：除零防护返回 0（不得崩） */
+    CHECK(lciod_sd_lat_avg_us(123ULL, 0) == 0ULL);
+    /* 1us = 1000ns → 平均 1us */
+    CHECK(lciod_sd_lat_avg_us(1000ULL, 1) == 1ULL);
+    /* 亚微秒截断：1500ns → 1us */
+    CHECK(lciod_sd_lat_avg_us(1500ULL, 1) == 1ULL);
+}
+
+/* 长尾判据：历时 >= 50ms 阈值（>= 边界，演练 500ms 必为长尾） */
+static void test_lat_is_tail(void)
+{
+    CHECK(LCIOD_SD_LAT_IS_TAIL(LCIOD_SD_LAT_TAIL_NS));
+    CHECK(LCIOD_SD_LAT_IS_TAIL(LCIOD_SD_LAT_TAIL_NS + 1ULL));
+    CHECK(!LCIOD_SD_LAT_IS_TAIL(LCIOD_SD_LAT_TAIL_NS - 1ULL));
+    /* 演练延迟（500ms）必为长尾 */
+    CHECK(LCIOD_SD_LAT_IS_TAIL(LCIOD_SD_DRILL_LAT_NS));
+    CHECK(!LCIOD_SD_LAT_IS_TAIL(0ULL));
+}
+
 /* SSR 解码：SPEED_CLASS 落 raw[2] 高字节，UHS_SPEED_GRADE 落 raw[3][15:12] */
 static void test_decode_ssr(void)
 {
@@ -134,6 +193,9 @@ int main(void)
     test_next_lower_speed();
     test_strip_modes_above();
     test_downgrade_combo();
+    test_build_stuck_evt();
+    test_lat_avg_us();
+    test_lat_is_tail();
     test_decode_ssr();
     if (g_fails) {
         printf("FAIL: %d/%d checks failed\n", g_fails, g_checks);

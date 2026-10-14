@@ -153,6 +153,29 @@
         {"name": "count",         "type": "int64"},
         {"name": "threshold",     "type": "int64"}
       ]
+    },
+    {
+      "id": 18,
+      "name": "qos_auto_adjust",
+      "desc": "SD window latency long-tail detected, feedback source for daemon auto QoS tier (kernel lciod_sd)",
+      "fields": [
+        {"name": "avg_lat_us",    "type": "int64"},
+        {"name": "tail_count",    "type": "int64"},
+        {"name": "threshold_us",  "type": "int64"}
+      ]
+    },
+    {
+      "id": 19,
+      "name": "zram_swap_pressure",
+      "desc": "zram swap-in pressure window exceeded threshold (daemon synthetic report, no kernel emitter)",
+      "fields": [
+        {"name": "swapin_pages",    "type": "int64"},
+        {"name": "swapout_pages",   "type": "int64"},
+        {"name": "zram_read_bytes", "type": "int64"},
+        {"name": "zram_write_bytes", "type": "int64"},
+        {"name": "psi_io_total_us", "type": "int64"},
+        {"name": "threshold_pages", "type": "int64"}
+      ]
     }
   ]
 }

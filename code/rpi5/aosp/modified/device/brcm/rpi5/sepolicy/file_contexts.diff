@@ -2,7 +2,7 @@ diff --git a/sepolicy/file_contexts b/sepolicy/file_contexts
 index 9692b33..503c891 100644
 --- a/sepolicy/file_contexts
 +++ b/sepolicy/file_contexts
-@@ -28,3 +28,41 @@
+@@ -28,3 +28,47 @@
  /dev/block/sda5       u:object_r:system_block_device:s0
  /dev/block/sda6       u:object_r:system_block_device:s0
  /dev/block/sda7       u:object_r:metadata_block_device:s0
@@ -44,3 +44,9 @@ index 9692b33..503c891 100644
 +#  标签 lechao_lcview_data_file → lcview 域可以在此目录下创建/读写文件
 +#  为什么 /data/vendor：vendor 分区的持久化数据必须放在 /data/vendor 下
 +/data/vendor/lechao_lcview(/.*)?                    u:object_r:lechao_lcview_data_file:s0
++
++# ===== rpi5_zram_setup - 开机启用 zram 脚本（system 分区） =====
++#  shell 脚本 /system/bin/rpi5_zram_setup（Android.bp sh_binary）
++#  标签 rpi5_zram_setup_exec（te 中声明的 exec_type，init_daemon_domain 处理 transition）
++#  rpi5-zram-setup.rc 中 seclabel u:r:rpi5_zram_setup:s0，以独立域运行
++/system/bin/rpi5_zram_setup                    u:object_r:rpi5_zram_setup_exec:s0

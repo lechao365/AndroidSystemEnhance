@@ -82,6 +82,15 @@
                                               * 合成，无内核发射点——lciod 每 10s 拉取延迟直方图，
                                               * 长尾档（>=50ms）计数窗口新增超阈即合成，见
                                               * DISABLED_EVENTS 豁免） */
+#define LCVIEW_EVENT_QOS_AUTO_ADJUST     18 /* SD 窗口延迟长尾触发自动分级（来源：LcIod
+                                              * lciod_sd.c，触发场景：10s 窗长尾延迟请求数 > 0
+                                              * 时上报窗口平均延迟/长尾计数/长尾阈值，daemon
+                                              * IoQosManager 自动档据此收紧/放松 bg 限速） */
+#define LCVIEW_EVENT_ZRAM_SWAP_PRESSURE  19 /* zram 换入压力超阈（方向三批一，用户态 daemon
+                                              * 合成，无内核发射点——lciod 每 10s 聚合 PSI io
+                                              * some total + vmstat 换入/换出页数 + zram0
+                                              * io_stat 读写字节差分，窗换入页数超阈即合成，见
+                                              * DISABLED_EVENTS 豁免） */
 
 /* --- 记录魔数 --- */
 #define LCVIEW_MAGIC  0x4C56

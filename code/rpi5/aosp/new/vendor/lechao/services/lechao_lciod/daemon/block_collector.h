@@ -141,6 +141,19 @@ struct ZramIoSample {
 // 解析 zram io_stat 一行。4~6 字段兼容，缺省补 0；全空行/out 空指针判 false。
 bool ParseZramIoStat(const std::string& line, ZramIoSample* out);
 
+// zram 写回后备（backing_dev）统计采样（bd_stat 3 字段，CONFIG_ZRAM_WRITEBACK
+// 开启时导出；每字段为 4KiB 页数，内核 FOUR_K 宏口径）。bd_count=当前驻留
+// 后备的页数，bd_reads=累计读回页数，bd_writes=累计写回页数（单调累计，
+// 换出页回写量的观测源）。
+struct ZramBdSample {
+    uint64_t bd_count = 0;
+    uint64_t bd_reads = 0;
+    uint64_t bd_writes = 0;
+};
+// 解析 zram bd_stat 一行（3 字段）。全空行/out 空指针判 false 并 ALOGE；
+// 字段数不足 3 时缺省补 0（兼容旧内核/写回未配置节点）。
+bool ParseZramBdStat(const std::string& line, ZramBdSample* out);
+
 // 悬挂检测状态：consecutive_high 连续满足条件次数。
 struct HangState {
     uint32_t consecutive_high = 0;
@@ -202,9 +215,13 @@ public:
         uint64_t failedWrites = 0; // io_stat.failed_writes
         uint64_t readBytes = 0;    // io_stat.read_bytes
         uint64_t writeBytes = 0;   // io_stat.write_bytes
+        // 写回后备统计（bd_stat；写回未配置/节点缺失时缺省 0，属降级不判失败）
+        uint64_t bdCount = 0;      // bd_stat.bd_count（当前驻留后备页数）
+        uint64_t bdReads = 0;      // bd_stat.bd_reads（累计读回页数）
+        uint64_t bdWrites = 0;     // bd_stat.bd_writes（累计写回页数）
     };
-    // 采样 zram0。任一关键文件读取/解析失败返回 false（限频 ALOGE，
-    // CXX-002 不吞错）。
+    // 采样 zram0（mm_stat/io_stat 为关键源，任一失败返回 false；bd_stat 为
+    // 可选增强源，缺失/解析失败仅缺省 0 并限频 ALOGE，不判失败）。
     bool SampleZram(Sample* out);
 };
 
@@ -228,6 +245,64 @@ public:
     // 纯函数：把 sysfs 文本行解析为非负 uint64；空/非数字返回 false。
     // （供单测直接覆盖，无 I/O）
     static bool ParseU64(const std::string& line, uint64_t* out);
+};
+
+// ============================================================
+// zram 换入压力观测（方向三批一）
+// ============================================================
+// 事件 id（与 config/lcview_events.json id=19 zram_swap_pressure 对应）
+inline constexpr uint16_t kEventZramSwapPressureId = 19;
+// 换入压力窗默认阈值（页/10s 窗）：窗口内换入页数达此值即合成上报。
+// 取值理由：单页 4KiB，256 页 ≈ 1MiB/窗，超出正常后台回收均值，可捕换入
+// 风暴；演练经 sysprop 调低至 1 令合成/背景换入即触发（禁真实压测）。
+inline constexpr uint64_t kZramSwapPressureThresholdPages = 256;
+// 反馈源：PSI io（/proc/pressure/io，proc_pressure_io）/ vmstat 换入换出
+// 计数（/proc/vmstat pswpin/pswpout，proc_vmstat）
+inline constexpr const char* kPsiIoPath = "/proc/pressure/io";
+inline constexpr const char* kVmstatPath = "/proc/vmstat";
+
+// PSI io "some ..." 行采样（/proc/pressure/io 首行）。
+struct PsiIoSample {
+    double avg10 = 0.0;     // some avg10（%）
+    double avg60 = 0.0;     // some avg60（%）
+    double avg300 = 0.0;    // some avg300（%）
+    uint64_t total_us = 0;  // some total（累计阻塞微秒，单调）
+};
+// 解析 PSI io "some avg10=.. avg60=.. avg300=.. total=.." 行；缺字段/非法判 false。
+bool ParsePsiIoSome(const std::string& line, PsiIoSample* out);
+
+// 从 /proc/vmstat 文本提取键值（如 pswpin/pswpout）→ 非负十进制；缺键/非法 false。
+bool ParseVmstatKey(const std::string& text, const std::string& key, uint64_t* out);
+
+// 换入压力超阈判定（纯函数）：窗口换入页数 > 0 且 >= 阈值 → true。
+// 阈值 0 表示"任何换入即触发"（演练降阈用，仍在 >0 前提下）。
+bool ShouldReportZramSwapPressure(uint64_t swapin_pages, uint64_t threshold_pages);
+
+// ZramSwapPressureCollector：10s 窗聚合换入压力——/proc/vmstat 换入/换出页数、
+// /proc/pressure/io some total、zram0 io_stat 读写字节的单调差分。仅主循环
+// 线程调用（无锁，内部 prev 状态不被并发访问）。
+class ZramSwapPressureCollector {
+public:
+    struct Sample {
+        bool primed = false;         // 首次采样只建 prev，无窗口差分
+        uint64_t swapinPages = 0;    // 窗口换入页数（vmstat pswpin 差分）
+        uint64_t swapoutPages = 0;   // 窗口换出页数（vmstat pswpout 差分）
+        uint64_t zramReadBytes = 0;  // 窗口 zram 读字节（io_stat 差分，换入读）
+        uint64_t zramWriteBytes = 0; // 窗口 zram 写字节（io_stat 差分，换出写）
+        uint64_t psiIoTotalUs = 0;   // 窗口 PSI io some total 差分（累计阻塞微秒）
+    };
+    // 采样一窗：读 /proc/vmstat + /proc/pressure/io + zram0 io_stat 并差分。
+    // 首次调用只建 prev（out->primed=false）返回 true；任一必需源读取/解析
+    // 失败返回 false（限频 ALOGE，CXX-002 不吞错），调用方降级跳过本轮。
+    bool SampleWindow(Sample* out);
+
+private:
+    bool have_ = false;             // 是否已建立 prev（首窗无差分）
+    uint64_t prevSwapin_ = 0;
+    uint64_t prevSwapout_ = 0;
+    uint64_t prevZramRead_ = 0;
+    uint64_t prevZramWrite_ = 0;
+    uint64_t prevPsiTotal_ = 0;
 };
 
 }  // namespace lciod

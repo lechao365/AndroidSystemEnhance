@@ -53,6 +53,20 @@
 #              drop_caches + dd 读块设备（默认 /dev/block/sda，LCVIEW_BLOCK_DEV
 #              覆盖，只读到 /dev/null 无破坏面）→ 差分断言 ≥1 设备读方向
 #              （dir 0）计数之和严格增量（防假绿；无增量判红）。
+#   sd-inject — SD 自愈演练闭环校验（SD 自愈演练接口与故障面断言闭环）：
+#              自驱向 sysfs inject_stuck（root-only，写一次触发一次）注入一次
+#              合成 STUCK 事件（仅内存模拟，不依赖真卡异常）→ 四重断言——
+#              (1) stuck_count 计数递增（注入前读基线）；
+#              (2) lcview JSONL 新增 sd_stuck(id=16) 记录；
+#              (3) last_speed 反映降档（等于新增事件 new_speed，且 old>new）；
+#              (4) 内核留痕：logcat -b kernel（或 dmesg 计数增量）含 "sd stuck"。
+#              缺证据（属性不可读/注入失败/计数未增/无新事件/速度不符/无留痕）
+#              均判红。
+#   zram-writeback — zram 写回预研闭环校验：U 盘在位（sd* removable=1，严禁
+#              mmcblk 系统盘）才校验，不在位 SKIP；自驱配置 zram0 写回
+#              （swapoff→reset→绑 backing_dev=U 盘→disksize→写随机页→idle→
+#              writeback），断言 backing_dev 绑定且 bd_stat 写回页数递增；
+#              复原 mkswap+swapon。任一步 adb 超时返 -1 透传失败。
 #
 # 退出码：0 校验通过 / 1 校验失败 / 2 设备不可达或参数错误
 # ============================================================
@@ -682,8 +696,8 @@ _SD_LOG_TAG = _STORM_LOG_TAG
 _SD_LVVIEW_LOG_DIR = "/data/vendor/lechao_lcview/logs"
 # sysfs 必须齐全的属性（缺任一即内核打点回归，判红）
 _SD_REQUIRED_ATTRS = ["enable", "window_bytes", "window_requests",
-                      "stuck_count", "ssr_speed_class", "ssr_uhs_grade",
-                      "ssr_valid"]
+                      "stuck_count", "last_speed", "ssr_speed_class",
+                      "ssr_uhs_grade", "ssr_valid"]
 # 仅允许 0/1 的布尔属性（其余属性校验非负十进制数字）
 _SD_BOOL_ATTRS = ("enable", "ssr_valid")
 # SD 产载读块设备变量（方向 2）：独立变量 LCIOD_SD_BLOCK_DEV（默认 SD 卡
@@ -867,9 +881,766 @@ def mode_sd(args):
 
 
 # ============================================================
-# C 批二 方向 3：USB 传输延迟/块大小二维直方图用户态验收（--mode histo）
+# SD 自愈演练闭环：合成 STUCK 注入 + 故障面断言（--mode sd-inject）
 # ============================================================
 
+# 演练入口属性（root-only，写一次触发一次；内存构造合成 STUCK，不触碰真卡）
+_SD_DRILL_ATTR = "inject_stuck"
+# 演练事件 JSONL 文件名关键字（16_sd_stuck_<YYYYMMDD>_pN.jsonl）
+_SD_STUCK_JSONL_KEY = "sd_stuck"
+# 内核留痕正文（lciod_sd.c pr_warn_ratelimited "kernel_lechao_usb: sd stuck:"）
+_SD_STUCK_KMSG = "sd stuck"
+
+
+def _sd_sysfs_read(attr):
+    """读单个 SD sysfs 属性 → (值 int 或 None, rc)。
+
+    rc==-1 adb 超时透传；rc!=0 不可读；rc==2 内容非十进制（值 None）。调用
+    方据 rc 区分"不可读"与"非法值"，不得静默当 0（防假绿）。
+    """
+    val, rc = adb(["shell", "cat", f"{_SD_SYSFS_DIR}/{attr}"])
+    if rc == -1:
+        return None, -1
+    if rc != 0:
+        return None, rc
+    try:
+        return int(val.strip(), 0), 0
+    except ValueError:
+        return None, 2
+
+
+def _read_sd_stuck_records():
+    """读取 lcview 日志目录全部 sd_stuck(id=16) 记录 → (记录列表, 超时, 错误列表)。
+
+    文件名为 16_sd_stuck_<YYYYMMDD>_pN.jsonl，按文件名排序取读；逐行
+    json.loads 容错（失败行跳过），收集 rec["id"]==16 的记录。JSONL 记录
+    无 name 字段，判据只能用 id（照 _check_sd_health 口径）。目录/文件不可读
+    返回错误（不得当"无事件"假绿）。
+    """
+    out, rc = adb(["shell", "ls", _SD_LVVIEW_LOG_DIR])
+    if rc == -1:
+        return [], True, []
+    if rc != 0:
+        return [], False, [f"lcview 日志目录 {_SD_LVVIEW_LOG_DIR} 不可读 rc={rc}"]
+    files = sorted(f.split("/")[-1] for f in out.split()
+                   if _SD_STUCK_JSONL_KEY in f and "*" not in f)
+    records = []
+    for fn in files:
+        body, brc = adb(["shell", "cat", f"{_SD_LVVIEW_LOG_DIR}/{fn}"])
+        if brc == -1:
+            return records, True, []
+        if brc != 0:
+            return records, False, [f"读取 sd_stuck 日志文件失败 rc={brc}: {fn}"]
+        for line in body.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and rec.get("id") == 16:
+                records.append(rec)
+    return records, False, []
+
+
+def _max_sd_stuck_seq(records):
+    """记录集内 sd_stuck 最大 seq（无记录返 -1）——增量判据用 seq 而非条数，
+    防日志轮转/文件读取顺序致条数比较误判。"""
+    return max((r.get("seq", -1) for r in records), default=-1)
+
+
+def _sd_stuck_kmsg_count():
+    """dmesg 中 "sd stuck" 出现次数；adb 超时返 -1，dmesg 不可读返 None。"""
+    out, rc = adb(["shell", "dmesg"])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        return None
+    return sum(1 for ln in out.splitlines() if _SD_STUCK_KMSG in ln)
+
+
+def _sd_stuck_logcat_trace(since):
+    """内核 "sd stuck" logcat 留痕检测 → (命中 bool, adb超时 bool)。
+
+    优先 logcat -b kernel -T <since>（本设备 ro.logd.kernel=true，内核 printk
+    入 kernel 缓冲）；仅判锚点后的行，避免旧留痕假绿；adb 超时透传。
+    """
+    out, rc = adb(["logcat", "-d", "-b", "kernel", "-T", str(int(since))])
+    if rc == -1:
+        return False, True
+    return (rc == 0 and _SD_STUCK_KMSG in out), False
+
+
+def mode_sd_inject(args):
+    """SD 自愈演练闭环校验（--mode sd-inject）。
+
+    自驱向 inject_stuck 注入一次合成 STUCK（仅内存模拟，不依赖真卡异常），
+    四重断言（防假绿判红项）：
+      1) stuck_count 递增（注入前读基线）；
+      2) lcview JSONL 新增 sd_stuck(id=16) 记录（seq 增量判据）；
+      3) last_speed 反映降档（== 新增事件 new_speed 且 old_speed > new_speed）；
+      4) 内核留痕 "sd stuck"（logcat -b kernel 锚点后命中，或 dmesg 计数增量）；
+    任一步 adb 超时（rc==-1）return -1 由 main 透传为失败。
+    """
+    # 1) 注入前基线：stuck_count + last_speed + 已有 sd_stuck 记录 + dmesg 计数
+    base_count, crc = _sd_sysfs_read("stuck_count")
+    if crc == -1:
+        return -1
+    if base_count is None:
+        print(f"ERROR: stuck_count 不可读 rc={crc}（lciod_sd 未加载？）")
+        return 1
+    base_speed, src = _sd_sysfs_read("last_speed")
+    if src == -1:
+        return -1
+    if base_speed is None:
+        print(f"ERROR: last_speed 不可读 rc={src}（演练属性缺失？）")
+        return 1
+    recs_before, timeout, rerrs = _read_sd_stuck_records()
+    if timeout:
+        return -1
+    if rerrs:
+        for e in rerrs:
+            print(f"FAIL: {e}")
+        print("ERROR: lciod sd-inject 校验失败（读取 sd_stuck 基线）")
+        return 1
+    base_seq = _max_sd_stuck_seq(recs_before)
+    base_kmsg = _sd_stuck_kmsg_count()
+    if base_kmsg == -1:
+        return -1
+
+    # 2) 注入前取设备时钟锚点（logcat -T 只判锚点后缓冲，防旧留痕假绿）
+    since = args.log_since
+    if since is None:
+        since = device_now()
+        if since is None:
+            print("ERROR: 无法读取设备时钟（logcat 抓取窗口无法锚定）")
+            return 1
+
+    # 3) 注入一次合成 STUCK（root-only 触发属性）
+    out, rc = adb(["shell", f"echo 1 > {_SD_SYSFS_DIR}/{_SD_DRILL_ATTR}"])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print(f"ERROR: 注入 {_SD_DRILL_ATTR} 失败 rc={rc}"
+              "（root-only 触发属性不可写？）")
+        return 1
+
+    # 4) 轮询等待：计数递增 + 事件经 daemon 消费落盘（最多 ~12s）
+    after_count = base_count
+    recs_after = recs_before
+    for _ in range(6):
+        time.sleep(2)
+        c, c2 = _sd_sysfs_read("stuck_count")
+        if c2 == -1:
+            return -1
+        if c is not None:
+            after_count = c
+        r, t, _ = _read_sd_stuck_records()
+        if t:
+            return -1
+        recs_after = r
+        if after_count > base_count and _max_sd_stuck_seq(r) > base_seq:
+            break
+
+    # 5) 断言：计数递增 + 新增事件降档 + last_speed 反映
+    errors = []
+    if after_count <= base_count:
+        errors.append(f"stuck_count 未递增（{base_count}→{after_count}），注入未生效")
+    new_recs = [r for r in recs_after if r.get("seq", -1) > base_seq]
+    if not new_recs:
+        errors.append(f"lcview JSONL 无新增 sd_stuck(id=16) 记录"
+                      f"（基线 seq={base_seq}）")
+    else:
+        evt = max(new_recs, key=lambda r: r.get("seq", -1))
+        fields = evt.get("f") or []
+        if (len(fields) < 2 or not isinstance(fields[0], int)
+                or not isinstance(fields[1], int)):
+            errors.append(f"sd_stuck 记录字段非法（f={fields!r}）")
+        else:
+            old_speed, new_speed = fields[0], fields[1]
+            if old_speed <= new_speed:
+                errors.append(f"sd_stuck 未反映降档（old={old_speed} "
+                              f"new={new_speed}）")
+            after_speed, s2 = _sd_sysfs_read("last_speed")
+            if s2 == -1:
+                return -1
+            if after_speed is None:
+                errors.append("last_speed 注入后不可读")
+            elif after_speed != new_speed:
+                errors.append(f"last_speed={after_speed} 与事件 new_speed="
+                              f"{new_speed} 不符（未反映降档）")
+
+    # 6) 内核留痕：logcat -b kernel 锚点后命中，或 dmesg 计数增量
+    trace, t = _sd_stuck_logcat_trace(since)
+    if t:
+        return -1
+    if not trace:
+        after_kmsg = _sd_stuck_kmsg_count()
+        if after_kmsg == -1:
+            return -1
+        if (after_kmsg is not None and base_kmsg is not None
+                and after_kmsg > base_kmsg):
+            trace = True
+    if not trace:
+        errors.append('无内核留痕（logcat -b kernel -T 与 dmesg 均无 "sd stuck"）')
+
+    if errors:
+        for e in errors:
+            print(f"FAIL: {e}")
+        print("ERROR: lciod sd-inject 校验失败")
+        return 1
+    print(f"OK: stuck_count {base_count}→{after_count}，新增 sd_stuck "
+          f"{len(new_recs)} 条，last_speed 反映降档，内核留痕")
+    print("OK: lciod sd-inject 校验通过（合成 STUCK 演练闭环）")
+    return 0
+
+
+# ============================================================
+# QoS 延迟感知自动分级闭环校验（--mode qos-auto）
+# ============================================================
+
+# 自动档开关与延迟阈值 sysprop（与 io_qos.cpp 对齐）：
+#   ioqos_auto 开关（"1" 开 / 空或 "0" 关）；ioqos_lat_ms 延迟阈值（毫秒）
+_QOS_AUTO_PROP = "sys.lechao.lciod.ioqos_auto"
+_QOS_LAT_PROP = "sys.lechao.lciod.ioqos_lat_ms"
+# 延迟演练入口属性（root-only，写一次触发一次；合成慢 COMPLETE 入窗口/直方图）
+_SD_LAT_DRILL_ATTR = "inject_latency"
+# qos_auto 事件 JSONL 文件名关键字（18_qos_auto_adjust_<YYYYMMDD>_pN.jsonl）
+_QOS_AUTO_JSONL_KEY = "qos_auto_adjust"
+# daemon 自动档 JSON 留痕 rule 值（logcat tag lechao_lciod_event）
+_QOS_AUTO_RULE = '"rule":"qos_auto"'
+# 延迟阈值缺省（毫秒）：与 daemon kIoQosAutoLatThresholdMs 对齐
+_QOS_AUTO_LAT_MS_DEFAULT = 50
+
+
+def _read_qos_auto_records():
+    """读取 lcview 日志目录全部 qos_auto_adjust(id=18) 记录。
+
+    返回 (记录列表, 超时 bool, 错误列表)。文件名形如
+    18_qos_auto_adjust_<YYYYMMDD>_pN.jsonl，按名排序取读；逐行 json.loads
+    容错（失败行跳过），收集 rec["id"]==18 的记录（JSONL 无 name 字段，
+    判据只能用 id，照 sd_stuck 口径）。目录/文件不可读返回错误（不得当
+    "无事件"假绿）。
+    """
+    out, rc = adb(["shell", "ls", _SD_LVVIEW_LOG_DIR])
+    if rc == -1:
+        return [], True, []
+    if rc != 0:
+        return [], False, [f"lcview 日志目录 {_SD_LVVIEW_LOG_DIR} 不可读 rc={rc}"]
+    files = sorted(f.split("/")[-1] for f in out.split()
+                   if _QOS_AUTO_JSONL_KEY in f and "*" not in f)
+    records = []
+    for fn in files:
+        body, brc = adb(["shell", "cat", f"{_SD_LVVIEW_LOG_DIR}/{fn}"])
+        if brc == -1:
+            return records, True, []
+        if brc != 0:
+            return records, False, [f"读取 qos_auto 日志文件失败 rc={brc}: {fn}"]
+        for line in body.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and rec.get("id") == 18:
+                records.append(rec)
+    return records, False, []
+
+
+def _max_qos_auto_seq(records):
+    """记录集内 qos_auto 最大 seq（无记录返 -1）——增量判据用 seq 而非条数，
+    防日志轮转/文件读取顺序致条数比较误判。"""
+    return max((r.get("seq", -1) for r in records), default=-1)
+
+
+def _qos_auto_logcat_trace(since):
+    """daemon "rule":"qos_auto" logcat 留痕检测 → (命中 bool, 超时 bool)。
+
+    抓 tag lechao_lciod_event（IoQosManager 自动档档位变化经 EVENT_ALOG 打
+    JSON 行）；只判锚点后的行，避免旧留痕假绿；adb 超时透传。
+    """
+    out, rc = adb(["logcat", "-d", "-T", str(int(since)), "-s", _SD_LOG_TAG])
+    if rc == -1:
+        return False, True
+    return (rc == 0 and _QOS_AUTO_RULE in out), False
+
+
+def _qos_limit_contains_bg(paths):
+    """读限速文件判断当前是否处于 bg 收紧态 → (state, 超时 bool)。
+
+    state ∈ {"bg","off","unreadable"}：含 bg 限速值（8388608）为 "bg"；off
+    档（内核移除/清空限速条目）读回空/0/max 均属合法"放松"态为 "off"；
+    文件不可读为 "unreadable"（调用方判红，不得当放松假绿）。
+    """
+    out, rc = adb(["shell", "cat", paths["limit_file"]])
+    if rc == -1:
+        return "unreadable", True
+    if rc != 0:
+        return "unreadable", False
+    if _QOS_BG_BYTES in out:
+        return "bg", False
+    return "off", False
+
+
+def mode_qos_auto(args):
+    """QoS 延迟感知自动分级闭环校验（--mode qos-auto）。
+
+    自驱向 inject_latency 注入慢 COMPLETE（仅内存模拟，不依赖真卡异常）
+    抬升 SD 窗口延迟 → daemon IoQosManager 自动档据反馈收紧 bg 限速；停止
+    注入待 10s 窗回落 → 断言放松。四重断言（防假绿判红项）：
+      1) setprop ioqos_auto=1 + 阈值后注入抬延迟 → 限速文件进入 bg
+         （含 8388608，自动档收紧）；
+      2) lcview JSONL 新增 qos_auto_adjust(id=18) 记录（seq 增量判据）；
+      3) logcat tag lechao_lciod_event 新增 "rule":"qos_auto" 行（档位变化
+         留痕）；
+      4) 停止注入待窗口回落 → 限速文件退出 bg（自动档放松）。
+    产载沿临时文件/内存注入模式，禁块设备裸写（inject_latency 仅内存合成
+    慢 COMPLETE，无任何块设备读写）。teardown（finally 兜底）：关自动档 +
+    清延迟阈值。任一步 adb 超时（rc==-1）return -1 由 main 透传为失败。
+    """
+    paths = _qos_cgroup_paths()
+    if paths is None:
+        print("ERROR: 无法探测 cgroup（v2 cgroup.controllers 无 io 且 "
+              "v1 blkio 目录缺失），qos-auto 校验无法进行")
+        return 1
+    out, rc = adb(["shell", "ls", "-d", paths["group_dir"]])
+    if rc != 0 or not out.strip():
+        print(f"ERROR: cgroup 组 {paths['group_dir']} 不存在"
+              "（daemon IoQosManager 未建组？）")
+        return 1
+
+    # 基线：qos_auto 事件 seq + 设备时钟锚点（logcat -T 只判锚点后缓冲）
+    recs_before, t, rerrs = _read_qos_auto_records()
+    if t:
+        return -1
+    if rerrs:
+        for e in rerrs:
+            print(f"FAIL: {e}")
+        print("ERROR: lciod qos-auto 校验失败（读取 qos_auto 基线）")
+        return 1
+    base_seq = _max_qos_auto_seq(recs_before)
+
+    since = args.log_since
+    if since is None:
+        since = device_now()
+        if since is None:
+            print("ERROR: 无法读取设备时钟（logcat 抓取窗口无法锚定）")
+            return 1
+
+    try:
+        # 打开自动档 + 阈值（阈值约束平均延迟分支；长尾分支独立触发）
+        for prop, val in ((_QOS_LAT_PROP, str(args.qos_auto_lat_ms)),
+                          (_QOS_AUTO_PROP, "1")):
+            _out, prc = adb(["shell", "setprop", prop, val])
+            if prc == -1:
+                return -1
+            if prc != 0:
+                print(f"ERROR: setprop {prop}={val} 失败 rc={prc}")
+                return 1
+
+        # 注入抬延迟 → 轮询等待：daemon 收紧 bg + id=18 + logcat 留痕。
+        # 每轮重复注入防 10s 窗到期清零后延迟回落致误判放松。
+        bg_ok = False
+        new_seq = base_seq
+        trace_ok = False
+        for _ in range(args.qos_auto_rounds):
+            out, rc = adb(["shell",
+                           f"echo 1 > {_SD_SYSFS_DIR}/{_SD_LAT_DRILL_ATTR}"])
+            if rc == -1:
+                return -1
+            if rc != 0:
+                print(f"ERROR: 注入 {_SD_LAT_DRILL_ATTR} 失败 rc={rc}"
+                      "（root-only 触发属性不可写？）")
+                return 1
+            time.sleep(args.qos_auto_sleep)
+            state, st = _qos_limit_contains_bg(paths)
+            if st:
+                return -1
+            if state == "unreadable":
+                print(f"ERROR: 限速文件 {paths['limit_file']} 不可读")
+                return 1
+            recs, rt, _ = _read_qos_auto_records()
+            if rt:
+                return -1
+            new_seq = max(new_seq, _max_qos_auto_seq(recs))
+            tr, tt = _qos_auto_logcat_trace(since)
+            if tt:
+                return -1
+            bg_ok = (state == "bg")
+            trace_ok = trace_ok or tr
+            if bg_ok and new_seq > base_seq and trace_ok:
+                break
+
+        errors = []
+        if not bg_ok:
+            errors.append("注入抬延迟后限速文件未进入 bg（自动档未收紧）")
+        if new_seq <= base_seq:
+            errors.append(f"lcview JSONL 无新增 qos_auto_adjust(id=18) 记录"
+                          f"（基线 seq={base_seq}）")
+        if not trace_ok:
+            errors.append('logcat 无 "rule":"qos_auto" 行（自动档留痕缺失）')
+        if errors:
+            for e in errors:
+                print(f"FAIL: {e}")
+            print("ERROR: lciod qos-auto 校验失败（收紧阶段）")
+            return 1
+        print(f"OK: 自动档收紧 bg（窗口延迟超阈），新增 qos_auto_adjust "
+              f"(seq {base_seq}→{new_seq})，logcat 留痕")
+
+        # 停止注入 → 待 10s 窗回落（窗口清零后无长尾）→ 断言放松
+        relaxed = False
+        for _ in range(args.qos_auto_relax_rounds):
+            time.sleep(args.qos_auto_relax_sleep)
+            state, st = _qos_limit_contains_bg(paths)
+            if st:
+                return -1
+            if state == "unreadable":
+                print(f"ERROR: 限速文件 {paths['limit_file']} 不可读")
+                return 1
+            if state != "bg":
+                relaxed = True
+                break
+        if not relaxed:
+            print("FAIL: 停止注入后限速文件仍为 bg（延迟回落未放松）")
+            print("ERROR: lciod qos-auto 校验失败（放松阶段）")
+            return 1
+        print("OK: 延迟回落后自动档放松（限速文件退出 bg）")
+        print("OK: lciod qos-auto 校验通过（延迟感知自动分级闭环）")
+        return 0
+    finally:
+        # teardown：关自动档 + 清延迟阈值（回落手动 ioqos_level 常规驱动）
+        adb(["shell", "setprop", _QOS_AUTO_PROP, ""])
+        adb(["shell", "setprop", _QOS_LAT_PROP, ""])
+
+
+# ============================================================
+# zram 启用与换入压力观测闭环校验（--mode zram）
+# ============================================================
+
+# zram0 设备 sysfs / swap 表路径
+_ZRAM_SYSFS = "/sys/block/zram0"
+_ZRAM_SWAP_FILE = "/proc/swaps"
+_ZRAM_SWAP_DEV = "/dev/block/zram0"
+# daemon 留痕 rule 值（logcat tag lechao_lciod_event）：
+#   "zram" 为 ZramCollector 每 10s 采集；"zram_swap_pressure" 为换入压力超阈合成
+_ZRAM_RULE = '"rule":"zram"'
+_ZRAM_SWAP_PRESSURE_RULE = '"rule":"zram_swap_pressure"'
+# 降阈/演练 sysprop（与 service.cpp 对齐）：zram_swap_threshold 超阈页数（0/缺省
+# 用 daemon 默认），zram_swap_drill 合成换入页数（值变化一次性计入，OOM-safe）
+_ZRAM_THRESHOLD_PROP = "sys.lechao.lciod.zram_swap_threshold"
+_ZRAM_DRILL_PROP = "sys.lechao.lciod.zram_swap_drill"
+
+
+def _zram_swap_state():
+    """读 /proc/swaps 与 zram0 disksize 判定 swap 是否生效。
+
+    返回 (state, timeout)：state ∈ {"active","inactive","unreadable"}。
+    active=swaps 含 /dev/block/zram0 且 disksize>0；任一源不可读为
+    unreadable（判红，不得当未启用假绿）。
+    """
+    out, rc = adb(["shell", "cat", _ZRAM_SWAP_FILE])
+    if rc == -1:
+        return "unreadable", True
+    if rc != 0:
+        return "unreadable", False
+    if _ZRAM_SWAP_DEV not in out:
+        return "inactive", False
+    ds, drc = adb(["shell", "cat", _ZRAM_SYSFS + "/disksize"])
+    if drc == -1:
+        return "unreadable", True
+    if drc != 0 or not ds.strip().isdigit() or int(ds.strip()) <= 0:
+        return "inactive", False
+    return "active", False
+
+
+def _zram_logcat_trace(since, needle):
+    """daemon logcat 留痕检测 → (命中 bool, 超时 bool)。
+
+    抓 tag lechao_lciod_event，只判锚点后的行（防旧留痕假绿），adb 超时透传。
+    """
+    out, rc = adb(["logcat", "-d", "-T", str(int(since)), "-s", _SD_LOG_TAG])
+    if rc == -1:
+        return False, True
+    return (rc == 0 and needle in out), False
+
+
+def mode_zram(args):
+    """zram 启用与换入压力观测闭环校验（--mode zram）。
+
+    三段断言（防假绿判红项）：
+      1) 启用态：/proc/swaps 含 /dev/block/zram0 且 disksize>0（init
+         rpi5-zram-setup 生效，swap 可用）；
+      2) 采集留痕：logcat tag lechao_lciod_event 有 "rule":"zram" 行
+         （daemon ZramCollector 采集在跑）；
+      3) 事件触发：降阈 sysprop（threshold=1）+ 循环注入合成换入页
+         （zram_swap_drill，OOM-safe 确定性、无真实内存压力）→ logcat
+         新增 "rule":"zram_swap_pressure" 行。
+    产载沿 sysfs/sysprop 内存合成，禁块设备裸写与真实内存压测（防 OOM）。
+    teardown（finally 兜底）：清 threshold/drill sysprop。任一步 adb 超时
+    （rc==-1）return -1 由 main 透传为失败。
+    """
+    since = args.log_since
+    if since is None:
+        since = device_now()
+        if since is None:
+            print("ERROR: 无法读取设备时钟（logcat 抓取窗口无法锚定）")
+            return 1
+
+    try:
+        # 段1：swap 生效
+        state, st = _zram_swap_state()
+        if st:
+            return -1
+        if state == "unreadable":
+            print(f"ERROR: {_ZRAM_SWAP_FILE} 或 {_ZRAM_SYSFS}/disksize 不可读")
+            return 1
+        if state != "active":
+            print(f"FAIL: zram swap 未生效（{_ZRAM_SWAP_FILE} 无 {_ZRAM_SWAP_DEV} "
+                  "或 disksize=0）")
+            print("ERROR: lciod zram 校验失败（init 启用未生效）")
+            return 1
+        print(f"OK: zram swap 生效（{_ZRAM_SWAP_FILE} 含 {_ZRAM_SWAP_DEV}，"
+              "disksize>0）")
+
+        # 段2：采集留痕（daemon 每 10s 采 zram0 → "rule":"zram"）
+        trace_ok = False
+        for _ in range(args.zram_rounds):
+            tr, tt = _zram_logcat_trace(since, _ZRAM_RULE)
+            if tt:
+                return -1
+            if tr:
+                trace_ok = True
+                break
+            time.sleep(args.zram_sleep)
+        if not trace_ok:
+            print('FAIL: logcat 无 "rule":"zram" 行（daemon zram 采集未留痕）')
+            print("ERROR: lciod zram 校验失败（采集留痕缺失）")
+            return 1
+        print('OK: daemon zram 采集留痕（"rule":"zram"）')
+
+        # 段3：降阈 + 合成换入页 → 换入压力事件
+        for prop, val in ((_ZRAM_THRESHOLD_PROP, str(args.zram_threshold_pages)),
+                          (_ZRAM_DRILL_PROP, str(args.zram_drill_pages))):
+            _o, prc = adb(["shell", "setprop", prop, val])
+            if prc == -1:
+                return -1
+            if prc != 0:
+                print(f"ERROR: setprop {prop}={val} 失败 rc={prc}")
+                return 1
+        pressure_ok = False
+        for _ in range(args.zram_rounds):
+            # drill 为值变化一次性计入：先置 0 再置目标页，保证每轮重新触发
+            for val in ("0", str(args.zram_drill_pages)):
+                _o, prc = adb(["shell", "setprop", _ZRAM_DRILL_PROP, val])
+                if prc == -1:
+                    return -1
+                if prc != 0:
+                    print(f"ERROR: setprop {_ZRAM_DRILL_PROP}={val} 失败 rc={prc}")
+                    return 1
+            time.sleep(args.zram_sleep)
+            tr, tt = _zram_logcat_trace(since, _ZRAM_SWAP_PRESSURE_RULE)
+            if tt:
+                return -1
+            if tr:
+                pressure_ok = True
+                break
+        if not pressure_ok:
+            print('FAIL: logcat 无 "rule":"zram_swap_pressure" 行'
+                  "（降阈+合成换入未触发上报）")
+            print("ERROR: lciod zram 校验失败（换入压力事件未触发）")
+            return 1
+        print('OK: 换入压力事件触发（"rule":"zram_swap_pressure"，降阈+合成换入）')
+        print("OK: lciod zram 校验通过（zram 启用与换入压力观测闭环）")
+        return 0
+    finally:
+        # teardown：清降阈与演练 sysprop（回 daemon 默认阈值）
+        adb(["shell", "setprop", _ZRAM_THRESHOLD_PROP, ""])
+        adb(["shell", "setprop", _ZRAM_DRILL_PROP, ""])
+
+
+# ============================================================
+# zram writeback 预研闭环校验（--mode zram-writeback）
+# ============================================================
+
+# zram0 写回相关 sysfs 节点与设备路径
+_ZRAM_WB_BACKING = "/sys/block/zram0/backing_dev"
+_ZRAM_WB_BD_STAT = "/sys/block/zram0/bd_stat"
+_ZRAM_WB_IDLE = "/sys/block/zram0/idle"
+_ZRAM_WB_WRITEBACK = "/sys/block/zram0/writeback"
+_ZRAM_WB_RESET = "/sys/block/zram0/reset"
+_ZRAM_WB_DISKSIZE = "/sys/block/zram0/disksize"
+_ZRAM_WB_SWAP_DEV = "/dev/block/zram0"
+# 未配置 zram0 时演练用默认 disksize（64MiB，足够容纳演练随机页）
+_ZRAM_WB_DEFAULT_DISKSIZE = 64 * 1024 * 1024
+
+
+def _list_removable_usb_block_devs():
+    """枚举 removable 标志为 1 的 USB 块设备（/sys/block/sd*）→ (名字列表, 超时)。
+
+    仅扫 sd*（USB 存储命名），严禁 mmcblk 系统盘（不匹配前缀，天然排除）；
+    removable==0 的固定 USB SSD 亦跳过，只取可移除测试介质。末尾 true 保证
+    无匹配时 rc 仍为 0（for 循环末命令失败不视为错误）。adb 超时 rc==-1
+    返回 timeout=True 由调用方透传（不得当"无设备"假 SKIP）。
+    """
+    cmd = ('for d in /sys/block/sd*; do [ -e "$d/removable" ] && '
+           'echo "$(basename $d) $(cat $d/removable)"; done; true')
+    out, rc = adb(["shell", cmd])
+    if rc == -1:
+        return [], True
+    if rc != 0:
+        return [], False
+    names = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == "1":
+            names.append(parts[0])
+    return names, False
+
+
+def _zram_wb_read(path):
+    """读 sysfs 文本 → (strip 值, rc)。rc==-1 adb 超时；rc!=0 不可读。"""
+    out, rc = adb(["shell", "cat", path])
+    if rc == -1:
+        return None, -1
+    if rc != 0:
+        return None, rc
+    return out.strip(), 0
+
+
+def _parse_bd_stat(text):
+    """解析 bd_stat 一行（bd_count bd_reads bd_writes）→ 三元组 int；非法 None。"""
+    parts = text.split() if text else []
+    if len(parts) < 3:
+        return None
+    try:
+        return tuple(int(p, 0) for p in parts[:3])
+    except ValueError:
+        return None
+
+
+def mode_zram_writeback(args):
+    """zram writeback 预研闭环校验（--mode zram-writeback）。
+
+    语义（U 盘在位才校验，不在位 SKIP）：
+      1) 枚举 removable==1 的 USB 块设备（/sys/block/sd*，严禁 mmcblk 系统盘）；
+         无则打印 "SKIP:" exit 0（验收层转 skip 态不判红）；
+      2) 自驱配置 zram0 写回闭环（确定性，不依赖开机 init setup 重跑）：
+         swapoff zram0 → reset（清 backing_dev/计数）→ 绑 backing_dev=U 盘
+         （内核要求须在 disksize 之前）→ 设 disksize → dd 写随机页构造已分配页
+         → 标记 idle → 触发 writeback；
+      3) 断言：backing_dev 回读指向 U 盘；bd_stat 写回页数（第 3 字段）严格
+         递增（防假绿——无任一递增即判红）；
+      4) 复原：mkswap + swapon zram0（恢复 swap 生效，backing_dev 保持绑定）。
+
+    产载仅写 zram0（内存压缩块设备，无物理介质）与 U 盘 backing（可移除测试
+    介质，backing_dev 裸块写回）；不触碰系统盘 mmcblk 与 SD 卡。任一步 adb
+    超时（rc==-1）return -1 由 main 透传为失败。
+    """
+    names, t = _list_removable_usb_block_devs()
+    if t:
+        return -1
+    if not names:
+        print("SKIP: 板上无 removable USB 块设备（sd* removable=1）")
+        return 0
+    usb_name = names[0]
+    usb_dev = f"/dev/block/{usb_name}"
+
+    # 记录当前 disksize 以复原（未配置/不可读时用默认 64MiB）
+    ds, drc = _zram_wb_read(_ZRAM_WB_DISKSIZE)
+    if drc == -1:
+        return -1
+    disksize = _ZRAM_WB_DEFAULT_DISKSIZE
+    if drc == 0 and ds and ds.isdigit() and int(ds) > 0:
+        disksize = int(ds)
+
+    # 复位 zram0（先 swapoff 释放活动用户）并绑定 backing_dev
+    _o, rc = adb(["shell", f"swapoff {_ZRAM_WB_SWAP_DEV} 2>/dev/null; true"])
+    if rc == -1:
+        return -1
+    _o, rc = adb(["shell", f"echo 1 > {_ZRAM_WB_RESET} 2>/dev/null; true"])
+    if rc == -1:
+        return -1
+    _o, rc = adb(["shell", f"echo {usb_dev} > {_ZRAM_WB_BACKING}"])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print(f"ERROR: 绑定 backing_dev={usb_dev} 失败 rc={rc}")
+        return 1
+    bd, brc = _zram_wb_read(_ZRAM_WB_BACKING)
+    if brc == -1:
+        return -1
+    if brc != 0 or usb_name not in (bd or ""):
+        print(f"FAIL: backing_dev 未绑定到 U 盘（读到 {bd!r}，期望含 {usb_name}）")
+        print("ERROR: lciod zram-writeback 校验失败（backing_dev 绑定）")
+        return 1
+    print(f"OK: backing_dev 绑定 {bd}")
+
+    # 设 disksize + 写随机页（构造已分配页；零页会标记 ZRAM_SAME 不写回，
+    # 故用 urandom 生成不可压缩非零页）
+    _o, rc = adb(["shell", f"echo {disksize} > {_ZRAM_WB_DISKSIZE}"])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print(f"ERROR: 写 disksize={disksize} 失败 rc={rc}")
+        return 1
+    _o, rc = adb(["shell",
+                  f"dd if=/dev/urandom of={_ZRAM_WB_SWAP_DEV} "
+                  f"bs=4096 count={args.zram_wb_pages} 2>/dev/null"],
+                 timeout=args.dd_timeout)
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print(f"ERROR: 写 {_ZRAM_WB_SWAP_DEV} 构造已分配页失败 rc={rc}")
+        return 1
+
+    # baseline bd_stat → idle + writeback → after bd_stat
+    base, brc = _zram_wb_read(_ZRAM_WB_BD_STAT)
+    if brc == -1:
+        return -1
+    base_stat = _parse_bd_stat(base)
+    if base_stat is None:
+        print(f"FAIL: bd_stat 不可读/非法: {base!r}")
+        print("ERROR: lciod zram-writeback 校验失败（bd_stat 基线）")
+        return 1
+    _o, rc = adb(["shell", f"echo all > {_ZRAM_WB_IDLE} 2>/dev/null; true"])
+    if rc == -1:
+        return -1
+    _o, rc = adb(["shell", f"echo idle > {_ZRAM_WB_WRITEBACK}"])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print(f"ERROR: 触发 writeback 失败 rc={rc}")
+        return 1
+    after, arc = _zram_wb_read(_ZRAM_WB_BD_STAT)
+    if arc == -1:
+        return -1
+    after_stat = _parse_bd_stat(after)
+    if after_stat is None:
+        print(f"FAIL: bd_stat 不可读/非法: {after!r}")
+        print("ERROR: lciod zram-writeback 校验失败（bd_stat 回读）")
+        return 1
+
+    # 复原 swap（mkswap + swapon；backing_dev 保持绑定，backing 写回路径不变）
+    _o, rc = adb(["shell", f"mkswap {_ZRAM_WB_SWAP_DEV} >/dev/null 2>&1; "
+                           f"swapon {_ZRAM_WB_SWAP_DEV} 2>/dev/null; true"])
+    if rc == -1:
+        return -1
+
+    if after_stat[2] <= base_stat[2]:
+        print(f"FAIL: bd_stat 写回页数未递增（{base_stat[2]} -> {after_stat[2]}）")
+        print("ERROR: lciod zram-writeback 校验失败（writeback 未生效）")
+        return 1
+    print(f"OK: bd_stat 写回页数递增 {base_stat[2]} -> {after_stat[2]}")
+    print("OK: lciod zram-writeback 校验通过（backing_dev 绑定 + 写回递增）")
+    return 0
+
+
+# ============================================================
+# C 批二 方向 3：USB 传输延迟/块大小二维直方图用户态验收（--mode histo）
+# ============================================================
 
 def run_histo_probe():
     """设备侧执行 lciod_probe --histo（GET_LATENCY_HISTOGRAM ioctl 取数），
@@ -1246,7 +2017,8 @@ def main():
     ap = argparse.ArgumentParser(description="lciod 板端数据校验器（host 侧）")
     ap.add_argument("--mode", required=True,
                     choices=["stats", "baseline", "delta", "perf", "uas",
-                             "link", "storm", "qos", "sd", "histo"])
+                             "link", "storm", "qos", "qos-auto", "sd",
+                             "sd-inject", "histo", "zram", "zram-writeback"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
@@ -1276,6 +2048,32 @@ def main():
     ap.add_argument("--qos-sleep", type=float, default=2.0,
                     help="qos 模式 setprop 后等待秒数（等 daemon 1s 周期应用），"
                          "默认 2")
+    ap.add_argument("--qos-auto-lat-ms", type=int,
+                    default=_QOS_AUTO_LAT_MS_DEFAULT,
+                    help="qos-auto 模式自动档延迟阈值（毫秒），默认 50")
+    ap.add_argument("--qos-auto-rounds", type=int, default=8,
+                    help="qos-auto 模式收紧阶段注入/轮询轮数（每轮注入一次抬"
+                         "延迟），默认 8")
+    ap.add_argument("--qos-auto-sleep", type=float, default=2.0,
+                    help="qos-auto 模式收紧阶段每轮等待秒数（等 daemon 1s 周期"
+                         "与 10s 窗），默认 2")
+    ap.add_argument("--qos-auto-relax-rounds", type=int, default=10,
+                    help="qos-auto 模式放松阶段轮询轮数（等 10s 窗回落），默认 10")
+    ap.add_argument("--qos-auto-relax-sleep", type=float, default=2.0,
+                    help="qos-auto 模式放松阶段每轮等待秒数，默认 2")
+    ap.add_argument("--zram-drill-pages", type=int, default=64,
+                    help="zram 模式合成换入页数（sysprop zram_swap_drill），"
+                         "默认 64（OOM-safe 确定性合成，无真实内存压力）")
+    ap.add_argument("--zram-threshold-pages", type=int, default=1,
+                    help="zram 模式降阈页数（sysprop zram_swap_threshold），"
+                         "默认 1（令合成换入即触发上报）")
+    ap.add_argument("--zram-rounds", type=int, default=8,
+                    help="zram 模式采集留痕/事件触发轮询轮数，默认 8")
+    ap.add_argument("--zram-sleep", type=float, default=4.0,
+                    help="zram 模式每轮等待秒数（等 daemon 10s 采集窗），默认 4")
+    ap.add_argument("--zram-wb-pages", type=int, default=16,
+                    help="zram-writeback 模式演练随机页数（构造已分配页），"
+                         "默认 16")
     args = ap.parse_args()
 
     ensure_connected()
@@ -1312,9 +2110,41 @@ def main():
             return 1
         return 0 if rc == 0 else 1
 
+    if args.mode == "sd-inject":
+        # SD 自愈演练闭环：合成 STUCK 注入 + 故障面四重断言
+        rc = mode_sd_inject(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "qos-auto":
+        # QoS 延迟感知自动分级闭环：注入抬延迟 → 收紧/放松断言
+        rc = mode_qos_auto(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
     if args.mode == "histo":
         # C 批二 方向 3：USB 传输延迟/块大小二维直方图用户态验收
         rc = mode_histo(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "zram":
+        # 方向三批一：zram 启用与换入压力观测闭环
+        rc = mode_zram(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "zram-writeback":
+        # 方向三批二：zram writeback 预研闭环（U 盘 backing_dev + bd_stat 递增）
+        rc = mode_zram_writeback(args)
         if rc == -1:
             print("ERROR: adb 执行超时")
             return 1

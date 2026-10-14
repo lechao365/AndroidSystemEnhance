@@ -22,9 +22,11 @@
 
 using lechao::lciod::BuildBlkioLine;
 using lechao::lciod::BuildIoMaxLine;
+using lechao::lciod::DecideAutoLevel;
 using lechao::lciod::IoQosLevel;
 using lechao::lciod::IoQosManager;
 using lechao::lciod::LevelToBytesPerSec;
+using lechao::lciod::ParseAutoFlag;
 using lechao::lciod::ParseIoQosLevel;
 
 namespace {
@@ -133,6 +135,131 @@ TEST(LevelToBytesPerSecTest, Fg_16MiBPerSec) {
 
 TEST(LevelToBytesPerSecTest, Bg_8MiBPerSec) {
     EXPECT_EQ(LevelToBytesPerSec(IoQosLevel::kBg), 8388608u);  // 8MiB/s
+}
+
+/* --- ParseAutoFlag：自动档开关解析（QoS 延迟感知分级） --- */
+
+TEST(ParseAutoFlagTest, OnValues_True) {
+    bool out = false;
+    EXPECT_TRUE(ParseAutoFlag("1", &out));
+    EXPECT_TRUE(out);
+    EXPECT_TRUE(ParseAutoFlag("on", &out));
+    EXPECT_TRUE(out);
+    EXPECT_TRUE(ParseAutoFlag("true", &out));
+    EXPECT_TRUE(out);
+}
+
+TEST(ParseAutoFlagTest, OffValues_False) {
+    bool out = true;
+    EXPECT_TRUE(ParseAutoFlag("0", &out));
+    EXPECT_FALSE(out);
+    EXPECT_TRUE(ParseAutoFlag("off", &out));
+    EXPECT_FALSE(out);
+    EXPECT_TRUE(ParseAutoFlag("", &out));  // 空串视为关
+    EXPECT_FALSE(out);
+}
+
+TEST(ParseAutoFlagTest, UnknownValue_Rejected_NoOutPollution) {
+    // CXX-003：未知开关值拒绝且不写 out
+    bool out = true;
+    EXPECT_FALSE(ParseAutoFlag("yes", &out));
+    EXPECT_TRUE(out);
+    EXPECT_FALSE(ParseAutoFlag(" ON", &out));
+    EXPECT_FALSE(ParseAutoFlag("1 ", &out));
+}
+
+TEST(ParseAutoFlagTest, NullOut_ReturnsFalse) {
+    EXPECT_FALSE(ParseAutoFlag("1", nullptr));
+}
+
+/* --- DecideAutoLevel：自动档档位决策（带滞回，收紧/放松分离） --- */
+
+TEST(DecideAutoLevelTest, FromOff_TailCount_Tightens) {
+    // 未收紧时长尾计数 > 0 → 收紧 bg（无论平均延迟）
+    EXPECT_EQ(DecideAutoLevel(IoQosLevel::kOff, 0, 1, 50000, 25000),
+              IoQosLevel::kBg);
+    EXPECT_EQ(DecideAutoLevel(IoQosLevel::kOff, 1000, 3, 50000, 25000),
+              IoQosLevel::kBg);
+}
+
+TEST(DecideAutoLevelTest, FromOff_AvgOverTighten_Tightens) {
+    // 未收紧无长尾但平均延迟 >= 收紧阈 → 收紧
+    EXPECT_EQ(DecideAutoLevel(IoQosLevel::kOff, 50000, 0, 50000, 25000),
+              IoQosLevel::kBg);
+    EXPECT_EQ(DecideAutoLevel(IoQosLevel::kOff, 60000, 0, 50000, 25000),
+              IoQosLevel::kBg);
+}
+
+TEST(DecideAutoLevelTest, FromOff_NoTailAvgBelow_StaysOff) {
+    // 未收紧无长尾且均值低于收紧阈 → 保持放松
+    EXPECT_EQ(DecideAutoLevel(IoQosLevel::kOff, 10000, 0, 50000, 25000),
+              IoQosLevel::kOff);
+    EXPECT_EQ(DecideAutoLevel(IoQosLevel::kOff, 49999, 0, 50000, 25000),
+              IoQosLevel::kOff);
+}
+
+TEST(DecideAutoLevelTest, FromBg_HysteresisBand_HoldsBg) {
+    // 滞回带 [relax, tighten) 内：已收紧，均值低于收紧阈但未达放松阈 → 维持
+    EXPECT_EQ(DecideAutoLevel(IoQosLevel::kBg, 49999, 0, 50000, 25000),
+              IoQosLevel::kBg);
+    EXPECT_EQ(DecideAutoLevel(IoQosLevel::kBg, 30000, 0, 50000, 25000),
+              IoQosLevel::kBg);
+    EXPECT_EQ(DecideAutoLevel(IoQosLevel::kBg, 25000, 0, 50000, 25000),
+              IoQosLevel::kBg);
+}
+
+TEST(DecideAutoLevelTest, FromBg_AvgBelowRelax_Relaxes) {
+    // 已收紧无长尾且均值落到放松阈以下 → 放松 off
+    EXPECT_EQ(DecideAutoLevel(IoQosLevel::kBg, 24999, 0, 50000, 25000),
+              IoQosLevel::kOff);
+    EXPECT_EQ(DecideAutoLevel(IoQosLevel::kBg, 0, 0, 50000, 25000),
+              IoQosLevel::kOff);
+}
+
+TEST(DecideAutoLevelTest, FromBg_TailCount_HoldsBg) {
+    // 已收紧时只要有长尾即维持 bg（均值再低也不放松）
+    EXPECT_EQ(DecideAutoLevel(IoQosLevel::kBg, 0, 1, 50000, 25000),
+              IoQosLevel::kBg);
+    EXPECT_EQ(DecideAutoLevel(IoQosLevel::kBg, 100, 2, 50000, 25000),
+              IoQosLevel::kBg);
+}
+
+TEST(DecideAutoLevelTest, Hysteresis_NoFlipFlopOnBoundary) {
+    // 阈值边界抖动防翻转：均值在 [relax, tighten) 内往返，档位不来回翻转
+    const uint64_t kTighten = 50000;
+    const uint64_t kRelax = 25000;
+    IoQosLevel lvl = IoQosLevel::kOff;
+    // (1) 未收紧时在滞回带内抖动：均低于收紧阈，始终不收紧
+    lvl = DecideAutoLevel(lvl, 49999, 0, kTighten, kRelax);
+    EXPECT_EQ(lvl, IoQosLevel::kOff);
+    lvl = DecideAutoLevel(lvl, 30000, 0, kTighten, kRelax);
+    EXPECT_EQ(lvl, IoQosLevel::kOff);
+    lvl = DecideAutoLevel(lvl, 25000, 0, kTighten, kRelax);
+    EXPECT_EQ(lvl, IoQosLevel::kOff);
+    // (2) 达到收紧阈 → 一次性收紧
+    lvl = DecideAutoLevel(lvl, 50000, 0, kTighten, kRelax);
+    EXPECT_EQ(lvl, IoQosLevel::kBg);
+    // (3) 收紧后在滞回带内抖动（含正好等于 relax）：维持 bg，不翻转
+    lvl = DecideAutoLevel(lvl, 49999, 0, kTighten, kRelax);
+    EXPECT_EQ(lvl, IoQosLevel::kBg);
+    lvl = DecideAutoLevel(lvl, 30000, 0, kTighten, kRelax);
+    EXPECT_EQ(lvl, IoQosLevel::kBg);
+    lvl = DecideAutoLevel(lvl, 25000, 0, kTighten, kRelax);
+    EXPECT_EQ(lvl, IoQosLevel::kBg);
+    // (4) 落到放松阈以下 → 放松
+    lvl = DecideAutoLevel(lvl, 24999, 0, kTighten, kRelax);
+    EXPECT_EQ(lvl, IoQosLevel::kOff);
+}
+
+TEST(DecideAutoLevelTest, ZeroTighten_NotTriggeredByAvg) {
+    // 收紧阈 0 视为无效：不因平均延迟触发（仅长尾触发），防缺省 0 恒收紧
+    EXPECT_EQ(DecideAutoLevel(IoQosLevel::kOff, 999999, 0, 0, 0),
+              IoQosLevel::kOff);
+    EXPECT_EQ(DecideAutoLevel(IoQosLevel::kOff, 999999, 1, 0, 0),
+              IoQosLevel::kBg);
+    // 已收紧 + 无长尾 + relax 0（无均值门）→ 允许放松（防 latch 恒 bg）
+    EXPECT_EQ(DecideAutoLevel(IoQosLevel::kBg, 999999, 0, 0, 0),
+              IoQosLevel::kOff);
 }
 
 /* --- BuildIoMaxLine / BuildBlkioLine：限速行拼接 --- */

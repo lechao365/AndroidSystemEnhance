@@ -994,6 +994,306 @@ class TestModeSdLoadDevice(unittest.TestCase):
 
 
 # ============================================================
+# SD 自愈演练闭环：--mode sd-inject 合成 STUCK 注入 + 故障面四重断言
+# （TestModeSdInject）覆盖：计数递增 / 新增 sd_stuck 事件 / last_speed 反映
+# 降档 / 内核留痕四判据的判绿与各破坏场景判红。CDP-DOD-001：每个判红逻辑
+# 配套破坏场景红灯用例。
+# ============================================================
+
+class _FakeAdbSdInject:
+    """伪 adb（sd-inject 模式）：模拟 sysfs 计数/速度、sd_stuck JSONL、
+    dmesg 内核留痕与 logcat -b kernel。注入前后按 self.injected 切换态。"""
+
+    def __init__(self, stuck_inc=True, speed_after=3, event_after=True,
+                 old=4, new=3, logcat_hit=True, kmsg_hit=True,
+                 inject_rc=0, sysfs_rc=0):
+        self.stuck_inc = stuck_inc
+        self.speed_after = speed_after
+        self.event_after = event_after
+        self.old = old
+        self.new = new
+        self.logcat_hit = logcat_hit
+        self.kmsg_hit = kmsg_hit
+        self.inject_rc = inject_rc
+        self.sysfs_rc = sysfs_rc
+        self.injected = False
+        self.calls = []
+        # 注入前已有 1 条 sd_stuck 记录（seq=100），注入后追加 seq=101
+        self._before = [{"ts": 1, "id": 16, "level": 2, "seq": 100,
+                         "mono": 1, "f": [4, 3, -5, 1]}]
+
+    def _recs(self):
+        recs = list(self._before)
+        if self.injected and self.event_after:
+            recs.append({"ts": 2, "id": 16, "level": 2, "seq": 101,
+                         "mono": 2, "f": [self.old, self.new, -5, 2]})
+        return recs
+
+    def __call__(self, args, timeout=60):
+        self.calls.append(args)
+        if args[0] == "logcat":
+            return ("X kernel_lechao_usb: sd stuck\n" if self.logcat_hit
+                    else "", 0)
+        if args[0] != "shell":
+            return ("", 0)
+        if len(args) >= 3 and args[1] == "cat":
+            path = args[2]
+            if path.endswith("/stuck_count"):
+                if self.sysfs_rc:
+                    return ("", self.sysfs_rc)
+                n = 1 + (1 if self.injected and self.stuck_inc else 0)
+                return (f"{n}\n", 0)
+            if path.endswith("/last_speed"):
+                if self.sysfs_rc:
+                    return ("", self.sysfs_rc)
+                return (f"{self.speed_after if self.injected else 4}\n", 0)
+            body = "\n".join(json.dumps(r) for r in self._recs())
+            return (body, 0)
+        if len(args) >= 2 and args[1] == "ls":
+            return ("/data/vendor/lechao_lcview/logs/"
+                    "16_sd_stuck_20261013_p0.jsonl\n", 0)
+        if len(args) >= 2 and str(args[1]).startswith("echo 1 >"):
+            if self.inject_rc:
+                return ("", self.inject_rc)
+            self.injected = True
+            return ("", 0)
+        if len(args) >= 2 and args[1] == "dmesg":
+            return ("kernel_lechao_usb: sd stuck\n"
+                    if (self.injected and self.kmsg_hit) else "", 0)
+        return ("", 0)
+
+
+def _sd_inject_args(**kw):
+    a = argparse.Namespace()
+    a.log_since = kw.get("log_since", 123)
+    return a
+
+
+class TestModeSdInject(unittest.TestCase):
+    def _run(self, fake, **kw):
+        with mock.patch.object(lc, "adb", fake), \
+                mock.patch.object(lc.time, "sleep"):
+            return lc.mode_sd_inject(_sd_inject_args(**kw))
+
+    def test_pass_all_four_assertions(self):
+        # 计数递增 + 新增降档事件 + last_speed==new_speed + 内核留痕 → 判绿
+        self.assertEqual(self._run(_FakeAdbSdInject()), 0)
+
+    def test_pass_via_dmesg_fallback(self):
+        # logcat -b kernel 未命中但 dmesg 留痕计数增量 → 判绿（降级兜底）
+        fake = _FakeAdbSdInject(logcat_hit=False, kmsg_hit=True)
+        self.assertEqual(self._run(fake), 0)
+
+    def test_count_not_incremented_red(self):
+        # 注入后 stuck_count 未增（注入未生效）→ 判红
+        self.assertEqual(self._run(_FakeAdbSdInject(stuck_inc=False)), 1)
+
+    def test_no_new_event_red(self):
+        # 无新增 sd_stuck(id=16) 记录（daemon 未落盘）→ 判红
+        self.assertEqual(self._run(_FakeAdbSdInject(event_after=False)), 1)
+
+    def test_last_speed_mismatch_red(self):
+        # last_speed 与事件 new_speed 不符（未反映降档）→ 判红
+        self.assertEqual(self._run(_FakeAdbSdInject(speed_after=2)), 1)
+
+    def test_no_downgrade_red(self):
+        # 事件 old_speed<=new_speed（未发生降档）→ 判红
+        self.assertEqual(self._run(_FakeAdbSdInject(old=3, new=3)), 1)
+
+    def test_inject_write_fail_red(self):
+        # inject_stuck 写失败（root-only 属性不可写）→ 判红（注入不可用不蒙混）
+        self.assertEqual(self._run(_FakeAdbSdInject(inject_rc=1)), 1)
+
+    def test_no_kernel_trace_red(self):
+        # logcat -b kernel 与 dmesg 均无 "sd stuck" → 判红（内核留痕缺失）
+        self.assertEqual(
+            self._run(_FakeAdbSdInject(logcat_hit=False, kmsg_hit=False)), 1)
+
+    def test_sysfs_unreadable_red(self):
+        # stuck_count 不可读（lciod_sd 未加载）→ 判红（不得当基线 0 假绿）
+        self.assertEqual(self._run(_FakeAdbSdInject(sysfs_rc=1)), 1)
+
+    def test_inject_writes_drill_attr(self):
+        # 回归锚点：注入须写 sysfs inject_stuck（root-only 触发属性）
+        fake = _FakeAdbSdInject()
+        self.assertEqual(self._run(fake), 0)
+        self.assertTrue(any("inject_stuck" in str(c) for c in fake.calls))
+
+
+# ============================================================
+# QoS 延迟感知自动分级：--mode qos-auto 注入抬延迟 → 收紧/放松断言
+# （TestModeQosAuto）覆盖：bg 收紧 / 新增 qos_auto_adjust(id=18) / logcat
+# 留痕 / 回落放松四判据的判绿与各破坏场景判红。CDP-DOD-001：每个判红逻辑
+# 配套破坏场景红灯用例。
+# ============================================================
+
+class _FakeAdbQosAuto:
+    """伪 adb（qos-auto 模式）：模拟 cgroup v2 探测、限速文件、qos_auto
+    JSONL 与 logcat。注入后限速文件进入 bg；停止注入（连续 3 次未注入读
+    限速）后回落 off，模拟 10s 窗延迟回落放松。"""
+
+    def __init__(self, bg_after_inject=True, relax=True, event_after=True,
+                 logcat_hit=True, inject_rc=0, limit_unreadable=False):
+        self.bg_after_inject = bg_after_inject
+        self.relax = relax
+        self.event_after = event_after
+        self.logcat_hit = logcat_hit
+        self.inject_rc = inject_rc
+        self.limit_unreadable = limit_unreadable
+        self.injected = False
+        self.limit_bg = False
+        self.cats_since_inject = 0
+        self.calls = []
+        # 注入前已有 1 条 qos_auto_adjust 记录（seq=200），注入后追加 seq=201
+        self._before = [{"ts": 1, "id": 18, "level": 2, "seq": 200,
+                         "mono": 1, "f": [500000, 1, 50000]}]
+
+    def _recs(self):
+        recs = list(self._before)
+        if self.injected and self.event_after:
+            recs.append({"ts": 2, "id": 18, "level": 2, "seq": 201,
+                         "mono": 2, "f": [500000, 1, 50000]})
+        return recs
+
+    def __call__(self, args, timeout=60):
+        self.calls.append(args)
+        if args[0] == "logcat":
+            return ('X lechao_lciod_event {"rule":"qos_auto","level":"bg"}\n'
+                    if self.logcat_hit else "", 0)
+        if args[0] != "shell":
+            return ("", 0)
+        if len(args) >= 2 and args[1] == "setprop":
+            return ("", 0)
+        if len(args) >= 3 and args[1] == "cat":
+            path = args[2]
+            if path.endswith("cgroup.controllers"):
+                return ("cpu io memory\n", 0)
+            if path.endswith("io.max") or "blkio.throttle" in path:
+                if self.limit_unreadable:
+                    return ("", 1)
+                self.cats_since_inject += 1
+                if (self.limit_bg and self.relax
+                        and self.cats_since_inject >= 3):
+                    self.limit_bg = False  # 延迟回落 → 放松
+                if self.limit_bg:
+                    return ("179:0 rbps=8388608 wbps=8388608\n", 0)
+                return ("179:0 rbps=max wbps=max\n", 0)
+            if "18_qos_auto_adjust" in path:
+                return ("\n".join(json.dumps(r) for r in self._recs()), 0)
+            return ("", 0)
+        if len(args) >= 2 and args[1] == "ls":
+            if len(args) >= 3 and args[2] == "-d":
+                return (f"{args[3]}\n", 0)  # cgroup 组目录存在
+            return ("/data/vendor/lechao_lcview/logs/"
+                    "18_qos_auto_adjust_20261013_p0.jsonl\n", 0)
+        if len(args) >= 2 and str(args[1]).startswith("echo 1 >"):
+            if self.inject_rc:
+                return ("", self.inject_rc)
+            self.injected = True
+            self.limit_bg = self.bg_after_inject
+            self.cats_since_inject = 0
+            return ("", 0)
+        return ("", 0)
+
+
+def _qos_auto_args(**kw):
+    a = argparse.Namespace()
+    a.log_since = kw.get("log_since", 123)
+    a.qos_auto_lat_ms = kw.get("qos_auto_lat_ms", 50)
+    a.qos_auto_rounds = kw.get("qos_auto_rounds", 8)
+    a.qos_auto_sleep = kw.get("qos_auto_sleep", 2.0)
+    a.qos_auto_relax_rounds = kw.get("qos_auto_relax_rounds", 10)
+    a.qos_auto_relax_sleep = kw.get("qos_auto_relax_sleep", 2.0)
+    return a
+
+
+class TestModeQosAuto(unittest.TestCase):
+    def _run(self, fake, **kw):
+        with mock.patch.object(lc, "adb", fake), \
+                mock.patch.object(lc.time, "sleep"):
+            return lc.mode_qos_auto(_qos_auto_args(**kw))
+
+    def test_pass_tighten_then_relax(self):
+        # 注入抬延迟 → bg 收紧 + 新增 id=18 + logcat 留痕 → 回落放松 → 判绿
+        self.assertEqual(self._run(_FakeAdbQosAuto()), 0)
+
+    def test_no_cgroup_red(self):
+        # cgroup 既非 v2 也无 blkio → 判红（无反馈面不得假绿）
+        fake = _FakeAdbQosAuto()
+
+        def _no_io(args, timeout=60):
+            fake.calls.append(args)
+            if args[0] == "shell" and len(args) >= 3 and args[1] == "cat" \
+                    and args[2].endswith("cgroup.controllers"):
+                return ("cpu memory\n", 0)
+            if args[0] == "shell" and len(args) >= 2 and args[1] == "ls":
+                return ("", 1)
+            return ("", 0)
+
+        with mock.patch.object(lc, "adb", _no_io), \
+                mock.patch.object(lc.time, "sleep"):
+            self.assertEqual(lc.mode_qos_auto(_qos_auto_args()), 1)
+
+    def test_group_missing_red(self):
+        # lechao_bg 组目录缺失（daemon 未建组）→ 判红
+        fake = _FakeAdbQosAuto()
+
+        def _no_group(args, timeout=60):
+            fake.calls.append(args)
+            if args[0] == "shell" and len(args) >= 3 and args[1] == "cat" \
+                    and args[2].endswith("cgroup.controllers"):
+                return ("cpu io memory\n", 0)
+            if args[0] == "shell" and len(args) >= 3 and args[1] == "ls" \
+                    and args[2] == "-d":
+                return ("", 1)
+            return ("", 0)
+
+        with mock.patch.object(lc, "adb", _no_group), \
+                mock.patch.object(lc.time, "sleep"):
+            self.assertEqual(lc.mode_qos_auto(_qos_auto_args()), 1)
+
+    def test_not_tightened_red(self):
+        # 注入后限速文件未进入 bg（自动档未收紧）→ 判红
+        self.assertEqual(self._run(_FakeAdbQosAuto(bg_after_inject=False)), 1)
+
+    def test_no_new_event_red(self):
+        # 无新增 qos_auto_adjust(id=18) 记录 → 判红
+        self.assertEqual(self._run(_FakeAdbQosAuto(event_after=False)), 1)
+
+    def test_no_logcat_trace_red(self):
+        # logcat 无 "rule":"qos_auto" 行（自动档留痕缺失）→ 判红
+        self.assertEqual(self._run(_FakeAdbQosAuto(logcat_hit=False)), 1)
+
+    def test_not_relaxed_red(self):
+        # 停止注入后仍为 bg（延迟回落未放松）→ 判红
+        self.assertEqual(self._run(_FakeAdbQosAuto(relax=False)), 1)
+
+    def test_inject_write_fail_red(self):
+        # inject_latency 写失败（root-only 属性不可写）→ 判红
+        self.assertEqual(self._run(_FakeAdbQosAuto(inject_rc=1)), 1)
+
+    def test_limit_file_unreadable_red(self):
+        # 限速文件不可读 → 判红（不得当放松假绿）
+        self.assertEqual(self._run(_FakeAdbQosAuto(limit_unreadable=True)), 1)
+
+    def test_inject_writes_latency_attr(self):
+        # 回归锚点：注入须写 sysfs inject_latency（root-only 触发属性）
+        fake = _FakeAdbQosAuto()
+        self.assertEqual(self._run(fake), 0)
+        self.assertTrue(any("inject_latency" in str(c) for c in fake.calls))
+
+    def test_sets_auto_prop_and_teardown_clears(self):
+        # 回归锚点：须 setprop ioqos_auto=1 且 teardown 清空自动档属性
+        fake = _FakeAdbQosAuto()
+        self.assertEqual(self._run(fake), 0)
+        auto_calls = [c for c in fake.calls
+                      if len(c) >= 2 and c[1] == "setprop"
+                      and c[2] == "sys.lechao.lciod.ioqos_auto"]
+        self.assertTrue(any(c[3] == "1" for c in auto_calls))
+        self.assertTrue(any(c[3] == "" for c in auto_calls))
+
+
+# ============================================================
 # 进程级退出码透传回归（方向 1）：perf/storm/qos/sd/histo 模式内部用 return
 # 返回 0/1，入口若只写 main() 会丢弃返回值、进程 rc 恒 0（判红模式假绿）。
 # 本用例以子进程真实执行脚本 __main__ 入口（runpy run_name=__main__，不调
@@ -1030,6 +1330,237 @@ class TestProcessExitCodePassthrough(unittest.TestCase):
         self.assertIn("probe 快照校验未通过", proc.stdout)
         self.assertEqual(proc.returncode, 1,
                          "perf 模式失败须透传进程 rc=1，入口丢弃 main 返回值即假绿")
+
+
+# ============================================================
+# zram 启用与换入压力观测闭环：--mode zram 三段断言
+# （TestModeZram）覆盖：swap 生效 / "rule":"zram" 采集留痕 /
+# "rule":"zram_swap_pressure" 降阈+合成换入触发 的判绿与各破坏场景判红。
+# CDP-DOD-001：每个判红逻辑配套破坏场景红灯用例。
+# ============================================================
+
+class _FakeAdbZram:
+    """伪 adb（zram 模式）：模拟 /proc/swaps、zram0 disksize、daemon logcat
+    留痕与 setprop 降阈/演练注入。drill 注入后 logcat 出现换入压力事件。"""
+
+    def __init__(self, swap_active=True, swap_readable=True, zram_trace=True,
+                 pressure_after=True, setprop_fail=False, timeout=False):
+        self.swap_active = swap_active
+        self.swap_readable = swap_readable
+        self.zram_trace = zram_trace
+        self.pressure_after = pressure_after
+        self.setprop_fail = setprop_fail
+        self.timeout = timeout
+        self.drilled = False
+        self.calls = []
+
+    def __call__(self, args, timeout=60):
+        self.calls.append(args)
+        if args[0] == "logcat":
+            lines = []
+            if self.zram_trace:
+                lines.append('X lechao_lciod_event '
+                             '{"rule":"zram","mem_used_total":0}')
+            if self.drilled and self.pressure_after:
+                lines.append('X lechao_lciod_event '
+                             '{"rule":"zram_swap_pressure","swapin_pages":0}')
+            return ("\n".join(lines) + "\n", 0)
+        if args[0] != "shell":
+            return ("", 0)
+        if len(args) >= 2 and args[1] == "setprop":
+            if self.setprop_fail and args[2] == lc._ZRAM_THRESHOLD_PROP:
+                return ("", 1)
+            # drill 置非空值视为注入（"" 为 teardown 清空）
+            if args[2] == lc._ZRAM_DRILL_PROP and args[3] != "":
+                self.drilled = True
+            return ("", 0)
+        if len(args) >= 3 and args[1] == "cat":
+            path = args[2]
+            if path == lc._ZRAM_SWAP_FILE:
+                if self.timeout:
+                    return ("", -1)
+                if not self.swap_readable:
+                    return ("", 1)
+                body = ("Filename\t\t\t\tType\t\tSize\tUsed\tPriority\n")
+                if self.swap_active:
+                    body += ("/dev/block/zram0                          "
+                             "partition\t4131389440\t0\t-2\n")
+                return (body, 0)
+            if path.endswith("disksize"):
+                return ("4131389440\n" if self.swap_active else "0\n", 0)
+            return ("", 0)
+        return ("", 0)
+
+
+def _zram_args(**kw):
+    a = argparse.Namespace()
+    a.log_since = kw.get("log_since", 123)
+    a.zram_drill_pages = kw.get("zram_drill_pages", 64)
+    a.zram_threshold_pages = kw.get("zram_threshold_pages", 1)
+    a.zram_rounds = kw.get("zram_rounds", 3)
+    a.zram_sleep = kw.get("zram_sleep", 0.0)
+    return a
+
+
+class TestModeZram(unittest.TestCase):
+    def _run(self, fake, **kw):
+        with mock.patch.object(lc, "adb", fake), \
+                mock.patch.object(lc.time, "sleep"):
+            return lc.mode_zram(_zram_args(**kw))
+
+    def test_pass(self):
+        # swap 生效 + 采集留痕 + 降阈注入触发换入压力事件 → 判绿
+        self.assertEqual(self._run(_FakeAdbZram()), 0)
+
+    def test_swap_inactive_red(self):
+        # /proc/swaps 无 zram0（init 未生效）→ 判红
+        self.assertEqual(self._run(_FakeAdbZram(swap_active=False)), 1)
+
+    def test_swap_unreadable_red(self):
+        # /proc/swaps 不可读 → 判红（不得当未启用假绿）
+        self.assertEqual(self._run(_FakeAdbZram(swap_readable=False)), 1)
+
+    def test_no_zram_trace_red(self):
+        # logcat 无 "rule":"zram"（采集未留痕）→ 判红
+        self.assertEqual(self._run(_FakeAdbZram(zram_trace=False)), 1)
+
+    def test_no_pressure_event_red(self):
+        # 降阈+合成换入后仍无 "rule":"zram_swap_pressure" → 判红
+        self.assertEqual(self._run(_FakeAdbZram(pressure_after=False)), 1)
+
+    def test_setprop_fail_red(self):
+        # 降阈 setprop 失败 → 判红
+        self.assertEqual(self._run(_FakeAdbZram(setprop_fail=True)), 1)
+
+    def test_adb_timeout_returns_minus1(self):
+        # adb 超时（rc==-1）→ 返回 -1 由 main 透传失败
+        self.assertEqual(self._run(_FakeAdbZram(timeout=True)), -1)
+
+    def test_lowered_threshold_and_drill_set(self):
+        # 回归锚点：须 setprop 降阈 + 合成换入页（OOM-safe 确定性触发）
+        fake = _FakeAdbZram()
+        self.assertEqual(self._run(fake), 0)
+        sets = [(c[2], c[3]) for c in fake.calls
+                if len(c) >= 4 and c[1] == "setprop"]
+        self.assertIn((lc._ZRAM_THRESHOLD_PROP, "1"), sets)
+        self.assertIn((lc._ZRAM_DRILL_PROP, "64"), sets)
+
+    def test_teardown_clears_props(self):
+        # 回归锚点：teardown 清空降阈/演练 sysprop
+        fake = _FakeAdbZram()
+        self.assertEqual(self._run(fake), 0)
+        clears = [c for c in fake.calls
+                  if len(c) >= 4 and c[1] == "setprop" and c[3] == ""]
+        cleared = {c[2] for c in clears}
+        self.assertIn(lc._ZRAM_THRESHOLD_PROP, cleared)
+        self.assertIn(lc._ZRAM_DRILL_PROP, cleared)
+
+
+class _FakeAdbZramWb:
+    """伪 adb（zram-writeback 模式）：模拟 U 盘枚举、backing_dev 绑定/回读、
+    bd_stat 前后差分与 writeback 触发。状态机：writeback 触发后 bd_stat 递增。"""
+
+    def __init__(self, usb=True, bind_ok=True, backing_readback=None,
+                 increment=True, bd_readable=True, timeout=False):
+        self.usb = usb
+        self.bind_ok = bind_ok
+        # None → 绑定时回读 /dev/block/sdb；否则返回给定值（如 none）
+        self.backing_readback = backing_readback
+        self.increment = increment
+        self.bd_readable = bd_readable
+        self.timeout = timeout
+        self.written_back = False
+        self.calls = []
+
+    def __call__(self, args, timeout=60):
+        self.calls.append(args)
+        if self.timeout:
+            return ("", -1)
+        if args[0] != "shell" or len(args) < 2:
+            return ("", 0)
+        if args[1] == "cat":
+            path = args[2]
+            if path == lc._ZRAM_WB_DISKSIZE:
+                return ("67108864\n", 0)
+            if path == lc._ZRAM_WB_BACKING:
+                if self.backing_readback is not None:
+                    return (self.backing_readback + "\n", 0)
+                return ("/dev/block/sdb\n", 0)
+            if path == lc._ZRAM_WB_BD_STAT:
+                if not self.bd_readable:
+                    return ("", 1)
+                return ("16 0 16\n" if self.written_back else "0 0 0\n", 0)
+            return ("", 0)
+        cmd = args[1]
+        if "for d in /sys/block/sd*" in cmd:
+            return ("sdb 1\n" if self.usb else "", 0)
+        if "> /sys/block/zram0/backing_dev" in cmd:
+            return ("", 0 if self.bind_ok else 1)
+        if "> /sys/block/zram0/writeback" in cmd:
+            self.written_back = self.increment
+            return ("", 0)
+        return ("", 0)
+
+
+def _zram_wb_args(**kw):
+    a = argparse.Namespace()
+    a.zram_wb_pages = kw.get("zram_wb_pages", 16)
+    a.dd_timeout = kw.get("dd_timeout", 300)
+    return a
+
+
+class TestModeZramWriteback(unittest.TestCase):
+    def _run(self, fake, **kw):
+        with mock.patch.object(lc, "adb", fake):
+            return lc.mode_zram_writeback(_zram_wb_args(**kw))
+
+    def test_pass(self):
+        # U 盘在位 + backing_dev 绑定 + bd_stat 递增 → 判绿
+        self.assertEqual(self._run(_FakeAdbZramWb()), 0)
+
+    def test_no_usb_skips_exit_zero(self):
+        # 无 removable USB 块设备 → SKIP exit 0（验收层转 skip 不判红）
+        self.assertEqual(self._run(_FakeAdbZramWb(usb=False)), 0)
+
+    def test_bind_fail_red(self):
+        # backing_dev 写失败 → 判红
+        self.assertEqual(self._run(_FakeAdbZramWb(bind_ok=False)), 1)
+
+    def test_bind_mismatch_red(self):
+        # backing_dev 回读未指向 U 盘 → 判红
+        self.assertEqual(self._run(_FakeAdbZramWb(backing_readback="none")), 1)
+
+    def test_no_increment_red(self):
+        # writeback 后 bd_stat 未递增 → 判红（防假绿）
+        self.assertEqual(self._run(_FakeAdbZramWb(increment=False)), 1)
+
+    def test_bd_stat_unreadable_red(self):
+        # bd_stat 不可读 → 判红（不得当无写回假绿）
+        self.assertEqual(self._run(_FakeAdbZramWb(bd_readable=False)), 1)
+
+    def test_adb_timeout_returns_minus1(self):
+        # adb 超时（rc==-1）→ 返回 -1 由 main 透传失败
+        self.assertEqual(self._run(_FakeAdbZramWb(timeout=True)), -1)
+
+    def test_binds_before_disksize(self):
+        # 回归锚点：backing_dev 写须在 disksize 写之前（内核 init_done 约束）
+        fake = _FakeAdbZramWb()
+        self.assertEqual(self._run(fake), 0)
+        cmds = [c[1] for c in fake.calls if len(c) >= 2 and c[0] == "shell"]
+        bind_idx = next(i for i, c in enumerate(cmds)
+                        if c.startswith("echo") and "backing_dev" in c)
+        ds_idx = next(i for i, c in enumerate(cmds)
+                      if c.startswith("echo 67108864 >"))
+        self.assertLess(bind_idx, ds_idx)
+
+    def test_restores_swap(self):
+        # 回归锚点：收尾 mkswap + swapon 复原 swap
+        fake = _FakeAdbZramWb()
+        self.assertEqual(self._run(fake), 0)
+        joined = " ".join(c[1] for c in fake.calls
+                          if len(c) >= 2 and c[0] == "shell")
+        self.assertIn("mkswap", joined)
+        self.assertIn("swapon", joined)
 
 
 if __name__ == "__main__":

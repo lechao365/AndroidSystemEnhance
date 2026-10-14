@@ -64,3 +64,16 @@ allow lechao_lciod cgroup_v2:file { create open read write getattr setattr };
 # 允许读取 /sys/block/mmcblk0/dev（SD 卡 major:minor 探测，写 QoS 目标设备）
 allow lechao_lciod sysfs:dir { search open read getattr };
 allow lechao_lciod sysfs:file { open read getattr };
+
+# 方向三批一：zram 换入压力观测只读授权
+#   /proc/pressure/io（PSI io some total，标签 proc_pressure_io）与
+#   /proc/vmstat（pswpin/pswpout 换入换出页数，标签 proc_vmstat）为窗聚合
+#   必需源；/sys/block/zram0/io_stat（标签 sysfs_zram）为可选维度。
+#   均仅读，缺授权在 enforce 下会 avc denied 致采样失败跳过本轮（permissive
+#   下仅留痕），须补齐防后续 enforce 化。
+allow lechao_lciod proc_pressure_io:file { open read getattr };
+allow lechao_lciod proc_vmstat:file { open read getattr };
+#   /sys/block/zram0 目录本身标签 sysfs_zram（读 io_stat 前需 search 该目录，
+#   实测 avc denied search tclass=dir），故 file 之外须补 dir 权限。
+allow lechao_lciod sysfs_zram:dir { search open read getattr };
+allow lechao_lciod sysfs_zram:file { open read getattr };

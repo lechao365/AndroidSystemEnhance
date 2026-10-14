@@ -1,0 +1,42 @@
+# ============================================================
+# rpi5_zram_setup.te — 开机启用 zram0 换入设备的 SELinux 域（方向三批一）
+# 所属：rpi5 设备 sepolicy
+# 运行：init 以 /system/bin/rpi5_zram_setup（u:r:rpi5_zram_setup_exec:s0）
+#       启动 root oneshot 服务 rpi5_zram_setup，seclabel 强制本域。
+# 职责：读 /proc/meminfo 算容量 → 写 /sys/block/zram0/{comp_algorithm,disksize}
+#       → mkswap/swapon /dev/block/zram0。
+# 注：当前设备 SELinux permissive，本域规则为 enforce 化前置；规则按最小
+#     必要面授予（仅 zram0/内存信息/自身命令解释器，不触物理块设备）。
+# ============================================================
+
+# 声明 zram 启用域与可执行文件标签
+type rpi5_zram_setup, domain;
+type rpi5_zram_setup_exec, exec_type, file_type;
+
+# init 启动的 daemon 域（自动处理 init→domain transition）
+init_daemon_domain(rpi5_zram_setup)
+
+# ---- 解释器与命令：/system/bin/sh + toybox（mkswap/swapon/sed/grep/cat） ----
+allow rpi5_zram_setup shell_exec:file rx_file_perms;
+allow rpi5_zram_setup toolbox_exec:file rx_file_perms;
+allow rpi5_zram_setup system_file:file rx_file_perms;
+allow rpi5_zram_setup system_file:dir { search read open getattr };
+
+# ---- zram0 配置：/sys/block/zram0/{comp_algorithm,disksize} ----
+allow rpi5_zram_setup sysfs_zram:file { open read write getattr };
+allow rpi5_zram_setup sysfs:dir { search open read getattr };
+
+# ---- /dev/block/zram0（mkswap 写签名 + swapon 挂载，ram_device 块设备） ----
+allow rpi5_zram_setup ram_device:blk_file { open read write getattr ioctl };
+allow rpi5_zram_setup block_device:dir { search read open getattr };
+
+# ---- /proc 读取：meminfo(MemTotal)、swaps（幂等判断） ----
+allow rpi5_zram_setup proc_meminfo:file { open read getattr };
+allow rpi5_zram_setup proc_swaps:file { open read getattr };
+allow rpi5_zram_setup proc:dir { search open read getattr };
+
+# ---- swapon/swapoff 需 CAP_SYS_ADMIN ----
+allow rpi5_zram_setup self:capability sys_admin;
+
+# ---- /dev/kmsg 留痕（dmesg 核查） ----
+allow rpi5_zram_setup kmsg_device:chr_file { open write getattr };

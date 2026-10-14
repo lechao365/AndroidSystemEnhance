@@ -52,10 +52,15 @@ enum lechao_sd_event_cat {
  *   bytes：COMPLETE 本次有效传输字节（mqrq->brq.data.bytes_xfered）
  *   duration_ns：COMPLETE 历时（ktime_get_ns() - req->start_time_ns）
  *   err：STUCK 错误码（__mmc_poll_for_busy 或错误位判定后的 errno）
+ *   synthetic：演练合成标记（1=由 sysfs 演练入口合成的内存事件，非真实块层
+ *     事件）；合成事件携带的 card 为内存构造的临时卡，回调不得将其写入
+ *     sd_state.card（否则 SSR 刷新线程会误读已释放的合成卡）。
  *
  * 【使用场景】
  *   lciod_sd 的 notifier 回调据此累加 10s 窗字节/请求数；STUCK 时依据
  *   card->sd_bus_speed 调用纯函数逐级剥 caps 降档（见 lciod_sd.h）。
+ *   真实发射点（block.c）均以 {0} 初始化，synthetic 恒为 0；仅 lciod_sd
+ *   的 inject_stuck 演练入口置 1。
  */
 struct lechao_sd_notifier_data {
 	struct mmc_card *card;   /* 事件关联卡片 */
@@ -64,6 +69,7 @@ struct lechao_sd_notifier_data {
 	u32  bytes;              /* COMPLETE：本次有效传输字节 */
 	u64  duration_ns;        /* COMPLETE：历时（纳秒） */
 	int  err;                /* STUCK：错误码（errno） */
+	u8   synthetic;          /* 演练合成标记：1=合成事件（不占据真实卡） */
 };
 
 /* 链头在 block.c 定义并 EXPORT，本头提供操作接口 */

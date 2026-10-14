@@ -817,3 +817,33 @@ baselines:
       archived_in: ''
   approved_by: release-review <review@lechao.dev>
   approved_at: '2026-10-13T11:52:29+08:00'
+- baseline_id: BL-20261014-01
+  status: promoted
+  source_branch: dev
+  source_commit: a5c2e6c978a2
+  sync_manifest: data/verify-results/20261014-121351-772bda962c9b.md
+  build_result: PASS
+  package_result: PASS
+  board_verify: PASS
+  evidence_scope: lciod-blk,lciod-histo,lciod-link,lciod-liveness,lciod-perf,lciod-pipeline,lciod-qos,lciod-recover-hal,lciod-sd,lciod-sd-inject,lciod-storm,lciod-trigger,lciod-uas,lcview-blk,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger,qos-auto,zram,zram-writeback
+  evidence:
+    build_result: PASS
+    package_result: PASS
+    board_verify: PASS
+    sync_manifest: data/verify-results/20261014-121351-772bda962c9b.md
+    ki_gate: inferred
+    evidence_scope: lciod-blk,lciod-histo,lciod-link,lciod-liveness,lciod-perf,lciod-pipeline,lciod-qos,lciod-recover-hal,lciod-sd,lciod-sd-inject,lciod-storm,lciod-trigger,lciod-uas,lcview-blk,lcview-liveness,lcview-perf,lcview-pipeline,lcview-pipeline-warn,lcview-recover-daemon,lcview-sepolicy-label,lcview-transfer,lcview-trigger,qos-auto,zram,zram-writeback
+    known_issues_carried: KI-FLAKE-20d380d0f753-e1789e,KI-FLAKE-cefa39e1699f-1bac08,KI-FLAKE-d9ec6877f6c1-0714c7,KI-FLAKE-d9ec6877f6c1-d84e34,KI-FLAKE-d9ec6877f6c1-24bc54,KI-FLAKE-52e8c1ee2ec2-ee0c4b,KI-FLAKE-6824b8320bf9-8ed89d,KI-FLAKE-da7ebadae4b2-ed391a,KI-FLAKE-9142f5522b37-6152ca
+    package_evidence: data/verify-results/20261014-121351-772bda962c9b.md
+    package_rc: 0
+    cases_coverage:
+      result: full
+      missing: []
+      run_count: 25
+    known_issues_closed:
+    - issue_id: KI-FLAKE-d6daed24110b-6b8d79
+      resolved_in: 20260912-494cb5191b53
+      title: '[flake] harness/skills/cross-device/tests/test_cdp_issue.py::TestBackfilledSeverity::test_all_repo_issues_pass_validation'
+      archived_in: ''
+  approved_by: lechao
+  approved_at: '2026-10-14T12:20:07+08:00'

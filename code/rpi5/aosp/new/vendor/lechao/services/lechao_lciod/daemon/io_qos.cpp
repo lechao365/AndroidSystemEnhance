@@ -78,6 +78,38 @@ uint64_t LevelToBytesPerSec(IoQosLevel lvl) {
     return 0;
 }
 
+bool ParseAutoFlag(const std::string& val, bool* out) {
+    if (out == nullptr)
+        return false;
+    if (val == "1" || val == "on" || val == "true") {
+        *out = true;
+        return true;
+    }
+    if (val == "0" || val == "off" || val.empty()) {
+        *out = false;
+        return true;
+    }
+    /* 未知值一律拒绝（CXX-003 外部输入防御），out 不写入 */
+    return false;
+}
+
+IoQosLevel DecideAutoLevel(IoQosLevel current, uint64_t avg_lat_us,
+                           uint64_t tail_count, uint64_t tighten_us,
+                           uint64_t relax_us) {
+    /* 已收紧：仅当无长尾且均值落到放松阈以下才放松（滞回保持，防边界翻转） */
+    if (current == IoQosLevel::kBg) {
+        if (tail_count == 0 && (relax_us == 0 || avg_lat_us < relax_us))
+            return IoQosLevel::kOff;
+        return IoQosLevel::kBg;
+    }
+    /* 未收紧：长尾计数 > 0，或收紧阈有效且平均延迟达标 → 收紧 */
+    if (tail_count > 0)
+        return IoQosLevel::kBg;
+    if (tighten_us > 0 && avg_lat_us >= tighten_us)
+        return IoQosLevel::kBg;
+    return IoQosLevel::kOff;  /* 无长尾且均值低于收紧阈 → 保持放松 */
+}
+
 std::string BuildIoMaxLine(const std::string& majmin, uint64_t bytes) {
     char buf[128];
     if (bytes == 0) {
@@ -144,6 +176,45 @@ bool ReadDeviceMajorMinor(const std::string& sysblock_dev_path, std::string* out
         return false;
     *out = val;
     return true;
+}
+
+/* ParseU64Str — 解析非负十进制字符串为 uint64（CXX-003 输入防御，无溢出回绕） */
+static bool ParseU64Str(const std::string& s, uint64_t* out) {
+    if (!out || s.empty())
+        return false;
+    uint64_t v = 0;
+    for (char ch : s) {
+        if (ch < '0' || ch > '9')
+            return false;
+        uint64_t digit = static_cast<uint64_t>(ch - '0');
+        if (v > (UINT64_MAX - digit) / 10)
+            return false;  /* CXX-002：累加前检溢出 */
+        v = v * 10 + digit;
+    }
+    *out = v;
+    return true;
+}
+
+/* ReadU64File — 读文件并解析为非负十进制 uint64（自动档延迟反馈源读取）。
+ * 成功写 out 返回 true；文件缺失/内容非法返回 false（CXX-004：反馈源缺失
+ * 由调用方置 0 处理，不静默崩溃）。 */
+static bool ReadU64File(const char* path, uint64_t* out) {
+    if (!path || !out)
+        return false;
+    FILE* f = fopen(path, "r");
+    if (!f)
+        return false;
+    char buf[64] = {0};
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0)
+        return false;
+    buf[n] = '\0';
+    /* 去尾部空白（sysfs 属性值带尾随换行） */
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' ||
+                     buf[n - 1] == ' ' || buf[n - 1] == '\t'))
+        buf[--n] = '\0';
+    return ParseU64Str(std::string(buf), out);
 }
 
 /*
@@ -412,9 +483,128 @@ bool IoQosManager::MovePidToGroup(int pid) {
     return AppendFileLine(path, line);
 }
 
+bool IoQosManager::ResolveMajMin(const std::string& dev_override,
+                                 std::string* majmin) {
+    if (majmin == nullptr)
+        return false;
+    /* 设备确定：ioqos_dev sysprop 覆盖默认 mmcblk0 */
+    if (!dev_override.empty()) {
+        *majmin = dev_override;
+        noDeviceWarned_ = false;
+        return true;
+    }
+    if (ReadDeviceMajorMinor(kDefaultBlockDevPath, majmin)) {
+        noDeviceWarned_ = false;
+        return true;
+    }
+    /* 默认设备不可读且未配置覆盖：告警一次不静默（CXX-004） */
+    if (!noDeviceWarned_) {
+        noDeviceWarned_ = true;
+        LC_ALOGW("qos: 默认设备 %s 不可读且未设置 ioqos_dev，本周期不应用",
+                 kDefaultBlockDevPath);
+    }
+    return false;
+}
+
+void IoQosManager::ReadSdWindowLat(uint64_t* avg_lat_us,
+                                   uint64_t* tail_count) {
+    uint64_t v = 0;
+    /* 反馈源缺失（lciod_sd 未加载）置 0：等价"无长尾/低延迟"，不误收紧 */
+    *avg_lat_us = ReadU64File(kSdWindowLatAvgPath, &v) ? v : 0;
+    *tail_count = ReadU64File(kSdWindowLatTailPath, &v) ? v : 0;
+}
+
+void IoQosManager::PollAndApplyAuto() {
+    /* 收紧阈（毫秒）sysprop，缺省 kIoQosAutoLatThresholdMs；非法值回落缺省 */
+    char thr_buf[PROP_VALUE_MAX] = {0};
+    __system_property_get("sys.lechao.lciod.ioqos_lat_ms", thr_buf);
+    uint64_t threshold_ms = kIoQosAutoLatThresholdMs;
+    uint64_t parsed = 0;
+    if (thr_buf[0] != '\0' && ParseU64Str(std::string(thr_buf), &parsed))
+        threshold_ms = parsed;
+    uint64_t tighten_us = threshold_ms * 1000ULL;
+
+    /* 放松阈（毫秒）sysprop，缺省取收紧阈半值（滞回）；非法值回落缺省 */
+    char relax_buf[PROP_VALUE_MAX] = {0};
+    __system_property_get(kIoQosRelaxLatProp, relax_buf);
+    uint64_t relax_us = 0;
+    uint64_t parsed_relax = 0;
+    if (relax_buf[0] != '\0' && ParseU64Str(std::string(relax_buf), &parsed_relax))
+        relax_us = parsed_relax * 1000ULL;
+    if (relax_us == 0)
+        relax_us = tighten_us / kIoQosAutoRelaxDivisor;
+    /* 滞回须满足 relax < tighten；否则退化为收紧阈半值，防阈值边界翻转抖动 */
+    if (tighten_us > 0 && relax_us >= tighten_us)
+        relax_us = tighten_us / kIoQosAutoRelaxDivisor;
+
+    char dev_buf[PROP_VALUE_MAX] = {0};
+    __system_property_get("sys.lechao.lciod.ioqos_dev", dev_buf);
+
+    uint64_t avg_lat_us = 0;
+    uint64_t tail_count = 0;
+    ReadSdWindowLat(&avg_lat_us, &tail_count);
+
+    std::string majmin;
+    if (!ResolveMajMin(std::string(dev_buf), &majmin))
+        return;
+
+    /* 滞回状态：以当前自动档档位为决策输入（未生效时视为 kOff） */
+    IoQosLevel current = autoActive_ ? lastAutoLevel_ : IoQosLevel::kOff;
+    IoQosLevel desired = DecideAutoLevel(current, avg_lat_us, tail_count,
+                                         tighten_us, relax_us);
+    /* 幂等：自动档已生效且档位未变化则不重复应用/留痕 */
+    if (autoActive_ && desired == lastAutoLevel_)
+        return;
+    /* 应用失败不更新 lastAutoLevel_/autoActive_，下轮重试（ApplyLevel 已 ERROR 留痕） */
+    if (!ApplyLevel(desired, majmin))
+        return;
+    lastAutoLevel_ = desired;
+    autoActive_ = true;
+
+    /* 留痕 logcat JSON（EVENT_ALOG 同款，snprintf 截断丢弃整行，CXX-002） */
+    char line[320];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"qos_auto\",\"level\":\"%s\",\"avg_lat_us\":%llu,"
+        "\"tail_count\":%llu,\"threshold_us\":%llu,\"relax_us\":%llu,"
+        "\"dev\":\"%s\",\"limit_bytes_per_s\":%llu,\"cgroup\":\"%s\"}",
+        IoQosLevelToString(desired),
+        static_cast<unsigned long long>(avg_lat_us),
+        static_cast<unsigned long long>(tail_count),
+        static_cast<unsigned long long>(tighten_us),
+        static_cast<unsigned long long>(relax_us), majmin.c_str(),
+        static_cast<unsigned long long>(LevelToBytesPerSec(desired)),
+        CgroupVersionToString(version_));
+    if (n < 0 || n >= static_cast<int>(sizeof(line))) {
+        LC_ALOGE("qos_auto: JSON 留痕截断丢弃整行（level=%s dev=%s）",
+                 IoQosLevelToString(desired), majmin.c_str());
+    } else {
+        EVENT_ALOG("%s", line);
+    }
+    LC_ALOGI("qos_auto: adjust level=%s avg_lat_us=%llu tail=%llu "
+             "tighten_us=%llu relax_us=%llu dev=%s",
+             IoQosLevelToString(desired),
+             static_cast<unsigned long long>(avg_lat_us),
+             static_cast<unsigned long long>(tail_count),
+             static_cast<unsigned long long>(tighten_us),
+             static_cast<unsigned long long>(relax_us), majmin.c_str());
+}
+
 void IoQosManager::PollAndApply() {
     /* PROP_VALUE_MAX 为属性值上限，缓冲按上限开防 __system_property_get
      * 溢出（CXX-002 边界防御） */
+    char auto_buf[PROP_VALUE_MAX] = {0};
+    __system_property_get("sys.lechao.lciod.ioqos_auto", auto_buf);
+    bool auto_on = false;
+    bool auto_valid = ParseAutoFlag(std::string(auto_buf), &auto_on);
+
+    if (auto_valid && auto_on) {
+        /* 自动档：以 SD 窗口延迟反馈决定档位，覆盖手动 ioqos_level */
+        PollAndApplyAuto();
+        return;
+    }
+    /* 自动档关闭（含未知开关值）：复位自动态，回落手动档 */
+    autoActive_ = false;
+
     char level_buf[PROP_VALUE_MAX] = {0};
     __system_property_get("sys.lechao.lciod.ioqos_level", level_buf);
     char dev_buf[PROP_VALUE_MAX] = {0};
@@ -433,22 +623,9 @@ void IoQosManager::PollAndApply() {
     }
     lastLevelProp_ = level_val;
 
-    /* 设备确定：ioqos_dev sysprop 覆盖默认 mmcblk0 */
     std::string majmin;
-    if (dev_buf[0] != '\0') {
-        majmin = dev_buf;
-        noDeviceWarned_ = false;
-    } else if (ReadDeviceMajorMinor(kDefaultBlockDevPath, &majmin)) {
-        noDeviceWarned_ = false;
-    } else {
-        /* 默认设备不可读且未配置覆盖：告警一次不静默（CXX-004） */
-        if (!noDeviceWarned_) {
-            noDeviceWarned_ = true;
-            LC_ALOGW("qos: 默认设备 %s 不可读且未设置 ioqos_dev，本周期不应用",
-                     kDefaultBlockDevPath);
-        }
+    if (!ResolveMajMin(std::string(dev_buf), &majmin))
         return;
-    }
     /* ApplyLevel 幂等，失败路径内部已 ERROR 留痕（CXX-004） */
     ApplyLevel(lvl, majmin);
 }

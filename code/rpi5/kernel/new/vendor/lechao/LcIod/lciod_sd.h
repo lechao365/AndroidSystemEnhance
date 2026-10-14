@@ -84,6 +84,83 @@ static inline unsigned int lciod_sd_strip_modes_above(unsigned int sd3_bus_mode,
 	return sd3_bus_mode & keep;
 }
 
+/*
+ * SD 故障演练闭环（自愈演练）：合成 STUCK 事件的起点档位/模式与事件构造
+ * 契约。演练入口（lciod_sd.c sysfs inject_stuck，root-only 写一次触发一次）
+ * 依据本契约在内存构造一张合成 SD 卡并经 notifier 处理路径走完整降档链
+ * （stuck_count 递增 → 剥 caps 降档 → SD_STUCK 上报），**不触碰真实 mmc
+ * 卡/硬件操作**。纯函数，host 单测直接覆盖，防演练口径漂移。
+ */
+#define LCIOD_SD_DRILL_START_SPEED  LCIOD_SD_SPEED_MAX
+/* 起点模式位全集：SDR12|SDR25|SDR50|SDR104|DDR50 = 0x1F */
+#define LCIOD_SD_DRILL_START_MODE   0x1Fu
+#define LCIOD_SD_DRILL_ERR          (-5) /* -EIO，模拟卡死错误码 */
+
+/* 一次合成 STUCK 降档事件（降档前/后档位与模式 + 错误码） */
+struct lciod_sd_stuck_evt {
+	unsigned int old_speed;
+	unsigned int new_speed;
+	unsigned int old_mode;
+	unsigned int new_mode;
+	int err;
+};
+
+/*
+ * lciod_sd_build_stuck_evt — 由演练起点档位/模式构造一次降档事件
+ * @speed/mode：合成卡起始速度档位（LCIOD_SD_SPEED_*）与模式位掩码
+ * @err：模拟 STUCK 错误码
+ * @out：事件输出（NULL 安全，直接返回）
+ *
+ * 语义：new_speed = next_lower_speed(speed)，new_mode = strip_modes_above(
+ * mode, new_speed)——与 notifier 回调内真实降档同源纯函数，保证演练与
+ * 生产降档口径一致。无内核 API 依赖，host 与内核共用。
+ */
+static inline void lciod_sd_build_stuck_evt(unsigned int speed,
+					    unsigned int mode, int err,
+					    struct lciod_sd_stuck_evt *out)
+{
+	if (!out)
+		return;
+	out->old_speed = speed;
+	out->new_speed = lciod_sd_next_lower_speed(speed);
+	out->old_mode = mode;
+	out->new_mode = lciod_sd_strip_modes_above(mode, out->new_speed);
+	out->err = err;
+}
+
+/*
+ * SD 延迟感知自动分级（QoS 延迟反馈）——窗口延迟只读导出与延迟演练契约
+ *
+ * COMPLETE 事件在 10s 窗内累计请求历时：窗口平均延迟 window_lat_avg_us 与
+ * 长尾计数 window_lat_tail（历时 >= LCIOD_SD_LAT_TAIL_NS 的请求数）为 daemon
+ * IoQosManager 自动档的反馈源——超阈收紧 bg 限速、回落放松（口径见
+ * docs/02-IO增强/02.08-IO-QoS延迟感知分级.md）。窗口到期若长尾计数 > 0，
+ * 经 LcView 上报 QOS_AUTO_ADJUST（id=18）。纯函数 host 单测直接覆盖。
+ */
+#define LCIOD_SD_LAT_TAIL_NS 50000000ULL /* 50ms 长尾阈值（纳秒） */
+
+/* 延迟演练入口（inject_latency）合成一次慢 COMPLETE 的历时与块大小 */
+#define LCIOD_SD_DRILL_LAT_NS    500000000ULL /* 500ms 慢 COMPLETE 历时 */
+#define LCIOD_SD_DRILL_LAT_BYTES 131072u      /* 128KiB（入块大小直方图档） */
+
+/* 长尾判据宏：请求历时是否达到长尾阈值 */
+#define LCIOD_SD_LAT_IS_TAIL(duration_ns) \
+	((uint64_t)(duration_ns) >= LCIOD_SD_LAT_TAIL_NS)
+
+/*
+ * lciod_sd_lat_avg_us — 窗口平均延迟（微秒，纯函数）
+ * @sum_ns：窗口内累计请求历时（纳秒）
+ * @count：窗口内计入历时的请求数
+ * 语义：count == 0 时返回 0（CXX-002 除零防护）；否则 sum_ns/count/1000。
+ * 无内核 API 依赖（仅整数运算），host 与内核共用同一实现。
+ */
+static inline uint64_t lciod_sd_lat_avg_us(uint64_t sum_ns, uint64_t count)
+{
+	if (count == 0)
+		return 0;
+	return sum_ns / count / 1000ULL;
+}
+
 /* SD Status Register 字数（512bit = 16 x u32） */
 #define LCIOD_SD_SSR_WORDS 16
 

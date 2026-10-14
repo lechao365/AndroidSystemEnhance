@@ -8,3 +8,21 @@ sh_binary {
     name: "rpi5_wifi_connect",
     src: "rpi5-wifi-connect.sh",
 }
+
+// 方向三批一：开机启用 zram0 换入设备（root oneshot）
+//   按 MemTotal 四成配置 disksize + zstd 并 mkswap/swapon，失败不影响启动。
+//   安装到 /system/bin/rpi5_zram_setup，由 init.rpi5.zram rc 的
+//   service rpi5_zram_setup 以 u:r:rpi5_zram_setup 域 root 运行。
+sh_binary {
+    name: "rpi5_zram_setup",
+    src: "rpi5-zram-setup.sh",
+}
+
+// zram 启用的 init 配置（prebuilt_etc 落到 /system/etc/init/rpi5-zram-setup.rc，
+// init 会扫描该目录；与本模块 sh_binary 同批部署）
+prebuilt_etc {
+    name: "rpi5_zram_setup_rc",
+    src: "rpi5-zram-setup.rc",
+    sub_dir: "init",
+    filename_from_src: true,
+}

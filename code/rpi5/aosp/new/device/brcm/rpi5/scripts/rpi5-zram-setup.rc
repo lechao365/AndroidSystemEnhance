@@ -1,0 +1,19 @@
+# ============================================================
+# rpi5-zram-setup.rc — 开机启用 zram0 换入设备（方向三批一）
+# 所属：rpi5 设备 init 配置（prebuilt_etc 安装到 /system/etc/init/）
+#
+# 由 root oneshot 服务运行 rpi5_zram_setup 脚本：按 MemTotal 四成配置
+# zram0 disksize + zstd 并 mkswap/swapon；失败不影响启动（脚本内回退清零）。
+# 依赖：/system/bin/rpi5_zram_setup（Android.bp sh_binary）
+# ============================================================
+
+service rpi5_zram_setup /system/bin/rpi5_zram_setup
+    class core
+    user root
+    group root system
+    seclabel u:r:rpi5_zram_setup:s0
+    oneshot
+
+# boot 阶段启动一次（zram 为内核内建设备，init 时 /sys/block/zram0 已就绪）
+on boot
+    start rpi5_zram_setup

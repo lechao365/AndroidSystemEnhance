@@ -551,6 +551,19 @@ class TestMainOrchestration(unittest.TestCase):
         self.assertIsNone(sr["ok"])
         self.assertEqual(data["overall"], "pass")
 
+    def test_bin_restart_oneshot_stopped_skipped(self):
+        # 方向三批一：oneshot 服务（init.svc=stopped，无常驻 pid，如
+        # rpi5_zram_setup）→ 跳过不判红，不得因 pid 前后皆空误判红
+        rc = self._run_bin_only(
+            self._bin_fake(svc_out="stopped", pidof_seq=["", ""]))
+        self.assertEqual(rc, 0)
+        data = json.loads(self.result.read_text(encoding="utf-8"))
+        self.assertIsNone(data["reboot"])
+        sr = data["service_restarts"][0]
+        self.assertIsNone(sr["ok"])
+        self.assertIn("oneshot", sr["detail"])
+        self.assertEqual(data["overall"], "pass")
+
     def test_bin_restart_records_pid_change_idempotent(self):
         # 方向 1 意图核心：幂等跳过（产物与设备全等，pushed=False）也要重启
         # 服务——旧进程可能仍在跑旧代码，此前跳过不重启致验收报绿
