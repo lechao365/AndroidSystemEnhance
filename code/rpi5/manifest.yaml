@@ -227,6 +227,10 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lciod/daemon/service.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/service.h
       source: aosp/vendor/lechao/services/lechao_lciod/daemon/service.h
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/trim_manager.cpp
+      source: aosp/vendor/lechao/services/lechao_lciod/daemon/trim_manager.cpp
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/daemon/trim_manager.h
+      source: aosp/vendor/lechao/services/lechao_lciod/daemon/trim_manager.h
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/hal/Android.bp
       source: aosp/vendor/lechao/services/lechao_lciod/hal/Android.bp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/hal/device_io.cpp
@@ -267,6 +271,8 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lciod/tests/MinorUtils_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/tests/Service_test.cpp
       source: aosp/vendor/lechao/services/lechao_lciod/tests/Service_test.cpp
+    - patch: aosp/new/vendor/lechao/services/lechao_lciod/tests/TrimManager_test.cpp
+      source: aosp/vendor/lechao/services/lechao_lciod/tests/TrimManager_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/tests/block_collector_test.cpp
       source: aosp/vendor/lechao/services/lechao_lciod/tests/block_collector_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lciod/tools/Android.bp

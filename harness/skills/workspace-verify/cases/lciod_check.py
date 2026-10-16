@@ -65,8 +65,13 @@
 #   zram-writeback — zram 写回预研闭环校验：U 盘在位（sd* removable=1，严禁
 #              mmcblk 系统盘）才校验，不在位 SKIP；自驱配置 zram0 写回
 #              （swapoff→reset→绑 backing_dev=U 盘→disksize→写随机页→idle→
-#              writeback），断言 backing_dev 绑定且 bd_stat 写回页数递增；
+#               writeback），断言 backing_dev 绑定且 bd_stat 写回页数递增；
 #              复原 mkswap+swapon。任一步 adb 超时返 -1 透传失败。
+#   trim       — ext4 碎片清理链（FITRIM）闭环校验：开开关 trim_enable=1 +
+#              单段演练 trim_drill=1，断言块层 /sys/block/mmcblk0/stat discard
+#              I/Os 递增（FITRIM 真实下发 discard）+ logcat 出现 "rule":"trim"
+#              （事件 id=20 落盘）；FITRIM 仅清空闲块无损，禁块设备裸写。
+#              teardown 复原开关；任一步 adb 超时返 -1 透传失败。
 #
 # 退出码：0 校验通过 / 1 校验失败 / 2 设备不可达或参数错误
 # ============================================================
@@ -1333,6 +1338,19 @@ _ZRAM_SWAP_PRESSURE_RULE = '"rule":"zram_swap_pressure"'
 _ZRAM_THRESHOLD_PROP = "sys.lechao.lciod.zram_swap_threshold"
 _ZRAM_DRILL_PROP = "sys.lechao.lciod.zram_swap_drill"
 
+# ============================================================
+# ext4 碎片清理链（--mode trim，UP-110 批一）
+# ============================================================
+# 块层统计 /sys/block/mmcblk0/stat 第 12 字段（索引 11）为累计 discard I/Os；
+# FITRIM 经块层下发 discard 会使其递增（真实下发证据）。
+_TRIM_BLOCK_STAT = "/sys/block/mmcblk0/stat"
+# daemon 留痕 rule 值（logcat tag lechao_lciod_event，事件 id=20）
+_TRIM_RULE = '"rule":"trim"'
+# 开关/演练 sysprop（与 service.cpp 对齐）：trim_enable 缺省 0 关闭即零动作；
+# trim_drill 为单段演练段数（值变化一次性计入，确定性单段便于对账）
+_TRIM_ENABLE_PROP = "sys.lechao.lciod.trim_enable"
+_TRIM_DRILL_PROP = "sys.lechao.lciod.trim_drill"
+
 
 def _zram_swap_state():
     """读 /proc/swaps 与 zram0 disksize 判定 swap 是否生效。
@@ -1459,6 +1477,119 @@ def mode_zram(args):
         # teardown：清降阈与演练 sysprop（回 daemon 默认阈值）
         adb(["shell", "setprop", _ZRAM_THRESHOLD_PROP, ""])
         adb(["shell", "setprop", _ZRAM_DRILL_PROP, ""])
+
+
+def _trim_discard_ios():
+    """读 /sys/block/mmcblk0/stat 第 12 字段（discard I/Os）。
+
+    内核 15 字段格式（索引 11 为 discard I/Os，紧随 flush I/Os 之后）。
+    返回 (值, 超时)；字段不足/不可读返回 (None, False)，adb 超时返回 (None, True)。
+    """
+    out, rc = adb(["shell", "cat", _TRIM_BLOCK_STAT])
+    if rc == -1:
+        return None, True
+    if rc != 0:
+        return None, False
+    line = out.strip().splitlines()[0] if out.strip() else ""
+    parts = line.split()
+    if len(parts) < 12:
+        return None, False
+    try:
+        return int(parts[11]), False
+    except ValueError:
+        return None, False
+
+
+def _trim_logcat_trace(since, needle):
+    """trim 事件 logcat 留痕检测 → (命中 bool, 超时 bool)。"""
+    out, rc = adb(["logcat", "-d", "-T", str(int(since)), "-s", _SD_LOG_TAG])
+    if rc == -1:
+        return False, True
+    return (rc == 0 and needle in out), False
+
+
+def mode_trim(args):
+    """ext4 碎片清理链（FITRIM）闭环校验（--mode trim）。
+
+    断言（防假绿判红项）：
+      1) 开开关 sys.lechao.lciod.trim_enable=1，单段演练 trim_drill=1；
+      2) 块层 /sys/block/mmcblk0/stat 第 12 字段（discard I/Os）严格递增
+         ——FITRIM 真实经块层下发 discard 的硬证据；
+      3) logcat tag lechao_lciod_event 出现 "rule":"trim" 行（事件 id=20 落盘）。
+    安全：仅 FITRIM 清理文件系统空闲块（无损，不触碰已分配数据），禁块设备裸写
+    /dd；teardown（finally）清演练并复原 trim_enable 原值。任一步 adb 超时
+    （rc==-1）return -1 由上游判红。
+    """
+    since = args.log_since
+    if since is None:
+        since = device_now()
+        if since is None:
+            print("ERROR: 无法读取设备时钟（logcat 抓取窗口无法锚定）")
+            return 1
+
+    before, bo = _trim_discard_ios()
+    if bo:
+        return -1
+    if before is None:
+        print(f"ERROR: 无法读取 {_TRIM_BLOCK_STAT}（字段不足/不可读）")
+        return 1
+
+    out, prc = adb(["shell", "getprop", _TRIM_ENABLE_PROP])
+    if prc == -1:
+        return -1
+    prev_enable = out.strip() if prc == 0 else ""
+
+    try:
+        for prop, val in ((_TRIM_ENABLE_PROP, "1"), (_TRIM_DRILL_PROP, "1")):
+            _o, src = adb(["shell", "setprop", prop, val])
+            if src == -1:
+                return -1
+            if src != 0:
+                print(f"ERROR: setprop {prop}={val} 失败 rc={src}")
+                return 1
+
+        discard_ok = False
+        event_ok = False
+        for _ in range(args.trim_rounds):
+            # drill 值变化一次性：每轮先置 0 再置 1，保证重新触发单段
+            for val in ("0", "1"):
+                _o, src = adb(["shell", "setprop", _TRIM_DRILL_PROP, val])
+                if src == -1:
+                    return -1
+                if src != 0:
+                    print(f"ERROR: setprop {_TRIM_DRILL_PROP}={val} 失败 rc={src}")
+                    return 1
+            time.sleep(args.trim_sleep)
+            cur, co = _trim_discard_ios()
+            if co:
+                return -1
+            if cur is not None and cur > before:
+                discard_ok = True
+            hit, to = _trim_logcat_trace(since, _TRIM_RULE)
+            if to:
+                return -1
+            if hit:
+                event_ok = True
+            if discard_ok and event_ok:
+                break
+
+        if not discard_ok:
+            print(f"FAIL: {_TRIM_BLOCK_STAT} discard I/Os 未递增"
+                  f"（before={before}，FITRIM 未下发 discard）")
+            print("ERROR: lciod trim 校验失败（块层 discard 计数未递增）")
+            return 1
+        if not event_ok:
+            print('FAIL: logcat 无 "rule":"trim" 行（trim 事件未落盘）')
+            print("ERROR: lciod trim 校验失败（事件未触发）")
+            return 1
+        print(f"OK: FITRIM 单段生效（discard I/Os before={before} 后递增）")
+        print('OK: trim 事件落盘（"rule":"trim"）')
+        print("OK: lciod trim 校验通过（ext4 碎片清理链闭环）")
+        return 0
+    finally:
+        # teardown：清演练并复原开关原值（YAML teardown 再兜底）
+        adb(["shell", "setprop", _TRIM_DRILL_PROP, ""])
+        adb(["shell", "setprop", _TRIM_ENABLE_PROP, prev_enable])
 
 
 # ============================================================
@@ -2018,7 +2149,8 @@ def main():
     ap.add_argument("--mode", required=True,
                     choices=["stats", "baseline", "delta", "perf", "uas",
                              "link", "storm", "qos", "qos-auto", "sd",
-                             "sd-inject", "histo", "zram", "zram-writeback"])
+                             "sd-inject", "histo", "zram", "zram-writeback",
+                             "trim"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
@@ -2074,6 +2206,10 @@ def main():
     ap.add_argument("--zram-wb-pages", type=int, default=16,
                     help="zram-writeback 模式演练随机页数（构造已分配页），"
                          "默认 16")
+    ap.add_argument("--trim-rounds", type=int, default=8,
+                    help="trim 模式单段演练触发/轮询轮数，默认 8")
+    ap.add_argument("--trim-sleep", type=float, default=4.0,
+                    help="trim 模式每轮等待秒数（等 daemon 10s 决策窗），默认 4")
     args = ap.parse_args()
 
     ensure_connected()
@@ -2145,6 +2281,14 @@ def main():
     if args.mode == "zram-writeback":
         # 方向三批二：zram writeback 预研闭环（U 盘 backing_dev + bd_stat 递增）
         rc = mode_zram_writeback(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "trim":
+        # UP-110 批一：ext4 碎片清理链（FITRIM）闭环（开关+演练 → discard 递增 + 事件落盘）
+        rc = mode_trim(args)
         if rc == -1:
             print("ERROR: adb 执行超时")
             return 1

@@ -91,6 +91,12 @@
                                               * some total + vmstat 换入/换出页数 + zram0
                                               * io_stat 读写字节差分，窗换入页数超阈即合成，见
                                               * DISABLED_EVENTS 豁免） */
+#define LCVIEW_EVENT_TRIM                20 /* ext4 碎片清理链 FITRIM（UP-110 批一，用户态
+                                              * lciod TrimManager 合成，无内核发射点——开关
+                                              * sys.lechao.lciod.trim_enable 开启后按空闲率/天数
+                                              * 决策分段 FITRIM 清理 /data 空闲块，落 rule=trim
+                                              * JSON 行（度量前后块层 discard 差分），见
+                                              * DISABLED_EVENTS 豁免） */
 
 /* --- 记录魔数 --- */
 #define LCVIEW_MAGIC  0x4C56

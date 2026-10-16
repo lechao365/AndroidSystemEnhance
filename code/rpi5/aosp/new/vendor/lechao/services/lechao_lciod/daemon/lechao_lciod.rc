@@ -19,6 +19,11 @@ service lechao_lciod /system/bin/lechao_lciod
     class main
     user system
     group system
+    # UP-110 批一：ext4 碎片清理链（TrimManager）FITRIM ioctl 前置
+    # capable(CAP_SYS_ADMIN)（ext4 ext4_ioctl/FITRIM），system 用户缺该能力，
+    # 由 init 授予 SYS_ADMIN（仅按开关 sys.lechao.lciod.trim_enable 触发，
+    # 缺省 0 关闭即零动作；FITRIM 仅释放空闲块无损）。
+    capabilities SYS_ADMIN
     interface aidl system.lechao.lciod.IIoService/default
 
 # 系统启动完成时启动 IO Daemon

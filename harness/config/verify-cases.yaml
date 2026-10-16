@@ -387,6 +387,27 @@ cases:
     acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lciod_check.sh --mode zram-writeback"'
     timeout_s: 300
 
+  # UP-110 批一：ext4 碎片清理链（FITRIM）闭环（本批新增验收 case，验收
+  # case:trim）。语义：cases/lciod_check.sh --mode trim——
+  #   1) 开开关 sys.lechao.lciod.trim_enable=1 + 单段演练
+  #      sys.lechao.lciod.trim_drill=1，等 daemon 10s 决策窗；
+  #   2) 断言块层 /sys/block/mmcblk0/stat 第 12 字段（discard I/Os）严格递增
+  #      ——FITRIM 真实经块层下发 discard 的硬证据；
+  #   3) 断言 logcat tag lechao_lciod_event 出现 "rule":"trim"（事件 id=20 落盘）。
+  # 防假绿：开关未生效 / discard 计数未递增 / 无事件落痕均判红。
+  # 安全：FITRIM 仅清文件系统空闲块无损（不触碰已分配数据），禁块设备裸写/dd；
+  # 副作用字段为两个 sysprop（快照/恢复），timeout_s 240（含 daemon 10s 决策
+  # 窗与轮询）。
+  trim:
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lciod_check.sh --mode trim"'
+    setup_snapshot:
+      - 'adb shell "getprop sys.lechao.lciod.trim_enable"'
+      - 'adb shell "getprop sys.lechao.lciod.trim_drill"'
+    teardown:
+      - 'adb shell "setprop sys.lechao.lciod.trim_enable \"${SNAPSHOT_0}\""'
+      - 'adb shell "setprop sys.lechao.lciod.trim_drill \"${SNAPSHOT_1}\""'
+    timeout_s: 240
+
   # C 批二 方向 3：lciod USB 传输延迟/块大小二维直方图用户态验收（本批新增
   # 验收 case）。语义：cases/lciod_check.sh --mode histo 内部执行
   #   lciod_probe --histo 取数（GET_LATENCY_HISTOGRAM cmd5）→ 结构断言

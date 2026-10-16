@@ -176,6 +176,20 @@
         {"name": "psi_io_total_us", "type": "int64"},
         {"name": "threshold_pages", "type": "int64"}
       ]
+    },
+    {
+      "id": 20,
+      "name": "trim",
+      "desc": "ext4 segmented FITRIM executed by lciod TrimManager (daemon synthetic report, no kernel emitter)",
+      "fields": [
+        {"name": "trimmed_bytes",         "type": "int64"},
+        {"name": "segments",              "type": "int64"},
+        {"name": "duration_ms",           "type": "int64"},
+        {"name": "free_ratio_bp",         "type": "int64"},
+        {"name": "discard_ios_delta",     "type": "int64"},
+        {"name": "discard_sectors_delta", "type": "int64"},
+        {"name": "time_queue_delta_ms",   "type": "int64"}
+      ]
     }
   ]
 }

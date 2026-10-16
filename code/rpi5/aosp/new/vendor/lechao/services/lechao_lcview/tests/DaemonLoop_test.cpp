@@ -229,7 +229,8 @@ TEST(DaemonLoopHelperTest, SchemaLoadRetry_SuccessOnFirstTry) {
         // C 批二方向2：新增 id=17 usb_latency_tail（daemon 合成），schema 升为 16 事件
         // QoS 延迟感知分级：新增 id=18 qos_auto_adjust，schema 升为 17 事件
         // 方向三批一：新增 id=19 zram_swap_pressure（daemon 合成），schema 升为 18 事件
-        EXPECT_EQ(sp.eventCount(), 18u);
+        // UP-110 批一：新增 id=20 trim（lciod daemon 合成），schema 升为 19 事件
+        EXPECT_EQ(sp.eventCount(), 19u);
     } else {
         GTEST_SKIP() << "真配置不存在（host 环境）";
     }

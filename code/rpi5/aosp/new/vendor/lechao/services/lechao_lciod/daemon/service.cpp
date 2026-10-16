@@ -34,6 +34,8 @@
 #include <vector>
 #include <cstdlib>
 #include <string>
+#include <ctime>
+#include <fstream>
 #include <sys/epoll.h>
 #include <sys/system_properties.h>
 #include <unistd.h>
@@ -49,6 +51,9 @@
 /* R5 方向1：块设备/zram 观测采集器（纯函数 + BlockCollector/ZramCollector，
  * 自 lcview 平移至 lciod），service.cpp 提供 10s 采集线程见 BlockCollectorRunLoop */
 #include "block_collector.h"
+/* UP-110 批一：ext4 碎片清理链（TrimManager，纯函数 + 分段 FITRIM 执行器），
+ * service.cpp 提供 10s 决策/执行循环见 TrimManagerRunLoop */
+#include "trim_manager.h"
 /* R-14 方向 1：共享事件枚举头（AOSP hal 镜像，与内核真相源 1:1 同步），
  * 事件类型/方向名映射单一事实源，消模块内 switch 硬编码 */
 #include "vendor_lechao_usbd-ioctl.h"
@@ -562,6 +567,165 @@ static void BlockCollectorRunLoop() {
     }
 }
 
+/* UP-110 批一：trim 事件 JSON 行（rule=trim，事件 id=20）。字段与
+ * config/lcview_events.json id=20 定义一致：trimmed_bytes/segments/
+ * duration_ms/free_ratio_bp/discard_ios_delta/discard_sectors_delta/
+ * time_queue_delta_ms。 */
+static void EmitTrimJson(const lechao::lciod::TrimManager::Result& r) {
+    char line[320];
+    int n = snprintf(line, sizeof(line),
+        "{\"rule\":\"trim\",\"trimmed_bytes\":%llu,\"segments\":%u,"
+        "\"duration_ms\":%llu,\"free_ratio_bp\":%u,"
+        "\"discard_ios_delta\":%llu,\"discard_sectors_delta\":%llu,"
+        "\"time_queue_delta_ms\":%llu}",
+        static_cast<unsigned long long>(r.trimmed_bytes),
+        static_cast<unsigned>(r.segments),
+        static_cast<unsigned long long>(r.duration_ms),
+        static_cast<unsigned>(r.free_ratio_bp),
+        static_cast<unsigned long long>(r.discard_ios_delta),
+        static_cast<unsigned long long>(r.discard_sectors_delta),
+        static_cast<unsigned long long>(r.time_queue_delta_ms));
+    EmitCollectorJson("trim", line, n, sizeof(line));
+    LC_ALOGI("trim: ran=%d segments=%u trimmed_bytes=%llu free_ratio_bp=%u "
+             "discard_ios_delta=%llu discard_sectors_delta=%llu circuit_breaker=%d",
+             static_cast<int>(r.ran), static_cast<unsigned>(r.segments),
+             static_cast<unsigned long long>(r.trimmed_bytes),
+             static_cast<unsigned>(r.free_ratio_bp),
+             static_cast<unsigned long long>(r.discard_ios_delta),
+             static_cast<unsigned long long>(r.discard_sectors_delta),
+             static_cast<int>(r.circuit_breaker));
+}
+
+/* 读 /sys/block/mmcblk0/stat → BlockStatSample（度量差分用）。失败返回 false。 */
+static bool ReadBlockStatSample(const char* path, lechao::lciod::BlockStatSample* out) {
+    if (path == nullptr || out == nullptr)
+        return false;
+    std::ifstream ifs(path);
+    if (!ifs.is_open())
+        return false;
+    std::string line;
+    if (!std::getline(ifs, line))
+        return false;
+    return lechao::lciod::ParseBlockStat(line, out);
+}
+
+/*
+ * UP-110 批一：ext4 碎片清理链运行循环（IoServiceImpl::start() 以
+ * std::thread(...).detach() 启动）。对齐 BlockCollectorRunLoop 的
+ * steady_clock 绝对时间对齐范式，每 kTrimLoopIntervalSec(10s) 一轮：
+ *   1) 读开关 sys.lechao.lciod.trim_enable（缺省 0，关闭即零动作）；
+ *   2) 演练钩子 sys.lechao.lciod.trim_drill（段数，值变化一次性，仿
+ *      zram_swap_drill）——支持开单段/限段测试；
+ *   3) 决策（/data 空闲率 + 距上次 trim 天数，状态存
+ *      data/misc/lechao/lciod/trim-state，禁碰 vold 路径）通过则自盘尾
+ *      分段 FITRIM（32MiB/段、段间 usleep 5ms、300s + 段上限熔断）；
+ *   4) 前后 /sys/block/mmcblk0/stat 第 11-14 字段差分度量，成功写状态；
+ *   5) 经 EVENT_ALOG 落 JSON 行（rule=trim，事件 id=20）。
+ * 安全边界：FITRIM 仅释放文件系统空闲块（无损，不触碰已分配数据），禁块
+ * 设备裸写（BLKDISCARD）与 dd；开关缺省 0，未开启零动作。观测为增强项非
+ * 致命：statvfs/状态/执行失败已限频 ALOG，跳过本轮，线程不退出（CXX-004）。
+ */
+static void TrimManagerRunLoop() {
+    using clock = std::chrono::steady_clock;
+    const auto period = std::chrono::seconds(lechao::lciod::kTrimLoopIntervalSec);
+    lechao::lciod::TrimManager trim;
+    /* drill 值变化一次性（仿 zram_swap_drill 幂等一次），防每轮重复触发 */
+    uint64_t lastDrill = 0;
+    uint64_t pendingDrill = 0;
+
+    while (true) {
+        std::this_thread::sleep_until(clock::now() + period);
+
+        uint64_t en = 0;
+        const bool enabled = ParsePropU64("sys.lechao.lciod.trim_enable", &en) && en != 0;
+
+        uint64_t drill = 0;
+        if (ParsePropU64("sys.lechao.lciod.trim_drill", &drill) && drill != lastDrill) {
+            lastDrill = drill;
+            if (drill > 0)
+                pendingDrill = drill;  /* 值变化一次性计入 */
+        }
+        if (!enabled) {
+            pendingDrill = 0;  /* 开关关闭：丢弃未处理演练，避免开启后补跑旧值 */
+            continue;
+        }
+        const bool drillRun = pendingDrill > 0;
+
+        uint64_t total_bytes = 0;
+        uint64_t free_bytes = 0;
+        if (!lechao::lciod::TrimManager::StatMount(lechao::lciod::kTrimMountPath,
+                                                   &total_bytes, &free_bytes)) {
+            ALOGW("lechao_lciod: trim statvfs(%s) failed: %s (skip)",
+                  lechao::lciod::kTrimMountPath, std::strerror(errno));
+            continue;
+        }
+        const uint32_t free_bp =
+            lechao::lciod::ComputeFreeRatioBp(free_bytes, total_bytes);
+
+        uint64_t last_epoch = 0;
+        bool never_trimmed = false;
+        if (!lechao::lciod::TrimManager::ReadState(lechao::lciod::kTrimStatePath,
+                                                   &last_epoch, &never_trimmed)) {
+            ALOGW("lechao_lciod: trim read state failed (skip this round)");
+            continue;
+        }
+        uint64_t days = 0;
+        if (!never_trimmed) {
+            const time_t now = time(nullptr);
+            days = (now > static_cast<time_t>(last_epoch))
+                       ? static_cast<uint64_t>(now - static_cast<time_t>(last_epoch)) / 86400ull
+                       : 0;
+        }
+        const bool eligible = lechao::lciod::ShouldTrim(
+            enabled, drillRun, free_bp, lechao::lciod::kTrimFreeThresholdBp,
+            days, lechao::lciod::kTrimMinDays, never_trimmed);
+        if (!eligible)
+            continue;
+
+        const uint32_t max_segments = drillRun
+            ? static_cast<uint32_t>(pendingDrill > 0xffffffffull
+                                        ? 0xffffffffu : pendingDrill)
+            : lechao::lciod::kTrimMaxSegments;
+        if (drillRun)
+            pendingDrill = 0;
+
+        lechao::lciod::BlockStatSample before {};
+        const bool have_before =
+            ReadBlockStatSample(lechao::lciod::kTrimBlockStatPath, &before);
+
+        lechao::lciod::TrimManager::Result res;
+        res.enabled = enabled;
+        res.decision_passed = eligible;
+        res.free_ratio_bp = free_bp;
+        const bool ok = trim.ExecuteSegmentedTrim(
+            total_bytes, max_segments, lechao::lciod::kTrimSegmentBytes,
+            lechao::lciod::kTrimSegmentSleepUs, lechao::lciod::kTrimBudgetMs, &res);
+        res.ran = ok || res.segments > 0;
+
+        lechao::lciod::BlockStatSample after {};
+        if (have_before && ReadBlockStatSample(lechao::lciod::kTrimBlockStatPath, &after)) {
+            const lechao::lciod::BlockStatDelta d =
+                lechao::lciod::DiffBlockSamples(before, after);
+            res.time_queue_delta_ms = d.time_in_queue_ms;
+            res.discard_ios_delta = d.discard_ios;
+            res.discard_merges_delta = d.discard_merges;
+            res.discard_sectors_delta = d.discard_sectors;
+        }
+
+        if (res.ran) {
+            const time_t now = time(nullptr);
+            if (!lechao::lciod::TrimManager::WriteState(
+                    lechao::lciod::kTrimStateDir, lechao::lciod::kTrimStatePath,
+                    static_cast<uint64_t>(now))) {
+                ALOGW("lechao_lciod: trim write state failed: %s", std::strerror(errno));
+            }
+        }
+        EmitTrimJson(res);
+        if (!ok && !res.error.empty())
+            ALOGW("lechao_lciod: trim run not completed: %s", res.error.c_str());
+    }
+}
+
 void IoServiceImpl::start() {
     start_monitor();
     /* R2 方向 5+6：启动独立全局链路监控线程（LinkMonitorRun，detach）。
@@ -578,6 +742,11 @@ void IoServiceImpl::start() {
      * detach）。与 monitor/QoS 线程并行，观测为增强项非致命；线程随进程
      * 生命周期终止（进程非 oneshot，init 自动重启）。 */
     std::thread(BlockCollectorRunLoop).detach();
+    /* UP-110 批一：启动 ext4 碎片清理链运行循环（TrimManagerRunLoop，detach）。
+     * 开关 sys.lechao.lciod.trim_enable 缺省 0（关闭零动作）；FITRIM 仅释放
+     * 空闲块无损，禁块设备裸写；线程随进程生命周期终止（进程非 oneshot，
+     * init 自动重启）。 */
+    std::thread(TrimManagerRunLoop).detach();
 }
 
 /*
