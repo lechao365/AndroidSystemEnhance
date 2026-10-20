@@ -567,9 +567,10 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(br.load()["baselines"][0]["package_result"], "UNKNOWN")
 
-    def test_add_candidate_sudo_n_false_warns_manual_path(self):
-        # 方向 5：UNKNOWN 且证据 sudo_n=false（opencode 会话 NoNewPrivileges
-        # 使 sudo 恒被内核拒绝）→ 告警指向人工打包路径（BLD-013），登记不阻断
+    def test_add_candidate_sudo_n_false_without_privilege_warns_allowlist(
+            self):
+        # 旧证据无 privilege 字段：告警先指 privileged allowlist 自动路径，
+        # 仍不可用再按 BLD-013 会话外人工回退，登记不阻断
         rp = self._make_receipt(build="pass", board="pass",
                                 cases="lcview-liveness")
         ev_dir = self._root / "harness" / "log" / "workspace-verify"
@@ -583,8 +584,36 @@ class TestBaselineRegister(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(br.load()["baselines"][0]["package_result"], "UNKNOWN")
         self.assertIn("sudo_n=false", out)
+        self.assertIn("privileged_exec.py", out)
+        self.assertIn("--check", out)
+        self.assertIn("allowlist", out)
         self.assertIn("BLD-013", out)
         self.assertIn("会话外普通终端", out)
+        self.assertLess(out.index("allowlist"), out.index("BLD-013"))
+
+    def test_add_candidate_sudo_n_false_privilege_usable_warns_script_fail(
+            self):
+        # 提权机制已可用（systemd-run）时的 UNKNOWN 源于脚本失败：告警须
+        # 指向脚本证据，不得误指会话外人工回退
+        rp = self._make_receipt(build="pass", board="pass",
+                                cases="lcview-liveness")
+        ev_dir = self._root / "harness" / "log" / "workspace-verify"
+        ev_dir.mkdir(parents=True)
+        (ev_dir / "package-batch-test.json").write_text(
+            json.dumps({"run_id": "r", "script_rc": 1, "sudo_n": False,
+                        "privilege": {"usable": True, "context_sudo_ok": True,
+                                      "mechanism": "systemd-run"},
+                        "error": "打包脚本失败"}), encoding="utf-8")
+        rc, out = self._run("add-candidate", "--receipt-path", rp,
+                            "--source-commit", "abc123",
+                            "--evidence-scope", "lcview-liveness")
+        self.assertEqual(rc, 0)
+        self.assertEqual(br.load()["baselines"][0]["package_result"], "UNKNOWN")
+        self.assertIn("提权机制可用", out)
+        self.assertIn("打包脚本失败", out)
+        self.assertIn("systemd-run", out)
+        self.assertIn("script_rc=1", out)
+        self.assertNotIn("会话外普通终端", out)
 
     def test_add_candidate_sudo_n_false_no_warn_on_pass(self):
         # sudo_n=false 但证据 script_rc=0（PASS）→ 不告警（打包已成功，无需人工路径）

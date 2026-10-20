@@ -568,14 +568,28 @@ def main(argv=None):
         pkg_rc = pkg_evidence.get("script_rc") if pkg_evidence else None
         package_result = _package_result_from_evidence(pkg_evidence,
                                                        evidence_scope)
-        # 方向 5：UNKNOWN 且证据 sudo_n=false → 告警指向人工打包路径（BLD-013：
-        # opencode 会话 NoNewPrivileges 使 sudo 恒被内核拒绝，会话内无法打包）
+        # 方向 5：UNKNOWN 且证据 sudo_n=false → 按提权证据分支告警：
+        # 提权机制已可用时 UNKNOWN 源于脚本失败，不得误指会话外回退；
+        # 否则先指 allowlist 自动路径，再保留 BLD-013 会话外人工兜底
         if package_result == "UNKNOWN" and isinstance(pkg_evidence, dict) \
                 and pkg_evidence.get("sudo_n") is False:
-            print("warn: package_result=UNKNOWN 且打包证据 sudo_n=false（会话内 "
-                  "sudo 被 NoNewPrivileges 拒绝，BLD-013）：须在 opencode 会话外"
-                  "普通终端人工执行打包后重登记（见 harness/reference/"
-                  "build-reference.md）", file=sys.stderr)
+            privilege = pkg_evidence.get("privilege")
+            if isinstance(privilege, dict) and (
+                    privilege.get("usable") is True
+                    or privilege.get("context_sudo_ok") is True):
+                print("warn: package_result=UNKNOWN 但提权机制可用"
+                      f"（mechanism={privilege.get('mechanism') or 'unknown'}）；"
+                      "UNKNOWN 源于打包脚本失败"
+                      f"（script_rc={pkg_evidence.get('script_rc')}），"
+                      "请查看 output_tail/error 后重跑，不要走会话外回退",
+                      file=sys.stderr)
+            else:
+                print("warn: package_result=UNKNOWN 且打包证据 sudo_n=false"
+                      "（会话内 direct sudo 不可用）：先运行 "
+                      "python3 harness/lib/privileged_exec.py --check 检查 "
+                      "allowlist/systemd-run；若仍不可用，再按 BLD-013 在 "
+                      "opencode 会话外普通终端人工执行打包后重登记（见 "
+                      "harness/reference/build-reference.md）", file=sys.stderr)
         board_verify = ((r.push_board or "").strip() or "FAIL").upper()
         # 方向 4：Python 层登记防线——防绕过 shell 直调登记（publish_main_base.sh
         # prepare 有门禁，直调 add-candidate 须同样从严）
@@ -634,8 +648,9 @@ def main(argv=None):
             print(f"error: 登记门禁：dev 相对 origin/main 有 code/ 改动"
                   f"（{len(code_changes)} 提交）且 package_result={package_result}"
                   f" 非 PASS（须 ws_package 打包证据；no-code-change 豁免不受限）。"
-                  "打包在 opencode 会话内被 BLD-013 禁止，可用 systemd-run --user "
-                  "豁免或会话外终端执行 ws_package.py 后重登记（见 "
+                  "先运行 python3 harness/lib/privileged_exec.py --check 检查 "
+                  "allowlist 自动路径（NNP=1 会话内应走 systemd-run）；仍不可用"
+                  "再按 BLD-013 在会话外终端执行 ws_package.py 后重登记（见 "
                   "harness/reference/build-reference.md）", file=sys.stderr)
             return 1
         # ki_gate：known-issues 门禁结论（拒批已在脚本层 exit，缺参视为 not-run）
