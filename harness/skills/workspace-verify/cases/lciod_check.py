@@ -72,6 +72,11 @@
 #              I/Os 递增（FITRIM 真实下发 discard）+ logcat 出现 "rule":"trim"
 #              （事件 id=20 落盘）；FITRIM 仅清空闲块无损，禁块设备裸写。
 #              teardown 复原开关；任一步 adb 超时返 -1 透传失败。
+#   readahead  — 块层预读调优验收：断言 /sys/block/mmcblk0/queue/read_ahead_kb
+#              == 512（persist.lechao.readahead_kb 属性 trigger 落地的默认目标
+#              态）；drop_caches 后 am start 设置应用，记录冷启动耗时并与 173329
+#              基线 757ms 对比（仅记录变化，不作门禁）。默认即目标态不复原；
+#              仅读 sysfs + 可逆 drop_caches，无块设备写。
 #
 # 退出码：0 校验通过 / 1 校验失败 / 2 设备不可达或参数错误
 # ============================================================
@@ -1593,6 +1598,86 @@ def mode_trim(args):
 
 
 # ============================================================
+# readahead 调优验收（--mode readahead）
+# ============================================================
+
+# mmcblk0（RPi5 系统盘）块层队列预读窗口；173329 只读 A/B 收据定标：
+# 128→512 顺序读 82.9→88.1 M/s（+6.3%），1024 无额外增益。
+_READAHEAD_SYSFS = "/sys/block/mmcblk0/queue/read_ahead_kb"
+_READAHEAD_TARGET_KB = 512
+# 173329 冷缓存启动基线（drop_caches + am start 设置应用，TotalTime 757ms）
+_READAHEAD_COLD_BASELINE_MS = 757.0
+_SETTINGS_ACTION = "android.settings.SETTINGS"
+
+
+def _parse_am_total_ms(text):
+    """解析 `am start -W` 输出 → 启动耗时毫秒（TotalTime 优先，WaitTime 兜底）。
+
+    两者皆缺返回 None（不得把无输出当 0ms 假绿）。
+    """
+    for key in ("TotalTime", "WaitTime"):
+        m = re.search(rf"{key}:\s*(\d+)", text)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def mode_readahead(args):
+    """readahead 调优验收（--mode readahead）。
+
+    断言：
+      1) /sys/block/mmcblk0/queue/read_ahead_kb == 512（属性 trigger 生效，
+         默认即目标态）；非 512 / 不可读判红；
+      2) drop_caches 后 am start 设置应用，记录冷启动耗时并与 173329 基线
+         757ms 对比（仅记录变化，不作门禁——设备间差异大，门禁为主断言 1）。
+    安全：仅读 sysfs + drop_caches（可逆内存回收）+ am start（无数据写）；
+    默认即目标态，**不复原**（回退由 setprop persist.lechao.readahead_kb 128
+    驱动 rc trigger）。任一步 adb 超时（rc==-1）return -1 由上游判红。
+    """
+    out, rc = adb(["shell", "cat", _READAHEAD_SYSFS])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print(f"ERROR: 无法读取 {_READAHEAD_SYSFS}（属性 trigger 未生效？）")
+        return 1
+    try:
+        val = int(out.strip())
+    except ValueError:
+        print(f"ERROR: {_READAHEAD_SYSFS} 非数字: {out.strip()!r}")
+        return 1
+    if val != _READAHEAD_TARGET_KB:
+        print(f"FAIL: {_READAHEAD_SYSFS}={val} != {_READAHEAD_TARGET_KB}"
+              "（persist.lechao.readahead_kb 未生效）")
+        print("ERROR: lciod readahead 校验失败（目标态未落地）")
+        return 1
+    print(f"OK: {_READAHEAD_SYSFS}={val}（目标态 {_READAHEAD_TARGET_KB}）")
+
+    _o, rc = adb(["shell", "echo 3 > /proc/sys/vm/drop_caches"])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print("ERROR: drop_caches 失败（无法构造冷缓存）")
+        return 1
+    out, rc = adb(["shell", "am", "start", "-W", "-a", _SETTINGS_ACTION])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print(f"ERROR: am start {_SETTINGS_ACTION} 失败 rc={rc}")
+        return 1
+    total_ms = _parse_am_total_ms(out)
+    if total_ms is None:
+        print(f"ERROR: am start 输出缺 TotalTime/WaitTime: {out.strip()[:200]}")
+        return 1
+    delta = total_ms - _READAHEAD_COLD_BASELINE_MS
+    pct = delta / _READAHEAD_COLD_BASELINE_MS * 100
+    print(f"INFO: 冷缓存启动 TotalTime={total_ms} ms（173329 基线 "
+          f"{_READAHEAD_COLD_BASELINE_MS:.0f} ms，变化 {delta:+.1f} ms/"
+          f"{pct:+.1f}%）")
+    print("OK: lciod readahead 校验通过（sysfs=512 + 冷启动对比已记录）")
+    return 0
+
+
+# ============================================================
 # zram writeback 预研闭环校验（--mode zram-writeback）
 # ============================================================
 
@@ -2150,7 +2235,7 @@ def main():
                     choices=["stats", "baseline", "delta", "perf", "uas",
                              "link", "storm", "qos", "qos-auto", "sd",
                              "sd-inject", "histo", "zram", "zram-writeback",
-                             "trim"])
+                             "trim", "readahead"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
@@ -2289,6 +2374,14 @@ def main():
     if args.mode == "trim":
         # UP-110 批一：ext4 碎片清理链（FITRIM）闭环（开关+演练 → discard 递增 + 事件落盘）
         rc = mode_trim(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "readahead":
+        # 块层预读调优验收（sysfs=512 + 冷启动对比基线 173329）
+        rc = mode_readahead(args)
         if rc == -1:
             print("ERROR: adb 执行超时")
             return 1

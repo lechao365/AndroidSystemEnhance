@@ -161,6 +161,8 @@ aosp:
       source: aosp/device/brcm/rpi5/ramdisk/init.rpi5.wifi.rc
     - patch: aosp/new/device/brcm/rpi5/scripts/Android.bp
       source: aosp/device/brcm/rpi5/scripts/Android.bp
+    - patch: aosp/new/device/brcm/rpi5/scripts/rpi5-readahead.rc
+      source: aosp/device/brcm/rpi5/scripts/rpi5-readahead.rc
     - patch: aosp/new/device/brcm/rpi5/scripts/rpi5-wifi-connect.sh
       source: aosp/device/brcm/rpi5/scripts/rpi5-wifi-connect.sh
     - patch: aosp/new/device/brcm/rpi5/scripts/rpi5-zram-setup.rc

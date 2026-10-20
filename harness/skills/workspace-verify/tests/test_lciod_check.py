@@ -1563,5 +1563,76 @@ class TestModeZramWriteback(unittest.TestCase):
         self.assertIn("swapon", joined)
 
 
+class _FakeAdbReadahead:
+    """伪 adb（readahead 模式）：模拟 sysfs 读取与 drop_caches/am start。"""
+
+    def __init__(self, sysfs="512", cat_rc=0, am_rc=0,
+                 am_out="Status: ok\nLaunchState: WARM\nTotalTime: 700\n"
+                        "WaitTime: 710\n", timeout=False):
+        self.sysfs = sysfs
+        self.cat_rc = cat_rc
+        self.am_rc = am_rc
+        self.am_out = am_out
+        self.timeout = timeout
+        self.calls = []
+
+    def __call__(self, args, timeout=60):
+        self.calls.append(args)
+        if self.timeout:
+            return ("", -1)
+        if args[0] == "shell" and len(args) >= 2:
+            if args[1] == "cat":
+                return (f"{self.sysfs}\n", self.cat_rc)
+            if "drop_caches" in args[1]:
+                return ("", 0)
+            if args[1] == "am":
+                return (self.am_out, self.am_rc)
+        return ("", 0)
+
+
+def _readahead_args():
+    return argparse.Namespace()
+
+
+class TestModeReadahead(unittest.TestCase):
+    def _run(self, fake):
+        with mock.patch.object(lc, "adb", fake):
+            return lc.mode_readahead(_readahead_args())
+
+    def test_pass(self):
+        # sysfs=512 + am start 可解析 → 判绿
+        self.assertEqual(self._run(_FakeAdbReadahead()), 0)
+
+    def test_non_target_red(self):
+        # sysfs 未落到目标态 512 → 判红
+        self.assertEqual(self._run(_FakeAdbReadahead(sysfs="128")), 1)
+
+    def test_unreadable_red(self):
+        # sysfs 不可读 → 判红（不得当默认态假绿）
+        self.assertEqual(self._run(_FakeAdbReadahead(cat_rc=1)), 1)
+
+    def test_am_fail_red(self):
+        # 冷启动测量失败 → 判红（不得静默缺证据）
+        self.assertEqual(self._run(_FakeAdbReadahead(am_rc=1)), 1)
+
+    def test_am_no_time_red(self):
+        # am 输出缺 TotalTime/WaitTime → 判红（不得当 0ms 假绿）
+        self.assertEqual(
+            self._run(_FakeAdbReadahead(am_out="Status: ok\n")), 1)
+
+    def test_adb_timeout_returns_minus1(self):
+        # adb 超时（rc==-1）→ 返回 -1 由 main 透传失败
+        self.assertEqual(self._run(_FakeAdbReadahead(timeout=True)), -1)
+
+    def test_no_restore_write(self):
+        # 回归锚点：默认即目标态，不得回写 sysfs（回退由 setprop trigger 驱动）
+        fake = _FakeAdbReadahead()
+        self.assertEqual(self._run(fake), 0)
+        writes = [c for c in fake.calls
+                  if len(c) >= 2 and c[0] == "shell"
+                  and "read_ahead_kb" in c[1] and "cat" not in c[1]]
+        self.assertEqual(writes, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -408,6 +408,21 @@ cases:
       - 'adb shell "setprop sys.lechao.lciod.trim_drill \"${SNAPSHOT_1}\""'
     timeout_s: 240
 
+  # 块层预读调优（本批新增验收 case，批次验收 case:readahead）。
+  # 语义：cases/lciod_check.sh --mode readahead——
+  #   1) 断言 /sys/block/mmcblk0/queue/read_ahead_kb == 512（persist.lechao.
+  #      readahead_kb 默认 512，rpi5-readahead.rc 属性 trigger 写 sysfs）；
+  #   2) drop_caches 后 am start 设置应用，记录冷启动耗时并与 173329 基线
+  #      757ms 对比（仅记录变化，不作门禁）。
+  # 防假绿：sysfs 非 512 / 不可读 / am start 失败 / 输出缺 TotalTime 均判红。
+  # 安全：仅读 sysfs + 可逆 drop_caches，无块设备写；默认即目标态不复原
+  # （回退 setprop persist.lechao.readahead_kb 128 由 rc trigger 即时生效）。
+  # 注：增量推送不更新 vendor/build.prop，验收先 setprop 512 建立目标态
+  # （等价于 build.prop 默认值；全量刷机后开机即由属性 trigger 落地）。
+  readahead:
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"adb shell setprop persist.lechao.readahead_kb 512" hostcmd:"cases/lciod_check.sh --mode readahead"'
+    timeout_s: 120
+
   # C 批二 方向 3：lciod USB 传输延迟/块大小二维直方图用户态验收（本批新增
   # 验收 case）。语义：cases/lciod_check.sh --mode histo 内部执行
   #   lciod_probe --histo 取数（GET_LATENCY_HISTOGRAM cmd5）→ 结构断言
@@ -575,6 +590,9 @@ modules:
       # 落 /system/etc/init（init 扫描该目录加载 service rpi5_zram_setup）
       - rpi5_zram_setup
       - rpi5_zram_setup_rc
+      # readahead 调优 init 配置（prebuilt_etc rpi5_readahead_rc 落
+      # /system/etc/init/rpi5-readahead.rc，属性 trigger 写块层队列参数）
+      - rpi5_readahead_rc
     # 测试 target（AGENTS.md 强制四个 test target 含 lcview 两个，
     # tests/Android.bp 定义）
     test_targets:
@@ -621,6 +639,10 @@ modules:
       - module: rpi5_zram_setup_rc
         dst:
           - /system/etc/init/rpi5-zram-setup.rc
+      # readahead 调优 init 配置（属性 trigger 写 mmcblk0 read_ahead_kb）
+      - module: rpi5_readahead_rc
+        dst:
+          - /system/etc/init/rpi5-readahead.rc
       # R4 方向 4：sepolicy cgroup 建组写授权（lechao_lciod.te 新增 allow），
       # vendor_file_contexts/precompiled_sepolicy 手工推送——同 lcview 先例
       # （2026-09-15），清刷不推必炸，须登记
