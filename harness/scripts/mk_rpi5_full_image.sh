@@ -29,6 +29,16 @@ set -euo pipefail
 
 # --- 脚本目录 + 精简公共库（自包含，替代 LcHarness shell 库）---------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# NNP=1（opencode 会话）下仅 mode 0 打包需要特权重入；其他模式保持原有行为。
+if [ "${LC_PRIVILEGE_CONTEXT:-}" != "1" ] \
+   && [ "${1:-}" = "-mode" ] && [ "${2:-}" = "0" ] \
+   && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/self/status 2>/dev/null; then
+  exec python3 "$SCRIPT_DIR/../lib/privileged_exec.py" \
+    --entry-id package.rpi5.mode0 --reason "mk_rpi5_full_image direct" \
+    -- bash "$SCRIPT_DIR/$(basename "$0")" "$@"
+fi
+
 ARTIFACT_DIR="${SCRIPT_DIR}/../log/mk_rpi5_full_image"
 
 _START_TS=$(date +%s)

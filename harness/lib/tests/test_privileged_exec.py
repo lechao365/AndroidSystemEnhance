@@ -2,6 +2,8 @@ import inspect
 import json
 import os
 import pwd
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -859,6 +861,79 @@ entries:
                 "--entry-id", "demo.run", "--reason", "x",
                 "--", "bash", str(self.script), "-mode", "0"])
         self.assertEqual(rc, 3)
+
+    def test_mk_image_guard_order_and_syntax(self):
+        script = (Path(priv.__file__).resolve().parents[1]
+                  / "scripts" / "mk_rpi5_full_image.sh")
+        text = script.read_text(encoding="utf-8")
+        guard = text.index("privileged_exec.py")
+        script_dir = text.index("SCRIPT_DIR=")
+        sudo = text.index("sudo TARGET_PRODUCT=")
+        self.assertLess(script_dir, guard)
+        self.assertLess(guard, sudo)
+        subprocess.run(["bash", "-n", str(script)], check=True)
+
+    def _require_setpriv(self):
+        if shutil.which("setpriv") is None:
+            self.skipTest("setpriv 不可用")
+        probe = subprocess.run(
+            ["setpriv", "--no-new-privs", "true"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if probe.returncode != 0:
+            self.skipTest("setpriv 不支持 --no-new-privs")
+
+    def _make_reentry_tree(self, root):
+        scripts = root / "scripts"
+        lib = root / "lib"
+        scripts.mkdir(parents=True)
+        lib.mkdir(parents=True)
+        src = (Path(priv.__file__).resolve().parents[1]
+               / "scripts" / "mk_rpi5_full_image.sh")
+        script = scripts / src.name
+        shutil.copy2(src, script)
+        fake = lib / "privileged_exec.py"
+        fake.write_text(
+            "import json, os, sys\n"
+            "with open(os.environ['CAPTURE'], 'w', encoding='utf-8') as f:\n"
+            "    json.dump(sys.argv, f)\n",
+            encoding="utf-8")
+        fake.chmod(0o755)
+        return script
+
+    def test_mk_image_reentry_only_mode0(self):
+        self._require_setpriv()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = root / "capture.json"
+            script = self._make_reentry_tree(root)
+            env = {**os.environ, "CAPTURE": str(capture)}
+            env.pop("LC_PRIVILEGE_CONTEXT", None)
+
+            subprocess.run(
+                ["setpriv", "--no-new-privs", "bash", str(script),
+                 "-mode", "0"], env=env, check=True)
+            argv = json.loads(capture.read_text(encoding="utf-8"))
+            self.assertEqual(argv[argv.index("--entry-id") + 1],
+                             "package.rpi5.mode0")
+            self.assertIn("--reason", argv)
+            self.assertEqual(argv[argv.index("bash") + 1], str(script))
+            self.assertEqual(argv[-2:], ["-mode", "0"])
+
+            capture.unlink()
+            env["LC_PRIVILEGE_CONTEXT"] = "1"
+            help_run = subprocess.run(
+                ["setpriv", "--no-new-privs", "bash", str(script), "-h"],
+                env=env, check=True, capture_output=True, text=True)
+            self.assertIn("用法", help_run.stdout)
+            self.assertFalse(capture.exists())
+
+            env.pop("LC_PRIVILEGE_CONTEXT")
+            env["KERNEL_SRC"] = ""
+            subprocess.run(
+                ["setpriv", "--no-new-privs", "bash", str(script),
+                 "-mode", "1"], env=env, check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.assertFalse(capture.exists())
 
 
 if __name__ == "__main__":
