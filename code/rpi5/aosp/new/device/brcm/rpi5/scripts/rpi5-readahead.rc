@@ -1,0 +1,18 @@
+# ============================================================
+# rpi5-readahead.rc — 块层 readahead 调优（mmcblk0 系统盘）
+# 所属：rpi5 设备 init 配置（prebuilt_etc 安装到 /system/etc/init/）
+#
+# 背景：173329 只读 A/B 收据实测 read_ahead_kb 128→512 顺序读吞吐
+#   82.9→88.1 M/s（+6.3%），512 已饱和（1024 无额外增益）。
+# 机制：persist.lechao.readahead_kb 默认 512（vendor.prop），属性变化
+#   触发 init write sysfs，故 setprop 即时生效；回退置 128 亦即时生效。
+# 安全：仅写块层队列参数（可逆），非块设备裸写。
+# ============================================================
+
+# 目标态：512（默认值，开机属性初始化即触发）
+on property:persist.lechao.readahead_kb=512
+    write /sys/block/mmcblk0/queue/read_ahead_kb 512
+
+# 回退态：128（原厂默认，setprop persist.lechao.readahead_kb 128 即时生效）
+on property:persist.lechao.readahead_kb=128
+    write /sys/block/mmcblk0/queue/read_ahead_kb 128

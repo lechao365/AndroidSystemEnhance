@@ -1006,7 +1006,7 @@ class _FakeAdbSdInject:
 
     def __init__(self, stuck_inc=True, speed_after=3, event_after=True,
                  old=4, new=3, logcat_hit=True, kmsg_hit=True,
-                 inject_rc=0, sysfs_rc=0):
+                 inject_rc=0, sysfs_rc=0, before_seq=100, after_seq=101):
         self.stuck_inc = stuck_inc
         self.speed_after = speed_after
         self.event_after = event_after
@@ -1016,17 +1016,21 @@ class _FakeAdbSdInject:
         self.kmsg_hit = kmsg_hit
         self.inject_rc = inject_rc
         self.sysfs_rc = sysfs_rc
+        self.before_seq = before_seq
+        self.after_seq = after_seq
         self.injected = False
         self.calls = []
-        # 注入前已有 1 条 sd_stuck 记录（seq=100），注入后追加 seq=101
-        self._before = [{"ts": 1, "id": 16, "level": 2, "seq": 100,
-                         "mono": 1, "f": [4, 3, -5, 1]}]
+        # 注入前已有 1 条 sd_stuck 记录，注入后追加一条（ts 单调递增；
+        # seq 可跨日重置，见 test_cross_day_seq_reset_pass）
+        self._before = [{"ts": 1, "id": 16, "level": 2,
+                         "seq": before_seq, "mono": 1, "f": [4, 3, -5, 1]}]
 
     def _recs(self):
         recs = list(self._before)
         if self.injected and self.event_after:
-            recs.append({"ts": 2, "id": 16, "level": 2, "seq": 101,
-                         "mono": 2, "f": [self.old, self.new, -5, 2]})
+            recs.append({"ts": 2, "id": 16, "level": 2,
+                         "seq": self.after_seq, "mono": 2,
+                         "f": [self.old, self.new, -5, 2]})
         return recs
 
     def __call__(self, args, timeout=60):
@@ -1082,6 +1086,12 @@ class TestModeSdInject(unittest.TestCase):
     def test_pass_via_dmesg_fallback(self):
         # logcat -b kernel 未命中但 dmesg 留痕计数增量 → 判绿（降级兜底）
         fake = _FakeAdbSdInject(logcat_hit=False, kmsg_hit=True)
+        self.assertEqual(self._run(fake), 0)
+
+    def test_cross_day_seq_reset_pass(self):
+        # 跨日日志文件 seq 重置（新 seq 小于旧文件最大 seq），ts 仍递增 → 判绿
+        # （回归：基线取跨文件 max(seq)=9081，新记录 seq=1279 被误判无新增）
+        fake = _FakeAdbSdInject(before_seq=9081, after_seq=1279)
         self.assertEqual(self._run(fake), 0)
 
     def test_count_not_incremented_red(self):
@@ -1561,6 +1571,107 @@ class TestModeZramWriteback(unittest.TestCase):
                           if len(c) >= 2 and c[0] == "shell")
         self.assertIn("mkswap", joined)
         self.assertIn("swapon", joined)
+
+
+class _FakeAdbReadahead:
+    """伪 adb（readahead 模式）：模拟 sysfs 读取与 drop_caches/am start。"""
+
+    def __init__(self, sysfs="512", cat_rc=0, am_rc=0,
+                 am_out="Status: ok\nLaunchState: WARM\nTotalTime: 700\n"
+                        "WaitTime: 710\n", timeout=False):
+        self.sysfs = sysfs
+        self.cat_rc = cat_rc
+        self.am_rc = am_rc
+        self.am_out = am_out
+        self.timeout = timeout
+        self.calls = []
+
+    def __call__(self, args, timeout=60):
+        self.calls.append(args)
+        if self.timeout:
+            return ("", -1)
+        if args[0] == "shell" and len(args) >= 2:
+            if args[1] == "cat":
+                return (f"{self.sysfs}\n", self.cat_rc)
+            if "drop_caches" in args[1]:
+                return ("", 0)
+            if args[1] == "am":
+                return (self.am_out, self.am_rc)
+        return ("", 0)
+
+
+def _readahead_args():
+    return argparse.Namespace()
+
+
+class TestModeReadahead(unittest.TestCase):
+    def _run(self, fake):
+        with mock.patch.object(lc, "adb", fake):
+            return lc.mode_readahead(_readahead_args())
+
+    def test_pass(self):
+        # sysfs=512 + am start 可解析 → 判绿
+        self.assertEqual(self._run(_FakeAdbReadahead()), 0)
+
+    def test_non_target_red(self):
+        # sysfs 未落到目标态 512 → 判红
+        self.assertEqual(self._run(_FakeAdbReadahead(sysfs="128")), 1)
+
+    def test_unreadable_red(self):
+        # sysfs 不可读 → 判红（不得当默认态假绿）
+        self.assertEqual(self._run(_FakeAdbReadahead(cat_rc=1)), 1)
+
+    def test_am_fail_red(self):
+        # 冷启动测量失败 → 判红（不得静默缺证据）
+        self.assertEqual(self._run(_FakeAdbReadahead(am_rc=1)), 1)
+
+    def test_am_no_time_red(self):
+        # am 输出缺 TotalTime/WaitTime → 判红（不得当 0ms 假绿）
+        self.assertEqual(
+            self._run(_FakeAdbReadahead(am_out="Status: ok\n")), 1)
+
+    def test_adb_timeout_returns_minus1(self):
+        # adb 超时（rc==-1）→ 返回 -1 由 main 透传失败
+        self.assertEqual(self._run(_FakeAdbReadahead(timeout=True)), -1)
+
+    def test_no_restore_write(self):
+        # 回归锚点：默认即目标态，不得回写 sysfs（回退由 setprop trigger 驱动）
+        fake = _FakeAdbReadahead()
+        self.assertEqual(self._run(fake), 0)
+        writes = [c for c in fake.calls
+                  if len(c) >= 2 and c[0] == "shell"
+                  and "read_ahead_kb" in c[1] and "cat" not in c[1]]
+        self.assertEqual(writes, [])
+
+
+class TestWritebackGuardHelpers(unittest.TestCase):
+    """拔盘韧性守护辅助函数（纯解析 + 事件轮询）。"""
+
+    def test_parse_backing_target(self):
+        self.assertEqual(lc._parse_backing_target("/dev/block/sdb"), "sdb")
+        self.assertEqual(
+            lc._parse_backing_target("/dev/block/sdb (deleted)"), "sdb")
+        self.assertEqual(lc._parse_backing_target("none"), "")
+        self.assertEqual(lc._parse_backing_target(""), "")
+
+    def test_wait_event_hit(self):
+        fake = mock.Mock(
+            return_value=('{"rule":"writeback_guard","state":"lost"}\n', 0))
+        with mock.patch.object(lc, "adb", fake):
+            self.assertEqual(lc._wb_guard_wait_event(100, "lost", 1), 1)
+
+    def test_wait_event_timeout(self):
+        fake = mock.Mock(return_value=("", 0))
+        with mock.patch.object(lc, "adb", fake), \
+                mock.patch.object(lc.time, "monotonic",
+                                  side_effect=[0, 0, 100]), \
+                mock.patch.object(lc.time, "sleep"):
+            self.assertEqual(lc._wb_guard_wait_event(100, "lost", 1), 0)
+
+    def test_wait_event_adb_timeout(self):
+        fake = mock.Mock(return_value=("", -1))
+        with mock.patch.object(lc, "adb", fake):
+            self.assertEqual(lc._wb_guard_wait_event(100, "lost", 1), -1)
 
 
 if __name__ == "__main__":

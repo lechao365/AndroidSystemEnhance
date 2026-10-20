@@ -19,6 +19,8 @@ filegroup {
         "link_monitor.cpp",   // R2 方向 5+6：全局链路事件监控（LinkMonitor）
         "io_qos.cpp",         // R4 方向 1/2/3/5：SD 卡写 QoS 限速（IoQosManager）
         "block_collector.cpp", // R5 方向1/2/3：块设备/zram 观测采集器（自 lcview 平移）
+        "trim_manager.cpp",    // UP-110 批一：ext4 碎片清理链（TrimManager，分段 FITRIM）
+        "writeback_guard.cpp", // 拔盘韧性守护：zram writeback 后备盘断供/恢复检测（id=21）
     ],
 }
 

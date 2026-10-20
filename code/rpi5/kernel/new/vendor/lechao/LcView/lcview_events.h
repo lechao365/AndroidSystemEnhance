@@ -91,6 +91,17 @@
                                               * some total + vmstat 换入/换出页数 + zram0
                                               * io_stat 读写字节差分，窗换入页数超阈即合成，见
                                               * DISABLED_EVENTS 豁免） */
+#define LCVIEW_EVENT_TRIM                20 /* ext4 碎片清理链 FITRIM（UP-110 批一，用户态
+                                              * lciod TrimManager 合成，无内核发射点——开关
+                                              * sys.lechao.lciod.trim_enable 开启后按空闲率/天数
+                                              * 决策分段 FITRIM 清理 /data 空闲块，落 rule=trim
+                                              * JSON 行（度量前后块层 discard 差分），见
+                                              * DISABLED_EVENTS 豁免） */
+#define LCVIEW_EVENT_WRITEBACK_GUARD     21 /* zram writeback 后备盘断供/恢复（用户态 lciod
+                                              * WritebackGuard 合成，无内核发射点——每 60s 巡检
+                                              * zram0/backing_dev 与其指向的 /sys/block/<dev>，
+                                              * 断供上报 state=lost、恢复上报 state=recovered，
+                                              * 不自动重绑，见 DISABLED_EVENTS 豁免） */
 
 /* --- 记录魔数 --- */
 #define LCVIEW_MAGIC  0x4C56

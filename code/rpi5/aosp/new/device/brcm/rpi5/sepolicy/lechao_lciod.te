@@ -77,3 +77,20 @@ allow lechao_lciod proc_vmstat:file { open read getattr };
 #   实测 avc denied search tclass=dir），故 file 之外须补 dir 权限。
 allow lechao_lciod sysfs_zram:dir { search open read getattr };
 allow lechao_lciod sysfs_zram:file { open read getattr };
+
+# UP-110 批一：ext4 碎片清理链（TrimManager）
+#   开关 sys.lechao.lciod.trim_enable 开启后，daemon 在 /data 挂载点目录 fd
+#   上发起 FITRIM（仅释放文件系统空闲块，无损；禁块设备裸写 BLKDISCARD），
+#   并把末次成功 epoch 存自持状态 data/misc/lechao/lciod/trim-state（禁碰
+#   vold 的 data/misc/vold/last-fstrim）。
+#   1) FITRIM 前置 capable(CAP_SYS_ADMIN)（ext4 ext4_ioctl 的 FITRIM 分支）；
+#      与 lechao_lciod.rc 的 capabilities SYS_ADMIN 配套。
+allow lechao_lciod self:capability sys_admin;
+#   2) /data 挂载点目录（标签 system_data_root_file）打开目录 fd 并发 FITRIM
+#      ioctl（dir 类含 ioctl 权限）；仅读打开，不改数据。
+allow lechao_lciod system_data_root_file:dir { open read search getattr ioctl };
+#   3) 自持状态目录/文件（/data/misc 标签 system_data_file；新建的
+#      lechao/lciod 子目录与 trim-state 继承该标签）：建子目录 + 原子写
+#      （写 .tmp 后 rename）。
+allow lechao_lciod system_data_file:dir { create add_name remove_name rename search write setattr };
+allow lechao_lciod system_data_file:file { create open read write getattr setattr };

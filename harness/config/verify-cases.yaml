@@ -387,6 +387,58 @@ cases:
     acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lciod_check.sh --mode zram-writeback"'
     timeout_s: 300
 
+  # UP-110 批一：ext4 碎片清理链（FITRIM）闭环（本批新增验收 case，验收
+  # case:trim）。语义：cases/lciod_check.sh --mode trim——
+  #   1) 开开关 sys.lechao.lciod.trim_enable=1 + 单段演练
+  #      sys.lechao.lciod.trim_drill=1，等 daemon 10s 决策窗；
+  #   2) 断言块层 /sys/block/mmcblk0/stat 第 12 字段（discard I/Os）严格递增
+  #      ——FITRIM 真实经块层下发 discard 的硬证据；
+  #   3) 断言 logcat tag lechao_lciod_event 出现 "rule":"trim"（事件 id=20 落盘）。
+  # 防假绿：开关未生效 / discard 计数未递增 / 无事件落痕均判红。
+  # 安全：FITRIM 仅清文件系统空闲块无损（不触碰已分配数据），禁块设备裸写/dd；
+  # 副作用字段为两个 sysprop（快照/恢复），timeout_s 240（含 daemon 10s 决策
+  # 窗与轮询）。
+  trim:
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"cases/lciod_check.sh --mode trim"'
+    setup_snapshot:
+      - 'adb shell "getprop sys.lechao.lciod.trim_enable"'
+      - 'adb shell "getprop sys.lechao.lciod.trim_drill"'
+    teardown:
+      - 'adb shell "setprop sys.lechao.lciod.trim_enable \"${SNAPSHOT_0}\""'
+      - 'adb shell "setprop sys.lechao.lciod.trim_drill \"${SNAPSHOT_1}\""'
+    timeout_s: 240
+
+  # 块层预读调优（本批新增验收 case，批次验收 case:readahead）。
+  # 语义：cases/lciod_check.sh --mode readahead——
+  #   1) 断言 /sys/block/mmcblk0/queue/read_ahead_kb == 512（persist.lechao.
+  #      readahead_kb 默认 512，rpi5-readahead.rc 属性 trigger 写 sysfs）；
+  #   2) drop_caches 后 am start 设置应用，记录冷启动耗时并与 173329 基线
+  #      757ms 对比（仅记录变化，不作门禁）。
+  # 防假绿：sysfs 非 512 / 不可读 / am start 失败 / 输出缺 TotalTime 均判红。
+  # 安全：仅读 sysfs + 可逆 drop_caches，无块设备写；默认即目标态不复原
+  # （回退 setprop persist.lechao.readahead_kb 128 由 rc trigger 即时生效）。
+  # 注：增量推送不更新 vendor/build.prop，验收先 setprop 512 建立目标态
+  # （等价于 build.prop 默认值；全量刷机后开机即由属性 trigger 落地）。
+  readahead:
+    acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"adb shell setprop persist.lechao.readahead_kb 512" hostcmd:"cases/lciod_check.sh --mode readahead"'
+    timeout_s: 120
+
+  # 拔盘韧性守护（本批新增验收 case，批次验收 case:writeback-guard）。
+  # 语义：cases/lciod_check.sh --mode writeback-guard——
+  #   1) 读 zram0/backing_dev 定位后备盘及其 USB 接口/实际驱动（uas 或
+  #      usb-storage，按 sysfs 实测动态选择）；
+  #   2) unbind USB 接口模拟拔盘 → 断言 90s 内 daemon 上报 id=21 lost
+  #      （"rule":"writeback_guard"）且进程存活、writeback 写不挂死（10s 门限）；
+  #   3) 复位 zram 释放 stale backing → rebind USB → 按开机 setup 等价步骤
+  #      重绑新出现的 sd* → 断言 recovered 事件。
+  # 防假绿：无 lost / daemon 崩溃 / writeback 挂死 / 无 recovered 均判红。
+  # 安全：unbind/rebind 为 USB 热插拔接口可逆操作；zram 重绑仅写内存压缩
+  # 设备（无 sdb 块级写）；最坏 panic 可重启恢复。timeout_s 300（两段 90s
+  # 事件窗 + 盘枚举/重绑）。
+  writeback-guard:
+    acceptance: 'hostcmd:"cases/lciod_check.sh --mode writeback-guard"'
+    timeout_s: 300
+
   # C 批二 方向 3：lciod USB 传输延迟/块大小二维直方图用户态验收（本批新增
   # 验收 case）。语义：cases/lciod_check.sh --mode histo 内部执行
   #   lciod_probe --histo 取数（GET_LATENCY_HISTOGRAM cmd5）→ 结构断言
@@ -554,6 +606,9 @@ modules:
       # 落 /system/etc/init（init 扫描该目录加载 service rpi5_zram_setup）
       - rpi5_zram_setup
       - rpi5_zram_setup_rc
+      # readahead 调优 init 配置（prebuilt_etc rpi5_readahead_rc 落
+      # /system/etc/init/rpi5-readahead.rc，属性 trigger 写块层队列参数）
+      - rpi5_readahead_rc
     # 测试 target（AGENTS.md 强制四个 test target 含 lcview 两个，
     # tests/Android.bp 定义）
     test_targets:
@@ -600,6 +655,10 @@ modules:
       - module: rpi5_zram_setup_rc
         dst:
           - /system/etc/init/rpi5-zram-setup.rc
+      # readahead 调优 init 配置（属性 trigger 写 mmcblk0 read_ahead_kb）
+      - module: rpi5_readahead_rc
+        dst:
+          - /system/etc/init/rpi5-readahead.rc
       # R4 方向 4：sepolicy cgroup 建组写授权（lechao_lciod.te 新增 allow），
       # vendor_file_contexts/precompiled_sepolicy 手工推送——同 lcview 先例
       # （2026-09-15），清刷不推必炸，须登记

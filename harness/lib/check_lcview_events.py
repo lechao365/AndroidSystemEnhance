@@ -77,6 +77,12 @@ DISABLED_EVENTS = {
     # 方向三批一：ZRAM_SWAP_PRESSURE 为 lciod daemon（zram 换入压力窗聚合规则）
     # 合成事件，无内核发射点，schema 保留定义供用户态解析，按停发语义豁免。
     "LCVIEW_EVENT_ZRAM_SWAP_PRESSURE",
+    # UP-110 批一：TRIM 为 lciod daemon（TrimManager 分段 FITRIM 规则）合成
+    # 事件，无内核发射点，schema 保留定义供用户态解析，按停发语义豁免。
+    "LCVIEW_EVENT_TRIM",
+    # 拔盘韧性守护：WRITEBACK_GUARD 为 lciod daemon（WritebackGuard 60s 巡检）
+    # 合成事件，无内核发射点（仅 logcat JSON 行），按停发语义豁免。
+    "LCVIEW_EVENT_WRITEBACK_GUARD",
 }
 
 

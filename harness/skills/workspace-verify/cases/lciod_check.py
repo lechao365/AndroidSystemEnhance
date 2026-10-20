@@ -65,8 +65,23 @@
 #   zram-writeback — zram 写回预研闭环校验：U 盘在位（sd* removable=1，严禁
 #              mmcblk 系统盘）才校验，不在位 SKIP；自驱配置 zram0 写回
 #              （swapoff→reset→绑 backing_dev=U 盘→disksize→写随机页→idle→
-#              writeback），断言 backing_dev 绑定且 bd_stat 写回页数递增；
+#               writeback），断言 backing_dev 绑定且 bd_stat 写回页数递增；
 #              复原 mkswap+swapon。任一步 adb 超时返 -1 透传失败。
+#   trim       — ext4 碎片清理链（FITRIM）闭环校验：开开关 trim_enable=1 +
+#              单段演练 trim_drill=1，断言块层 /sys/block/mmcblk0/stat discard
+#              I/Os 递增（FITRIM 真实下发 discard）+ logcat 出现 "rule":"trim"
+#              （事件 id=20 落盘）；FITRIM 仅清空闲块无损，禁块设备裸写。
+#              teardown 复原开关；任一步 adb 超时返 -1 透传失败。
+#   readahead  — 块层预读调优验收：断言 /sys/block/mmcblk0/queue/read_ahead_kb
+#              == 512（persist.lechao.readahead_kb 属性 trigger 落地的默认目标
+#              态）；drop_caches 后 am start 设置应用，记录冷启动耗时并与 173329
+#              基线 757ms 对比（仅记录变化，不作门禁）。默认即目标态不复原；
+#              仅读 sysfs + 可逆 drop_caches，无块设备写。
+#   writeback-guard — zram writeback 后备盘拔盘韧性验收：读 backing_dev 定位
+#              USB 接口/驱动 → unbind 模拟拔盘 → 断言 90s 内 lost 事件（id=21）
+#              且 daemon 存活、writeback 不挂死 → 复位 zram 并按开机 setup
+#              等价步骤重绑新盘 → 断言 recovered 事件。不写 sdb 块设备；
+#              unbind/rebind 可逆，异常路径 finally 兜底 rebind。
 #
 # 退出码：0 校验通过 / 1 校验失败 / 2 设备不可达或参数错误
 # ============================================================
@@ -909,6 +924,42 @@ def _sd_sysfs_read(attr):
         return None, 2
 
 
+def _device_yyyymmdd():
+    """设备侧当前日期 YYYYMMDD（活动日志文件名用）；不可读返 None。
+
+    设备无 RTC：时钟可能被测试/校时回拨，目录里会残留"未来日期"文件；
+    按日期选活动文件，避免把未来文件当最新（mtime 在回拨后不可信）。
+    """
+    out, rc = adb(["shell", "date +%Y%m%d"])
+    if rc != 0:
+        return None
+    d = out.strip()
+    return d if len(d) == 8 and d.isdigit() else None
+
+
+def _active_log_file(key):
+    """返回 mtime 最新的活动日志文件名（限定设备当天日期）→ (文件名, 错误)。
+
+    先 `ls -t` 取 mtime 序；若设备日期可得，只保留 `_<YYYYMMDD>_` 文件，
+    当天无文件返回 (None, None)（尚无事件，基线为空）。日期不可得时回落
+    mtime 最新文件（兼容 host 伪 adb/旧环境）。
+    """
+    out, rc = adb(["shell", "ls", "-t", _SD_LVVIEW_LOG_DIR])
+    if rc != 0:
+        return None, f"lcview 日志目录 {_SD_LVVIEW_LOG_DIR} 不可读 rc={rc}"
+    files = [f.split("/")[-1] for f in out.split()
+             if key in f and "*" not in f]
+    if not files:
+        return None, None
+    today = _device_yyyymmdd()
+    if today:
+        today_files = [f for f in files if f"_{today}_" in f]
+        if not today_files:
+            return None, None
+        files = today_files
+    return files[0], None
+
+
 def _read_sd_stuck_records():
     """读取 lcview 日志目录全部 sd_stuck(id=16) 记录 → (记录列表, 超时, 错误列表)。
 
@@ -917,37 +968,35 @@ def _read_sd_stuck_records():
     无 name 字段，判据只能用 id（照 _check_sd_health 口径）。目录/文件不可读
     返回错误（不得当"无事件"假绿）。
     """
-    out, rc = adb(["shell", "ls", _SD_LVVIEW_LOG_DIR])
-    if rc == -1:
+    fn, ferr = _active_log_file(_SD_STUCK_JSONL_KEY)
+    if ferr:
+        return [], False, [ferr]
+    if not fn:
+        return [], False, []
+    body, brc = adb(["shell", "cat", f"{_SD_LVVIEW_LOG_DIR}/{fn}"])
+    if brc == -1:
         return [], True, []
-    if rc != 0:
-        return [], False, [f"lcview 日志目录 {_SD_LVVIEW_LOG_DIR} 不可读 rc={rc}"]
-    files = sorted(f.split("/")[-1] for f in out.split()
-                   if _SD_STUCK_JSONL_KEY in f and "*" not in f)
+    if brc != 0:
+        return [], False, [f"读取 sd_stuck 日志文件失败 rc={brc}: {fn}"]
     records = []
-    for fn in files:
-        body, brc = adb(["shell", "cat", f"{_SD_LVVIEW_LOG_DIR}/{fn}"])
-        if brc == -1:
-            return records, True, []
-        if brc != 0:
-            return records, False, [f"读取 sd_stuck 日志文件失败 rc={brc}: {fn}"]
-        for line in body.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(rec, dict) and rec.get("id") == 16:
-                records.append(rec)
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get("id") == 16:
+            records.append(rec)
     return records, False, []
 
 
-def _max_sd_stuck_seq(records):
-    """记录集内 sd_stuck 最大 seq（无记录返 -1）——增量判据用 seq 而非条数，
-    防日志轮转/文件读取顺序致条数比较误判。"""
-    return max((r.get("seq", -1) for r in records), default=-1)
+def _max_sd_stuck_ts(records):
+    """记录集内 sd_stuck 最大 ts（无记录返 -1）——增量判据用 ts 而非 seq：
+    seq 按日志文件（按天）重置，跨日新文件 seq 会小于旧文件最大值；ts 为
+    全局单调纳秒时间戳，跨文件比较才可靠。"""
+    return max((r.get("ts", -1) for r in records), default=-1)
 
 
 def _sd_stuck_kmsg_count():
@@ -978,7 +1027,7 @@ def mode_sd_inject(args):
     自驱向 inject_stuck 注入一次合成 STUCK（仅内存模拟，不依赖真卡异常），
     四重断言（防假绿判红项）：
       1) stuck_count 递增（注入前读基线）；
-      2) lcview JSONL 新增 sd_stuck(id=16) 记录（seq 增量判据）；
+      2) lcview JSONL 新增 sd_stuck(id=16) 记录（ts 增量判据，跨日 seq 会重置）；
       3) last_speed 反映降档（== 新增事件 new_speed 且 old_speed > new_speed）；
       4) 内核留痕 "sd stuck"（logcat -b kernel 锚点后命中，或 dmesg 计数增量）；
     任一步 adb 超时（rc==-1）return -1 由 main 透传为失败。
@@ -1004,7 +1053,7 @@ def mode_sd_inject(args):
             print(f"FAIL: {e}")
         print("ERROR: lciod sd-inject 校验失败（读取 sd_stuck 基线）")
         return 1
-    base_seq = _max_sd_stuck_seq(recs_before)
+    base_ts = _max_sd_stuck_ts(recs_before)
     base_kmsg = _sd_stuck_kmsg_count()
     if base_kmsg == -1:
         return -1
@@ -1040,19 +1089,19 @@ def mode_sd_inject(args):
         if t:
             return -1
         recs_after = r
-        if after_count > base_count and _max_sd_stuck_seq(r) > base_seq:
+        if after_count > base_count and _max_sd_stuck_ts(r) > base_ts:
             break
 
     # 5) 断言：计数递增 + 新增事件降档 + last_speed 反映
     errors = []
     if after_count <= base_count:
         errors.append(f"stuck_count 未递增（{base_count}→{after_count}），注入未生效")
-    new_recs = [r for r in recs_after if r.get("seq", -1) > base_seq]
+    new_recs = [r for r in recs_after if r.get("ts", -1) > base_ts]
     if not new_recs:
         errors.append(f"lcview JSONL 无新增 sd_stuck(id=16) 记录"
-                      f"（基线 seq={base_seq}）")
+                      f"（基线 ts={base_ts}）")
     else:
-        evt = max(new_recs, key=lambda r: r.get("seq", -1))
+        evt = max(new_recs, key=lambda r: r.get("ts", -1))
         fields = evt.get("f") or []
         if (len(fields) < 2 or not isinstance(fields[0], int)
                 or not isinstance(fields[1], int)):
@@ -1123,30 +1172,27 @@ def _read_qos_auto_records():
     判据只能用 id，照 sd_stuck 口径）。目录/文件不可读返回错误（不得当
     "无事件"假绿）。
     """
-    out, rc = adb(["shell", "ls", _SD_LVVIEW_LOG_DIR])
-    if rc == -1:
+    fn, ferr = _active_log_file(_QOS_AUTO_JSONL_KEY)
+    if ferr:
+        return [], False, [ferr]
+    if not fn:
+        return [], False, []
+    body, brc = adb(["shell", "cat", f"{_SD_LVVIEW_LOG_DIR}/{fn}"])
+    if brc == -1:
         return [], True, []
-    if rc != 0:
-        return [], False, [f"lcview 日志目录 {_SD_LVVIEW_LOG_DIR} 不可读 rc={rc}"]
-    files = sorted(f.split("/")[-1] for f in out.split()
-                   if _QOS_AUTO_JSONL_KEY in f and "*" not in f)
+    if brc != 0:
+        return [], False, [f"读取 qos_auto 日志文件失败 rc={brc}: {fn}"]
     records = []
-    for fn in files:
-        body, brc = adb(["shell", "cat", f"{_SD_LVVIEW_LOG_DIR}/{fn}"])
-        if brc == -1:
-            return records, True, []
-        if brc != 0:
-            return records, False, [f"读取 qos_auto 日志文件失败 rc={brc}: {fn}"]
-        for line in body.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(rec, dict) and rec.get("id") == 18:
-                records.append(rec)
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get("id") == 18:
+            records.append(rec)
     return records, False, []
 
 
@@ -1333,6 +1379,19 @@ _ZRAM_SWAP_PRESSURE_RULE = '"rule":"zram_swap_pressure"'
 _ZRAM_THRESHOLD_PROP = "sys.lechao.lciod.zram_swap_threshold"
 _ZRAM_DRILL_PROP = "sys.lechao.lciod.zram_swap_drill"
 
+# ============================================================
+# ext4 碎片清理链（--mode trim，UP-110 批一）
+# ============================================================
+# 块层统计 /sys/block/mmcblk0/stat 第 12 字段（索引 11）为累计 discard I/Os；
+# FITRIM 经块层下发 discard 会使其递增（真实下发证据）。
+_TRIM_BLOCK_STAT = "/sys/block/mmcblk0/stat"
+# daemon 留痕 rule 值（logcat tag lechao_lciod_event，事件 id=20）
+_TRIM_RULE = '"rule":"trim"'
+# 开关/演练 sysprop（与 service.cpp 对齐）：trim_enable 缺省 0 关闭即零动作；
+# trim_drill 为单段演练段数（值变化一次性计入，确定性单段便于对账）
+_TRIM_ENABLE_PROP = "sys.lechao.lciod.trim_enable"
+_TRIM_DRILL_PROP = "sys.lechao.lciod.trim_drill"
+
 
 def _zram_swap_state():
     """读 /proc/swaps 与 zram0 disksize 判定 swap 是否生效。
@@ -1459,6 +1518,199 @@ def mode_zram(args):
         # teardown：清降阈与演练 sysprop（回 daemon 默认阈值）
         adb(["shell", "setprop", _ZRAM_THRESHOLD_PROP, ""])
         adb(["shell", "setprop", _ZRAM_DRILL_PROP, ""])
+
+
+def _trim_discard_ios():
+    """读 /sys/block/mmcblk0/stat 第 12 字段（discard I/Os）。
+
+    内核 15 字段格式（索引 11 为 discard I/Os，紧随 flush I/Os 之后）。
+    返回 (值, 超时)；字段不足/不可读返回 (None, False)，adb 超时返回 (None, True)。
+    """
+    out, rc = adb(["shell", "cat", _TRIM_BLOCK_STAT])
+    if rc == -1:
+        return None, True
+    if rc != 0:
+        return None, False
+    line = out.strip().splitlines()[0] if out.strip() else ""
+    parts = line.split()
+    if len(parts) < 12:
+        return None, False
+    try:
+        return int(parts[11]), False
+    except ValueError:
+        return None, False
+
+
+def _trim_logcat_trace(since, needle):
+    """trim 事件 logcat 留痕检测 → (命中 bool, 超时 bool)。"""
+    out, rc = adb(["logcat", "-d", "-T", str(int(since)), "-s", _SD_LOG_TAG])
+    if rc == -1:
+        return False, True
+    return (rc == 0 and needle in out), False
+
+
+def mode_trim(args):
+    """ext4 碎片清理链（FITRIM）闭环校验（--mode trim）。
+
+    断言（防假绿判红项）：
+      1) 开开关 sys.lechao.lciod.trim_enable=1，单段演练 trim_drill=1；
+      2) 块层 /sys/block/mmcblk0/stat 第 12 字段（discard I/Os）严格递增
+         ——FITRIM 真实经块层下发 discard 的硬证据；
+      3) logcat tag lechao_lciod_event 出现 "rule":"trim" 行（事件 id=20 落盘）。
+    安全：仅 FITRIM 清理文件系统空闲块（无损，不触碰已分配数据），禁块设备裸写
+    /dd；teardown（finally）清演练并复原 trim_enable 原值。任一步 adb 超时
+    （rc==-1）return -1 由上游判红。
+    """
+    since = args.log_since
+    if since is None:
+        since = device_now()
+        if since is None:
+            print("ERROR: 无法读取设备时钟（logcat 抓取窗口无法锚定）")
+            return 1
+
+    before, bo = _trim_discard_ios()
+    if bo:
+        return -1
+    if before is None:
+        print(f"ERROR: 无法读取 {_TRIM_BLOCK_STAT}（字段不足/不可读）")
+        return 1
+
+    out, prc = adb(["shell", "getprop", _TRIM_ENABLE_PROP])
+    if prc == -1:
+        return -1
+    prev_enable = out.strip() if prc == 0 else ""
+
+    try:
+        for prop, val in ((_TRIM_ENABLE_PROP, "1"), (_TRIM_DRILL_PROP, "1")):
+            _o, src = adb(["shell", "setprop", prop, val])
+            if src == -1:
+                return -1
+            if src != 0:
+                print(f"ERROR: setprop {prop}={val} 失败 rc={src}")
+                return 1
+
+        discard_ok = False
+        event_ok = False
+        for _ in range(args.trim_rounds):
+            # drill 值变化一次性：每轮先置 0 再置 1，保证重新触发单段
+            for val in ("0", "1"):
+                _o, src = adb(["shell", "setprop", _TRIM_DRILL_PROP, val])
+                if src == -1:
+                    return -1
+                if src != 0:
+                    print(f"ERROR: setprop {_TRIM_DRILL_PROP}={val} 失败 rc={src}")
+                    return 1
+            time.sleep(args.trim_sleep)
+            cur, co = _trim_discard_ios()
+            if co:
+                return -1
+            if cur is not None and cur > before:
+                discard_ok = True
+            hit, to = _trim_logcat_trace(since, _TRIM_RULE)
+            if to:
+                return -1
+            if hit:
+                event_ok = True
+            if discard_ok and event_ok:
+                break
+
+        if not discard_ok:
+            print(f"FAIL: {_TRIM_BLOCK_STAT} discard I/Os 未递增"
+                  f"（before={before}，FITRIM 未下发 discard）")
+            print("ERROR: lciod trim 校验失败（块层 discard 计数未递增）")
+            return 1
+        if not event_ok:
+            print('FAIL: logcat 无 "rule":"trim" 行（trim 事件未落盘）')
+            print("ERROR: lciod trim 校验失败（事件未触发）")
+            return 1
+        print(f"OK: FITRIM 单段生效（discard I/Os before={before} 后递增）")
+        print('OK: trim 事件落盘（"rule":"trim"）')
+        print("OK: lciod trim 校验通过（ext4 碎片清理链闭环）")
+        return 0
+    finally:
+        # teardown：清演练并复原开关原值（YAML teardown 再兜底）
+        adb(["shell", "setprop", _TRIM_DRILL_PROP, ""])
+        adb(["shell", "setprop", _TRIM_ENABLE_PROP, prev_enable])
+
+
+# ============================================================
+# readahead 调优验收（--mode readahead）
+# ============================================================
+
+# mmcblk0（RPi5 系统盘）块层队列预读窗口；173329 只读 A/B 收据定标：
+# 128→512 顺序读 82.9→88.1 M/s（+6.3%），1024 无额外增益。
+_READAHEAD_SYSFS = "/sys/block/mmcblk0/queue/read_ahead_kb"
+_READAHEAD_TARGET_KB = 512
+# 173329 冷缓存启动基线（drop_caches + am start 设置应用，TotalTime 757ms）
+_READAHEAD_COLD_BASELINE_MS = 757.0
+_SETTINGS_ACTION = "android.settings.SETTINGS"
+
+
+def _parse_am_total_ms(text):
+    """解析 `am start -W` 输出 → 启动耗时毫秒（TotalTime 优先，WaitTime 兜底）。
+
+    两者皆缺返回 None（不得把无输出当 0ms 假绿）。
+    """
+    for key in ("TotalTime", "WaitTime"):
+        m = re.search(rf"{key}:\s*(\d+)", text)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def mode_readahead(args):
+    """readahead 调优验收（--mode readahead）。
+
+    断言：
+      1) /sys/block/mmcblk0/queue/read_ahead_kb == 512（属性 trigger 生效，
+         默认即目标态）；非 512 / 不可读判红；
+      2) drop_caches 后 am start 设置应用，记录冷启动耗时并与 173329 基线
+         757ms 对比（仅记录变化，不作门禁——设备间差异大，门禁为主断言 1）。
+    安全：仅读 sysfs + drop_caches（可逆内存回收）+ am start（无数据写）；
+    默认即目标态，**不复原**（回退由 setprop persist.lechao.readahead_kb 128
+    驱动 rc trigger）。任一步 adb 超时（rc==-1）return -1 由上游判红。
+    """
+    out, rc = adb(["shell", "cat", _READAHEAD_SYSFS])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print(f"ERROR: 无法读取 {_READAHEAD_SYSFS}（属性 trigger 未生效？）")
+        return 1
+    try:
+        val = int(out.strip())
+    except ValueError:
+        print(f"ERROR: {_READAHEAD_SYSFS} 非数字: {out.strip()!r}")
+        return 1
+    if val != _READAHEAD_TARGET_KB:
+        print(f"FAIL: {_READAHEAD_SYSFS}={val} != {_READAHEAD_TARGET_KB}"
+              "（persist.lechao.readahead_kb 未生效）")
+        print("ERROR: lciod readahead 校验失败（目标态未落地）")
+        return 1
+    print(f"OK: {_READAHEAD_SYSFS}={val}（目标态 {_READAHEAD_TARGET_KB}）")
+
+    _o, rc = adb(["shell", "echo 3 > /proc/sys/vm/drop_caches"])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print("ERROR: drop_caches 失败（无法构造冷缓存）")
+        return 1
+    out, rc = adb(["shell", "am", "start", "-W", "-a", _SETTINGS_ACTION])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print(f"ERROR: am start {_SETTINGS_ACTION} 失败 rc={rc}")
+        return 1
+    total_ms = _parse_am_total_ms(out)
+    if total_ms is None:
+        print(f"ERROR: am start 输出缺 TotalTime/WaitTime: {out.strip()[:200]}")
+        return 1
+    delta = total_ms - _READAHEAD_COLD_BASELINE_MS
+    pct = delta / _READAHEAD_COLD_BASELINE_MS * 100
+    print(f"INFO: 冷缓存启动 TotalTime={total_ms} ms（173329 基线 "
+          f"{_READAHEAD_COLD_BASELINE_MS:.0f} ms，变化 {delta:+.1f} ms/"
+          f"{pct:+.1f}%）")
+    print("OK: lciod readahead 校验通过（sysfs=512 + 冷启动对比已记录）")
+    return 0
 
 
 # ============================================================
@@ -1636,6 +1888,296 @@ def mode_zram_writeback(args):
     print(f"OK: bd_stat 写回页数递增 {base_stat[2]} -> {after_stat[2]}")
     print("OK: lciod zram-writeback 校验通过（backing_dev 绑定 + 写回递增）")
     return 0
+
+
+# ============================================================
+# 拔盘韧性守护验收（--mode writeback-guard）
+# ============================================================
+
+# daemon 事件 rule 与巡检周期（writeback_guard.h kWritebackGuardIntervalSec=60）
+_WB_GUARD_RULE = "writeback_guard"
+# USB 存储驱动候选：方向要求 uas，但 U 盘可能绑定 usb-storage（BOT），
+# 按 backing 设备实际驱动的 sysfs 结果动态选择（register 于 apply 侧实测）。
+_WB_GUARD_DRIVERS = ("uas", "usb-storage")
+# 等待事件窗口：须大于 60s 巡检周期，留 30s 余量（边界轮询/调度抖动）
+_WB_GUARD_EVENT_WAIT_S = 90
+
+
+def _parse_backing_target(text):
+    """从 backing_dev 文本解析设备名（"/dev/block/sdb (deleted)" → "sdb"）。"""
+    s = (text or "").strip()
+    s = s.replace(" (deleted)", "").strip()
+    if not s or s == "none":
+        return ""
+    return s.rsplit("/", 1)[-1].strip()
+
+
+def _wb_guard_resolve_usb_iface(dev_name):
+    """解析块设备所属 USB 接口与驱动 → (iface, driver, rc)。
+
+    readlink /sys/block/<dev> 路径形如 .../1-2/1-2:1.0/host0/target...。
+    驱动按 uas → usb-storage 顺序探测（实际绑定以 sysfs 存在为准）。
+    无接口/无法定位返回 (None, None, 0)；adb 超时 rc=-1。
+    """
+    out, rc = adb(["shell", f"readlink -f /sys/block/{dev_name}"])
+    if rc == -1:
+        return None, None, -1
+    if rc != 0:
+        return None, None, rc
+    m = re.search(r"/(\d+-\d+(?:\.\d+)?:\d+\.\d+)(?:/|$)", out)
+    if not m:
+        return None, None, 0
+    iface = m.group(1)
+    for driver in _WB_GUARD_DRIVERS:
+        o, r = adb(["shell",
+                    f"test -e /sys/bus/usb/drivers/{driver}/{iface} && echo yes"])
+        if r == -1:
+            return None, None, -1
+        if r == 0 and o.strip() == "yes":
+            return iface, driver, 0
+    return None, None, 0
+
+
+def _device_logcat_anchor():
+    """设备侧 logcat 时间锚点（"MM-DD HH:MM:SS.mmm"）→ (字符串, rc)。
+
+    必须用时间字符串而非 epoch：toybox logcat 把纯数字 -T 参数解析为
+    "最近 N 行"（count），epoch 过滤失效会把锚点前旧事件当前置证据（假绿）。
+    """
+    out, rc = adb(["shell", 'date +"%m-%d %H:%M:%S.000"'])
+    if rc == -1:
+        return None, -1
+    if rc != 0:
+        return None, rc
+    anchor = out.strip()
+    return (anchor, 0) if anchor else (None, 1)
+
+
+def _wb_guard_wait_event(since, state, wait_s):
+    """轮询 logcat 等待 writeback_guard 指定状态事件 → 1 命中 / 0 超时 / -1 adb 超时。
+
+    since 为设备侧时间字符串（见 _device_logcat_anchor），保证只匹配锚点后
+    新事件，不吃上一轮 recovered 残留。
+    """
+    deadline = time.monotonic() + wait_s
+    last = ""
+    while True:
+        out, rc = adb(["logcat", "-d", "-T", since, "-s", _SD_LOG_TAG])
+        if rc == -1:
+            return -1
+        last = out
+        if (rc == 0 and f'"rule":"{_WB_GUARD_RULE}"' in out
+                and f'"state":"{state}"' in out):
+            return 1
+        if time.monotonic() >= deadline:
+            if last.strip():
+                print(f"INFO: 最近 writeback_guard 日志片段: "
+                      f"{last.strip().splitlines()[-1][:200]}")
+            return 0
+        time.sleep(5)
+
+
+def _wb_guard_daemon_alive():
+    """daemon 进程存活 → bool（adb 超时/命令失败返回 False）。"""
+    out, rc = adb(["shell", "pidof lechao_lciod"])
+    return rc == 0 and bool(out.strip())
+
+
+def _wb_guard_writeback_probe():
+    """断供下发起一次 writeback（bounded 10s）→ True 返回/False 挂死/None adb 超时。
+
+    仅向 zram0/writeback 写 "idle"（无可用后备时内核返回错误但不写磁盘），
+    用设备侧 timeout 10s 界定"报错未挂死"。
+    """
+    out, rc = adb(["shell",
+                   "timeout 10 sh -c 'echo idle > /sys/block/zram0/writeback'; "
+                   "echo rc=$?"], timeout=30)
+    if rc == -1:
+        return None
+    return "rc=124" not in out
+
+
+def _wb_guard_reset_zram():
+    """复位 zram0（swapoff 释放活动用户 + reset 清除 stale backing）→ rc。"""
+    _o, rc = adb(["shell", f"swapoff {_ZRAM_WB_SWAP_DEV} 2>/dev/null; true"])
+    if rc != 0:
+        return rc
+    _o, rc = adb(["shell", f"echo 1 > {_ZRAM_WB_RESET} 2>/dev/null; true"])
+    return rc
+
+
+def _wb_guard_setup_zram(dev_path, disksize):
+    """模拟开机 setup 把 zram0 重新绑定到新盘（backing→disksize→mkswap/swapon）。
+
+    注：这是验收侧对"恢复留给开机 setup"的等价模拟——daemon 自身不重绑。
+    """
+    _o, rc = adb(["shell", f"echo {dev_path} > {_ZRAM_WB_BACKING}"])
+    if rc != 0:
+        return rc
+    _o, rc = adb(["shell", f"echo {disksize} > {_ZRAM_WB_DISKSIZE}"])
+    if rc != 0:
+        return rc
+    _o, rc = adb(["shell", f"mkswap {_ZRAM_WB_SWAP_DEV} >/dev/null 2>&1; "
+                           f"swapon {_ZRAM_WB_SWAP_DEV} 2>/dev/null; true"])
+    return rc
+
+
+def mode_writeback_guard(args):
+    """zram writeback 拔盘韧性守护验收（--mode writeback-guard）。
+
+    流程（不写 sdb 块设备）：
+      1) 读 zram0/backing_dev 解析后备盘（须存在），定位其 USB 接口与实际驱动
+         （uas 或 usb-storage）；
+      2) echo <iface> > /sys/bus/usb/drivers/<driver>/unbind 模拟拔盘；
+      3) 断言 90s 内收到 state=lost 事件（id=21）且 daemon 存活、
+         writeback sysfs 写不挂死（bounded 10s）；
+      4) 复位 zram0 释放 stale backing，rebind USB 接口，选取新出现的 removable
+         sd*，按开机 setup 等价步骤重绑 zram（恢复留给 setup，daemon 不重绑）；
+      5) 断言 90s 内收到 state=recovered 事件。
+    安全：unbind/rebind 为 USB 热插拔接口操作（可逆），zram 重绑仅写内存压缩
+    设备（无块设备裸写）；最坏 panic 可由重启恢复。异常路径 finally 兜底 rebind。
+    """
+    backing, rc = _zram_wb_read(_ZRAM_WB_BACKING)
+    if rc == -1:
+        return -1
+    if rc != 0 or not backing:
+        print("ERROR: 无法读取 zram0/backing_dev（zram writeback 未配置？）")
+        return 1
+    target = _parse_backing_target(backing)
+    if not target:
+        print(f"FAIL: backing_dev 无有效设备: {backing!r}（zram 未绑定 U 盘）")
+        return 1
+    out, rc = adb(["shell", f"test -e /sys/block/{target} && echo yes"])
+    if rc == -1:
+        return -1
+    if rc != 0 or out.strip() != "yes":
+        print(f"FAIL: backing 设备 /sys/block/{target} 不存在（当前已断供，"
+              "请重启恢复后重跑）")
+        return 1
+    print(f"OK: 当前 backing_dev={backing}（目标 {target} 在位）")
+
+    iface, driver, rc = _wb_guard_resolve_usb_iface(target)
+    if rc == -1:
+        return -1
+    if not iface:
+        print(f"ERROR: 无法定位 /sys/block/{target} 的 USB 接口（无法模拟拔盘）")
+        return 1
+    print(f"INFO: 后备盘 {target} USB 接口 {iface}（驱动 {driver}）")
+
+    ds, drc = _zram_wb_read(_ZRAM_WB_DISKSIZE)
+    if drc == -1:
+        return -1
+    disksize = _ZRAM_WB_DEFAULT_DISKSIZE
+    if drc == 0 and ds and ds.isdigit() and int(ds) > 0:
+        disksize = int(ds)
+    before_names, t = _list_removable_usb_block_devs()
+    if t:
+        return -1
+    since, arc = _device_logcat_anchor()
+    if arc == -1:
+        return -1
+    if not since:
+        print("ERROR: 无法读取设备时钟（logcat 抓取窗口无法锚定）")
+        return 1
+
+    unbound = False
+    try:
+        out, rc = adb(["shell",
+                       f"echo {iface} > /sys/bus/usb/drivers/{driver}/unbind"])
+        if rc == -1:
+            return -1
+        if rc != 0:
+            print(f"ERROR: unbind {driver}/{iface} 失败 rc={rc}")
+            return 1
+        unbound = True
+        print(f"INFO: 已 unbind {driver}/{iface}（模拟拔盘）")
+
+        r = _wb_guard_wait_event(since, "lost", _WB_GUARD_EVENT_WAIT_S)
+        if r == -1:
+            return -1
+        if r == 0:
+            print(f"FAIL: {_WB_GUARD_EVENT_WAIT_S}s 内未收到 writeback_guard lost 事件")
+            print("ERROR: lciod writeback-guard 校验失败（断供未上报）")
+            return 1
+        print('OK: 断供事件上报（"rule":"writeback_guard","state":"lost"）')
+
+        if not _wb_guard_daemon_alive():
+            print("FAIL: 断供后 lechao_lciod 进程不在（疑似崩溃/退出）")
+            print("ERROR: lciod writeback-guard 校验失败（daemon 未存活）")
+            return 1
+        print("OK: 断供后 daemon 存活")
+        alive = _wb_guard_writeback_probe()
+        if alive is None:
+            print("FAIL: 断供下 writeback 操作 adb 超时（疑似挂死）")
+            print("ERROR: lciod writeback-guard 校验失败（writeback 挂死）")
+            return 1
+        if not alive:
+            print("FAIL: 断供下 writeback 超过 10s 未返回（挂死）")
+            print("ERROR: lciod writeback-guard 校验失败（writeback 挂死）")
+            return 1
+        print("OK: 断供下 writeback 报错返回（未挂死）")
+
+        # 复位 zram 释放 stale backing（内核标记 deleted，sdb 号不复用），
+        # 再 rebind USB；新盘可能以新 sd 名出现，按实际名重绑（开机 setup 等价）。
+        rc = _wb_guard_reset_zram()
+        if rc == -1:
+            return -1
+        if rc != 0:
+            print(f"ERROR: zram0 reset 失败 rc={rc}")
+            return 1
+
+        _o, rc = adb(["shell",
+                      f"echo {iface} > /sys/bus/usb/drivers/{driver}/bind"])
+        if rc == -1:
+            return -1
+        if rc != 0:
+            print(f"ERROR: rebind {driver}/{iface} 失败 rc={rc}")
+            return 1
+        unbound = False
+        print(f"INFO: 已 rebind {driver}/{iface}")
+
+        new_name = ""
+        for _ in range(15):
+            names, t = _list_removable_usb_block_devs()
+            if t:
+                return -1
+            fresh = [n for n in names if n not in before_names]
+            if fresh:
+                new_name = fresh[0]
+                break
+            if target in names:
+                new_name = target
+                break
+            time.sleep(2)
+        if not new_name:
+            print("FAIL: rebind 后未发现新的 removable USB 块设备")
+            print("ERROR: lciod writeback-guard 校验失败（盘未回）")
+            return 1
+        print(f"INFO: rebind 后后备盘为 {new_name}")
+
+        rc = _wb_guard_setup_zram(f"/dev/block/{new_name}", disksize)
+        if rc == -1:
+            return -1
+        if rc != 0:
+            print(f"ERROR: 重绑 zram0 backing={new_name} 失败 rc={rc}")
+            return 1
+        print(f"INFO: zram0 已按开机 setup 等价步骤重绑 /dev/block/{new_name}")
+
+        r = _wb_guard_wait_event(since, "recovered", _WB_GUARD_EVENT_WAIT_S)
+        if r == -1:
+            return -1
+        if r == 0:
+            print(f"FAIL: {_WB_GUARD_EVENT_WAIT_S}s 内未收到 writeback_guard "
+                  "recovered 事件")
+            print("ERROR: lciod writeback-guard 校验失败（恢复未上报）")
+            return 1
+        print('OK: 恢复事件上报（"rule":"writeback_guard","state":"recovered"）')
+        print("OK: lciod writeback-guard 校验通过（断供 lost / 恢复 recovered）")
+        return 0
+    finally:
+        # 异常兜底：确保 USB 接口已 rebind（盘回；zram 恢复留给下一轮 setup）
+        if unbound:
+            adb(["shell", f"echo {iface} > /sys/bus/usb/drivers/{driver}/bind"])
 
 
 # ============================================================
@@ -2018,7 +2560,8 @@ def main():
     ap.add_argument("--mode", required=True,
                     choices=["stats", "baseline", "delta", "perf", "uas",
                              "link", "storm", "qos", "qos-auto", "sd",
-                             "sd-inject", "histo", "zram", "zram-writeback"])
+                             "sd-inject", "histo", "zram", "zram-writeback",
+                             "trim", "readahead", "writeback-guard"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
@@ -2074,6 +2617,10 @@ def main():
     ap.add_argument("--zram-wb-pages", type=int, default=16,
                     help="zram-writeback 模式演练随机页数（构造已分配页），"
                          "默认 16")
+    ap.add_argument("--trim-rounds", type=int, default=8,
+                    help="trim 模式单段演练触发/轮询轮数，默认 8")
+    ap.add_argument("--trim-sleep", type=float, default=4.0,
+                    help="trim 模式每轮等待秒数（等 daemon 10s 决策窗），默认 4")
     args = ap.parse_args()
 
     ensure_connected()
@@ -2145,6 +2692,30 @@ def main():
     if args.mode == "zram-writeback":
         # 方向三批二：zram writeback 预研闭环（U 盘 backing_dev + bd_stat 递增）
         rc = mode_zram_writeback(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "trim":
+        # UP-110 批一：ext4 碎片清理链（FITRIM）闭环（开关+演练 → discard 递增 + 事件落盘）
+        rc = mode_trim(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "readahead":
+        # 块层预读调优验收（sysfs=512 + 冷启动对比基线 173329）
+        rc = mode_readahead(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "writeback-guard":
+        # 拔盘韧性守护验收（unbind/lost + rebind/recovered，id=21）
+        rc = mode_writeback_guard(args)
         if rc == -1:
             print("ERROR: adb 执行超时")
             return 1

@@ -26,3 +26,14 @@ prebuilt_etc {
     sub_dir: "init",
     filename_from_src: true,
 }
+
+// readahead 调优的 init 配置（prebuilt_etc 落到
+// /system/etc/init/rpi5-readahead.rc，init 扫描该目录）。
+// 由 persist.lechao.readahead_kb 的属性 trigger 写块层队列参数：
+// 512 为目标态（默认）、128 为回退态，setprop 即时生效且可逆。
+prebuilt_etc {
+    name: "rpi5_readahead_rc",
+    src: "rpi5-readahead.rc",
+    sub_dir: "init",
+    filename_from_src: true,
+}
