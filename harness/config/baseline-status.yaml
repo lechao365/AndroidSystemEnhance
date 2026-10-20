@@ -898,7 +898,7 @@ baselines:
 - baseline_id: BL-20261020-01
   status: promoted
   source_branch: dev
-  source_commit: 909804c9fda0
+  source_commit: 25eded20e47b
   sync_manifest: data/verify-results/20261020-192711-manual-2610201927.md
   build_result: PASS
   package_result: PASS
