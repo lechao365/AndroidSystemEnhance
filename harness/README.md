@@ -14,6 +14,7 @@ harness/
 │   ├── verify_common.py        # workspace-verify 共享基础（原子写 JSON/batch 回落）
 │   ├── git_workspace_util.py   # workspace 扫描排除正则（sync 脚本共享）
 │   ├── role_guard.py           # 角色守卫（HARNESS_ROLE emit/apply）
+│   ├── privileged_exec.py      # host 特权 allowlist 入口（默认拒绝/审计）
 │   ├── check_*.py              # 接入自检判红链的检查器（config/contract/refs/
 │   │                           #   ioctl/lcview_events/manifest/discipline/scan/
 │   │                           #   quotepath/known_issues/commit_coverage/ruff/host）
@@ -21,6 +22,7 @@ harness/
 │                               #   log_prune/slow_guard/shell_env/check_unverified 等）
 ├── config/
 │   ├── paths.conf          # 路径配置（PATCHS_DIR / KERNEL_WS / AOSP_WS）
+│   ├── privileged-allowlist.yaml # host 特权操作静态 allowlist
 │   ├── baseline-status.yaml    # baseline 状态登记表
 │   ├── baseline-evidence-template.yaml
 │   ├── known-issues-template.md    # 已知问题登记模板（头字段集与 cdp_issue._FIELDS 一致）
@@ -48,6 +50,7 @@ harness/
 │   ├── cdp-apply-dod.md        # CDP-DOD-001~003：apply 完成判据（检查器门禁三要件/干净克隆/收据自报）
 │   ├── local-dev-dod.md       # LOCAL-DEV-001~003：本地直连开发 DoD（manual 收据/三态自报）
 │   ├── env-baseline.md        # ENV-BASE-001~002：方案设计前环境基线必测/产批锚点 git 可见
+│   ├── privileged-exec.md     # PRIV-001~004：特权 allowlist/失败关闭/破坏性默认禁用
 ├── reference/
 │   ├── README.md                 # RPI5 开发参考文档索引（ENV/BLD/FLASH/INC/DBG/RMT 规则 ID 总表）
 │   ├── env-setup-reference.md    # WSL2 / 宿主环境搭建、AOSP 编译前准备（ENV-001~007）
@@ -72,6 +75,7 @@ harness/
 | `CDP-DOD-001~003` | [rules/cdp-apply-dod.md](rules/cdp-apply-dod.md) | apply 完成判据（检查器门禁/干净克隆/收据自报） |
 | `LOCAL-DEV-001~003` | [rules/local-dev-dod.md](rules/local-dev-dod.md) | 本地直连开发 DoD |
 | `ENV-BASE-001~002` | [rules/env-baseline.md](rules/env-baseline.md) | 环境基线与产批锚点（方案前必测基线/git 可见锚点） |
+| `PRIV-001~004` | [rules/privileged-exec.md](rules/privileged-exec.md) | 特权 allowlist/失败关闭/破坏性默认禁用 |
 | `HPY-001~003` | [rules/harness-python-conventions.md](rules/harness-python-conventions.md) | harness Python 工程约束（双名收敛/原子写/守卫红灯） |
 | `CDP-001` | [skills/cross-device/docs/cdp-contract.md](skills/cross-device/docs/cdp-contract.md) | CDP 批次契约与解析器（`cdp_parse.py`）成对修改 |
 

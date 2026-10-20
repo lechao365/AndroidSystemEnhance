@@ -126,7 +126,9 @@ stages:
    - aosp 模块：m <module>（BLD-004 先 source build/envsetup.sh + lunch；BLD-005 禁裸 make）
    - boot/内核：make Image dtbs（BLD-001~003 Clang+LLD/产物拷贝 rpi5-kernel/；
      INC-006 Image+dtbs+overlays 同源；INC-009 android_rpi5_defconfig；INC-007 VINTF）
-   - 打包：mk_rpi5_full_image.sh -mode 2|3|4（BLD-007 sudo 打包显式传
+   - 打包：`mk_rpi5_full_image.sh -mode 2|3|4` **仅会话外/WSL 普通终端**执行
+     （会话内 allowlist 未登记这些 mode）；会话内仅 `ws_package.py --mode 0`
+     走 `package.rpi5.mode0` allowlist（BLD-007 sudo 打包显式传
      TARGET_PRODUCT+ANDROID_PRODUCT_OUT；BLD-008 选对 mode）
     - 全程：INC-001 禁 make clean/clobber；BLD-009 CCACHE_DIR=out/ccache
     编译段打点（verify_build）：-sv 链式模式由 ws_verify_chain build 链步
@@ -217,28 +219,38 @@ stages:
      只写新收据引用旧批次（如 -s 自检批 + 说明），禁止编辑旧收据补字段
      （2026-09-02 BL-20260902-01 发布被迫回填 7833c640079a 的教训）。
 
-### 人工打包步骤（opencode 会话内 sudo 不可用，BLD-013）
+### 打包（allowlist 自动，BLD-013）
 
-opencode 会话（systemd user unit 设 `NoNewPrivileges=true`）内 sudo 恒被内核
-拒绝，ws_package 的 `sudo -n true` 探测会如实记因（`sudo_n=false`）不执行，
-收据 package 字段内嵌证据 `script_rc=null` → baseline 记 UNKNOWN。要拿到
-package_result=PASS，须在**会话外普通终端**人工执行打包：
+打包走 `package.rpi5.mode0` allowlist：`ws_package.py` 内部调用
+`privileged_exec`，父进程 direct sudo 不可用时自动用
+`systemd-run --user --property=NoNewPrivileges=no` 临时 unit。先检查机制：
 
-1. 会话外普通终端（普通 WSL2 shell，非 opencode）运行 ws_package，落默认证据位
-   （证据文件名按 batch_id 命名，供会话内 ws_report 自动探测）：
-   ```bash
-   export CDP_BATCH_ID=<batch_id>
-   python3 harness/skills/workspace-verify/ws_package.py
-   # → harness/log/workspace-verify/package-<batch_id>.json（script_rc=0）
-   ```
-   （也可直接跑 `harness/scripts/mk_rpi5_full_image.sh -mode 0`，但须按 BLD-007
-   sudo 显式传 TARGET_PRODUCT/ANDROID_PRODUCT_OUT，且证据须按 ws_package 格式落盘）
-2. 回会话内重跑 ws_report（或重跑 verify 链 report 步）：未传 --package-file 时
-   自动探测 `harness/log/workspace-verify/package-<batch_id>.json`，把打包证据
-   内嵌收据 package 字段随收据入库——**证据链不受影响**（证据内嵌是收据侧的
-   单点动作，与打包执行位置无关，同 batch 同 run_id 可追溯）。
-3. baseline_register 从收据 package 字段取证据 → script_rc=0 记 PASS → promote
-   硬门禁放行。
+```bash
+python3 harness/lib/privileged_exec.py --check
+```
+
+会话内直接执行：
+
+```bash
+export CDP_BATCH_ID=<batch_id>
+python3 harness/skills/workspace-verify/ws_package.py --mode 0
+# → harness/log/workspace-verify/package-<batch_id>.json
+```
+
+证据含 `script_rc`、`images_ok`、`sudo_n`、`output_tail` 与 `privilege` 字段
+（`allowlist_id`/`mechanism`/`parent_sudo_n`/`no_new_privs`/`systemd_run`/
+`usable`/`context_sudo_ok`/`audit`/`audit_file`/`audit_error`/`rejected_code`/
+`detail`）。`--check` 退出码 3 或报
+`PRIV_SUDO_UNAVAILABLE`/`PRIV_SYSTEMD_UNAVAILABLE`/`PRIV_ENTRY_DISABLED` 时，
+才按 BLD-013 回退到会话外普通终端人工打包；不要再手工套 `systemd-run`。
+`ws_report` 未传 `--package-file` 时自动探测该证据并内嵌收据 package 字段，
+`baseline_register` 从收据取证据、`script_rc=0` 记 PASS。
+
+> **`WINDOWS_IMG_DIR` 边界**：该变量目前不在 `package.rpi5.mode0` 的
+> `env_passthrough` 白名单，会话内打包不会执行 Windows 拷贝（镜像保留在
+> `ANDROID_PRODUCT_OUT`）。需要时后续须先扩展 `harness/lib/privileged_exec.py`
+> 的 `_TRUSTED_ROOT_KEYS` 与路径校验，再登记 allowlist，不要直接宣称加
+> `trusted_roots` 即可自动同步 Windows。
 
 > **语义边界（2026-09-16 明确）**：`package_result=PASS` 仅表示 out 三镜像
 > （boot/system/vendor）齐备且打包脚本 rc 为 0，**不表示刷机包与本轮增量推送

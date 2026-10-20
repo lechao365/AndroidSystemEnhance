@@ -11,7 +11,7 @@ entries:
     as_root: false
     mechanism: auto
     timeout_s: 900
-    env_passthrough: [HOME, USER, LANG, AOSP_WS, AOSP_ROOT,
+    env_passthrough: [LANG, AOSP_WS, AOSP_ROOT,
                       ANDROID_PRODUCT_OUT, TARGET_PRODUCT,
                       CDP_BATCH_ID, CDP_RUN_ID]
     trusted_roots:
@@ -33,7 +33,7 @@ entries:
     as_root: true
     mechanism: auto
     timeout_s: 900
-    env_passthrough: [HOME, USER, LANG, ANDROID_PRODUCT_OUT,
+    env_passthrough: [LANG, ANDROID_PRODUCT_OUT,
                       LC_FLASH_DEVICE, LC_FLASH_IMAGE,
                       LC_PRIVILEGE_ALLOW_DESTRUCTIVE]
     trusted_roots:

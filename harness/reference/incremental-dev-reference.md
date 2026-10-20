@@ -94,11 +94,27 @@ adb reboot
 
 **方式二：SD 卡直接写入（设备未启动）**
 
+> 优先使用 allowlist wrapper（条目默认禁用，需评审启用；破坏性操作须显式授权）：
+>
+> ```bash
+> export LC_FLASH_DEVICE=/dev/sdX1
+> export LC_FLASH_IMAGE="$AOSP_ROOT/out/target/product/rpi5/boot.img"
+> export ANDROID_PRODUCT_OUT="$AOSP_ROOT/out/target/product/rpi5"
+> export LC_PRIVILEGE_ALLOW_DESTRUCTIVE=YES
+> python3 harness/lib/privileged_exec.py --entry-id flash.rpi5.boot_dd \
+>   --reason "<原因>" --confirm-destructive -- \
+>   bash harness/scripts/flash_rpi5_boot.sh --confirm
+> ```
+>
+> wrapper 只允许 `/dev/sdXn` 且 `removable=1`、镜像位于 `ANDROID_PRODUCT_OUT`
+> 内、镜像大小不超过目标分区容量。手工 `sudo dd` 仅作 wrapper 不可用时的回退，
+> 且须人工确认目标确为可移动测试盘。
+
 ```bash
 lsblk    # 确认 SD 卡设备路径，如 /dev/sdX
 sudo dd if="$AOSP_ROOT/out/target/product/rpi5/boot.img" of=/dev/sdX1 bs=4M status=progress conv=fsync
 sync
-sudo eject /dev/sdX
+sudo eject /dev/sdX    # 仅手工回退，非 wrapper 行为（wrapper 不 eject）
 ```
 
 > **INC-004**: Windows 下用 Imager/Etcher 写 boot.img 只写第一分区，**避免覆盖整个 SD 卡**。推荐 Linux/WSL 或 ADB 方式。
