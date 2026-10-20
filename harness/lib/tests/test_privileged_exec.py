@@ -923,7 +923,8 @@ entries:
             env["LC_PRIVILEGE_CONTEXT"] = "1"
             help_run = subprocess.run(
                 ["setpriv", "--no-new-privs", "bash", str(script), "-h"],
-                env=env, check=True, capture_output=True, text=True)
+                env=env, check=True, capture_output=True, text=True,
+                encoding="utf-8", errors="replace")
             self.assertIn("用法", help_run.stdout)
             self.assertFalse(capture.exists())
 
@@ -941,7 +942,8 @@ entries:
         env = dict(os.environ)
         env.pop("LC_PRIVILEGE_ALLOW_DESTRUCTIVE", None)
         proc = subprocess.run(["bash", str(script)], capture_output=True,
-                              text=True, env=env)
+                              text=True, env=env, encoding="utf-8",
+                              errors="replace")
         self.assertEqual(proc.returncode, 2)
         self.assertIn("--confirm", proc.stderr)
 
@@ -951,7 +953,8 @@ entries:
         env = dict(os.environ)
         env.pop("LC_PRIVILEGE_ALLOW_DESTRUCTIVE", None)
         proc = subprocess.run(["bash", str(script), "--confirm"],
-                              capture_output=True, text=True, env=env)
+                              capture_output=True, text=True, env=env,
+                              encoding="utf-8", errors="replace")
         self.assertEqual(proc.returncode, 2)
         self.assertIn("LC_PRIVILEGE_ALLOW_DESTRUCTIVE", proc.stderr)
 
@@ -998,7 +1001,8 @@ entries:
                                 f"{full_env.get('PATH', '')}")
         return subprocess.run(
             ["bash", str(self._flash_script()), "--confirm"],
-            capture_output=True, text=True, env=full_env)
+            capture_output=True, text=True, env=full_env,
+            encoding="utf-8", errors="replace")
 
     def test_flash_wrapper_rejects_non_sd_device(self):
         product, image = self._flash_paths()
