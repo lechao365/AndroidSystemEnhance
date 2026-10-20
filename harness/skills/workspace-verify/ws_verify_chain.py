@@ -61,8 +61,8 @@ from verify_common import atomic_write_json as _atomic_write_json_impl  # noqa: 
 import ws_lock  # noqa: E402
 
 # 链式步骤名序列（可注入单测）：argv 由 _build_argv/_build_report_argv 按名构造
-# package 步骤（方向 3）：acceptance 后、report 前用 systemd-run --user 拉起
-# ws_package.py 打包（绕 NoNewPrivileges，sudo_n 真实探测），落盘
+# package 步骤（方向 3）：acceptance 后、report 前由 ws_package 内部
+# privileged_exec 选择机制（direct / systemd-run）拉起打包，落盘
 # package-<batch_id>.json 供 report 内嵌——打包是证据补充（非上板门禁），
 # 失败不阻断链、不置 overall=fail，只记步。
 _CHAIN_STEPS = ("sync", "build", "connect", "push", "unit_test", "acceptance",
@@ -343,14 +343,12 @@ def _build_argv(name, product, out, chain_args):
         # （push/acceptance 内部仍各自 ensure，双保险不冲突）
         return [sys.executable, str(_SCRIPT_DIR / "ws_adb_connect.py"), "ensure"]
     if name == "package":
-        # 方向 3：打包用 systemd-run --user（绕 opencode 会话 NoNewPrivileges
-        # 导致 sudo -n true 恒拒——上批 BLD-013 实测 systemd-run --user 可绕，
-        # 其下 sudo 正常可用），--wait 等打包完成返回真实 rc；
+        # 方向 3：打包由 ws_package 内部 privileged_exec 选择机制（direct /
+        # systemd-run allowlist），链侧不再自带 systemd-run 包装；
         # 同 batch_id 落盘 package-<batch_id>.json 供 report 探测内嵌。
-        # CDP_RUN_ID/CDP_BATCH_ID/AOSP_WS 等 env 由 systemd-run 继承调用者环境。
         pkg_file = chain_args.get("package_file")
-        cmd = ["systemd-run", "--user", "--wait", sys.executable,
-               str(_SCRIPT_DIR / "ws_package.py"), "--mode", "0"]
+        cmd = [sys.executable, str(_SCRIPT_DIR / "ws_package.py"),
+               "--mode", "0"]
         if pkg_file:
             cmd += ["--evidence-file", pkg_file]
         return cmd

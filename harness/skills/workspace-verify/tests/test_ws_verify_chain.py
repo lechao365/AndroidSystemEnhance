@@ -168,10 +168,7 @@ class TestChain(unittest.TestCase):
         self.assertNotIn("- 方向2: 完成", body)
         self.assertIn("链停于 push", body)
 
-    def test_package_step_uses_systemd_run_with_batch_id_evidence(self):
-        # 方向 3：package 步用 systemd-run --user --wait 拉起 ws_package.py，
-        # --evidence-file 指向 package-<batch_id>.json（与 ws_report 探测同源）；
-        # 打包失败不置 overall=fail、不阻断链（证据补充非门禁）
+    def test_package_step_uses_privileged_helper(self):
         calls = []
         ctor = mock.Mock(side_effect=lambda argv, **kw: (
             calls.append(argv),
@@ -186,10 +183,9 @@ class TestChain(unittest.TestCase):
         self.assertEqual(result["overall"], "pass")
         pkg = next(c for c in calls
                    if any(os.path.basename(x) == "ws_package.py" for x in c))
-        # argv: [systemd-run, --user, --wait, python, ws_package.py, ...]
-        self.assertEqual(pkg[0], "systemd-run")
-        self.assertEqual(pkg[1], "--user")
-        self.assertEqual(pkg[2], "--wait")
+        self.assertEqual(pkg[0], sys.executable)
+        self.assertTrue(pkg[1].endswith("ws_package.py"))
+        self.assertNotIn("systemd-run", pkg)
         self.assertIn("--evidence-file", pkg)
         bid = wc.batch_id_from_text(self.batch.read_text(encoding="utf-8"))
         self.assertEqual(pkg[pkg.index("--evidence-file") + 1],
