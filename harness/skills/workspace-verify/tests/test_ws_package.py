@@ -1,8 +1,9 @@
 # ws_package 单测：打包证据生产（mk_rpi5_full_image.sh mode 0 包装）。
-# 关键场景：三镜像齐备真跑（打桩 subprocess）→ 证据含镜像路径/sha256/字节/
-# rc/耗时且原子写；镜像缺失 → 如实记因不执行不产假证据；BLD-007 sudo 行
-# 未显式传参 → 拒执行；成功后登记最新 SD 卡刷机镜像。
-# 注：AOSP_WS/脚本路径/证据目录均 patch 到临时域，subprocess 打桩隔离。
+# 关键场景：三镜像齐备真跑（打桩 privileged_exec helper）→ 证据含镜像
+# 路径/sha256/字节/rc/耗时/privilege 且原子写；镜像缺失 → 如实记因不执行
+# 不产假证据；BLD-007 sudo 行未显式传参 → 拒执行；helper 拒绝/审计失败
+# 的归因透传；成功后登记最新 SD 卡刷机镜像。
+# 注：AOSP_WS/脚本路径/证据目录 patch 到临时域，helper probe/run 打桩隔离。
 
 import json
 import os
@@ -31,6 +32,8 @@ class TestWsPackage(unittest.TestCase):
             'ANDROID_PRODUCT_OUT="${ANDROID_PRODUCT_OUT}" ./rpi5-mkimg.sh; then\n',
             encoding="utf-8")
         self.evidence = Path(self._tmp.name) / "package-x.json"
+        self.evidence_dir = Path(self._tmp.name) / "evidence"
+        self.evidence_dir.mkdir()
         self._imgs = {}
         for name in wp._IMAGES:
             p = self.product_out / name
@@ -43,27 +46,31 @@ class TestWsPackage(unittest.TestCase):
         os.environ.pop("CDP_BATCH_ID", None)
         os.environ.pop("CDP_RUN_ID", None)
 
-    def _run(self, run=True, script_rc=0, sudo_rc=0, **kw):
+    def _run(self, run=True, script_rc=0, probe=None, result=None,
+             run_error=None, **kw):
         kw.setdefault("aosp_ws", str(self.aosp))
         if "evidence_file" in kw and kw["evidence_file"] is None:
             kw.pop("evidence_file")  # 显式 None：交给 run_package 缺省命名
         else:
             kw.setdefault("evidence_file", str(self.evidence))
-
-        def _fake(args, *a, **k):
-            # 两次调用区分：sudo -n true 探测 vs 打包脚本执行（方向 4）
-            if list(args) == ["sudo", "-n", "true"]:
-                return mock.Mock(returncode=sudo_rc, stdout="", stderr="")
-            return mock.Mock(returncode=script_rc, stdout="ok", stderr="")
-
+        if probe is None:
+            probe = wp.priv.ProbeResult(
+                True, False, True, "direct", True, "")
+        if result is None:
+            result = wp.priv.RunResult(
+                script_rc, "package.rpi5.mode0", "direct", True, False,
+                True, 0.1, "", "ok", "" if script_rc == 0 else "rc")
+        run_kwargs = {"side_effect": run_error} if run_error is not None \
+            else {"return_value": result}
         with mock.patch.object(wp, "_SCRIPT", self.script), \
-                mock.patch.object(wp.subprocess, "run",
-                                  side_effect=_fake) as run_mock:
+                mock.patch.object(wp, "_EVIDENCE_DIR", self.evidence_dir), \
+                mock.patch.object(wp.priv, "probe", return_value=probe), \
+                mock.patch.object(wp.priv, "run", **run_kwargs) as run_mock:
             rc, ev = wp.run_package(run=run, **kw)
         return rc, ev, run_mock
 
     def test_success_evidence_complete(self):
-        # 真跑成功：证据含三镜像路径/sha256/字节 + rc + 耗时 + SD 镜像，原子落盘
+        # 真跑成功：证据含三镜像 + rc + 耗时 + SD 镜像，且记录 privilege 段
         img = self.product_out / "RaspberryVanillaAOSP15-20260905-rpi5.img"
         img.write_bytes(b"\x01" * 8)
         rc, ev, run_mock = self._run(script_rc=0)
@@ -80,14 +87,24 @@ class TestWsPackage(unittest.TestCase):
         self.assertEqual(ev["packaged_img"]["bytes"], 8)
         self.assertIn("dur_s", ev)
         self.assertIn("started_at", ev)
-        # 原子写落盘且子进程以显式 env 执行（BLD-007 调用方侧）
+        self.assertTrue(ev["privilege"]["usable"])
+        self.assertEqual(ev["privilege"]["mechanism"], "direct")
+        self.assertEqual(ev["privilege"]["rejected_code"], "")
+        self.assertEqual(ev["privilege"]["audit_error"], "")
+        run_mock.assert_called_once()
+        call = run_mock.call_args
+        self.assertEqual(call.args[0], "package.rpi5.mode0")
+        self.assertEqual(call.args[1],
+                         ["bash", str(self.script), "-mode", "0"])
+        self.assertEqual(call.kwargs["reason"], "ws_package mode 0")
+        self.assertEqual(call.kwargs["timeout"], 900)
+        self.assertEqual(call.kwargs["cwd"],
+                         str(wp._SCRIPT_DIR.parents[2]))
+        self.assertEqual(call.kwargs["env"]["TARGET_PRODUCT"], "aosp_rpi5")
+        self.assertEqual(call.kwargs["env"]["ANDROID_PRODUCT_OUT"],
+                         str(self.product_out))
         data = json.loads(self.evidence.read_text(encoding="utf-8"))
         self.assertEqual(data["script_rc"], 0)
-        env = run_mock.call_args.kwargs["env"]
-        self.assertEqual(env["TARGET_PRODUCT"], "aosp_rpi5")
-        self.assertEqual(env["ANDROID_PRODUCT_OUT"], str(self.product_out))
-        self.assertEqual(run_mock.call_args.args[0],
-                         ["bash", str(self.script), "-mode", "0"])
 
     def test_missing_image_records_reason_no_fake_evidence(self):
         # 镜像缺失：不执行打包，证据如实记原因（rc 非 0），不产假证据
@@ -122,37 +139,64 @@ class TestWsPackage(unittest.TestCase):
         self.assertIn("output_tail", ev)
 
     def test_sudo_unavailable_refuses(self):
-        # 方向 4：sudo -n true 探测失败（需密码/无权限）→ 如实记因不执行，
-        # 打包脚本不被调用（防非 tty 卡死或错报）；error 补指引指向 BLD-013
-        # 人工打包路径（opencode 会话 NoNewPrivileges 使 sudo 恒被内核拒绝）
-        rc, ev, run_mock = self._run(sudo_rc=1)
+        # helper 判定提权不可用（direct sudo 与 systemd-run 均失败）→
+        # 如实记因不执行，错误指向 privileged_exec --check 与 allowlist
+        probe = wp.priv.ProbeResult(
+            False, True, False, "none", False, "no systemd")
+        rc, ev, run_mock = self._run(probe=probe)
         self.assertEqual(rc, 1)
         self.assertFalse(ev["sudo_n"])
-        self.assertFalse(ev["ran"])
-        self.assertIsNone(ev["script_rc"])
-        self.assertIn("sudo", ev["error"])
-        self.assertIn("拒绝执行", ev["error"])
-        # 指引（方向 3）：指向 BLD-013 与会话外人工执行
-        self.assertIn("BLD-013", ev["error"])
-        self.assertIn("会话外普通终端", ev["error"])
-        self.assertIn("build-reference.md", ev["error"])
-        # 仅探测调用（sudo），打包脚本（bash <script>）未被调用
-        scripts = [c for c in run_mock.call_args_list
-                   if list(c.args[0])[:1] == ["bash"]]
-        self.assertEqual(scripts, [])
-        data = json.loads(self.evidence.read_text(encoding="utf-8"))
-        self.assertFalse(data["sudo_n"])
-        self.assertIn("sudo", data["error"])
-        self.assertIn("BLD-013", data["error"])
+        self.assertFalse(ev["privilege"]["usable"])
+        self.assertIn("privileged_exec.py --check", ev["error"])
+        self.assertIn("allowlist", ev["error"])
+        run_mock.assert_not_called()
 
-    def test_sudo_probe_success_proceeds(self):
-        # sudo 探测通过（sudo_rc=0）→ 正常走打包，证据 sudo_n=True
+    def test_systemd_run_success(self):
+        # NNP 会话下 systemd-run 成功：sudo_n=false 但 context_sudo_ok=true
+        probe = wp.priv.ProbeResult(
+            False, True, True, "systemd-run", True, "systemd-run 可用")
+        result = wp.priv.RunResult(
+            0, "package.rpi5.mode0", "systemd-run", False, True, True,
+            0.1, "audit.json", "ok", "")
         img = self.product_out / "RaspberryVanillaAOSP15-20260905-rpi5.img"
         img.write_bytes(b"\x01" * 8)
-        rc, ev, _ = self._run(sudo_rc=0, script_rc=0)
+        rc, ev, _ = self._run(probe=probe, result=result)
         self.assertEqual(rc, 0)
-        self.assertTrue(ev["sudo_n"])
         self.assertEqual(ev["script_rc"], 0)
+        self.assertTrue(ev["ran"])
+        self.assertEqual(ev["output_tail"], "ok")
+        self.assertFalse(ev["sudo_n"])
+        self.assertEqual(ev["privilege"]["mechanism"], "systemd-run")
+        self.assertTrue(ev["privilege"]["context_sudo_ok"])
+        self.assertEqual(ev["privilege"]["audit"], "audit.json")
+        self.assertEqual(ev["privilege"]["audit_file"], "audit.json")
+
+    def test_helper_rejection_recorded(self):
+        # probe 可用但 helper 拒绝（如 AOSP_WS 非默认未同步 trusted_roots）：
+        # 如实记录拒绝 code，不执行、不产假证据
+        err = wp.priv.PrivilegeError(
+            "PRIV_ENV_PATH_DENIED", "PATH 指向非受控根")
+        rc, ev, run_mock = self._run(run_error=err)
+        self.assertEqual(rc, 1)
+        self.assertFalse(ev["ran"])
+        self.assertIsNone(ev["script_rc"])
+        self.assertIn("PRIV_ENV_PATH_DENIED", ev["error"])
+        self.assertEqual(ev["privilege"]["rejected_code"],
+                         "PRIV_ENV_PATH_DENIED")
+        run_mock.assert_called_once()
+
+    def test_audit_failure_not_silenced(self):
+        # helper 执行成功但审计写失败：rc/PASS 不变，审计错误单独留痕
+        result = wp.priv.RunResult(
+            0, "package.rpi5.mode0", "direct", True, False, True,
+            0.1, "", "ok", "PRIV_AUDIT_WRITE_FAILED: disk")
+        img = self.product_out / "RaspberryVanillaAOSP15-20260905-rpi5.img"
+        img.write_bytes(b"\x01" * 8)
+        rc, ev, _ = self._run(result=result)
+        self.assertEqual(rc, 0)
+        self.assertEqual(ev["error"], "")
+        self.assertIn("PRIV_AUDIT_WRITE_FAILED",
+                      ev["privilege"]["audit_error"])
 
     def test_missing_aosp_ws(self):
         # AOSP_WS 未配置（paths.env_path 返空）：如实记因不执行

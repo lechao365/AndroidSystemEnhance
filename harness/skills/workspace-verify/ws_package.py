@@ -6,10 +6,14 @@
 #   以 BLD-007 合规方式（显式传 TARGET_PRODUCT 与 ANDROID_PRODUCT_OUT，
 #   并核验打包脚本 sudo 行同样显式传参）调 mk_rpi5_full_image.sh mode 0，
 #   落自描述证据 JSON（镜像路径/sha256/字节、脚本 rc、耗时、原因），
-#   原子写。镜像缺失或 sudo 环境不可用等失败一律如实记因，不产假证据
+#   原子写。镜像缺失或提权不可用等失败一律如实记因，不产假证据
 #   （证据 rc 非 0 → baseline_register 记 UNKNOWN，不声称 PASS）。
-#   真跑前先做 sudo -n true 非交互探测（sudo_n 字段）：免密可用才执行，
-#   不可用如实记因不执行——防非 tty 卡死（脚本内 sudo 提示密码）或错报。
+#   真跑前经 privileged_exec 探测提权机制（direct sudo / systemd-run），
+#   不可用如实记因不执行——防非 tty 卡死或错报；执行本身也统一走
+#   allowlist helper（package.rpi5.mode0），不保留父进程裸 sudo/bash 调用。
+#   注意：helper 的 trusted_roots 是静态安全边界；AOSP_WS 非默认路径时须同步
+#   更新 harness/config/privileged-allowlist.yaml 的 trusted_roots，否则 helper
+#   以 PRIV_ENV_PATH_DENIED 拒绝（错误信息含根因，可据此补配置）。
 # 证据消费方：baseline_register.py add-candidate（收据 package 字段优先，
 #   保留 --package-evidence 与按 batch_id 探测兜底）；ws_report 把证据内嵌
 #   收据 package 字段随收据入库可追溯。
@@ -22,7 +26,6 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 import uuid
@@ -32,6 +35,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 # 复用仓内路径工具：AOSP_WS 单一事实源（paths.conf，支持环境变量覆盖）
 sys.path.insert(0, str(_SCRIPT_DIR.parents[1] / "lib"))
 import paths  # noqa: E402
+import privileged_exec as priv  # noqa: E402
 
 _SCRIPT = _SCRIPT_DIR.parents[1] / "scripts" / "mk_rpi5_full_image.sh"
 # 证据目录：harness/log/workspace-verify/（gitignore 域，与 chain runs/ 同域）
@@ -156,55 +160,71 @@ def run_package(mode=0, evidence_file=None, timeout=900, aosp_ws=None,
     if not run:
         return _finish(0)
 
-    # 非交互 sudo 前置探测（本批意图 4）：sudo -n true 免密可用才执行打包；
-    # 不可用（需密码/无权限/超时）如实记因不执行——打包脚本内 sudo 在非
-    # tty 下提示输密码会挂死整链，或把 sudo 失败误包装成打包失败/成功错报。
-    sudo_ok = False
-    sudo_detail = ""
-    try:
-        sp = subprocess.run(["sudo", "-n", "true"], capture_output=True,
-                            text=True, encoding="utf-8", errors="replace",
-                            timeout=30)
-        sudo_ok = sp.returncode == 0
-        sudo_detail = (sp.stderr or "").strip()[-200:]
-    except subprocess.TimeoutExpired:
-        sudo_detail = "sudo -n true 超时（>30s）"
-    except OSError as e:
-        sudo_detail = f"sudo 不可执行: {e}"
-    evidence["sudo_n"] = sudo_ok
-    if not sudo_ok:
-        evidence["error"] = ("sudo 非交互探测失败（sudo -n true 不可用，需密码/"
-                             f"无权限）：{sudo_detail or '未知原因'}，拒绝执行防"
-                             "非 tty 卡死或错报。提示：若在 opencode 会话内，"
-                             "systemd user unit 的 NoNewPrivileges 标志使 sudo "
-                             "恒被内核拒绝（BLD-013，配 NOPASSWD 亦无效），须在"
-                             "会话外普通终端人工执行打包（见 "
-                             "harness/reference/build-reference.md）")
+    # 提权机制探测：direct sudo 或 systemd-run context 可用才执行打包；
+    # 不可用（需密码/无权限/NoNewPrivileges）如实记因不执行——防非 tty
+    # 卡死，或把提权失败误包装成打包失败/成功错报。
+    probe = priv.probe()
+    evidence["sudo_n"] = probe.sudo_n
+    evidence["privilege"] = {
+        "allowlist_id": "package.rpi5.mode0",
+        "mechanism": probe.mechanism,
+        "parent_sudo_n": probe.sudo_n,
+        "no_new_privs": probe.no_new_privs,
+        "systemd_run": probe.systemd_run,
+        "usable": probe.usable,
+        "context_sudo_ok": probe.context_sudo_ok,
+        "audit": "",
+        "audit_file": "",
+        "audit_error": "",
+        "rejected_code": "",
+        "detail": probe.detail,
+    }
+    if not probe.usable:
+        evidence["error"] = (
+            "提权机制不可用（sudo direct 与 systemd-run 均失败）；"
+            f"detail={probe.detail or '未知'}。请运行 "
+            "python3 harness/lib/privileged_exec.py --check，并检查 "
+            "harness/config/privileged-allowlist.yaml；不要等待密码输入")
         return _finish(1)
 
-    # 真跑：显式传 TARGET_PRODUCT/ANDROID_PRODUCT_OUT（BLD-007 调用方侧），
-    # mode 0 仅打包（不编译），输出捕获尾段供失败归因
+    # 真跑：经统一 helper 执行（allowlist 精确匹配），显式传
+    # TARGET_PRODUCT/ANDROID_PRODUCT_OUT（BLD-007 调用方侧），输出尾段供归因
     env = dict(os.environ)
     env["AOSP_ROOT"] = str(aosp)
     env["ANDROID_PRODUCT_OUT"] = str(product_out)
     env["TARGET_PRODUCT"] = _TARGET_PRODUCT
     try:
-        proc = subprocess.run(["bash", str(_SCRIPT), "-mode", str(mode)],
-                              env=env, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace",
-                              timeout=timeout)
-    except subprocess.TimeoutExpired:
-        evidence["ran"] = True
-        evidence["error"] = f"打包超时（>{timeout}s），进程组已回收"
-        return _finish(1)
-    except OSError as e:
-        evidence["error"] = f"打包脚本启动失败: {e}"
+        result = priv.run(
+            "package.rpi5.mode0",
+            ["bash", str(_SCRIPT), "-mode", str(mode)],
+            reason=f"ws_package mode {mode}",
+            timeout=timeout,
+            cwd=str(_SCRIPT_DIR.parents[2]),
+            env=env,
+        )
+    except priv.PrivilegeError as exc:
+        evidence["privilege"]["rejected_code"] = exc.code
+        evidence["error"] = (
+            f"{exc.code}: {exc}；检查 allowlist 或运行 "
+            "python3 harness/lib/privileged_exec.py --check")
         return _finish(1)
     evidence["ran"] = True
-    evidence["script_rc"] = proc.returncode
-    evidence["output_tail"] = ((proc.stdout or "") + (proc.stderr or ""))[-2000:]
-    if proc.returncode != 0:
-        evidence["error"] = f"打包脚本 rc={proc.returncode}（详见 output_tail）"
+    evidence["script_rc"] = result.rc
+    evidence["output_tail"] = result.output_tail
+    evidence["privilege"].update({
+        "mechanism": result.mechanism,
+        "context_sudo_ok": result.context_sudo_ok,
+        "audit": result.audit_path,
+        "audit_file": result.audit_path,
+        "detail": result.error or evidence["privilege"]["detail"],
+    })
+    # 审计失败不改变执行结果（rc/PASS 保持），但不得静默，单独留痕
+    if result.error.startswith("PRIV_AUDIT_WRITE_FAILED"):
+        evidence["privilege"]["audit_error"] = result.error
+    if result.rc != 0:
+        evidence["error"] = f"打包脚本 rc={result.rc}"
+        if result.error:
+            evidence["error"] += f"：{result.error}"
         return _finish(1)
     # 成功：登记最新 SD 卡刷机镜像（路径/sha256/字节）
     outputs = sorted(product_out.glob(_OUTPUT_RE), key=lambda p: p.stat().st_mtime)
