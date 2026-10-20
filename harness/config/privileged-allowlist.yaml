@@ -1,0 +1,44 @@
+version: 1
+default: deny
+
+entries:
+  - id: package.rpi5.mode0
+    description: RPi5 三镜像打包（mode 0，sudo 分区/格式化/losetup）
+    command: harness/scripts/mk_rpi5_full_image.sh
+    interpreter: bash
+    args: ["-mode", "0"]
+    requires_privilege: true
+    as_root: false
+    mechanism: auto
+    timeout_s: 900
+    env_passthrough: [HOME, USER, LANG, AOSP_WS, AOSP_ROOT,
+                      ANDROID_PRODUCT_OUT, TARGET_PRODUCT,
+                      CDP_BATCH_ID, CDP_RUN_ID]
+    trusted_roots:
+      AOSP_WS: /home/lechao/workspace/aosp
+      AOSP_ROOT: /home/lechao/workspace/aosp
+      ANDROID_PRODUCT_OUT: /home/lechao/workspace/aosp/out/target/product/rpi5
+    reason_required: true
+    enabled: true
+    destructive: false
+    approved_by: release-review
+    approved_at: "2026-10-20"
+
+  - id: flash.rpi5.boot_dd
+    description: 刷写 RPi5 boot 分区（破坏性，默认禁用）
+    command: harness/scripts/flash_rpi5_boot.sh
+    interpreter: bash
+    args: ["--confirm"]
+    requires_privilege: true
+    as_root: true
+    mechanism: auto
+    timeout_s: 900
+    env_passthrough: [HOME, USER, LANG, ANDROID_PRODUCT_OUT,
+                      LC_FLASH_DEVICE, LC_FLASH_IMAGE,
+                      LC_PRIVILEGE_ALLOW_DESTRUCTIVE]
+    reason_required: true
+    enabled: false
+    destructive: true
+    human_confirm: true
+    approved_by: ""
+    approved_at: ""
