@@ -302,3 +302,4 @@
 2026-10-20 19:17:15 manual-2610201917 pass build=pass board=pass acc={"run_id":"a4d8edad20fd4467b1b284624d44e 全量 28 case 上板通过（writeback_guard 批次补证；har
 2026-10-20 19:21:42 manual-2610201921 pass build=pass board=skip acc={"run_id":"a4d8edad20fd4467b1b284624d44e 补覆盖：amended harness 修复提交（含 flake 登记）
 2026-10-20 19:27:15 manual-2610201927 pass build=pass board=pass acc={"run_id":"a4d8edad20fd4467b1b284624d44e 全量 28 case 上板通过（writeback_guard 批次补证；har
+2026-10-21 00:30:12 manual-2610210029 skip build=skip board=skip acc=- 特权 allowlist 与打包 sudo 绕过机制
