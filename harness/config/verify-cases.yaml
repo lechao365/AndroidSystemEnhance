@@ -423,6 +423,22 @@ cases:
     acceptance: 'hostcmd:"python3 ws_adb_connect.py ensure >/dev/null && { adb root 2>&1 | grep -q \"already\" || { sleep 2 && python3 ws_adb_connect.py ensure >/dev/null; }; }" hostcmd:"adb shell setprop persist.lechao.readahead_kb 512" hostcmd:"cases/lciod_check.sh --mode readahead"'
     timeout_s: 120
 
+  # 拔盘韧性守护（本批新增验收 case，批次验收 case:writeback-guard）。
+  # 语义：cases/lciod_check.sh --mode writeback-guard——
+  #   1) 读 zram0/backing_dev 定位后备盘及其 USB 接口/实际驱动（uas 或
+  #      usb-storage，按 sysfs 实测动态选择）；
+  #   2) unbind USB 接口模拟拔盘 → 断言 90s 内 daemon 上报 id=21 lost
+  #      （"rule":"writeback_guard"）且进程存活、writeback 写不挂死（10s 门限）；
+  #   3) 复位 zram 释放 stale backing → rebind USB → 按开机 setup 等价步骤
+  #      重绑新出现的 sd* → 断言 recovered 事件。
+  # 防假绿：无 lost / daemon 崩溃 / writeback 挂死 / 无 recovered 均判红。
+  # 安全：unbind/rebind 为 USB 热插拔接口可逆操作；zram 重绑仅写内存压缩
+  # 设备（无 sdb 块级写）；最坏 panic 可重启恢复。timeout_s 300（两段 90s
+  # 事件窗 + 盘枚举/重绑）。
+  writeback-guard:
+    acceptance: 'hostcmd:"cases/lciod_check.sh --mode writeback-guard"'
+    timeout_s: 300
+
   # C 批二 方向 3：lciod USB 传输延迟/块大小二维直方图用户态验收（本批新增
   # 验收 case）。语义：cases/lciod_check.sh --mode histo 内部执行
   #   lciod_probe --histo 取数（GET_LATENCY_HISTOGRAM cmd5）→ 结构断言

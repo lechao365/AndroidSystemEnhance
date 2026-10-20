@@ -1634,5 +1634,35 @@ class TestModeReadahead(unittest.TestCase):
         self.assertEqual(writes, [])
 
 
+class TestWritebackGuardHelpers(unittest.TestCase):
+    """拔盘韧性守护辅助函数（纯解析 + 事件轮询）。"""
+
+    def test_parse_backing_target(self):
+        self.assertEqual(lc._parse_backing_target("/dev/block/sdb"), "sdb")
+        self.assertEqual(
+            lc._parse_backing_target("/dev/block/sdb (deleted)"), "sdb")
+        self.assertEqual(lc._parse_backing_target("none"), "")
+        self.assertEqual(lc._parse_backing_target(""), "")
+
+    def test_wait_event_hit(self):
+        fake = mock.Mock(
+            return_value=('{"rule":"writeback_guard","state":"lost"}\n', 0))
+        with mock.patch.object(lc, "adb", fake):
+            self.assertEqual(lc._wb_guard_wait_event(100, "lost", 1), 1)
+
+    def test_wait_event_timeout(self):
+        fake = mock.Mock(return_value=("", 0))
+        with mock.patch.object(lc, "adb", fake), \
+                mock.patch.object(lc.time, "monotonic",
+                                  side_effect=[0, 0, 100]), \
+                mock.patch.object(lc.time, "sleep"):
+            self.assertEqual(lc._wb_guard_wait_event(100, "lost", 1), 0)
+
+    def test_wait_event_adb_timeout(self):
+        fake = mock.Mock(return_value=("", -1))
+        with mock.patch.object(lc, "adb", fake):
+            self.assertEqual(lc._wb_guard_wait_event(100, "lost", 1), -1)
+
+
 if __name__ == "__main__":
     unittest.main()

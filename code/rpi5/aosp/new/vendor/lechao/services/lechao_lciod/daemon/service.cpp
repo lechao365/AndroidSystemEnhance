@@ -54,6 +54,9 @@
 /* UP-110 批一：ext4 碎片清理链（TrimManager，纯函数 + 分段 FITRIM 执行器），
  * service.cpp 提供 10s 决策/执行循环见 TrimManagerRunLoop */
 #include "trim_manager.h"
+/* 拔盘韧性守护：zram writeback 后备盘断供/恢复检测（纯函数 + sysfs 采样），
+ * service.cpp 提供 60s 边沿触发巡检线程见 WritebackGuardRunLoop */
+#include "writeback_guard.h"
 /* R-14 方向 1：共享事件枚举头（AOSP hal 镜像，与内核真相源 1:1 同步），
  * 事件类型/方向名映射单一事实源，消模块内 switch 硬编码 */
 #include "vendor_lechao_usbd-ioctl.h"
@@ -726,6 +729,52 @@ static void TrimManagerRunLoop() {
     }
 }
 
+/* 拔盘韧性守护：事件 JSON 行（rule=writeback_guard，事件 id=21） */
+static void EmitWritebackGuardJson(const lechao::lciod::WritebackSupplySample& s) {
+    char line[384];
+    const int n = lechao::lciod::FormatWritebackGuardJson(
+        !s.healthy, s.backing_dev, s.target_present, line, sizeof(line));
+    EmitCollectorJson("writeback_guard", line, n, sizeof(line));
+    LC_ALOGI("writeback_guard: state=%s backing_dev=%s target_present=%d",
+             s.healthy ? "recovered" : "lost", s.backing_dev.c_str(),
+             static_cast<int>(s.target_present));
+}
+
+/*
+ * 拔盘韧性守护运行循环（IoServiceImpl::start() 以 std::thread(...).detach()
+ * 启动）：每 kWritebackGuardIntervalSec(60s) 只读采样一次 zram0/backing_dev
+ * 与其指向的 /sys/block/<dev> 是否存在，按边沿触发上报：
+ *   - 供给健康 → 断供：上报 lost 事件（id=21，rule=writeback_guard）；
+ *   - 断供 → 供给恢复：上报 recovered 事件。
+ * **不自动重绑**：换盘后把 backing_dev 指向新设备会丢弃已 writeback 页，
+ * 恢复统一留给开机 setup（rpi5-zram-setup.sh）；守护只负责可见性。
+ * 观测为增强项非致命：sysfs 读失败按"无供给"暴露，线程持续运行
+ * （CXX-004：非致命错误不触发进程退出）。
+ */
+static void WritebackGuardRunLoop() {
+    using clock = std::chrono::steady_clock;
+    const auto period =
+        std::chrono::seconds(lechao::lciod::kWritebackGuardIntervalSec);
+    bool last_lost = false;
+    bool primed = false;
+
+    while (true) {
+        lechao::lciod::WritebackSupplySample sample;
+        if (!lechao::lciod::QueryWritebackSupply(&sample)) {
+            ALOGW("lechao_lciod: writeback_guard sample failed (skip)");
+        } else {
+            const bool lost = !sample.healthy;
+            /* 边沿触发：首次采样即上报（若已断供），此后仅状态翻转时上报，
+             * 防 60s 周期刷屏。 */
+            if (!primed || lost != last_lost)
+                EmitWritebackGuardJson(sample);
+            last_lost = lost;
+            primed = true;
+        }
+        std::this_thread::sleep_until(clock::now() + period);
+    }
+}
+
 void IoServiceImpl::start() {
     start_monitor();
     /* R2 方向 5+6：启动独立全局链路监控线程（LinkMonitorRun，detach）。
@@ -747,6 +796,11 @@ void IoServiceImpl::start() {
      * 空闲块无损，禁块设备裸写；线程随进程生命周期终止（进程非 oneshot，
      * init 自动重启）。 */
     std::thread(TrimManagerRunLoop).detach();
+    /* 拔盘韧性守护：启动 zram writeback 后备盘 60s 巡检线程
+     * （WritebackGuardRunLoop，detach）。只读 sysfs，断供/恢复边沿触发
+     * 事件 id=21；不自动重绑（恢复留给开机 setup）。线程随进程生命周期
+     * 终止（进程非 oneshot，init 自动重启）。 */
+    std::thread(WritebackGuardRunLoop).detach();
 }
 
 /*

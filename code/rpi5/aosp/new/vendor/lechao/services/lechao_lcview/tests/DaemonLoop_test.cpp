@@ -230,7 +230,8 @@ TEST(DaemonLoopHelperTest, SchemaLoadRetry_SuccessOnFirstTry) {
         // QoS 延迟感知分级：新增 id=18 qos_auto_adjust，schema 升为 17 事件
         // 方向三批一：新增 id=19 zram_swap_pressure（daemon 合成），schema 升为 18 事件
         // UP-110 批一：新增 id=20 trim（lciod daemon 合成），schema 升为 19 事件
-        EXPECT_EQ(sp.eventCount(), 19u);
+        // 本批（zram writeback 韧性）：新增 id=21 writeback_guard，升为 20 事件
+        EXPECT_EQ(sp.eventCount(), 20u);
     } else {
         GTEST_SKIP() << "真配置不存在（host 环境）";
     }

@@ -77,6 +77,11 @@
 #              态）；drop_caches 后 am start 设置应用，记录冷启动耗时并与 173329
 #              基线 757ms 对比（仅记录变化，不作门禁）。默认即目标态不复原；
 #              仅读 sysfs + 可逆 drop_caches，无块设备写。
+#   writeback-guard — zram writeback 后备盘拔盘韧性验收：读 backing_dev 定位
+#              USB 接口/驱动 → unbind 模拟拔盘 → 断言 90s 内 lost 事件（id=21）
+#              且 daemon 存活、writeback 不挂死 → 复位 zram 并按开机 setup
+#              等价步骤重绑新盘 → 断言 recovered 事件。不写 sdb 块设备；
+#              unbind/rebind 可逆，异常路径 finally 兜底 rebind。
 #
 # 退出码：0 校验通过 / 1 校验失败 / 2 设备不可达或参数错误
 # ============================================================
@@ -1855,6 +1860,296 @@ def mode_zram_writeback(args):
 
 
 # ============================================================
+# 拔盘韧性守护验收（--mode writeback-guard）
+# ============================================================
+
+# daemon 事件 rule 与巡检周期（writeback_guard.h kWritebackGuardIntervalSec=60）
+_WB_GUARD_RULE = "writeback_guard"
+# USB 存储驱动候选：方向要求 uas，但 U 盘可能绑定 usb-storage（BOT），
+# 按 backing 设备实际驱动的 sysfs 结果动态选择（register 于 apply 侧实测）。
+_WB_GUARD_DRIVERS = ("uas", "usb-storage")
+# 等待事件窗口：须大于 60s 巡检周期，留 30s 余量（边界轮询/调度抖动）
+_WB_GUARD_EVENT_WAIT_S = 90
+
+
+def _parse_backing_target(text):
+    """从 backing_dev 文本解析设备名（"/dev/block/sdb (deleted)" → "sdb"）。"""
+    s = (text or "").strip()
+    s = s.replace(" (deleted)", "").strip()
+    if not s or s == "none":
+        return ""
+    return s.rsplit("/", 1)[-1].strip()
+
+
+def _wb_guard_resolve_usb_iface(dev_name):
+    """解析块设备所属 USB 接口与驱动 → (iface, driver, rc)。
+
+    readlink /sys/block/<dev> 路径形如 .../1-2/1-2:1.0/host0/target...。
+    驱动按 uas → usb-storage 顺序探测（实际绑定以 sysfs 存在为准）。
+    无接口/无法定位返回 (None, None, 0)；adb 超时 rc=-1。
+    """
+    out, rc = adb(["shell", f"readlink -f /sys/block/{dev_name}"])
+    if rc == -1:
+        return None, None, -1
+    if rc != 0:
+        return None, None, rc
+    m = re.search(r"/(\d+-\d+(?:\.\d+)?:\d+\.\d+)(?:/|$)", out)
+    if not m:
+        return None, None, 0
+    iface = m.group(1)
+    for driver in _WB_GUARD_DRIVERS:
+        o, r = adb(["shell",
+                    f"test -e /sys/bus/usb/drivers/{driver}/{iface} && echo yes"])
+        if r == -1:
+            return None, None, -1
+        if r == 0 and o.strip() == "yes":
+            return iface, driver, 0
+    return None, None, 0
+
+
+def _device_logcat_anchor():
+    """设备侧 logcat 时间锚点（"MM-DD HH:MM:SS.mmm"）→ (字符串, rc)。
+
+    必须用时间字符串而非 epoch：toybox logcat 把纯数字 -T 参数解析为
+    "最近 N 行"（count），epoch 过滤失效会把锚点前旧事件当前置证据（假绿）。
+    """
+    out, rc = adb(["shell", 'date +"%m-%d %H:%M:%S.000"'])
+    if rc == -1:
+        return None, -1
+    if rc != 0:
+        return None, rc
+    anchor = out.strip()
+    return (anchor, 0) if anchor else (None, 1)
+
+
+def _wb_guard_wait_event(since, state, wait_s):
+    """轮询 logcat 等待 writeback_guard 指定状态事件 → 1 命中 / 0 超时 / -1 adb 超时。
+
+    since 为设备侧时间字符串（见 _device_logcat_anchor），保证只匹配锚点后
+    新事件，不吃上一轮 recovered 残留。
+    """
+    deadline = time.monotonic() + wait_s
+    last = ""
+    while True:
+        out, rc = adb(["logcat", "-d", "-T", since, "-s", _SD_LOG_TAG])
+        if rc == -1:
+            return -1
+        last = out
+        if (rc == 0 and f'"rule":"{_WB_GUARD_RULE}"' in out
+                and f'"state":"{state}"' in out):
+            return 1
+        if time.monotonic() >= deadline:
+            if last.strip():
+                print(f"INFO: 最近 writeback_guard 日志片段: "
+                      f"{last.strip().splitlines()[-1][:200]}")
+            return 0
+        time.sleep(5)
+
+
+def _wb_guard_daemon_alive():
+    """daemon 进程存活 → bool（adb 超时/命令失败返回 False）。"""
+    out, rc = adb(["shell", "pidof lechao_lciod"])
+    return rc == 0 and bool(out.strip())
+
+
+def _wb_guard_writeback_probe():
+    """断供下发起一次 writeback（bounded 10s）→ True 返回/False 挂死/None adb 超时。
+
+    仅向 zram0/writeback 写 "idle"（无可用后备时内核返回错误但不写磁盘），
+    用设备侧 timeout 10s 界定"报错未挂死"。
+    """
+    out, rc = adb(["shell",
+                   "timeout 10 sh -c 'echo idle > /sys/block/zram0/writeback'; "
+                   "echo rc=$?"], timeout=30)
+    if rc == -1:
+        return None
+    return "rc=124" not in out
+
+
+def _wb_guard_reset_zram():
+    """复位 zram0（swapoff 释放活动用户 + reset 清除 stale backing）→ rc。"""
+    _o, rc = adb(["shell", f"swapoff {_ZRAM_WB_SWAP_DEV} 2>/dev/null; true"])
+    if rc != 0:
+        return rc
+    _o, rc = adb(["shell", f"echo 1 > {_ZRAM_WB_RESET} 2>/dev/null; true"])
+    return rc
+
+
+def _wb_guard_setup_zram(dev_path, disksize):
+    """模拟开机 setup 把 zram0 重新绑定到新盘（backing→disksize→mkswap/swapon）。
+
+    注：这是验收侧对"恢复留给开机 setup"的等价模拟——daemon 自身不重绑。
+    """
+    _o, rc = adb(["shell", f"echo {dev_path} > {_ZRAM_WB_BACKING}"])
+    if rc != 0:
+        return rc
+    _o, rc = adb(["shell", f"echo {disksize} > {_ZRAM_WB_DISKSIZE}"])
+    if rc != 0:
+        return rc
+    _o, rc = adb(["shell", f"mkswap {_ZRAM_WB_SWAP_DEV} >/dev/null 2>&1; "
+                           f"swapon {_ZRAM_WB_SWAP_DEV} 2>/dev/null; true"])
+    return rc
+
+
+def mode_writeback_guard(args):
+    """zram writeback 拔盘韧性守护验收（--mode writeback-guard）。
+
+    流程（不写 sdb 块设备）：
+      1) 读 zram0/backing_dev 解析后备盘（须存在），定位其 USB 接口与实际驱动
+         （uas 或 usb-storage）；
+      2) echo <iface> > /sys/bus/usb/drivers/<driver>/unbind 模拟拔盘；
+      3) 断言 90s 内收到 state=lost 事件（id=21）且 daemon 存活、
+         writeback sysfs 写不挂死（bounded 10s）；
+      4) 复位 zram0 释放 stale backing，rebind USB 接口，选取新出现的 removable
+         sd*，按开机 setup 等价步骤重绑 zram（恢复留给 setup，daemon 不重绑）；
+      5) 断言 90s 内收到 state=recovered 事件。
+    安全：unbind/rebind 为 USB 热插拔接口操作（可逆），zram 重绑仅写内存压缩
+    设备（无块设备裸写）；最坏 panic 可由重启恢复。异常路径 finally 兜底 rebind。
+    """
+    backing, rc = _zram_wb_read(_ZRAM_WB_BACKING)
+    if rc == -1:
+        return -1
+    if rc != 0 or not backing:
+        print("ERROR: 无法读取 zram0/backing_dev（zram writeback 未配置？）")
+        return 1
+    target = _parse_backing_target(backing)
+    if not target:
+        print(f"FAIL: backing_dev 无有效设备: {backing!r}（zram 未绑定 U 盘）")
+        return 1
+    out, rc = adb(["shell", f"test -e /sys/block/{target} && echo yes"])
+    if rc == -1:
+        return -1
+    if rc != 0 or out.strip() != "yes":
+        print(f"FAIL: backing 设备 /sys/block/{target} 不存在（当前已断供，"
+              "请重启恢复后重跑）")
+        return 1
+    print(f"OK: 当前 backing_dev={backing}（目标 {target} 在位）")
+
+    iface, driver, rc = _wb_guard_resolve_usb_iface(target)
+    if rc == -1:
+        return -1
+    if not iface:
+        print(f"ERROR: 无法定位 /sys/block/{target} 的 USB 接口（无法模拟拔盘）")
+        return 1
+    print(f"INFO: 后备盘 {target} USB 接口 {iface}（驱动 {driver}）")
+
+    ds, drc = _zram_wb_read(_ZRAM_WB_DISKSIZE)
+    if drc == -1:
+        return -1
+    disksize = _ZRAM_WB_DEFAULT_DISKSIZE
+    if drc == 0 and ds and ds.isdigit() and int(ds) > 0:
+        disksize = int(ds)
+    before_names, t = _list_removable_usb_block_devs()
+    if t:
+        return -1
+    since, arc = _device_logcat_anchor()
+    if arc == -1:
+        return -1
+    if not since:
+        print("ERROR: 无法读取设备时钟（logcat 抓取窗口无法锚定）")
+        return 1
+
+    unbound = False
+    try:
+        out, rc = adb(["shell",
+                       f"echo {iface} > /sys/bus/usb/drivers/{driver}/unbind"])
+        if rc == -1:
+            return -1
+        if rc != 0:
+            print(f"ERROR: unbind {driver}/{iface} 失败 rc={rc}")
+            return 1
+        unbound = True
+        print(f"INFO: 已 unbind {driver}/{iface}（模拟拔盘）")
+
+        r = _wb_guard_wait_event(since, "lost", _WB_GUARD_EVENT_WAIT_S)
+        if r == -1:
+            return -1
+        if r == 0:
+            print(f"FAIL: {_WB_GUARD_EVENT_WAIT_S}s 内未收到 writeback_guard lost 事件")
+            print("ERROR: lciod writeback-guard 校验失败（断供未上报）")
+            return 1
+        print('OK: 断供事件上报（"rule":"writeback_guard","state":"lost"）')
+
+        if not _wb_guard_daemon_alive():
+            print("FAIL: 断供后 lechao_lciod 进程不在（疑似崩溃/退出）")
+            print("ERROR: lciod writeback-guard 校验失败（daemon 未存活）")
+            return 1
+        print("OK: 断供后 daemon 存活")
+        alive = _wb_guard_writeback_probe()
+        if alive is None:
+            print("FAIL: 断供下 writeback 操作 adb 超时（疑似挂死）")
+            print("ERROR: lciod writeback-guard 校验失败（writeback 挂死）")
+            return 1
+        if not alive:
+            print("FAIL: 断供下 writeback 超过 10s 未返回（挂死）")
+            print("ERROR: lciod writeback-guard 校验失败（writeback 挂死）")
+            return 1
+        print("OK: 断供下 writeback 报错返回（未挂死）")
+
+        # 复位 zram 释放 stale backing（内核标记 deleted，sdb 号不复用），
+        # 再 rebind USB；新盘可能以新 sd 名出现，按实际名重绑（开机 setup 等价）。
+        rc = _wb_guard_reset_zram()
+        if rc == -1:
+            return -1
+        if rc != 0:
+            print(f"ERROR: zram0 reset 失败 rc={rc}")
+            return 1
+
+        _o, rc = adb(["shell",
+                      f"echo {iface} > /sys/bus/usb/drivers/{driver}/bind"])
+        if rc == -1:
+            return -1
+        if rc != 0:
+            print(f"ERROR: rebind {driver}/{iface} 失败 rc={rc}")
+            return 1
+        unbound = False
+        print(f"INFO: 已 rebind {driver}/{iface}")
+
+        new_name = ""
+        for _ in range(15):
+            names, t = _list_removable_usb_block_devs()
+            if t:
+                return -1
+            fresh = [n for n in names if n not in before_names]
+            if fresh:
+                new_name = fresh[0]
+                break
+            if target in names:
+                new_name = target
+                break
+            time.sleep(2)
+        if not new_name:
+            print("FAIL: rebind 后未发现新的 removable USB 块设备")
+            print("ERROR: lciod writeback-guard 校验失败（盘未回）")
+            return 1
+        print(f"INFO: rebind 后后备盘为 {new_name}")
+
+        rc = _wb_guard_setup_zram(f"/dev/block/{new_name}", disksize)
+        if rc == -1:
+            return -1
+        if rc != 0:
+            print(f"ERROR: 重绑 zram0 backing={new_name} 失败 rc={rc}")
+            return 1
+        print(f"INFO: zram0 已按开机 setup 等价步骤重绑 /dev/block/{new_name}")
+
+        r = _wb_guard_wait_event(since, "recovered", _WB_GUARD_EVENT_WAIT_S)
+        if r == -1:
+            return -1
+        if r == 0:
+            print(f"FAIL: {_WB_GUARD_EVENT_WAIT_S}s 内未收到 writeback_guard "
+                  "recovered 事件")
+            print("ERROR: lciod writeback-guard 校验失败（恢复未上报）")
+            return 1
+        print('OK: 恢复事件上报（"rule":"writeback_guard","state":"recovered"）')
+        print("OK: lciod writeback-guard 校验通过（断供 lost / 恢复 recovered）")
+        return 0
+    finally:
+        # 异常兜底：确保 USB 接口已 rebind（盘回；zram 恢复留给下一轮 setup）
+        if unbound:
+            adb(["shell", f"echo {iface} > /sys/bus/usb/drivers/{driver}/bind"])
+
+
+# ============================================================
 # C 批二 方向 3：USB 传输延迟/块大小二维直方图用户态验收（--mode histo）
 # ============================================================
 
@@ -2235,7 +2530,7 @@ def main():
                     choices=["stats", "baseline", "delta", "perf", "uas",
                              "link", "storm", "qos", "qos-auto", "sd",
                              "sd-inject", "histo", "zram", "zram-writeback",
-                             "trim", "readahead"])
+                             "trim", "readahead", "writeback-guard"])
     ap.add_argument("--reset", action="store_true",
                     help="baseline 模式：设备侧 lciod_probe --reset 归零计数")
     ap.add_argument("--expect", nargs="+", default=[],
@@ -2382,6 +2677,14 @@ def main():
     if args.mode == "readahead":
         # 块层预读调优验收（sysfs=512 + 冷启动对比基线 173329）
         rc = mode_readahead(args)
+        if rc == -1:
+            print("ERROR: adb 执行超时")
+            return 1
+        return 0 if rc == 0 else 1
+
+    if args.mode == "writeback-guard":
+        # 拔盘韧性守护验收（unbind/lost + rebind/recovered，id=21）
+        rc = mode_writeback_guard(args)
         if rc == -1:
             print("ERROR: adb 执行超时")
             return 1

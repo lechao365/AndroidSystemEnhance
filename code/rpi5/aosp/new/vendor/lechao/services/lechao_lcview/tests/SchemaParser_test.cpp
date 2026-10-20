@@ -287,12 +287,14 @@ TEST(SchemaParserParseJsonTest, ProductionConfig_LoadsAll9Events) {
     // 延迟长尾触发），schema 升为 17 事件
     // 方向三批一：新增 id=19 zram_swap_pressure（daemon 合成），schema 升为 18 事件
     // UP-110 批一：新增 id=20 trim（lciod daemon 合成），schema 升为 19 事件
-    EXPECT_EQ(sp.eventCount(), 19u);
-    // id 1..20 全部定义（含 1~3 预留占位 + 5~13 USB 事件 + 14 slow_disk +
+    // 本批（zram writeback 韧性）：新增 id=21 writeback_guard（lciod daemon
+    // 合成），schema 升为 20 事件
+    EXPECT_EQ(sp.eventCount(), 20u);
+    // id 1..21 全部定义（含 1~3 预留占位 + 5~13 USB 事件 + 14 slow_disk +
     // 15 sd_health + 16 sd_stuck + 17 usb_latency_tail + 18 qos_auto_adjust +
-    // 19 zram_swap_pressure + 20 trim，与内核 lcview_events.h 的
-    // LCVIEW_EVENT_* 宏一致）
-    for (uint16_t id = 1; id <= 20; id++) {
+    // 19 zram_swap_pressure + 20 trim + 21 writeback_guard，与内核
+    // lcview_events.h 的 LCVIEW_EVENT_* 宏一致）
+    for (uint16_t id = 1; id <= 21; id++) {
         if (id == 4) continue;  // id=4 TRANSPORT_START 已删除
         const EventSchema* s = sp.find(id);
         ASSERT_NE(s, nullptr) << "事件 " << id << " 缺失";
@@ -301,8 +303,9 @@ TEST(SchemaParserParseJsonTest, ProductionConfig_LoadsAll9Events) {
     // 1~3 为预留占位（字段未定义，允许空 fields）；5~13 为实际 USB 事件，
     // 14 为 daemon 合成 slow_disk、15/16 为内核 SD 健康事件、17 为 daemon
     // 合成 usb_latency_tail、18 为内核 SD 延迟长尾自动分级、19 为 daemon
-    // 合成 zram_swap_pressure、20 为 daemon 合成 trim（均含字段）
-    for (uint16_t id = 5; id <= 20; id++) {
+    // 合成 zram_swap_pressure、20 为 daemon 合成 trim、21 为 daemon 合成
+    // writeback_guard（均含字段）
+    for (uint16_t id = 5; id <= 21; id++) {
         const EventSchema* s = sp.find(id);
         ASSERT_NE(s, nullptr) << "事件 " << id << " 缺失";
         EXPECT_FALSE(s->fields.empty()) << "事件 " << id << " 无字段";
