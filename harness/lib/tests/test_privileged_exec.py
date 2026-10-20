@@ -935,6 +935,124 @@ entries:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.assertFalse(capture.exists())
 
+    def test_flash_wrapper_refuses_without_confirm(self):
+        script = (Path(priv.__file__).resolve().parents[1]
+                  / "scripts" / "flash_rpi5_boot.sh")
+        env = dict(os.environ)
+        env.pop("LC_PRIVILEGE_ALLOW_DESTRUCTIVE", None)
+        proc = subprocess.run(["bash", str(script)], capture_output=True,
+                              text=True, env=env)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--confirm", proc.stderr)
+
+    def test_flash_wrapper_requires_destructive_env(self):
+        script = (Path(priv.__file__).resolve().parents[1]
+                  / "scripts" / "flash_rpi5_boot.sh")
+        env = dict(os.environ)
+        env.pop("LC_PRIVILEGE_ALLOW_DESTRUCTIVE", None)
+        proc = subprocess.run(["bash", str(script), "--confirm"],
+                              capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("LC_PRIVILEGE_ALLOW_DESTRUCTIVE", proc.stderr)
+
+    def _flash_script(self):
+        return (Path(priv.__file__).resolve().parents[1]
+                / "scripts" / "flash_rpi5_boot.sh")
+
+    def _flash_paths(self):
+        root = Path(self.tmp.name)
+        product = root / "product"
+        product.mkdir(exist_ok=True)
+        image = product / "boot.img"
+        image.write_bytes(b"boot-image")
+        return product, image
+
+    def _flash_env(self, product, image, device="/dev/sdb1"):
+        return {
+            "LC_PRIVILEGE_ALLOW_DESTRUCTIVE": "YES",
+            "ANDROID_PRODUCT_OUT": str(product),
+            "LC_FLASH_DEVICE": device,
+            "LC_FLASH_IMAGE": str(image),
+        }
+
+    def _flash_stubs(self):
+        bin_dir = Path(self.tmp.name) / "flash-bin"
+        bin_dir.mkdir(exist_ok=True)
+        stubs = {
+            "lsblk": '#!/bin/sh\nprintf "%s\\n" "${STUB_LSBLK_RM:-1}"\n',
+            "blockdev": ('#!/bin/sh\n'
+                         'printf "%s\\n" "${STUB_BLOCKDEV_SIZE:-1099511627776}"\n'),
+            "dd": '#!/bin/sh\nprintf "%s\\n" "$@" > "${STUB_DD_CAPTURE:?}"\n',
+        }
+        for name, body in stubs.items():
+            path = bin_dir / name
+            path.write_text(body, encoding="utf-8")
+            path.chmod(0o755)
+        return bin_dir
+
+    def _run_flash(self, env, stub_bin=None):
+        full_env = dict(os.environ)
+        full_env.update(env)
+        if stub_bin is not None:
+            full_env["PATH"] = (f"{stub_bin}{os.pathsep}"
+                                f"{full_env.get('PATH', '')}")
+        return subprocess.run(
+            ["bash", str(self._flash_script()), "--confirm"],
+            capture_output=True, text=True, env=full_env)
+
+    def test_flash_wrapper_rejects_non_sd_device(self):
+        product, image = self._flash_paths()
+        proc = self._run_flash(self._flash_env(
+            product, image, device="/dev/nvme0n1p1"))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("/dev/sdXn", proc.stderr)
+
+    def test_flash_wrapper_rejects_missing_image(self):
+        product, _ = self._flash_paths()
+        proc = self._run_flash(self._flash_env(
+            product, product / "missing.img"))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("镜像不存在", proc.stderr)
+
+    def test_flash_wrapper_rejects_image_outside_product_out(self):
+        product, _ = self._flash_paths()
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        image = outside / "boot.img"
+        image.write_bytes(b"boot-image")
+        proc = self._run_flash(self._flash_env(product, image))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("ANDROID_PRODUCT_OUT", proc.stderr)
+
+    def test_flash_wrapper_rejects_non_removable_device(self):
+        product, image = self._flash_paths()
+        env = self._flash_env(product, image)
+        env["STUB_LSBLK_RM"] = "0"
+        proc = self._run_flash(env, self._flash_stubs())
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("removable", proc.stderr)
+
+    def test_flash_wrapper_happy_path_stubbed(self):
+        product, image = self._flash_paths()
+        capture = Path(self.tmp.name) / "dd-argv.txt"
+        env = self._flash_env(product, image)
+        env["STUB_LSBLK_RM"] = "1"
+        env["STUB_BLOCKDEV_SIZE"] = "1099511627776"
+        env["STUB_DD_CAPTURE"] = str(capture)
+        proc = self._run_flash(env, self._flash_stubs())
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        argv = capture.read_text(encoding="utf-8").splitlines()
+        self.assertIn(f"if={image.resolve()}", argv)
+        self.assertIn("of=/dev/sdb1", argv)
+
+    def test_flash_wrapper_rejects_oversize_image(self):
+        product, image = self._flash_paths()
+        env = self._flash_env(product, image)
+        env["STUB_BLOCKDEV_SIZE"] = "1"
+        proc = self._run_flash(env, self._flash_stubs())
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("超过目标分区容量", proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

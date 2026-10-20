@@ -36,6 +36,8 @@ entries:
     env_passthrough: [HOME, USER, LANG, ANDROID_PRODUCT_OUT,
                       LC_FLASH_DEVICE, LC_FLASH_IMAGE,
                       LC_PRIVILEGE_ALLOW_DESTRUCTIVE]
+    trusted_roots:
+      ANDROID_PRODUCT_OUT: /home/lechao/workspace/aosp/out/target/product/rpi5
     reason_required: true
     enabled: false
     destructive: true
