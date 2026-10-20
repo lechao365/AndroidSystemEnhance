@@ -924,6 +924,42 @@ def _sd_sysfs_read(attr):
         return None, 2
 
 
+def _device_yyyymmdd():
+    """设备侧当前日期 YYYYMMDD（活动日志文件名用）；不可读返 None。
+
+    设备无 RTC：时钟可能被测试/校时回拨，目录里会残留"未来日期"文件；
+    按日期选活动文件，避免把未来文件当最新（mtime 在回拨后不可信）。
+    """
+    out, rc = adb(["shell", "date +%Y%m%d"])
+    if rc != 0:
+        return None
+    d = out.strip()
+    return d if len(d) == 8 and d.isdigit() else None
+
+
+def _active_log_file(key):
+    """返回 mtime 最新的活动日志文件名（限定设备当天日期）→ (文件名, 错误)。
+
+    先 `ls -t` 取 mtime 序；若设备日期可得，只保留 `_<YYYYMMDD>_` 文件，
+    当天无文件返回 (None, None)（尚无事件，基线为空）。日期不可得时回落
+    mtime 最新文件（兼容 host 伪 adb/旧环境）。
+    """
+    out, rc = adb(["shell", "ls", "-t", _SD_LVVIEW_LOG_DIR])
+    if rc != 0:
+        return None, f"lcview 日志目录 {_SD_LVVIEW_LOG_DIR} 不可读 rc={rc}"
+    files = [f.split("/")[-1] for f in out.split()
+             if key in f and "*" not in f]
+    if not files:
+        return None, None
+    today = _device_yyyymmdd()
+    if today:
+        today_files = [f for f in files if f"_{today}_" in f]
+        if not today_files:
+            return None, None
+        files = today_files
+    return files[0], None
+
+
 def _read_sd_stuck_records():
     """读取 lcview 日志目录全部 sd_stuck(id=16) 记录 → (记录列表, 超时, 错误列表)。
 
@@ -932,37 +968,35 @@ def _read_sd_stuck_records():
     无 name 字段，判据只能用 id（照 _check_sd_health 口径）。目录/文件不可读
     返回错误（不得当"无事件"假绿）。
     """
-    out, rc = adb(["shell", "ls", _SD_LVVIEW_LOG_DIR])
-    if rc == -1:
+    fn, ferr = _active_log_file(_SD_STUCK_JSONL_KEY)
+    if ferr:
+        return [], False, [ferr]
+    if not fn:
+        return [], False, []
+    body, brc = adb(["shell", "cat", f"{_SD_LVVIEW_LOG_DIR}/{fn}"])
+    if brc == -1:
         return [], True, []
-    if rc != 0:
-        return [], False, [f"lcview 日志目录 {_SD_LVVIEW_LOG_DIR} 不可读 rc={rc}"]
-    files = sorted(f.split("/")[-1] for f in out.split()
-                   if _SD_STUCK_JSONL_KEY in f and "*" not in f)
+    if brc != 0:
+        return [], False, [f"读取 sd_stuck 日志文件失败 rc={brc}: {fn}"]
     records = []
-    for fn in files:
-        body, brc = adb(["shell", "cat", f"{_SD_LVVIEW_LOG_DIR}/{fn}"])
-        if brc == -1:
-            return records, True, []
-        if brc != 0:
-            return records, False, [f"读取 sd_stuck 日志文件失败 rc={brc}: {fn}"]
-        for line in body.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(rec, dict) and rec.get("id") == 16:
-                records.append(rec)
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get("id") == 16:
+            records.append(rec)
     return records, False, []
 
 
-def _max_sd_stuck_seq(records):
-    """记录集内 sd_stuck 最大 seq（无记录返 -1）——增量判据用 seq 而非条数，
-    防日志轮转/文件读取顺序致条数比较误判。"""
-    return max((r.get("seq", -1) for r in records), default=-1)
+def _max_sd_stuck_ts(records):
+    """记录集内 sd_stuck 最大 ts（无记录返 -1）——增量判据用 ts 而非 seq：
+    seq 按日志文件（按天）重置，跨日新文件 seq 会小于旧文件最大值；ts 为
+    全局单调纳秒时间戳，跨文件比较才可靠。"""
+    return max((r.get("ts", -1) for r in records), default=-1)
 
 
 def _sd_stuck_kmsg_count():
@@ -993,7 +1027,7 @@ def mode_sd_inject(args):
     自驱向 inject_stuck 注入一次合成 STUCK（仅内存模拟，不依赖真卡异常），
     四重断言（防假绿判红项）：
       1) stuck_count 递增（注入前读基线）；
-      2) lcview JSONL 新增 sd_stuck(id=16) 记录（seq 增量判据）；
+      2) lcview JSONL 新增 sd_stuck(id=16) 记录（ts 增量判据，跨日 seq 会重置）；
       3) last_speed 反映降档（== 新增事件 new_speed 且 old_speed > new_speed）；
       4) 内核留痕 "sd stuck"（logcat -b kernel 锚点后命中，或 dmesg 计数增量）；
     任一步 adb 超时（rc==-1）return -1 由 main 透传为失败。
@@ -1019,7 +1053,7 @@ def mode_sd_inject(args):
             print(f"FAIL: {e}")
         print("ERROR: lciod sd-inject 校验失败（读取 sd_stuck 基线）")
         return 1
-    base_seq = _max_sd_stuck_seq(recs_before)
+    base_ts = _max_sd_stuck_ts(recs_before)
     base_kmsg = _sd_stuck_kmsg_count()
     if base_kmsg == -1:
         return -1
@@ -1055,19 +1089,19 @@ def mode_sd_inject(args):
         if t:
             return -1
         recs_after = r
-        if after_count > base_count and _max_sd_stuck_seq(r) > base_seq:
+        if after_count > base_count and _max_sd_stuck_ts(r) > base_ts:
             break
 
     # 5) 断言：计数递增 + 新增事件降档 + last_speed 反映
     errors = []
     if after_count <= base_count:
         errors.append(f"stuck_count 未递增（{base_count}→{after_count}），注入未生效")
-    new_recs = [r for r in recs_after if r.get("seq", -1) > base_seq]
+    new_recs = [r for r in recs_after if r.get("ts", -1) > base_ts]
     if not new_recs:
         errors.append(f"lcview JSONL 无新增 sd_stuck(id=16) 记录"
-                      f"（基线 seq={base_seq}）")
+                      f"（基线 ts={base_ts}）")
     else:
-        evt = max(new_recs, key=lambda r: r.get("seq", -1))
+        evt = max(new_recs, key=lambda r: r.get("ts", -1))
         fields = evt.get("f") or []
         if (len(fields) < 2 or not isinstance(fields[0], int)
                 or not isinstance(fields[1], int)):
@@ -1138,30 +1172,27 @@ def _read_qos_auto_records():
     判据只能用 id，照 sd_stuck 口径）。目录/文件不可读返回错误（不得当
     "无事件"假绿）。
     """
-    out, rc = adb(["shell", "ls", _SD_LVVIEW_LOG_DIR])
-    if rc == -1:
+    fn, ferr = _active_log_file(_QOS_AUTO_JSONL_KEY)
+    if ferr:
+        return [], False, [ferr]
+    if not fn:
+        return [], False, []
+    body, brc = adb(["shell", "cat", f"{_SD_LVVIEW_LOG_DIR}/{fn}"])
+    if brc == -1:
         return [], True, []
-    if rc != 0:
-        return [], False, [f"lcview 日志目录 {_SD_LVVIEW_LOG_DIR} 不可读 rc={rc}"]
-    files = sorted(f.split("/")[-1] for f in out.split()
-                   if _QOS_AUTO_JSONL_KEY in f and "*" not in f)
+    if brc != 0:
+        return [], False, [f"读取 qos_auto 日志文件失败 rc={brc}: {fn}"]
     records = []
-    for fn in files:
-        body, brc = adb(["shell", "cat", f"{_SD_LVVIEW_LOG_DIR}/{fn}"])
-        if brc == -1:
-            return records, True, []
-        if brc != 0:
-            return records, False, [f"读取 qos_auto 日志文件失败 rc={brc}: {fn}"]
-        for line in body.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(rec, dict) and rec.get("id") == 18:
-                records.append(rec)
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get("id") == 18:
+            records.append(rec)
     return records, False, []
 
 

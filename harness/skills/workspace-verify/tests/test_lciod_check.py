@@ -1006,7 +1006,7 @@ class _FakeAdbSdInject:
 
     def __init__(self, stuck_inc=True, speed_after=3, event_after=True,
                  old=4, new=3, logcat_hit=True, kmsg_hit=True,
-                 inject_rc=0, sysfs_rc=0):
+                 inject_rc=0, sysfs_rc=0, before_seq=100, after_seq=101):
         self.stuck_inc = stuck_inc
         self.speed_after = speed_after
         self.event_after = event_after
@@ -1016,17 +1016,21 @@ class _FakeAdbSdInject:
         self.kmsg_hit = kmsg_hit
         self.inject_rc = inject_rc
         self.sysfs_rc = sysfs_rc
+        self.before_seq = before_seq
+        self.after_seq = after_seq
         self.injected = False
         self.calls = []
-        # 注入前已有 1 条 sd_stuck 记录（seq=100），注入后追加 seq=101
-        self._before = [{"ts": 1, "id": 16, "level": 2, "seq": 100,
-                         "mono": 1, "f": [4, 3, -5, 1]}]
+        # 注入前已有 1 条 sd_stuck 记录，注入后追加一条（ts 单调递增；
+        # seq 可跨日重置，见 test_cross_day_seq_reset_pass）
+        self._before = [{"ts": 1, "id": 16, "level": 2,
+                         "seq": before_seq, "mono": 1, "f": [4, 3, -5, 1]}]
 
     def _recs(self):
         recs = list(self._before)
         if self.injected and self.event_after:
-            recs.append({"ts": 2, "id": 16, "level": 2, "seq": 101,
-                         "mono": 2, "f": [self.old, self.new, -5, 2]})
+            recs.append({"ts": 2, "id": 16, "level": 2,
+                         "seq": self.after_seq, "mono": 2,
+                         "f": [self.old, self.new, -5, 2]})
         return recs
 
     def __call__(self, args, timeout=60):
@@ -1082,6 +1086,12 @@ class TestModeSdInject(unittest.TestCase):
     def test_pass_via_dmesg_fallback(self):
         # logcat -b kernel 未命中但 dmesg 留痕计数增量 → 判绿（降级兜底）
         fake = _FakeAdbSdInject(logcat_hit=False, kmsg_hit=True)
+        self.assertEqual(self._run(fake), 0)
+
+    def test_cross_day_seq_reset_pass(self):
+        # 跨日日志文件 seq 重置（新 seq 小于旧文件最大 seq），ts 仍递增 → 判绿
+        # （回归：基线取跨文件 max(seq)=9081，新记录 seq=1279 被误判无新增）
+        fake = _FakeAdbSdInject(before_seq=9081, after_seq=1279)
         self.assertEqual(self._run(fake), 0)
 
     def test_count_not_incremented_red(self):
