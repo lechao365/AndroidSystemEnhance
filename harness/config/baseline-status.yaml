@@ -2,7 +2,8 @@
 # 登记 patch 资产在晋升链 archive → candidate baseline → promoted baseline 上的当前状态；
 # 新流程（cross-device）从 candidate 起步（archive 仅旧流程历史）。
 # 状态语义见 ../README.md#控制总纲（状态模型与证据要求），证据字段定义见 baseline-evidence-template.yaml
-# status 取值: archive → candidate → promoted（rollback 经 revert-candidate 回 candidate）
+# status 取值: archive → candidate → promoted；superseded 表示已被后续
+# promoted 基线全量吸收，禁止引用（rollback 经 revert-candidate 回 candidate）
 # 仅 promoted 行的 approved_by / approved_at 必填
 # sync_manifest 路径相对于项目根；
 # 新流程（cross-device）sync_manifest 填 data/verify-results 收据路径
@@ -848,7 +849,9 @@ baselines:
   approved_by: lechao
   approved_at: '2026-10-14T12:20:07+08:00'
 - baseline_id: BL-20261016-01
-  status: candidate
+  status: superseded
+  superseded_by: BL-20261020-01
+  superseded_note: 被 BL-20261020-01（28 case 全集）吸收，禁止引用
   source_branch: dev
   source_commit: ad7d3375370a
   sync_manifest: data/verify-results/20261016-145847-5285047081a8.md

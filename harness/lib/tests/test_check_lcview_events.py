@@ -11,7 +11,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from check_lcview_events import (DISABLED_EVENTS, EMIT_SOURCE_RELS,  # noqa: E402
                                  EVENTS_H_REL,  # noqa: E402
-                                 SCHEMA_REL, compare,  # noqa: E402
+                                 SCHEMA_REL, UT_SINGLE_SOURCE_HELPER,  # noqa: E402
+                                 UT_TESTS_REL,  # noqa: E402
+                                 compare,  # noqa: E402
                                  parse_emit_sequences,  # noqa: E402
                                  parse_event_id_macros, parse_schema)  # noqa: E402
 
@@ -87,6 +89,15 @@ class TestCompare(unittest.TestCase):
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(emit if i == 0 else "/* no emits */\n",
                          encoding="utf-8")
+        # UT 单源夹具：辅助头 + 引用它的单测（不硬编码事件计数）
+        ut_dir = d / Path(UT_TESTS_REL)
+        ut_dir.mkdir(parents=True, exist_ok=True)
+        (ut_dir / UT_SINGLE_SOURCE_HELPER).write_text(
+            "// kSchemaConfigPath loadExpectedEvents\n", encoding="utf-8")
+        (ut_dir / "SchemaParser_test.cpp").write_text(
+            "// loadExpectedEvents\n"
+            "EXPECT_EQ(sp.eventCount(), expected.size());\n",
+            encoding="utf-8")
         return d
 
     def _cleanup(self, d):
@@ -194,6 +205,50 @@ class TestCompare(unittest.TestCase):
             self._cleanup(d)
         self.assertEqual(rc, 2)
         self.assertIn("文件缺失", msg)
+
+    # ============================================================
+    # 方向 2：UT 期望事件集合单源（配置生成，禁硬编码计数）
+    # CDP-DOD-001：破坏场景（硬编码/辅助缺失/未引用）必须判红
+    # ============================================================
+
+    def _ut_dir(self, d):
+        return d / Path(UT_TESTS_REL)
+
+    def test_ut_hardcoded_event_count_returns_red(self):
+        # UT 重新写死 eventCount(), 20u → 判红（新增事件漏同步风险回潮）
+        d = self._repo()
+        try:
+            (self._ut_dir(d) / "SchemaParser_test.cpp").write_text(
+                "// loadExpectedEvents\n"
+                "EXPECT_EQ(sp.eventCount(), 20u);\n", encoding="utf-8")
+            rc, msg = compare(d)
+        finally:
+            self._cleanup(d)
+        self.assertEqual(rc, 1)
+        self.assertIn("硬编码事件计数", msg)
+
+    def test_ut_single_source_helper_missing_returns_red(self):
+        # 单源辅助被删 → 判红（UT 无法从配置生成期望值）
+        d = self._repo()
+        try:
+            (self._ut_dir(d) / UT_SINGLE_SOURCE_HELPER).unlink()
+            rc, msg = compare(d)
+        finally:
+            self._cleanup(d)
+        self.assertEqual(rc, 1)
+        self.assertIn("单源辅助缺失", msg)
+
+    def test_ut_without_single_source_reference_returns_red(self):
+        # 辅助存在但 UT 未引用（仍靠别处硬编码）→ 判红
+        d = self._repo()
+        try:
+            for p in self._ut_dir(d).glob("*_test.cpp"):
+                p.write_text("// no config reference\n", encoding="utf-8")
+            rc, msg = compare(d)
+        finally:
+            self._cleanup(d)
+        self.assertEqual(rc, 1)
+        self.assertIn("未引用配置单源辅助", msg)
 
     # ============================================================
     # R-04 方向 3：双向互查 + commit 段界 + 零字段事件不误报

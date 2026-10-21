@@ -21,6 +21,7 @@
 #include "batch_parser.h"
 #include "SchemaParser.h"
 #include "FileWriter.h"
+#include "schema_config_source.h"
 #undef private
 #undef protected
 #include "../include/lcview_events.h"
@@ -215,23 +216,15 @@ TEST(DaemonLoopHelperTest, SchemaLoadRetry_EventualSuccess) {
 }
 
 TEST(DaemonLoopHelperTest, SchemaLoadRetry_SuccessOnFirstTry) {
-    // 真实配置（上板路径 /vendor/etc/lcview_events.json）一次加载成功
+    // 真实配置（上板路径 /vendor/etc/lcview_events.json）一次加载成功；
+    // 期望事件数与 SchemaParser_test 同源（由配置 JSON 生成，禁硬编码）
     auto neverStop = [] { return false; };
     SchemaParser sp;
-    if (access("/vendor/etc/lcview_events.json", R_OK) == 0) {
-        EXPECT_TRUE(loadSchemaWithRetry(sp, "/vendor/etc/lcview_events.json", neverStop, 0,
+    std::vector<lechao_test::ExpectedEvent> expected;
+    if (lechao_test::loadExpectedEvents(&expected)) {
+        EXPECT_TRUE(loadSchemaWithRetry(sp, lechao_test::kSchemaConfigPath, neverStop, 0,
                                         std::chrono::milliseconds(1)));
-        // R-16 P4 方向 1：START(4) 已并入 END，schema 由 10 事件降为 9 事件
-        // R-19 P5 方向 3：新增 id=1~3 预留占位条目，schema 升为 12 事件
-        // R3 方向 1/3：新增 id=14 slow_disk，schema 升为 13 事件
-        // A 批一（内核 SD/MMC 健康契约）：新增 id=15 sd_health、id=16 sd_stuck，
-        // schema 升为 15 事件
-        // C 批二方向2：新增 id=17 usb_latency_tail（daemon 合成），schema 升为 16 事件
-        // QoS 延迟感知分级：新增 id=18 qos_auto_adjust，schema 升为 17 事件
-        // 方向三批一：新增 id=19 zram_swap_pressure（daemon 合成），schema 升为 18 事件
-        // UP-110 批一：新增 id=20 trim（lciod daemon 合成），schema 升为 19 事件
-        // 本批（zram writeback 韧性）：新增 id=21 writeback_guard，升为 20 事件
-        EXPECT_EQ(sp.eventCount(), 20u);
+        EXPECT_EQ(sp.eventCount(), expected.size());
     } else {
         GTEST_SKIP() << "真配置不存在（host 环境）";
     }

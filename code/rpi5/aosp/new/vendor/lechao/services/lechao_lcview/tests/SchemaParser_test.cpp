@@ -15,6 +15,7 @@
 #include <vector>
 #include "SchemaParser.h"
 #include "lcview_events.h"
+#include "schema_config_source.h"
 #undef private
 #undef protected
 
@@ -269,46 +270,26 @@ TEST(SchemaParserParseJsonTest, FindUnknownId_ReturnsNull) {
 // 方向 3：生产配置（/vendor/etc/lcview_events.json）加载校验——
 // 此前 UT 全用内联 kValidJson，真配置不被任何测试加载；
 // 上板跑时该路径即生产配置文件（host 环境跳过）
-TEST(SchemaParserParseJsonTest, ProductionConfig_LoadsAll9Events) {
-    if (access("/vendor/etc/lcview_events.json", R_OK) != 0) {
-        GTEST_SKIP() << "生产配置不存在（host 环境）";
+TEST(SchemaParserParseJsonTest, ProductionConfig_MatchesConfigEventSet) {
+    // 单源：期望事件数/ID/字段数全部由生产配置生成，UT 不再硬编码计数
+    // （批一/批四首跑 fail 根因：新增事件漏同步 UT 计数）。配置缺失时
+    // （host 环境）跳过；解析失败按失败处理，不得当空集合假绿。
+    std::vector<lechao_test::ExpectedEvent> expected;
+    if (!lechao_test::loadExpectedEvents(&expected)) {
+        GTEST_SKIP() << "生产配置不存在或不可解析（host 环境）";
         return;
     }
     SchemaParser sp;
-    ASSERT_TRUE(sp.loadFromFile("/vendor/etc/lcview_events.json"));
-    // R-16 P4 方向 1：START(4) 已并入 END，schema 由 10 事件降为 9 事件
-    // R-19 P5 方向 3：新增 id=1~3 预留占位条目，schema 由 9 事件升为 12 事件
-    // R3 方向 1/3：新增 id=14 slow_disk（daemon BlockCollector 规则二），
-    // schema 升为 13 事件
-    // A 批一（内核 SD/MMC 健康契约）：新增 id=15 sd_health、id=16 sd_stuck，
-    // schema 升为 15 事件
-    // C 批二方向2：新增 id=17 usb_latency_tail（daemon 合成），schema 升为 16 事件
-    // QoS 延迟感知分级（本批）：新增 id=18 qos_auto_adjust（内核 SD 窗口
-    // 延迟长尾触发），schema 升为 17 事件
-    // 方向三批一：新增 id=19 zram_swap_pressure（daemon 合成），schema 升为 18 事件
-    // UP-110 批一：新增 id=20 trim（lciod daemon 合成），schema 升为 19 事件
-    // 本批（zram writeback 韧性）：新增 id=21 writeback_guard（lciod daemon
-    // 合成），schema 升为 20 事件
-    EXPECT_EQ(sp.eventCount(), 20u);
-    // id 1..21 全部定义（含 1~3 预留占位 + 5~13 USB 事件 + 14 slow_disk +
-    // 15 sd_health + 16 sd_stuck + 17 usb_latency_tail + 18 qos_auto_adjust +
-    // 19 zram_swap_pressure + 20 trim + 21 writeback_guard，与内核
-    // lcview_events.h 的 LCVIEW_EVENT_* 宏一致）
-    for (uint16_t id = 1; id <= 21; id++) {
-        if (id == 4) continue;  // id=4 TRANSPORT_START 已删除
-        const EventSchema* s = sp.find(id);
-        ASSERT_NE(s, nullptr) << "事件 " << id << " 缺失";
-        EXPECT_FALSE(s->name.empty());
-    }
-    // 1~3 为预留占位（字段未定义，允许空 fields）；5~13 为实际 USB 事件，
-    // 14 为 daemon 合成 slow_disk、15/16 为内核 SD 健康事件、17 为 daemon
-    // 合成 usb_latency_tail、18 为内核 SD 延迟长尾自动分级、19 为 daemon
-    // 合成 zram_swap_pressure、20 为 daemon 合成 trim、21 为 daemon 合成
-    // writeback_guard（均含字段）
-    for (uint16_t id = 5; id <= 21; id++) {
-        const EventSchema* s = sp.find(id);
-        ASSERT_NE(s, nullptr) << "事件 " << id << " 缺失";
-        EXPECT_FALSE(s->fields.empty()) << "事件 " << id << " 无字段";
+    ASSERT_TRUE(sp.loadFromFile(lechao_test::kSchemaConfigPath));
+    EXPECT_EQ(sp.eventCount(), expected.size());
+    for (const auto& ev : expected) {
+        const EventSchema* s = sp.find(static_cast<uint16_t>(ev.id));
+        ASSERT_NE(s, nullptr) << "事件 " << ev.id << " 缺失";
+        EXPECT_EQ(s->name, ev.name) << "事件 " << ev.id << " 名称不符";
+        // 字段数同样以配置为准：预留占位事件（fields=[]）自然为 0，
+        // 新增/删减字段无需同步 UT
+        EXPECT_EQ(s->fields.size(), ev.fieldCount)
+            << "事件 " << ev.id << " 字段数不符";
     }
     // R-20 P5 方向 1：生产配置 usb_probe(id=8) 设备身份字段须已标记敏感
     // （vid/pid/vendor/product），输出层据此掩码；device_index 保持明文

@@ -32,6 +32,23 @@ EMIT_SOURCE_RELS = [
     # A 批一：SD/MMC 块层健康监控发射点（SD_HEALTH/SD_STUCK）
     "rpi5/kernel/new/vendor/lechao/LcIod/lciod_sd.c",
 ]
+# lcview UT 单源约束（方向 2）：UT 期望事件数须由配置 JSON 生成，禁止
+# 硬编码计数（批一/批四首跑 fail 同根因：新增事件漏同步 UT 计数）。
+UT_TESTS_REL = "rpi5/aosp/new/vendor/lechao/services/lechao_lcview/tests"
+UT_SINGLE_SOURCE_HELPER = "schema_config_source.h"
+UT_SINGLE_SOURCE_REF = "loadExpectedEvents"
+# 硬编码 UT 事件数：`eventCount(), 20u` / `eventCount(), 20`
+_HARDCODED_UT_COUNT_RE = re.compile(
+    r"eventCount\(\)\s*,\s*\d+\s*u?\b")
+# 生产配置用例标记：仅含这些标记的 TEST 块受"禁硬编码计数"约束
+# （内联最小 schema 用例对 1/0 的断言是合法契约，不属生产事件集合）
+_UT_PROD_CONFIG_MARKERS = (
+    UT_SINGLE_SOURCE_REF,
+    "kSchemaConfigPath",
+    "/vendor/etc/lcview_events.json",
+    "ExpectedEvent",
+)
+_TEST_BLOCK_RE = re.compile(r"^TEST(?:_F|_P)?\s*\(", re.M)
 
 # 内核发射点字段类型映射（add_* API → schema 字段类型）；正则捕获的是
 # API 去掉 "add_" 前缀后的余段（如 add_int → int）
@@ -143,6 +160,55 @@ def parse_emit_sequences(text: str) -> dict[str, list[str]]:
     return out
 
 
+def _iter_test_blocks(text: str):
+    """按 TEST(...) 边界切块；无 TEST 声明时整段视为一块（夹具/片段兼容）。"""
+    starts = [m.start() for m in _TEST_BLOCK_RE.finditer(text)]
+    if not starts:
+        yield text
+        return
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(text)
+        yield text[start:end]
+
+
+def check_ut_single_source(repo: Path) -> list[str]:
+    """UT 期望事件集合单源一致性断言（方向 2）。
+
+    结构性保证「新增事件漏同步 UT」不可能：UT 必须引用
+    schema_config_source.h 的 loadExpectedEvents（从生产配置生成期望值），
+    且生产配置用例中不得出现 `eventCount(), <数字>` 这类硬编码计数
+    （内联最小 schema 用例对 1/0 的断言不在此列）。
+    返回违规列表（空列表即通过）。
+    """
+    tests_dir = repo / UT_TESTS_REL
+    if not tests_dir.is_dir():
+        return [f"UT 目录缺失: {UT_TESTS_REL}"]
+    helper = tests_dir / UT_SINGLE_SOURCE_HELPER
+    if not helper.is_file():
+        return [f"UT 单源辅助缺失: {UT_TESTS_REL}/{UT_SINGLE_SOURCE_HELPER}"]
+    problems = []
+    referenced = False
+    for p in sorted(tests_dir.glob("*_test.cpp")):
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError as e:
+            problems.append(f"UT 读取失败 {p.name}: {e}")
+            continue
+        for block in _iter_test_blocks(text):
+            if not any(marker in block for marker in _UT_PROD_CONFIG_MARKERS):
+                continue
+            referenced = True
+            for m in _HARDCODED_UT_COUNT_RE.finditer(block):
+                problems.append(
+                    f"UT 硬编码事件计数 {p.name}: {m.group(0)!r}"
+                    f"（须由 {UT_SINGLE_SOURCE_HELPER} 从配置生成）")
+    if not referenced:
+        problems.append(
+            f"UT 未引用配置单源辅助 {UT_SINGLE_SOURCE_HELPER}"
+            f"（{UT_SINGLE_SOURCE_REF}）")
+    return problems
+
+
 def compare(repo: Path) -> tuple[int, str]:
     """执行比对，返回 (rc, 描述)。"""
     schema_path = repo / SCHEMA_REL
@@ -203,6 +269,8 @@ def compare(repo: Path) -> tuple[int, str]:
         if schema_name not in name_to_macro:
             problems.append(f"内核发射点 {macro} 无对应 schema 事件 "
                             f"（schema 漏加 {schema_name}？）")
+    # 4) UT 单源（方向 2）：期望事件集合由配置生成，禁硬编码计数
+    problems.extend(check_ut_single_source(repo))
     if problems:
         return 1, "\n".join(problems)
     return 0, f"一致: {len(schema)} 事件 id 与字段类型序全部匹配"

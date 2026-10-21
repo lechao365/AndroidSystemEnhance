@@ -351,6 +351,8 @@ aosp:
       source: aosp/vendor/lechao/services/lechao_lcview/tests/SchemaParser_test.cpp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/tests/record_codec_test.cpp
       source: aosp/vendor/lechao/services/lechao_lcview/tests/record_codec_test.cpp
+    - patch: aosp/new/vendor/lechao/services/lechao_lcview/tests/schema_config_source.h
+      source: aosp/vendor/lechao/services/lechao_lcview/tests/schema_config_source.h
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/tools/Android.bp
       source: aosp/vendor/lechao/services/lechao_lcview/tools/Android.bp
     - patch: aosp/new/vendor/lechao/services/lechao_lcview/tools/usbreset.c

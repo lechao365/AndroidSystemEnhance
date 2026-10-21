@@ -74,9 +74,11 @@
 #              teardown 复原开关；任一步 adb 超时返 -1 透传失败。
 #   readahead  — 块层预读调优验收：断言 /sys/block/mmcblk0/queue/read_ahead_kb
 #              == 512（persist.lechao.readahead_kb 属性 trigger 落地的默认目标
-#              态）；drop_caches 后 am start 设置应用，记录冷启动耗时并与 173329
-#              基线 757ms 对比（仅记录变化，不作门禁）。默认即目标态不复原；
-#              仅读 sysfs + 可逆 drop_caches，无块设备写。
+#              态）；drop_caches 后 force-stop 设置应用再 am start（force-stop
+#              保证进程死亡，恢复冷启动语义；否则已在前台的 Activity 会给出
+#              TotalTime=0 使对比失真），记录冷启动耗时并与 173329 基线 757ms
+#              对比（仅记录变化，不作门禁）。默认即目标态不复原；仅读 sysfs +
+#              可逆 drop_caches + force-stop（系统自动重拉），无块设备写。
 #   writeback-guard — zram writeback 后备盘拔盘韧性验收：读 backing_dev 定位
 #              USB 接口/驱动 → unbind 模拟拔盘 → 断言 90s 内 lost 事件（id=21）
 #              且 daemon 存活、writeback 不挂死 → 复位 zram 并按开机 setup
@@ -1641,9 +1643,13 @@ def mode_trim(args):
 # 128→512 顺序读 82.9→88.1 M/s（+6.3%），1024 无额外增益。
 _READAHEAD_SYSFS = "/sys/block/mmcblk0/queue/read_ahead_kb"
 _READAHEAD_TARGET_KB = 512
-# 173329 冷缓存启动基线（drop_caches + am start 设置应用，TotalTime 757ms）
+# 173329 冷缓存启动基线（drop_caches + force-stop + am start 设置应用，
+# TotalTime 757ms）
 _READAHEAD_COLD_BASELINE_MS = 757.0
 _SETTINGS_ACTION = "android.settings.SETTINGS"
+# force-stop 目标包：设置应用已在前台时 am start 返回 TotalTime=0（192138
+# 收据失真根因），必须先杀进程恢复冷启动语义
+_SETTINGS_PACKAGE = "com.android.settings"
 
 
 def _parse_am_total_ms(text):
@@ -1664,11 +1670,14 @@ def mode_readahead(args):
     断言：
       1) /sys/block/mmcblk0/queue/read_ahead_kb == 512（属性 trigger 生效，
          默认即目标态）；非 512 / 不可读判红；
-      2) drop_caches 后 am start 设置应用，记录冷启动耗时并与 173329 基线
-         757ms 对比（仅记录变化，不作门禁——设备间差异大，门禁为主断言 1）。
-    安全：仅读 sysfs + drop_caches（可逆内存回收）+ am start（无数据写）；
-    默认即目标态，**不复原**（回退由 setprop persist.lechao.readahead_kb 128
-    驱动 rc trigger）。任一步 adb 超时（rc==-1）return -1 由上游判红。
+      2) drop_caches → force-stop 设置应用 → am start 设置应用，记录冷启动
+         耗时并与 173329 基线 757ms 对比（仅记录变化，不作门禁——设备间
+         差异大，门禁为主断言 1）。force-stop 保证进程死亡，避免已在前台
+         时 TotalTime=0 的失真（192138 收据）。
+    安全：仅读 sysfs + drop_caches（可逆内存回收）+ force-stop（系统自动
+    重拉）+ am start（无数据写）；默认即目标态，**不复原**（回退由 setprop
+    persist.lechao.readahead_kb 128 驱动 rc trigger）。任一步 adb 超时
+    （rc==-1）return -1 由上游判红。
     """
     out, rc = adb(["shell", "cat", _READAHEAD_SYSFS])
     if rc == -1:
@@ -1693,6 +1702,15 @@ def mode_readahead(args):
         return -1
     if rc != 0:
         print("ERROR: drop_caches 失败（无法构造冷缓存）")
+        return 1
+    # 冷启动语义：先杀设置进程，避免 Activity 已在前台时 am start 返回
+    # TotalTime=0（192138 收据失真）；force-stop 由系统自动重拉，无数据风险
+    _o, rc = adb(["shell", "am", "force-stop", _SETTINGS_PACKAGE])
+    if rc == -1:
+        return -1
+    if rc != 0:
+        print(f"ERROR: am force-stop {_SETTINGS_PACKAGE} 失败 rc={rc}"
+              "（无法保证冷启动语义）")
         return 1
     out, rc = adb(["shell", "am", "start", "-W", "-a", _SETTINGS_ACTION])
     if rc == -1:

@@ -1578,12 +1578,13 @@ class _FakeAdbReadahead:
 
     def __init__(self, sysfs="512", cat_rc=0, am_rc=0,
                  am_out="Status: ok\nLaunchState: WARM\nTotalTime: 700\n"
-                        "WaitTime: 710\n", timeout=False):
+                        "WaitTime: 710\n", timeout=False, force_stop_rc=0):
         self.sysfs = sysfs
         self.cat_rc = cat_rc
         self.am_rc = am_rc
         self.am_out = am_out
         self.timeout = timeout
+        self.force_stop_rc = force_stop_rc
         self.calls = []
 
     def __call__(self, args, timeout=60):
@@ -1595,6 +1596,9 @@ class _FakeAdbReadahead:
                 return (f"{self.sysfs}\n", self.cat_rc)
             if "drop_caches" in args[1]:
                 return ("", 0)
+            if args[1] == "am" and len(args) >= 3 \
+                    and args[2] == "force-stop":
+                return ("", self.force_stop_rc)
             if args[1] == "am":
                 return (self.am_out, self.am_rc)
         return ("", 0)
@@ -1633,6 +1637,31 @@ class TestModeReadahead(unittest.TestCase):
     def test_adb_timeout_returns_minus1(self):
         # adb 超时（rc==-1）→ 返回 -1 由 main 透传失败
         self.assertEqual(self._run(_FakeAdbReadahead(timeout=True)), -1)
+
+    def test_force_stop_before_am_start(self):
+        # 冷启动语义锚点：am start 前必须 force-stop 设置包，且顺序为
+        # drop_caches → force-stop → am start（192138 收据 TotalTime=0
+        # 失真根因：Activity 已在前台时 am start 不计冷启动）
+        fake = _FakeAdbReadahead()
+        self.assertEqual(self._run(fake), 0)
+        shells = [c for c in fake.calls
+                  if len(c) >= 2 and c[0] == "shell"]
+        drop_idx = next(i for i, c in enumerate(shells)
+                        if "drop_caches" in c[1])
+        stop_idx = next(i for i, c in enumerate(shells)
+                        if len(c) >= 3 and c[1] == "am"
+                        and c[2] == "force-stop")
+        start_idx = next(i for i, c in enumerate(shells)
+                         if len(c) >= 3 and c[1] == "am"
+                         and c[2] == "start")
+        self.assertLess(drop_idx, stop_idx)
+        self.assertLess(stop_idx, start_idx)
+        self.assertIn("com.android.settings", shells[stop_idx])
+
+    def test_force_stop_fail_red(self):
+        # force-stop 失败 → 冷启动语义不可保证，判红（不得照常记录失真耗时）
+        self.assertEqual(
+            self._run(_FakeAdbReadahead(force_stop_rc=1)), 1)
 
     def test_no_restore_write(self):
         # 回归锚点：默认即目标态，不得回写 sysfs（回退由 setprop trigger 驱动）
