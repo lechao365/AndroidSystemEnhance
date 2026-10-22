@@ -71,7 +71,7 @@ struct lciod_sd_state {
 	u64 stuck_count;            /* 累计 STUCK 次数 */
 	struct lciod_histo histo;   /* 传输延迟/块大小二维直方图（lock 保护，累计） */
 	unsigned int last_speed;    /* 最近降档后速度档位（0 起） */
-	struct mmc_card *card;          /* 最近一次事件关联卡片（非空即持引用，WRITE_ONCE） */
+	struct mmc_card *card;          /* 最近一次事件关联卡片（非空即持引用；锁内替换，旧卡锁外 put） */
 	unsigned int ssr_speed_class;   /* 最近解码 SD 速度档 SPEED_CLASS */
 	unsigned int ssr_uhs_grade;     /* 最近解码 UHS_SPEED_GRADE */
 	unsigned int ssr_valid;         /* SSR 最近读取是否成功（1/0） */
@@ -237,6 +237,7 @@ int lciod_sd_notifier(struct notifier_block *nb, unsigned long action,
 		      void *data)
 {
 	struct lechao_sd_notifier_data *nd = data;
+	struct mmc_card *old_card = NULL;
 	unsigned long flags;
 
 	if (WARN_ON_ONCE(!nd))
@@ -281,17 +282,26 @@ int lciod_sd_notifier(struct notifier_block *nb, unsigned long action,
 	spin_unlock_irqrestore(&sd_state.lock, flags);
 
 	/*
-	 * 记录最近关联卡片（WRITE_ONCE，供 SSR 刷新线程 READ_ONCE 读取）。
-	 * 放锁外（仍 atomic），指针写入用 WRITE_ONCE 防撕裂。演练合成事件
+	 * 记录最近关联卡片：先 get_device 持引用，锁内替换指针，旧卡在锁外
+	 * put（不在 spinlock 内触发 device release）。演练合成事件
 	 * （synthetic）的 card 为临时内存卡，禁止写入 sd_state.card——否则
 	 * kfree 后 SSR 刷新线程会 READ_ONCE 到悬空指针。
 	 */
-	if (nd->card && !nd->synthetic)
+	if (nd->card && !nd->synthetic) {
+		get_device(&nd->card->dev);
+		spin_lock_irqsave(&sd_state.lock, flags);
+		old_card = sd_state.card;
 		WRITE_ONCE(sd_state.card, nd->card);
+		spin_unlock_irqrestore(&sd_state.lock, flags);
+	}
 
 	/* 降档需解引用 card：放锁外（仍 atomic），仅 WRITE_ONCE 赋值 */
 	if (nd->category == LECHAO_SD_EVENT_STUCK && nd->card)
 		lciod_sd_downgrade(nd->card, nd->err);
+
+	/* 旧卡引用锁外释放（SSR 此后读到的是新卡，旧卡不会悬空） */
+	if (old_card)
+		put_device(&old_card->dev);
 
 	return NOTIFY_OK;
 }
@@ -310,16 +320,29 @@ struct notifier_block lciod_sd_nb = {
  */
 static void lciod_sd_refresh_ssr(void)
 {
-	struct mmc_card *card = READ_ONCE(sd_state.card);
+	struct mmc_card *card;
 	struct lciod_sd_ssr d;
 	unsigned int raw_ssr[LCIOD_SD_SSR_WORDS];
 	unsigned long flags;
 
-	if (!card || !mmc_card_sd(card))
-		return;
+	/*
+	 * 与 notifier 的指针替换同锁取卡并 get_device：sd_state.card 虽由
+	 * notifier 持引用，但若先 READ_ONCE 再 get_device，notifier 可能在
+	 * 两步之间换卡并 put 旧卡，旧卡引用归零即已释放（UAF）。锁内取引用
+	 * 保证拿到的是仍被 sd_state 持有的卡。
+	 */
+	spin_lock_irqsave(&sd_state.lock, flags);
+	card = sd_state.card;
+	if (card)
+		get_device(&card->dev);
+	spin_unlock_irqrestore(&sd_state.lock, flags);
 
-	/* 持 card 引用防读取期间拔卡（CXX-002 资源生命周期） */
-	get_device(&card->dev);
+	if (!card)
+		return;
+	if (!mmc_card_sd(card)) {
+		put_device(&card->dev);
+		return;
+	}
 
 	if (lechao_mmc_read_sd_status(card, raw_ssr) == 0) {
 		lciod_sd_decode_ssr(raw_ssr, &d);
@@ -721,13 +744,26 @@ static int __init lciod_sd_init(void)
 /*
  * lciod_sd_exit — 销毁 SD/MMC 健康监控
  *
- * 与 init 顺序相反：先停窗口工作（阻止新上报）→ 注销 notifier → 拆
- * sysfs/device/class。上下文：进程上下文（module_exit）。
+ * 与 init 顺序相反：先停窗口工作（阻止新上报）→ 注销 notifier（阻止新卡
+ * 指针交换）→ 释放最近关联卡引用 → 拆 sysfs/device/class。上下文：进程
+ * 上下文（module_exit）。
  */
 static void __exit lciod_sd_exit(void)
 {
+	struct mmc_card *card;
+	unsigned long flags;
+
 	cancel_delayed_work_sync(&sd_work);
 	lechao_sd_notifier_unregister(&lciod_sd_nb);
+
+	/* 释放 notifier 持有的最近关联卡引用（get_device 配对释放） */
+	spin_lock_irqsave(&sd_state.lock, flags);
+	card = sd_state.card;
+	WRITE_ONCE(sd_state.card, NULL);
+	spin_unlock_irqrestore(&sd_state.lock, flags);
+	if (card)
+		put_device(&card->dev);
+
 	sysfs_remove_group(&lciod_sd_dev->kobj, &lciod_sd_attr_group);
 	device_destroy(lciod_sd_class, MKDEV(0, 0));
 	class_destroy(lciod_sd_class);

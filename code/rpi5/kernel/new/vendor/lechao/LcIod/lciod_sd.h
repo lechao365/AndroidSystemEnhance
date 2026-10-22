@@ -49,14 +49,18 @@
  * @sd_bus_speed: 当前档位（LCIOD_SD_SPEED_*）
  * @return 降档后档位；已是最低档（SDR12）时保持 0，未知档位按上限处理
  *
- * 语义：仅做档位数值逐级递减（4→3→2→1→0），不在此处做 DDR50/SDR104
- * 的物理等价归并——物理兼容由 block/mmc 核心重协商承担，本函数只决定
- * "下一档"的速度档位。无内核 API 依赖，host 与内核共用。
+ * 语义：档位数值递减（3→2→1→0），但 DDR50(4) 特判直接落 SDR50(2) ——
+ * DDR50 为 SDR50 时钟的 DDR 双沿模式，SDR104(3) 是更高时钟的单沿模式，
+ * 4→3 并非降速而是升频。该物理档位倒挂由本函数吸收，不依赖 block/mmc
+ * 核心重协商。无内核 API 依赖，host 与内核共用。
  */
 static inline unsigned int lciod_sd_next_lower_speed(unsigned int sd_bus_speed)
 {
 	if (sd_bus_speed == 0u)
 		return 0u;
+	/* DDR50 特判：跳过 SDR104，直接降 SDR50（避免降档方向反转） */
+	if (sd_bus_speed == LCIOD_SD_SPEED_UHS_DDR50)
+		return LCIOD_SD_SPEED_UHS_SDR50;
 	if (sd_bus_speed > LCIOD_SD_SPEED_MAX)
 		return LCIOD_SD_SPEED_MAX - 1u;
 	return sd_bus_speed - 1u;

@@ -169,8 +169,8 @@ static DEFINE_MUTEX(vendor_lechao_usbd_mutex);
  *
  * 从 inode 中恢复指向 vendor_lechao_usbd_device 的指针
  * （通过 container_of 从内嵌的 cdev 成员推算）。
- * 在增加 kref 引用计数之前检查设备是否正在被移除，
- * 防止在设备断开和 open 的竞态条件下访问已释放的内存。
+ * 先取得 kref 引用再检查 removing：仅在持引用期间访问设备状态，
+ * 防止在设备断开和 open 的竞态条件下访问已释放的内存（UAF）。
  *
  * 为什么用 kref_get_unless_zero 而非 kref_get：
  * 当 kref 降为 0 时，设备正在被释放，此时不能再增加引用。
@@ -188,13 +188,18 @@ static int vendor_lechao_usbd_open(struct inode *inode, struct file *file)
 
     rate_dev = container_of(inode->i_cdev, struct vendor_lechao_usbd_device, cdev);
 
-    if (READ_ONCE(rate_dev->removing)) {
-        pr_warn(PREFIX "open: device removing\n");
+    /* 先持引用：removing 与 kref 归零存在竞态，未持引用时读 removing
+     * 可能落在已释放内存上（UAF）。 */
+    if (!kref_get_unless_zero(&rate_dev->kref)) {
+        pr_warn(PREFIX "open: device gone (kref)\n");
         return -ENODEV;
     }
 
-    if (!kref_get_unless_zero(&rate_dev->kref)) {
-        pr_warn(PREFIX "open: device gone (kref)\n");
+    /* 持引用后复查 removing：为真说明设备已进入移除流程，释放引用
+     * 并拒绝打开，避免把即将销毁的设备交给 fd 持有者。 */
+    if (READ_ONCE(rate_dev->removing)) {
+        pr_warn(PREFIX "open: device removing\n");
+        kref_put(&rate_dev->kref, vendor_lechao_usbd_device_release);
         return -ENODEV;
     }
 
@@ -629,8 +634,10 @@ struct vendor_lechao_usbd_device *vendor_lechao_usbd_device_alloc(struct us_data
         return ERR_PTR(-ENODEV);
     }
 
-    rate_dev->stats.vid = us->pusb_dev->descriptor.idVendor;
-    rate_dev->stats.pid = us->pusb_dev->descriptor.idProduct;
+    /* CXX-001：USB 描述符 idVendor/idProduct 为 __le16 线材字段，
+     * 显式转 CPU 序后再入 stats，禁止隐式依赖主机字节序。 */
+    rate_dev->stats.vid = le16_to_cpu(us->pusb_dev->descriptor.idVendor);
+    rate_dev->stats.pid = le16_to_cpu(us->pusb_dev->descriptor.idProduct);
     
     memset(rate_dev->stats.vendor, 0, sizeof(rate_dev->stats.vendor));
     memset(rate_dev->stats.product, 0, sizeof(rate_dev->stats.product));
@@ -1166,8 +1173,11 @@ static struct notifier_block vendor_lechao_usbd_uas_vendor_nb = {
  *   usb_for_each_dev 遍历的是 struct usb_device，需要通过
  *   USB 接口的驱动名匹配 "usb-storage" 或 "uas"：
  *   - "usb-storage"：probe 时 usb_set_intfdata(intf, us)，drvdata 即
- *     struct us_data*，直接取用（方向 2：删除 scsi_host_get/host_to_us
- *     误用——BOT 的 drvdata 不是 Scsi_Host）。
+ *     struct us_data*（方向 2：先取 us 再经 us_to_host(us) 取真正的
+ *     Scsi_Host，禁止把 drvdata 直接当 Scsi_Host）。us_data 嵌于
+ *     shost->hostdata，disconnect 末段 release_everything 以
+ *     scsi_host_put 释放——扫描期间须持 shost 引用（scsi_host_get），
+ *     否则查链表/alloc 途中并发拔出会 UAF。
  *   - "uas"：uas.c 中 usb_set_intfdata(intf, shost)，drvdata 为
  *     struct Scsi_Host*，devinfo 嵌于 shost->hostdata（不透明类型，
  *     仅持指针调用 uas-notifier API）。shost 生命周期用
@@ -1175,6 +1185,8 @@ static struct notifier_block vendor_lechao_usbd_uas_vendor_nb = {
  *     （sizeof(*devinfo)）与 scsi_host 同分配，持 shost 引用期间
  *     devinfo 存活，覆盖 dedup/alloc/add_to_list 全程，防并发
  *     disconnect 释放后 UAF。
+ *
+ * 两类设备的 shost 引用在同一出口释放（found / alloc 失败 / add 完成）。
  *
  * 为什么 check us->notifier.head：
  *   确保 us_data 的 notifier 链已经初始化，防止在关键路径上
@@ -1204,11 +1216,19 @@ static int vendor_lechao_usbd_usb_dev_scan(struct usb_device *udev, void *data)
             continue;
 
         if (strcmp(intf->dev.driver->name, "usb-storage") == 0) {
-            /* usb-storage 的 intfdata 即 us_data（probe 时 usb_set_intfdata），
-             * 直接取用，删 scsi_host_get 与 host_to_us 的类型误用（方向 2）。 */
+            /* usb-storage 的 intfdata 即 us_data（probe 时 usb_set_intfdata）；
+             * us_data 嵌于 shost->hostdata，须持 shost 引用防扫描期间拔卡
+             * 释放（方向 2）。us_to_host 对 drvdata 类型无误用：先有 us 再取 host。 */
             us = dev_get_drvdata(&intf->dev);
-            if (!us || !us->notifier.head)
+            if (!us)
                 continue;
+            shost = scsi_host_get(us_to_host(us));
+            if (!shost)
+                continue;
+            if (!us->notifier.head) {
+                scsi_host_put(shost);
+                continue;
+            }
             handle = us;
         } else if (strcmp(intf->dev.driver->name, "uas") == 0) {
             /* uas.c 中 usb_set_intfdata(intf, shost)，devinfo 在 shost->hostdata */

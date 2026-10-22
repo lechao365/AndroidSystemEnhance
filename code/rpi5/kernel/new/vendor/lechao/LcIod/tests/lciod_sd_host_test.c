@@ -27,10 +27,12 @@ static int g_fails = 0;
                      LCIOD_SD_MODE_UHS_SDR50 | LCIOD_SD_MODE_UHS_SDR104 | \
                      LCIOD_SD_MODE_UHS_DDR50)
 
-/* 逐级降档：4→3→2→1→0，最低档保持，未知档位回落到 MAX-1 */
+/* 降档：DDR50 特判落 SDR50（跳过 SDR104），其余逐级 3→2→1→0 */
 static void test_next_lower_speed(void)
 {
-    CHECK(lciod_sd_next_lower_speed(LCIOD_SD_SPEED_UHS_DDR50) == 3u);
+    /* DDR50(4) 与 SDR104(3) 物理档位倒挂：降档须直接落 SDR50(2) */
+    CHECK(lciod_sd_next_lower_speed(LCIOD_SD_SPEED_UHS_DDR50) ==
+          LCIOD_SD_SPEED_UHS_SDR50);
     CHECK(lciod_sd_next_lower_speed(LCIOD_SD_SPEED_UHS_SDR104) == 2u);
     CHECK(lciod_sd_next_lower_speed(LCIOD_SD_SPEED_UHS_SDR50) == 1u);
     CHECK(lciod_sd_next_lower_speed(LCIOD_SD_SPEED_UHS_SDR25) == 0u);
@@ -73,27 +75,25 @@ static void test_strip_modes_above(void)
     CHECK(lciod_sd_strip_modes_above(0u, LCIOD_SD_SPEED_UHS_SDR50) == 0u);
 }
 
-/* 降档组合：逐级降档 + 剥位（模拟一次 STUCK 处理） */
+/* 降档组合：DDR50 特判 + 逐级降档 + 剥位（模拟多次 STUCK 处理） */
 static void test_downgrade_combo(void)
 {
     unsigned int speed = LCIOD_SD_SPEED_UHS_DDR50;
     unsigned int mode = ALL_MODES;
 
-    /* 第一次 STUCK：DDR50(4) → SDR104(3)，剥去 bit4 */
-    speed = lciod_sd_next_lower_speed(speed);
-    mode = lciod_sd_strip_modes_above(mode, speed);
-    CHECK(speed == LCIOD_SD_SPEED_UHS_SDR104);
-    CHECK(mode == 0x0Fu);
-
-    /* 第二次 STUCK：SDR104(3) → SDR50(2)，剥去 bit3 */
+    /* 第一次 STUCK：DDR50(4) 特判 → SDR50(2)，剥去 bit4/bit3 */
     speed = lciod_sd_next_lower_speed(speed);
     mode = lciod_sd_strip_modes_above(mode, speed);
     CHECK(speed == LCIOD_SD_SPEED_UHS_SDR50);
     CHECK(mode == 0x07u);
 
-    /* 逐级降到 SDR12：仅剩 bit0 */
+    /* 第二次 STUCK：SDR50(2) → SDR25(1)，剥去 bit2 */
     speed = lciod_sd_next_lower_speed(speed);
     mode = lciod_sd_strip_modes_above(mode, speed);
+    CHECK(speed == LCIOD_SD_SPEED_UHS_SDR25);
+    CHECK(mode == 0x03u);
+
+    /* 第三次 STUCK：SDR25(1) → SDR12(0)，仅剩 bit0 */
     speed = lciod_sd_next_lower_speed(speed);
     mode = lciod_sd_strip_modes_above(mode, speed);
     CHECK(speed == LCIOD_SD_SPEED_UHS_SDR12);
@@ -105,14 +105,15 @@ static void test_build_stuck_evt(void)
 {
     struct lciod_sd_stuck_evt e;
 
-    /* 演练起点（DDR50 + 全模式位）：DDR50(4)→SDR104(3)，剥去 bit4 */
+    /* 演练起点（DDR50 + 全模式位）：DDR50(4) 特判 → SDR50(2)，
+     * 剥去 bit4/bit3（跳过 SDR104，降档方向不反转） */
     lciod_sd_build_stuck_evt(LCIOD_SD_DRILL_START_SPEED,
                              LCIOD_SD_DRILL_START_MODE,
                              LCIOD_SD_DRILL_ERR, &e);
     CHECK(e.old_speed == LCIOD_SD_SPEED_UHS_DDR50);
-    CHECK(e.new_speed == LCIOD_SD_SPEED_UHS_SDR104);
+    CHECK(e.new_speed == LCIOD_SD_SPEED_UHS_SDR50);
     CHECK(e.old_mode == ALL_MODES);
-    CHECK(e.new_mode == 0x0Fu);
+    CHECK(e.new_mode == 0x07u);
     CHECK(e.err == LCIOD_SD_DRILL_ERR);
 
     /* 最低档起点：无档可降（new==old），模式仅剩 bit0 */
